@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +385,127 @@ func runWindowsRealSmokeCommand(t *testing.T, runnerExe string, base WindowsSand
 	if wantCode != 0 {
 		t.Fatalf("Windows sandbox command exit code = 0, want %d\n%s", wantCode, output)
 	}
+}
+
+// The write jail must hold on a path whose DACL grants Everyone write access.
+//
+// A WRITE_RESTRICTED token runs TWO checks for a write and needs both to pass:
+// the normal one against its enabled SIDs, and a second against its RESTRICTED
+// SID list. The jail is built on the second check only succeeding where Zero has
+// explicitly ACL'd a capability SID. Putting the World SID (S-1-1-0) in the
+// restricted list breaks that globally — every principal is a member of
+// Everyone, so on a DACL that grants Everyone write, the restricted half passes
+// for free and confinement collapses back to the ordinary user's own
+// permissions, which is precisely the boundary the sandbox exists to be
+// stricter than.
+//
+// The runner already states this rule for the SIDs it refuses to add ("None of
+// the granted SIDs can be added to the restricted list without collapsing the
+// write jail"); Everyone was in the list anyway, since the original sandbox
+// baseline.
+//
+// Realistic rather than theoretical: administrators open share roots with
+// Everyone:F, and third-party installers ship loose ACLs. It needs no privilege,
+// no symlink and no race. Checked and ruled out: C:\Users\Public\Documents
+// grants BATCH, not Everyone, so the common "public folder" case is not this.
+func TestWindowsRestrictedTokenDeniesWritesToEveryoneWritablePaths(t *testing.T) {
+	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
+	}
+	runnerExe := realSmokeExecutable(t, "ZERO_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	everyoneDir := filepath.Join(outside, "everyone-writable")
+	if err := os.MkdirAll(everyoneDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll everyone-writable: %v", err)
+	}
+	// Granted through the production ACL applier, so the hostile DACL is built
+	// the same way a real one is rather than by a test-only shortcut.
+	snapshot, applied, err := applyWindowsACLPathGroup(windowsACLPathGroup{
+		Path: everyoneDir,
+		Entries: []WindowsACLEntry{{
+			Action:     WindowsACLAllowWrite,
+			Path:       everyoneDir,
+			Capability: "S-1-1-0",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("grant Everyone write: %v", err)
+	}
+	if !applied {
+		t.Fatal("precondition: the Everyone grant did not apply, so there is no bypass to test for")
+	}
+	t.Cleanup(func() { _ = rollbackWindowsACLSnapshots([]windowsACLSnapshot{snapshot}) })
+
+	sandboxHome := filepath.Join(root, ".zero-sandbox")
+	// No DenyRead on purpose: that is what makes the runner choose the
+	// WRITE_RESTRICTED token, which is the default posture and the one whose
+	// restricted-SID list this test is about.
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                 FileSystemRestricted,
+			ReadRoots:            []string{root},
+			WriteRoots:           []WritableRoot{{Root: root, ProtectedMetadataNames: []string{".git", ".zero", ".agents"}}},
+			IncludePlatformRoots: true,
+			AllowTemp:            true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	config := WindowsSandboxCommandArgsOptions{
+		SandboxHome:       sandboxHome,
+		CommandCWD:        root,
+		WorkspaceRoots:    []string{root},
+		PermissionProfile: profile,
+		SandboxLevel:      WindowsSandboxLevelUnelevated,
+	}
+
+	// Granted root first. A jail that denies everything would satisfy the two
+	// assertions below while being useless, and this separates the two outcomes.
+	insideMarker := filepath.Join(root, "write-ok.txt")
+	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+		"cmd.exe", "/d", "/s", "/c", "echo ok>" + insideMarker,
+	}, 0)
+	if contents, err := os.ReadFile(insideMarker); err != nil || strings.TrimSpace(string(contents)) != "ok" {
+		t.Fatalf("sandboxed write to a granted root = %q, %v; want ok", contents, err)
+	}
+
+	// Control: an ordinary directory outside every granted root. This is the
+	// behaviour the Everyone case must match.
+	controlMarker := filepath.Join(outside, "control-denied.txt")
+	runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(controlMarker), deniedWriteExitCode)
+	if _, err := os.Stat(controlMarker); err == nil {
+		t.Fatal("precondition: the sandbox allowed a write to an ordinary path outside every granted root, so this test cannot measure the Everyone case")
+	}
+
+	// The assertion. Same as the control in every respect except the DACL.
+	everyoneMarker := filepath.Join(everyoneDir, "everyone-denied.txt")
+	runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(everyoneMarker), deniedWriteExitCode)
+	if _, err := os.Stat(everyoneMarker); err == nil {
+		t.Error("the sandbox wrote outside every granted root because the path grants Everyone write; the restricted-SID list is satisfied by a SID every principal carries")
+	} else if !os.IsNotExist(err) {
+		t.Errorf("stat the Everyone-writable marker: %v", err)
+	}
+}
+
+// deniedWriteExitCode is chosen so a denial cannot be confused with the runner
+// failing to start the command at all.
+//
+// The obvious spelling of these assertions is `echo leaked>path` expecting exit
+// 1, but the runner itself exits 1 for its own errors — a failed marker
+// validation, a bad argument, a token it could not build. A test written that
+// way passes both when the sandbox denies the write and when nothing ever ran,
+// and the second case proves nothing while looking identical to success. On a
+// test whose whole job is catching a confinement regression, that is a failure
+// mode to design out rather than hope about.
+//
+// 77 is arbitrary beyond being outside the range the runner produces for itself.
+const deniedWriteExitCode = 77
+
+// deniedWriteCommand attempts a write and reports deniedWriteExitCode when the
+// redirect is refused, so the exit code also proves cmd.exe actually ran.
+func deniedWriteCommand(marker string) []string {
+	return []string{"cmd.exe", "/d", "/s", "/c", "echo leaked>" + marker + " || exit " + strconv.Itoa(deniedWriteExitCode)}
 }
 
 func powershellSingleQuote(value string) string {

@@ -68,8 +68,11 @@ type ToolResult struct {
 	Output     string
 	// Truncated reports that the tool's model-visible output omitted content.
 	// The full result may be recoverable through Meta["spill_path"].
-	Truncated    bool
-	Meta         map[string]string
+	Truncated bool
+	Meta      map[string]string
+	// Images the tool produced, delivered to the model as a following user
+	// message rather than on this result. See tools.Result.Images.
+	Images       []zeroruntime.ImageBlock
 	Redacted     bool
 	ChangedFiles []string
 	// ChangeSummaries are non-selectable generated-tree summaries emitted by

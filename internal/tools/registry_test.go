@@ -30,8 +30,8 @@ func tempDirOutsideDefaultTemp(t *testing.T) string {
 
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	toolset := CoreReadOnlyToolsScoped(t.TempDir(), nil)
-	if len(toolset) != 9 {
-		t.Fatalf("expected 9 core read-only tools, got %d", len(toolset))
+	if len(toolset) != 10 {
+		t.Fatalf("expected 10 core read-only tools, got %d", len(toolset))
 	}
 
 	seen := map[string]bool{}
@@ -70,6 +70,11 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	}
 	if !seen[RequestPermissionsToolName] {
 		t.Fatalf("expected %s in core read-only tools", RequestPermissionsToolName)
+	}
+	// By name as well as by count: the count alone still passes if one reader is
+	// swapped for another.
+	if !seen[ViewImageToolName] {
+		t.Fatalf("expected %s in core read-only tools", ViewImageToolName)
 	}
 }
 

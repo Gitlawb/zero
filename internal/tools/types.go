@@ -5,6 +5,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type SideEffect string
@@ -102,6 +103,16 @@ type Result struct {
 	// while callers migrate away from parsing text and string metadata.
 	ExecutionRequest *execution.Request `json:"-"`
 	ExecutionOutcome *execution.Outcome `json:"-"`
+	// Images are pictures the tool is handing the model — a screenshot it just
+	// captured, a file it was asked to look at. Text-only tools leave it nil.
+	//
+	// They are NOT delivered on this result's own tool-result message. Every
+	// provider drops images there: Anthropic maps a tool result to a tool_result
+	// block whose content is a string, Gemini to a functionResponse, and OpenAI
+	// guards its image content-parts to the user role. The agent loop therefore
+	// emits them as a following user message, which is also the only shape that
+	// keeps one tool result per tool call.
+	Images []zeroruntime.ImageBlock `json:"-"`
 	// Redacted is set when secret scrubbing altered Output before it left the
 	// tool-execution boundary.
 	Redacted bool
