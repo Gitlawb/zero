@@ -215,10 +215,19 @@ func windowsExplicitAccessEntries(entries []WindowsACLEntry, isDir bool) ([]wind
 		if err != nil {
 			return nil, err
 		}
+		entryInheritance := inheritance
+		// DenyDelete governs the object it names and nothing beneath it. Inherited
+		// onto .git's children it would deny DELETE on every file inside, so git
+		// could not remove a lock file, a ref, or anything else it rewrites, and
+		// the guard would read as a broken repository rather than as a blocked
+		// rename.
+		if entry.Action == WindowsACLDenyDelete {
+			entryInheritance = windows.NO_INHERITANCE
+		}
 		out = append(out, windows.EXPLICIT_ACCESS{
 			AccessPermissions: permissions,
 			AccessMode:        accessMode,
-			Inheritance:       inheritance,
+			Inheritance:       entryInheritance,
 			Trustee: windows.TRUSTEE{
 				TrusteeForm:  windows.TRUSTEE_IS_SID,
 				TrusteeType:  windows.TRUSTEE_IS_GROUP,
@@ -270,6 +279,21 @@ func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACC
 		return windows.DENY_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE, nil
 	case WindowsACLDenyWrite:
 		return windows.DENY_ACCESS, windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER, nil
+	case WindowsACLDenyDelete:
+		// Deny removing or RENAMING the object itself, nothing more. Renaming a
+		// directory needs DELETE on that directory, so denying DELETE is what
+		// stops .git being moved aside and recreated without its carveouts.
+		//
+		// WRITE_DAC and WRITE_OWNER come along because a guard the principal can
+		// rewrite, or take ownership of and then rewrite, is not a guard.
+		//
+		// FILE_GENERIC_WRITE is deliberately absent: git writes index, objects and
+		// refs constantly, and denying it would break every commit rather than the
+		// rename. FILE_DELETE_CHILD is absent for the same reason one level down,
+		// since git deletes its own lock files and refs. Neither is needed here:
+		// this ACE does not inherit (see windowsExplicitAccessEntries), so it
+		// governs the .git directory object alone.
+		return windows.DENY_ACCESS, windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER, nil
 	default:
 		return 0, 0, fmt.Errorf("unsupported windows ACL action %q", action)
 	}
