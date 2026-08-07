@@ -330,10 +330,16 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 	// and retries, and the user never learns an image came back (#823). The note
 	// is appended only when something was actually dropped, so a text-only
 	// result is byte-for-byte what it was before.
+	//
+	// It says retrying cannot RECOVER the payload rather than that a retry
+	// returns the same thing. Each retry is a fresh call, so the server may well
+	// answer differently; what cannot change is that Zero still has nowhere to
+	// put a non-text block. Claiming the response would be identical would be a
+	// promise this code is in no position to make.
 	if dropped := DroppedContentSummary(result.Content); dropped != "" {
-		note := "[zero] this server also returned " + dropped + ", which Zero cannot forward yet. Retrying will return the same thing."
+		note := "[zero] this server also returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
 		if output == "" {
-			note = "[zero] this server returned " + dropped + ", which Zero cannot forward yet. Retrying will return the same thing."
+			note = "[zero] this server returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
 		}
 		output = strings.TrimSpace(output + "\n\n" + note)
 	}

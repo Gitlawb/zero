@@ -33,6 +33,18 @@ func TestAnImageOnlyResultSaysWhatItReturned(t *testing.T) {
 	if !strings.Contains(result.Output, "image/png") {
 		t.Errorf("the output does not name what the server returned:\n%s", result.Output)
 	}
+	// Naming the block is only half of it. Without the guidance the model still
+	// retries, which is the expensive symptom, so the wording is pinned too.
+	//
+	// "cannot recover this payload" and not "will return the same thing": every
+	// retry is a fresh call and the server may answer differently. What cannot
+	// change is that Zero has nowhere to put a non-text block.
+	if !strings.Contains(result.Output, "Retrying cannot recover this payload.") {
+		t.Errorf("the output does not tell the model retrying is pointless:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "will return the same thing") {
+		t.Errorf("the output promises an identical response, which a fresh call cannot guarantee:\n%s", result.Output)
+	}
 	if result.Status != tools.StatusOK {
 		t.Errorf("status = %v, want OK: the call succeeded, we just cannot forward the payload", result.Status)
 	}
