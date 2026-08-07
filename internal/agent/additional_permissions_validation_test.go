@@ -127,9 +127,7 @@ func TestExecuteToolCallMissingAdditionalPermissionsErrorIsActionable(t *testing
 	if !strings.Contains(result.Output, `{"network": {"enabled": true}}`) {
 		t.Fatalf("output = %q, want a concrete additional_permissions example", result.Output)
 	}
-	if !strings.Contains(result.Output, "omit sandbox_permissions") {
-		t.Fatalf("output = %q, want guidance that the flag can simply be omitted", result.Output)
-	}
+	assertNamesOmitRemedy(t, "missing additional_permissions", result.Output)
 }
 
 // A well-formed additional_permissions payload must still reach the normal
@@ -163,6 +161,123 @@ func TestExecuteToolCallStillPromptsForValidAdditionalPermissions(t *testing.T) 
 	if promptCalls != 1 {
 		t.Fatalf("OnPermissionRequest called %d times, want exactly 1 for a valid elevation request", promptCalls)
 	}
+}
+
+// runShellCall drives one shell tool call through the real registry (and so
+// through Registry.RunWithOptions) exactly as the agent loop would.
+func runShellCall(t *testing.T, root string, arguments string) ToolResult {
+	t.Helper()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedExecCommandTool(root, nil, nil))
+	result, err := executeToolCall(
+		context.Background(),
+		registry,
+		ToolCall{ID: "c1", Name: "exec_command", Arguments: arguments},
+		PermissionModeUnsafe,
+		Options{Cwd: root},
+	)
+	if err != nil {
+		t.Fatalf("executeToolCall: %v", err)
+	}
+	return result
+}
+
+// TestAdditionalPermissionsRejectionsConverge is the regression guard for
+// #845/#847. A model that attaches a permission object to a command needing
+// none used to be told only "set sandbox_permissions", which pushed it into the
+// OTHER invalid shape (flag set, payload empty) and its "include a permission"
+// error pushed it straight back — the reported loop that burned turns on
+// `git branch --show-current`.
+//
+// The contract this pins is convergence, not tolerance: both shapes are still
+// REJECTED (nothing here grants access), but each rejection must name the one
+// follow-up call that works, and that follow-up must actually succeed.
+func TestAdditionalPermissionsRejectionsConverge(t *testing.T) {
+	root := t.TempDir()
+	const readOnly = `"cmd":"git --version"`
+
+	// Step 1 of the reported loop: a permission object with no flag.
+	first := runShellCall(t, root, `{`+readOnly+`,"additional_permissions":{"network":{"enabled":true}}}`)
+	if first.Status != tools.StatusError {
+		t.Fatalf("unflagged additional_permissions status = %q, want error (rejecting is correct)", first.Status)
+	}
+	assertNamesOmitRemedy(t, "unflagged additional_permissions", first.Output)
+
+	// Step 2 of the reported loop: the model keeps the flag but empties the
+	// payload. This must not be the dead end it was.
+	second := runShellCall(t, root, `{`+readOnly+`,"sandbox_permissions":"with_additional_permissions"}`)
+	if second.Status != tools.StatusError {
+		t.Fatalf("flag without payload status = %q, want error", second.Status)
+	}
+	assertNamesOmitRemedy(t, "flag without payload", second.Output)
+
+	// The call both errors point at must actually work.
+	converged := runShellCall(t, root, `{`+readOnly+`}`)
+	if converged.Status != tools.StatusOK {
+		t.Fatalf("the call both errors instruct the model to make failed: status=%q output=%q", converged.Status, converged.Output)
+	}
+}
+
+// assertNamesOmitRemedy pins the actionable half of the error text: the message
+// must spell out that BOTH fields can simply be dropped. "Set the flag" or
+// "include a permission" alone is what made the two errors chase each other.
+func assertNamesOmitRemedy(t *testing.T, label string, output string) {
+	t.Helper()
+	if !strings.Contains(output, "omit both sandbox_permissions and additional_permissions") {
+		t.Fatalf("%s error = %q, want it to say to omit both fields entirely", label, output)
+	}
+	if !strings.Contains(output, "retry") {
+		t.Fatalf("%s error = %q, want it to tell the model to retry", label, output)
+	}
+}
+
+// The empty-payload rejection carries the same remedy. It is pinned on the
+// validator directly because normalizeNoopAdditionalPermissions absorbs the
+// empty payload before executeToolCall reaches this branch;
+// inlineAdditionalPermissionsProfile is still the shared source of truth that
+// buildPermissionEvent and the grant path re-run, so its text must converge too.
+func TestEmptyAdditionalPermissionsErrorNamesOmitRemedy(t *testing.T) {
+	args := map[string]any{
+		"cmd":                 "git --version",
+		"sandbox_permissions": string(tools.SandboxPermissionsWithAdditionalPermissions),
+		"additional_permissions": map[string]any{
+			"network":     map[string]any{"enabled": false},
+			"file_system": map[string]any{"read": []any{}, "write": []any{}},
+		},
+	}
+	_, requested, err := inlineAdditionalPermissionsProfile(args, t.TempDir())
+	if !requested {
+		t.Fatal("requested = false, want true for an explicit with_additional_permissions call")
+	}
+	if err == nil {
+		t.Fatal("an empty additional_permissions payload was accepted; it must still be rejected")
+	}
+	assertNamesOmitRemedy(t, "empty payload", err.Error())
+}
+
+// A provider that materializes every optional property may send
+// "additional_permissions": null. That grants nothing and carries no flag, so it
+// is the field omitted — rejecting it stalled an ordinary command behind an
+// error the model could not act on.
+func TestExecuteToolCallTreatsNullAdditionalPermissionsAsOmitted(t *testing.T) {
+	result := runShellCall(t, t.TempDir(), `{"cmd":"git --version","additional_permissions":null}`)
+	if result.Status != tools.StatusOK {
+		t.Fatalf("null additional_permissions was rejected: status=%q output=%q", result.Status, result.Output)
+	}
+}
+
+// A null payload alongside the flag must still be rejected, and must land on
+// the same error as an absent payload rather than being quietly downgraded.
+func TestExecuteToolCallRejectsFlaggedNullAdditionalPermissions(t *testing.T) {
+	result := runShellCall(t, t.TempDir(),
+		`{"cmd":"git --version","sandbox_permissions":"with_additional_permissions","additional_permissions":null}`)
+	if result.Status != tools.StatusError {
+		t.Fatalf("flagged null status = %q, want error", result.Status)
+	}
+	if !strings.Contains(result.Output, "no additional_permissions object was provided") {
+		t.Fatalf("output = %q, want the missing-payload error", result.Output)
+	}
+	assertNamesOmitRemedy(t, "flagged null", result.Output)
 }
 
 func TestNormalizeProviderExpandedEmptyAdditionalPermissions(t *testing.T) {

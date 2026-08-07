@@ -132,6 +132,34 @@ func intPtr(value int) *int {
 	return &value
 }
 
+// sandboxPermissionsDescription and additionalPermissionsDescription are shared
+// by every shell tool (bash, exec_command) so the two fields cannot drift apart.
+//
+// Both lead with "omit" on purpose. The pair used to be described only in terms
+// of what each value does, which left a model that had used
+// with_additional_permissions once (say, for `gh issue create`) no instruction
+// to stop attaching a permission object to the next, ordinary command. That
+// attachment is then rejected — correctly, but the rejection alone does not tell
+// the model that dropping the field is the fix, so it flips between an
+// unflagged permission object and a flagged empty one and never converges
+// (#845, #847). Making "omit it" the first sentence of both descriptions stops
+// the invalid shape from being emitted in the first place; the validator errors
+// are the backstop, not the teacher.
+//
+// These ride on every turn's exec_command schema, so they are kept close to the
+// length of the text they replaced; TestEagerToolSchemaTokenBudget is the ratchet.
+const (
+	sandboxPermissionsDescription = "Per-command sandbox override. Omit it unless the command needs access the " +
+		"sandbox does not already give it; use `with_additional_permissions` with a non-empty " +
+		"`additional_permissions` for sandboxed file/network access, or `require_escalated` only when the command " +
+		"must run outside the sandbox, such as host/global process, socket, service, or desktop state hidden by " +
+		"sandbox namespaces."
+
+	additionalPermissionsDescription = "Extra sandbox access. Omit this field entirely unless `sandbox_permissions` " +
+		"is `with_additional_permissions`; sending it with any other mode is rejected, as is an empty or all-false " +
+		"object. Example: {\"network\": {\"enabled\": true}}."
+)
+
 func additionalPermissionsProperties() map[string]PropertySchema {
 	return requestPermissionsProfileSchema().Properties
 }
