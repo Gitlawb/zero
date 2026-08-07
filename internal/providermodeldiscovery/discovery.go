@@ -328,16 +328,21 @@ func anthropicModelsEndpoint(baseURL string) (string, error) {
 
 type modelsResponse struct {
 	Data []struct {
-		ID               string `json:"id"`
-		DisplayName      string `json:"display_name"`
-		Name             string `json:"name"`
-		Description      string `json:"description"`
-		ContextWindow    int    `json:"context_window"`
-		ContextWindowAlt int    `json:"contextWindow"`
-		ContextLength    int    `json:"context_length"`
-		MaxContextLength int    `json:"max_context_length"`
-		Free             bool   `json:"free"`
-		IsFree           bool   `json:"is_free"`
+		ID                  string   `json:"id"`
+		DisplayName         string   `json:"display_name"`
+		Name                string   `json:"name"`
+		Description         string   `json:"description"`
+		ContextWindow       int      `json:"context_window"`
+		ContextWindowAlt    int      `json:"contextWindow"`
+		ContextLength       int      `json:"context_length"`
+		MaxContextLength    int      `json:"max_context_length"`
+		Free                bool     `json:"free"`
+		IsFree              bool     `json:"is_free"`
+		ToolCall            bool     `json:"tool_call"`
+		ToolCallCamel       bool     `json:"toolCall"`
+		Tools               bool     `json:"tools"`
+		Reasoning           bool     `json:"reasoning"`
+		SupportedParameters []string `json:"supported_parameters"`
 	} `json:"data"`
 }
 
@@ -370,10 +375,18 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 			item.ContextLength,
 			item.MaxContextLength,
 		)
+		toolCall := item.ToolCall || item.ToolCallCamel || item.Tools ||
+			discoveryContainsFold(item.SupportedParameters, "tools")
+		reasoning := item.Reasoning ||
+			discoveryContainsFold(item.SupportedParameters, "reasoning") ||
+			discoveryContainsFold(item.SupportedParameters, "reasoning_effort") ||
+			discoveryContainsFold(item.SupportedParameters, "include_reasoning")
 		models = append(models, Model{
 			ID:            id,
 			Description:   description,
 			ContextWindow: contextWindow,
+			ToolCall:      toolCall,
+			Reasoning:     reasoning,
 			Source:        "live",
 		})
 	}
@@ -456,10 +469,10 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 			if providermodelcatalog.IsKnownNonCodingModelID(live.ID) {
 				continue
 			}
-			// OpenRouter still applies the coding heuristic; OpenGateway trusts
-			// whatever the gateway lists (small, operator-curated set).
+			// OpenRouter keeps coding-capable live-only models (tools/reasoning
+			// or coding-like ids). OpenGateway trusts the gateway list.
 			if providercatalog.NormalizeID(provider.ID) == "openrouter" &&
-				!liveModelAllowedWithoutCatalog(provider, live.ID) {
+				!providermodelcatalog.IsCodingModel(catalogModelFromDiscovery(live)) {
 				continue
 			}
 		} else if !liveModelAllowedWithoutCatalog(provider, live.ID) {
@@ -469,6 +482,15 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 		result = append(result, live)
 	}
 	return result
+}
+
+func discoveryContainsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmptyDiscovery(values ...string) string {

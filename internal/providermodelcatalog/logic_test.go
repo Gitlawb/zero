@@ -66,6 +66,9 @@ func TestDefaultedOpenRouterURL(t *testing.T) {
 	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "https://openrouter.ai/api/v1"}, ""); got != "https://openrouter.ai/api/v1/models" {
 		t.Fatalf("derived = %q", got)
 	}
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "https://openrouter.ai/api/v1?token=x#frag"}, ""); got != "https://openrouter.ai/api/v1/models" {
+		t.Fatalf("query/fragment stripped = %q, want clean /models URL", got)
+	}
 	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "bad"}, ""); got != "https://openrouter.ai/api/v1/models" {
 		t.Fatalf("fallback = %q", got)
 	}

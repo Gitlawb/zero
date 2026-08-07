@@ -56,7 +56,7 @@ func TestParseModelsResponseCapturesContextAndFree(t *testing.T) {
 	models, err := parseModelsResponse([]byte(`{
 		"data": [
 			{"id": "xiaomi/mimo-v2.5-pro", "name": "MiMo V2.5-Pro", "context_window": 262144},
-			{"id": "nvidia/nemotron-3-ultra:free", "name": "Nemotron free", "context_length": 128000, "is_free": true}
+			{"id": "nvidia/nemotron-3-ultra:free", "name": "Nemotron", "context_length": 128000, "is_free": true}
 		]
 	}`))
 	if err != nil {
@@ -75,8 +75,8 @@ func TestParseModelsResponseCapturesContextAndFree(t *testing.T) {
 	if byID["xiaomi/mimo-v2.5-pro"].ContextWindow != 262144 {
 		t.Fatalf("mimo context = %d", byID["xiaomi/mimo-v2.5-pro"].ContextWindow)
 	}
-	if !strings.Contains(byID["nvidia/nemotron-3-ultra:free"].Description, "free") {
-		t.Fatalf("free model description = %q", byID["nvidia/nemotron-3-ultra:free"].Description)
+	if byID["nvidia/nemotron-3-ultra:free"].Description != "Nemotron (free)" {
+		t.Fatalf("free model description = %q, want annotated free label", byID["nvidia/nemotron-3-ultra:free"].Description)
 	}
 }
 
@@ -135,8 +135,9 @@ func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 }
 
 func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
-	// Catalog omits anthropic/claude-sonnet-4.5; live retains it so the preferLive
-	// merge branch is exercised. No API key: public OpenRouter listing is unauth.
+	// Catalog omits anthropic/claude-sonnet-4.5 and the generic tools-only id;
+	// live retains both so preferLive keeps coding-capable live-only entries
+	// (id heuristic + capability flags). No API key: public listing is unauth.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/catalog/api/v1/models":
@@ -148,6 +149,7 @@ func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
 			_, _ = w.Write([]byte(`{"data":[
 				{"id":"openai/gpt-4.1","name":"GPT-4.1","context_length":1048576,"supported_parameters":["tools"]},
 				{"id":"anthropic/claude-sonnet-4.5","name":"Claude Sonnet 4.5","context_length":200000,"supported_parameters":["tools","reasoning"]},
+				{"id":"vendor/generic-tools-model","name":"Generic Tools","context_length":32000,"supported_parameters":["tools"]},
 				{"id":"text-embedding-3-large","name":"Embedding"}
 			]}`))
 		default:
@@ -178,6 +180,9 @@ func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
 	if !strings.Contains(got, "openai/gpt-4.1") || !strings.Contains(got, "anthropic/claude-sonnet-4.5") {
 		t.Fatalf("models = %q, want live openrouter coding models including live-only claude", got)
 	}
+	if !strings.Contains(got, "vendor/generic-tools-model") {
+		t.Fatalf("models = %q, want capability-marked live-only generic tools model", got)
+	}
 	if strings.Contains(got, "text-embedding-3-large") {
 		t.Fatalf("models = %q, embedding model should be filtered", got)
 	}
@@ -187,6 +192,9 @@ func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
 		}
 		if model.ID == "anthropic/claude-sonnet-4.5" && model.ContextWindow != 200000 {
 			t.Fatalf("claude live-only metadata = %#v, want live context window", model)
+		}
+		if model.ID == "vendor/generic-tools-model" && (!model.ToolCall || model.ContextWindow != 32000) {
+			t.Fatalf("generic tools live-only = %#v, want tools + context from live payload", model)
 		}
 	}
 }

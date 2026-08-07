@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -467,11 +468,11 @@ func firstPositiveFloat(values ...float64) float64 {
 // pricing.completion values (USD per token) into the Model.InputCost/OutputCost
 // unit used everywhere else (USD per million tokens, matching models.dev
 // cost.input / cost.output). Values <= 0, including OpenRouter's "-1"
-// variable/BYOK marker, map to 0 so the picker shows no price rather than a
-// bogus number.
+// variable/BYOK marker, and non-finite values (NaN/Inf), map to 0 so the
+// picker shows no price rather than a bogus number.
 func parsePricingString(s string) float64 {
 	val, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil || val <= 0 {
+	if err != nil || val <= 0 || math.IsNaN(val) || math.IsInf(val, 0) {
 		return 0
 	}
 	return val * 1e6

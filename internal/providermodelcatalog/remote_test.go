@@ -207,6 +207,29 @@ func TestParseOpenRouterCatalogMapsLiveMetadata(t *testing.T) {
 	}
 }
 
+func TestParsePricingString(t *testing.T) {
+	cases := []struct {
+		in   string
+		want float64
+	}{
+		{"0.000003", 3},
+		{" 0.000015 ", 15},
+		{"-1", 0},
+		{"0", 0},
+		{"", 0},
+		{"not-a-number", 0},
+		{"Inf", 0},
+		{"+Inf", 0},
+		{"-Inf", 0},
+		{"NaN", 0},
+	}
+	for _, tc := range cases {
+		if got := parsePricingString(tc.in); got != tc.want {
+			t.Fatalf("parsePricingString(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestPublicLiveCatalog(t *testing.T) {
 	if !PublicLiveCatalog("openrouter") || !PublicLiveCatalog("gitlawb-opengateway") {
 		t.Fatal("openrouter and gitlawb-opengateway should advertise a public live catalog")
