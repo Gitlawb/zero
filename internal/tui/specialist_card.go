@@ -50,6 +50,12 @@ type specialistInfo struct {
 	currentDetail  string
 	// model is what this agent runs on, empty when it inherits the session's.
 	model string
+	// background marks a child that OUTLIVES the run that launched it: a
+	// background Task spawn, or a task of a background plan. It is the one
+	// distinction cancelRun needs — a foreground child dies with the run
+	// context and must be settled, a background one keeps working and must not
+	// be reported as cancelled.
+	background bool
 	// result is what the agent PRODUCED, bounded at the bridge. The sidebar
 	// shows the head of it when its row is expanded; the whole thing lives in
 	// the child's own session, which the card's drill-in opens.
@@ -101,13 +107,40 @@ func (t *specialistTracker) complete(childSessionID string, status specialistSta
 	}
 }
 
-// cancelRunning marks every still-running specialist cancelled. Called when
-// the USER cancels the run: the children die with the run context, so a row
-// left specialistRunning would keep its spinner, its ticking clock and its
-// "live" mark in MODELS over a process that no longer exists. The current-tool
-// line is cleared for the same reason — nothing is running it.
+// markBackground records that a child outlives the run that launched it.
+//
+// Called from the two places that can know: a background plan's task-start
+// message carries the flag, and a specialistRebindMsg is only ever emitted for
+// a background Task spawn (backgroundSpawnRebind refuses anything else).
+func (t *specialistTracker) markBackground(childSessionID string) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].background = true
+			return
+		}
+	}
+}
+
+// cancelRunning marks every still-running FOREGROUND specialist cancelled.
+//
+// Called when the USER cancels the run: those children die with the run
+// context, so a row left specialistRunning would keep its spinner, its ticking
+// clock and its "live" mark in MODELS over a process that no longer exists. The
+// current-tool line is cleared for the same reason — nothing is running it.
+//
+// BACKGROUND CHILDREN ARE SKIPPED INDIVIDUALLY, not by refusing to settle at
+// all. The first version of this guard wrapped the whole call in
+// BackgroundPlanLive, and this tracker holds foreground and background children
+// TOGETHER — so one live background plan left every foreground sub-agent
+// spinning forever, and nothing else settles them: a late completion is dropped
+// by the stale-run guard once cancelRun has zeroed activeRunID. That is the
+// exact defect TestCancelSettlesEveryRunningAgentAndTask exists to prevent,
+// reintroduced by the fix for its opposite.
 func (t *specialistTracker) cancelRunning(now time.Time) {
 	for index := range t.specialists {
+		if t.specialists[index].background {
+			continue
+		}
 		if t.specialists[index].status == specialistRunning {
 			t.specialists[index].status = specialistCancelled
 			t.specialists[index].completedAt = now

@@ -200,6 +200,7 @@ func specialistCacheFingerprint(info *specialistInfo) string {
 		info.currentTool,
 		info.currentDetail,
 		info.model,
+		strconv.FormatBool(info.background),
 		info.result,
 		strconv.FormatInt(info.startedAt.UnixNano(), 10),
 		strconv.FormatInt(info.completedAt.UnixNano(), 10),

@@ -37,6 +37,7 @@ func TestSpecialistFingerprintCoversEveryField(t *testing.T) {
 		"currentTool":    func(info *specialistInfo) { info.currentTool = "changed" },
 		"currentDetail":  func(info *specialistInfo) { info.currentDetail = "changed" },
 		"model":          func(info *specialistInfo) { info.model = "changed" },
+		"background":     func(info *specialistInfo) { info.background = true },
 		"result":         func(info *specialistInfo) { info.result = "changed" },
 	}
 

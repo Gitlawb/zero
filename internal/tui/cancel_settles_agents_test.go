@@ -81,6 +81,11 @@ func TestCancelLeavesALiveBackgroundPlanAlone(t *testing.T) {
 	m.pending = true
 	m.now = func() time.Time { return start }
 	m.specialists.start("bg", "background worker", "sess-bg", start)
+	// MARKED, as the production path does: a background plan's task-start
+	// message carries the flag, and a background Task spawn is marked on its
+	// rebind. Without the mark a row is foreground by definition, and the
+	// tracker holds both kinds together — see cancelRunning.
+	m.specialists.markBackground("sess-bg")
 	m.orchestrate.tasks = []orchestrateTask{{id: "a", status: orchestrateRunning, startedAt: start}}
 
 	// A live background plan: the same condition beginRun consults.
@@ -101,6 +106,67 @@ func TestCancelLeavesALiveBackgroundPlanAlone(t *testing.T) {
 	for _, info := range m.specialists.specialists {
 		if info.childSessionID == "sess-bg" && info.status != specialistRunning {
 			t.Fatalf("a background sub-agent was marked %v while still working", info.status)
+		}
+	}
+}
+
+// THE MIXED CASE, which neither of the two tests above covers and which both
+// reviewers reproduced independently.
+//
+// The specialist tracker holds foreground and background children TOGETHER, so
+// gating the whole settle on BackgroundPlanLive left a FOREGROUND sub-agent
+// spinning forever whenever any background plan happened to be live: still
+// specialistRunning, still showing its current tool, still counted live in
+// MODELS — over a process that died with the run context. Nothing else settles
+// it, because a late completion is dropped by the stale-run guard once
+// cancelRun has zeroed activeRunID.
+func TestCancelSettlesForegroundChildrenEvenWithALiveBackgroundPlan(t *testing.T) {
+	start := time.Unix(1000, 0)
+	m := sidebarTestModel()
+	m.pending = true
+	m.now = func() time.Time { return start }
+
+	// A foreground sub-agent: dies with the run context, must be settled.
+	m.specialists.start("fg", "foreground worker", "sess-fg", start)
+	m.specialists.setCurrentTool("sess-fg", "read_file", "internal/tui/model.go")
+	// A background one: outlives the run, must be left alone.
+	m.specialists.start("bg", "background worker", "sess-bg", start)
+	m.specialists.markBackground("sess-bg")
+
+	m.orchestrate.tasks = []orchestrateTask{{id: "a", status: orchestrateRunning, startedAt: start}}
+	m.planProgress = NewPlanProgressBridge()
+	m.planProgress.SetBackground(true)
+	m.planProgress.PlanRunning(func() {})
+	if !m.planProgress.BackgroundPlanLive() {
+		t.Fatal("setup: the background plan must look live")
+	}
+
+	m.cancelRun()
+
+	for _, info := range m.specialists.specialists {
+		switch info.childSessionID {
+		case "sess-fg":
+			if info.status != specialistCancelled {
+				t.Fatalf("the FOREGROUND child stayed %v; its process died with the run context "+
+					"and nothing else will settle it", info.status)
+			}
+			if info.currentTool != "" {
+				t.Fatalf("a settled child still claims to run %q", info.currentTool)
+			}
+		case "sess-bg":
+			if info.status != specialistRunning {
+				t.Fatalf("the BACKGROUND child was marked %v while still working", info.status)
+			}
+		}
+	}
+	// The background plan's own task is still untouched.
+	if _, _, _, _, running := m.orchestrate.counts(); running != 1 {
+		t.Fatal("a live background plan's task was cancelled; it is still running")
+	}
+	// And MODELS must not count the settled foreground child as live.
+	for _, entry := range modelMixEntries(m.sidebarSpecialists(), "glm-5.2") {
+		if entry.working > 1 {
+			t.Fatalf("MODELS counts %d live agents; only the background one is still working", entry.working)
 		}
 	}
 }
