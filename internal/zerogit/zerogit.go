@@ -623,8 +623,11 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	// another process). Zero must not report that as a full success: without
 	// the local upstream, a later ensureFeatureBranch retry would reassert
 	// --force-with-lease=<branch>: against a branch that already exists.
+	// Dry-run never publishes and never writes branch.<name>.remote/merge, so
+	// skip verification/repair: set-upstream-to would mutate the repo and fail
+	// for unpublished branches with a misleading "push published" error.
 	expectedUpstream := remote + "/" + branch
-	if UpstreamRef(ctx, root, branch, runGit) != expectedUpstream {
+	if !options.DryRun && UpstreamRef(ctx, root, branch, runGit) != expectedUpstream {
 		if _, setErr := gitOutput(ctx, runGit, root, "branch", "--set-upstream-to="+expectedUpstream, branch); setErr != nil {
 			return PushResult{Remote: remote, Branch: branch, Output: output}, fmt.Errorf(
 				"push published %s but failed to configure local upstream %s: %w; run `git branch --set-upstream-to=%s %s` then retry",
@@ -781,8 +784,9 @@ type BranchResult struct {
 }
 
 // CreateBranch checks out a new local branch named options.Name off the
-// current HEAD. DryRun previews the resolved name without mutating the
-// repository, matching the DryRun convention used by Commit and Push.
+// current HEAD. DryRun returns the requested trimmed name without collision
+// resolution or repository mutation; a real run may append a numeric suffix
+// when the name is already taken locally or on the remote.
 func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, error) {
 	cwd, err := resolveCwd(options.Cwd)
 	if err != nil {

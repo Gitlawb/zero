@@ -1056,10 +1056,14 @@ func TestParseChangesArgsAuto(t *testing.T) {
 type mockCommitMsgProvider struct {
 	response string
 	req      zeroruntime.CompletionRequest
+	err      error
 }
 
 func (p *mockCommitMsgProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	p.req = request
+	if p.err != nil {
+		return nil, p.err
+	}
 	events := make(chan zeroruntime.StreamEvent, 2)
 	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: p.response}
 	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
@@ -1274,6 +1278,9 @@ func TestExtractBranchSlug(t *testing.T) {
 		{"CodeFence", "```\nadd-login-page\n```", "add-login-page"},
 		{"FencedWithLanguage", "```text\nadd-login-page\n```", "add-login-page"},
 		{"QuotedPhrase", "\n\"add login page\"\n", "add login page"},
+		// Trailing sentence punctuation must not discard the suggestion as preamble.
+		{"TrailingPeriodSpaced", "add login page.", "add login page"},
+		{"TrailingPeriodKebab", "add-login-page.", "add-login-page"},
 		{"EmptyResponse", "   \n\n  ", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1296,6 +1303,7 @@ func TestEnsureFeatureBranchExtractsSlugFromMessyLLMReplies(t *testing.T) {
 		{"PreambleWithMultiWord", "Here is a suggested branch name:\nadd login page"},
 		{"CodeFence", "```\nadd-login-page\n```"},
 		{"FencedWithLanguage", "```text\nadd-login-page\n```"},
+		{"TrailingPeriod", "add login page."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cwd := t.TempDir()
@@ -1328,6 +1336,89 @@ func TestEnsureFeatureBranchExtractsSlugFromMessyLLMReplies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEnsureFeatureBranchFallsBackWhenLLMNamingFails pins the silent-to-notice
+// path: provider errors and empty generated slugs keep the deterministic name
+// and print a short notice (unless JSON mode).
+func TestEnsureFeatureBranchFallsBackWhenLLMNamingFails(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider zeroruntime.Provider
+		provErr  error
+	}{
+		{"ProviderError", &mockCommitMsgProvider{err: errors.New("provider down")}, nil},
+		{"EmptySlug", &mockCommitMsgProvider{response: "   \n\n  "}, nil},
+		{"NewProviderFails", nil, errors.New("cannot construct provider")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			var createdName string
+			var stdout bytes.Buffer
+
+			branch, _, _, err := ensureFeatureBranch(context.Background(), &stdout, false, cwd, "", false, false, true, 0, appDeps{
+				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+					return true, "main", "origin", nil
+				},
+				commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+				inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "login.go", Status: "added"}}, "+func Login() {}"),
+				resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+					if tc.provErr != nil {
+						return nil, tc.provErr
+					}
+					return tc.provider, nil
+				},
+				currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+				createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+					createdName = options.Name
+					return zerogit.BranchResult{Branch: options.Name}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("ensureFeatureBranch returned error: %v", err)
+			}
+			if branch != "someone/login-go" || createdName != "someone/login-go" {
+				t.Fatalf("expected deterministic fallback someone/login-go, got %q (created %q)", branch, createdName)
+			}
+			if !strings.Contains(stdout.String(), "LLM branch naming unavailable; using deterministic name.") {
+				t.Fatalf("expected fallback notice in stdout, got %q", stdout.String())
+			}
+		})
+	}
+
+	t.Run("JSONModeSuppressesNotice", func(t *testing.T) {
+		cwd := t.TempDir()
+		var stdout bytes.Buffer
+		branch, _, _, err := ensureFeatureBranch(context.Background(), &stdout, true, cwd, "", false, false, true, 0, appDeps{
+			isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+				return true, "main", "origin", nil
+			},
+			commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+			inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "login.go", Status: "added"}}, "+func Login() {}"),
+			resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+				return execResolvedConfig(), nil
+			},
+			newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+				return &mockCommitMsgProvider{err: errors.New("provider down")}, nil
+			},
+			currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+			createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+				return zerogit.BranchResult{Branch: options.Name}, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("ensureFeatureBranch returned error: %v", err)
+		}
+		if branch != "someone/login-go" {
+			t.Fatalf("expected deterministic fallback, got %q", branch)
+		}
+		if strings.Contains(stdout.String(), "LLM branch naming unavailable") || strings.Contains(stdout.String(), "Generating branch name") {
+			t.Fatalf("json mode must suppress naming notices, got %q", stdout.String())
+		}
+	})
 }
 
 func TestEnsureFeatureBranchSkipsWhenNotOnDefault(t *testing.T) {
@@ -2252,6 +2343,41 @@ func TestEnsureFeatureBranchRollsBackWhenDefaultRestoreFails(t *testing.T) {
 	}
 	if deletedBranch != "user/readme-md" {
 		t.Fatalf("expected rollback deletion of user/readme-md, got %q", deletedBranch)
+	}
+}
+
+// TestEnsureFeatureBranchReportsRollbackFailureWhenDeleteAlsoFails covers the
+// dual-failure path: restore fails and feature-branch deletion also fails, so
+// the error must mention both so the user knows manual repair is required.
+func TestEnsureFeatureBranchReportsRollbackFailureWhenDeleteAlsoFails(t *testing.T) {
+	cwd := t.TempDir()
+
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		currentGitUser: func(ctx context.Context, cwd string) string { return "user" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
+			return errors.New("update-ref failed")
+		},
+		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
+			return errors.New("cannot delete branch: checked out")
+		},
+	})
+	if err == nil {
+		t.Fatal("expected dual-failure error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "restore default branch") || !strings.Contains(msg, "rollback of user/readme-md also failed") {
+		t.Fatalf("expected restore+rollback error, got %v", err)
+	}
+	if !strings.Contains(msg, "cannot delete branch") {
+		t.Fatalf("expected delete cause in error, got %v", err)
 	}
 }
 

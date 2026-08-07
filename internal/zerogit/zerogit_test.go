@@ -787,6 +787,44 @@ func TestPushBranchesToRemote(t *testing.T) {
 			t.Fatalf("expected partial result for published branch, got %#v", result)
 		}
 	})
+
+	t.Run("DryRunSkipsUpstreamVerification", func(t *testing.T) {
+		// git push --dry-run -u does not publish and does not write
+		// branch.<name>.remote/merge. Upstream repair must not run: it would
+		// mutate config and fail for never-published branches.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "user/slug\n"},
+			{Stdout: "origin\n"},
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"},
+			{Stdout: "To origin\n * [new branch] user/slug -> user/slug (dry run)\n"},
+		}}
+
+		result, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+			DryRun: true,
+		})
+		if err != nil {
+			t.Fatalf("Push dry-run returned error: %v", err)
+		}
+		if result.Remote != "origin" || result.Branch != "user/slug" {
+			t.Fatalf("unexpected push result: %#v", result)
+		}
+		if got := runner.commandLine(4); got != "git push --dry-run -u -- origin user/slug" {
+			t.Fatalf("unexpected push command: %q", got)
+		}
+		for i := range runner.calls {
+			line := runner.commandLine(i)
+			if strings.Contains(line, "--set-upstream-to=") {
+				t.Fatalf("dry-run must not repair upstream, call %d: %q", i, line)
+			}
+		}
+		if len(runner.calls) != 5 {
+			t.Fatalf("expected only pre-push setup + dry-run push (5 calls), got %d", len(runner.calls))
+		}
+	})
 }
 
 func TestCreatePRCommandConstruction(t *testing.T) {
@@ -1182,8 +1220,9 @@ func TestCommitsAhead(t *testing.T) {
 	})
 
 	t.Run("ReturnsErrorWhenRemoteTrackingRefMissing", func(t *testing.T) {
-		// A never-fetched remote-tracking ref makes rev-list fail; the caller
-		// treats that as "cannot tell" and proceeds rather than block a push.
+		// A never-fetched remote-tracking ref makes rev-list fail. The caller
+		// treats that as a hard failure and refuses to auto-branch, rather
+		// than guessing that there is something to publish.
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{ExitCode: 128, Stderr: "fatal: ambiguous argument 'origin/main..HEAD'"},

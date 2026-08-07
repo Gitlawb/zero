@@ -1304,6 +1304,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		}
 	}
 	if autoNaming && strings.TrimSpace(summary.Diff) != "" {
+		llmSlug := ""
 		if resolved, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil && config.HasProviderProfile(resolved.Provider) {
 			if provider, provErr := deps.newProvider(resolved.Provider); provErr == nil {
 				if !jsonMode {
@@ -1313,9 +1314,17 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 				generated, genErr := generateAutoBranchSlug(genCtx, provider, resolved.Provider.Model, redactChangeSummary(summary))
 				cancel()
 				if genErr == nil && generated != "" {
-					slug = generated
+					llmSlug = generated
 				}
 			}
+		}
+		if llmSlug != "" {
+			slug = llmSlug
+		} else if !jsonMode {
+			// Cover resolveConfig failures, missing provider profiles,
+			// newProvider errors, generation errors, and empty results so the
+			// user is not left guessing after "Generating..." or silence.
+			fmt.Fprintln(stdout, "LLM branch naming unavailable; using deterministic name.")
 		}
 	}
 
@@ -1345,8 +1354,12 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	// check the default branch back out so the tree is not left half-moved.
 	if deps.resetBranchRef != nil {
 		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, restoreTip); err != nil {
+			var rollbackErr error
 			if deps.deleteBranch != nil {
-				_ = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
+				rollbackErr = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
+			}
+			if rollbackErr != nil {
+				return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w; rollback of %s also failed: %v", currentBranch, restoreTip, err, result.Branch, rollbackErr)
 			}
 			return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w", currentBranch, restoreTip, err)
 		}
@@ -1456,6 +1469,14 @@ func extractBranchSlug(text string) string {
 			if after != "" {
 				candidate = after
 			}
+		}
+		// Models often terminate a suggestion with sentence punctuation;
+		// strip it so "add login page." is recovered as the slug rather than
+		// rejected as preamble (isPreambleText treats a trailing '.' as a
+		// full sentence). True preamble lines still match the prefix list.
+		candidate = strings.TrimSpace(strings.TrimRight(candidate, ".!?"))
+		if candidate == "" {
+			continue
 		}
 
 		// Preamble classification runs before accepting a slug-shaped line so
