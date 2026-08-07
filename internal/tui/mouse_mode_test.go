@@ -76,6 +76,44 @@ func TestMouseModeFallsBackWhereAllMotionIsUnreliable(t *testing.T) {
 	}
 }
 
+// A KNOWN LIMIT, pinned deliberately rather than left to be rediscovered.
+//
+// Windows children inherit the parent environment, so WT_SESSION or
+// TERM_PROGRAM can outlive the terminal that set them: a shell started from
+// Windows Terminal, or from Git Bash, that later runs zero.exe against a
+// different console host still carries them, and mouseModeFor then asks for
+// AllMotion on a host that may drop every mouse event. That is the #870 failure
+// class arriving by a narrower door.
+//
+// It is not fixed here, and this test says so out loud. Telling an inherited
+// variable from a live one needs the actual console host rather than the
+// environment, and guessing wrong in the other direction costs every Windows
+// Terminal user their hover highlighting. ZERO_MOUSE_MODE=cell is the recourse
+// until that host check exists, which is why the override is not a nicety.
+//
+// If someone later adds real host detection, this test SHOULD fail. That is the
+// point of it.
+func TestInheritedWindowsTerminalEnvStillAsksForAllMotion(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"WT_SESSION": "inherited-from-an-ancestor"},
+		{"TERM_PROGRAM": "vscode"},
+	} {
+		if got := mouseModeFor("windows", envFrom(env), false); got != tea.MouseModeAllMotion {
+			t.Fatalf("mouseModeFor(windows, %v) = %v; if this now returns CellMotion the "+
+				"inherited-environment limit has been fixed, so delete this test and its note", env, got)
+		}
+		// The escape hatch has to keep working for exactly this case, since it is
+		// the only recourse a user has when the guess is wrong.
+		withOverride := map[string]string{mouseModeEnv: "cell"}
+		for key, value := range env {
+			withOverride[key] = value
+		}
+		if got := mouseModeFor("windows", envFrom(withOverride), false); got != tea.MouseModeCellMotion {
+			t.Fatalf("ZERO_MOUSE_MODE=cell did not override inherited %v, so an affected user has no recourse", env)
+		}
+	}
+}
+
 // The override exists so a user who hits an unsupported terminal can fix it
 // themselves without waiting for a release, and so a maintainer can ask a bug
 // reporter to test one specific mode.

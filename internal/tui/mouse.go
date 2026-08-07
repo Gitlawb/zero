@@ -54,6 +54,19 @@ func mouseModeFor(goos string, env func(string) string, underPRoot bool) tea.Mou
 // from an old cmd window, so an unidentified Windows terminal is assumed to be
 // that one. Guessing wrong in this direction costs a hover highlight; guessing
 // wrong in the other direction costs every mouse event.
+// KNOWN LIMIT: these variables are INHERITED, so they answer for the process
+// that set them rather than for the console host attached right now. A shell
+// launched from Windows Terminal, or from Git Bash, that later runs zero.exe
+// against the legacy console still carries them, and this returns true for a
+// host that may drop every mouse event.
+//
+// Left as is on purpose. Deciding it properly means asking the console host
+// rather than the environment, and erring the other way costs every Windows
+// Terminal user their hover highlighting for a case that needs an unusual
+// launch path to reach. ZERO_MOUSE_MODE=cell is the recourse in the meantime,
+// which is the main reason that override exists.
+// TestInheritedWindowsTerminalEnvStillAsksForAllMotion pins this, so it is a
+// documented limit rather than a surprise.
 func windowsTerminalReportsAllMotion(env func(string) string) bool {
 	return strings.TrimSpace(env("WT_SESSION")) != "" ||
 		strings.TrimSpace(env("TERM_PROGRAM")) != ""
