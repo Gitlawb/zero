@@ -1,6 +1,9 @@
 package specialist
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 // The size parser handles real ids from both kinds of provider: local ids name
 // their size, cloud ids do not (and are priced anyway).
@@ -188,5 +191,54 @@ func TestAPinOutsideTheShortlistStillRoutes(t *testing.T) {
 	tiers := buildModelTiers(models, prefs)
 	if got := tiers.modelForRoleWith(TaskRoleScan, prefs, served); got != "m:1b" {
 		t.Fatalf("scan resolved to %q; a pin the provider serves must win over the shortlist", got)
+	}
+}
+
+// A PRICED CATALOGUE IS NEVER NARROWED, and this is the case the first version
+// got wrong. The list is sorted least-to-most capable, but "capable" means SIZE
+// on a free provider and COST on a priced one — so taking the tail kept the
+// DEAREST ten and moved the cheap tier from the cheapest model in the catalogue
+// to the tenth-dearest. Measured: 12 models priced 1..12 put cheap at cost 3.
+func TestAPricedCatalogueKeepsItsCheapEnd(t *testing.T) {
+	var priced []DiscoveredModel
+	for i := 1; i <= 12; i++ {
+		priced = append(priced, DiscoveredModel{ID: "m" + strconv.Itoa(i), ToolCall: true, InputCost: float64(i)})
+	}
+	ranked := rankedEligibleModels(priced, ModelPreferences{})
+	if len(ranked) != 12 {
+		t.Fatalf("a priced catalogue was narrowed to %d; the cheap end is what the cheap tier spends", len(ranked))
+	}
+	if tiers := buildModelTiers(priced, ModelPreferences{}); tiers.cheap != "m1" {
+		t.Fatalf("cheap tier = %q, want the cheapest model in the catalogue", tiers.cheap)
+	}
+	// The free case is unchanged: still narrowed, still keeping the largest.
+	var free []DiscoveredModel
+	for _, size := range []string{"1b", "3b", "7b", "8b", "14b", "20b", "27b", "32b", "70b", "120b", "235b", "397b"} {
+		free = append(free, DiscoveredModel{ID: "m:" + size, ToolCall: true})
+	}
+	if got := rankedEligibleModels(free, ModelPreferences{}); len(got) != defaultTopRankedModels {
+		t.Fatalf("a free catalogue kept %d, want the top %d", len(got), defaultTopRankedModels)
+	}
+}
+
+// TRILLIONS PARSE. "kimi-k2:1t" read as size 0 — unknown — and on a free
+// provider sorted BELOW gpt-oss:20b, so the largest model on the account became
+// the cheap tier every scan task was routed to, and the first thing the
+// shortlist discarded.
+func TestATrillionParameterModelIsNotSizeZero(t *testing.T) {
+	if got := modelSizeBillions("kimi-k2:1t"); got != 1000 {
+		t.Fatalf("modelSizeBillions(kimi-k2:1t) = %v, want 1000", got)
+	}
+	free := []DiscoveredModel{
+		{ID: "gpt-oss:20b", ToolCall: true},
+		{ID: "kimi-k2:1t", ToolCall: true},
+		{ID: "qwen3-coder:480b", ToolCall: true},
+	}
+	tiers := buildModelTiers(free, ModelPreferences{})
+	if tiers.cheap == "kimi-k2:1t" {
+		t.Fatal("the trillion-parameter model became the cheap tier")
+	}
+	if tiers.strong != "kimi-k2:1t" {
+		t.Fatalf("strong tier = %q, want the largest model", tiers.strong)
 	}
 }

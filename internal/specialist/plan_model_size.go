@@ -21,7 +21,11 @@ import (
 // numeric ("qwen3.5:397b" — 3.5 is a version, 397b is the size), but a version
 // is not suffixed b/m, so only the real size matches; taking the largest is a
 // second guard against an incidental small number.
-var modelSizeToken = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)([bm])(?:[^a-z]|$)`)
+// TRILLIONS TOO. The suffix set was [bm], so "kimi-k2:1t" parsed as size 0 —
+// unknown — and on a free provider sorted BELOW gpt-oss:20b: the largest model
+// on the account became the cheap tier every scan task was routed to, and the
+// first thing the shortlist discarded.
+var modelSizeToken = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)([bmt])(?:[^a-z]|$)`)
 
 func modelSizeBillions(id string) float64 {
 	var largest float64
@@ -30,8 +34,11 @@ func modelSizeBillions(id string) float64 {
 		if err != nil || value <= 0 {
 			continue
 		}
-		if strings.EqualFold(match[2], "m") {
+		switch {
+		case strings.EqualFold(match[2], "m"):
 			value /= 1000 // millions -> billions
+		case strings.EqualFold(match[2], "t"):
+			value *= 1000 // trillions -> billions
 		}
 		if value > largest {
 			largest = value
@@ -89,14 +96,23 @@ func applyMinSizeFloor(models []DiscoveredModel, floor float64) []DiscoveredMode
 // fell through to alphabetical and tiered by nothing. The size branch is skipped
 // the moment any model reports a price, so a mixed or priced catalogue never
 // changes.
-func sortModelsByCapability(eligible []DiscoveredModel) {
-	priced := false
-	for _, model := range eligible {
+// catalogueIsPriced reports whether ANY model in the set carries a price.
+//
+// One authority for the question, because two things now branch on it: the
+// ranking (cost or size) and the shortlist (which must not narrow a priced
+// catalogue at all). Two copies of this loop would be two chances to disagree
+// about what "free provider" means.
+func catalogueIsPriced(models []DiscoveredModel) bool {
+	for _, model := range models {
 		if model.InputCost > 0 || model.OutputCost > 0 {
-			priced = true
-			break
+			return true
 		}
 	}
+	return false
+}
+
+func sortModelsByCapability(eligible []DiscoveredModel) {
+	priced := catalogueIsPriced(eligible)
 	sort.SliceStable(eligible, func(i, j int) bool {
 		a, b := eligible[i], eligible[j]
 		if !priced {
@@ -141,10 +157,26 @@ const defaultTopRankedModels = 10
 // The tail, not the head: the list is ascending, so the most capable models are
 // at the end. Taking the head would keep exactly the toys this exists to drop.
 func applyTopRank(models []DiscoveredModel, top int) []DiscoveredModel {
+	// A PRICED CATALOGUE IS NEVER NARROWED, and this is the correction to the
+	// version that shipped without it.
+	//
+	// The list is sorted least-to-most capable, but "capable" is measured by
+	// SIZE on a free provider and by COST on a priced one. Taking the tail is
+	// therefore "keep the biggest" in the first case and "keep the DEAREST" in
+	// the second — which moved the cheap tier from the cheapest model in the
+	// catalogue to the tenth-dearest, and every scan task in every auto-assigned
+	// plan with it. Measured on a 12-model priced fixture: cheap went from cost
+	// 1 to cost 3, and on a real 30-model account the gap is an order of
+	// magnitude of real money.
+	//
+	// The asymmetry is the point. On a free provider the small models cost
+	// nothing and buy nothing, so dropping them is pure gain. On a priced one
+	// the cheap end is exactly what the cheap tier exists to spend, so dropping
+	// it defeats the tiering rather than sharpening it.
 	if top <= 0 {
 		top = defaultTopRankedModels
 	}
-	if len(models) <= top {
+	if len(models) <= top || catalogueIsPriced(models) {
 		return models
 	}
 	return models[len(models)-top:]
