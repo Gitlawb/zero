@@ -96,6 +96,17 @@ var protectedMetadataNames = []string{".git", ".zero", ".agents"}
 // gitMetadataWriteCarveouts below.
 var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
+// sandboxRenameProtectedMetadataName is the metadata directory that cannot be
+// fully write-protected but must still not be REPLACEABLE.
+//
+// It is deliberately not in the list above. That list denies write, and git has
+// to write index, objects and refs. But the carveouts guarding it are attached
+// to .git/config and .git/hooks as objects, so a principal that renames .git and
+// recreates it gets fresh paths inheriting the workspace allow with no denies,
+// which restores credential.helper and core.hooksPath. The Windows ACL plan
+// therefore denies DELETE on this directory alone, uninherited.
+const sandboxRenameProtectedMetadataName = ".git"
+
 // gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
 // under the OS-level sandbox even though the rest of .git is writable to git
 // subprocesses. Nonexistent paths are harmless no-ops in every backend's
