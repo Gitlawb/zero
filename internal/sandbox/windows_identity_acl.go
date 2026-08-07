@@ -124,6 +124,20 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 				Materialize: true,
 			})
 		}
+		// .git gets DELETE denied on the directory itself, because the carveouts
+		// that protect it are attached to .git/config and .git/hooks as OBJECTS.
+		// Rename .git aside and recreate it and those objects are gone, so the
+		// fresh config and hooks inherit the workspace allow with no deny of their
+		// own, handing back credential.helper and core.hooksPath.
+		//
+		// Not DenyWrite (git writes index, objects and refs), not materialized
+		// (git creates .git, and an empty one breaks git init), and not inherited,
+		// so everything underneath stays writable.
+		entries = append(entries, WindowsACLEntry{
+			Action:     WindowsACLDenyDelete,
+			Path:       filepath.Join(cleaned, sandboxRenameProtectedMetadataName),
+			Capability: input.PrincipalSID,
+		})
 	}
 
 	// Then the grants the principal cannot work without.

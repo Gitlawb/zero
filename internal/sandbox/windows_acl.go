@@ -12,6 +12,16 @@ const (
 	WindowsACLAllowWrite WindowsACLAction = "allow-write"
 	WindowsACLDenyRead   WindowsACLAction = "deny-read"
 	WindowsACLDenyWrite  WindowsACLAction = "deny-write"
+	// WindowsACLDenyDelete denies removing or renaming the object it names,
+	// WITHOUT denying writes to it or inside it, and without inheriting.
+	//
+	// It exists for .git. The write-denied carveouts live on .git/config and
+	// .git/hooks as objects, so replacing the .git directory discards them: the
+	// recreated config and hooks inherit the workspace allow with no deny, which
+	// restores credential.helper and core.hooksPath. .git cannot simply join
+	// sandboxFullyProtectedMetadataNames, because DenyWrite's mask includes
+	// FILE_GENERIC_WRITE and git must write index, objects and refs.
+	WindowsACLDenyDelete WindowsACLAction = "deny-delete"
 )
 
 type WindowsACLEntry struct {
