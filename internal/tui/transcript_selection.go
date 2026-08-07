@@ -1499,7 +1499,54 @@ func (m model) selectedTranscriptText() string {
 	return strings.Join(parts, "\n")
 }
 
+// clipboardSafeText removes the control characters a clipboard write cannot
+// carry, keeping newlines and tabs.
+//
+// A NUL PANICS THE WHOLE PROGRAM ON WINDOWS, and that is not a theoretical
+// concern: syscall.StringToUTF16 — which github.com/atotto/clipboard calls on
+// Windows — PANICS rather than erroring when the string contains one, so a
+// single copied NUL killed the TUI with "program experienced a panic". It
+// reached the clipboard because ansi.Strip removes escape SEQUENCES and leaves
+// C0 bytes untouched, and the transcript legitimately carries them from two
+// directions: tool output (a read of a binary file, git's -z NUL-separated
+// listings) and this package's own card protocol, whose row prefixes are
+// literally "\x00command-card\x00".
+//
+// Stripped at the WRITE, not at each source, because the sources are unbounded:
+// any tool result a user can select from is a source, and a fix per source is
+// one that the next tool re-breaks. The same pass protects the OSC52 fallback,
+// where a stray control byte would terminate the escape sequence early and
+// corrupt the copy rather than crash.
+//
+// \n and \t survive: a multi-line selection is the normal case, and both are
+// legal clipboard content.
+func clipboardSafeText(text string) string {
+	if !strings.ContainsFunc(text, unsafeClipboardRune) {
+		return text
+	}
+	var out strings.Builder
+	out.Grow(len(text))
+	for _, r := range text {
+		if unsafeClipboardRune(r) {
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
+func unsafeClipboardRune(r rune) bool {
+	if r == '\n' || r == '\t' {
+		return false
+	}
+	return r < 0x20 || r == 0x7f
+}
+
 func copyTranscriptSelectionCmd(text string) tea.Cmd {
+	// SANITISED ONCE, HERE, before either destination sees it — the native
+	// clipboard would panic on a NUL and the OSC52 fallback would be corrupted
+	// by one.
+	text = clipboardSafeText(text)
 	return func() tea.Msg {
 		// Prefer the native OS clipboard (pbcopy / clip.exe / xclip): it works on
 		// local terminals — including macOS Terminal.app, which has no OSC52 support
