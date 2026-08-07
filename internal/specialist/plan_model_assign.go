@@ -54,6 +54,14 @@ type ModelPreferences struct {
 	// toy. A model of unknown size is kept; 0 is no floor. Named to match the
 	// config field it carries from (see the prefs-carry guard test).
 	MinSize float64
+	// TopModels is how many of the MOST CAPABLE models a plan may route to. A
+	// provider can list far more than a plan can sensibly use, and ranking the
+	// whole field makes the cheap tier the smallest thing it happens to serve.
+	// 0 means the default (defaultTopRankedModels); a provider offering fewer
+	// keeps all of them. Pins are checked against the served set, not this list,
+	// so naming a model outside the top N still routes to it. Named to match the
+	// config field it carries from (see the prefs-carry guard test).
+	TopModels int
 }
 
 func (prefs ModelPreferences) excluded(id string) bool {
@@ -157,7 +165,16 @@ func rankedEligibleModels(models []DiscoveredModel, prefs ModelPreferences) []Di
 	// the ends. Priced providers rank by cost exactly as before; a free provider
 	// ranks by the size in the id instead of falling through to alphabetical.
 	sortModelsByCapability(eligible)
-	return eligible
+
+	// THEN THE SHORTLIST. Ranking the whole field is what makes the cheap tier
+	// the smallest thing the provider happens to serve — on a provider listing
+	// twenty models, that is a toy doing a scan while nineteen better ones sit
+	// unused, and the router is handed all twenty to choose between. Keeping the
+	// most capable N narrows both, so the tiers span the good models rather than
+	// everything. A PIN IS UNAFFECTED: pins are validated against the provider's
+	// served set, never against this list, so naming a model outside the top N
+	// still routes to it — the user's explicit instruction outranks a heuristic.
+	return applyTopRank(eligible, prefs.TopModels)
 }
 
 func buildModelTiers(models []DiscoveredModel, prefs ModelPreferences) modelTiers {

@@ -113,3 +113,39 @@ func sortModelsByCapability(eligible []DiscoveredModel) {
 		return a.ID < b.ID
 	})
 }
+
+// defaultTopRankedModels is how many of the most capable models a plan may
+// route to, when nothing is configured.
+//
+// A provider can list far more than a plan can sensibly use. ollama-cloud
+// serves around twenty, and the ranking below spans the whole field — so the
+// cheap tier reads the SMALLEST thing the provider offers and the router is
+// handed twenty candidates to choose between, most of which no task should get.
+// Keeping the top ten narrows both to the models actually worth a sub-agent:
+// the tiers then span "smallest of the good ten" to "best", rather than
+// "smallest of everything" to "best".
+//
+// Ten rather than three: the tiers need spread (cheap/balanced/strong are read
+// off the ends and the middle), and the router's whole value is having real
+// choices — a shortlist of three is a tier table with extra steps.
+const defaultTopRankedModels = 10
+
+// applyTopRank keeps only the most capable N, from a list already sorted
+// least-to-most capable.
+//
+// FAIL-OPEN, like every other narrowing here: a provider offering fewer than N
+// keeps all of them, and a non-positive N means "the default" rather than
+// "none" — a zero value must never be the thing that leaves a plan with no
+// models to assign.
+//
+// The tail, not the head: the list is ascending, so the most capable models are
+// at the end. Taking the head would keep exactly the toys this exists to drop.
+func applyTopRank(models []DiscoveredModel, top int) []DiscoveredModel {
+	if top <= 0 {
+		top = defaultTopRankedModels
+	}
+	if len(models) <= top {
+		return models
+	}
+	return models[len(models)-top:]
+}

@@ -118,3 +118,75 @@ func TestPricedProviderTiersByCostUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// THE SHORTLIST. A provider can list far more than a plan can sensibly use, and
+// ranking the whole field is what put the SMALLEST model the provider serves on
+// the cheap tier — a toy doing a scan while nineteen better ones sat unused —
+// and handed the router twenty candidates to choose between.
+func TestOnlyTheTopRankedModelsAreOffered(t *testing.T) {
+	// Twelve free models, sized in the id: the ranking is by size, ascending.
+	sizes := []string{"1b", "3b", "7b", "8b", "14b", "20b", "27b", "32b", "70b", "120b", "235b", "397b"}
+	models := make([]DiscoveredModel, 0, len(sizes))
+	for _, size := range sizes {
+		models = append(models, DiscoveredModel{ID: "m:" + size, ToolCall: true})
+	}
+	ranked := rankedEligibleModels(models, ModelPreferences{})
+	if len(ranked) != defaultTopRankedModels {
+		t.Fatalf("offered %d models, want the top %d", len(ranked), defaultTopRankedModels)
+	}
+	// The TAIL is kept — the most capable end. Keeping the head would preserve
+	// exactly the toys this exists to drop.
+	if ranked[0].ID != "m:7b" || ranked[len(ranked)-1].ID != "m:397b" {
+		t.Fatalf("kept %q..%q, want the ten largest (7b..397b)", ranked[0].ID, ranked[len(ranked)-1].ID)
+	}
+	for _, dropped := range []string{"m:1b", "m:3b"} {
+		for _, model := range ranked {
+			if model.ID == dropped {
+				t.Fatalf("%s survived the shortlist", dropped)
+			}
+		}
+	}
+	// The cheap tier now reads the smallest of the GOOD ten, not of everything.
+	if tiers := buildModelTiers(models, ModelPreferences{}); tiers.cheap != "m:7b" {
+		t.Fatalf("cheap tier = %q, want the smallest of the shortlist", tiers.cheap)
+	}
+}
+
+// FAIL-OPEN, like every other narrowing here: a provider offering fewer than the
+// cap keeps all of them, and a configured cap is honoured.
+func TestTheShortlistNeverEmptiesTheField(t *testing.T) {
+	three := []DiscoveredModel{{ID: "m:7b"}, {ID: "m:70b"}, {ID: "m:120b"}}
+	if got := rankedEligibleModels(three, ModelPreferences{}); len(got) != 3 {
+		t.Fatalf("a provider with three models kept %d", len(got))
+	}
+	if got := applyTopRank(three, 0); len(got) != 3 {
+		t.Fatal("a zero cap must mean the default, never none")
+	}
+	if got := applyTopRank(three, -5); len(got) != 3 {
+		t.Fatal("a negative cap must mean the default, never none")
+	}
+	if got := applyTopRank(three, 2); len(got) != 2 || got[0].ID != "m:70b" {
+		t.Fatalf("a configured cap of 2 kept %v, want the two largest", got)
+	}
+	if got := rankedEligibleModels(nil, ModelPreferences{}); len(got) != 0 {
+		t.Fatalf("no models in, %d out", len(got))
+	}
+}
+
+// A PIN OUTSIDE THE SHORTLIST STILL APPLIES. The user naming a model is an
+// instruction, not a suggestion, and pins are validated against what the
+// provider SERVES rather than against this heuristic list.
+func TestAPinOutsideTheShortlistStillRoutes(t *testing.T) {
+	sizes := []string{"1b", "3b", "7b", "8b", "14b", "20b", "27b", "32b", "70b", "120b", "235b", "397b"}
+	models := make([]DiscoveredModel, 0, len(sizes))
+	served := map[string]bool{}
+	for _, size := range sizes {
+		models = append(models, DiscoveredModel{ID: "m:" + size, ToolCall: true})
+		served["m:"+size] = true
+	}
+	prefs := ModelPreferences{Scan: "m:1b"} // deliberately the smallest, off the list
+	tiers := buildModelTiers(models, prefs)
+	if got := tiers.modelForRoleWith(TaskRoleScan, prefs, served); got != "m:1b" {
+		t.Fatalf("scan resolved to %q; a pin the provider serves must win over the shortlist", got)
+	}
+}
