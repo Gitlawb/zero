@@ -16,7 +16,7 @@ quantization-safe diff bands.
 
 ## Dune Dark (`dune-dark`)
 
-A dark, colorblind-safe palette matching Claude Code's daltonized dark mode:
+A dark, colorblind-friendly palette inspired by Claude Code's daltonized dark palette:
 near-black surface, white ink, and a deuteranopia-adjusted brand-orange
 accent.
 

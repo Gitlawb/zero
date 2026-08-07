@@ -465,8 +465,8 @@ var dunePalette = palette{
 	cardPerm:  "#c2a04a",
 }
 
-// duneDarkPalette is a dark theme based on Claude Code's colorblind-friendly
-// (daltonized) dark mode. The base surface is near-black (Claude Code's true
+// duneDarkPalette is a dark theme inspired by Claude Code's colorblind-friendly
+// (daltonized) dark palette. The base surface is near-black (Claude Code's true
 // dark canvas), with white ink and the brand-orange accent adjusted for
 // deuteranopia. Diff signals reuse the proven dark-theme structure so every
 // WCAG-AA invariant still holds; the accent and status colors (cool success,
