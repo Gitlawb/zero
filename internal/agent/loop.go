@@ -722,6 +722,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Role:       zeroruntime.MessageRoleTool,
 				Content:    toolResult.Output,
 				ToolCallID: toolResult.ToolCallID,
+				IsError:    toolResult.Status == tools.StatusError,
 			})
 			// Images ride a following USER message rather than the tool result
 			// above. Every provider drops images on a tool-role message —
@@ -3285,6 +3286,7 @@ func appendAbortedToolResults(messages []Message, remaining []ToolCall) []Messag
 			Role:       zeroruntime.MessageRoleTool,
 			Content:    abortedToolResultNotice,
 			ToolCallID: call.ID,
+			IsError:    true,
 		})
 	}
 	return messages

@@ -35,6 +35,18 @@ func TestProjectCompactionInputDropsRecoverableToolBodies(t *testing.T) {
 	}
 }
 
+func TestProjectCompactionInputRetainsStructurallyMarkedToolErrors(t *testing.T) {
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{{ID: "git", Name: "exec_command", Arguments: `{"cmd":"git status"}`}}},
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "git", Content: "fatal: not a git repository", IsError: true},
+	}
+
+	projected := projectCompactionInput(messages)
+	if len(projected) != 1 || !strings.Contains(projected[0].Content, "fatal: not a git repository") {
+		t.Fatalf("structured tool error was dropped from projection: %#v", projected)
+	}
+}
+
 func TestProjectCompactionInputCapsToolCallsPerTurn(t *testing.T) {
 	calls := make([]zeroruntime.ToolCall, 12)
 	for index := range calls {

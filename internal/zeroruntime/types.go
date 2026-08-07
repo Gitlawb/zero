@@ -97,6 +97,7 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
+	IsError    bool             // tool-result status; ignored for non-tool messages
 	Images     []ImageBlock     // optional; nil for text-only messages
 	Reasoning  []ReasoningBlock // optional; preserved thinking blocks to replay
 }

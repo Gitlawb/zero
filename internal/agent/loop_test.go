@@ -3592,6 +3592,11 @@ func TestRunAppendsAbortedPlaceholderForUnexecutedToolCallsOnGuardStop(t *testin
 	if !strings.Contains(strings.ToLower(placeholder), "aborted") {
 		t.Fatalf("expected the placeholder result to mark the call as aborted, got %q", placeholder)
 	}
+	for _, message := range result.Messages {
+		if message.ToolCallID == "flaky-2" && !message.IsError {
+			t.Fatalf("aborted placeholder must carry error status: %#v", message)
+		}
+	}
 
 	// Every tool_use in the final assistant message must have a matching result.
 	for _, message := range result.Messages {
@@ -3604,6 +3609,33 @@ func TestRunAppendsAbortedPlaceholderForUnexecutedToolCallsOnGuardStop(t *testin
 			}
 		}
 	}
+}
+
+func TestRunCarriesToolErrorStatusIntoMessageHistory(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(alwaysFailingTool{})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "failed-call", ToolName: "flaky"},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "failed-call"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}},
+	}}
+
+	result, err := Run(context.Background(), "go", provider, Options{Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range result.Messages {
+		if message.ToolCallID == "failed-call" {
+			if !message.IsError {
+				t.Fatalf("failed tool result lost its structured status: %#v", message)
+			}
+			return
+		}
+	}
+	t.Fatalf("failed tool result missing from message history: %#v", result.Messages)
 }
 
 type secretEmittingTool struct{ output string }

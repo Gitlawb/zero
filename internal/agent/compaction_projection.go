@@ -64,7 +64,10 @@ func projectCompactionInput(messages []zeroruntime.Message) []zeroruntime.Messag
 				sections = append(sections, fmt.Sprintf("[assistant #%d]\n%s", index, strings.Join(lines, "\n")))
 			}
 		case zeroruntime.MessageRoleTool:
-			if !isLikelyToolError(message.Content) {
+			// New tool-result messages carry the execution status directly, as the
+			// source ToolResult does. Keep the text check for older session history
+			// created before Message exposed IsError.
+			if !message.IsError && !isLikelyToolError(message.Content) {
 				continue
 			}
 			name := toolNameForResult(messages, index)
