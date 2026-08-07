@@ -231,38 +231,38 @@ func toolAllowedByFilters(name string, enabled []string, disabled []string) bool
 	return !containsName(disabled, name)
 }
 
-// permissionModePlan and permissionModeSpecDraft mirror the string values of
-// agent.PermissionModePlan and agent.PermissionModeSpecDraft. RunOptions.PermissionMode
-// is already a plain string (set from agent.PermissionMode via string(permissionMode)),
-// so the tools package compares against the same literals rather than importing
-// the agent package's type, which would create an import cycle.
+// PlanMode and SpecDraftMode are the string values of agent.PermissionModePlan
+// and agent.PermissionModeSpecDraft. RunOptions.PermissionMode is already a
+// plain string (set from agent.PermissionMode via string(permissionMode)), so
+// this package owns the literals rather than importing the agent type (which
+// would create an import cycle). agent.ToolAdvertised delegates plan/spec-draft
+// decisions here so tool_search and the dispatch gate stay identical.
 const (
-	permissionModePlan      = "plan"
-	permissionModeSpecDraft = "spec-draft"
+	PlanMode      = "plan"
+	SpecDraftMode = "spec-draft"
 )
 
-// toolAdvertisedForPermissionMode mirrors agent.ToolAdvertised's plan/spec-draft
-// branches (toolAdvertisedInPlan/toolAdvertisedInSpecDraft) for a single
-// candidate tool (kept here to avoid an import cycle: the agent package
-// imports tools, not the other way around). Every other mode's advertisement
-// rules (auto, member-auto, unsafe, ask, and the empty string used by callers
-// that never set RunOptions.PermissionMode) are unaffected: tool_search's
-// existing EnabledTools/DisabledTools and deferred-eligibility filters already
-// govern those, so this only narrows plan/spec-draft, exactly the two modes
-// whose direct-invocation dispatch gate (executeToolCall) also restricts a
-// tool to SideEffectRead+PermissionAllow (plus the lsp_navigate exclusion and
-// the ask_user/update_plan/submit_spec special cases).
-func toolAdvertisedForPermissionMode(tool Tool, permissionMode string) bool {
+// ToolAdvertisedForPermissionMode is the single source of truth for whether a
+// tool may be advertised under a given permission mode string. agent.ToolAdvertised
+// calls this for plan/spec-draft after its own PermissionDeny short-circuit;
+// tool_search applies it to deferred candidates so a mutator cannot leak through
+// load_tools. Modes other than plan/spec-draft only apply the PermissionDeny
+// gate here (auto/member-auto/ask/unsafe advertisement rules stay in agent).
+func ToolAdvertisedForPermissionMode(tool Tool, permissionMode string) bool {
+	// A denied tool is never advertised in any mode (mirrors agent.ToolAdvertised).
+	if tool.Safety().Permission == PermissionDeny {
+		return false
+	}
 	switch permissionMode {
-	case permissionModePlan:
+	case PlanMode:
 		if tool.Name() == "lsp_navigate" {
 			return false
 		}
 		safety := tool.Safety()
 		return safety.SideEffect == SideEffectRead && safety.Permission == PermissionAllow
-	case permissionModeSpecDraft:
-		// Mirror agent.toolAdvertisedInSpecDraft: never trust control-tool
-		// names alone (a re-registered spoof can carry arbitrary Safety).
+	case SpecDraftMode:
+		// Never trust control-tool names alone (a re-registered spoof can carry
+		// arbitrary Safety).
 		safety := tool.Safety()
 		switch tool.Name() {
 		case "update_plan":
@@ -276,6 +276,12 @@ func toolAdvertisedForPermissionMode(tool Tool, permissionMode string) bool {
 	default:
 		return true
 	}
+}
+
+// toolAdvertisedForPermissionMode is the unexported name used by tool_search
+// internals; keep it as a thin alias so call sites stay short.
+func toolAdvertisedForPermissionMode(tool Tool, permissionMode string) bool {
+	return ToolAdvertisedForPermissionMode(tool, permissionMode)
 }
 
 func containsName(names []string, name string) bool {

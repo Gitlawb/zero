@@ -3183,14 +3183,17 @@ func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
 }
 
 func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
+	// Denied tools are never advertised in any mode. Keep this short-circuit
+	// here so auto/member-auto/ask/unsafe all honor it before mode branches;
+	// tools.ToolAdvertisedForPermissionMode repeats it for the tool_search path
+	// which never enters this function.
 	if tool.Safety().Permission == tools.PermissionDeny {
 		return false
 	}
-	if permissionMode == PermissionModeSpecDraft {
-		return toolAdvertisedInSpecDraft(tool)
-	}
-	if permissionMode == PermissionModePlan {
-		return toolAdvertisedInPlan(tool)
+	// plan/spec-draft policy lives in tools so tool_search and the dispatch
+	// gate cannot drift. PermissionDeny was already checked above.
+	if permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan {
+		return tools.ToolAdvertisedForPermissionMode(tool, string(permissionMode))
 	}
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
@@ -3211,51 +3214,6 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 		return false
 	}
 	return true
-}
-
-// toolAdvertisedInSpecDraft is the read-only-ish allowlist for --use-spec:
-// inspection tools, ask_user, and submit_spec (which writes the review
-// artifact). Like plan mode, control-tool names are never trusted alone:
-// Registry.Register can replace ask_user/submit_spec with an arbitrary
-// tool, so each special case requires the Safety shape of the real tool.
-func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
-	safety := tool.Safety()
-	switch tool.Name() {
-	case "update_plan":
-		return false
-	case "ask_user":
-		// Real ask_user is SideEffectRead + PermissionAllow.
-		return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
-	case "submit_spec":
-		// Real submit_spec is SideEffectWrite + PermissionAllow (writes
-		// under .zero/specs). Require that shape so a shell/network spoof
-		// registered under the same name is not advertised or executed.
-		return safety.SideEffect == tools.SideEffectWrite && safety.Permission == tools.PermissionAllow
-	}
-	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
-}
-
-// toolAdvertisedInPlan mirrors toolAdvertisedInSpecDraft: the agent may only
-// read the workspace, ask the user, and shape the plan with update_plan. No
-// mutating tool is advertised, so plan mode stays strictly read-only.
-//
-// ask_user and update_plan are validated against Safety like every other
-// tool, never whitelisted by name alone: Registry.Register lets a caller
-// replace either name with a mutating tool, and a name-only match would
-// advertise (and then let executeToolCall run) it under a mode that promises
-// read-only behavior. Both names currently carry SideEffectRead+PermissionAllow,
-// so this changes nothing for the real tools.
-//
-// lsp_navigate is excluded even though it is classified SideEffectRead: its
-// manager lazily starts a real language-server process (internal/lsp/server.go)
-// outside the sandbox and permission gates, which contradicts plan mode's
-// promise that nothing runs.
-func toolAdvertisedInPlan(tool tools.Tool) bool {
-	if tool.Name() == "lsp_navigate" {
-		return false
-	}
-	safety := tool.Safety()
-	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
 }
 
 func stopReasonFromToolResult(result ToolResult) StopReason {

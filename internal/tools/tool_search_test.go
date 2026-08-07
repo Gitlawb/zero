@@ -350,8 +350,8 @@ func TestToolSearchHonorsEnabledAllowlist(t *testing.T) {
 // denied by the agent's plan-mode dispatch gate. A deferred mutator (write
 // SideEffect) must be invisible to tool_search in plan mode: absent from
 // select: resolution, absent from keyword ranking, and absent from the
-// no-match/listing text — mirroring the read-only visibility rule
-// (agent.toolAdvertisedInPlan) applied to direct tool calls.
+// no-match/listing text — mirroring ToolAdvertisedForPermissionMode applied
+// to direct tool calls via agent.ToolAdvertised.
 func TestToolSearchExcludesDeferredMutatorInPlanMode(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(searchFakeTool{name: "weather_lookup", description: "Look up weather."})
@@ -411,7 +411,7 @@ func TestToolSearchExcludesDeferredMutatorInPlanMode(t *testing.T) {
 // TestToolSearchExcludesDeferredMutatorInSpecDraftMode is the spec-draft analog
 // of TestToolSearchExcludesDeferredMutatorInPlanMode: spec-draft is the other
 // read-only mode whose direct-invocation dispatch gate restricts a tool to
-// SideEffectRead+PermissionAllow (agent.toolAdvertisedInSpecDraft), so
+// SideEffectRead+PermissionAllow (ToolAdvertisedForPermissionMode), so
 // tool_search must apply the identical narrowing.
 func TestToolSearchExcludesDeferredMutatorInSpecDraftMode(t *testing.T) {
 	reg := NewRegistry()
@@ -468,6 +468,32 @@ func TestToolSearchRejectsSpoofedSpecDraftControlToolsBySafety(t *testing.T) {
 				t.Fatalf("spoofed %s schema leaked: %q", tc.name, result.Output)
 			}
 		})
+	}
+}
+
+// TestToolSearchExcludesPermissionDenyInDefaultMode locks the PermissionDeny
+// short-circuit that agent.ToolAdvertised applies in every mode: a deferred
+// tool marked PermissionDeny must stay unresolvable through tool_search even
+// under auto/empty permission mode (where plan/spec-draft narrowing does not
+// apply).
+func TestToolSearchExcludesPermissionDenyInDefaultMode(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(searchSpoofedSafetyTool{
+		name:        "denied_lookup",
+		description: "Should never resolve",
+		safety:      Safety{SideEffect: SideEffectRead, Permission: PermissionDeny, Reason: "denied"},
+	})
+	tool := NewToolSearchTool(reg).(optionsAwareTool)
+
+	for _, mode := range []string{"", "auto", "ask", "unsafe"} {
+		result := tool.RunWithOptions(context.Background(),
+			map[string]any{"query": "select:denied_lookup"}, RunOptions{PermissionMode: mode})
+		if got := result.Meta["load_tools"]; got != "" {
+			t.Fatalf("mode %q must not resolve PermissionDeny deferred tool, got load_tools=%q", mode, got)
+		}
+		if strings.Contains(result.Output, "Should never resolve") || strings.Contains(result.Output, "spoofed_secret") {
+			t.Fatalf("PermissionDeny deferred tool leaked under mode %q: %q", mode, result.Output)
+		}
 	}
 }
 

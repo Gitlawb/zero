@@ -398,6 +398,27 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModePlan)}, &SetSessionModeResult{}); err != nil {
 		t.Fatalf("set_mode plan: %v", err)
 	}
+	// Configuration path is a separate contract from MethodSessionSetMode: the
+	// mode option is advertised via configOptions and applied by handleSetConfigOption.
+	var planConfigured SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: newRes.SessionID, ConfigID: configIDMode, Value: string(agent.PermissionModePlan),
+	}, &planConfigured); err != nil {
+		t.Fatalf("set_config_option plan: %v", err)
+	}
+	if got := planConfigured.ConfigOptions[1].CurrentValue; got != string(agent.PermissionModePlan) {
+		t.Fatalf("configured mode after plan = %q, want plan", got)
+	}
+	hasPlanOption := false
+	for _, opt := range planConfigured.ConfigOptions[1].Options {
+		if opt.Value == string(agent.PermissionModePlan) {
+			hasPlanOption = true
+			break
+		}
+	}
+	if !hasPlanOption {
+		t.Fatalf("config mode options missing plan: %#v", planConfigured.ConfigOptions[1].Options)
+	}
 	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected Unsafe mode to be rejected over ACP")

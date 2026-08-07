@@ -55,13 +55,18 @@ func (m model) handlePlanCommand(args string) (model, string) {
 // gate only covers agent tool calls; these commands run entirely inside the
 // TUI process and would mutate the workspace or spawn a host process outside
 // that gate: /rewind restores files from a checkpoint, /export writes a
-// transcript file to disk, /sandbox-setup runs native platform setup, and
+// transcript file to disk, /sandbox-setup runs native platform setup,
+// /spec forks a drafting session, /mcp <sub> mutates server configuration, and
 // /init's whole job is writing AGENTS.md (which plan mode then denies).
-// Modeled on btwCommandUnavailable's shape for the analogous BTW guard.
+// Bare /mcp (empty text) only opens the read-only manager view, so it stays
+// available. Modeled on btwCommandUnavailable's shape for the analogous BTW guard.
 func planModeCommandUnavailable(command parsedCommand) bool {
 	switch command.kind {
-	case commandRewind, commandExport, commandSandboxSetup, commandSpec, commandMCP, commandInit:
+	case commandRewind, commandExport, commandSandboxSetup, commandSpec, commandInit:
 		return true
+	case commandMCP:
+		// Bare /mcp only opens the read-only manager view; subcommands mutate config.
+		return strings.TrimSpace(command.text) != ""
 	default:
 		return false
 	}

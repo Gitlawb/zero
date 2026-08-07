@@ -237,6 +237,42 @@ func TestPlanModeBlocksInitCommand(t *testing.T) {
 	}
 }
 
+// TestPlanModeAllowsBareMCPManagerView: bare /mcp only opens the read-only
+// manager overlay and must stay available while planning.
+func TestPlanModeAllowsBareMCPManagerView(t *testing.T) {
+	m := newModel(context.Background(), Options{Cwd: t.TempDir(), PermissionMode: agent.PermissionModePlan})
+
+	updated, cmd := m.dispatchCommand(parseCommand("/mcp"))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected bare /mcp to be synchronous")
+	}
+	if transcriptContains(next.transcript, "unavailable in plan mode") {
+		t.Fatalf("bare /mcp must not be blocked in plan mode, got %#v", next.transcript)
+	}
+	if next.mcpManager == nil {
+		t.Fatal("expected bare /mcp to open the MCP manager in plan mode")
+	}
+}
+
+// TestPlanModeBlocksMCPSubcommands: /mcp <sub> mutates server configuration
+// and must stay blocked while plan mode is active.
+func TestPlanModeBlocksMCPSubcommands(t *testing.T) {
+	m := newModel(context.Background(), Options{Cwd: t.TempDir(), PermissionMode: agent.PermissionModePlan})
+
+	updated, cmd := m.dispatchCommand(parseCommand("/mcp disable docs"))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /mcp subcommand to be blocked synchronously in plan mode")
+	}
+	if !transcriptContains(next.transcript, "unavailable in plan mode") {
+		t.Fatalf("expected plan-mode denial for /mcp subcommand, got %#v", next.transcript)
+	}
+	if next.mcpManager != nil {
+		t.Fatal("/mcp subcommand must not open the manager when blocked")
+	}
+}
+
 // TestPlanModeCommandGuardDoesNotBlockOutsideMode confirms the guard is
 // scoped to plan mode: the same commands must behave normally (not be
 // swallowed by the new check) once plan mode is off.

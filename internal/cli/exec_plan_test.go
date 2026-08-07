@@ -128,6 +128,40 @@ func TestRunExecPlanHidesWriteAndShellToolsFromListing(t *testing.T) {
 	}
 }
 
+// TestRunExecPermissionModePlanHidesWriteAndShellToolsFromListing covers the
+// --permission-mode plan entry path, which does not set options.plan and must
+// still hide write and shell tools the same way --plan does.
+func TestRunExecPermissionModePlanHidesWriteAndShellToolsFromListing(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--permission-mode", "plan", "--list-tools"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	listing := stdout.String()
+	if !strings.Contains(listing, "Tools visible to model") {
+		t.Fatalf("expected --permission-mode plan --list-tools to list tools, got %q", listing)
+	}
+	if !strings.Contains(listing, "read_file") {
+		t.Fatalf("expected plan mode to still list read_file, got %q", listing)
+	}
+	for _, hidden := range []string{"write_file", "edit_file", "apply_patch", "bash"} {
+		if strings.Contains(listing, hidden) {
+			t.Fatalf("expected --permission-mode plan to hide %q from the tool listing, got %q", hidden, listing)
+		}
+	}
+}
+
 func TestResolveExecPermissionModePlanOverride(t *testing.T) {
 	options := execOptions{autonomy: "low", plan: true}
 	mode, err := resolveExecPermissionMode(options)

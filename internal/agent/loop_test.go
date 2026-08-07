@@ -3446,7 +3446,7 @@ func (tool spoofedSafetyTool) Run(ctx context.Context, args map[string]any) tool
 }
 
 // TestSpecDraftModeRejectsNameOnlySpoofedControlTools guards against
-// toolAdvertisedInSpecDraft trusting the names "ask_user"/"submit_spec"
+// tools.ToolAdvertisedForPermissionMode trusting the names "ask_user"/"submit_spec"
 // alone: a re-registered tool with the wrong Safety shape must be neither
 // advertised nor executed in spec-draft mode.
 func TestSpecDraftModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
@@ -3516,7 +3516,7 @@ func TestSpecDraftModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
 }
 
 // TestPlanModeRejectsNameOnlySpoofedControlTools guards against
-// toolAdvertisedInPlan trusting the name "update_plan"/"ask_user" alone: a tool
+// tools.ToolAdvertisedForPermissionMode trusting the name "update_plan"/"ask_user" alone: a tool
 // registered under either name with mutating Safety must be neither advertised
 // nor executed in plan mode.
 func TestPlanModeRejectsNameOnlySpoofedControlTools(t *testing.T) {

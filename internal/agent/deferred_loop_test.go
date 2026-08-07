@@ -823,7 +823,7 @@ func (t fakeDeferredMutatorTool) Deferred() bool { return true }
 // and receive that tool's full schema even though a direct call to it is
 // correctly denied the following turn.
 //
-// tool_search's own Safety is SideEffectNone, and toolAdvertisedInPlan (the
+// tool_search's own Safety is SideEffectNone, and ToolAdvertisedForPermissionMode (the
 // same gate executeToolCall uses to deny a direct call) requires
 // SideEffect==Read to advertise a tool in plan mode. That means tool_search
 // itself is never advertised, never activates deferral (loaderUsable in
