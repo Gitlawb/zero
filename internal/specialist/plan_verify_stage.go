@@ -61,8 +61,13 @@ const verifyStagePrompt = "Verify the claims the tasks above made, and try to RE
 	"proves it, or REFUTED with the line that disproves it, and list separately anything you could not " +
 	"check and why. Refuting the other tasks' answers is the job; agreeing is not."
 
-// verifyStageNote explains the appended task wherever notes are shown.
-const verifyStageNote = verifyStageTaskID + ": added — no task in this plan verifies the others' claims"
+// verifyStageNote explains the appended task wherever notes are shown. Built
+// from the id ACTUALLY used, which is suffixed when the author already took the
+// preferred one — a note naming a task the plan does not contain is worse than
+// no note.
+func verifyStageNote(id string) string {
+	return id + ": added — no task in this plan verifies the others' claims"
+}
 
 // appendVerifyStageToTaskArgs adds a verification task to a plan that has none.
 //
@@ -75,7 +80,7 @@ const verifyStageNote = verifyStageTaskID + ": added — no task in this plan ve
 //
 // Returns the tasks unchanged and an empty note whenever any condition fails —
 // this is an addition that must never be the reason a plan does not run.
-func appendVerifyStageToTaskArgs(tasks []any, maxTasks, budgetMaxTokens int) ([]any, string) {
+func appendVerifyStageToTaskArgs(tasks []any, maxTasks, budgetMaxTokens, budgetPerTask int) ([]any, string) {
 	if len(tasks) < verifyStageMinimumTasks {
 		return tasks, ""
 	}
@@ -92,6 +97,17 @@ func appendVerifyStageToTaskArgs(tasks []any, maxTasks, budgetMaxTokens int) ([]
 	// wrote. The existing suite caught this; without the check the feature turns
 	// working plans into rejected ones.
 	if budgetMaxTokens > 0 && budgetMaxTokens < (len(tasks)+1)*minimumPlausibleTaskTokens {
+		return tasks, ""
+	}
+	// AND THE PER-TASK CAP IS A THIRD CEILING, missed by the first version of
+	// this guard. refuseUnreachablePerTaskCap requires max_tokens to cover
+	// max_tokens_per_task × taskCount, so the extra task raises that bar by one
+	// whole per-task cap. A 4-task plan with max_tokens 400,000 and
+	// max_tokens_per_task 100,000 parses fine and was then REFUSED outright once
+	// the verifier made it five — naming a task count and a budget its author
+	// never chose. Any plan whose per-task cap exceeds the 50,000 floor above
+	// falls in this window, so the floor check alone does not cover it.
+	if budgetMaxTokens > 0 && budgetPerTask > 0 && budgetMaxTokens < (len(tasks)+1)*budgetPerTask {
 		return tasks, ""
 	}
 	ids := make([]string, 0, len(tasks))
@@ -121,8 +137,9 @@ func appendVerifyStageToTaskArgs(tasks []any, maxTasks, budgetMaxTokens int) ([]
 		taken[id] = true
 	}
 
+	id := freeVerifyStageID(taken)
 	verifier := map[string]any{
-		"id":     freeVerifyStageID(taken),
+		"id":     id,
 		"prompt": verifyStagePrompt,
 		// depends_on EVERY task, which is what makes this a fan-in: the verifier
 		// starts only once there is something to verify, and the dependency
@@ -133,7 +150,7 @@ func appendVerifyStageToTaskArgs(tasks []any, maxTasks, budgetMaxTokens int) ([]
 		// read-only intersection of the parent's, so this can neither modify
 		// anything nor flip the plan into worktree isolation.
 	}
-	return append(append([]any{}, tasks...), verifier), verifyStageNote
+	return append(append([]any{}, tasks...), verifier), id
 }
 
 // verifyStageMinimumTasks is the smallest plan worth appending to. A single-task
@@ -181,22 +198,62 @@ func (tool *OrchestrateTool) appendVerifyStage(args map[string]any, options tool
 	// before the plan is constructed, and planBudget's own refusal for a missing
 	// budget object belongs to ParsePlan. An unreadable or absent max_tokens
 	// reads as 0 — unbounded — which is exactly the case the ceiling check skips.
-	budgetTokens := 0
+	budgetTokens, budgetPerTask := 0, 0
 	if budget, ok := args["budget"].(map[string]any); ok {
 		budgetTokens = planInt(budget, "max_tokens")
+		budgetPerTask = planInt(budget, "max_tokens_per_task")
 	}
-	tasks, note := appendVerifyStageToTaskArgs(raw, tool.limits(options).MaxTasks, budgetTokens)
-	if note == "" {
+	tasks, id := appendVerifyStageToTaskArgs(raw, tool.limits(options).MaxTasks, budgetTokens, budgetPerTask)
+	if id == "" {
 		return ""
 	}
 	args["tasks"] = tasks
-	return note
+	return id
 }
 
 // verifyStageSummary renders the appended-task note for the plan's output.
-func verifyStageSummary(note string) string {
-	if strings.TrimSpace(note) == "" {
+func verifyStageSummary(id string) string {
+	if strings.TrimSpace(id) == "" {
 		return ""
 	}
-	return fmt.Sprintf("\n\nVerification stage added:\n  %s", note)
+	return fmt.Sprintf("\n\nVerification stage added:\n  %s", verifyStageNote(id))
+}
+
+// onlyTheAppendedVerifierFailed reports that every task which did NOT succeed is
+// the one this file appended.
+//
+// A TASK THE AUTHOR DID NOT WRITE MUST NOT DECIDE THE AUTHOR'S VERDICT. The
+// verifier runs last, on the strongest tier, with the largest dependency
+// briefing — the task most likely to stall or exhaust its provider retry — and
+// its failure took the whole call to StatusError with it. The orchestrating
+// model then reads "the plan failed" and re-runs three tasks that had already
+// succeeded, paying twice for work that was done.
+//
+// The REPORT stays honest either way: Failed still counts it, the summary still
+// names it, and the caller is told plainly that the claims went unverified. Only
+// the OK/error verdict on the author's plan is left to the author's tasks.
+func onlyTheAppendedVerifierFailed(report PlanReport, verifyTaskID string) bool {
+	if strings.TrimSpace(verifyTaskID) == "" {
+		return false
+	}
+	sawIt := false
+	for _, task := range report.Tasks {
+		if task.Outcome == TaskSucceeded {
+			continue
+		}
+		if task.ID != verifyTaskID {
+			return false
+		}
+		sawIt = true
+	}
+	return sawIt
+}
+
+// verifyStageUnverifiedNote is what the caller is told when the appended
+// verifier is the only thing that did not succeed: the work stands, the
+// checking did not happen, and re-running the plan is not the answer.
+func verifyStageUnverifiedNote(id string) string {
+	return "\n\nNote: every task you asked for succeeded, but the appended " + id +
+		" did not finish, so their claims were NOT independently verified. " +
+		"The task results above are unchecked rather than wrong; re-running the plan would repeat work that already succeeded."
 }

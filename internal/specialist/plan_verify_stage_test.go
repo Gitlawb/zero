@@ -34,7 +34,7 @@ func taskIDsOf(t *testing.T, tasks []any) []string {
 }
 
 func TestAVerifierIsAppendedToAnUnverifiedPlan(t *testing.T) {
-	tasks, note := appendVerifyStageToTaskArgs(verifyStageTasks("scan", "trace"), 20, 0)
+	tasks, note := appendVerifyStageToTaskArgs(verifyStageTasks("scan", "trace"), 20, 0, 0)
 	if note == "" {
 		t.Fatal("a multi-task plan with no verifier must get one")
 	}
@@ -71,7 +71,7 @@ func TestAVerifierIsAppendedToAnUnverifiedPlan(t *testing.T) {
 func TestAPlanThatAlreadyVerifiesIsUntouched(t *testing.T) {
 	tasks := append(verifyStageTasks("scan", "trace"),
 		map[string]any{"id": "check", "prompt": "review the two findings above and confirm them"})
-	got, note := appendVerifyStageToTaskArgs(tasks, 20, 0)
+	got, note := appendVerifyStageToTaskArgs(tasks, 20, 0, 0)
 	if note != "" || len(got) != 3 {
 		t.Fatalf("a plan with a verify task must be untouched: note=%q tasks=%d", note, len(got))
 	}
@@ -79,7 +79,7 @@ func TestAPlanThatAlreadyVerifiesIsUntouched(t *testing.T) {
 
 // A single-task plan is one agent's work, read by the person who asked for it.
 func TestASingleTaskPlanGetsNoVerifier(t *testing.T) {
-	if _, note := appendVerifyStageToTaskArgs(verifyStageTasks("only"), 20, 0); note != "" {
+	if _, note := appendVerifyStageToTaskArgs(verifyStageTasks("only"), 20, 0, 0); note != "" {
 		t.Fatal("a one-task plan must not grow a verifier")
 	}
 }
@@ -92,22 +92,22 @@ func TestASingleTaskPlanGetsNoVerifier(t *testing.T) {
 // failed with "raise max_tokens to at least 150000".
 func TestTheAppendNeverCostsAnAuthorTheirPlan(t *testing.T) {
 	atTierCeiling := verifyStageTasks("a", "b", "c", "d", "e")
-	if _, note := appendVerifyStageToTaskArgs(atTierCeiling, 5, 0); note != "" {
+	if _, note := appendVerifyStageToTaskArgs(atTierCeiling, 5, 0, 0); note != "" {
 		t.Fatal("a plan at the size tier's ceiling must not be pushed over it")
 	}
-	if _, note := appendVerifyStageToTaskArgs(atTierCeiling, 6, 0); note == "" {
+	if _, note := appendVerifyStageToTaskArgs(atTierCeiling, 6, 0, 0); note == "" {
 		t.Fatal("one task of headroom is enough; the append should have happened")
 	}
 	// Budget exactly funds the two declared tasks (2 × 50,000) and nothing more.
 	twoTasks := verifyStageTasks("a", "b")
-	if _, note := appendVerifyStageToTaskArgs(twoTasks, 20, 2*minimumPlausibleTaskTokens); note != "" {
+	if _, note := appendVerifyStageToTaskArgs(twoTasks, 20, 2*minimumPlausibleTaskTokens, 0); note != "" {
 		t.Fatal("a plan whose budget exactly funds its own tasks must not be pushed over the floor")
 	}
-	if _, note := appendVerifyStageToTaskArgs(twoTasks, 20, 3*minimumPlausibleTaskTokens); note == "" {
+	if _, note := appendVerifyStageToTaskArgs(twoTasks, 20, 3*minimumPlausibleTaskTokens, 0); note == "" {
 		t.Fatal("a budget with room for one more task should have taken the verifier")
 	}
 	// An unset budget is unbounded, not zero-budget: the ceiling check skips it.
-	if _, note := appendVerifyStageToTaskArgs(twoTasks, 20, 0); note == "" {
+	if _, note := appendVerifyStageToTaskArgs(twoTasks, 20, 0, 0); note == "" {
 		t.Fatal("an unbounded plan must still get a verifier")
 	}
 }
@@ -118,7 +118,7 @@ func TestTheAppendedIDNeverCollides(t *testing.T) {
 		map[string]any{"id": verifyStageTaskID, "prompt": "trace the parser"},
 		map[string]any{"id": verifyStageTaskID + "_2", "prompt": "trace the lexer"},
 	}
-	got, note := appendVerifyStageToTaskArgs(tasks, 20, 0)
+	got, note := appendVerifyStageToTaskArgs(tasks, 20, 0, 0)
 	if note == "" {
 		t.Fatal("setup: the append should have happened")
 	}
@@ -142,7 +142,7 @@ func TestAMalformedTaskListIsLeftToParsePlan(t *testing.T) {
 		{"not an object", map[string]any{"id": "b", "prompt": "x"}},
 		{map[string]any{"prompt": "no id here"}, map[string]any{"id": "b", "prompt": "x"}},
 	} {
-		if got, note := appendVerifyStageToTaskArgs(tasks, 20, 0); note != "" || len(got) != len(tasks) {
+		if got, note := appendVerifyStageToTaskArgs(tasks, 20, 0, 0); note != "" || len(got) != len(tasks) {
 			t.Fatalf("a malformed list must be untouched: note=%q", note)
 		}
 	}
@@ -202,5 +202,55 @@ func TestTheAppendedVerifierRunsAndIsReported(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, verifyStageTaskID) {
 		t.Fatalf("the run must say a verifier was added:\n%s", result.Output)
+	}
+}
+
+// THE THIRD CEILING. refuseUnreachablePerTaskCap requires max_tokens to cover
+// max_tokens_per_task × taskCount, so the extra task raises that bar by one
+// whole per-task cap — a window the 50,000 floor check does not cover whenever
+// the per-task cap exceeds it. A 4-task plan with max_tokens 400,000 and
+// max_tokens_per_task 100,000 parsed fine and was then refused outright.
+func TestTheAppendRespectsThePerTaskCapCeiling(t *testing.T) {
+	four := verifyStageTasks("a", "b", "c", "d")
+	// Exactly funded for four at 100k each: the fifth task would need 500k.
+	if _, note := appendVerifyStageToTaskArgs(four, 20, 400_000, 100_000); note != "" {
+		t.Fatal("a plan whose per-task cap exactly consumes max_tokens must not be pushed over it")
+	}
+	// Room for five: the append is welcome.
+	if _, note := appendVerifyStageToTaskArgs(four, 20, 500_000, 100_000); note == "" {
+		t.Fatal("a budget with room for the verifier should have taken it")
+	}
+	// No per-task cap set: only the 50k floor applies, as before.
+	if _, note := appendVerifyStageToTaskArgs(four, 20, 400_000, 0); note == "" {
+		t.Fatal("without max_tokens_per_task the floor check alone governs")
+	}
+}
+
+// A TASK THE AUTHOR DID NOT WRITE MUST NOT DECIDE THE AUTHOR'S VERDICT. The
+// verifier runs last, on the strongest tier, with the largest briefing — the
+// task most likely to stall — and its failure took the whole call to
+// StatusError, so the orchestrating model re-ran a plan whose work was done.
+func TestTheAppendedVerifiersFailureDoesNotFailThePlan(t *testing.T) {
+	report := PlanReport{
+		Status:    PlanPartial,
+		Succeeded: 3,
+		Failed:    1,
+		Tasks: []TaskResult{
+			{ID: "a", Outcome: TaskSucceeded}, {ID: "b", Outcome: TaskSucceeded},
+			{ID: "c", Outcome: TaskSucceeded}, {ID: verifyStageTaskID, Outcome: TaskFailed},
+		},
+	}
+	if !onlyTheAppendedVerifierFailed(report, verifyStageTaskID) {
+		t.Fatal("the verifier alone failing must be recognised as such")
+	}
+	// An author's task failing alongside it is a real failure, verifier or not.
+	report.Tasks[0].Outcome = TaskFailed
+	if onlyTheAppendedVerifierFailed(report, verifyStageTaskID) {
+		t.Fatal("an author task failed too; the plan really did fail")
+	}
+	// And with nothing appended, the exemption never applies.
+	report.Tasks[0].Outcome = TaskSucceeded
+	if onlyTheAppendedVerifierFailed(report, "") {
+		t.Fatal("no appended task means no exemption")
 	}
 }

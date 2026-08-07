@@ -814,8 +814,19 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	// A plan that did not fully succeed must NOT report OK. This repo has
 	// repeatedly reported failure as success; in a plan, nineteen of twenty
 	// tasks failing surfacing as a clean result is the same defect at scale.
+	//
+	// The ONE exception is a task the author did not write: when the appended
+	// verifier is the only thing that did not succeed, every task that was asked
+	// for is done, and calling that "error" makes the orchestrating model re-run
+	// a plan whose work already completed. The report still counts the failure
+	// and the caller is told the claims went unverified — the verdict on the
+	// author's plan is simply left to the author's tasks.
 	if report.Status != PlanCompleted {
-		result.Status = tools.StatusError
+		if onlyTheAppendedVerifierFailed(report, verifyNote) {
+			result.Output += verifyStageUnverifiedNote(verifyNote)
+		} else {
+			result.Status = tools.StatusError
+		}
 	}
 	return result
 }
