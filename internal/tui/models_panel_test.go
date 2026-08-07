@@ -179,3 +179,20 @@ func TestSidebarGrowsModelsSectionOnlyWhenRouted(t *testing.T) {
 		t.Fatalf("an unrouted fleet must not grow a MODELS section:\n%s", ansi.Strip(joinedPlain))
 	}
 }
+
+// EVERY SCRIPT, not just Latin. The token filter tested ASCII ranges, so a task
+// or agent described in Chinese, Russian, Greek or Arabic had every token
+// rejected as "not a word" and the sidebar row lost its label — a silent
+// degradation for anyone not writing in English.
+func TestNonLatinLabelsAreRealWords(t *testing.T) {
+	for _, token := range []string{"解析器", "парсер", "ανάλυση", "محلل", "parser", "v2"} {
+		if !hasNameLetter(token) {
+			t.Errorf("%q was rejected as not-a-word; its label would be dropped", token)
+		}
+	}
+	for _, token := range []string{"---", "...", "→", ""} {
+		if hasNameLetter(token) {
+			t.Errorf("%q was accepted as a word", token)
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -508,6 +509,9 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	// The live meter, shared by every task in flight. Same limit, consulted from
 	// inside a running task rather than between two of them.
 	spend := &planSpend{limit: planSpendLimit(plan.Budget().MaxTokens, options.preSpent)}
+	// One budget for the whole plan, so a systemic provider failure costs two
+	// extra children rather than one per task. See planProviderRetryBudget.
+	providerRetries := &planProviderRetryBudget{remaining: maxPlanProviderRetries}
 	// WHO IS DEPENDED ON. Computed once from the validated graph: a task others
 	// wait for stops earlier than one nothing waits for, so the work downstream
 	// of it is not starved by it.
@@ -840,10 +844,11 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			// request_permissions READ grants must NOT: routing a read grant through
 			// the write channel would escalate it. They travel readOnlyRoots, emitted
 			// as --add-read-dir (scope.AddRead) so the child can read but not write.
-			readRoots:     scratchpadReadRoots(scratchpad),
-			readOnlyRoots: options.parentReadRoots,
-			maxRetries:    plan.Budget().MaxRetries,
-			wallClock:     wallClock,
+			readRoots:       scratchpadReadRoots(scratchpad),
+			readOnlyRoots:   options.parentReadRoots,
+			maxRetries:      plan.Budget().MaxRetries,
+			providerRetries: providerRetries,
+			wallClock:       wallClock,
 		}
 		slots.take()
 		started := time.Now()
@@ -906,6 +911,48 @@ type retryPolicy struct {
 	// rather than a fixed deadline so time the user spent paused does not
 	// count against it.
 	wallClock *planWallClock
+	// providerRetries is the PLAN-WIDE budget for provider-failure retries,
+	// shared by every task in the plan and nil when there is none.
+	//
+	// PLAN-WIDE, not per task, because the exit code cannot tell a transient
+	// 500 from a permanent one. internal/cli returns exitProvider for every
+	// agent-run failure — an expired key, an unknown model, exhausted quota —
+	// so a per-task retry meant a dead API key cost a ten-task plan twenty
+	// spawns to produce the same ten "authentication failed" errors. A shared
+	// budget keeps the value for the case this exists for (one task catching a
+	// bad moment) and bounds the waste when the failure is systemic: the first
+	// couple of tasks pay for the discovery, the rest do not.
+	providerRetries *planProviderRetryBudget
+}
+
+// planProviderRetryBudget bounds provider-failure retries across a whole plan.
+// Concurrent: tasks are dispatched in parallel, so the counter is mutex-guarded
+// like planSpend rather than a plain int.
+type planProviderRetryBudget struct {
+	mu        sync.Mutex
+	remaining int
+}
+
+// maxPlanProviderRetries is how many provider-failure retries one plan may
+// spend in total. Two: enough for a genuine blip to be re-tried and for a
+// second, independent one later in the same plan, and few enough that a
+// systemic failure costs two extra children rather than one per task.
+const maxPlanProviderRetries = 2
+
+// take reports whether a retry is available and consumes it when so. A nil
+// budget yields none, which is the honest answer for a caller that wired one
+// deliberately absent.
+func (budget *planProviderRetryBudget) take() bool {
+	if budget == nil {
+		return false
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if budget.remaining <= 0 {
+		return false
+	}
+	budget.remaining--
+	return true
 }
 
 // childExitIncomplete is the child's exit code for "stopped with work clearly
@@ -1064,6 +1111,11 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 				return result, err
 			}
 			if policy.wallClock.exhausted() {
+				return result, err
+			}
+			// THE PLAN-WIDE BUDGET, checked last so it is only spent on a retry
+			// that is actually going to happen.
+			if !policy.providerRetries.take() {
 				return result, err
 			}
 			retriedAfterProviderFailure = true

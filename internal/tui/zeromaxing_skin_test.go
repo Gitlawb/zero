@@ -439,27 +439,3 @@ func TestThePlanBarFillsWithTheGradientNotGreen(t *testing.T) {
 		t.Fatal("posture off must keep the historical bar byte-identically")
 	}
 }
-
-// A LOOK AT IT: the full sidebar with the posture on — spectrum headers over
-// the MODELS mix. Run with
-//
-//	go test ./internal/tui/ -run ZeromaxingSkinPreview -count=1 -v
-func TestZeromaxingSkinPreview(t *testing.T) {
-	start := time.Unix(1000, 0)
-	m := sidebarTestModel()
-	m.zeromaxing = agent.ZeromaxingActive
-	m.modelName = "glm-5.2"
-	m.specialists.start("impl", "refactor the parser", "s1", start)
-	m.specialists.setModel("s1", "gpt-oss:20b")
-	m.specialists.start("verify", "review the change", "s2", start)
-	m.specialists.setModel("s2", "kimi-k2.6")
-	m.specialists.start("scan", "find callers", "s3", start)
-	m.specialists.setModel("s3", "deepseek-v4-flash")
-	m.now = func() time.Time { return start }
-	for _, line := range m.renderContextSidebar(44, 26) {
-		if strings.TrimSpace(ansi.Strip(line)) == "" {
-			continue
-		}
-		t.Log(line)
-	}
-}

@@ -69,3 +69,38 @@ func TestCancelSettlesEveryRunningAgentAndTask(t *testing.T) {
 		t.Fatalf("the sidebar still says live after cancel:\n%s", ansi.Strip(joined))
 	}
 }
+
+// A BACKGROUND PLAN OUTLIVES THE RUN THAT LAUNCHED IT, BY DESIGN — beginRun
+// makes exactly this exemption a few lines above the settle. Marking its tasks
+// cancelled when the user stops the foreground turn was the mirror image of the
+// defect the background-status tests exist to prevent: work still spending
+// tokens and writing files, reported to the user as stopped.
+func TestCancelLeavesALiveBackgroundPlanAlone(t *testing.T) {
+	start := time.Unix(1000, 0)
+	m := sidebarTestModel()
+	m.pending = true
+	m.now = func() time.Time { return start }
+	m.specialists.start("bg", "background worker", "sess-bg", start)
+	m.orchestrate.tasks = []orchestrateTask{{id: "a", status: orchestrateRunning, startedAt: start}}
+
+	// A live background plan: the same condition beginRun consults.
+	m.planProgress = NewPlanProgressBridge()
+	m.planProgress.SetBackground(true)
+	// PlanRunning is what a launched plan calls with its cancel func; together
+	// with the background flag that is exactly what BackgroundPlanLive reads.
+	m.planProgress.PlanRunning(func() {})
+	if !m.planProgress.BackgroundPlanLive() {
+		t.Fatal("setup: the background plan must look live for this test to mean anything")
+	}
+
+	m.cancelRun()
+
+	if _, _, _, _, running := m.orchestrate.counts(); running != 1 {
+		t.Fatal("a live background plan's task was marked cancelled; it is still running")
+	}
+	for _, info := range m.specialists.specialists {
+		if info.childSessionID == "sess-bg" && info.status != specialistRunning {
+			t.Fatalf("a background sub-agent was marked %v while still working", info.status)
+		}
+	}
+}

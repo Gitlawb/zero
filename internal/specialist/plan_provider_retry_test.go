@@ -175,3 +175,58 @@ func TestTheProviderExitCodeThisPackageRetriesOnIsPinned(t *testing.T) {
 			"killed by one would no longer be recognised or retried", childExitProvider)
 	}
 }
+
+// THE PLAN-WIDE BOUND. exit code 3 means "the provider failed", but internal/cli
+// returns it for EVERY agent-run error — an expired key, an unknown model, a
+// quota wall — so a per-task retry meant a dead API key cost a ten-task plan
+// twenty spawns to produce the same ten authentication errors. The budget is
+// shared: the first couple of tasks pay for the discovery, the rest do not.
+func TestProviderRetriesAreBoundedAcrossTheWholePlan(t *testing.T) {
+	tasks := []any{}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
+		tasks = append(tasks, task(id, "find the "+id+" call sites"))
+	}
+	plan := mustPlan(t, tasks, okBudget(), readOnlyLimits())
+	counts := map[string]int{}
+	always := map[string]int{"a": 99, "b": 99, "c": 99, "d": 99, "e": 99, "f": 99}
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		providerFailingRunner(always, counts), nil)
+
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	// Six tasks, each attempted once, plus at most maxPlanProviderRetries extra.
+	if want := 6 + maxPlanProviderRetries; total != want {
+		t.Fatalf("the plan spent %d child spawns for 6 tasks; a systemic provider failure must cost "+
+			"at most %d (one per task plus %d shared retries)", total, want, maxPlanProviderRetries)
+	}
+	if report.Failed != 6 {
+		t.Fatalf("report = %+v; every task must still fail", report)
+	}
+}
+
+// A RESUME MUST NOT BE CHARGED A SPAWN SLOT. The budget bounds how many
+// sub-agents a session may START; a resume continues one already counted, so
+// iterating on one agent's answer thirty times used to consume thirty slots
+// while spawning nothing. A malformed call must not be charged either.
+func TestTheSessionBudgetChargesOnlyFreshSpawns(t *testing.T) {
+	budget := &SessionBudget{max: 3}
+	executor := Executor{SessionBudget: budget}
+	// A malformed call: refused before anything is charged.
+	if _, err := executor.Run(context.Background(), TaskParameters{Name: "explorer"},
+		TaskRunOptions{Cwd: t.TempDir()}); err == nil {
+		t.Fatal("an empty prompt must be refused")
+	}
+	if got := budget.Started(); got != 0 {
+		t.Fatalf("a refused call charged %d slot(s)", got)
+	}
+	// A resume: continues an existing child, so it is not a new spawn. It fails
+	// for want of a session store, which is fine — the charge is what matters.
+	_, _ = executor.Run(context.Background(),
+		TaskParameters{Name: "explorer", Prompt: "carry on", Resume: "specialist_00000000000000000000000a"},
+		TaskRunOptions{Cwd: t.TempDir()})
+	if got := budget.Started(); got != 0 {
+		t.Fatalf("a resume charged %d slot(s); the budget counts spawns", got)
+	}
+}

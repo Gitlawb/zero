@@ -68,7 +68,13 @@ var draculaPalette = palette{
 	// clear of amber's permission/warning meaning. Diff colours (gitAdd/addBg…)
 	// keep their conventional green/red — a diff is a diff on every theme.
 	// Contrast stays above the registry's asserted floors.
-	green:     "#8be9fd",
+	//
+	// SUCCESS IS A TEAL, NOT THE CYAN ITSELF. The first version set green to
+	// #8be9fd — byte-identical to this palette's blue — which collapsed two of
+	// the four series colours modelMixPalette cycles through, so two models in
+	// the MODELS bar could render indistinguishably. This sits in the same cool
+	// family without colliding with blue, amber or pink.
+	green:     "#5ad1b0",
 	red:       "#ff79c6",
 	amber:     "#ffb86c",
 	blue:      "#8be9fd",

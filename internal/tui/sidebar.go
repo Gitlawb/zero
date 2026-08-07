@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -904,9 +905,14 @@ var workerLabelRe = regexp.MustCompile(`^[A-Za-z]{1,2}[0-9]{1,3}\s*[:.)\-\x{2014
 // shortTaskName condenses a task briefing into a 1-2 word agent name: the first
 // significant word (usually the verb) plus the next non-filler word, so a member
 // reads as e.g. "Explore repository" instead of the full one-line briefing.
+// EVERY SCRIPT, not just Latin. The ASCII ranges this used to test rejected
+// every CJK, Cyrillic, Greek, Hebrew and Arabic token as "not a word", so a task
+// or agent described in one of them had every token dropped and the sidebar row
+// fell back to a generic label — a silent degradation for anyone not writing in
+// English. unicode.IsLetter/IsDigit is the same question asked correctly.
 func hasNameLetter(token string) bool {
 	for _, r := range token {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			return true
 		}
 	}

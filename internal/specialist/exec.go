@@ -411,12 +411,6 @@ func (executor Executor) Run(ctx context.Context, params TaskParameters, options
 	if options.CurrentDepth >= maxSpecialistDepth {
 		return ExecResult{}, fmt.Errorf("spawning a specialist at depth %d would exceed maximum nesting depth %d", options.CurrentDepth+1, maxSpecialistDepth)
 	}
-	// COUNTED HERE, beside the depth check and before any work: both answer
-	// "may this child start at all", and a budget consulted after the prompt is
-	// written or the session is created would already have spent something.
-	if err := executor.SessionBudget.admit(); err != nil {
-		return ExecResult{}, err
-	}
 	if strings.TrimSpace(params.Prompt) == "" {
 		return ExecResult{}, fmt.Errorf("specialist prompt is required")
 	}
@@ -424,7 +418,18 @@ func (executor Executor) Run(ctx context.Context, params TaskParameters, options
 		if params.RunInBackground {
 			return ExecResult{}, fmt.Errorf("specialist resume cannot run in background")
 		}
+		// NOT CHARGED. The budget bounds how many sub-agents this session may
+		// START; a resume continues one that was already counted. Charging it
+		// meant iterating on a single sub-agent's answer thirty times consumed
+		// thirty of the session's slots while spawning nothing.
 		return executor.runResume(ctx, params, options)
+	}
+	// COUNTED HERE: after the checks that can refuse this call outright, and on
+	// the FRESH path only, because this is the only path that starts a child.
+	// Charging before them spent a slot on a malformed call that never ran.
+	// Still ahead of every side effect — no prompt file, no session, no process.
+	if err := executor.SessionBudget.admit(); err != nil {
+		return ExecResult{}, err
 	}
 	return executor.runFresh(ctx, params, options)
 }
@@ -712,7 +717,7 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 	// midway through its own conversation.
 	requested := params.Model
 	if strings.TrimSpace(requested) == "" && strings.TrimSpace(manifest.Metadata.Model) == "" {
-		requested = session.ModelID
+		requested = executor.resumeModelStillServed(ctx, session.ModelID)
 	}
 	if err := applyTaskModel(&manifest, requested, options.ParentReasoningEffort); err != nil {
 		return ExecResult{}, err
@@ -731,6 +736,36 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		return ExecResult{}, err
 	}
 	return executor.runBuiltArgs(ctx, built, manifest, params, options, "resume", options.Progress)
+}
+
+// resumeModelStillServed returns the model a session ran on, unless discovery
+// says this provider no longer serves it.
+//
+// REJECTED ON EVIDENCE, not on the absence of proof — the opposite direction to
+// autoTaskModel, and deliberately so. autoTaskModel ADDS a model the caller did
+// not ask for, so it applies one only when the provider's list confirms it.
+// This RESTORES the model the session demonstrably ran on, which is the correct
+// answer in every case except one: the user switched provider since. So the
+// recorded model stands unless the current provider's own listing is available
+// AND does not contain it — at which point applying it would spawn a child that
+// dies with "not-found", the failure this whole family of guard exists for.
+//
+// No discoverer, a failed listing, or an empty one all leave the recovery in
+// place: without evidence, continuing on the model the session actually used
+// beats drifting to a different one mid-conversation.
+func (executor Executor) resumeModelStillServed(ctx context.Context, recorded string) string {
+	recorded = strings.TrimSpace(recorded)
+	if recorded == "" {
+		return ""
+	}
+	served, ok := executor.servedModelSet(ctx)
+	if !ok || len(served) == 0 {
+		return recorded
+	}
+	if !servedContains(served, recorded) {
+		return ""
+	}
+	return recorded
 }
 
 func (executor Executor) runBackground(ctx context.Context, built BuildArgsResult, manifest Manifest, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
