@@ -81,15 +81,24 @@ func TestParseModelsResponseCapturesContextAndFree(t *testing.T) {
 }
 
 func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
+	// Catalog and live endpoints return distinct payloads so the merge must keep
+	// live-only ids that are absent from the remote catalog response.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
+		switch r.URL.Path {
+		case "/catalog/v1/models":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"auto","name":"Auto (smart routing)"},
+				{"id":"xiaomi/mimo-v2.5-pro","name":"MiMo V2.5-Pro","context_window":262144}
+			]}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"auto","name":"Auto (smart routing)"},
+				{"id":"xiaomi/mimo-v2.5-pro","name":"MiMo V2.5-Pro","context_window":262144},
+				{"id":"live-only-model","name":"Live Only","context_window":64000}
+			]}`))
+		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"data":[
-			{"id":"auto","name":"Auto (smart routing)"},
-			{"id":"xiaomi/mimo-v2.5-pro","name":"MiMo V2.5-Pro","context_window":262144},
-			{"id":"live-only-model","name":"Live Only","context_window":64000}
-		]}`))
 	}))
 	defer server.Close()
 
@@ -106,7 +115,7 @@ func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 		// No API key: public live catalog must still load.
 	}, Options{
 		HTTPClient:     server.Client(),
-		OpenGatewayURL: server.URL + "/v1/models",
+		OpenGatewayURL: server.URL + "/catalog/v1/models",
 	})
 	if err != nil {
 		t.Fatalf("DiscoverCatalog: %v", err)
@@ -119,12 +128,22 @@ func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 		if model.ID == "xiaomi/mimo-v2.5-pro" && model.ContextWindow != 262144 {
 			t.Fatalf("mimo metadata = %#v", model)
 		}
+		if model.ID == "live-only-model" && model.ContextWindow != 64000 {
+			t.Fatalf("live-only metadata = %#v", model)
+		}
 	}
 }
 
 func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
+	// Catalog omits anthropic/claude-sonnet-4.5; live retains it so the preferLive
+	// merge branch is exercised. No API key: public OpenRouter listing is unauth.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/catalog/api/v1/models":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"openai/gpt-4.1","name":"GPT-4.1","context_length":1048576,"supported_parameters":["tools"]},
+				{"id":"text-embedding-3-large","name":"Embedding"}
+			]}`))
 		case "/api/v1/models", "/v1/models":
 			_, _ = w.Write([]byte(`{"data":[
 				{"id":"openai/gpt-4.1","name":"GPT-4.1","context_length":1048576,"supported_parameters":["tools"]},
@@ -147,17 +166,17 @@ func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
 		CatalogID:    "openrouter",
 		ProviderKind: config.ProviderKindOpenAICompatible,
 		BaseURL:      server.URL + "/api/v1",
-		APIKey:       "sk-or-test",
+		// No API key: unauthenticated public listing path.
 	}, Options{
 		HTTPClient:    server.Client(),
-		OpenRouterURL: server.URL + "/api/v1/models",
+		OpenRouterURL: server.URL + "/catalog/api/v1/models",
 	})
 	if err != nil {
 		t.Fatalf("DiscoverCatalog: %v", err)
 	}
 	got := strings.Join(modelIDs(models), ",")
 	if !strings.Contains(got, "openai/gpt-4.1") || !strings.Contains(got, "anthropic/claude-sonnet-4.5") {
-		t.Fatalf("models = %q, want live openrouter coding models", got)
+		t.Fatalf("models = %q, want live openrouter coding models including live-only claude", got)
 	}
 	if strings.Contains(got, "text-embedding-3-large") {
 		t.Fatalf("models = %q, embedding model should be filtered", got)
@@ -165,6 +184,9 @@ func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
 	for _, model := range models {
 		if model.ID == "openai/gpt-4.1" && model.ContextWindow != 1048576 {
 			t.Fatalf("gpt-4.1 metadata = %#v, want live context window", model)
+		}
+		if model.ID == "anthropic/claude-sonnet-4.5" && model.ContextWindow != 200000 {
+			t.Fatalf("claude live-only metadata = %#v, want live context window", model)
 		}
 	}
 }

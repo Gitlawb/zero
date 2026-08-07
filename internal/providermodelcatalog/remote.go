@@ -69,19 +69,24 @@ func FetchOpenGateway(ctx context.Context, endpoint string, options FetchOptions
 
 // FetchOpenRouter loads OpenRouter's public live model list (GET /api/v1/models).
 // Auth is optional for listing; callers may still attach a key for account-scoped
-// probes via the live discovery path. When the live host is unreachable, fall
-// back to models.dev so the picker still degrades instead of failing entirely
-// (both catalog and live probe hit openrouter.ai otherwise).
+// probes via the live discovery path. When the live host is unreachable or
+// returns an unparseable body, fall back to models.dev so the picker still
+// degrades instead of failing entirely (both catalog and live probe hit
+// openrouter.ai otherwise).
 func FetchOpenRouter(ctx context.Context, endpoint string, options FetchOptions) ([]Model, error) {
 	body, err := fetchJSON(ctx, endpoint, options.HTTPClient)
-	if err != nil {
-		fallback, fallbackErr := FetchModelsDev(ctx, "openrouter", options)
-		if fallbackErr == nil {
-			return fallback, nil
+	if err == nil {
+		models, parseErr := ParseOpenRouterCatalog(body)
+		if parseErr == nil {
+			return models, nil
 		}
-		return nil, fmt.Errorf("%w (models.dev fallback: %v)", err, fallbackErr)
+		err = parseErr
 	}
-	return ParseOpenRouterCatalog(body)
+	fallback, fallbackErr := FetchModelsDev(ctx, "openrouter", options)
+	if fallbackErr == nil {
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("%w (models.dev fallback: %v)", err, fallbackErr)
 }
 
 func ParseModelsDevProvider(body []byte, providerID string) ([]Model, error) {

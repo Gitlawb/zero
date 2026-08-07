@@ -207,6 +207,49 @@ func TestFetchOpenRouterFallsBackToModelsDev(t *testing.T) {
 	}
 }
 
+// TestFetchOpenRouterFallsBackOnMalformedJSON covers the HTTP-200-but-unparseable
+// path: a broken openrouter.ai body must still degrade to models.dev instead of
+// failing the catalog fetch entirely.
+func TestFetchOpenRouterFallsBackOnMalformedJSON(t *testing.T) {
+	openrouter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data": not-json`))
+	}))
+	defer openrouter.Close()
+
+	modelsDev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"openrouter": {
+				"models": {
+					"openai/gpt-4.1": {
+						"id": "openai/gpt-4.1",
+						"name": "GPT-4.1",
+						"tool_call": true,
+						"limit": {"context": 1048576},
+						"cost": {"input": 2, "output": 8},
+						"modalities": {"input": ["text"], "output": ["text"]}
+					}
+				}
+			}
+		}`))
+	}))
+	defer modelsDev.Close()
+
+	models, err := FetchOpenRouter(context.Background(), openrouter.URL, FetchOptions{
+		HTTPClient:   openrouter.Client(),
+		ModelsDevURL: modelsDev.URL,
+	})
+	if err != nil {
+		t.Fatalf("FetchOpenRouter malformed JSON fallback: %v", err)
+	}
+	if !containsModelID(models, "openai/gpt-4.1") {
+		t.Fatalf("models = %#v, want models.dev openrouter fallback entry", models)
+	}
+	if models[0].Source != "models.dev" {
+		t.Fatalf("source = %q, want models.dev fallback source", models[0].Source)
+	}
+}
+
 func containsModelID(models []Model, id string) bool {
 	for _, model := range models {
 		if model.ID == id {
