@@ -8,7 +8,7 @@ import (
 )
 
 func TestSnapshotFromReportRedactsLogsAndBuildsEvents(t *testing.T) {
-	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0"
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
 	report := Report{
 		Root:      "/workspace/" + secret,
 		StartedAt: "2026-06-06T10:00:00Z",

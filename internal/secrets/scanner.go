@@ -54,11 +54,10 @@ var patterns = []pattern{
 	// Match the ENTIRE PEM/OpenSSH block (header THROUGH the END marker, body
 	// included) so redaction removes the key material, not just the header.
 	{"private_key_block", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----`)},
-	// Strict JWS (both header and payload are JSON, so both start with eyJ)
-	// plus a looser three-segment form for non-JSON payloads and the first
-	// three segments of a compact JWE.
-	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
-	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
+	// Compact JWS (three segments) or compact JWE (five segments). The optional
+	// fourth and fifth segments capture JWE ciphertext and authentication tag so
+	// they are not left behind after redacting the first three.
+	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})?`)},
 }
 
 // Scan returns the distinct secrets found in text (deduplicated by match,

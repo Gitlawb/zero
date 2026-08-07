@@ -147,10 +147,10 @@ func TestScanDetectsHyphenatedOpenAICompatibleKeys(t *testing.T) {
 }
 
 func TestScanDetectsLooseJWTForms(t *testing.T) {
-	// Strict form requires the second segment to start with eyJ (JSON payload).
-	// Compact JWS with a non-JSON payload and the first three segments of a
-	// compact JWE still need to redact.
+	// Compact JWS (three segments, including non-JSON payloads) and full
+	// compact JWE (five segments: header, encrypted key, IV, ciphertext, tag).
 	cases := []string{
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SENTINELsignature123",
 		"eyJhbGciOiJIUzI1NiJ9.U0VOVElORUxwYXlsb2Fk.SENTINELsignature123",
 		"eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.SENTINELencryptedkey.SENTINELiv.SENTINELciphertext.SENTINELtag12345",
 	}
@@ -162,9 +162,10 @@ func TestScanDetectsLooseJWTForms(t *testing.T) {
 		if findings[0].Type != "jwt" {
 			t.Fatalf("expected jwt type for %q, got %#v", token, findings)
 		}
-		// At least the leading three segments (or the full three-part JWS) must go.
-		if strings.Contains(redacted, "eyJhbGci") {
-			t.Fatalf("jwt header leaked after redaction: %q", redacted)
+		// Every segment must be gone: partial matches used to leave JWE
+		// ciphertext and authentication tags in the output.
+		if redacted != "auth=[REDACTED:jwt]" {
+			t.Fatalf("jwt incompletely redacted for %q: got %q", token, redacted)
 		}
 	}
 }

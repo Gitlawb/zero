@@ -403,7 +403,28 @@ func writeOwnershipMarker(ctx context.Context, runGit GitRunner, target string) 
 	if err != nil {
 		return fmt.Errorf("resolve worktree git dir: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(gitDir, zeroOwnerMarkerFile), []byte(zeroOwnerMarkerContent), 0o600); err != nil {
+	// Atomic replace: Clean may read the same path from another process while
+	// Prepare re-marks a reused worktree. Write-then-rename so a concurrent
+	// reader never observes a truncated file.
+	destination := filepath.Join(gitDir, zeroOwnerMarkerFile)
+	temporary, err := os.CreateTemp(gitDir, zeroOwnerMarkerFile+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("write worktree ownership marker: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write worktree ownership marker: %w", err)
+	}
+	if _, err := temporary.WriteString(zeroOwnerMarkerContent); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write worktree ownership marker: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("write worktree ownership marker: %w", err)
+	}
+	if err := os.Rename(temporaryName, destination); err != nil {
 		return fmt.Errorf("write worktree ownership marker: %w", err)
 	}
 	return nil
@@ -722,6 +743,9 @@ func gitCommonDir(ctx context.Context, runGit GitRunner, dir string) (string, er
 func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResult, error) {
 	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = dir
+	// Pin C locale so English phrases callers match on (e.g. "already locked"
+	// in lockWorktree) stay parseable under localized git installs.
+	command.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	// Capture stdout and stderr separately: callers parse Stdout for values
 	// (rev-parse output) and prefer Stderr for error messages. CombinedOutput
 	// merged the two, letting git's stderr warnings pollute parsed output and
@@ -880,7 +904,13 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				if expiredLease {
-					_, _ = gitOutput(ctx, runGit, repoRoot, "worktree", "unlock", entry.path)
+					// Match the on-disk recovery path: a failed unlock leaves
+					// the lock in place and must not be reported as success, or
+					// the orphan is skipped silently on every later Clean pass.
+					if _, unlockErr := gitOutput(ctx, runGit, repoRoot, "worktree", "unlock", entry.path); unlockErr != nil {
+						lastErr = errors.Join(lastErr, fmt.Errorf("recover expired lease %s: %w", entry.path, unlockErr))
+						continue
+					}
 				}
 				_, _ = runGit(ctx, repoRoot, "worktree", "prune")
 			}
@@ -1020,13 +1050,26 @@ func isUnderDir(path, dir string) bool {
 // worktree, so the commit survives (visible under refs/zero/orphaned-worktree)
 // even after the worktree itself is gone.
 func preserveUnreachableWorktreeHead(ctx context.Context, runGit GitRunner, repoRoot, worktreePath string) error {
-	head, err := gitOutput(ctx, runGit, worktreePath, "rev-parse", "HEAD")
+	// --verify --quiet distinguishes unborn/missing HEAD (exit 1, no output)
+	// from real probe failures (other nonzero codes). Treating every failure
+	// as "nothing to preserve" used to authorize force-removal when HEAD was
+	// simply unreadable.
+	result, err := runGit(ctx, worktreePath, "rev-parse", "--verify", "--quiet", "HEAD")
 	if err != nil {
-		// No commit to preserve (an empty/unborn worktree, or one already
-		// gone) - nothing for this guard to do; let the caller proceed.
-		return nil
+		return fmt.Errorf("resolve worktree HEAD: %w", err)
 	}
-	head = strings.TrimSpace(head)
+	if result.ExitCode != 0 {
+		if result.ExitCode == 1 {
+			// Unborn or missing HEAD: no commit to keep alive.
+			return nil
+		}
+		message := strings.TrimSpace(firstNonEmpty(result.Stderr, result.Stdout))
+		if message == "" {
+			message = fmt.Sprintf("git exited with code %d", result.ExitCode)
+		}
+		return fmt.Errorf("resolve worktree HEAD: %s", message)
+	}
+	head := strings.TrimSpace(result.Stdout)
 	if head == "" {
 		return nil
 	}

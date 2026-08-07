@@ -1028,7 +1028,7 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 			// Main worktree must be listed first: Clean keys repoDir off entries[0].
 			{Stdout: "worktree " + repoRoot + "\nworktree " + youngPath + "\nworktree " + stalePath + "\n"},
 			{ExitCode: 0},               // status --porcelain <stalePath> (clean)
-			{Stdout: "deadbeef"},        // rev-parse HEAD <stalePath>
+			{Stdout: "deadbeef"},        // rev-parse --verify --quiet HEAD <stalePath>
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeef (already reachable)
 			{ExitCode: 0},               // worktree remove --force <stalePath>
 			{ExitCode: 0},               // worktree prune
@@ -1100,7 +1100,7 @@ func TestCleanReportsErrorOnFailedRemoval(t *testing.T) {
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + repoRoot + "\nworktree " + stalePath + "\n"},
 			{ExitCode: 0},               // status --porcelain <stalePath> (clean)
-			{Stdout: "deadbeef"},        // rev-parse HEAD <stalePath>
+			{Stdout: "deadbeef"},        // rev-parse --verify --quiet HEAD <stalePath>
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeef (already reachable)
 			{ExitCode: 1, Stderr: "fatal: unable to remove worktree: in use"}, // worktree remove --force <stalePath>
 			{ExitCode: 0},
@@ -1153,11 +1153,11 @@ func TestCleanAggregatesMultipleFailedRemovals(t *testing.T) {
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + repoRoot + "\nworktree " + stalePathA + "\n\nworktree " + stalePathB + "\n"},
 			{ExitCode: 0},               // status --porcelain <stalePathA> (clean)
-			{Stdout: "deadbeefa"},       // rev-parse HEAD <stalePathA>
+			{Stdout: "deadbeefa"},       // rev-parse --verify --quiet HEAD <stalePathA>
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeefa (already reachable)
 			{ExitCode: 1, Stderr: "fatal: unable to remove worktree A"}, // remove stalePathA
 			{ExitCode: 0},               // status --porcelain <stalePathB> (clean)
-			{Stdout: "deadbeefb"},       // rev-parse HEAD <stalePathB>
+			{Stdout: "deadbeefb"},       // rev-parse --verify --quiet HEAD <stalePathB>
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeefb (already reachable)
 			{ExitCode: 1, Stderr: "fatal: unable to remove worktree B"}, // remove stalePathB
 			{ExitCode: 0}, // final prune
@@ -1276,11 +1276,12 @@ func TestCleanSkipsWorktreeWithRecentNestedActivity(t *testing.T) {
 // A worktree explicitly locked via `git worktree lock` must never be pruned,
 // regardless of how stale its mtime looks.
 func TestCleanSkipsLockedWorktree(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
+	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
 
-	lockedPath := filepath.Join(baseDir, "locked-task")
+	lockedPath := filepath.Join(repoDir, "locked-task")
 	if err := os.MkdirAll(lockedPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1295,7 +1296,8 @@ func TestCleanSkipsLockedWorktree(t *testing.T) {
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + lockedPath + "\nHEAD abc1234\nlocked in use by zero\n"},
+			// Main worktree first: Clean keys repoDir off entries[0].
+			{Stdout: "worktree " + repoRoot + "\nworktree " + lockedPath + "\nHEAD abc1234\nlocked in use by zero\n"},
 			{ExitCode: 0}, // worktree prune
 		},
 	}
@@ -1304,6 +1306,9 @@ func TestCleanSkipsLockedWorktree(t *testing.T) {
 		t.Fatalf("Clean failed: %v", err)
 	}
 
+	if got := runner.commandLine(2); got != "git worktree prune" {
+		t.Fatalf("call 2 = %q, want git worktree prune (proves the locked entry was considered)", got)
+	}
 	for _, call := range runner.calls {
 		if len(call.args) > 0 && call.args[0] == "remove" {
 			t.Fatalf("Clean removed a locked worktree: %v", call.args)
@@ -1319,7 +1324,7 @@ func TestCleanSkipsLockedWorktree(t *testing.T) {
 // Before this fix, Prepare never locked its own worktrees, so entry.locked
 // only ever protected worktrees a human locked by hand.
 func TestCleanSkipsLockedZeroOwnedWorktree(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1339,7 +1344,9 @@ func TestCleanSkipsLockedZeroOwnedWorktree(t *testing.T) {
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + idlePath + "\nlocked zero: active task worktree\n"},
+			// Main worktree first: Clean keys repoDir off entries[0]. PID-less
+			// Zero leases are always honored (no dead-owner recovery).
+			{Stdout: "worktree " + repoRoot + "\nworktree " + idlePath + "\nlocked zero: active task worktree\n"},
 			{ExitCode: 0}, // worktree prune
 		},
 	}
@@ -1348,6 +1355,9 @@ func TestCleanSkipsLockedZeroOwnedWorktree(t *testing.T) {
 		t.Fatalf("Clean failed: %v", err)
 	}
 
+	if got := runner.commandLine(2); got != "git worktree prune" {
+		t.Fatalf("call 2 = %q, want git worktree prune (proves the locked entry was considered)", got)
+	}
 	for _, call := range runner.calls {
 		if len(call.args) > 0 && (call.args[0] == "remove" || call.args[0] == "status") {
 			t.Fatalf("Clean touched a locked zero-owned worktree: %v", call.args)
@@ -1453,7 +1463,7 @@ func TestCleanReclaimsReleasedWorktreeWithOnlyIgnoredFiles(t *testing.T) {
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + repoRoot + "\nworktree " + ignoredOnlyPath + "\n"},
 			{ExitCode: 0},               // status --porcelain: ignored files invisible => clean
-			{Stdout: "deadbeef"},        // rev-parse HEAD
+			{Stdout: "deadbeef"},        // rev-parse --verify --quiet HEAD
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains (reachable)
 			{ExitCode: 0},               // worktree remove --force
 			{ExitCode: 0},               // worktree prune
@@ -1514,7 +1524,7 @@ func TestCleanRecoversExpiredLease(t *testing.T) {
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + repoRoot + "\nworktree " + crashedPath + "\nlocked " + leaseReason(deadPID) + "\n"},
 			{ExitCode: 0},               // status --porcelain --ignored: clean
-			{Stdout: "deadbeef"},        // rev-parse HEAD
+			{Stdout: "deadbeef"},        // rev-parse --verify --quiet HEAD
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains (reachable)
 			{ExitCode: 0},               // worktree unlock (lease recovery)
 			{ExitCode: 0},               // worktree remove --force
@@ -1980,6 +1990,71 @@ func TestCleanUnlocksExpiredLeaseBeforePruningMissingDir(t *testing.T) {
 	}
 }
 
+// A failed unlock on a missing expired lease must surface as an error and must
+// not run prune for that entry, or the lock survives silently forever.
+func TestCleanReportsUnlockErrorForMissingExpiredLease(t *testing.T) {
+	deadPID := deadProcessPID(t)
+	tempDir := physicalTestPath(t, t.TempDir())
+	baseDir := filepath.Join(tempDir, "zero-worktrees")
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
+	missingPath := filepath.Join(repoDir, "missing-dead-task")
+
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{Stdout: repoRoot},
+			{Stdout: "worktree " + repoRoot + "\nworktree " + missingPath + "\nlocked " + leaseReason(deadPID) + "\n"},
+			{ExitCode: 128, Stderr: "fatal: unable to unlock"}, // unlock fails
+			{ExitCode: 0}, // final worktree prune (after the loop)
+		},
+	}
+
+	err := Clean(context.Background(), Options{Cwd: repoRoot, BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "recover expired lease") {
+		t.Fatalf("Clean error = %v, want recover expired lease failure", err)
+	}
+	// Per-entry prune after unlock must be skipped when unlock fails. The
+	// trailing prune at the end of Clean still runs once.
+	pruneCalls := 0
+	for _, call := range runner.calls {
+		if len(call.args) >= 2 && call.args[0] == "worktree" && call.args[1] == "prune" {
+			pruneCalls++
+		}
+	}
+	if pruneCalls != 1 {
+		t.Fatalf("expected only the trailing prune after unlock failure, got %d prune calls in %#v", pruneCalls, runner.calls)
+	}
+}
+
+func TestPreserveUnreachableWorktreeHeadSkipsUnbornHEAD(t *testing.T) {
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{ExitCode: 1}, // rev-parse --verify --quiet HEAD: unborn
+		},
+	}
+	if err := preserveUnreachableWorktreeHead(context.Background(), runner.Run, "/repo", "/wt"); err != nil {
+		t.Fatalf("unborn HEAD should be nil, got %v", err)
+	}
+	if got := runner.commandLine(0); got != "git rev-parse --verify --quiet HEAD" {
+		t.Fatalf("command = %q", got)
+	}
+}
+
+func TestPreserveUnreachableWorktreeHeadFailsClosedOnProbeError(t *testing.T) {
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{ExitCode: 128, Stderr: "fatal: not a git repository"},
+		},
+	}
+	err := preserveUnreachableWorktreeHead(context.Background(), runner.Run, "/repo", "/wt")
+	if err == nil || !strings.Contains(err.Error(), "resolve worktree HEAD") {
+		t.Fatalf("error = %v, want resolve worktree HEAD failure", err)
+	}
+}
+
 func TestCleanMigratesAndReclaimsLegacyZeroWorktrees(t *testing.T) {
 	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
@@ -2010,7 +2085,7 @@ func TestCleanMigratesAndReclaimsLegacyZeroWorktrees(t *testing.T) {
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + repoRoot + "\nworktree " + legacyPath + "\n"},
 			{ExitCode: 0},               // status --porcelain --ignored: clean (legacy gets includeIgnored)
-			{Stdout: "deadbeef"},        // rev-parse HEAD
+			{Stdout: "deadbeef"},        // rev-parse --verify --quiet HEAD
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains (reachable)
 			{ExitCode: 0},               // worktree remove --force
 			{ExitCode: 0},               // worktree prune

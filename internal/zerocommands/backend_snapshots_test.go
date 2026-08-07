@@ -89,7 +89,9 @@ func TestMCPServerSnapshotWithCountsMergesRuntimeCounts(t *testing.T) {
 }
 
 func TestMCPServerSnapshotRedactsSecretCommand(t *testing.T) {
-	secret := "sk-proj-" + strings.Repeat("d", 23) + "0"
+	// Digit-free known OpenAI prefix: exercises the special-case path that
+	// redacts sk-proj- even when the body has no digit.
+	secret := "sk-proj-" + strings.Repeat("d", 24)
 	server := mcp.Server{
 		Name:    "leaky",
 		Type:    mcp.ServerTypeStdio,
@@ -201,7 +203,7 @@ func TestHookSnapshotFromDefinitionPreservesPositionForRedactedArgs(t *testing.T
 }
 
 func TestHookSnapshotFromDefinitionRedactsSecretCommand(t *testing.T) {
-	secret := "sk-proj-" + strings.Repeat("c", 23) + "0"
+	secret := "sk-proj-" + strings.Repeat("c", 24)
 	def := hooks.Definition{
 		ID:      "hook-secret-command",
 		Event:   hooks.EventAfterTool,
@@ -400,7 +402,7 @@ func TestPluginSnapshotFromPluginCollapsesSlicesToCounts(t *testing.T) {
 }
 
 func TestPluginSnapshotRedactsOperatorFacingStrings(t *testing.T) {
-	secret := "sk-proj-" + strings.Repeat("e", 23) + "0"
+	secret := "sk-proj-" + strings.Repeat("e", 24)
 	plugin := plugins.LoadedPlugin{
 		ID:           "plugin-" + secret,
 		Name:         "Docs " + secret,

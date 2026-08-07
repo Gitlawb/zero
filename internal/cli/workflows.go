@@ -887,8 +887,9 @@ prepare flags:
   -h, --help              Show this help
 
 release flags:
-  -C, --cwd <path>        Source repository directory (required if the
-                           worktree directory was already deleted)
+  -C, --cwd <path>        Source repository directory; needed when the
+                           worktree directory was already deleted and you
+                           are not running inside the source repository
   -h, --help              Show this help
 `)
 	return err

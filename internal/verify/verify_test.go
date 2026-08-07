@@ -91,7 +91,7 @@ func TestRunParsesStructuredFailureSummary(t *testing.T) {
 		ExitCode: 1,
 		Stdout: strings.Join([]string{
 			"--- FAIL: TestSecret (0.00s)",
-			"    secret_test.go:12: token sk-proj-abcdefghijklmnopqrstuvwxyz0",
+			"    secret_test.go:12: token sk-proj-abcdefghijklmnopqrstuvwxyz",
 			"FAIL",
 		}, "\n"),
 	}}}
@@ -108,7 +108,7 @@ func TestRunParsesStructuredFailureSummary(t *testing.T) {
 	if !strings.Contains(lines, "TestSecret") || !strings.Contains(lines, "[REDACTED]") {
 		t.Fatalf("expected redacted failure summary lines, got %q", lines)
 	}
-	if strings.Contains(lines, "sk-proj-abcdefghijklmnopqrstuvwxyz0") {
+	if strings.Contains(lines, "sk-proj-abcdefghijklmnopqrstuvwxyz") {
 		t.Fatalf("failure summary leaked secret: %q", lines)
 	}
 	if report.Results[0].TestSummary == nil {
