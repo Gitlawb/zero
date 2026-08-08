@@ -75,14 +75,43 @@ type windowsACLSnapshot struct {
 func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
 	groups := groupWindowsACLPlanByPath(plan)
 	snapshots := make([]windowsACLSnapshot, 0, len(groups))
+	abort := func(err error) (func() error, error) {
+		if rollbackErr := rollbackWindowsACLSnapshots(snapshots); rollbackErr != nil {
+			return nil, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+		}
+		return nil, err
+	}
+
+	var deferred []windowsACLPathGroup
 	for _, group := range groups {
 		snapshot, applied, err := applyWindowsACLPathGroup(group)
 		if err != nil {
-			rollbackErr := rollbackWindowsACLSnapshots(snapshots)
-			if rollbackErr != nil {
-				return nil, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
-			}
-			return nil, err
+			return abort(err)
+		}
+		if applied {
+			snapshots = append(snapshots, snapshot)
+			continue
+		}
+		deferred = append(deferred, group)
+	}
+
+	// A group that applied to nothing was skipped because its target did not
+	// exist and the group does not materialize one. A LATER group can still
+	// create it, so the skip has to be retried rather than treated as final.
+	//
+	// The .git rename guard is exactly this shape and was silently absent
+	// because of it. .git must NOT be materialized, since an empty one breaks
+	// `git init`, so its deny-delete group carries no Materialize. But .git does
+	// get created, as the parent chain of the .git\config carveout, and that
+	// group sorts AFTER it. So on every workspace that did not already have a
+	// .git, the guard was skipped, the directory appeared moments later, and
+	// nothing went back for it: the principal could then rename .git aside and
+	// shed the config and hooks carveouts, which is the escape the guard exists
+	// to stop. Groups that are genuinely absent simply skip again here.
+	for _, group := range deferred {
+		snapshot, applied, err := applyWindowsACLPathGroup(group)
+		if err != nil {
+			return abort(err)
 		}
 		if applied {
 			snapshots = append(snapshots, snapshot)
