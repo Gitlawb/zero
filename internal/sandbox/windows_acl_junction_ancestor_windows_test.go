@@ -49,7 +49,7 @@ func TestMaterializeRefusesAncestorJunctionBeforeCreating(t *testing.T) {
 			makeJunction(t, gitDir, external)
 
 			target := filepath.Join(gitDir, "hooks", "config")
-			err := materializeWindowsACLTarget(target, asFile)
+			_, err := materializeWindowsACLTarget(target, asFile)
 			if err == nil {
 				t.Fatalf("materialized %s through a junction ancestor instead of refusing", target)
 			}
@@ -79,7 +79,7 @@ func TestMaterializeStillCreatesOrdinaryTargets(t *testing.T) {
 	for name, asFile := range map[string]bool{"file target": true, "directory target": false} {
 		t.Run(name, func(t *testing.T) {
 			target := filepath.Join(root, name, "nested", "deeper", "target")
-			if err := materializeWindowsACLTarget(target, asFile); err != nil {
+			if _, err := materializeWindowsACLTarget(target, asFile); err != nil {
 				t.Fatalf("materializeWindowsACLTarget: %v", err)
 			}
 			info, err := os.Stat(target)
