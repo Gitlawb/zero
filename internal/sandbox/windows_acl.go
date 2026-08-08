@@ -2,9 +2,45 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
+
+// validateWindowsACLComponent rejects anything that is not a single path
+// component.
+//
+// This is load-bearing in two places, which is why it lives in the portable file
+// rather than beside either of them.
+//
+// At apply time NtCreateFile happily resolves a RELATIVE name containing
+// separators, and it resolves it the ordinary way, so an intermediate junction
+// inside that name is followed and the object lands outside the pinned parent.
+// A name with a separator reopens exactly the hole the parent handle exists to
+// close.
+//
+// At plan time the same shape escapes the write root: a name is joined onto the
+// root to place a deny ACE, so ".." or a separator puts that ACE on a directory
+// outside the workspace entirely.
+//
+// The separators are checked explicitly rather than via filepath.Base, because
+// these are Windows paths whatever the build host is, and on Linux
+// filepath.Base leaves a backslash-joined name untouched and would wave it
+// through. A colon is rejected too: it names an alternate data stream or a
+// drive, neither of which is a child.
+func validateWindowsACLComponent(name string) error {
+	switch {
+	case name == "":
+		return errors.New("windows ACL path component is empty")
+	case name == "." || name == "..":
+		return fmt.Errorf("windows ACL path component %q is a relative reference, not a child", name)
+	case strings.ContainsAny(name, `\/`):
+		return fmt.Errorf("windows ACL path component %q contains a separator, so it would resolve through intermediate directories instead of staying a child", name)
+	case strings.Contains(name, ":"):
+		return fmt.Errorf("windows ACL path component %q contains a colon, which names a stream or a drive rather than a child", name)
+	}
+	return nil
+}
 
 type WindowsACLAction string
 
