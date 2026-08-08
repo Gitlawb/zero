@@ -9,6 +9,7 @@ func TestAnalyzeCommand(t *testing.T) {
 		interactive bool
 		destructive bool
 		network     bool
+		localServer bool
 		tooComplex  bool
 	}{
 		{name: "editor", script: "vim foo.txt", interactive: true},
@@ -67,7 +68,7 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "Windows drive relative path curl exe", script: `'C:curl.exe' https://example.com`, network: true},
 		{name: "Windows npm cmd", script: "npm.cmd install", network: true},
 		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},
-		{name: "python http server", script: "python3 -m http.server 8000", network: true},
+		{name: "python http server", script: "python3 -m http.server 8000", localServer: true},
 		{name: "python pip install", script: "python3 -m pip install requests", network: true},
 		{name: "npm install", script: "npm install", network: true},
 		{name: "npm ci", script: "npm ci", network: true},
@@ -76,12 +77,12 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "npm metadata search", script: "npm search typescript", network: true},
 		{name: "npm offline install", script: "npm install --offline", network: false},
 		{name: "npm version is offline", script: "npm --version", network: false},
-		{name: "npm start", script: "npm start", network: true},
-		{name: "npm run dev", script: "npm run dev", network: true},
+		{name: "npm start", script: "npm start", localServer: true},
+		{name: "npm run dev", script: "npm run dev", localServer: true},
 		{name: "npx http server", script: "npx http-server public -p 8080 -a 127.0.0.1", network: true},
-		{name: "direct http server", script: "http-server public -p 8080 -a 127.0.0.1", network: true},
-		{name: "direct vite", script: "vite --host 127.0.0.1", network: true},
-		{name: "next dev", script: "next dev", network: true},
+		{name: "direct http server", script: "http-server public -p 8080 -a 127.0.0.1", localServer: true},
+		{name: "direct vite", script: "vite --host 127.0.0.1", localServer: true},
+		{name: "next dev", script: "next dev", localServer: true},
 		{name: "git clone", script: "git clone https://example.com/repo.git", network: true},
 		{name: "git fetch", script: "git fetch origin", network: true},
 		{name: "git status is offline", script: "git status", network: false},
@@ -90,15 +91,26 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "process pattern is not network", script: `pkill -f "python3 -m http.server 8000"`, network: false},
 		{name: "process listing is not special-cased", script: "ps aux", network: false},
 
+		// Binding a port is not reaching out. These four are the shape that made
+		// ordinary local work stop for a network approval it never needed, and the
+		// fetching siblings beside them are what must keep asking.
+		{name: "pnpm dev binds", script: "pnpm dev", localServer: true},
+		{name: "yarn serve binds", script: "yarn serve", localServer: true},
+		{name: "bun run preview binds", script: "bun run preview", localServer: true},
+		{name: "pnpm install still fetches", script: "pnpm install", network: true},
+		{name: "yarn add still fetches", script: "yarn add left-pad", network: true},
+		{name: "npm publish still fetches", script: "npm publish", network: true},
+		{name: "python pip install still fetches", script: "python3 -m pip install requests", network: true},
+
 		{name: "unparseable", script: `'unterminated quote`, tooComplex: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := AnalyzeCommand(tc.script)
 			if got.Interactive != tc.interactive || got.Destructive != tc.destructive ||
-				got.Network != tc.network || got.TooComplex != tc.tooComplex {
-				t.Fatalf("AnalyzeCommand(%q) = %#v, want interactive=%v destructive=%v network=%v tooComplex=%v",
-					tc.script, got, tc.interactive, tc.destructive, tc.network, tc.tooComplex)
+				got.Network != tc.network || got.LocalServer != tc.localServer || got.TooComplex != tc.tooComplex {
+				t.Fatalf("AnalyzeCommand(%q) = %#v, want interactive=%v destructive=%v network=%v localServer=%v tooComplex=%v",
+					tc.script, got, tc.interactive, tc.destructive, tc.network, tc.localServer, tc.tooComplex)
 			}
 		})
 	}
