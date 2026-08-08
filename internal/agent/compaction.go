@@ -76,6 +76,12 @@ type CompactionResult struct {
 	// summary message also includes summaryLabel and any preserved structured
 	// state needed by later compactions.
 	SummaryText string
+	// ProjectedChars is the text content sent to the summarizer after semantic
+	// projection, excluding provider protocol framing.
+	ProjectedChars int
+	// Truncated reports whether projection dropped content to satisfy its
+	// bounded brief or previous-summary limits.
+	Truncated bool
 	// Compacted reports whether Messages contains an injected summary.
 	Compacted bool
 }
@@ -239,6 +245,8 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 		RemovedCount:   len(middle),
 		PreservedCount: len(messages) - len(middle),
 		SummaryText:    summary,
+		ProjectedChars: summaryResult.ProjectedChars,
+		Truncated:      summaryResult.Truncated,
 		Compacted:      true,
 	}, nil
 }

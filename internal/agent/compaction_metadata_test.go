@@ -43,6 +43,12 @@ func TestCompactMessagesReturnsMetadataForManualCompaction(t *testing.T) {
 	if result.SummaryText != "manual summary" {
 		t.Fatalf("SummaryText = %q, want trimmed summary", result.SummaryText)
 	}
+	if result.ProjectedChars != compactionMessageChars(captured) || result.ProjectedChars == 0 {
+		t.Fatalf("ProjectedChars = %d, want %d", result.ProjectedChars, compactionMessageChars(captured))
+	}
+	if result.Truncated {
+		t.Fatal("Truncated = true for a projection within its limits")
+	}
 	if len(captured) != 1 || !strings.Contains(captured[0].Content, "first question") || !strings.Contains(captured[0].Content, "second question") {
 		t.Fatalf("summarized projection = %#v, want intent from the non-preserved middle", captured)
 	}
@@ -96,8 +102,43 @@ func TestCompactMessagesNoopReturnsUncompactedMetadata(t *testing.T) {
 	if result.SummaryText != "" {
 		t.Fatalf("SummaryText = %q, want empty", result.SummaryText)
 	}
+	if result.ProjectedChars != 0 || result.Truncated {
+		t.Fatalf("no-op projection metadata = (%d, %t), want zero values", result.ProjectedChars, result.Truncated)
+	}
 	if !reflect.DeepEqual(result.Messages, messages) {
 		t.Fatalf("Messages changed on no-op: %#v", result.Messages)
+	}
+}
+
+func TestCompactMessagesReturnsTruncatedProjectionMetadata(t *testing.T) {
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleSystem, Content: "system"}}
+	for index := range 20 {
+		messages = append(messages, zeroruntime.Message{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: strings.Repeat("contextword ", 256) + string(rune('a'+index)),
+		})
+	}
+	messages = append(messages,
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "recent answer"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "latest question"},
+	)
+
+	var captured []zeroruntime.Message
+	result, err := CompactMessages(messages, CompactionOptions{
+		PreserveLast: 2,
+		Summarize: func(toSummarize []zeroruntime.Message) (string, error) {
+			captured = append([]zeroruntime.Message(nil), toSummarize...)
+			return "bounded summary", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Compacted || !result.Truncated {
+		t.Fatalf("compaction metadata = compacted %t, truncated %t; want both true", result.Compacted, result.Truncated)
+	}
+	if result.ProjectedChars != compactionMessageChars(captured) || result.ProjectedChars == 0 {
+		t.Fatalf("ProjectedChars = %d, want %d", result.ProjectedChars, compactionMessageChars(captured))
 	}
 }
 
