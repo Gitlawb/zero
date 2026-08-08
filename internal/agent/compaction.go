@@ -217,11 +217,11 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 		}, nil
 	}
 
-	summary, err := SummarizeCompactionMessages(middle, opts.Summarize)
+	summaryResult, err := SummarizeCompactionMessages(middle, opts.Summarize)
 	if err != nil {
 		return CompactionResult{}, err
 	}
-	summary = strings.TrimSpace(summary)
+	summary := summaryResult.SummaryText
 
 	// Preserve structured state (active plan + loaded skills) from the elided
 	// middle verbatim, so it is not lost or paraphrased away by the prose summary.
@@ -243,22 +243,45 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 	}, nil
 }
 
+// CompactionSummaryResult describes the shared summarization input and output.
+type CompactionSummaryResult struct {
+	SummaryText    string
+	ProjectedChars int
+	Truncated      bool
+}
+
 // SummarizeCompactionMessages applies the shared semantic projection before
 // invoking a caller-supplied summarizer. Automatic context-pressure compaction
 // and manual session compaction both use this path.
-func SummarizeCompactionMessages(messages []zeroruntime.Message, summarize func([]zeroruntime.Message) (string, error)) (string, error) {
+func SummarizeCompactionMessages(messages []zeroruntime.Message, summarize func([]zeroruntime.Message) (string, error)) (CompactionSummaryResult, error) {
 	if summarize == nil {
-		return "", errors.New("compaction requires a Summarize function")
+		return CompactionSummaryResult{}, errors.New("compaction requires a Summarize function")
 	}
-	summaryInput := projectCompactionInput(messages)
+	projection := projectCompactionInput(messages)
+	summaryInput := projection.messages
 	if len(summaryInput) == 0 {
 		summaryInput = messages
 	}
 	summary, err := summarize(summaryInput)
 	if err != nil {
-		return "", err
+		return CompactionSummaryResult{}, err
 	}
-	return strings.TrimSpace(summary), nil
+	return CompactionSummaryResult{
+		SummaryText:    strings.TrimSpace(summary),
+		ProjectedChars: compactionMessageChars(summaryInput),
+		Truncated:      projection.truncated,
+	}, nil
+}
+
+func compactionMessageChars(messages []zeroruntime.Message) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Content)
+		for _, call := range message.ToolCalls {
+			total += len(call.Name) + len(call.Arguments)
+		}
+	}
+	return total
 }
 
 // safeSuffixBoundary walks the preserve boundary backward (toward systemEnd) so

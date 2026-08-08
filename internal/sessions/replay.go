@@ -49,8 +49,9 @@ type CompactionPlan struct {
 	CompactableEvents []EventRef `json:"compactableEvents"`
 	PreservedEvents   []EventRef `json:"preservedEvents"`
 	SummaryPrompt     string     `json:"summaryPrompt"`
-	PromptChars       int        `json:"promptChars"`
-	Truncated         bool       `json:"truncated,omitempty"`
+	// PromptChars counts prompt text content and excludes provider protocol framing.
+	PromptChars int  `json:"promptChars"`
+	Truncated   bool `json:"truncated,omitempty"`
 }
 
 type RecordCompactionInput struct {
@@ -320,8 +321,9 @@ func buildCompactionPrompt(events []Event, maxChars int) (string, bool) {
 
 // CompactionMessages converts durable session events into the same normalized
 // message shape used by the running agent's compaction pipeline. Provider usage
-// and checkpoint blobs are omitted; security-sensitive event payloads use the
-// same redacted previews as the session compaction plan.
+// and checkpoint blobs are omitted. Message/tool fields rely on the session
+// writer's invariant that tool output is scrubbed before persistence;
+// ask_user answers and generic event previews are redacted here.
 func CompactionMessages(events []Event) []zeroruntime.Message {
 	messages := make([]zeroruntime.Message, 0, len(events))
 	for _, event := range events {

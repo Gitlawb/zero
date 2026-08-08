@@ -864,15 +864,18 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 	if err != nil {
 		return m, CompactResult{}, err
 	}
-	summary, promptChars, truncated, err := m.summarizeCompactionPlan(plan, sessions.CompactionMessages(compactableEvents))
+	summaryResult, err := m.summarizeCompactionPlan(plan, sessions.CompactionMessages(compactableEvents))
 	if err != nil {
 		return m, CompactResult{}, err
 	}
-	plan.PromptChars = promptChars
-	plan.Truncated = truncated
+	// PromptChars counts the text content sent to the provider: the shared
+	// system instruction plus projected message/tool payloads. Provider protocol
+	// framing is intentionally excluded.
+	plan.PromptChars = len(agent.CompactionSummaryInstructions) + summaryResult.ProjectedChars
+	plan.Truncated = summaryResult.Truncated
 	if _, err := m.sessionStore.RecordCompaction(m.activeSession.SessionID, sessions.RecordCompactionInput{
 		Plan:    plan,
-		Summary: summary,
+		Summary: summaryResult.SummaryText,
 	}); err != nil {
 		return m, CompactResult{}, err
 	}
@@ -894,7 +897,7 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 		Compacted:    len(events) < len(beforeEvents)+1,
 		BeforeTokens: beforeTokens,
 		AfterTokens:  estimateTranscriptTokens(m.transcript),
-		Summary:      summary,
+		Summary:      summaryResult.SummaryText,
 	}, nil
 }
 
@@ -914,14 +917,8 @@ func sessionEventsForRefs(events []sessions.Event, refs []sessions.EventRef) ([]
 	return selected, nil
 }
 
-func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan, messages []zeroruntime.Message) (string, int, bool, error) {
-	promptChars := 0
-	truncated := false
-	summary, err := agent.SummarizeCompactionMessages(messages, func(projected []zeroruntime.Message) (string, error) {
-		for _, message := range projected {
-			promptChars += len(message.Content)
-			truncated = truncated || strings.Contains(message.Content, "omitted to fit compaction budget") || strings.Contains(message.Content, "[middle omitted]")
-		}
+func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan, messages []zeroruntime.Message) (agent.CompactionSummaryResult, error) {
+	return agent.SummarizeCompactionMessages(messages, func(projected []zeroruntime.Message) (string, error) {
 		if m.provider == nil {
 			return deterministicCompactionSummary(plan), nil
 		}
@@ -941,7 +938,6 @@ func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan, messages []
 		}
 		return result, nil
 	})
-	return summary, promptChars, truncated, err
 }
 
 func deterministicCompactionSummary(plan sessions.CompactionPlan) string {

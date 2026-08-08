@@ -551,6 +551,56 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestManualCompactionPersistsStructuralTruncationMetadata(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "Bounded summary."},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1", Provider: provider, SessionStore: store})
+	var err error
+	m, err = m.ensureActiveSession("compact a large session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range 20 {
+		content := strings.Repeat("contextword ", 256) + string(rune('a'+index))
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: content})
+	}
+
+	next, result, err := m.compactActiveSession()
+	if err != nil || !result.Compacted {
+		t.Fatalf("compactActiveSession() = (%#v, %v)", result, err)
+	}
+	raw, err := store.ReadEvents(next.activeSession.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := raw[len(raw)-1]
+	if latest.Type != sessions.EventCompaction {
+		t.Fatalf("latest event = %s, want compaction", latest.Type)
+	}
+	payload := sessionPayload(latest)
+	if !payloadBool(payload, "truncated") {
+		t.Fatalf("compaction did not persist structural truncation: %#v", payload)
+	}
+	request := provider.requests[0]
+	wantPromptChars := len(agent.CompactionSummaryInstructions)
+	for _, message := range request.Messages[1:] {
+		wantPromptChars += len(message.Content)
+		for _, call := range message.ToolCalls {
+			wantPromptChars += len(call.Name) + len(call.Arguments)
+		}
+	}
+	if promptChars, ok := payload["promptChars"].(float64); !ok || int(promptChars) != wantPromptChars {
+		t.Fatalf("promptChars = %#v, want %d", payload["promptChars"], wantPromptChars)
+	}
+}
+
 func TestCompactCommandRecordsRequestWhenNoCompactorIsAvailable(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/compact")

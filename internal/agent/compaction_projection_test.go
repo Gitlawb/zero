@@ -16,6 +16,16 @@ func TestClipBytesHandlesTinyLimitsOnRuneBoundaries(t *testing.T) {
 	}
 }
 
+func TestBoundaryClippersHandleNonPositiveLimits(t *testing.T) {
+	for _, clip := range []func(string, int) string{clipPrefixAtBoundary, clipSuffixAtBoundary} {
+		for _, limit := range []int{-1, 0} {
+			if got := clip("世界", limit); got != "" {
+				t.Fatalf("clipper limit %d = %q, want empty", limit, got)
+			}
+		}
+	}
+}
+
 func TestProjectCompactionInputDropsRecoverableToolBodies(t *testing.T) {
 	largeBody := strings.Repeat("recoverable source line\n", 1000)
 	messages := []zeroruntime.Message{
@@ -26,7 +36,8 @@ func TestProjectCompactionInputDropsRecoverableToolBodies(t *testing.T) {
 		{Role: zeroruntime.MessageRoleTool, ToolCallID: "test", Content: "Error: parser regression\nlong diagnostic details"},
 	}
 
-	projected := projectCompactionInput(messages)
+	projection := projectCompactionInput(messages)
+	projected := projection.messages
 	if len(projected) != 1 {
 		t.Fatalf("projection = %#v, want one compact message", projected)
 	}
@@ -50,7 +61,7 @@ func TestProjectCompactionInputRetainsStructurallyMarkedToolErrors(t *testing.T)
 		{Role: zeroruntime.MessageRoleTool, ToolCallID: "git", Content: "fatal: not a git repository", IsError: true},
 	}
 
-	projected := projectCompactionInput(messages)
+	projected := projectCompactionInput(messages).messages
 	if len(projected) != 1 || !strings.Contains(projected[0].Content, "fatal: not a git repository") {
 		t.Fatalf("structured tool error was dropped from projection: %#v", projected)
 	}
@@ -68,7 +79,7 @@ func TestProjectCompactionInputRetainsAskUserExchangeAndSemanticArguments(t *tes
 		{Role: zeroruntime.MessageRoleTool, ToolCallID: "patch", Content: "Done!", ChangedFiles: []string{"internal/db.go"}},
 	}
 
-	content := projectCompactionInput(messages)[0].Content
+	content := projectCompactionInput(messages).messages[0].Content
 	for _, want := range []string{"Which database should remain?", "Postgres only; do not touch MySQL", "internal/db.go", "https://example.com/spec", "Inspect the Windows implementation"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("projection missing %q: %q", want, content)
@@ -81,7 +92,7 @@ func TestProjectCompactionInputCapsToolCallsPerTurn(t *testing.T) {
 	for index := range calls {
 		calls[index] = zeroruntime.ToolCall{Name: "read_file", Arguments: `{"path":"file.go"}`}
 	}
-	projected := projectCompactionInput([]zeroruntime.Message{{Role: zeroruntime.MessageRoleAssistant, ToolCalls: calls}})
+	projected := projectCompactionInput([]zeroruntime.Message{{Role: zeroruntime.MessageRoleAssistant, ToolCalls: calls}}).messages
 	content := projected[0].Content
 	if strings.Count(content, "* read_file") != compactionToolCallsPerTurn || !strings.Contains(content, "4 earlier tool calls omitted") {
 		t.Fatalf("tool-call tail was not bounded: %q", content)
@@ -96,11 +107,24 @@ func TestProjectCompactionInputCarriesPreviousSummaryOutsideBriefCap(t *testing.
 		messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "later request " + strings.Repeat("context ", 20) + string(rune('a'+index%26))})
 	}
 
-	content := projectCompactionInput(messages)[0].Content
+	projection := projectCompactionInput(messages)
+	content := projection.messages[0].Content
 	if !strings.Contains(content, "[previous summary]\nkeep the earlier architecture decision") || !strings.Contains(content, "keep the newest prior decision") {
 		t.Fatalf("previous summary was lost when the brief tail was capped: %q", content)
 	}
 	if !strings.Contains(content, "middle transcript omitted to fit compaction budget") {
 		t.Fatalf("oversized brief was not head/tail capped: %q", content)
+	}
+	if !projection.truncated {
+		t.Fatal("projection did not structurally report truncation")
+	}
+}
+
+func TestProjectCompactionInputDoesNotInferTruncationFromUserText(t *testing.T) {
+	projection := projectCompactionInput([]zeroruntime.Message{{
+		Role: zeroruntime.MessageRoleUser, Content: "Keep this literal marker: [middle omitted]",
+	}})
+	if projection.truncated {
+		t.Fatal("literal user text produced a false truncation signal")
 	}
 }

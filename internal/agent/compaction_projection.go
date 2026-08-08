@@ -22,13 +22,19 @@ const (
 
 var compactionWordPattern = regexp.MustCompile(`[\p{L}\p{N}]+`)
 
+type compactionProjection struct {
+	messages  []zeroruntime.Message
+	truncated bool
+}
+
 // projectCompactionInput removes reconstructible tool output before the model
 // summary call. It retains a bounded transcript of user intent, assistant
 // decisions, tool actions, and concise errors. Exact durable state is appended
 // separately from the original messages after the summary returns.
-func projectCompactionInput(messages []zeroruntime.Message) []zeroruntime.Message {
+func projectCompactionInput(messages []zeroruntime.Message) compactionProjection {
 	sections := make([]string, 0, len(messages))
 	previousSummary := ""
+	truncated := false
 	for index, message := range messages {
 		switch message.Role {
 		case zeroruntime.MessageRoleUser:
@@ -38,7 +44,9 @@ func projectCompactionInput(messages []zeroruntime.Message) []zeroruntime.Messag
 			}
 			trimmed := strings.TrimSpace(content)
 			if strings.HasPrefix(trimmed, summaryLabel) {
-				previousSummary = clipHeadTailBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, summaryLabel)), compactionPreviousSummaryBytes)
+				fullSummary := strings.TrimSpace(strings.TrimPrefix(trimmed, summaryLabel))
+				previousSummary = clipHeadTailBytes(fullSummary, compactionPreviousSummaryBytes)
+				truncated = truncated || len(fullSummary) > compactionPreviousSummaryBytes
 				continue
 			}
 			if content = clipInformativeWords(content, compactionUserWordBudget); content != "" {
@@ -88,18 +96,22 @@ func projectCompactionInput(messages []zeroruntime.Message) []zeroruntime.Messag
 		}
 	}
 	if len(sections) == 0 && previousSummary == "" {
-		return nil
+		return compactionProjection{}
 	}
-	brief := capCompactionBrief(strings.Join(sections, "\n\n"))
+	brief, briefTruncated := capCompactionBrief(strings.Join(sections, "\n\n"))
+	truncated = truncated || briefTruncated
 	if previousSummary != "" {
 		brief = "[previous summary]\n" + previousSummary + "\n\n" + brief
 	}
-	return []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: strings.TrimSpace(brief)}}
+	return compactionProjection{
+		messages:  []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: strings.TrimSpace(brief)}},
+		truncated: truncated,
+	}
 }
 
-func capCompactionBrief(brief string) string {
+func capCompactionBrief(brief string) (string, bool) {
 	if len(brief) <= compactionBriefMaxBytes {
-		return brief
+		return brief, false
 	}
 	marker := "\n\n...[middle transcript omitted to fit compaction budget]...\n\n"
 	available := compactionBriefMaxBytes - len(marker)
@@ -109,7 +121,7 @@ func capCompactionBrief(brief string) string {
 	tailBytes := available - headBytes
 	head := clipPrefixAtBoundary(brief, headBytes)
 	tail := clipSuffixAtBoundary(brief, tailBytes)
-	return strings.TrimSpace(head) + marker + strings.TrimSpace(tail)
+	return strings.TrimSpace(head) + marker + strings.TrimSpace(tail), true
 }
 
 func compactionToolCallLine(call zeroruntime.ToolCall) string {
@@ -215,6 +227,9 @@ func clipHeadTailBytes(text string, limit int) string {
 }
 
 func clipPrefixAtBoundary(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(text) <= limit {
 		return text
 	}
@@ -229,6 +244,9 @@ func clipPrefixAtBoundary(text string, limit int) string {
 }
 
 func clipSuffixAtBoundary(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(text) <= limit {
 		return text
 	}
