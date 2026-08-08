@@ -49,6 +49,13 @@ const windowsPowerShellExitSuffix = "\nif ($null -ne $LASTEXITCODE) { exit $LAST
 var (
 	hostShellOnce sync.Once
 	hostShell     shellRuntime
+
+	// The sandboxed answer is cached separately from the unsandboxed one
+	// because the two environments genuinely disagree: PowerShell probes fine
+	// in this process and then cannot start inside the sandbox. Sharing one
+	// cache would let whichever question was asked first answer both.
+	sandboxedShellOnce sync.Once
+	sandboxedShell     shellRuntime
 )
 
 // windowsMsysProneNames is the single source of truth for POSIX coreutil and
@@ -90,6 +97,30 @@ func detectShellRuntime(goos string) shellRuntime {
 		hostShell = detectShellRuntimeWithProbe(goos, exec.LookPath, os.Getenv, powerShellExecutableUsable)
 	})
 	return hostShell
+}
+
+// detectShellRuntimeSandboxed picks the shell using a probe that starts the
+// candidate the way a tool command will actually start it — inside the sandbox
+// — rather than in this unrestricted process.
+//
+// The plain probe asks the wrong environment. On Windows the sandbox runs
+// commands under a WRITE_RESTRICTED restricted token, and PowerShell is a .NET
+// program whose crypto initialization fails there:
+//
+//	System.DllNotFoundException: Unable to load DLL 'BCrypt.dll' ... (0x8007045A)
+//
+// So PowerShell answers "usable" when probed directly, is then selected, and
+// cannot run so much as `echo` once wrapped. cmd.exe does survive the token, and
+// is already the documented fallback, so an honest probe reaches it on its own.
+// This is the same restricted-token incompatibility class as the Schannel and
+// MSYS2 limitations recorded in internal/sandbox/windows_command_runner_windows.go.
+//
+// usable must run the candidate through the same sandbox the command will use.
+func detectShellRuntimeSandboxed(usable func(string) bool) shellRuntime {
+	sandboxedShellOnce.Do(func() {
+		sandboxedShell = detectShellRuntimeWithProbe(runtime.GOOS, exec.LookPath, os.Getenv, usable)
+	})
+	return sandboxedShell
 }
 
 func detectShellRuntimeWithLookup(goos string, lookPath func(string) (string, error), getenv func(string) string) shellRuntime {
