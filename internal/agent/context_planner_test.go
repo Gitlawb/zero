@@ -13,7 +13,15 @@ func TestContextPlannerPreservesProviderRequest(t *testing.T) {
 		{Role: zeroruntime.MessageRoleUser, Content: "inspect this", Images: []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte{1, 2, 3}}}},
 		{Role: zeroruntime.MessageRoleAssistant, Content: "working", ToolCalls: []zeroruntime.ToolCall{{ID: "call-1", Name: "read_file", Arguments: `{"path":"main.go"}`}}, Reasoning: []zeroruntime.ReasoningBlock{{Provider: "test", Type: "thinking", Signature: "sig"}}},
 	}
-	toolDefs := []zeroruntime.ToolDefinition{{Name: "read_file", Description: "Read a file", Parameters: map[string]any{"type": "object"}}}
+	toolDefs := []zeroruntime.ToolDefinition{{
+		Name: "read_file", Description: "Read a file",
+		Parameters: map[string]any{
+			"type":       "object",
+			"required":   []string{"path"},
+			"properties": map[string]any{"path": map[string]any{"type": "string"}},
+			"anyOf":      []any{map[string]any{"type": "object"}},
+		},
+	}}
 	planner := newContextPlanner(contextPlannerConfig{
 		contextWindow:  128_000,
 		promptCacheKey: "session-1",
@@ -30,12 +38,35 @@ func TestContextPlannerPreservesProviderRequest(t *testing.T) {
 	if !reflect.DeepEqual(plan.Request, want) {
 		t.Fatalf("planned request changed provider input:\n got: %#v\nwant: %#v", plan.Request, want)
 	}
+	stable := planner.Plan(messages, toolDefs, "medium")
+	if &stable.Request.Tools[0] != &plan.Request.Tools[0] {
+		t.Fatal("stable tool fingerprint rebuilt the immutable schema snapshot")
+	}
 
-	// A plan owns its request snapshot; later caller mutation cannot change it.
+	// A plan owns its request snapshot; later caller mutation cannot change its
+	// messages or its recursively nested tool schema.
 	messages[1].Content = "changed"
 	messages[1].Images[0].Data[0] = 9
+	toolDefs[0].Name = "changed_tool"
+	toolDefs[0].Parameters["required"].([]string)[0] = "other"
+	toolDefs[0].Parameters["properties"].(map[string]any)["path"].(map[string]any)["type"] = "integer"
+	toolDefs[0].Parameters["anyOf"].([]any)[0].(map[string]any)["type"] = "array"
 	if plan.Request.Messages[1].Content != "inspect this" || plan.Request.Messages[1].Images[0].Data[0] != 1 {
 		t.Fatalf("planned messages alias caller state: %#v", plan.Request.Messages[1])
+	}
+	if plan.Request.Tools[0].Name != "read_file" ||
+		plan.Request.Tools[0].Parameters["required"].([]string)[0] != "path" ||
+		plan.Request.Tools[0].Parameters["properties"].(map[string]any)["path"].(map[string]any)["type"] != "string" ||
+		plan.Request.Tools[0].Parameters["anyOf"].([]any)[0].(map[string]any)["type"] != "object" {
+		t.Fatalf("planned tools alias caller state: %#v", plan.Request.Tools[0])
+	}
+
+	next := planner.Plan(messages, toolDefs, "medium")
+	if next.PrefixFingerprint == plan.PrefixFingerprint || next.Request.Tools[0].Name != "changed_tool" {
+		t.Fatalf("changed tool schema did not refresh snapshot: %#v", next)
+	}
+	if plan.Request.Tools[0].Name != "read_file" {
+		t.Fatalf("refresh mutated earlier request: %#v", plan.Request.Tools[0])
 	}
 }
 
