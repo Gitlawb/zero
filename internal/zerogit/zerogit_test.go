@@ -439,6 +439,9 @@ func initGitRepo(t *testing.T, withCommit bool) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	root := t.TempDir()
 	runGitCommand(t, root, "init")
 	if withCommit {
@@ -785,6 +788,25 @@ func TestPushBranchesToRemote(t *testing.T) {
 		// Remote side did publish: result still carries remote/branch for callers.
 		if result.Remote != "origin" || result.Branch != "user/slug" {
 			t.Fatalf("expected partial result for published branch, got %#v", result)
+		}
+	})
+
+	t.Run("SurfacesUpstreamStillWrongAfterRepair", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "user/slug\n"},
+			{Stdout: "origin\n"},
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"},
+			{Stdout: "To origin\n * [new branch] user/slug -> user/slug\n"},
+			{ExitCode: 128, Stderr: "fatal: no upstream configured"},
+			{Stdout: ""},              // branch --set-upstream-to succeeds
+			{Stdout: "origin/main\n"}, // but the upstream is still wrong
+		}}
+
+		_, err := Push(context.Background(), PushOptions{Cwd: root, RunGit: runner.Run})
+		if err == nil || !strings.Contains(err.Error(), "local upstream is still not") {
+			t.Fatalf("expected residual-mismatch error, got %v", err)
 		}
 	})
 

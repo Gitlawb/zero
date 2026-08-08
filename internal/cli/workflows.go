@@ -960,7 +960,16 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, options.dryRun, options.auto, options.maxDiffBytes, deps)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	branch, remote, created, err := ensureFeatureBranch(ctx, stdout, workspaceRoot, options.remote, featureBranchOptions{
+		JSONMode:           options.json,
+		AllowDefaultBranch: options.yes,
+		DryRun:             options.dryRun,
+		AutoNaming:         options.auto,
+		MaxDiffBytes:       options.maxDiffBytes,
+	}, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -1019,7 +1028,16 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	branch, remote, created, err := ensureFeatureBranch(ctx, stdout, workspaceRoot, options.remote, featureBranchOptions{
+		JSONMode:           options.json,
+		AllowDefaultBranch: options.yes,
+		DryRun:             false,
+		AutoNaming:         options.auto,
+		MaxDiffBytes:       options.maxDiffBytes,
+	}, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -1183,10 +1201,16 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // The working tree must be clean and HEAD must be ahead of the resolved
 // remote branch; both are verified before any branch is created. The
 // inspectChanges, commitsAhead, headCommitSubject, currentGitUser, and
-// createBranch fields on deps are mandatory dependencies populated by
-// fillAppDeps.
-func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, bool, error) {
-	if allowDefaultBranch || dryRun {
+type featureBranchOptions struct {
+	JSONMode           bool
+	AllowDefaultBranch bool
+	DryRun             bool
+	AutoNaming         bool
+	MaxDiffBytes       int
+}
+
+func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot string, requestedRemote string, opts featureBranchOptions, deps appDeps) (string, string, bool, error) {
+	if opts.AllowDefaultBranch || opts.DryRun {
 		return "", strings.TrimSpace(requestedRemote), false, nil
 	}
 
@@ -1279,7 +1303,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	// commitsAhead just checked. A working-tree snapshot can describe edits a
 	// commit-only push will never include.
 	baseRef := remote + "/" + currentBranch
-	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: baseRef, MaxDiffBytes: maxDiffBytes})
+	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: baseRef, MaxDiffBytes: opts.MaxDiffBytes})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)
 	}
@@ -1293,11 +1317,11 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 			slug = zerogit.SlugifyBranchComponent(subject)
 		}
 	}
-	if autoNaming && strings.TrimSpace(summary.Diff) != "" {
+	if opts.AutoNaming && strings.TrimSpace(summary.Diff) != "" {
 		llmSlug := ""
 		if resolved, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil && config.HasProviderProfile(resolved.Provider) {
 			if provider, provErr := deps.newProvider(resolved.Provider); provErr == nil {
-				if !jsonMode {
+				if !opts.JSONMode {
 					fmt.Fprintln(stdout, "Generating branch name using LLM...")
 				}
 				genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -1310,7 +1334,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		}
 		if llmSlug != "" {
 			slug = llmSlug
-		} else if !jsonMode {
+		} else if !opts.JSONMode {
 			// Cover resolveConfig failures, missing provider profiles,
 			// newProvider errors, generation errors, and empty results so the
 			// user is not left guessing after "Generating..." or silence.
@@ -1354,7 +1378,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 			return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w", currentBranch, restoreTip, err)
 		}
 	}
-	if !jsonMode {
+	if !opts.JSONMode {
 		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)
 	}
 	return result.Branch, remote, true, nil
