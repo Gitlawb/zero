@@ -102,3 +102,12 @@ func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 		t.Fatalf("unknown extension must pass through: %q", content)
 	}
 }
+
+func TestFormatOnWriteFormatterLookupFailure(t *testing.T) {
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	t.Setenv("PATH", t.TempDir())
+	content := maybeFormatWrittenFile(context.Background(), filepath.Join(t.TempDir(), "a.go"), "package a\n\nfunc  A( ) {   }\n")
+	if content != "package a\n\nfunc  A( ) {   }\n" {
+		t.Fatalf("missing formatter must return written content, got %q", content)
+	}
+}

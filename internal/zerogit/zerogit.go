@@ -872,7 +872,7 @@ func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
 // hard failure rather than guessing that there is something to publish.
 func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner) (int, error) {
 	runGit, _ = resolveRunners(runGit, nil)
-	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", remote+"/"+branch+"..HEAD")
+	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "--end-of-options", remote+"/"+branch+"..HEAD")
 	if err != nil {
 		return 0, err
 	}
@@ -1002,10 +1002,10 @@ func UpstreamRemote(ctx context.Context, cwd, branch string, runGit Runner) stri
 // DeleteBranch switches to fallbackBranch and deletes branchToDelete.
 func DeleteBranch(ctx context.Context, cwd, fallbackBranch, branchToDelete string, runGit Runner) error {
 	runGit, _ = resolveRunners(runGit, nil)
-	if _, err := gitOutput(ctx, runGit, cwd, "checkout", fallbackBranch); err != nil {
+	if _, err := gitOutput(ctx, runGit, cwd, "switch", "--", fallbackBranch); err != nil {
 		return err
 	}
-	_, err := gitOutput(ctx, runGit, cwd, "branch", "-D", branchToDelete)
+	_, err := gitOutput(ctx, runGit, cwd, "branch", "-D", "--", branchToDelete)
 	return err
 }
 

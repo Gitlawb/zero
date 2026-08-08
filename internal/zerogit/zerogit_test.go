@@ -1214,7 +1214,7 @@ func TestCommitsAhead(t *testing.T) {
 		if count != 3 {
 			t.Fatalf("count = %d, want 3", count)
 		}
-		if got := runner.commandLine(0); got != "git rev-list --count origin/main..HEAD" {
+		if got := runner.commandLine(0); got != "git rev-list --count --end-of-options origin/main..HEAD" {
 			t.Fatalf("unexpected command: %q", got)
 		}
 	})

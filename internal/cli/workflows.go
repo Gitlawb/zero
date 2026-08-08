@@ -603,9 +603,6 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 			return options, false, execUsageError{fmt.Sprintf("unexpected changes argument %q", arg)}
 		}
 	}
-	if command != "commit" && options.message != "" {
-		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
-	}
 	if command != "commit" && options.hasMessage {
 		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
 	}
@@ -1022,43 +1019,38 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	// Resolve the remote the unborn-remote preflight (and later push) will
-	// target. Explicit --remote wins. Otherwise:
-	//   - without --yes: IsDefaultBranch resolves the current branch's
-	//     upstream (then "origin"), matching Push's remote resolution;
-	//   - with --yes: skip IsDefaultBranch so a remote-HEAD failure cannot
-	//     block the documented default-branch override, but still resolve the
-	//     current branch and its configured upstream so a fork's non-origin
-	//     upstream is not silently replaced by "origin".
+	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	// Resolve the target remote for the unborn-remote check. Explicit --remote wins,
+	// followed by the remote resolved by ensureFeatureBranch. When --yes is set,
+	// fall back to the branch upstream or "origin".
 	targetRemote := strings.TrimSpace(options.remote)
 	if targetRemote == "" {
-		if !options.yes {
-			_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
-			if err != nil {
-				return writeExecUsageError(stderr, err.Error())
-			}
-			targetRemote = remoteForCheck
-		} else {
-			currentBranch := ""
-			if deps.currentGitBranch != nil {
-				currentBranch = deps.currentGitBranch(context.Background(), workspaceRoot)
-			}
-			if deps.branchUpstreamRemote != nil && currentBranch != "" {
-				targetRemote = deps.branchUpstreamRemote(context.Background(), workspaceRoot, currentBranch)
-			}
+		targetRemote = remote
+	}
+	if targetRemote == "" {
+		currentBranch := ""
+		if deps.currentGitBranch != nil {
+			currentBranch = deps.currentGitBranch(context.Background(), workspaceRoot)
+		}
+		if deps.branchUpstreamRemote != nil && currentBranch != "" {
+			targetRemote = deps.branchUpstreamRemote(context.Background(), workspaceRoot, currentBranch)
 		}
 		if targetRemote == "" {
 			targetRemote = "origin"
 		}
 	}
 
+	// Probe errors are intentionally ignored so the flow can continue; if the
+	// probe fails, the subsequent push or PR operation provides fail-closed behavior.
 	if deps.isUnbornRemote != nil {
 		if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
 			return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
 		}
 	}
-
-	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -1192,17 +1184,19 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // returns, so a user who passed --diff-bytes to bound the proprietary source
 // sent for LLM naming has that cap honored here just as the commit path does.
 // The working tree must be clean and HEAD must be ahead of the resolved remote
-// default before a branch is created; otherwise the push would either leave
-// uncommitted edits behind or publish an empty comparison. A confirmed-unborn
-// remote (freshly created, zero refs) is not auto-branched: pushing only a
-// feature branch would leave the remote without its configured default
-// (dangling HEAD), and the next `changes pr` cannot recover. Establish the
-// initial default branch with --yes first, then auto-branch subsequent work.
+// ensureFeatureBranch verifies working tree cleanliness, checks default branch
+// state, and auto-creates a feature branch if on the default branch. The
+// inspectChanges, commitsAhead, headCommitSubject, currentGitUser, and
+// createBranch fields on deps are mandatory dependencies populated by
+// fillAppDeps.
 func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, bool, error) {
 	if allowDefaultBranch || dryRun {
 		return "", strings.TrimSpace(requestedRemote), false, nil
 	}
 
+	if deps.isDefaultBranch == nil {
+		return "", "", false, fmt.Errorf("isDefaultBranch dependency missing")
+	}
 	isDefault, currentBranch, remote, err := deps.isDefaultBranch(ctx, zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: requestedRemote})
 	if err != nil {
 		return "", "", false, err
@@ -1451,7 +1445,6 @@ func isPreambleText(s string) bool {
 // non-preamble line so plain multi-word replies still slugify correctly.
 func extractBranchSlug(text string) string {
 	var firstLine string
-	var plausibleLine string
 
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -1490,16 +1483,7 @@ func extractBranchSlug(text string) string {
 		if firstLine == "" && !isPreambleText(candidate) {
 			firstLine = candidate
 		}
-
-		if (!isPreambleText(line) || candidate != line) && !isPreambleText(candidate) {
-			if plausibleLine == "" {
-				plausibleLine = candidate
-			}
-		}
 	}
 
-	if plausibleLine != "" {
-		return plausibleLine
-	}
 	return firstLine
 }

@@ -2568,6 +2568,10 @@ func TestRunChangesBareRemotePushThenPRUsable(t *testing.T) {
 		t.Skipf("git unavailable: %v", err)
 	}
 
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
 	tmp := t.TempDir()
 	bare := filepath.Join(tmp, "remote.git")
 	repo := filepath.Join(tmp, "repo")
