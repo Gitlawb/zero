@@ -624,13 +624,11 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 
 // summarizeMessagesOnce performs a single tool-less summarization call.
 func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
-	request := zeroruntime.CompletionRequest{
-		Messages: []zeroruntime.Message{
-			{Role: zeroruntime.MessageRoleSystem, Content: CompactionSummaryInstructions},
-			{Role: zeroruntime.MessageRoleUser, Content: "Summarize this conversation:\n\n" + renderTranscript(messages)},
-		},
-		// No tools: this is a plain text summarization call.
-	}
+	planner := newContextPlanner(contextPlannerConfig{})
+	request := planner.Plan([]zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: CompactionSummaryInstructions},
+		{Role: zeroruntime.MessageRoleUser, Content: "Summarize this conversation:\n\n" + renderTranscript(messages)},
+	}, nil, "").Request
 	stream, err := provider.StreamCompletion(ctx, request)
 	if err != nil {
 		return "", err

@@ -3729,6 +3729,8 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 		{Type: zeroruntime.StreamEventDone},
 	}}}
 	onUsageCalls := 0
+	onContextCalls := 0
+	var contextPlan ContextBreakdown
 	rec := trace.NewRecorder("tracing-session", "run-1", "test")
 	if _, err := Run(context.Background(), "hi", provider, Options{
 		SessionID:    "tracing-session",
@@ -3737,6 +3739,10 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 		Model:        "test-model",
 		Trace:        rec,
 		OnUsage:      func(Usage) { onUsageCalls++ },
+		OnContext: func(breakdown ContextBreakdown) {
+			onContextCalls++
+			contextPlan = breakdown
+		},
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -3762,6 +3768,12 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	}
 	if onUsageCalls == 0 {
 		t.Fatal("wrapped OnUsage did not forward to the caller's callback")
+	}
+	if onContextCalls != 1 || len(contextPlan.Blocks) != 2 || contextPlan.PrefixInvalidationReason != "initial" {
+		t.Fatalf("context plan callback = calls %d, plan %#v", onContextCalls, contextPlan)
+	}
+	if len(tr.PrefixHashes) != 1 || tr.PrefixHashes[0].InvalidationReason != "initial" || tr.PrefixHashes[0].CompletePrefixHash != contextPlan.CompletePrefixHash {
+		t.Fatalf("trace context evidence = %#v, plan %#v", tr.PrefixHashes, contextPlan)
 	}
 }
 

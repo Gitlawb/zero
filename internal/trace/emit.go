@@ -105,6 +105,7 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 			"tools":               p.ToolsHash,
 			"schema":              p.SchemaHash,
 			"complete_prefix":     p.CompletePrefixHash,
+			"invalidation_reason": p.InvalidationReason,
 		}); err != nil {
 			return err
 		}
