@@ -1,10 +1,45 @@
 package tools
 
 import (
+	"encoding/json"
 	"strings"
 )
 
 const humanOutcomePreviewBytes = 8 * 1024
+
+type serializedToolOutcome struct {
+	ModelView   string             `json:"modelView,omitempty"`
+	HumanView   Display            `json:"humanView,omitempty"`
+	Artifact    *ToolArtifact      `json:"artifact,omitempty"`
+	Diagnostics OutcomeDiagnostics `json:"diagnostics,omitempty"`
+	Finalized   bool               `json:"finalized,omitempty"`
+}
+
+// MarshalJSON preserves the private finalized marker without making outcome
+// state mutable to callers.
+func (outcome ToolOutcome) MarshalJSON() ([]byte, error) {
+	return json.Marshal(serializedToolOutcome{
+		ModelView:   outcome.ModelView,
+		HumanView:   outcome.HumanView,
+		Artifact:    outcome.Artifact,
+		Diagnostics: outcome.Diagnostics,
+		Finalized:   outcome.finalized,
+	})
+}
+
+// UnmarshalJSON restores the finalized marker used to select canonical views.
+func (outcome *ToolOutcome) UnmarshalJSON(data []byte) error {
+	var serialized serializedToolOutcome
+	if err := json.Unmarshal(data, &serialized); err != nil {
+		return err
+	}
+	outcome.ModelView = serialized.ModelView
+	outcome.HumanView = serialized.HumanView
+	outcome.Artifact = serialized.Artifact
+	outcome.Diagnostics = serialized.Diagnostics
+	outcome.finalized = serialized.Finalized
+	return nil
+}
 
 // finalizeToolOutcome is the single seam between tool execution and its three
 // consumers: provider context, human presentation, and recoverable artifacts.

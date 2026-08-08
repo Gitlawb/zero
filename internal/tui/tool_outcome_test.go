@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -45,5 +46,39 @@ func TestToolResultDetailUsesFinalizedHumanEvidenceForReducedError(t *testing.T)
 	}
 	if detail == result.ModelOutput() {
 		t.Fatal("human detail collapsed back to the reduced model view")
+	}
+}
+
+func TestToolResultDetailSurvivesOutcomeJSONRoundTrip(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	raw := "output:\n" + strings.Repeat("ok  \texample.test/package\t0.01s\n", 24) +
+		"--- FAIL: TestImportant\nexpected 7, got 9\nFAIL\nexit_code: 1"
+	registry := tools.NewRegistry()
+	registry.Register(tuiOutcomeErrorTool{output: raw})
+	toolResult := registry.Run(context.Background(), tools.ExecCommandToolName, map[string]any{"cmd": "go test ./..."})
+	original := agent.ToolResult{
+		Name:    tools.ExecCommandToolName,
+		Status:  toolResult.Status,
+		Output:  toolResult.Output,
+		Display: toolResult.Display,
+		Outcome: toolResult.Outcome,
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal tool result: %v", err)
+	}
+	var restored agent.ToolResult
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal tool result: %v", err)
+	}
+	if !restored.Outcome.Finalized() {
+		t.Fatal("restored outcome lost its finalized state")
+	}
+	detail := toolResultDetail(restored)
+	for _, want := range []string{"ok  \texample.test/package", "TestImportant", "expected 7, got 9"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("restored human detail missing %q: %q", want, detail)
+		}
 	}
 }
