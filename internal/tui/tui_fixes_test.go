@@ -34,7 +34,7 @@ func TestBashEscapeGatedByPermissionMode(t *testing.T) {
 		}
 	}
 
-	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeUnsafe})
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeFullAuto})
 	m.input.SetValue("!echo hi")
 	_, cmd := m.handleSubmit()
 	if cmd == nil {

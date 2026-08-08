@@ -420,7 +420,7 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 		t.Fatalf("config mode options missing plan: %#v", planConfigured.ConfigOptions[1].Options)
 	}
 	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
-	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeFullAuto)}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected Unsafe mode to be rejected over ACP")
 	}
 	// An unknown mode must be rejected.

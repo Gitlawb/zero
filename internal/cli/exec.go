@@ -607,20 +607,32 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if writer.err != nil {
 		return exitCrash
 	}
-	// Surface the unsafe-permissions warning whenever the run resolves to unsafe
-	// mode, covering BOTH --skip-permissions-unsafe and --auto high (which also
-	// resolves to PermissionModeUnsafe). Previously only the explicit flag path
-	// warned, so --auto high silently ran without notice.
-	if permissionMode == agent.PermissionModeUnsafe {
+	// Surface the warning whenever the run resolves to full-auto, covering BOTH
+	// the explicit flag and --auto high (which also resolves to
+	// PermissionModeFullAuto). Previously only the explicit flag path warned, so
+	// --auto high silently ran without notice.
+	//
+	// The wording names permission prompts specifically. Full-auto skips
+	// approvals; it does not remove the OS sandbox, and a warning that implied
+	// otherwise would misdescribe what is actually happening.
+	if permissionMode == agent.PermissionModeFullAuto {
+		// Named generically for the flag path because either spelling reaches
+		// here and the bool does not record which one was typed. Claiming
+		// --full-auto when the caller passed --skip-permissions-unsafe would be a
+		// small lie in a warning, which is the wrong place for one.
 		reason := "--auto high"
 		switch {
 		case options.skipPermissionsUnsafe:
-			reason = "--skip-permissions-unsafe"
-		case strings.EqualFold(strings.TrimSpace(options.permissionMode), "unsafe"),
+			// One bool backs both spellings, so naming both is the only accurate
+			// option: pointing someone at a flag they did not type sends them
+			// looking for it.
+			reason = "--full-auto (or --skip-permissions-unsafe)"
+		case strings.EqualFold(strings.TrimSpace(options.permissionMode), "full-auto"),
+			strings.EqualFold(strings.TrimSpace(options.permissionMode), "unsafe"),
 			strings.EqualFold(strings.TrimSpace(options.permissionMode), "high"):
-			reason = "--permission-mode unsafe"
+			reason = "--permission-mode full-auto"
 		}
-		writer.warning(fmt.Sprintf("Unsafe permissions are active for this run because %s was passed.", reason))
+		writer.warning(fmt.Sprintf("Full-auto is active for this run because %s was passed: prompt-gated tools run without approval.", reason))
 		if writer.err != nil {
 			return exitCrash
 		}
