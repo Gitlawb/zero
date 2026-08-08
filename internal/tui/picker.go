@@ -36,10 +36,15 @@ const (
 // readout (ctx window · capabilities); the dot flags mark provider locality
 // for model rows (accent = remote, blue = local).
 type pickerItem struct {
-	Group    string
-	Label    string
-	Value    string
-	Meta     string
+	Group string
+	Label string
+	Value string
+	Meta  string
+	// Tab is the tab-strip bucket this item belongs to, for pickers that show
+	// one (see commandPicker.tabs). Empty means the item only ever appears
+	// under "All". Distinct from Group, which renders as an inline header:
+	// a tabbed picker shows one bucket at a time instead of stacking them.
+	Tab      string
 	Provider string // display tag (catalog id / locality)
 	// OwnerProvider is the saved provider profile name a model belongs to, so the
 	// /model picker can switch providers when a model from a non-active provider is
@@ -63,6 +68,49 @@ type commandPicker struct {
 	// loading marks a picker still fetching its rows (e.g. the STT model list from
 	// GitHub): the overlay shows a "fetching…" line instead of "no matching items".
 	loading bool
+	// tabs is the tab strip across the top of the overlay, cycled with Tab.
+	// tabs[0] is always "All" and matches every item; the rest are matched
+	// against pickerItem.Tab. Empty means this picker has no tab strip, which is
+	// every picker but /resume.
+	tabs      []string
+	activeTab int
+}
+
+const pickerTabAll = "All"
+
+// hasTabs reports whether this picker draws a tab strip. One entry means "All"
+// and nothing else, which is not worth a row of chrome.
+func (p *commandPicker) hasTabs() bool {
+	return p != nil && len(p.tabs) > 1
+}
+
+// cycleTab moves to the next/previous tab and re-filters. The query is kept:
+// switching tabs while searching is a narrowing, not a reset.
+func (p *commandPicker) cycleTab(delta int) {
+	if !p.hasTabs() {
+		return
+	}
+	count := len(p.tabs)
+	p.activeTab = ((p.activeTab+delta)%count + count) % count
+	p.selected = 0
+	p.applyQuery()
+}
+
+// activeTabName is the currently selected tab, or "All" when there is no strip.
+func (p *commandPicker) activeTabName() string {
+	if !p.hasTabs() || p.activeTab < 0 || p.activeTab >= len(p.tabs) {
+		return pickerTabAll
+	}
+	return p.tabs[p.activeTab]
+}
+
+// matchesActiveTab reports whether an item belongs in the current tab.
+func (p *commandPicker) matchesActiveTab(item pickerItem) bool {
+	tab := p.activeTabName()
+	if tab == pickerTabAll {
+		return true
+	}
+	return strings.EqualFold(item.Tab, tab)
 }
 
 func (p *commandPicker) move(delta int) {
@@ -103,6 +151,19 @@ func (p *commandPicker) applyQuery() {
 	source := p.allItems
 	if len(source) == 0 {
 		source = p.items
+	}
+	// The tab narrows the candidate set BEFORE the query ranks it, so both the
+	// empty-query path and the scored path below see the same rows. Filtering
+	// only inside the scored branch would make an empty search box show every
+	// tab's items — the exact moment the strip needs to be trusted.
+	if p.hasTabs() {
+		narrowed := make([]pickerItem, 0, len(source))
+		for _, item := range source {
+			if p.matchesActiveTab(item) {
+				narrowed = append(narrowed, item)
+			}
+		}
+		source = narrowed
 	}
 	query := strings.ToLower(strings.TrimSpace(p.query))
 	if query == "" {

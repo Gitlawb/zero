@@ -7,10 +7,12 @@ import (
 	"math"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -220,6 +222,19 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		return m, m.resumeText()
 	}
 
+	// A "<agent>:<id>" argument names another agent's session. Import it first,
+	// then resume the copy. Zero session ids cannot contain a colon
+	// (sessions.ValidSessionID), so this is unambiguous.
+	importNote := ""
+	if strings.Contains(args, ":") {
+		imported, note, err := m.importForeignSession(args)
+		if err != nil {
+			return m, "Sessions\n" + err.Error()
+		}
+		args = imported
+		importNote = note
+	}
+
 	session, err := m.resolveResumeSession(args)
 	if err != nil {
 		return m, "Sessions\n" + err.Error()
@@ -248,6 +263,9 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	}
 
 	rows := initialTranscript()
+	if importNote != "" {
+		rows = appendRow(rows, rowSystem, importNote)
+	}
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
 	if loopsCleared > 0 {
 		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
@@ -418,11 +436,17 @@ func (m model) newSessionPicker() *commandPicker {
 		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
+		agent := sessionAgentName(meta.Tag)
 		items = append(items, pickerItem{
 			Label: label,
 			Value: meta.SessionID,
+			// Shown on the right of the row, so the "All" tab says at a glance
+			// which agent each session came from.
+			Meta: agent,
+			Tab:  agent,
 		})
 	}
+	items = append(items, m.foreignSessionItems(metas, now)...)
 	if len(items) == 0 {
 		return nil // every resumable session was an empty/failed run
 	}
@@ -432,7 +456,123 @@ func (m model) newSessionPicker() *commandPicker {
 		items:    items,
 		allItems: append([]pickerItem{}, items...),
 		selected: 0,
+		tabs:     sessionPickerTabs(items),
 	}
+}
+
+// importForeignSession copies another agent's session into Zero and returns the
+// new Zero session id, plus a note for the transcript saying what happened.
+//
+// Resuming a foreign session cannot be silent: it creates a durable Zero session
+// the user did not explicitly ask for, and it may have run in a different
+// directory, so the note names both.
+func (m model) importForeignSession(ref string) (string, string, error) {
+	if m.sessionStore == nil {
+		return "", "", errors.New("no session store")
+	}
+	env := agentsessions.OSEnv()
+	adapter, id, err := agentsessions.ParseRef(env, ref)
+	if err != nil {
+		return "", "", err
+	}
+	result, err := agentsessions.Import(m.sessionStore, adapter, id, agentsessions.ReadOptions{})
+	if err != nil {
+		return "", "", err
+	}
+	// This session is no longer un-imported, so the memo that says otherwise
+	// must go before the picker is rebuilt.
+	agentsessions.InvalidateDiscovery()
+
+	note := fmt.Sprintf("Imported %s session %s into Zero as %s (%d events).",
+		result.Source.Agent, result.Source.ID, result.Session.SessionID, result.Events)
+	if recorded := strings.TrimSpace(result.Session.Cwd); recorded != "" && !sessionMatchesWorkspace(recorded, m.cwd) {
+		note += "\nIt ran in " + recorded + ", so paths it mentions refer to that tree."
+	}
+	return result.Session.SessionID, note, nil
+}
+
+// foreignSessionItems lists sessions belonging to OTHER coding agents that have
+// not been imported yet, so /resume shows the work that exists rather than only
+// the part already copied into Zero. Choosing one imports it and then resumes,
+// which is why its Value is an "<agent>:<id>" reference rather than a Zero id.
+//
+// Reading these is a bounded index of each transcript's head, never the whole
+// file (see internal/agentsessions). A store that is missing or has changed
+// shape contributes nothing rather than failing the picker — /resume must still
+// open on a machine where one vendor shipped a new format this morning.
+func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) []pickerItem {
+	// Anything already imported is skipped: listing a session twice, once as
+	// itself and once as its copy, is worse than not offering it at all.
+	imported := map[string]bool{}
+	for _, meta := range existing {
+		if agent, sourceID, ok := agentsessions.ParseImportTag(meta.Tag); ok {
+			imported[agent+":"+sourceID] = true
+		}
+	}
+
+	found, _ := agentsessions.DiscoverAllCached(agentsessions.OSEnv(), m.cwd)
+	items := make([]pickerItem, 0, len(found))
+	for _, session := range found {
+		ref := session.Agent + ":" + session.ID
+		if imported[ref] {
+			continue
+		}
+		label := displayValue(session.Title, "untitled")
+		if when := sessionWhen(session.UpdatedAt.Format(time.RFC3339), now); when != "" {
+			label = sessionPickerLabel(when, label)
+		}
+		items = append(items, pickerItem{
+			Label: label,
+			Value: ref,
+			Meta:  session.Agent,
+			Tab:   session.Agent,
+		})
+	}
+	return items
+}
+
+// sessionAgentName is the agent a session came from, for the picker's tab strip.
+//
+// Imported sessions carry "imported:<agent>" in their tag (see
+// internal/agentsessions). Everything else is Zero's own work. Deriving this
+// from the tag rather than storing a second field keeps one source of truth —
+// two fields recording the same fact would drift (repo invariant #5).
+func sessionAgentName(tag string) string {
+	if agent := agentsessions.ImportedAgent(tag); agent != "" {
+		return agent
+	}
+	return "zero"
+}
+
+// sessionPickerTabs builds the tab strip: "All" first, then one tab per agent
+// actually present, most-populated first so the busiest source is nearest.
+//
+// Only agents with sessions get a tab. A strip advertising "codex" on a machine
+// that has never run Codex is a dead end the user has to discover by pressing
+// Tab twice.
+func sessionPickerTabs(items []pickerItem) []string {
+	counts := map[string]int{}
+	order := []string{}
+	for _, item := range items {
+		if item.Tab == "" {
+			continue
+		}
+		if _, seen := counts[item.Tab]; !seen {
+			order = append(order, item.Tab)
+		}
+		counts[item.Tab]++
+	}
+	if len(order) < 2 {
+		// One source only — the strip would say "All | zero" and mean nothing.
+		return nil
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		if counts[order[a]] != counts[order[b]] {
+			return counts[order[a]] > counts[order[b]]
+		}
+		return order[a] < order[b]
+	})
+	return append([]string{pickerTabAll}, order...)
 }
 
 const sessionPickerTimeWidth = len("Jan 02 15:04")
