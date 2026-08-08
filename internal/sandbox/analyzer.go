@@ -15,6 +15,15 @@ type AnalysisResult struct {
 	Interactive bool
 	Destructive bool
 	Network     bool
+	// LocalServer is set when a command BINDS a local port rather than reaching
+	// out: `python -m http.server`, `vite`, `next dev` and friends.
+	//
+	// Kept distinct from Network instead of folded into it. Listening and
+	// fetching are different acts with different consequences, and treating a
+	// dev server as egress made ordinary local work prompt for network approval
+	// it never needed. The information is preserved rather than dropped, so a
+	// caller that does care about inbound can still see it.
+	LocalServer bool
 	// TooComplex is set when the script cannot be parsed (obfuscated or invalid),
 	// so a caller can treat it as higher-risk instead of trusting a clean result.
 	TooComplex bool
@@ -183,6 +192,9 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if commandUsesNetwork(prog, rest) {
 			result.Network = true
 		}
+		if commandRunsLocalServer(prog, rest) {
+			result.LocalServer = true
+		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
 			(powerShellRemoveItemPrograms[prog] && hasPowerShellRecursiveForce(rest)) ||
@@ -198,9 +210,9 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 		return true
 	}
 	words := literalWordTexts(args)
-	if localServerPrograms[prog] {
-		return true
-	}
+	// localServerPrograms deliberately does NOT land here. Binding a port is not
+	// egress, and counting it as such is what made `python -m http.server` ask
+	// for network approval to serve files out of the workspace.
 	switch prog {
 	case "python", "python2", "python3", "py":
 		return pythonModuleUsesNetwork(words)
@@ -253,11 +265,11 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 		"update", "upgrade", "search", "view", "info", "show", "dist-tag",
 		"deprecate", "owner", "org", "team", "token", "profile", "access":
 		return true
-	case "start", "serve", "dev", "preview":
-		return true
-	case "run":
-		second := secondSubcommand(words)
-		return second == "start" || second == "serve" || second == "dev" || second == "preview"
+	// start / serve / dev / preview are handled by packageManagerRunsLocalServer
+	// instead. They start a dev server, which binds rather than fetches, and
+	// `npm run dev` is the single most common command an agent is asked to run
+	// while building something. Classifying it as egress made every one of them
+	// stop for a network approval that protected nothing.
 	case "exec":
 		// Package-manager exec commands may resolve and download a missing
 		// package before launching it. An explicit offline flag keeps this path
@@ -303,11 +315,61 @@ func pythonModuleUsesNetwork(words []string) bool {
 		if words[index] != "-m" || index+1 >= len(words) {
 			continue
 		}
-		module := words[index+1]
-		if module == "http.server" {
+		// http.server is handled by pythonModuleRunsLocalServer instead: it
+		// listens, it does not fetch. pip install genuinely reaches out.
+		if words[index+1] == "pip" && firstSubcommand(words[index+2:], nil) == "install" {
 			return true
 		}
-		if module == "pip" && firstSubcommand(words[index+2:], nil) == "install" {
+	}
+	return false
+}
+
+// commandRunsLocalServer reports a command that binds a local port.
+//
+// Separate from commandUsesNetwork on purpose. A dev server is the single most
+// common thing an agent is asked to start while building something, and making
+// it indistinguishable from `curl` meant every one of them stopped for a
+// network approval that protected nobody.
+//
+// Honest about the edges: some of these do touch the network incidentally, and
+// `npm run dev` may install first. What is claimed here is narrow, that BINDING
+// is not EGRESS, not that dev tooling is inert. Anything that actually fetches
+// still matches commandUsesNetwork through its own program or subcommand.
+func commandRunsLocalServer(prog string, args []*syntax.Word) bool {
+	if localServerPrograms[prog] {
+		return true
+	}
+	words := literalWordTexts(args)
+	switch prog {
+	case "python", "python2", "python3", "py":
+		return pythonModuleRunsLocalServer(words)
+	case "npm", "pnpm", "yarn", "bun":
+		return packageManagerRunsLocalServer(words)
+	}
+	return false
+}
+
+// packageManagerRunsLocalServer covers `npm run dev` and its siblings across the
+// package managers, both as a direct subcommand and behind `run`.
+func packageManagerRunsLocalServer(words []string) bool {
+	switch firstSubcommand(words, nil) {
+	case "start", "serve", "dev", "preview":
+		return true
+	case "run":
+		switch secondSubcommand(words) {
+		case "start", "serve", "dev", "preview":
+			return true
+		}
+	}
+	return false
+}
+
+func pythonModuleRunsLocalServer(words []string) bool {
+	for index := 0; index < len(words); index++ {
+		if words[index] != "-m" || index+1 >= len(words) {
+			continue
+		}
+		if words[index+1] == "http.server" {
 			return true
 		}
 	}
