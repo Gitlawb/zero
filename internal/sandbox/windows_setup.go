@@ -15,7 +15,7 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 5
+const windowsSandboxSetupMarkerSchemaVersion = 6
 
 // windowsSandboxIdentityEnv opts a machine into the principal backend while it
 // is still experimental. Provisioning is inert without it, so an existing
@@ -114,6 +114,16 @@ type WindowsSandboxSetupMarker struct {
 	// environment and could disagree silently — see
 	// ValidateWindowsSandboxSetupMarker.
 	PrincipalOptIn bool `json:"principalOptIn"`
+	// PrincipalPlanHash fingerprints the PRINCIPAL ACL plan, which ACLPlanHash
+	// above does not cover: that one hashes BuildWindowsACLPlan, the
+	// capability-SID plan, while principal grants are built separately by
+	// buildWindowsPrincipalACLPlan from the same profile.
+	//
+	// Without it, narrowing or removing a principal read root left setup looking
+	// current, so the old AllowRead ACEs stayed on disk with nothing to notice
+	// they no longer matched the policy. Empty when the principal backend is not
+	// opted into, which keeps the marker stable for the default install.
+	PrincipalPlanHash string `json:"principalPlanHash,omitempty"`
 }
 
 func WindowsSandboxSetupMarkerPath(sandboxHome string) string {
@@ -295,16 +305,54 @@ func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if len(infraPlan.IdentitySIDs) > 0 {
 		offlineSID = infraPlan.IdentitySIDs[0]
 	}
+	principalHash, err := windowsPrincipalPlanFingerprint(config)
+	if err != nil {
+		return WindowsSandboxSetupMarker{}, err
+	}
 	return WindowsSandboxSetupMarker{
-		SchemaVersion:    windowsSandboxSetupMarkerSchemaVersion,
-		ACLPlanHash:      hash,
-		ACLPlanEntries:   len(plan.Entries),
-		NetworkInfraHash: infraHash,
-		OfflineFilterSID: offlineSID,
-		NetworkFilters:   len(infraPlan.Filters),
-		PrincipalOptIn:   config.PrincipalOptIn,
+		SchemaVersion:     windowsSandboxSetupMarkerSchemaVersion,
+		ACLPlanHash:       hash,
+		ACLPlanEntries:    len(plan.Entries),
+		NetworkInfraHash:  infraHash,
+		OfflineFilterSID:  offlineSID,
+		NetworkFilters:    len(infraPlan.Filters),
+		PrincipalOptIn:    config.PrincipalOptIn,
+		PrincipalPlanHash: principalHash,
 	}, nil
 }
+
+// windowsPrincipalPlanFingerprint hashes the principal ACL plan so a change to
+// principal read or write roots invalidates setup.
+//
+// The SID is a fixed placeholder rather than the real principal's, deliberately.
+// The account is recreated with a fresh SID on reprovision, so hashing the real
+// one would make the fingerprint change every time the account is rebuilt even
+// though the GRANTED PATHS are identical, and every command would then rerun
+// setup. What must invalidate the marker is the set of paths and actions, which
+// is exactly what this captures.
+//
+// Returns empty when the principal backend is not opted into, so the default
+// install's marker is unchanged.
+func windowsPrincipalPlanFingerprint(config WindowsSandboxSetupConfig) (string, error) {
+	if !config.PrincipalOptIn {
+		return "", nil
+	}
+	filesystem := config.commandConfig().PermissionProfile.FileSystem
+	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
+		PrincipalSID: windowsPrincipalFingerprintSID,
+		WriteRoots:   filesystem.WriteRoots,
+		ReadRoots:    filesystem.ReadRoots,
+		DenyRead:     filesystem.DenyRead,
+	})
+	if err != nil {
+		return "", fmt.Errorf("fingerprint windows principal ACL plan: %w", err)
+	}
+	return WindowsACLPlanHash(plan)
+}
+
+// windowsPrincipalFingerprintSID is a placeholder trustee used only for hashing.
+// It never reaches an ACE.
+const windowsPrincipalFingerprintSID = "S-1-0-0"
 
 func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSandboxSetupMarker, error) {
 	marker, err := BuildWindowsSandboxSetupMarker(config)
@@ -388,6 +436,15 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	}
 	if actual.ACLPlanHash != expected.ACLPlanHash || actual.ACLPlanEntries != expected.ACLPlanEntries {
 		return errors.New("windows sandbox setup is out of date: permission roots or deny lists changed")
+	}
+	// The capability-SID plan above and the principal plan are built separately
+	// from the same profile, so the hash above does not cover principal grants.
+	// Without this check, removing a principal read root left setup looking
+	// current and the stale AllowRead ACE in place, which is the opposite of
+	// what narrowing a policy is supposed to do.
+	if actual.PrincipalPlanHash != expected.PrincipalPlanHash {
+		return errors.New("windows sandbox setup is out of date: sandbox principal grants changed — " +
+			"re-run `zero sandbox setup` from an elevated (Administrator) terminal so the old grants are revoked")
 	}
 	// Mode-agnostic: validate the provisioned infrastructure, never the
 	// per-command network mode — so an approved (allow) network command and an
