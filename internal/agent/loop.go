@@ -1229,7 +1229,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		return executeRequestPermissions(ctx, call, args, permissionMode, options)
 	}
 
-	permissionGranted := permissionMode == PermissionModeUnsafe
+	permissionGranted := permissionMode == PermissionModeFullAuto
 	if toolFound && effectivePermission(tool, args) == tools.PermissionAllow {
 		permissionGranted = true
 	}
@@ -1550,7 +1550,7 @@ func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry 
 	}
 	requestEvent := sandboxRestrictionRetryEvent(call, tool, args, permissionMode, options, result)
 	request := permissionRequestFromEvent(requestEvent, args, options)
-	if permissionMode == PermissionModeUnsafe {
+	if permissionMode == PermissionModeFullAuto {
 		retryArgs := unsandboxedRetryArgs(args)
 		retry := runToolForUnsandboxedRetry(ctx, registry, call.Name, call.ID, retryArgs, permissionMode, options, progressCallback)
 		return retry, nil, true, PermissionDecisionAllow, "unsafe permission mode permits unsandboxed retry", nil, nil
@@ -1604,7 +1604,7 @@ func maybeRetryWithNetworkAfterSandboxDenial(ctx context.Context, registry *tool
 	}
 	requestEvent := sandboxDeniedNetworkRetryEvent(call, tool, args, permissionMode, options, result)
 	request := permissionRequestFromEvent(requestEvent, args, options)
-	if permissionMode == PermissionModeUnsafe {
+	if permissionMode == PermissionModeFullAuto {
 		retry := runToolForNetworkRetry(ctx, registry, call.Name, call.ID, args, permissionMode, options, progressCallback)
 		return retry, nil, true, PermissionDecisionAllow, "unsafe permission mode permits sandbox network retry", nil
 	}

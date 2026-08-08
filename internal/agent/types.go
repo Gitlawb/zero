@@ -24,7 +24,7 @@ type PermissionDecisionAction string
 const (
 	PermissionModeAuto      PermissionMode = "auto"
 	PermissionModeAsk       PermissionMode = "ask"
-	PermissionModeUnsafe    PermissionMode = "unsafe"
+	PermissionModeFullAuto  PermissionMode = "full-auto"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
 	// PermissionModePlan is an interactive, read-only planning mode. It applies
 	// to the CURRENT session (unlike spec-draft, which drafts in a separate

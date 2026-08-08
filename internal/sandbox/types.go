@@ -70,7 +70,7 @@ const (
 const (
 	PermissionModeAuto PermissionMode = "auto"
 	PermissionModeAsk  PermissionMode = "ask"
-	PermissionUnsafe   PermissionMode = "unsafe"
+	PermissionFullAuto PermissionMode = "full-auto"
 )
 
 const (

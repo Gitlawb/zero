@@ -105,12 +105,12 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 		// swarm launcher sets this; it is not part of the public low|medium|high set.
 		mode = agent.PermissionModeMemberAuto
 	case "high":
-		mode = agent.PermissionModeUnsafe
+		mode = agent.PermissionModeFullAuto
 	default:
 		return "", execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, or high.", options.autonomy)}
 	}
 	if options.skipPermissionsUnsafe {
-		return agent.PermissionModeUnsafe, nil
+		return agent.PermissionModeFullAuto, nil
 	}
 	return mode, nil
 }
