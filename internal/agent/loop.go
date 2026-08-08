@@ -183,6 +183,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	defer runPermissions.cleanup()
 
 	promptParts := buildSystemPromptParts(options)
+	planner := newContextPlanner(contextPlannerConfig{
+		contextWindow:  options.ContextWindow,
+		promptCacheKey: options.SessionID,
+		promptParts:    promptParts,
+	})
 	messages := zeroruntime.SeedMessagesWithImages(promptParts.prompt, prompt, options.Images)
 
 	guards := newGuardState()
@@ -282,42 +287,15 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		exposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
 		toolPartitionSpan.End()
 
-		// Fingerprint the exact system prompt built at run start plus this turn's
-		// provider-visible tool definitions in their emitted order. Reusing the
-		// retained prompt parts avoids rebuilding workspace context while ensuring
-		// the trace describes the same bytes carried by the request.
-		if options.Trace != nil {
-			fp := computePrefixFingerprint(buildPromptSubstringsFromParts(promptParts, exposed))
-			options.Trace.EmitPrefixHash(trace.PrefixHash{
-				SystemPromptHash:       fp.SystemPromptHash,
-				BaseInstructionsHash:   fp.BaseInstructionsHash,
-				ConfirmationPolicyHash: fp.ConfirmationPolicyHash,
-				ProjectContextHash:     fp.ProjectContextHash,
-				SkillsHash:             fp.SkillsHash,
-				ToolsHash:              fp.ToolsHash,
-				SchemaHash:             fp.SchemaHash,
-				CompletePrefixHash:     fp.CompletePrefixHash,
-			})
-		}
-
 		// PROACTIVE compaction: if the history is approaching the model's
 		// context window, summarize the oldest middle before building the
 		// request. A no-op when ContextWindow == 0 (compaction disabled).
 		compactionSpan := options.Trace.Span(trace.SpanCompaction)
 		messages = compactor.maybeCompact(ctx, provider, messages, exposed)
 		compactionSpan.End()
-		request := zeroruntime.CompletionRequest{
-			Messages:        copyMessages(messages),
-			Tools:           exposed,
-			ReasoningEffort: options.ReasoningEffort,
-			PromptCacheKey:  options.SessionID,
-		}
-
-		// Report the per-category context budget for this turn so a surface can
-		// show utilization. Opt-in: a no-op when OnContext is unset.
-		if options.OnContext != nil {
-			options.OnContext(MeasureContext(messages, request.Tools, options.ContextWindow))
-		}
+		plan := planner.Plan(messages, exposed, options.ReasoningEffort)
+		request := plan.Request
+		recordContextPlan(options, plan)
 
 		// A transient upstream disconnect on the initial connect is retried with
 		// backoff (before any content is forwarded, so no OnText is duplicated);
@@ -342,12 +320,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// on registry+loaded, not on the messages, so they stay valid after
 				// compaction. Using the bare toolDefinitions here would route through an
 				// empty-loaded partition, re-hiding every already-loaded deferred tool.
-				request = zeroruntime.CompletionRequest{
-					Messages:        copyMessages(messages),
-					Tools:           exposed,
-					ReasoningEffort: options.ReasoningEffort,
-					PromptCacheKey:  options.SessionID,
-				}
+				retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+				request = retryPlan.Request
+				recordContextPlan(options, retryPlan)
 				// Pre-content connect after a context-limit compaction: route through the
 				// reconnect helper so a transient upstream hiccup here doesn't fail the
 				// whole run and re-burn every token (AUDIT-L1).
@@ -431,12 +406,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// Reuse the SAME active-mode partition (exposed) from this turn rather
 				// than the bare toolDefinitions: exposed depends on registry+loaded (not
 				// the messages), so it stays valid after compaction.
-				retryRequest := zeroruntime.CompletionRequest{
-					Messages:        copyMessages(messages),
-					Tools:           exposed,
-					ReasoningEffort: options.ReasoningEffort,
-					PromptCacheKey:  options.SessionID,
-				}
+				retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+				retryRequest := retryPlan.Request
+				recordContextPlan(options, retryPlan)
 				retryStream, retryStreamErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 				if retryStreamErr != nil {
 					return collected, retryStreamErr
@@ -494,12 +466,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				result.Messages = copyMessages(messages)
 				return result, err
 			}
-			retryRequest := zeroruntime.CompletionRequest{
-				Messages:        copyMessages(messages),
-				Tools:           exposed,
-				ReasoningEffort: options.ReasoningEffort,
-				PromptCacheKey:  options.SessionID,
-			}
+			retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+			retryRequest := retryPlan.Request
+			recordContextPlan(options, retryPlan)
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
 				result.Messages = copyMessages(messages)
@@ -929,7 +898,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		})
 	}
 	finalExposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
-	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, messages, finalExposed, options); strings.TrimSpace(answer) != "" {
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, planner, messages, finalExposed, options); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
 		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
@@ -971,7 +940,32 @@ func recordOutputBudgetTrace(recorder *trace.Recorder, result ToolResult) {
 	})
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
+func recordContextPlan(options Options, plan contextPlan) {
+	recordContextPlanTrace(options.Trace, plan)
+	if options.OnContext != nil {
+		options.OnContext(plan.Breakdown)
+	}
+}
+
+func recordContextPlanTrace(recorder *trace.Recorder, plan contextPlan) {
+	if recorder == nil {
+		return
+	}
+	fingerprint := plan.PrefixFingerprint
+	recorder.EmitPrefixHash(trace.PrefixHash{
+		SystemPromptHash:       fingerprint.SystemPromptHash,
+		BaseInstructionsHash:   fingerprint.BaseInstructionsHash,
+		ConfirmationPolicyHash: fingerprint.ConfirmationPolicyHash,
+		ProjectContextHash:     fingerprint.ProjectContextHash,
+		SkillsHash:             fingerprint.SkillsHash,
+		ToolsHash:              fingerprint.ToolsHash,
+		SchemaHash:             fingerprint.SchemaHash,
+		CompletePrefixHash:     fingerprint.CompletePrefixHash,
+		InvalidationReason:     plan.Breakdown.PrefixInvalidationReason,
+	})
+}
+
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *contextPlanner, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
@@ -980,12 +974,9 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 	// The max-turns final-answer call is a pre-content connect, often after a long
 	// autonomous/cron run — route it through the reconnect helper so a single
 	// transient hiccup doesn't drop the final summary (AUDIT-L1).
-	stream, err := streamWithReconnect(ctx, provider, zeroruntime.CompletionRequest{
-		Messages:        copyMessages(finalMessages),
-		Tools:           toolDefs,
-		ReasoningEffort: options.ReasoningEffort,
-		PromptCacheKey:  options.SessionID,
-	}, reconnectNoticeFor(options))
+	plan := planner.Plan(finalMessages, toolDefs, options.ReasoningEffort)
+	recordContextPlan(options, plan)
+	stream, err := streamWithReconnect(ctx, provider, plan.Request, reconnectNoticeFor(options))
 	if err != nil {
 		return "", messages, ""
 	}

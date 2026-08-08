@@ -159,6 +159,7 @@ type PrefixHash struct {
 	ToolsHash              string `json:"tools"`
 	SchemaHash             string `json:"schema"`
 	CompletePrefixHash     string `json:"complete_prefix"`
+	InvalidationReason     string `json:"invalidation_reason,omitempty"`
 }
 
 // WallDuration is the total traced wall time of the run.

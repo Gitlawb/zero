@@ -381,6 +381,8 @@ type compactionState struct {
 	// but its token COST must still be counted so usage reports and budgets include it.
 	onUsage func(Usage)
 	task    *taskState
+	planner *contextPlanner
+	trace   *trace.Recorder
 
 	// calibrationRatio scales the raw byte/4 token estimate toward the provider's
 	// real prompt-token count. ApproxTextTokens over-counts code-heavy content by
@@ -427,6 +429,8 @@ func newCompactionState(options Options, task *taskState) *compactionState {
 		preserveLast: options.CompactionPreserveLast,
 		onUsage:      options.OnUsage,
 		task:         task,
+		planner:      newContextPlanner(contextPlannerConfig{contextWindow: options.ContextWindow}),
+		trace:        options.Trace,
 	}
 	return state
 }
@@ -482,7 +486,7 @@ func (state *compactionState) maybeCompact(
 
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		Summarize:    state.summarizeClosure(ctx, provider),
 		taskState:    state.task.snapshotForCompaction(messages),
 	})
 	if err != nil {
@@ -533,7 +537,7 @@ func (state *compactionState) recover(
 
 	result, compactErr := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		Summarize:    state.summarizeClosure(ctx, provider),
 		taskState:    state.task.snapshotForCompaction(messages),
 	})
 	if compactErr != nil {
@@ -567,9 +571,12 @@ func (state *compactionState) recover(
 // provider call. The summary stream intentionally does NOT forward OnText (so
 // compaction stays invisible on the user-facing surface), but it DOES forward
 // OnUsage so the summarizer's token cost is still counted by usage/budgeting.
-func summarizeClosure(ctx context.Context, provider Provider, onUsage func(Usage)) func([]zeroruntime.Message) (string, error) {
+func (state *compactionState) summarizeClosure(ctx context.Context, provider Provider) func([]zeroruntime.Message) (string, error) {
+	if state.planner == nil {
+		state.planner = newContextPlanner(contextPlannerConfig{})
+	}
 	return func(toSummarize []zeroruntime.Message) (string, error) {
-		return summarizeWithFallback(ctx, provider, toSummarize, onUsage)
+		return summarizeWithPlanner(ctx, provider, toSummarize, state.onUsage, state.planner, state.trace)
 	}
 }
 
@@ -581,7 +588,11 @@ func summarizeClosure(ctx context.Context, provider Provider, onUsage func(Usage
 // Non-context-limit errors (and a single message that still won't fit) surface
 // to the caller unchanged.
 func summarizeWithFallback(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
-	summary, err := summarizeMessagesOnce(ctx, provider, messages, onUsage)
+	return summarizeWithPlanner(ctx, provider, messages, onUsage, newContextPlanner(contextPlannerConfig{}), nil)
+}
+
+func summarizeWithPlanner(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage), planner *contextPlanner, recorder *trace.Recorder) (string, error) {
+	summary, err := summarizeMessagesOnce(ctx, provider, messages, onUsage, planner, recorder)
 	if err == nil {
 		return summary, nil
 	}
@@ -590,11 +601,11 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 	}
 
 	mid := len(messages) / 2
-	left, leftErr := summarizeWithFallback(ctx, provider, messages[:mid], onUsage)
+	left, leftErr := summarizeWithPlanner(ctx, provider, messages[:mid], onUsage, planner, recorder)
 	if leftErr != nil {
 		return "", leftErr
 	}
-	right, rightErr := summarizeWithFallback(ctx, provider, messages[mid:], onUsage)
+	right, rightErr := summarizeWithPlanner(ctx, provider, messages[mid:], onUsage, planner, recorder)
 	if rightErr != nil {
 		return "", rightErr
 	}
@@ -607,7 +618,7 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 	combined := strings.TrimSpace(left + "\n\n" + right)
 	reduced, reduceErr := summarizeMessagesOnce(ctx, provider, []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleUser, Content: combined},
-	}, onUsage)
+	}, onUsage, planner, recorder)
 	if reduceErr != nil {
 		if isContextLimitError(reduceErr.Error()) {
 			// Even the two combined partials don't fit (extreme): fall back to the
@@ -623,15 +634,15 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 }
 
 // summarizeMessagesOnce performs a single tool-less summarization call.
-func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
-	request := zeroruntime.CompletionRequest{
-		Messages: []zeroruntime.Message{
-			{Role: zeroruntime.MessageRoleSystem, Content: CompactionSummaryInstructions},
-			{Role: zeroruntime.MessageRoleUser, Content: "Summarize this conversation:\n\n" + renderTranscript(messages)},
-		},
-		// No tools: this is a plain text summarization call.
+func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage), planner *contextPlanner, recorder *trace.Recorder) (string, error) {
+	requestMessages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: CompactionSummaryInstructions},
+		{Role: zeroruntime.MessageRoleUser, Content: "Summarize this conversation:\n\n" + renderTranscript(messages)},
 	}
-	stream, err := provider.StreamCompletion(ctx, request)
+	parts := systemPromptParts{prompt: CompactionSummaryInstructions, baseInstructions: CompactionSummaryInstructions}
+	plan := planner.planWithPromptParts(requestMessages, nil, "", parts)
+	recordContextPlanTrace(recorder, plan)
+	stream, err := provider.StreamCompletion(ctx, plan.Request)
 	if err != nil {
 		return "", err
 	}

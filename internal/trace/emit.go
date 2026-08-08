@@ -86,16 +86,16 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 		}
 	}
 
-	// Prefix fingerprints are emitted after counters in insertion (turn)
+	// Prefix fingerprints are emitted after counters in insertion (request)
 	// order. The order is the order EmitPrefixHash was called, which is the
-	// order the agent loop computed each turn's fingerprint, which is the
-	// order a downstream consumer needs to correlate a prefix_hash event
-	// with the cached_input_tokens counter for that turn. Sorting by
-	// complete_prefix hash would destroy that correlation, so we do not
+	// order the agent computed each request's fingerprint, which is the
+	// order a downstream consumer needs to reconstruct prefix changes across
+	// main, compaction, and retry requests. Sorting by complete_prefix hash would
+	// destroy that sequence, so we do not
 	// sort. The slice is already a deep copy from Finish (see
 	// Recorder.Finish) so it is safe to range over without copying.
 	for _, p := range t.PrefixHashes {
-		if err := enc.Encode(map[string]any{
+		obj := map[string]any{
 			"type":                "prefix_hash",
 			"system_prompt":       p.SystemPromptHash,
 			"base_instructions":   p.BaseInstructionsHash,
@@ -105,7 +105,11 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 			"tools":               p.ToolsHash,
 			"schema":              p.SchemaHash,
 			"complete_prefix":     p.CompletePrefixHash,
-		}); err != nil {
+		}
+		if p.InvalidationReason != "" {
+			obj["invalidation_reason"] = p.InvalidationReason
+		}
+		if err := enc.Encode(obj); err != nil {
 			return err
 		}
 	}

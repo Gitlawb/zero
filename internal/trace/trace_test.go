@@ -382,6 +382,7 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 		ToolsHash:              "t1",
 		SchemaHash:             "x1",
 		CompletePrefixHash:     "complete1",
+		InvalidationReason:     "initial",
 	})
 	r.EmitPrefixHash(PrefixHash{
 		SystemPromptHash:       "system2",
@@ -392,6 +393,7 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 		ToolsHash:              "t2",
 		SchemaHash:             "x2",
 		CompletePrefixHash:     "complete2",
+		InvalidationReason:     "tools",
 	})
 	original := r.Finish()
 
@@ -421,8 +423,8 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	if parsed.FirstTokenAt.IsZero() {
 		t.Fatal("first_token_at lost in round-trip")
 	}
-	// prefix_hash round-trip: two events, in insertion order, with all
-	// seven sub-hash fields preserved exactly.
+	// prefix_hash round-trip: two events, in insertion order, with all hash
+	// fields and the invalidation reason preserved exactly.
 	if len(parsed.PrefixHashes) != 2 {
 		t.Fatalf("expected 2 prefix_hash events after round-trip, got %d", len(parsed.PrefixHashes))
 	}
@@ -434,6 +436,38 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	}
 	if parsed.PrefixHashes[1].SystemPromptHash != "system2" || parsed.PrefixHashes[1].BaseInstructionsHash != "b2" || parsed.PrefixHashes[1].SchemaHash != "x2" {
 		t.Fatalf("prefix_hash sub-hashes lost on second event: got %+v", parsed.PrefixHashes[1])
+	}
+	if parsed.PrefixHashes[0].InvalidationReason != "initial" || parsed.PrefixHashes[1].InvalidationReason != "tools" {
+		t.Fatalf("prefix invalidation reasons lost: %+v", parsed.PrefixHashes)
+	}
+}
+
+func TestWriteNDJSONOmitsEmptyPrefixInvalidationReason(t *testing.T) {
+	recorder := NewRecorder("session", "run", "test")
+	recorder.Start()
+	recorder.EmitPrefixHash(PrefixHash{CompletePrefixHash: "stable"})
+	tr := recorder.Finish()
+
+	var output bytes.Buffer
+	if err := WriteNDJSON(&output, tr); err != nil {
+		t.Fatalf("WriteNDJSON: %v", err)
+	}
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if event["type"] != "prefix_hash" {
+			continue
+		}
+		found = true
+		if _, exists := event["invalidation_reason"]; exists {
+			t.Fatalf("empty invalidation reason should be omitted: %s", line)
+		}
+	}
+	if !found {
+		t.Fatal("prefix_hash event not written")
 	}
 }
 

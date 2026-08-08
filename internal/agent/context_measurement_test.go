@@ -32,6 +32,9 @@ func TestMeasureContextSplitsByCategory(t *testing.T) {
 	if breakdown.UsedFraction != wantFraction {
 		t.Fatalf("UsedFraction = %v, want %v", breakdown.UsedFraction, wantFraction)
 	}
+	if len(breakdown.Blocks) != 3 {
+		t.Fatalf("Blocks = %#v, want system/tools/conversation", breakdown.Blocks)
+	}
 }
 
 func TestMeasureContextUnknownWindowHasZeroFraction(t *testing.T) {
