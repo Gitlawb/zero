@@ -2012,11 +2012,18 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
 	m.width = 96
 
-	// shift+tab toggles Auto<->Ask only; Unsafe is intentionally NOT reachable by
-	// a casual keypress (it disables permission prompts).
+	// The cycle has three positions now: Auto, Ask, and an unsafe OFFER that
+	// sits on Ask until it is either confirmed with the dedicated key or
+	// declined by pressing on. So returning to Auto costs two presses, which is
+	// simply what a third position means.
+	//
+	// shift+tab itself must still never land on Unsafe, however many times it is
+	// pressed; that is asserted inside the loop and again in
+	// TestHoldingShiftTabNeverCommitsUnsafe.
 	for _, want := range []agent.PermissionMode{
-		agent.PermissionModeAsk,
-		agent.PermissionModeAuto,
+		agent.PermissionModeAsk,  // Auto -> Ask
+		agent.PermissionModeAsk,  // offers unsafe, stays on Ask
+		agent.PermissionModeAuto, // declines the offer, completes the cycle
 	} {
 		updated, cmd := m.Update(testKeyShift(tea.KeyTab))
 		m = updated.(model)
@@ -2817,17 +2824,72 @@ func testSessionStore(t *testing.T) *sessions.Store {
 	})
 }
 
-func TestNextPermissionModeFoldsUnsafeToAsk(t *testing.T) {
-	if got := nextPermissionMode(agent.PermissionModeAuto); got != agent.PermissionModeAsk {
-		t.Fatalf("Auto -> %s, want Ask", got)
+// shift+tab alone must never reach unsafe, however many times it is pressed,
+// and the cycle must stay complete. An earlier draft made the second press
+// commit unsafe, which silently removed Ask -> Auto from the cycle: this walks
+// the whole loop so that cannot come back unnoticed.
+func TestPermissionModeCycleNeverReachesUnsafeOnItsOwn(t *testing.T) {
+	mode := agent.PermissionModeAuto
+	offered := false
+	seen := map[agent.PermissionMode]bool{mode: true}
+
+	for press := 0; press < 8; press++ {
+		mode, offered = advancePermissionMode(mode, offered)
+		if mode == agent.PermissionModeUnsafe {
+			t.Fatalf("press %d landed on Unsafe with shift+tab alone", press+1)
+		}
+		seen[mode] = true
 	}
-	if got := nextPermissionMode(agent.PermissionModeAsk); got != agent.PermissionModeAuto {
-		t.Fatalf("Ask -> %s, want Auto", got)
+	for _, want := range []agent.PermissionMode{agent.PermissionModeAuto, agent.PermissionModeAsk} {
+		if !seen[want] {
+			t.Errorf("%s is unreachable by cycling, so the toggle lost a mode", want)
+		}
 	}
-	// Unsafe must fold to the STRICTER Ask, never Auto (toggling an Unsafe session
-	// must not make it less strict).
-	if got := nextPermissionMode(agent.PermissionModeUnsafe); got != agent.PermissionModeAsk {
-		t.Fatalf("Unsafe -> %s, want Ask", got)
+}
+
+// Declining is what keeps the cycle whole: the press after an offer continues
+// to Auto rather than committing.
+func TestDecliningTheUnsafeOfferContinuesTheCycle(t *testing.T) {
+	mode, offered := advancePermissionMode(agent.PermissionModeAsk, false)
+	if mode != agent.PermissionModeAsk || !offered {
+		t.Fatalf("first press from Ask = (%s, offered=%v), want (Ask, true)", mode, offered)
+	}
+	mode, offered = advancePermissionMode(mode, offered)
+	if mode != agent.PermissionModeAuto || offered {
+		t.Fatalf("second press = (%s, offered=%v), want (Auto, false)", mode, offered)
+	}
+}
+
+// The confirm key is inert without a live offer. This is the property that
+// stops ctrl+g being a one-key shortcut into unsafe.
+func TestConfirmDoesNothingWithoutALiveOffer(t *testing.T) {
+	for _, mode := range []agent.PermissionMode{agent.PermissionModeAuto, agent.PermissionModeAsk} {
+		got, confirmed := confirmUnsafePermissionMode(mode, false)
+		if got != mode || confirmed {
+			t.Errorf("confirm with no offer from %s = (%s, %v), want unchanged", mode, got, confirmed)
+		}
+	}
+	got, confirmed := confirmUnsafePermissionMode(agent.PermissionModeAsk, true)
+	if got != agent.PermissionModeUnsafe || !confirmed {
+		t.Errorf("confirm with a live offer = (%s, %v), want (Unsafe, true)", got, confirmed)
+	}
+}
+
+// Leaving unsafe must be one press and must never need confirming: getting
+// stricter is always allowed to be easy.
+func TestLeavingUnsafeIsOnePress(t *testing.T) {
+	mode, offered := advancePermissionMode(agent.PermissionModeUnsafe, false)
+	if mode != agent.PermissionModeAuto || offered {
+		t.Fatalf("Unsafe -> (%s, offered=%v), want (Auto, false)", mode, offered)
+	}
+}
+
+// An unrecognized mode folds to the stricter of the two prompt-respecting
+// modes, so a bad value can never resolve into something looser.
+func TestUnknownPermissionModeFoldsToAsk(t *testing.T) {
+	mode, offered := advancePermissionMode(agent.PermissionMode("nonsense"), false)
+	if mode != agent.PermissionModeAsk || offered {
+		t.Fatalf("unknown -> (%s, offered=%v), want (Ask, false)", mode, offered)
 	}
 }
 

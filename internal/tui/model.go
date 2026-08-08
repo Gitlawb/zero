@@ -143,9 +143,19 @@ type model struct {
 	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
 	// the execProfile displaced/applied pattern below).
 	permissionModeBeforePlan agent.PermissionMode
-	selfCorrectTests         bool
-	reasoningEffort          modelregistry.ReasoningEffort
-	serviceTier              string
+	// unsafeArmed means the last keypress was a shift+tab that offered unsafe
+	// mode, and the next one commits it. Unsafe turns permission prompts off
+	// entirely, so it is the one mode that must not be reachable by a single
+	// keypress landing on it.
+	//
+	// Cleared unconditionally at the top of the key handler and re-armed only by
+	// the shift+tab branch, so forgetting a path clears it rather than leaving it
+	// set. A stale flag would turn a later innocent shift+tab into a silent drop
+	// into unsafe, which is exactly the accident the arming exists to prevent.
+	unsafeArmed      bool
+	selfCorrectTests bool
+	reasoningEffort  modelregistry.ReasoningEffort
+	serviceTier      string
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -1516,6 +1526,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !keyIs(msg, tea.KeyEnter) {
 			m.lastCharTime = now
 		}
+		// Disarm unsafe mode for EVERY keypress, before any branch can return,
+		// and let only the shift+tab branch below re-arm from this local. The
+		// inversion is deliberate: clearing in each of the many paths that should
+		// cancel would mean a missed one leaves the flag set, and a stale flag
+		// turns a later innocent shift+tab into a silent drop into unsafe. This
+		// way a path nobody thought about cancels the arm, which is the harmless
+		// direction to be wrong in.
+		unsafeWasArmed := m.unsafeArmed
+		m.unsafeArmed = false
 		// Enter the solid-while-typing state right away: only composerBlinkMsg
 		// evaluates the typing threshold, so if the blink phase had just hidden
 		// the caret, the typed character would render caret-less for up to a
@@ -1840,13 +1859,28 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.moveAskUserTab(-1), nil
 			}
-			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
-			// is intentionally not reachable by a casual keypress — see
-			// nextPermissionMode), but only when nothing modal is up: a permission
-			// prompt, ask_user questionnaire, or open picker all take precedence
-			// and let the key fall through to their own handlers below.
+			// shift+tab cycles the permission mode, but only when nothing modal is
+			// up: a permission prompt, ask_user questionnaire, or open picker all
+			// take precedence and let the key fall through to their own handlers.
+			//
+			// Unsafe is in the cycle but takes two presses to reach, because it
+			// turns permission prompts off entirely. See advancePermissionMode.
 			if m.noBlockingModal() {
-				m.permissionMode = nextPermissionMode(m.permissionMode)
+				m.permissionMode, m.unsafeArmed = advancePermissionMode(m.permissionMode, unsafeWasArmed)
+				// The peer record carries the permission class, so it has to be
+				// resynced wherever the mode changes. This branch and the ctrl+g
+				// confirm below are now two such places, not one.
+				m = m.syncPeerIdentity()
+				return m, nil
+			}
+		case keyCtrl(msg, 'g') && unsafeWasArmed:
+			// Confirms an unsafe offer raised by the shift+tab immediately before
+			// this. Guarded on unsafeWasArmed in the case itself rather than inside
+			// the body, so without a live offer this key is not consumed at all and
+			// falls through to whatever would normally handle it. That is what
+			// keeps ctrl+g from being a standalone shortcut into unsafe mode.
+			if m.noBlockingModal() {
+				m.permissionMode, _ = confirmUnsafePermissionMode(m.permissionMode, unsafeWasArmed)
 				m = m.syncPeerIdentity()
 				return m, nil
 			}

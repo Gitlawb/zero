@@ -311,32 +311,72 @@ func providerDisplayNameIsGenericCustom(name string) bool {
 	}
 }
 
-// nextPermissionMode toggles between the two prompt-respecting modes:
-// Auto ⇄ Ask. Unsafe (which disables permission prompts entirely) is
-// deliberately NOT reachable by a casual keypress — a single shift+tab landing
-// on it would let prompt-required tools run with no decision. Unsafe stays an
-// explicit opt-in (the launch/--skip-permissions-unsafe path), not a UI toggle.
-// Unsafe is folded back to Ask so the toggle always lands somewhere safe.
-// Plan is left untouched: folding it to Ask would be a LESS strict landing
-// (Ask allows write/shell tools with a prompt; Plan hides them entirely), so
-// the read-only guarantee must only be given up through the explicit /plan
-// off exit, never a stray shift+tab.
-func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
+// advancePermissionMode is one shift+tab press. It returns the mode to land on
+// and whether unsafe is being OFFERED after this press.
+//
+// shift+tab always advances the cycle and never commits unsafe. That is the
+// property worth protecting: unsafe turns permission prompts off entirely, so
+// no repeat of a navigation key may land on it. Committing takes a separate,
+// deliberate key (see confirmUnsafePermissionMode).
+//
+// The cycle stays complete. From Ask the first press OFFERS unsafe while
+// staying on Ask, and a second press declines the offer and continues to Auto,
+// so every mode is still reachable with shift+tab alone. An earlier draft of
+// this made the second press commit unsafe, which silently removed Ask -> Auto
+// from the cycle entirely.
+//
+// Leaving unsafe is one press and never gated. Getting stricter should never
+// need confirming.
+//
+// Plan is outside the cycle in both directions: it is stricter than Ask, so
+// shift+tab neither leaves it nor offers unsafe from it. Only /plan off exits.
+func advancePermissionMode(mode agent.PermissionMode, offered bool) (agent.PermissionMode, bool) {
 	switch mode {
 	case agent.PermissionModeAuto:
-		return agent.PermissionModeAsk
+		return agent.PermissionModeAsk, false
 	case agent.PermissionModeAsk:
-		return agent.PermissionModeAuto
+		if offered {
+			return agent.PermissionModeAuto, false
+		}
+		return agent.PermissionModeAsk, true
+	case agent.PermissionModeUnsafe:
+		return agent.PermissionModeAuto, false
 	case agent.PermissionModePlan:
-		return agent.PermissionModePlan
+		// Plan stays put, and never carries an offer.
+		//
+		// Folding it to Ask would be a LESS strict landing: Ask allows write and
+		// shell tools behind a prompt, Plan hides them entirely. The read-only
+		// guarantee is given up only through the explicit /plan off exit, never a
+		// stray shift+tab, and certainly not by offering unsafe from it.
+		return agent.PermissionModePlan, false
 	default:
-		// Anything else (incl. an externally-set Unsafe) folds to Ask — the stricter
-		// landing, so toggling never makes an Unsafe session less strict.
-		return agent.PermissionModeAsk
+		// Anything else folds to Ask, the stricter landing, so an unrecognized
+		// mode can never resolve into a less strict one.
+		return agent.PermissionModeAsk, false
 	}
 }
 
+// confirmUnsafePermissionMode commits unsafe, but only from a live offer.
+//
+// The offer is cleared by every keypress that is not this one, so confirming
+// has to immediately follow the shift+tab that raised it. Without a live offer
+// this does nothing at all, which is what stops the confirm key from being a
+// standalone shortcut into unsafe.
+func confirmUnsafePermissionMode(mode agent.PermissionMode, offered bool) (agent.PermissionMode, bool) {
+	if !offered {
+		return mode, false
+	}
+	return agent.PermissionModeUnsafe, true
+}
+
 func (m model) modeLabel() (string, lipgloss.Style) {
+	// The offer renders in the unsafe style rather than the current mode's, so
+	// it is unmistakable before it is accepted, and it names the exact key. It
+	// reads as a question because nothing has changed yet: the session is still
+	// in whatever mode it was, and any other key declines.
+	if m.unsafeArmed {
+		return "unsafe? ctrl+g to confirm", zeroTheme.modeUnsafe
+	}
 	switch m.permissionMode {
 	case agent.PermissionModeAuto:
 		return "auto-approve", zeroTheme.modeAuto
