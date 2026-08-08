@@ -22,9 +22,18 @@ type PermissionAction string
 type PermissionDecisionAction string
 
 const (
-	PermissionModeAuto      PermissionMode = "auto"
-	PermissionModeAsk       PermissionMode = "ask"
-	PermissionModeFullAuto  PermissionMode = "full-auto"
+	PermissionModeAuto     PermissionMode = "auto"
+	PermissionModeAsk      PermissionMode = "ask"
+	PermissionModeFullAuto PermissionMode = "full-auto"
+	// PermissionModeUnsafe is the former name of PermissionModeFullAuto.
+	//
+	// Kept as an alias rather than deleted because this constant is referenced
+	// across packages and by code that lands independently of this branch, so
+	// removing it turns an ordinary merge into a compile failure for whoever
+	// merges second. It is the same value, so behaviour is identical either way.
+	//
+	// Deprecated: use PermissionModeFullAuto.
+	PermissionModeUnsafe                   = PermissionModeFullAuto
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
 	// PermissionModePlan is an interactive, read-only planning mode. It applies
 	// to the CURRENT session (unlike spec-draft, which drafts in a separate
