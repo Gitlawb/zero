@@ -1832,7 +1832,7 @@ func TestPermissionRowRendersSandboxBlocks(t *testing.T) {
 		ToolName:       "write_file",
 		Action:         agent.PermissionActionDeny,
 		Permission:     "prompt",
-		PermissionMode: agent.PermissionModeUnsafe,
+		PermissionMode: agent.PermissionModeFullAuto,
 		Autonomy:       "high",
 		SideEffect:     "write",
 		Reason:         "workspace boundary enforced",
@@ -2033,7 +2033,7 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 		if m.permissionMode != want {
 			t.Fatalf("expected permission mode %q after shift+tab, got %q", want, m.permissionMode)
 		}
-		if m.permissionMode == agent.PermissionModeUnsafe {
+		if m.permissionMode == agent.PermissionModeFullAuto {
 			t.Fatalf("shift+tab must never land on Unsafe")
 		}
 	}
@@ -2835,7 +2835,7 @@ func TestPermissionModeCycleNeverReachesUnsafeOnItsOwn(t *testing.T) {
 
 	for press := 0; press < 8; press++ {
 		mode, offered = advancePermissionMode(mode, offered)
-		if mode == agent.PermissionModeUnsafe {
+		if mode == agent.PermissionModeFullAuto {
 			t.Fatalf("press %d landed on Unsafe with shift+tab alone", press+1)
 		}
 		seen[mode] = true
@@ -2870,7 +2870,7 @@ func TestConfirmDoesNothingWithoutALiveOffer(t *testing.T) {
 		}
 	}
 	got, confirmed := confirmUnsafePermissionMode(agent.PermissionModeAsk, true)
-	if got != agent.PermissionModeUnsafe || !confirmed {
+	if got != agent.PermissionModeFullAuto || !confirmed {
 		t.Errorf("confirm with a live offer = (%s, %v), want (Unsafe, true)", got, confirmed)
 	}
 }
@@ -2878,7 +2878,7 @@ func TestConfirmDoesNothingWithoutALiveOffer(t *testing.T) {
 // Leaving unsafe must be one press and must never need confirming: getting
 // stricter is always allowed to be easy.
 func TestLeavingUnsafeIsOnePress(t *testing.T) {
-	mode, offered := advancePermissionMode(agent.PermissionModeUnsafe, false)
+	mode, offered := advancePermissionMode(agent.PermissionModeFullAuto, false)
 	if mode != agent.PermissionModeAuto || offered {
 		t.Fatalf("Unsafe -> (%s, offered=%v), want (Auto, false)", mode, offered)
 	}

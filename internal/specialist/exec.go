@@ -162,7 +162,7 @@ func memberAwareAutonomy(permissionMode string, member bool) string {
 // childPermissionModeFlag returns the --permission-mode value to pass a child
 // process, or "" when the child's tool set must be driven by --auto alone.
 // Only plan and spec-draft require the flag: resolveExecPermissionMode prefers
-// --permission-mode over --auto, so forwarding auto/ask/member/unsafe would
+// --permission-mode over --auto, so forwarding auto/ask/member/full-auto would
 // discard the member rung and widen headless ask children.
 func childPermissionModeFlag(permissionMode string) string {
 	switch strings.TrimSpace(permissionMode) {
@@ -173,7 +173,7 @@ func childPermissionModeFlag(permissionMode string) string {
 	}
 }
 
-// permissionModeUnsafe mirrors agent.PermissionModeUnsafe without importing the
+// permissionModeUnsafe mirrors agent.PermissionModeFullAuto without importing the
 // agent package (which would create an import cycle): exec resolves "--auto high"
 // to this mode.
 const permissionModeUnsafe = "unsafe"

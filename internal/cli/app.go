@@ -340,7 +340,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	// default until it opts in here.
 	if len(addDirs) > 0 {
 		switch args[0] {
-		case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
+		case "--skip-permissions-unsafe", "--full-auto", "-p", "--prompt", "exec":
 			// Forwarded by the matching case below.
 		default:
 			return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
@@ -348,7 +348,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 
 	switch args[0] {
-	case "--skip-permissions-unsafe":
+	case "--skip-permissions-unsafe", "--full-auto":
 		// Launch the interactive TUI directly in unsafe mode. Without this, the
 		// flag fell through to the unknown-command path, so a user could never
 		// reach unsafe mode in the shell — and the "!" shell escape (which is
@@ -390,7 +390,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `zero exec --skip-permissions-unsafe -p \"...\"`", 1)
 			}
 		}
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeFullAuto, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -1341,7 +1341,8 @@ Flags:
   -v, --version                  Print version
   -p, --prompt                   Run a one-shot prompt
       --add-dir <path>           Allow writes in an extra directory (repeatable)
-      --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)
+      --full-auto                Launch the interactive shell in full-auto mode (enables the ! shell escape)
+      --skip-permissions-unsafe  Deprecated spelling of --full-auto
 `)
 	return err
 }
@@ -1516,7 +1517,8 @@ Flags:
       --depth <number>               Set specialist nesting depth metadata
       --session-title <text>         Set the created session title
       --init-session-id <id>         Create a new exec session with this id
-      --skip-permissions-unsafe      Allow prompt-gated tools without approval
+      --full-auto                    Allow prompt-gated tools without approval
+      --skip-permissions-unsafe      Deprecated spelling of --full-auto
       --allow-escalation             Let the agent escalate to a stronger model mid-run via escalate_model
       --self-correct                 Run the post-edit verify-and-correct loop (auto-fix needs --auto medium or high)
       --notify <off|bell|notify|both>

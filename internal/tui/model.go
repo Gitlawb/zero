@@ -4943,7 +4943,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		// the explicit unsafe permission mode. In auto/ask mode it is not executed;
 		// the user is told how to enable it. This keeps a sandbox-bypassing exec
 		// from running without a deliberate safety posture.
-		if m.permissionMode != agent.PermissionModeUnsafe {
+		if m.permissionMode != agent.PermissionModeFullAuto {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendSystem,
 				text: "Shell escape (!) is disabled in " + string(m.permissionMode) + " mode — it bypasses the sandbox. Relaunch with --skip-permissions-unsafe to run shell commands directly.",
@@ -5373,7 +5373,7 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string, images
 // while restrictive modes only surface the failure. Mirrors exec's --auto levels.
 func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 	switch mode {
-	case agent.PermissionModeUnsafe:
+	case agent.PermissionModeFullAuto:
 		return "high"
 	case agent.PermissionModeAuto:
 		return "medium"
