@@ -735,3 +735,20 @@ var (
 	lookupWindowsSandboxIdentityFn          = lookupWindowsSandboxIdentity
 	removeWindowsSandboxPrincipalForSetupFn = removeWindowsSandboxPrincipalForSetup
 )
+
+// windowsACLPlanPaths returns each distinct path a plan touches, in plan order.
+//
+// Windows-tagged deliberately: every caller is, so defining it in the portable
+// file made it unused on Linux and macOS builds and failed static analysis.
+func windowsACLPlanPaths(plan WindowsACLPlan) []string {
+	seen := make(map[string]struct{}, len(plan.Entries))
+	paths := make([]string, 0, len(plan.Entries))
+	for _, entry := range plan.Entries {
+		if _, ok := seen[entry.Path]; ok {
+			continue
+		}
+		seen[entry.Path] = struct{}{}
+		paths = append(paths, entry.Path)
+	}
+	return paths
+}

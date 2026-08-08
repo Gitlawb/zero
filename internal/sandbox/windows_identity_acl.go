@@ -200,16 +200,6 @@ func windowsPrincipalRevokePlan(principalSID string, paths []string) (WindowsACL
 // access it granted or denied.
 const windowsACLRevoke WindowsACLAction = "revoke"
 
-// windowsACLPlanPaths returns each distinct path a plan touches, in plan order.
-func windowsACLPlanPaths(plan WindowsACLPlan) []string {
-	seen := make(map[string]struct{}, len(plan.Entries))
-	paths := make([]string, 0, len(plan.Entries))
-	for _, entry := range plan.Entries {
-		if _, ok := seen[entry.Path]; ok {
-			continue
-		}
-		seen[entry.Path] = struct{}{}
-		paths = append(paths, entry.Path)
-	}
-	return paths
-}
+// windowsACLPlanPaths lives in windows_identity_runtime_windows.go, beside its
+// only callers. It was here, in the portable file, which made it dead code on
+// every non-Windows build and failed the static analysis gate.
