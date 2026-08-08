@@ -804,6 +804,10 @@ func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, err
 	if name == "" {
 		return BranchResult{}, fmt.Errorf("branch name required")
 	}
+	if strings.HasPrefix(name, "-") || strings.HasPrefix(name, "/") ||
+		strings.Contains(name, "..") || strings.ContainsAny(name, "\\ \t\n") {
+		return BranchResult{}, fmt.Errorf("invalid branch name %q", name)
+	}
 	if options.DryRun {
 		return BranchResult{Branch: name}, nil
 	}
@@ -845,7 +849,7 @@ func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, err
 		}
 		name = fmt.Sprintf("%s-%d", base, suffix)
 	}
-	if _, err := gitOutput(ctx, runGit, root, "checkout", "-b", name); err != nil {
+	if _, err := gitOutput(ctx, runGit, root, "checkout", "-b", name, "--"); err != nil {
 		return BranchResult{}, fmt.Errorf("create branch %q: %w", name, err)
 	}
 	return BranchResult{Branch: name}, nil

@@ -912,7 +912,7 @@ func TestCreateBranch(t *testing.T) {
 		if got := runner.commandLine(1); got != "git rev-parse --verify --quiet refs/heads/alice/fix-typo" {
 			t.Fatalf("unexpected existence-check command: %q", got)
 		}
-		if got := runner.commandLine(2); got != "git checkout -b alice/fix-typo" {
+		if got := runner.commandLine(2); got != "git checkout -b alice/fix-typo --" {
 			t.Fatalf("unexpected checkout command: %q", got)
 		}
 	})
@@ -942,7 +942,7 @@ func TestCreateBranch(t *testing.T) {
 		if result.Branch != "alice/fix-typo-2" {
 			t.Fatalf("unexpected branch: %#v", result)
 		}
-		if got := runner.commandLine(3); got != "git checkout -b alice/fix-typo-2" {
+		if got := runner.commandLine(3); got != "git checkout -b alice/fix-typo-2 --" {
 			t.Fatalf("expected a fresh suffixed branch, got %q", got)
 		}
 	})
@@ -1530,6 +1530,9 @@ func TestRemoteHasBranchSeesPushWithoutLocalUpstream(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	tmp := t.TempDir()
 	bare := filepath.Join(tmp, "remote.git")
 	repo := filepath.Join(tmp, "repo")
@@ -1577,6 +1580,9 @@ func TestHasUpstreamRejectsInheritedMainUpstream(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	tmp := t.TempDir()
 	bare := filepath.Join(tmp, "remote.git")
 	repo := filepath.Join(tmp, "repo")

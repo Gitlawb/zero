@@ -1051,9 +1051,6 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
 		}
 	}
-	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
-	}
 
 	if !options.json {
 		if _, err := fmt.Fprintln(stdout, "Pushing current branch to set upstream..."); err != nil {
@@ -1183,9 +1180,8 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // information only. maxDiffBytes caps the committed-range diff Inspect
 // returns, so a user who passed --diff-bytes to bound the proprietary source
 // sent for LLM naming has that cap honored here just as the commit path does.
-// The working tree must be clean and HEAD must be ahead of the resolved remote
-// ensureFeatureBranch verifies working tree cleanliness, checks default branch
-// state, and auto-creates a feature branch if on the default branch. The
+// The working tree must be clean and HEAD must be ahead of the resolved
+// remote branch; both are verified before any branch is created. The
 // inspectChanges, commitsAhead, headCommitSubject, currentGitUser, and
 // createBranch fields on deps are mandatory dependencies populated by
 // fillAppDeps.
