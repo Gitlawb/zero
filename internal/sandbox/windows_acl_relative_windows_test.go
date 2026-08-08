@@ -138,6 +138,64 @@ func TestDeleteFollowsTheHandleNotThePath(t *testing.T) {
 	}
 }
 
+// A delete that cannot happen must SAY so.
+//
+// This is the gap that let a silent bug ship in the first version of this file.
+// It deleted with FILE_DELETE_ON_CLOSE, which defers the removal to cleanup,
+// where a non-empty directory makes it fail with nowhere to report it: the open
+// returned success, the close returned success, and the directory was still
+// there. The only test covering deletion used an EMPTY directory, so it passed
+// throughout. Rollback built on that would have reported success while leaving
+// materialized state on disk, which is worse than the os.RemoveAll it replaced,
+// because os.RemoveAll actually removed it.
+func TestDeletingANonEmptyDirectoryIsReported(t *testing.T) {
+	root := t.TempDir()
+	populated := filepath.Join(root, "populated")
+	if err := os.Mkdir(populated, 0o700); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(populated, "occupant"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed occupant: %v", err)
+	}
+	parent, err := openWindowsACLDirectoryNoFollow(root)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer func() { _ = windows.CloseHandle(parent) }()
+
+	err = deleteWindowsACLChildDirectory(parent, "populated")
+	if _, statErr := os.Stat(populated); statErr != nil {
+		t.Fatalf("the directory was removed with its contents, which this delete must never do: %v", statErr)
+	}
+	if err == nil {
+		t.Fatal("reported success while leaving the directory in place")
+	}
+}
+
+// The directory form must refuse a file rather than delete it, and the file form
+// must handle the one materialized target that is a file.
+func TestDeleteDistinguishesFilesFromDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	parent, err := openWindowsACLDirectoryNoFollow(root)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer func() { _ = windows.CloseHandle(parent) }()
+
+	if err := deleteWindowsACLChildDirectory(parent, "config"); err == nil {
+		t.Error("the directory delete accepted a file")
+	}
+	if err := deleteWindowsACLChildFile(parent, "config"); err != nil {
+		t.Fatalf("deleteWindowsACLChildFile: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "config")); err == nil {
+		t.Error("the file survived its delete")
+	}
+}
+
 // Rollback runs on failure paths where the object may never have been created,
 // so a missing child is success rather than an error to report.
 func TestDeletingAMissingChildIsNotAnError(t *testing.T) {
