@@ -977,8 +977,15 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 		if !strings.Contains(item.Label, want.title) {
 			t.Fatalf("picker Label %q should contain the title %q", item.Label, want.title)
 		}
-		if item.Meta != "" {
-			t.Fatalf("picker %q should not expose raw session id metadata, got %q", want.title, item.Meta)
+		// Meta now carries the source agent ("zero", "codex", …) so the picker's
+		// All tab says where each session came from. What it must never carry is
+		// the raw session id, which is what this check has always been about:
+		// rendering the id consumed half the picker and truncated the title.
+		if strings.Contains(item.Meta, want.id) {
+			t.Fatalf("picker %q exposes the raw session id in metadata: %q", want.title, item.Meta)
+		}
+		if item.Meta != "zero" {
+			t.Fatalf("picker %q metadata = %q, want the source agent", want.title, item.Meta)
 		}
 	}
 	// The picker overlay renders clean title rows plus a position indicator.
