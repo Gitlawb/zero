@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -74,32 +73,6 @@ func windowsIdentityOfHandle(handle windows.Handle) (windowsFileIdentity, error)
 		IndexHigh: info.FileIndexHigh,
 		IndexLow:  info.FileIndexLow,
 	}, nil
-}
-
-// validateWindowsACLComponent rejects anything that is not a single path
-// component.
-//
-// This is load-bearing, not defensive tidiness. NtCreateFile happily resolves a
-// RELATIVE name containing separators, and it resolves it the ordinary way,
-// which means an intermediate junction inside that name is followed and the
-// object lands outside the anchor. A name with a separator therefore reopens
-// exactly the hole the parent handle exists to close, so the shape is checked
-// rather than assumed.
-//
-// A colon is rejected too: it introduces an alternate data stream, or a drive
-// qualifier, neither of which is a child of the parent handle.
-func validateWindowsACLComponent(name string) error {
-	switch {
-	case name == "":
-		return errors.New("windows ACL path component is empty")
-	case name == "." || name == "..":
-		return fmt.Errorf("windows ACL path component %q is a relative reference, not a child", name)
-	case strings.ContainsAny(name, `\/`):
-		return fmt.Errorf("windows ACL path component %q contains a separator, so the kernel would resolve it through intermediate directories instead of the parent handle", name)
-	case strings.Contains(name, ":"):
-		return fmt.Errorf("windows ACL path component %q contains a colon, which names a stream or a drive rather than a child", name)
-	}
-	return nil
 }
 
 // openWindowsACLDirectoryNoFollow opens an existing directory by pathname,
