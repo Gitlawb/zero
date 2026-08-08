@@ -5,15 +5,20 @@ package browser
 
 import (
 	"fmt"
+	"net/url"
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 // OpenURL launches url in the default browser. It returns once the launcher
 // process has started (it does not wait for the browser to close). A failure to
 // start the launcher is returned so callers can fall back to printing the URL.
-func OpenURL(url string) error {
-	name, args := openCommand(runtime.GOOS, url)
+func OpenURL(rawURL string) error {
+	if err := validateURL(rawURL); err != nil {
+		return err
+	}
+	name, args := openCommand(runtime.GOOS, rawURL)
 	cmd := exec.Command(name, args...)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("browser: open url: %w", err)
@@ -21,6 +26,22 @@ func OpenURL(url string) error {
 	// Reap the short-lived launcher (open/xdg-open/rundll32 exit promptly) so it
 	// does not linger as a zombie; the browser window itself is independent.
 	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// validateURL rejects URLs that could enable argument injection or that use
+// unsafe schemes. Only http and https are permitted.
+func validateURL(rawURL string) error {
+	if strings.HasPrefix(rawURL, "-") {
+		return fmt.Errorf("browser: open url: invalid URL")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("browser: open url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("browser: open url: unsupported scheme %q", parsed.Scheme)
+	}
 	return nil
 }
 
