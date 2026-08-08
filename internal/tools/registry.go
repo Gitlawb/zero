@@ -143,6 +143,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	var ok bool
 	defer func() {
 		result = scrubResultSecrets(result)
+		boundaryOutput := result.Output
 		result = reduceCommandOutput(name, args, result)
 		if selfManagedOutput {
 			result = applySelfManagedOutputBudget(tool, name, args, result)
@@ -150,6 +151,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			result = applyRegistryOutputBudget(tool, name, args, result)
 			result = enforceOutputCeiling(name, result)
 		}
+		result = finalizeToolOutcome(result, boundaryOutput)
 		if commitFileObservation {
 			result = registry.CommitFileObservation(result, options.FileTracker)
 		}

@@ -5666,10 +5666,11 @@ func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage
 // (a code/diff preview) when present on a successful result, else the Output that
 // the model also saw. Error results keep their Output so the failure shows.
 func toolResultDetail(result agent.ToolResult) string {
-	if result.Status != tools.StatusError && strings.TrimSpace(result.Display.Preview) != "" {
-		return result.Display.Preview
+	display := result.HumanDisplay()
+	if strings.TrimSpace(display.Preview) != "" && (result.Status != tools.StatusError || result.Outcome.Finalized()) {
+		return display.Preview
 	}
-	return result.Output
+	return result.ModelOutput()
 }
 
 func toolResultRowText(result agent.ToolResult) string {
@@ -5677,5 +5678,5 @@ func toolResultRowText(result agent.ToolResult) string {
 	if status == "" {
 		status = tools.StatusOK
 	}
-	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.Output, tuiToolOutputLimit))
+	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.ModelOutput(), tuiToolOutputLimit))
 }

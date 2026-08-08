@@ -126,9 +126,71 @@ type Result struct {
 	ChangeSummaries []execution.Change
 	// Display carries a short, structured summary for the TUI / stream.
 	Display Display
+	// Outcome is the finalized, typed representation produced at the registry
+	// seam. ModelView, HumanView, and Artifact deliberately serve different
+	// consumers; Output, Display, and spill metadata remain synchronized for
+	// compatibility with direct tool callers and persisted sessions.
+	Outcome ToolOutcome
 	// pendingFileObservation is proposed by read_file and committed only after
 	// the final model-visible output boundary confirms the exact content survived.
 	pendingFileObservation *pendingFileObservation
+}
+
+// ToolOutcome is the canonical post-execution representation of one tool
+// result. It separates the bounded provider payload from the human-facing
+// presentation and the recoverable output retained outside model context.
+type ToolOutcome struct {
+	ModelView   string
+	HumanView   Display
+	Artifact    *ToolArtifact
+	Diagnostics OutcomeDiagnostics
+	finalized   bool
+}
+
+// Finalized reports whether the outcome crossed the registry boundary. Direct
+// Tool.Run results deliberately return false and use their legacy fields.
+func (outcome ToolOutcome) Finalized() bool {
+	return outcome.finalized
+}
+
+// ToolArtifact identifies recoverable output saved by the tool boundary.
+// CompleteAtBoundary means the artifact contains every redacted byte received
+// by that boundary; an underlying process may already have applied its own
+// capture limit before producing the result.
+type ToolArtifact struct {
+	Path               string
+	CompleteAtBoundary bool
+}
+
+// OutcomeDiagnostics describes how the model-facing representation differs
+// from the redacted output received by the registry boundary.
+type OutcomeDiagnostics struct {
+	Category                string
+	OriginalBytes           int
+	ModelBytes              int
+	EstimatedOriginalTokens int
+	EstimatedModelTokens    int
+	Truncated               bool
+	Redacted                bool
+	Reason                  string
+}
+
+// ModelOutput returns the finalized provider-facing text, falling back to the
+// legacy field for direct Tool.Run callers that have not crossed the registry.
+func (result Result) ModelOutput() string {
+	if result.Outcome.finalized {
+		return result.Outcome.ModelView
+	}
+	return result.Output
+}
+
+// HumanDisplay returns the finalized presentation, falling back to the legacy
+// display for direct Tool.Run callers.
+func (result Result) HumanDisplay() Display {
+	if result.Outcome.finalized {
+		return result.Outcome.HumanView
+	}
+	return result.Display
 }
 
 // Display carries a short, structured summary of a tool result for the TUI/stream.

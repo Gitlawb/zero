@@ -99,15 +99,18 @@ func selfManagedOutputBudget(toolName string, args map[string]any) outputBudget 
 // newly combined result so hooks cannot bypass the established safety ceiling.
 func (registry *Registry) RebudgetAfterHook(toolName string, args map[string]any, result Result) Result {
 	result = scrubResultSecrets(result)
+	boundaryOutput := result.Output
 	tool, _ := registry.Get(toolName)
 	if _, ok := tool.(selfBudgeting); ok {
 		// Match the primary registry boundary: self-managed tools keep their
 		// call-specific capture/output budget instead of being tightened or
 		// loosened to the generic registry ceiling after hook feedback.
-		return applySelfManagedOutputBudget(tool, toolName, args, result)
+		result = applySelfManagedOutputBudget(tool, toolName, args, result)
+		return finalizeToolOutcome(result, boundaryOutput)
 	}
 	result = applyRegistryOutputBudget(tool, toolName, args, result)
-	return enforceOutputCeiling(toolName, result)
+	result = enforceOutputCeiling(toolName, result)
+	return finalizeToolOutcome(result, boundaryOutput)
 }
 
 func registryOutputBudget(toolName string) outputBudget {
