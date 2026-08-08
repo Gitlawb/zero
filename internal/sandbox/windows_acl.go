@@ -7,6 +7,21 @@ import (
 	"strings"
 )
 
+// isWindowsVolumeRoot reports whether a cleaned path is the top of a volume,
+// with nothing above it: `C:\`, a bare separator, or a UNC share root.
+//
+// Detected structurally rather than by pattern matching drive letters, because
+// filepath.Dir of a root is that same root and of anything else is strictly
+// shorter. That holds for drive-qualified paths, for the separator alone, and
+// for UNC roots, on either build host.
+func isWindowsVolumeRoot(path string) bool {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || cleaned == "." {
+		return false
+	}
+	return filepath.Dir(cleaned) == cleaned
+}
+
 // validateWindowsACLComponent rejects anything that is not a single path
 // component.
 //

@@ -416,6 +416,10 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	if err := removeWindowsSandboxSecret(secretPath); err != nil {
 		return err
 	}
+	// Set when ACE revocation could not complete. Teardown continues regardless,
+	// but the ledger is kept and the error surfaced, so the residue stays
+	// findable instead of being silently orphaned.
+	var revokeErr error
 	// Drop the LSA account rights before the account itself. Deleting the account
 	// first would leave its rights behind keyed to a SID that no longer resolves,
 	// which is the same orphaned residue the trustee-keyed ACE revocation exists
@@ -436,8 +440,18 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 		// The rollback is discarded here on purpose, unlike at setup: this is
 		// teardown, the account is about to be deleted, and putting its ACEs back
 		// is the opposite of what the caller asked for.
-		if paths, pathsErr := windowsPrincipalRevocationPaths(config, identity.SID.String()); pathsErr == nil {
-			_, _ = revokeWindowsPrincipalACEs(identity.SID.String(), paths)
+		//
+		// The ERROR is not discarded, though it used to be. Teardown carried on
+		// and reported success, which meant a failed revocation left ACEs naming
+		// this SID on the user's tree while the ledger recording which paths they
+		// sat on was deleted moments later: residue nothing could find again.
+		// Remembered below rather than returned here, so removing the account
+		// still happens and the principal is not stranded.
+		paths, pathsErr := windowsPrincipalRevocationPaths(config, identity.SID.String())
+		if pathsErr != nil {
+			revokeErr = fmt.Errorf("resolve the paths holding ACEs for sandbox principal %s: %w", username, pathsErr)
+		} else if _, err := revokeWindowsPrincipalACEs(identity.SID.String(), paths); err != nil {
+			revokeErr = fmt.Errorf("revoke ACEs for sandbox principal %s: %w", username, err)
 		}
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
 			return err
@@ -454,8 +468,16 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	// It describes grants for a SID that no longer resolves, and leaving it would
 	// have the next setup revoke those paths on behalf of a freshly minted SID
 	// that never held them. That is a harmless no-op rather than a hole — the
-	// deleted account's RID is never reused — but a record that outlives its
+	// deleted account's RID is never reused, but a record that outlives its
 	// principal is a lie the next reader has no way to detect.
+	//
+	// Unless revocation failed. Then the ledger is the ONLY surviving record of
+	// which paths still carry ACEs for this SID, and deleting it turns a
+	// reportable leftover into permanent unfindable residue. Keeping a record
+	// that outlives its principal is the lesser problem, and the error says so.
+	if revokeErr != nil {
+		return fmt.Errorf("%w; the principal ACL ledger has been kept so the remaining ACEs can still be found", revokeErr)
+	}
 	return removeWindowsPrincipalACLLedger(config.SandboxHome, username)
 }
 

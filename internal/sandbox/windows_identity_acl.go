@@ -162,6 +162,26 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 		})
 	}
 	for _, path := range normalizeProfilePaths(input.ReadRoots) {
+		// NEVER grant at a volume root.
+		//
+		// permissionProfileReadRoots seeds its list with profileRootPath(), which
+		// is the separator alone, because the workspace-write posture is
+		// read-all/write-jail. That is harmless for the capability backend, whose
+		// child runs as the CALLER and therefore reads what the caller could read
+		// anyway. It is not harmless here: a principal is a separate local
+		// account, so this loop turns that synthetic entry into a real,
+		// persistent, inheritable allow-read ACE for that account at the root of
+		// the current drive, reaching every directory that does not block
+		// inheritance.
+		//
+		// Dropping it does not take away the reads the principal needs to run
+		// commands. It is a member of Users, and the machine's own ACLs already
+		// grant Users read on the system and program directories. What the grant
+		// added on top was read access to places Users are deliberately kept out
+		// of, which is the opposite of what a sandbox is for.
+		if isWindowsVolumeRoot(path) {
+			continue
+		}
 		entries = append(entries, WindowsACLEntry{
 			Action:     WindowsACLAllowRead,
 			Path:       path,
