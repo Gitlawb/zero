@@ -207,6 +207,61 @@ func TestPrincipalACLPlanRefusesProtectedNamesThatEscapeTheWriteRoot(t *testing.
 	}
 }
 
+// A PRINCIPAL MUST NEVER BE GRANTED READ AT A VOLUME ROOT.
+//
+// permissionProfileReadRoots seeds its list with the bare separator, because
+// the workspace-write posture is read-all with a write jail. That costs nothing
+// for the capability backend, whose child runs as the caller and could read
+// those paths anyway. For a principal it is a real, persistent, inheritable
+// allow-read ACE for a separate local account at the root of the drive.
+//
+// Built from the production profile rather than a synthetic fixture, because
+// the whole point is that the shipped configuration produced it.
+func TestPrincipalACLPlanNeverGrantsReadAtAVolumeRoot(t *testing.T) {
+	workspace := filepath.FromSlash("/ws/project")
+	profile := DefaultPermissionProfile(workspace)
+
+	// If the profile ever stops carrying a volume root, this test proves nothing
+	// and should be retired rather than left passing vacuously.
+	seeded := false
+	for _, root := range profile.FileSystem.ReadRoots {
+		if isWindowsVolumeRoot(normalizeProfilePath(root)) {
+			seeded = true
+			break
+		}
+	}
+	if !seeded {
+		t.Skipf("the production profile no longer contains a volume read root: %v", profile.FileSystem.ReadRoots)
+	}
+
+	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
+		PrincipalSID: testPrincipalSID,
+		ReadRoots:    profile.FileSystem.ReadRoots,
+		WriteRoots:   profile.FileSystem.WriteRoots,
+	})
+	if err != nil {
+		t.Fatalf("buildWindowsPrincipalACLPlan: %v", err)
+	}
+	for _, entry := range plan.Entries {
+		if entry.Action == WindowsACLAllowRead && isWindowsVolumeRoot(entry.Path) {
+			t.Errorf("plan grants the principal read at the volume root %q, which inherits into every directory on the drive", entry.Path)
+		}
+	}
+	// And the workspace itself must still be reachable, or this traded a real
+	// grant for a broken sandbox.
+	wantWorkspace := normalizeProfilePath(workspace)
+	reachable := false
+	for _, entry := range plan.Entries {
+		if entry.Path == wantWorkspace && (entry.Action == WindowsACLAllowRead || entry.Action == WindowsACLAllowWrite) {
+			reachable = true
+			break
+		}
+	}
+	if !reachable {
+		t.Errorf("no grant for the workspace root %q, so the principal could not read its own workspace", wantWorkspace)
+	}
+}
+
 // The ordinary names must keep working, or the guard above is just a break.
 func TestPrincipalACLPlanStillAcceptsTheRealProtectedNames(t *testing.T) {
 	input := testPrincipalInput()
