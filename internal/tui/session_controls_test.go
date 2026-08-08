@@ -481,6 +481,15 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, input := range []sessions.AppendEventInput{
+		{Type: sessions.EventToolCall, Payload: map[string]any{"id": "ask", "name": "ask_user", "arguments": `{"questions":[{"question":"Which database should remain?"}]}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"toolCallId": "ask", "name": "ask_user", "status": "ok", "output": "Postgres only"}},
+	} {
+		m, err = m.appendSessionEvent(input.Type, input.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, content := range []string{
 		"old decision A",
 		"old decision B",
@@ -521,6 +530,15 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one provider summarization request, got %d", len(provider.requests))
 	}
+	request := provider.requests[0]
+	if len(request.Messages) != 2 || request.Messages[0].Content != agent.CompactionSummaryInstructions {
+		t.Fatalf("manual compaction did not use the shared agent compaction prompt: %#v", request.Messages)
+	}
+	for _, want := range []string{"Which database should remain?", "Postgres only"} {
+		if !strings.Contains(request.Messages[1].Content, want) {
+			t.Fatalf("manual compaction projection lost %q: %q", want, request.Messages[1].Content)
+		}
+	}
 	if next.lastCompactResult == nil || next.lastCompactResult.Summary != "Provider summary keeps the actual old decisions." {
 		t.Fatalf("expected provider summary result, got %#v", next.lastCompactResult)
 	}
@@ -530,6 +548,56 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	}
 	if strings.Contains(prompt, "old decision A") {
 		t.Fatalf("next prompt should not include raw compacted event:\n%s", prompt)
+	}
+}
+
+func TestManualCompactionPersistsStructuralTruncationMetadata(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "Bounded summary."},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1", Provider: provider, SessionStore: store})
+	var err error
+	m, err = m.ensureActiveSession("compact a large session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range 20 {
+		content := strings.Repeat("contextword ", 256) + string(rune('a'+index))
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: content})
+	}
+
+	next, result, err := m.compactActiveSession()
+	if err != nil || !result.Compacted {
+		t.Fatalf("compactActiveSession() = (%#v, %v)", result, err)
+	}
+	raw, err := store.ReadEvents(next.activeSession.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := raw[len(raw)-1]
+	if latest.Type != sessions.EventCompaction {
+		t.Fatalf("latest event = %s, want compaction", latest.Type)
+	}
+	payload := sessionPayload(latest)
+	if !payloadBool(payload, "truncated") {
+		t.Fatalf("compaction did not persist structural truncation: %#v", payload)
+	}
+	request := provider.requests[0]
+	wantPromptChars := len(agent.CompactionSummaryInstructions)
+	for _, message := range request.Messages[1:] {
+		wantPromptChars += len(message.Content)
+		for _, call := range message.ToolCalls {
+			wantPromptChars += len(call.Name) + len(call.Arguments)
+		}
+	}
+	if promptChars, ok := payload["promptChars"].(float64); !ok || int(promptChars) != wantPromptChars {
+		t.Fatalf("promptChars = %#v, want %d", payload["promptChars"], wantPromptChars)
 	}
 }
 

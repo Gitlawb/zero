@@ -58,12 +58,15 @@ func TestCompactKeepsSystemAndPreservedSuffix(t *testing.T) {
 	if last.Content != "most recent question" {
 		t.Fatalf("expected most recent message preserved, got %q", last.Content)
 	}
-	// The summarized middle excludes system and preserved suffix.
-	if len(captured) != 3 {
-		t.Fatalf("expected 3 summarized messages, got %d: %#v", len(captured), captured)
+	// The summarizer receives a compact semantic projection of the middle rather
+	// than reconstructible raw tool output.
+	if len(captured) != 1 || captured[0].Role != zeroruntime.MessageRoleUser {
+		t.Fatalf("expected one projected summary input, got %#v", captured)
 	}
-	if captured[0].Content != "first question" {
-		t.Fatalf("expected oldest non-system message first, got %#v", captured[0])
+	for _, want := range []string{"[user #0]", "first question", "[assistant #1]", "first answer", "second question"} {
+		if !strings.Contains(captured[0].Content, want) {
+			t.Fatalf("projected summary input missing %q: %q", want, captured[0].Content)
+		}
 	}
 	// Compaction must shrink the conversation.
 	if estimateTokens(result) >= estimateTokens(messages) {

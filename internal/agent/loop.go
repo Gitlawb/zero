@@ -187,6 +187,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 	guards := newGuardState()
 	task := newTaskState(prompt, options.Trace)
+	onPermission := options.OnPermission
+	options.OnPermission = func(event PermissionEvent) {
+		task.observe(taskStateEvent{kind: taskStateEventPermission, permission: event})
+		if onPermission != nil {
+			onPermission(event)
+		}
+	}
 	compactor := newCompactionState(options, task)
 	defer func() {
 		// A final transcript comparison is observational. It records drift but
@@ -698,7 +705,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterToolCalls, 1)
 			recordOutputBudgetTrace(options.Trace, toolResult)
-			task.observe(taskStateEvent{kind: taskStateEventToolResult, toolResult: toolResult})
+			task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: call.Arguments, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}
@@ -712,9 +719,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				turnRequestedModel = toolResult.RequestedModel
 			}
 			messages = append(messages, zeroruntime.Message{
-				Role:       zeroruntime.MessageRoleTool,
-				Content:    toolResult.Output,
-				ToolCallID: toolResult.ToolCallID,
+				Role:         zeroruntime.MessageRoleTool,
+				Content:      toolResult.Output,
+				ToolCallID:   toolResult.ToolCallID,
+				IsError:      toolResult.Status == tools.StatusError,
+				ChangedFiles: append([]string(nil), toolResult.ChangedFiles...),
 			})
 			// Images ride a following USER message rather than the tool result
 			// above. Every provider drops images on a tool-role message —
@@ -3278,6 +3287,7 @@ func appendAbortedToolResults(messages []Message, remaining []ToolCall) []Messag
 			Role:       zeroruntime.MessageRoleTool,
 			Content:    abortedToolResultNotice,
 			ToolCallID: call.ID,
+			IsError:    true,
 		})
 	}
 	return messages
@@ -3307,6 +3317,9 @@ func copyMessages(messages []Message) []Message {
 		}
 		if message.Reasoning != nil {
 			copied[index].Reasoning = append([]zeroruntime.ReasoningBlock{}, message.Reasoning...)
+		}
+		if message.ChangedFiles != nil {
+			copied[index].ChangedFiles = append([]string(nil), message.ChangedFiles...)
 		}
 		// Deep-copy image attachments (slice AND each Data byte slice) so the
 		// raw image bytes are never aliased across history/request/result copies.

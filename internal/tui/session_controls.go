@@ -21,7 +21,6 @@ import (
 var responseStyles = []string{"balanced", "concise", "explanatory", "review"}
 
 const tuiCompactionPreserveLast = 8
-const tuiCompactionMaxPromptChars = 8000
 const compactStatusRowID = "compact/status"
 
 var compactFrames = []string{"⠂", "⠒", "⠲", "⠴"}
@@ -842,8 +841,8 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 	beforeEvents := append([]sessions.Event{}, m.sessionEvents...)
 	beforeTokens := estimateTranscriptTokens(m.transcript)
 	plan, err := m.sessionStore.PlanCompaction(m.activeSession.SessionID, sessions.CompactionOptions{
-		PreserveLast:   tuiCompactionPreserveLast,
-		MaxPromptChars: tuiCompactionMaxPromptChars,
+		PreserveLast: tuiCompactionPreserveLast,
+		SkipPrompt:   true,
 	})
 	if err != nil {
 		return m, CompactResult{}, err
@@ -857,13 +856,26 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 		}, nil
 	}
 
-	summary, err := m.summarizeCompactionPlan(plan)
+	rawEvents, err := m.sessionStore.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		return m, CompactResult{}, fmt.Errorf("read session events for compaction: %w", err)
+	}
+	compactableEvents, err := sessionEventsForRefs(rawEvents, plan.CompactableEvents)
 	if err != nil {
 		return m, CompactResult{}, err
 	}
+	summaryResult, err := m.summarizeCompactionPlan(plan, sessions.CompactionMessages(compactableEvents))
+	if err != nil {
+		return m, CompactResult{}, err
+	}
+	// PromptChars counts the text content sent to the provider: the shared
+	// system instruction plus projected message/tool payloads. Provider protocol
+	// framing is intentionally excluded.
+	plan.PromptChars = len(agent.CompactionSummaryInstructions) + summaryResult.ProjectedChars
+	plan.Truncated = summaryResult.Truncated
 	if _, err := m.sessionStore.RecordCompaction(m.activeSession.SessionID, sessions.RecordCompactionInput{
 		Plan:    plan,
-		Summary: summary,
+		Summary: summaryResult.SummaryText,
 	}); err != nil {
 		return m, CompactResult{}, err
 	}
@@ -885,32 +897,47 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 		Compacted:    len(events) < len(beforeEvents)+1,
 		BeforeTokens: beforeTokens,
 		AfterTokens:  estimateTranscriptTokens(m.transcript),
-		Summary:      summary,
+		Summary:      summaryResult.SummaryText,
 	}, nil
 }
 
-func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan) (string, error) {
-	if m.provider == nil {
-		return deterministicCompactionSummary(plan), nil
+func sessionEventsForRefs(events []sessions.Event, refs []sessions.EventRef) ([]sessions.Event, error) {
+	byID := make(map[string]sessions.Event, len(events))
+	for _, event := range events {
+		byID[event.ID] = event
 	}
-	stream, err := m.provider.StreamCompletion(m.ctx, zeroruntime.CompletionRequest{
-		Messages: []zeroruntime.Message{
-			{Role: zeroruntime.MessageRoleSystem, Content: "Summarize compacted Zero session events for future coding context. Preserve user goals, decisions, files, tool outcomes, blockers, and exact next steps. Omit secrets and do not invent details."},
-			{Role: zeroruntime.MessageRoleUser, Content: plan.SummaryPrompt},
-		},
+	selected := make([]sessions.Event, 0, len(refs))
+	for _, ref := range refs {
+		event, ok := byID[ref.ID]
+		if !ok || event.Sequence != ref.Sequence || event.Type != ref.Type {
+			return nil, fmt.Errorf("session changed while compaction was being planned; retry /compact")
+		}
+		selected = append(selected, event)
+	}
+	return selected, nil
+}
+
+func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan, messages []zeroruntime.Message) (agent.CompactionSummaryResult, error) {
+	return agent.SummarizeCompactionMessages(messages, func(projected []zeroruntime.Message) (string, error) {
+		if m.provider == nil {
+			return deterministicCompactionSummary(plan), nil
+		}
+		stream, streamErr := m.provider.StreamCompletion(m.ctx, zeroruntime.CompletionRequest{
+			Messages: append([]zeroruntime.Message{{Role: zeroruntime.MessageRoleSystem, Content: agent.CompactionSummaryInstructions}}, projected...),
+		})
+		if streamErr != nil {
+			return "", fmt.Errorf("summarize compacted session: %w", streamErr)
+		}
+		collected := zeroruntime.CollectStream(m.ctx, stream)
+		if collected.Error != "" {
+			return "", fmt.Errorf("summarize compacted session: %s", collected.Error)
+		}
+		result := strings.TrimSpace(collected.Text)
+		if result == "" {
+			return "", fmt.Errorf("summarize compacted session: empty summary")
+		}
+		return result, nil
 	})
-	if err != nil {
-		return "", fmt.Errorf("summarize compacted session: %w", err)
-	}
-	collected := zeroruntime.CollectStream(m.ctx, stream)
-	if collected.Error != "" {
-		return "", fmt.Errorf("summarize compacted session: %s", collected.Error)
-	}
-	summary := strings.TrimSpace(collected.Text)
-	if summary == "" {
-		return "", fmt.Errorf("summarize compacted session: empty summary")
-	}
-	return summary, nil
 }
 
 func deterministicCompactionSummary(plan sessions.CompactionPlan) string {

@@ -93,12 +93,14 @@ type ReasoningBlock struct {
 
 // Message is a normalized conversation turn passed to providers.
 type Message struct {
-	Role       MessageRole
-	Content    string
-	ToolCalls  []ToolCall
-	ToolCallID string
-	Images     []ImageBlock     // optional; nil for text-only messages
-	Reasoning  []ReasoningBlock // optional; preserved thinking blocks to replay
+	Role         MessageRole
+	Content      string
+	ToolCalls    []ToolCall
+	ToolCallID   string
+	IsError      bool             // tool-result status; ignored for non-tool messages
+	ChangedFiles []string         // durable tool-result mutation targets; ignored by providers
+	Images       []ImageBlock     // optional; nil for text-only messages
+	Reasoning    []ReasoningBlock // optional; preserved thinking blocks to replay
 }
 
 // ToolDefinition describes a model-visible tool and its JSON-schema parameters.
