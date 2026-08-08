@@ -117,6 +117,15 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 			})
 		}
 		for _, name := range root.ProtectedMetadataNames {
+			// These are documented as NAMES, and the join below is what makes that
+			// documentation load-bearing rather than descriptive: ".." or a
+			// separator would place this deny ACE, and the directory it
+			// materializes, outside the write root entirely. Today every caller
+			// passes a package constant, so this is unreachable; it is here so that
+			// stays true when a future caller sources these from config.
+			if err := validateWindowsACLComponent(name); err != nil {
+				return WindowsACLPlan{}, fmt.Errorf("windows principal ACL plan: protected metadata name: %w", err)
+			}
 			entries = append(entries, WindowsACLEntry{
 				Action:      WindowsACLDenyWrite,
 				Path:        filepath.Join(cleaned, name),
