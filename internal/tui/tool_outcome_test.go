@@ -24,8 +24,16 @@ func (tool tuiOutcomeErrorTool) Run(context.Context, map[string]any) tools.Resul
 	return tools.Result{Status: tools.StatusError, Output: tool.output}
 }
 
+func setToolOutcomeTempDir(t *testing.T) {
+	t.Helper()
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	t.Setenv("TMP", tempDir)
+	t.Setenv("TEMP", tempDir)
+}
+
 func TestToolResultDetailUsesFinalizedHumanEvidenceForReducedError(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	setToolOutcomeTempDir(t)
 	raw := "output:\n" + strings.Repeat("ok  \texample.test/package\t0.01s\n", 24) +
 		"--- FAIL: TestImportant\nexpected 7, got 9\nFAIL\nexit_code: 1"
 	registry := tools.NewRegistry()
@@ -50,7 +58,7 @@ func TestToolResultDetailUsesFinalizedHumanEvidenceForReducedError(t *testing.T)
 }
 
 func TestToolResultDetailSurvivesOutcomeJSONRoundTrip(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	setToolOutcomeTempDir(t)
 	raw := "output:\n" + strings.Repeat("ok  \texample.test/package\t0.01s\n", 24) +
 		"--- FAIL: TestImportant\nexpected 7, got 9\nFAIL\nexit_code: 1"
 	registry := tools.NewRegistry()
