@@ -65,6 +65,24 @@ func TestContextPlannerReportsInspectableBlocks(t *testing.T) {
 	}
 }
 
+func TestContextPlannerFingerprintsActualRequestSystemPrompt(t *testing.T) {
+	planner := newContextPlanner(contextPlannerConfig{promptParts: systemPromptParts{
+		prompt: "configured system", baseInstructions: "configured system",
+	}})
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "request-specific system"},
+		{Role: zeroruntime.MessageRoleUser, Content: "task"},
+	}
+
+	plan := planner.Plan(messages, nil, "")
+	want := computePrefixFingerprint(buildPromptSubstringsFromParts(
+		systemPromptParts{prompt: "request-specific system"}, nil,
+	))
+	if plan.PrefixFingerprint != want {
+		t.Fatalf("fingerprint describes configured prompt instead of request:\n got: %#v\nwant: %#v", plan.PrefixFingerprint, want)
+	}
+}
+
 func TestContextPlannerExplainsPrefixInvalidation(t *testing.T) {
 	planner := newContextPlanner(contextPlannerConfig{promptParts: systemPromptParts{
 		prompt: "system", baseInstructions: "base", projectContext: "project",
@@ -88,6 +106,7 @@ func TestContextPlannerExplainsPrefixInvalidation(t *testing.T) {
 	}
 	planner.config.promptParts.prompt = "system with changed project"
 	planner.config.promptParts.projectContext = "changed project"
+	messages[0].Content = "system with changed project"
 	if got := planner.Plan(messages, tools, "").Breakdown.PrefixInvalidationReason; got != "project_context" {
 		t.Fatalf("project reason = %q, want project_context", got)
 	}

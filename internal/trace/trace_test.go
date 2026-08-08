@@ -442,6 +442,35 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteNDJSONOmitsEmptyPrefixInvalidationReason(t *testing.T) {
+	recorder := NewRecorder("session", "run", "test")
+	recorder.Start()
+	recorder.EmitPrefixHash(PrefixHash{CompletePrefixHash: "stable"})
+	tr := recorder.Finish()
+
+	var output bytes.Buffer
+	if err := WriteNDJSON(&output, tr); err != nil {
+		t.Fatalf("WriteNDJSON: %v", err)
+	}
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if event["type"] != "prefix_hash" {
+			continue
+		}
+		found = true
+		if _, exists := event["invalidation_reason"]; exists {
+			t.Fatalf("empty invalidation reason should be omitted: %s", line)
+		}
+	}
+	if !found {
+		t.Fatal("prefix_hash event not written")
+	}
+}
+
 func TestReadNDJSONRejectsNonTrace(t *testing.T) {
 	// A file with content but no type:trace header is never a valid empty trace.
 	if _, err := ReadNDJSON(strings.NewReader("not json at all\n")); err == nil {

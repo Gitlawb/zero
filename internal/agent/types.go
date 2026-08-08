@@ -333,9 +333,11 @@ type Options struct {
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.
 	OnToolProgress func(toolCallID string, event streamjson.Event)
-	// OnContext, when set, is called once per turn with the per-category context
-	// budget of the request about to be sent, so a surface (TUI/CLI) can show
-	// context utilization. Opt-in like the other callbacks; nil is a no-op.
+	// OnContext, when set, is called for each main agent request with its
+	// per-category context budget, including a replacement request after
+	// compaction or a stall retry. Internal summarizer requests are excluded so
+	// surfaces keep showing the active conversation budget. Opt-in like the other
+	// callbacks; nil is a no-op.
 	OnContext func(ContextBreakdown)
 	// ModelSwitcher, when set, lets a tool escalate the run to a stronger model
 	// mid-run: the loop calls it with the requested model id and, on success,

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -428,6 +429,7 @@ type reactiveProvider struct {
 	summarizeCalls int
 	turnRequests   int
 	failedOnce     bool
+	connectError   bool
 	bigText        string
 	finalText      string
 }
@@ -449,11 +451,47 @@ func (provider *reactiveProvider) StreamCompletion(ctx context.Context, request 
 		return streamEvents(toolTurnWithText(provider.bigText, "1", "read_file", `{"path":"x"}`)), nil
 	case provider.turnRequests == 2 && !provider.failedOnce:
 		provider.failedOnce = true
+		if provider.connectError {
+			return nil, errors.New("context_length_exceeded")
+		}
 		return streamEvents([]zeroruntime.StreamEvent{
 			{Type: zeroruntime.StreamEventError, Error: "This model's maximum context length is 1000 tokens. Please reduce the length of the messages."},
 		}), nil
 	default:
 		return streamEvents(textTurn(provider.finalText)), nil
+	}
+}
+
+func TestRunConnectErrorCompactionRecordsReplacementPlan(t *testing.T) {
+	provider := &reactiveProvider{
+		connectError: true,
+		bigText:      strings.Repeat("b", 6000),
+		finalText:    "recovered",
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
+	recorder := trace.NewRecorder("connect-compaction", "run-1", "test")
+	var contextPlans []ContextBreakdown
+
+	result, err := Run(context.Background(), strings.Repeat("z", 6000), provider, Options{
+		Registry:               registry,
+		PermissionMode:         PermissionModeUnsafe,
+		ContextWindow:          10_000_000,
+		CompactionPreserveLast: 2,
+		Trace:                  recorder,
+		OnContext: func(breakdown ContextBreakdown) {
+			contextPlans = append(contextPlans, breakdown)
+		},
+	})
+	if err != nil || result.FinalAnswer != "recovered" {
+		t.Fatalf("connect-error compaction failed: result=%#v err=%v", result, err)
+	}
+	if len(contextPlans) != 3 || contextPlans[2].MessageTokens >= contextPlans[1].MessageTokens {
+		t.Fatalf("replacement request context not reported: %#v", contextPlans)
+	}
+	gotTrace := recorder.Finish()
+	if len(gotTrace.PrefixHashes) != 4 || gotTrace.PrefixHashes[3].InvalidationReason != "unchanged" {
+		t.Fatalf("replacement request trace not recorded: %#v", gotTrace.PrefixHashes)
 	}
 }
 
@@ -468,6 +506,8 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 	// bloats the history.
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
+	recorder := trace.NewRecorder("reactive-compaction", "run-1", "test")
+	var contextPlans []ContextBreakdown
 
 	// ContextWindow large enough that proactive compaction never triggers, so
 	// only the reactive path can save the run.
@@ -476,6 +516,10 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 		PermissionMode:         PermissionModeUnsafe,
 		ContextWindow:          10_000_000,
 		CompactionPreserveLast: 2,
+		Trace:                  recorder,
+		OnContext: func(breakdown ContextBreakdown) {
+			contextPlans = append(contextPlans, breakdown)
+		},
 	})
 	if err != nil {
 		t.Fatalf("expected reactive compaction to recover the run, got error: %v", err)
@@ -485,6 +529,25 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 	}
 	if provider.summarizeCalls == 0 {
 		t.Fatal("expected reactive compaction to invoke the summarizer")
+	}
+	if len(contextPlans) != 3 {
+		t.Fatalf("main request context callbacks = %d, want initial turns plus compacted retry", len(contextPlans))
+	}
+	if contextPlans[2].MessageTokens >= contextPlans[1].MessageTokens {
+		t.Fatalf("retry context was not updated after compaction: before=%d after=%d", contextPlans[1].MessageTokens, contextPlans[2].MessageTokens)
+	}
+	gotTrace := recorder.Finish()
+	if len(gotTrace.PrefixHashes) != 4 {
+		t.Fatalf("prefix evidence count = %d, want two turns, compaction, and retry: %#v", len(gotTrace.PrefixHashes), gotTrace.PrefixHashes)
+	}
+	if gotTrace.PrefixHashes[0].InvalidationReason != "initial" ||
+		gotTrace.PrefixHashes[1].InvalidationReason != "unchanged" ||
+		gotTrace.PrefixHashes[2].InvalidationReason != "initial" ||
+		gotTrace.PrefixHashes[3].InvalidationReason != "unchanged" {
+		t.Fatalf("unexpected request-specific invalidation evidence: %#v", gotTrace.PrefixHashes)
+	}
+	if gotTrace.PrefixHashes[2].CompletePrefixHash == gotTrace.PrefixHashes[1].CompletePrefixHash {
+		t.Fatalf("compaction fingerprint reused the main request prefix: %#v", gotTrace.PrefixHashes)
 	}
 }
 

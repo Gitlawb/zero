@@ -320,7 +320,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// on registry+loaded, not on the messages, so they stay valid after
 				// compaction. Using the bare toolDefinitions here would route through an
 				// empty-loaded partition, re-hiding every already-loaded deferred tool.
-				request = planner.Plan(messages, exposed, options.ReasoningEffort).Request
+				retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+				request = retryPlan.Request
+				recordContextPlan(options, retryPlan)
 				// Pre-content connect after a context-limit compaction: route through the
 				// reconnect helper so a transient upstream hiccup here doesn't fail the
 				// whole run and re-burn every token (AUDIT-L1).
@@ -404,7 +406,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// Reuse the SAME active-mode partition (exposed) from this turn rather
 				// than the bare toolDefinitions: exposed depends on registry+loaded (not
 				// the messages), so it stays valid after compaction.
-				retryRequest := planner.Plan(messages, exposed, options.ReasoningEffort).Request
+				retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+				retryRequest := retryPlan.Request
+				recordContextPlan(options, retryPlan)
 				retryStream, retryStreamErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 				if retryStreamErr != nil {
 					return collected, retryStreamErr
@@ -462,7 +466,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				result.Messages = copyMessages(messages)
 				return result, err
 			}
-			retryRequest := planner.Plan(messages, exposed, options.ReasoningEffort).Request
+			retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+			retryRequest := retryPlan.Request
+			recordContextPlan(options, retryPlan)
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
 				result.Messages = copyMessages(messages)
@@ -935,23 +941,28 @@ func recordOutputBudgetTrace(recorder *trace.Recorder, result ToolResult) {
 }
 
 func recordContextPlan(options Options, plan contextPlan) {
-	if options.Trace != nil {
-		fingerprint := plan.PrefixFingerprint
-		options.Trace.EmitPrefixHash(trace.PrefixHash{
-			SystemPromptHash:       fingerprint.SystemPromptHash,
-			BaseInstructionsHash:   fingerprint.BaseInstructionsHash,
-			ConfirmationPolicyHash: fingerprint.ConfirmationPolicyHash,
-			ProjectContextHash:     fingerprint.ProjectContextHash,
-			SkillsHash:             fingerprint.SkillsHash,
-			ToolsHash:              fingerprint.ToolsHash,
-			SchemaHash:             fingerprint.SchemaHash,
-			CompletePrefixHash:     fingerprint.CompletePrefixHash,
-			InvalidationReason:     plan.Breakdown.PrefixInvalidationReason,
-		})
-	}
+	recordContextPlanTrace(options.Trace, plan)
 	if options.OnContext != nil {
 		options.OnContext(plan.Breakdown)
 	}
+}
+
+func recordContextPlanTrace(recorder *trace.Recorder, plan contextPlan) {
+	if recorder == nil {
+		return
+	}
+	fingerprint := plan.PrefixFingerprint
+	recorder.EmitPrefixHash(trace.PrefixHash{
+		SystemPromptHash:       fingerprint.SystemPromptHash,
+		BaseInstructionsHash:   fingerprint.BaseInstructionsHash,
+		ConfirmationPolicyHash: fingerprint.ConfirmationPolicyHash,
+		ProjectContextHash:     fingerprint.ProjectContextHash,
+		SkillsHash:             fingerprint.SkillsHash,
+		ToolsHash:              fingerprint.ToolsHash,
+		SchemaHash:             fingerprint.SchemaHash,
+		CompletePrefixHash:     fingerprint.CompletePrefixHash,
+		InvalidationReason:     plan.Breakdown.PrefixInvalidationReason,
+	})
 }
 
 func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *contextPlanner, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
@@ -963,8 +974,9 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *c
 	// The max-turns final-answer call is a pre-content connect, often after a long
 	// autonomous/cron run — route it through the reconnect helper so a single
 	// transient hiccup doesn't drop the final summary (AUDIT-L1).
-	request := planner.Plan(finalMessages, toolDefs, options.ReasoningEffort).Request
-	stream, err := streamWithReconnect(ctx, provider, request, reconnectNoticeFor(options))
+	plan := planner.Plan(finalMessages, toolDefs, options.ReasoningEffort)
+	recordContextPlan(options, plan)
+	stream, err := streamWithReconnect(ctx, provider, plan.Request, reconnectNoticeFor(options))
 	if err != nil {
 		return "", messages, ""
 	}

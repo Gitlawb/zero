@@ -37,15 +37,28 @@ func newContextPlanner(config contextPlannerConfig) *contextPlanner {
 // It intentionally performs no relevance filtering: preserving current model
 // capability is the baseline contract for future planner policies.
 func (planner *contextPlanner) Plan(messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, reasoningEffort string) contextPlan {
+	return planner.plan(messages, toolDefs, reasoningEffort, planner.config.promptParts)
+}
+
+// planWithPromptParts plans a request whose stable system sections differ from
+// the planner's configured main-run prompt, such as a compaction summary call.
+func (planner *contextPlanner) planWithPromptParts(messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, reasoningEffort string, parts systemPromptParts) contextPlan {
+	return planner.plan(messages, toolDefs, reasoningEffort, parts)
+}
+
+func (planner *contextPlanner) plan(messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, reasoningEffort string, parts systemPromptParts) contextPlan {
 	request := zeroruntime.CompletionRequest{
 		Messages:        copyMessages(messages),
 		Tools:           toolDefs,
 		ReasoningEffort: reasoningEffort,
 		PromptCacheKey:  planner.config.promptCacheKey,
 	}
-	parts := planner.config.promptParts
-	if parts.prompt == "" {
-		parts.prompt = leadingSystemContent(request.Messages)
+	requestSystemPrompt := leadingSystemContent(request.Messages)
+	if parts.prompt != requestSystemPrompt {
+		// Component boundaries from a different request would make the detailed
+		// invalidation reason misleading. Retain the exact request prefix and
+		// classify it conservatively as an unstructured system prompt instead.
+		parts = systemPromptParts{prompt: requestSystemPrompt}
 	}
 	fingerprint := computePrefixFingerprint(buildPromptSubstringsFromParts(parts, request.Tools))
 	breakdown := MeasureContext(request.Messages, request.Tools, planner.config.contextWindow)
