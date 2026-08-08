@@ -3,8 +3,11 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 )
 
 func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writer) int {
@@ -158,8 +161,56 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 		return nil
 	}
 	if _, err := applyWindowsACLPlan(plan); err != nil {
+		// Refusing to run is right: without these ACEs the write jail does not
+		// exist, so continuing would run the command believing it is sandboxed
+		// when it is not. What was wrong was the diagnosis. Every failure got the
+		// same "the workspace may be on a filesystem you do not own" guess, and
+		// the suggested remedy was elevated setup, which does not help at all
+		// when the real problem is one root in the plan that nobody can ACL.
+		//
+		// Being precise matters because this failure repeats: the success marker
+		// is only recorded on success, so the same plan fails identically on
+		// every later command until the offending root leaves it. A reader who
+		// cannot tell which root is at fault has no way out of that.
+		if denied := windowsACLPlanDeniedPath(err); denied != "" {
+			return fmt.Errorf("apply unelevated workspace ACLs: %w; %s cannot have its permissions changed by this user, "+
+				"so the sandbox cannot enforce a write boundary there and will not run the command. "+
+				"That path is one of this workspace's sandbox roots, usually a system directory that arrived via TEMP or TMP. "+
+				"Check those, or re-run with `--sandbox forbid` to skip OS sandboxing. "+
+				"Running `zero sandbox setup` elevated will NOT fix this", err, denied)
+		}
 		return fmt.Errorf("apply unelevated workspace ACLs: %w — the workspace may be on a filesystem the current user does not own; "+
 			"run `zero sandbox setup` from an elevated (Administrator) terminal, or re-run with `--sandbox forbid` to skip OS sandboxing", err)
 	}
 	return recordWindowsUnelevatedAppliedPlan(config.SandboxHome, applied)
+}
+
+// windowsACLPlanDeniedPath pulls the target path out of an apply failure that
+// was an access denial, and returns "" for anything else.
+//
+// applyWindowsACLPathGroup already wraps the path into its error, so this reads
+// the message rather than threading a typed error through four layers for one
+// diagnostic. The string it matches is produced in the same package by
+// openWindowsACLTarget, and a test pins the pairing so the two cannot drift
+// apart silently.
+func windowsACLPlanDeniedPath(err error) string {
+	if err == nil || !errors.Is(err, os.ErrPermission) {
+		return ""
+	}
+	const marker = "open windows ACL target "
+	message := err.Error()
+	start := strings.Index(message, marker)
+	if start < 0 {
+		return ""
+	}
+	// Colon-SPACE, not colon. The wrapper is "...target %s: %w", and on Windows
+	// the path itself starts with a drive colon, so splitting on the first colon
+	// returns "C". A drive colon is always followed by a separator, never a
+	// space, which makes ": " the only unambiguous boundary here.
+	rest := message[start+len(marker):]
+	end := strings.Index(rest, ": ")
+	if end <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
 }
