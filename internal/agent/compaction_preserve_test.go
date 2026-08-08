@@ -65,6 +65,9 @@ func TestCompactPreservesBoundedTaskContext(t *testing.T) {
 	objective := strings.Repeat("世", maxTaskObjectiveBytes)
 	task := newTaskState(objective, nil)
 	task.observe(taskStateEvent{kind: taskStateEventPlan, arguments: `{"plan":[{"content":"write code","status":"in_progress"},{"content":"add tests","status":"pending"}]}`})
+	task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: `{"patch":"*** Update File: internal/db.go"}`, toolResult: ToolResult{
+		Name: "apply_patch", Status: tools.StatusOK, Output: "Done!", ChangedFiles: []string{"internal/db.go"},
+	}})
 	messages := stateConversation()
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast: 2,
@@ -80,6 +83,9 @@ func TestCompactPreservesBoundedTaskContext(t *testing.T) {
 	}
 	if len(state.Task.Objective) > maxTaskObjectiveBytes || !utf8.ValidString(state.Task.Objective) {
 		t.Fatalf("objective was not safely bounded: %d bytes %q", len(state.Task.Objective), state.Task.Objective)
+	}
+	if len(state.Task.ChangedFiles) != 1 || state.Task.ChangedFiles[0] != "internal/db.go" {
+		t.Fatalf("changed files were not preserved: %#v", state.Task.ChangedFiles)
 	}
 }
 

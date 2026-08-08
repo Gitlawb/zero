@@ -5,7 +5,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
+
+func TestCompactionMessagesPreservesInteractiveAndMutationEvidence(t *testing.T) {
+	events := []Event{
+		{Type: EventToolCall, Payload: json.RawMessage(`{"id":"ask","name":"ask_user","arguments":"{\"questions\":[{\"question\":\"Which database?\"}]}"}`)},
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"ask","name":"ask_user","status":"ok","output":"Postgres only"}`)},
+		{Type: EventToolCall, Payload: json.RawMessage(`{"id":"patch","name":"apply_patch","arguments":"{\"patch\":\"*** Update File: db.go\"}"}`)},
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"patch","name":"apply_patch","status":"ok","output":"Done!","changedFiles":["db.go"]}`)},
+	}
+
+	messages := CompactionMessages(events)
+	if len(messages) != 4 || messages[0].Role != zeroruntime.MessageRoleAssistant || messages[1].Role != zeroruntime.MessageRoleTool {
+		t.Fatalf("unexpected normalized compaction messages: %#v", messages)
+	}
+	if messages[1].Content != "Postgres only" || len(messages[3].ChangedFiles) != 1 || messages[3].ChangedFiles[0] != "db.go" {
+		t.Fatalf("interactive or mutation evidence was lost: %#v", messages)
+	}
+}
 
 func TestStorePlansRewindBySequence(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
@@ -127,6 +146,26 @@ func TestStorePlansCompactionWindow(t *testing.T) {
 	}
 	if plan.Truncated {
 		t.Fatalf("did not expect summary prompt truncation: %#v", plan)
+	}
+}
+
+func TestStoreCanPlanCompactionWithoutBuildingLegacyPrompt(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "compactnoprompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"one", "two", "three"} {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 1, SkipPrompt: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.CompactableCount != 2 || plan.SummaryPrompt != "" || plan.PromptChars != 0 || plan.Truncated {
+		t.Fatalf("unexpected prompt-free plan: %#v", plan)
 	}
 }
 

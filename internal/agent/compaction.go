@@ -38,8 +38,9 @@ const compactionTriggerRatio = 0.7
 // transcript (and so tests can assert on it).
 const summaryLabel = "[Summary of earlier conversation]"
 
-// summaryInstructions is the system prompt handed to the summarizer model.
-const summaryInstructions = "You are compacting a coding-assistant conversation to save context. " +
+// CompactionSummaryInstructions is the system prompt handed to both automatic
+// and manually requested compaction summarizers.
+const CompactionSummaryInstructions = "You are compacting a coding-assistant conversation to save context. " +
 	"Write a dense, factual summary of the conversation so far. Preserve: the user's goals and explicit constraints; " +
 	"decisions made and why; files created or modified (with paths) and key code changes; commands run and their important " +
 	"results; and anything still in progress or unresolved. Omit pleasantries. Use terse bullet points. Do not invent details. " +
@@ -216,11 +217,7 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 		}, nil
 	}
 
-	summaryInput := projectCompactionInput(middle)
-	if len(summaryInput) == 0 {
-		summaryInput = middle
-	}
-	summary, err := opts.Summarize(summaryInput)
+	summary, err := SummarizeCompactionMessages(middle, opts.Summarize)
 	if err != nil {
 		return CompactionResult{}, err
 	}
@@ -244,6 +241,24 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 		SummaryText:    summary,
 		Compacted:      true,
 	}, nil
+}
+
+// SummarizeCompactionMessages applies the shared semantic projection before
+// invoking a caller-supplied summarizer. Automatic context-pressure compaction
+// and manual session compaction both use this path.
+func SummarizeCompactionMessages(messages []zeroruntime.Message, summarize func([]zeroruntime.Message) (string, error)) (string, error) {
+	if summarize == nil {
+		return "", errors.New("compaction requires a Summarize function")
+	}
+	summaryInput := projectCompactionInput(messages)
+	if len(summaryInput) == 0 {
+		summaryInput = messages
+	}
+	summary, err := summarize(summaryInput)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(summary), nil
 }
 
 // safeSuffixBoundary walks the preserve boundary backward (toward systemEnd) so
@@ -580,7 +595,7 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
 	request := zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{
-			{Role: zeroruntime.MessageRoleSystem, Content: summaryInstructions},
+			{Role: zeroruntime.MessageRoleSystem, Content: CompactionSummaryInstructions},
 			{Role: zeroruntime.MessageRoleUser, Content: "Summarize this conversation:\n\n" + renderTranscript(messages)},
 		},
 		// No tools: this is a plain text summarization call.

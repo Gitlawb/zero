@@ -15,8 +15,9 @@ const (
 	compactionToolCallsPerTurn     = 8
 	compactionToolArgumentBytes    = 120
 	compactionErrorBytes           = 150
-	compactionPreviousSummaryWords = 400
-	compactionBriefMaxLines        = 120
+	compactionResultBytes          = 1200
+	compactionPreviousSummaryBytes = 16 * 1024
+	compactionBriefMaxBytes        = 24 * 1024
 )
 
 var compactionWordPattern = regexp.MustCompile(`[\p{L}\p{N}]+`)
@@ -37,7 +38,7 @@ func projectCompactionInput(messages []zeroruntime.Message) []zeroruntime.Messag
 			}
 			trimmed := strings.TrimSpace(content)
 			if strings.HasPrefix(trimmed, summaryLabel) {
-				previousSummary = clipInformativeWords(strings.TrimSpace(strings.TrimPrefix(trimmed, summaryLabel)), compactionPreviousSummaryWords)
+				previousSummary = clipHeadTailBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, summaryLabel)), compactionPreviousSummaryBytes)
 				continue
 			}
 			if content = clipInformativeWords(content, compactionUserWordBudget); content != "" {
@@ -67,20 +68,27 @@ func projectCompactionInput(messages []zeroruntime.Message) []zeroruntime.Messag
 			// New tool-result messages carry the execution status directly, as the
 			// source ToolResult does. Keep the text check for older session history
 			// created before Message exposed IsError.
-			if !message.IsError && !isLikelyToolError(message.Content) {
+			name := toolNameForResult(messages, index)
+			mustPreserve := name == "ask_user" || len(message.ChangedFiles) > 0
+			if !mustPreserve && !message.IsError && !isLikelyToolError(message.Content) {
 				continue
 			}
-			name := toolNameForResult(messages, index)
 			if name == "" {
 				name = "tool"
 			}
-			sections = append(sections, fmt.Sprintf("[tool_error #%d] %s\n%s", index, name, clipBytes(firstLine(message.Content), compactionErrorBytes)))
+			switch {
+			case message.IsError || isLikelyToolError(message.Content):
+				sections = append(sections, fmt.Sprintf("[tool_error #%d] %s\n%s", index, name, clipBytes(firstLine(message.Content), compactionErrorBytes)))
+			case name == "ask_user":
+				sections = append(sections, fmt.Sprintf("[user_answer #%d] %s\n%s", index, name, clipBytes(message.Content, compactionResultBytes)))
+			default:
+				sections = append(sections, fmt.Sprintf("[tool_result #%d] %s changed %s\n%s", index, name,
+					clipBytes(strings.Join(message.ChangedFiles, ", "), compactionToolArgumentBytes), clipBytes(firstLine(message.Content), compactionErrorBytes)))
+			}
 		}
 	}
-	if len(sections) == 0 {
-		if previousSummary == "" {
-			return nil
-		}
+	if len(sections) == 0 && previousSummary == "" {
+		return nil
 	}
 	brief := capCompactionBrief(strings.Join(sections, "\n\n"))
 	if previousSummary != "" {
@@ -90,29 +98,36 @@ func projectCompactionInput(messages []zeroruntime.Message) []zeroruntime.Messag
 }
 
 func capCompactionBrief(brief string) string {
-	lines := strings.Split(brief, "\n")
-	if len(lines) <= compactionBriefMaxLines {
+	if len(brief) <= compactionBriefMaxBytes {
 		return brief
 	}
-	kept := lines[len(lines)-compactionBriefMaxLines:]
-	for index, line := range kept {
-		if strings.HasPrefix(line, "[") {
-			kept = kept[index:]
-			break
-		}
-	}
-	omitted := len(lines) - len(kept)
-	return fmt.Sprintf("...(%d earlier lines omitted)\n\n%s", omitted, strings.Join(kept, "\n"))
+	marker := "\n\n...[middle transcript omitted to fit compaction budget]...\n\n"
+	available := compactionBriefMaxBytes - len(marker)
+	// Keep both chronological edges: the oldest material has not necessarily
+	// been summarized before, while the newest material is most actionable.
+	headBytes := available * 2 / 5
+	tailBytes := available - headBytes
+	head := clipPrefixAtBoundary(brief, headBytes)
+	tail := clipSuffixAtBoundary(brief, tailBytes)
+	return strings.TrimSpace(head) + marker + strings.TrimSpace(tail)
 }
 
 func compactionToolCallLine(call zeroruntime.ToolCall) string {
 	detail := ""
 	var arguments map[string]any
 	if json.Unmarshal([]byte(strings.TrimSpace(call.Arguments)), &arguments) == nil {
-		for _, key := range []string{"file_path", "path", "query", "pattern"} {
+		for _, key := range []string{"file_path", "path", "url", "query", "pattern", "prompt", "description", "question"} {
 			if value, ok := arguments[key].(string); ok && strings.TrimSpace(value) != "" {
 				detail = value
 				break
+			}
+		}
+		if detail == "" && call.Name == "ask_user" {
+			detail = askUserQuestionsDetail(arguments)
+		}
+		if detail == "" && call.Name == "apply_patch" {
+			if patch, ok := arguments["patch"].(string); ok {
+				detail = strings.Join(patchPaths(patch), ", ")
 			}
 		}
 	}
@@ -161,14 +176,106 @@ func clipInformativeWords(text string, limit int) string {
 
 func clipBytes(text string, limit int) string {
 	text = strings.TrimSpace(text)
+	if limit <= 0 {
+		return ""
+	}
 	if len(text) <= limit {
 		return text
+	}
+	if limit <= 3 {
+		end := limit
+		for end > 0 && end < len(text) && text[end]&0xc0 == 0x80 {
+			end--
+		}
+		return text[:end]
 	}
 	end := limit - 3
 	for end > 0 && end < len(text) && text[end]&0xc0 == 0x80 {
 		end--
 	}
 	return strings.TrimSpace(text[:end]) + "..."
+}
+
+func clipHeadTailBytes(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= limit {
+		return text
+	}
+	if limit <= 0 {
+		return ""
+	}
+	marker := "\n...[middle omitted]...\n"
+	if limit <= len(marker) {
+		return clipBytes(text, limit)
+	}
+	available := limit - len(marker)
+	head := clipPrefixAtBoundary(text, available/2)
+	tail := clipSuffixAtBoundary(text, available-available/2)
+	return strings.TrimSpace(head) + marker + strings.TrimSpace(tail)
+}
+
+func clipPrefixAtBoundary(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	end := limit
+	for end > 0 && text[end]&0xc0 == 0x80 {
+		end--
+	}
+	if boundary := strings.LastIndex(text[:end], "\n\n["); boundary > 0 {
+		end = boundary
+	}
+	return text[:end]
+}
+
+func clipSuffixAtBoundary(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	start := len(text) - limit
+	for start < len(text) && text[start]&0xc0 == 0x80 {
+		start++
+	}
+	if boundary := strings.Index(text[start:], "\n\n["); boundary >= 0 {
+		start += boundary + 2
+	}
+	return text[start:]
+}
+
+func askUserQuestionsDetail(arguments map[string]any) string {
+	raw, ok := arguments["questions"].([]any)
+	if !ok {
+		return ""
+	}
+	questions := make([]string, 0, len(raw))
+	for _, item := range raw {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if question, ok := object["question"].(string); ok && strings.TrimSpace(question) != "" {
+			questions = append(questions, strings.TrimSpace(question))
+		}
+	}
+	return strings.Join(questions, " | ")
+}
+
+func patchPaths(patch string) []string {
+	var paths []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(patch, "\n") {
+		for _, prefix := range []string{"*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "} {
+			if !strings.HasPrefix(line, prefix) {
+				continue
+			}
+			path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			if path != "" && !seen[path] {
+				seen[path] = true
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
 }
 
 var compactionStopWords = map[string]bool{

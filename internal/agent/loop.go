@@ -719,10 +719,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				turnRequestedModel = toolResult.RequestedModel
 			}
 			messages = append(messages, zeroruntime.Message{
-				Role:       zeroruntime.MessageRoleTool,
-				Content:    toolResult.Output,
-				ToolCallID: toolResult.ToolCallID,
-				IsError:    toolResult.Status == tools.StatusError,
+				Role:         zeroruntime.MessageRoleTool,
+				Content:      toolResult.Output,
+				ToolCallID:   toolResult.ToolCallID,
+				IsError:      toolResult.Status == tools.StatusError,
+				ChangedFiles: append([]string(nil), toolResult.ChangedFiles...),
 			})
 			// Images ride a following USER message rather than the tool result
 			// above. Every provider drops images on a tool-role message —
@@ -3316,6 +3317,9 @@ func copyMessages(messages []Message) []Message {
 		}
 		if message.Reasoning != nil {
 			copied[index].Reasoning = append([]zeroruntime.ReasoningBlock{}, message.Reasoning...)
+		}
+		if message.ChangedFiles != nil {
+			copied[index].ChangedFiles = append([]string(nil), message.ChangedFiles...)
 		}
 		// Deep-copy image attachments (slice AND each Data byte slice) so the
 		// raw image bytes are never aliased across history/request/result copies.

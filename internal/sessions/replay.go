@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type EventRef struct {
@@ -37,6 +38,7 @@ type RewindPlan struct {
 type CompactionOptions struct {
 	PreserveLast   int
 	MaxPromptChars int
+	SkipPrompt     bool
 }
 
 type CompactionPlan struct {
@@ -164,7 +166,11 @@ func (store *Store) PlanCompaction(sessionID string, options CompactionOptions) 
 	}
 	compactable := events[:split]
 	preserved := events[split:]
-	prompt, truncated := buildCompactionPrompt(compactable, maxPromptChars)
+	prompt := ""
+	truncated := false
+	if !options.SkipPrompt {
+		prompt, truncated = buildCompactionPrompt(compactable, maxPromptChars)
+	}
 	return CompactionPlan{
 		SessionID:         sessionID,
 		PreserveLast:      preserveLast,
@@ -310,6 +316,87 @@ func buildCompactionPrompt(events []Event, maxChars int) (string, bool) {
 		return cutPromptRuneBoundary(prompt, maxChars-len("\n[truncated]")) + "\n[truncated]", true
 	}
 	return prompt, false
+}
+
+// CompactionMessages converts durable session events into the same normalized
+// message shape used by the running agent's compaction pipeline. Provider usage
+// and checkpoint blobs are omitted; security-sensitive event payloads use the
+// same redacted previews as the session compaction plan.
+func CompactionMessages(events []Event) []zeroruntime.Message {
+	messages := make([]zeroruntime.Message, 0, len(events))
+	for _, event := range events {
+		var payload map[string]any
+		_ = json.Unmarshal(event.Payload, &payload)
+		stringField := func(key string) string {
+			value, _ := payload[key].(string)
+			return strings.TrimSpace(value)
+		}
+		switch event.Type {
+		case EventMessage:
+			role := strings.ToLower(stringField("role"))
+			content := stringField("content")
+			switch role {
+			case "user":
+				messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: content})
+			case "assistant":
+				messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: content})
+			case "ask_user_answers":
+				if answers, ok := payload["answers"]; ok {
+					encoded, _ := json.Marshal(answers)
+					messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "User answers: " + redaction.RedactString(string(encoded), redaction.Options{})})
+				}
+			default:
+				if content != "" {
+					messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: content})
+				}
+			}
+		case EventToolCall:
+			messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{{
+				ID: firstSessionString(stringField("toolCallId"), stringField("id")), Name: firstSessionString(stringField("name"), stringField("toolName")), Arguments: stringField("arguments"),
+			}}})
+		case EventToolResult:
+			status := strings.ToLower(stringField("status"))
+			messages = append(messages, zeroruntime.Message{
+				Role: zeroruntime.MessageRoleTool, ToolCallID: firstSessionString(stringField("toolCallId"), stringField("id")),
+				Content: stringField("output"), IsError: status != "" && status != "ok", ChangedFiles: sessionStringSlice(payload["changedFiles"]),
+			})
+		case EventCompaction:
+			if summary := stringField("summary"); summary != "" {
+				messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "[Summary of earlier conversation]\n" + summary})
+			}
+		case EventProviderUsage, EventSessionCheckpoint:
+			continue
+		default:
+			preview := shapedPayloadPreview(event)
+			if strings.TrimSpace(preview) != "" && preview != "{}" {
+				messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: fmt.Sprintf("[%s] %s", event.Type, preview)})
+			}
+		}
+	}
+	return messages
+}
+
+func firstSessionString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func sessionStringSlice(value any) []string {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+			values = append(values, strings.TrimSpace(text))
+		}
+	}
+	return values
 }
 
 func shapedPayloadPreview(event Event) string {

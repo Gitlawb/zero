@@ -102,7 +102,7 @@ type skillEntry struct {
 	body string
 }
 
-// recentEdits returns the files mutated by write_file/edit_file calls in messages
+// recentEdits returns files mutated by editing calls in messages
 // — latest note per path, in last-seen order — as skillEntry{name: path, body:
 // note}. After compaction elides the editing turns, this tells the model WHAT it
 // changed in each file (from the tool's result) so it need not re-read to
@@ -113,6 +113,7 @@ type skillEntry struct {
 // rather than an earlier, now-stale entry.
 func recentEdits(messages []zeroruntime.Message) []skillEntry {
 	pathByID := map[string]string{}
+	noteByPath := map[string]string{}
 	sequence := make([]string, 0)
 	for _, message := range messages {
 		for _, call := range message.ToolCalls {
@@ -129,12 +130,24 @@ func recentEdits(messages []zeroruntime.Message) []skillEntry {
 			sequence = append(sequence, path)
 		}
 	}
+	for _, message := range messages {
+		if message.Role != zeroruntime.MessageRoleTool || len(message.ChangedFiles) == 0 {
+			continue
+		}
+		for _, path := range message.ChangedFiles {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			sequence = append(sequence, path)
+			noteByPath[path] = editNote(message.Content)
+		}
+	}
 	order := lastSeenOrder(sequence)
 	if len(order) == 0 {
 		return nil
 	}
 
-	noteByPath := map[string]string{}
 	for _, message := range messages {
 		if message.Role != zeroruntime.MessageRoleTool || message.ToolCallID == "" {
 			continue
@@ -435,6 +448,7 @@ type preservedTaskState struct {
 	VerificationFailed  int                 `json:"verification_failed,omitempty"`
 	VerificationOutcome Outcome             `json:"verification_outcome,omitempty"`
 	Constraints         []string            `json:"constraints,omitempty"`
+	ChangedFiles        []string            `json:"changed_files,omitempty"`
 	UnresolvedFailures  []taskFailureState  `json:"unresolved_failures,omitempty"`
 	Approvals           []taskApprovalState `json:"approvals,omitempty"`
 	Artifacts           []taskArtifactState `json:"artifacts,omitempty"`
@@ -474,6 +488,7 @@ func appendPreservedState(summary string, middle []zeroruntime.Message, taskSnap
 		task = &preservedTaskState{
 			Objective:          capTaskObjective(taskSnapshot.Objective),
 			Constraints:        mergeBoundedComparable(priorTaskConstraints(priorState.Task), taskSnapshot.Constraints, maxTaskConstraints),
+			ChangedFiles:       mergeBoundedComparable(priorTaskChangedFiles(priorState.Task), taskSnapshot.ChangedFiles, maxTaskEvidenceEntries),
 			UnresolvedFailures: mergeTaskFailures(priorTaskFailures(priorState.Task), taskSnapshot.UnresolvedFailures, taskSnapshot.ResolvedFailureKeys),
 			Approvals:          mergeBoundedComparable(priorTaskApprovals(priorState.Task), taskSnapshot.Approvals, maxTaskEvidenceEntries),
 			Artifacts:          mergeBoundedComparable(priorTaskArtifacts(priorState.Task), taskSnapshot.Artifacts, maxTaskEvidenceEntries),
@@ -551,6 +566,13 @@ func priorTaskConstraints(task *preservedTaskState) []string {
 		return nil
 	}
 	return task.Constraints
+}
+
+func priorTaskChangedFiles(task *preservedTaskState) []string {
+	if task == nil {
+		return nil
+	}
+	return task.ChangedFiles
 }
 
 func priorTaskFailures(task *preservedTaskState) []taskFailureState {

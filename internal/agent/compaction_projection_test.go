@@ -3,9 +3,18 @@ package agent
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
+
+func TestClipBytesHandlesTinyLimitsOnRuneBoundaries(t *testing.T) {
+	for _, limit := range []int{0, 1, 2, 3} {
+		if clipped := clipBytes("世界", limit); len(clipped) > limit || !utf8.ValidString(clipped) {
+			t.Fatalf("clipBytes limit %d returned invalid result %q", limit, clipped)
+		}
+	}
+}
 
 func TestProjectCompactionInputDropsRecoverableToolBodies(t *testing.T) {
 	largeBody := strings.Repeat("recoverable source line\n", 1000)
@@ -47,6 +56,26 @@ func TestProjectCompactionInputRetainsStructurallyMarkedToolErrors(t *testing.T)
 	}
 }
 
+func TestProjectCompactionInputRetainsAskUserExchangeAndSemanticArguments(t *testing.T) {
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{{ID: "ask", Name: "ask_user", Arguments: `{"questions":[{"question":"Which database should remain?"}]}`}}},
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "ask", Content: "Which database should remain?: Postgres only; do not touch MySQL."},
+		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{
+			{ID: "patch", Name: "apply_patch", Arguments: `{"patch":"*** Begin Patch\n*** Update File: internal/db.go\n*** End Patch"}`},
+			{ID: "fetch", Name: "web_fetch", Arguments: `{"url":"https://example.com/spec"}`},
+			{ID: "task", Name: "task", Arguments: `{"prompt":"Inspect the Windows implementation"}`},
+		}},
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "patch", Content: "Done!", ChangedFiles: []string{"internal/db.go"}},
+	}
+
+	content := projectCompactionInput(messages)[0].Content
+	for _, want := range []string{"Which database should remain?", "Postgres only; do not touch MySQL", "internal/db.go", "https://example.com/spec", "Inspect the Windows implementation"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("projection missing %q: %q", want, content)
+		}
+	}
+}
+
 func TestProjectCompactionInputCapsToolCallsPerTurn(t *testing.T) {
 	calls := make([]zeroruntime.ToolCall, 12)
 	for index := range calls {
@@ -60,17 +89,18 @@ func TestProjectCompactionInputCapsToolCallsPerTurn(t *testing.T) {
 }
 
 func TestProjectCompactionInputCarriesPreviousSummaryOutsideBriefCap(t *testing.T) {
-	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: summaryLabel + "\nkeep the earlier architecture decision\n\n" + preservedStateLabel + "\n{}"}}
-	for range compactionBriefMaxLines {
-		messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "later transcript detail"})
-		messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "later request"})
+	previous := "keep the earlier architecture decision\n" + strings.Repeat("prior detail ", 2000) + "\nkeep the newest prior decision"
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: summaryLabel + "\n" + previous + "\n\n" + preservedStateLabel + "\n{}"}}
+	for index := range 500 {
+		messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: strings.Repeat("later transcript detail ", 20)})
+		messages = append(messages, zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "later request " + strings.Repeat("context ", 20) + string(rune('a'+index%26))})
 	}
 
 	content := projectCompactionInput(messages)[0].Content
-	if !strings.Contains(content, "[previous summary]\nkeep the earlier architecture decision") {
+	if !strings.Contains(content, "[previous summary]\nkeep the earlier architecture decision") || !strings.Contains(content, "keep the newest prior decision") {
 		t.Fatalf("previous summary was lost when the brief tail was capped: %q", content)
 	}
-	if !strings.Contains(content, "earlier lines omitted") {
-		t.Fatalf("oversized brief was not capped: %q", content)
+	if !strings.Contains(content, "middle transcript omitted to fit compaction budget") {
+		t.Fatalf("oversized brief was not head/tail capped: %q", content)
 	}
 }

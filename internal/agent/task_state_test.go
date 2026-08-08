@@ -163,6 +163,18 @@ func TestTaskStateRecordsDurableRuntimeEvidence(t *testing.T) {
 	if failures := state.snapshot().UnresolvedFailures; len(failures) != 0 {
 		t.Fatalf("successful non-command retry did not resolve its matching failure: %#v", failures)
 	}
+	state.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: `{"path":"a.go"}`, toolResult: ToolResult{
+		ToolCallID: "read-a-3", Name: "read_file", Status: tools.StatusError, Output: "Error: a.go failed again",
+	}})
+	snapshot = state.snapshot()
+	if len(snapshot.UnresolvedFailures) != 1 || snapshot.UnresolvedFailures[0].Summary != "Error: a.go failed again" {
+		t.Fatalf("a failure recurring after success was hidden: %#v", snapshot.UnresolvedFailures)
+	}
+	for _, key := range snapshot.ResolvedFailureKeys {
+		if key == snapshot.UnresolvedFailures[0].Key {
+			t.Fatalf("recurring failure retained a stale resolved key: %#v", snapshot.ResolvedFailureKeys)
+		}
+	}
 }
 
 func TestTaskStatePlanParityUsesLatestPlan(t *testing.T) {

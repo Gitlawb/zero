@@ -481,6 +481,15 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, input := range []sessions.AppendEventInput{
+		{Type: sessions.EventToolCall, Payload: map[string]any{"id": "ask", "name": "ask_user", "arguments": `{"questions":[{"question":"Which database should remain?"}]}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"toolCallId": "ask", "name": "ask_user", "status": "ok", "output": "Postgres only"}},
+	} {
+		m, err = m.appendSessionEvent(input.Type, input.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, content := range []string{
 		"old decision A",
 		"old decision B",
@@ -520,6 +529,15 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one provider summarization request, got %d", len(provider.requests))
+	}
+	request := provider.requests[0]
+	if len(request.Messages) != 2 || request.Messages[0].Content != agent.CompactionSummaryInstructions {
+		t.Fatalf("manual compaction did not use the shared agent compaction prompt: %#v", request.Messages)
+	}
+	for _, want := range []string{"Which database should remain?", "Postgres only"} {
+		if !strings.Contains(request.Messages[1].Content, want) {
+			t.Fatalf("manual compaction projection lost %q: %q", want, request.Messages[1].Content)
+		}
 	}
 	if next.lastCompactResult == nil || next.lastCompactResult.Summary != "Provider summary keeps the actual old decisions." {
 		t.Fatalf("expected provider summary result, got %#v", next.lastCompactResult)

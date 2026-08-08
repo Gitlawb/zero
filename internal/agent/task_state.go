@@ -242,6 +242,7 @@ func (state *taskState) observeToolEvidence(arguments string, result ToolResult)
 			state.snapshotValue.ResolvedFailureKeys = appendBoundedUnique(state.snapshotValue.ResolvedFailureKeys, key, maxTaskEvidenceEntries)
 		}
 	} else {
+		state.snapshotValue.ResolvedFailureKeys = removeString(state.snapshotValue.ResolvedFailureKeys, key)
 		state.snapshotValue.UnresolvedFailures = removeTaskFailure(state.snapshotValue.UnresolvedFailures, key)
 		state.snapshotValue.UnresolvedFailures = appendBounded(state.snapshotValue.UnresolvedFailures, taskFailureState{
 			Key: key, Tool: result.Name, Command: command, Summary: capTaskEvidence(firstLine(result.Output)),
@@ -376,6 +377,16 @@ func removeTaskFailure(values []taskFailureState, key string) []taskFailureState
 	out := values[:0]
 	for _, value := range values {
 		if value.Key != key {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func removeString(values []string, target string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != target {
 			out = append(out, value)
 		}
 	}
