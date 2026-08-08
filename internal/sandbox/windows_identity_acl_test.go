@@ -180,3 +180,41 @@ func TestPrincipalACLActionsAreDistinct(t *testing.T) {
 		seen[action] = true
 	}
 }
+
+// ProtectedMetadataNames is joined onto the write root to place a deny ACE and to
+// materialize the directory it names. A value that is not a single component
+// therefore puts both OUTSIDE the workspace: ".." walks up out of it, and a
+// separator reaches through whatever sits in between. Every caller passes a
+// package constant today, so this is the guard that keeps it true if one ever
+// sources these from config.
+func TestPrincipalACLPlanRefusesProtectedNamesThatEscapeTheWriteRoot(t *testing.T) {
+	root := filepath.FromSlash("/ws/project")
+	for _, name := range []string{"..", ".", "", `..\..\Windows\System32`, "nested/child", `nested\child`, "C:", "stream:name"} {
+		t.Run(name, func(t *testing.T) {
+			input := testPrincipalInput()
+			input.WriteRoots = []WritableRoot{{
+				Root:                   root,
+				ProtectedMetadataNames: []string{name},
+			}}
+			plan, err := buildWindowsPrincipalACLPlan(input)
+			if err == nil {
+				t.Fatalf("accepted protected metadata name %q, which would place a deny ACE outside %s:\n%#v", name, root, plan.Entries)
+			}
+			if len(plan.Entries) != 0 {
+				t.Errorf("returned %d entries alongside the error, so a caller ignoring err would still apply them", len(plan.Entries))
+			}
+		})
+	}
+}
+
+// The ordinary names must keep working, or the guard above is just a break.
+func TestPrincipalACLPlanStillAcceptsTheRealProtectedNames(t *testing.T) {
+	input := testPrincipalInput()
+	input.WriteRoots = []WritableRoot{{
+		Root:                   filepath.FromSlash("/ws/project"),
+		ProtectedMetadataNames: sandboxFullyProtectedMetadataNames,
+	}}
+	if _, err := buildWindowsPrincipalACLPlan(input); err != nil {
+		t.Fatalf("the shipped protected names were rejected: %v", err)
+	}
+}
