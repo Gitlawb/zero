@@ -18,7 +18,7 @@ import (
 // index, objects and refs. So the directory needs DELETE denied on itself while
 // staying writable underneath.
 func TestThePrincipalCannotRenameTheGitDirectory(t *testing.T) {
-	root := filepath.Join("C:\\", "work", "repo")
+	root := filepath.FromSlash("/ws/repo")
 	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
 		PrincipalSID: "S-1-5-21-1-2-3-1001",
 		WriteRoots: []WritableRoot{{
@@ -31,7 +31,11 @@ func TestThePrincipalCannotRenameTheGitDirectory(t *testing.T) {
 		t.Fatalf("buildWindowsPrincipalACLPlan: %v", err)
 	}
 
-	gitDir := filepath.Join(root, ".git")
+	// The plan normalizes every write root before it names an ACE, so the
+	// expected path has to be normalized too or this compares two spellings of
+	// the same directory. Hardcoding a drive letter instead would pass on
+	// Windows and fail everywhere else, since the builder is portable code.
+	gitDir := filepath.Join(normalizeProfilePath(root), ".git")
 	var denyDelete *WindowsACLEntry
 	for index := range plan.Entries {
 		if plan.Entries[index].Action == WindowsACLDenyDelete && plan.Entries[index].Path == gitDir {
@@ -52,7 +56,7 @@ func TestThePrincipalCannotRenameTheGitDirectory(t *testing.T) {
 // rename. It also must not be materialized into existence: .git is git's to
 // create, and an empty .git directory made by setup breaks `git init`.
 func TestTheGitRenameGuardDoesNotBlockGitsOwnWrites(t *testing.T) {
-	root := filepath.Join("C:\\", "work", "repo")
+	root := filepath.FromSlash("/ws/repo")
 	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
 		PrincipalSID: "S-1-5-21-1-2-3-1001",
 		WriteRoots: []WritableRoot{{
@@ -65,7 +69,7 @@ func TestTheGitRenameGuardDoesNotBlockGitsOwnWrites(t *testing.T) {
 		t.Fatalf("buildWindowsPrincipalACLPlan: %v", err)
 	}
 
-	gitDir := filepath.Join(root, ".git")
+	gitDir := filepath.Join(normalizeProfilePath(root), ".git")
 	for _, entry := range plan.Entries {
 		if entry.Path != gitDir {
 			continue
