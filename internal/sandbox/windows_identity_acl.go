@@ -175,10 +175,16 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 		// inheritance.
 		//
 		// Dropping it does not take away the reads the principal needs to run
-		// commands. It is a member of Users, and the machine's own ACLs already
-		// grant Users read on the system and program directories. What the grant
-		// added on top was read access to places Users are deliberately kept out
-		// of, which is the opposite of what a sandbox is for.
+		// commands. NetUserAdd with USER_PRIV_USER puts the account in the
+		// built-in Users group (see usrPrivUser in windows_identity_windows.go),
+		// and the machine's own ACLs already grant Users read on the system and
+		// program directories. What the grant added on top was read access to the
+		// places Users are deliberately kept out of, which is the opposite of what
+		// a sandbox is for.
+		//
+		// Note this inherits rather than asserts: nothing here checks that those
+		// default ACLs are actually in place, so a hardened image that strips
+		// Users read would need an explicit bounded read set instead.
 		if isWindowsVolumeRoot(path) {
 			continue
 		}
