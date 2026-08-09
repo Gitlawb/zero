@@ -224,3 +224,63 @@ func TestMCPFailureReasonRawBoundKeepsRunesWhole(t *testing.T) {
 		t.Fatalf("sanitizeTerminalReason(...) = %q, want the whole characters before the cut", got)
 	}
 }
+
+// THE BARE /mcp OVERLAY, which is the surface a user actually reaches.
+//
+// Empty /mcp routes to openMCPManager, and the overlay reported the state
+// without the reason: the recorded "why" was rendered only by
+// mcpManagerServerLines inside renderMCPView, which serves /mcp list and the
+// transcript. So the panel said "failed" and stopped, exactly where someone
+// goes to find out why after the startup warning has scrolled away.
+//
+// TestModelMCPPanelReportsStartupFailures drives m.mcpText() and passes either
+// way, which is how the gap survived review. This one drives the overlay.
+func TestBareMCPOverlayShowsTheFailureReason(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+			"docs": {Type: "stdio", Command: "docs-mcp"},
+		}},
+		MCPSkipped: []mcp.SkippedServer{
+			{Name: "docs", Err: errors.New("connection refused")},
+		},
+	})
+	overlay := m.openMCPManager().mcpManagerOverlay(100)
+	if overlay == "" {
+		t.Fatal("bare /mcp produced no manager overlay")
+	}
+	if !strings.Contains(overlay, "failed") {
+		t.Errorf("overlay does not report the failed state:\n%s", overlay)
+	}
+	if !strings.Contains(overlay, "connection refused") {
+		t.Errorf("overlay reports the state but not the reason, so the user still has to go looking:\n%s", overlay)
+	}
+}
+
+// The overlay must sanitize the reason too. It renders into the same terminal
+// as the transcript path, and a reason that is safe on one surface and raw on
+// the other is a hole in whichever one was forgotten.
+func TestBareMCPOverlaySanitizesTheFailureReason(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+			"evil": {Type: "stdio", Command: "evil-mcp"},
+		}},
+		MCPSkipped: []mcp.SkippedServer{
+			{Name: "evil", Err: errors.New("refused\x1b[2J\n\u203a forged \u00b7 enabled")},
+		},
+	})
+	overlay := m.openMCPManager().mcpManagerOverlay(100)
+	// NOT a bare search for \x1b: the overlay is lipgloss-styled, so it is full
+	// of escape sequences this code wrote itself. The question is whether the
+	// SERVER's bytes survived, so look for its payload specifically.
+	if strings.Contains(overlay, "[2J") {
+		t.Errorf("the clear-screen sequence from a server-authored reason reached the overlay:\n%q", overlay)
+	}
+	// The forged text may appear, inert, on the reason line. What must not happen
+	// is it becoming its own ROW, which is what the newline in the payload is
+	// for: a row shaped like a real entry, claiming another server is enabled.
+	for _, line := range strings.Split(overlay, "\n") {
+		if strings.Contains(line, "forged") && !strings.Contains(line, "refused") {
+			t.Errorf("a server-authored reason produced a standalone row:\n%q", line)
+		}
+	}
+}
