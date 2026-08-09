@@ -19,14 +19,16 @@ func newPlatformTransport() localTransport { return unixTransport{} }
 
 func (unixTransport) Endpoint(root, nonce string, pid int) (string, error) {
 	dir := filepath.Join(root, "sockets")
-	if err := ensurePrivateDir(dir); err != nil {
+	dir, err := canonicalPrivateDir(dir)
+	if err != nil {
 		return "", fmt.Errorf("peer messaging: create socket directory: %w", err)
 	}
 	path := filepath.Join(dir, fmt.Sprintf("%d-%s.sock", pid, nonce))
 	// macOS has the smallest supported sockaddr_un path (103 usable bytes).
 	if len(path) > unixSocketPathMax {
 		dir = filepath.Join(os.TempDir(), fmt.Sprintf("zero-peers-%d", os.Getuid()))
-		if err := ensurePrivateDir(dir); err != nil {
+		dir, err = canonicalPrivateDir(dir)
+		if err != nil {
 			return "", fmt.Errorf("peer messaging: create fallback socket directory: %w", err)
 		}
 		path = filepath.Join(dir, fmt.Sprintf("%d-%s.sock", pid, nonce))
@@ -35,6 +37,17 @@ func (unixTransport) Endpoint(root, nonce string, pid int) (string, error) {
 		return "", fmt.Errorf("peer messaging: socket path is too long: %s", path)
 	}
 	return path, nil
+}
+
+func canonicalPrivateDir(path string) (string, error) {
+	canonical, err := canonicalRuntimePath(path)
+	if err != nil {
+		return "", err
+	}
+	if err := ensurePrivateDir(canonical); err != nil {
+		return "", err
+	}
+	return canonical, nil
 }
 
 func (unixTransport) Listen(endpoint string) (net.Listener, error) {

@@ -33,6 +33,33 @@ func TestUnixTransportFallbackAndSocketMode(t *testing.T) {
 	}
 }
 
+func TestUnixTransportCanonicalizesSymlinkedRoot(t *testing.T) {
+	root, err := os.MkdirTemp("", "zp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	target := filepath.Join(root, "physical")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := (unixTransport{}).Endpoint(alias, "0123456789abcdef", 4242)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(endpoint, canonicalTarget+string(filepath.Separator)) {
+		t.Fatalf("endpoint %q is not rooted at canonical target %q", endpoint, canonicalTarget)
+	}
+}
+
 func TestUnixTransportRejectsPathLongerThanFallback(t *testing.T) {
 	transport := unixTransport{}
 	oldTmp := os.Getenv("TMPDIR")
