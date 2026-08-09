@@ -877,9 +877,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
 	// files nor run shell. Ask advertises them and routes each through the existing
-	// OnPermissionRequest flow; shift+tab lets the user switch modes live. An
-	// explicit --skip-permissions-unsafe launch overrides this to unsafe (the only
-	// way to reach unsafe, since shift+tab deliberately cycles auto↔ask only).
+	// OnPermissionRequest flow; shift+tab lets the user switch modes live. A
+	// --full-auto launch overrides this to full-auto. Shift+tab cycles auto↔ask
+	// and never lands on full-auto by itself: it only OFFERS it, and the offer
+	// has to be accepted with ctrl+g before the mode changes.
 	//
 	// Resolve the effective mode BEFORE the deferral gate below so the registration
 	// count uses the SAME permission mode the agent loop's partition will use; an

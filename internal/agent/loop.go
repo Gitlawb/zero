@@ -182,7 +182,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		registry = tools.NewRegistry()
 	}
 
-	permissionMode := options.PermissionMode
+	// Normalized once, here, because this is the single place the run's mode is
+	// read off Options; every comparison downstream takes it as a parameter from
+	// this local. Normalizing at the individual comparison sites instead would
+	// leave the next one added to be found by whoever it breaks.
+	permissionMode := NormalizePermissionMode(options.PermissionMode)
 	if permissionMode == "" {
 		permissionMode = PermissionModeAuto
 	}
@@ -1519,7 +1523,7 @@ func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry 
 	if permissionMode == PermissionModeFullAuto {
 		retryArgs := unsandboxedRetryArgs(args)
 		retry := runToolForUnsandboxedRetry(ctx, registry, call.Name, call.ID, retryArgs, permissionMode, options, progressCallback)
-		return retry, nil, true, PermissionDecisionAllow, "unsafe permission mode permits unsandboxed retry", nil, nil
+		return retry, nil, true, PermissionDecisionAllow, "full-auto permission mode permits unsandboxed retry", nil, nil
 	}
 	decision, err := requestPermission(ctx, request, options)
 	if err != nil {
@@ -1572,7 +1576,7 @@ func maybeRetryWithNetworkAfterSandboxDenial(ctx context.Context, registry *tool
 	request := permissionRequestFromEvent(requestEvent, args, options)
 	if permissionMode == PermissionModeFullAuto {
 		retry := runToolForNetworkRetry(ctx, registry, call.Name, call.ID, args, permissionMode, options, progressCallback)
-		return retry, nil, true, PermissionDecisionAllow, "unsafe permission mode permits sandbox network retry", nil
+		return retry, nil, true, PermissionDecisionAllow, "full-auto permission mode permits sandbox network retry", nil
 	}
 	decision, err := requestPermission(ctx, request, options)
 	if err != nil {

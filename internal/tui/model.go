@@ -1382,6 +1382,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		m = m.cancelUnsafeOfferOnMouse(msg)
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
 		}
@@ -1468,6 +1469,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
+		// A paste is input the user meant, so it answers the pending full-auto
+		// offer with "not now" exactly as any other key does. Without this the
+		// offer stays live across the paste and an unrelated ctrl+g afterwards
+		// silently enters full-auto.
+		m.unsafeArmed = false
 		// A paste into the cloud-STT key prompt fills the key (the common way to
 		// enter an API key), not the composer.
 		if m.sttKeyPrompt != nil {
@@ -4946,7 +4952,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		if m.permissionMode != agent.PermissionModeFullAuto {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendSystem,
-				text: "Shell escape (!) is disabled in " + string(m.permissionMode) + " mode — it bypasses the sandbox. Relaunch with --skip-permissions-unsafe to run shell commands directly.",
+				text: "Shell escape (!) is disabled in " + string(m.permissionMode) + " mode — it bypasses the sandbox. Press shift+tab to full-auto (then ctrl+g to confirm), or relaunch with --full-auto.",
 			})
 			return m, nil
 		}
@@ -6021,4 +6027,24 @@ func toolResultRowText(result agent.ToolResult) string {
 		status = tools.StatusOK
 	}
 	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.ModelOutput(), tuiToolOutputLimit))
+}
+
+// cancelUnsafeOfferOnMouse withdraws a pending full-auto offer when the user
+// acts with the mouse.
+//
+// Deliberate actions only. Passive motion is excluded because terminals report
+// it continuously once motion tracking is on (see the AllMotion/CellMotion
+// fallback in syncMouseCapture): treating a twitch as an answer would retract
+// the offer before anyone could accept it, and a gate that cannot be used gets
+// worked around rather than respected.
+//
+// A click, a release or a wheel turn is a real decision to do something else,
+// and the offer must not survive it. Otherwise a ctrl+g pressed later, for its
+// ordinary meaning, commits full-auto with nobody having agreed to it.
+func (m model) cancelUnsafeOfferOnMouse(msg tea.MouseMsg) model {
+	if _, motion := msg.(tea.MouseMotionMsg); motion {
+		return m
+	}
+	m.unsafeArmed = false
+	return m
 }
