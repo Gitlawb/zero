@@ -27,6 +27,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"unsafe"
@@ -106,6 +107,12 @@ type userInfo1 struct {
 // takes when nothing else about the account should change.
 type userInfo1003 struct {
 	Password *uint16
+}
+
+// userInfo1007 mirrors USER_INFO_1007, the comment-only form. Used to finish
+// the legacy-comment upgrade windowsSandboxUserIsManaged promises.
+type userInfo1007 struct {
+	Comment *uint16
 }
 
 // localGroupInfo1 mirrors LOCALGROUP_INFO_1.
@@ -378,11 +385,83 @@ func windowsSandboxUserIsManaged(username string, workspaceKey string) (bool, er
 	comment := windows.UTF16PtrToString(info.Comment)
 	// An account provisioned before the key was recorded is still ours; it
 	// predates this check and cannot be attributed to a workspace, so it is
-	// adopted and its comment rewritten on the way through.
+	// adopted and its comment rewritten on the way through. The rewrite is
+	// upgradeWindowsSandboxUserComment, called from the adoption path.
 	if comment == windowsSandboxUserComment {
 		return true, nil
 	}
 	return comment == windowsSandboxUserCommentFor(workspaceKey), nil
+}
+
+// windowsSandboxUserHasLegacyComment reports an account carrying the OLD bare
+// ownership comment, the one with no workspace key.
+//
+// Separate from windowsSandboxUserIsManaged rather than folded into it so that
+// function keeps its (bool, error) shape and the test seam around it does not
+// have to change. Both read the same field; this one runs on the adoption path
+// only, at setup time, so the second lookup costs nothing that matters.
+func windowsSandboxUserHasLegacyComment(username string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(username)
+	if err != nil {
+		return false, err
+	}
+	var buffer *byte
+	status, _, _ := procNetUserGetInfo.Call(
+		0, // local machine
+		uintptr(unsafe.Pointer(name)),
+		1, // level: USER_INFO_1
+		uintptr(unsafe.Pointer(&buffer)),
+	)
+	runtime.KeepAlive(name)
+	if status == nerrUserNotFound {
+		return false, nil
+	}
+	if err := netAPIStatus("NetUserGetInfo", status); err != nil {
+		return false, err
+	}
+	if buffer == nil {
+		return false, nil
+	}
+	defer procNetApiBufferFree.Call(uintptr(unsafe.Pointer(buffer)))
+	info := (*userInfo1)(unsafe.Pointer(buffer))
+	if info.Comment == nil {
+		return false, nil
+	}
+	return windows.UTF16PtrToString(info.Comment) == windowsSandboxUserComment, nil
+}
+
+// upgradeWindowsSandboxUserComment stamps the workspace-keyed ownership comment
+// onto an account still carrying the legacy bare one.
+//
+// windowsSandboxUserIsManaged has always said the comment is "rewritten on the
+// way through", and it never was: provisioning only ever set the password. So a
+// pre-key account stayed permanently unattributable, and every later run had to
+// keep accepting the bare comment to avoid orphaning it. Writing the key ends
+// that, and lets the bare form eventually be retired.
+//
+// Not fatal on failure. The account is adopted and usable either way; refusing
+// to provision because a cosmetic stamp did not take would strand a working
+// sandbox over bookkeeping.
+func upgradeWindowsSandboxUserComment(username string, workspaceKey string) error {
+	name, err := windows.UTF16PtrFromString(username)
+	if err != nil {
+		return err
+	}
+	comment, err := windows.UTF16PtrFromString(windowsSandboxUserCommentFor(workspaceKey))
+	if err != nil {
+		return err
+	}
+	info := userInfo1007{Comment: comment}
+	status, _, _ := procNetUserSetInfo.Call(
+		0, // local machine
+		uintptr(unsafe.Pointer(name)),
+		1007, // level: USER_INFO_1007, comment only
+		uintptr(unsafe.Pointer(&info)),
+		0, // no parameter-error index
+	)
+	runtime.KeepAlive(name)
+	runtime.KeepAlive(comment)
+	return netAPIStatus("NetUserSetInfo", status)
 }
 
 // localGroupUsersInfo0 mirrors LOCALGROUP_USERS_INFO_0: one group name pointer.
@@ -501,15 +580,16 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 // post-creation pair would never get past ensureWindowsSandboxGroup on an
 // ordinary machine and would pass without reaching the code it names.
 var (
-	ensureWindowsSandboxGroupFn       = ensureWindowsSandboxGroup
-	ensureWindowsSandboxUserFn        = ensureWindowsSandboxUser
-	addWindowsSandboxUserToGroupFn    = addWindowsSandboxUserToGroup
-	resolveWindowsSandboxSIDFn        = resolveWindowsSandboxSID
-	resetWindowsSandboxUserPasswordFn = resetWindowsSandboxUserPassword
-	windowsSandboxUserIsManagedFn     = windowsSandboxUserIsManaged
-	windowsSandboxUserIsPrivilegedFn  = windowsSandboxUserIsPrivileged
-	grantWindowsSandboxLogonRightsFn  = grantWindowsSandboxLogonRights
-	revokeWindowsSandboxLogonRightsFn = revokeWindowsSandboxLogonRights
+	ensureWindowsSandboxGroupFn          = ensureWindowsSandboxGroup
+	ensureWindowsSandboxUserFn           = ensureWindowsSandboxUser
+	addWindowsSandboxUserToGroupFn       = addWindowsSandboxUserToGroup
+	resolveWindowsSandboxSIDFn           = resolveWindowsSandboxSID
+	resetWindowsSandboxUserPasswordFn    = resetWindowsSandboxUserPassword
+	windowsSandboxUserIsManagedFn        = windowsSandboxUserIsManaged
+	windowsSandboxUserHasLegacyCommentFn = windowsSandboxUserHasLegacyComment
+	windowsSandboxUserIsPrivilegedFn     = windowsSandboxUserIsPrivileged
+	grantWindowsSandboxLogonRightsFn     = grantWindowsSandboxLogonRights
+	revokeWindowsSandboxLogonRightsFn    = revokeWindowsSandboxLogonRights
 	// applyWindowsACLPlanFn is a seam so a test can pin the ORDER of setup's ACL
 	// work. The revocation below only prevents a stale grant if it runs before
 	// the plan that re-adds the current one; a test that exercised the revoke
@@ -566,6 +646,21 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 		}
 		if privileged {
 			return windowsSandboxIdentity{}, "", false, fmt.Errorf("%w: %q", errWindowsSandboxPrivilegedAccount, username)
+		}
+		// Finish the upgrade windowsSandboxUserIsManaged has always promised. An
+		// account carrying the legacy bare comment gets the workspace key stamped
+		// on now, so it stops being unattributable and the bare form can
+		// eventually be retired rather than accepted forever.
+		//
+		// Best effort on purpose: the account is adopted and working either way,
+		// and failing provisioning over a comment would strand a usable sandbox
+		// for bookkeeping. Reported rather than swallowed so a run that keeps
+		// re-adopting the same legacy account is visible.
+		if legacy, err := windowsSandboxUserHasLegacyCommentFn(username); err == nil && legacy {
+			if err := upgradeWindowsSandboxUserComment(username, workspaceKey); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: could not stamp the workspace key onto sandbox principal %s: %v\n",
+					WindowsSandboxSetupName, username, err)
+			}
 		}
 		// Deliberately NOT resetting the password here.
 		//
