@@ -231,6 +231,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 	case rowReasoning:
 		return renderReasoningRow(row, width)
 	case rowSystem:
+		if row.tool == "peer" {
+			return renderPeerMessageRow(row.text, width)
+		}
 		if payload, ok := planCardTranscriptPayload(row.text); ok {
 			return renderPlanCardRow(payload, width)
 		}
@@ -685,6 +688,21 @@ func renderSystemNote(text string, width int) string {
 	return strings.Join(out, "\n")
 }
 
+// renderPeerMessageRow keeps accepted cross-session input lightweight while
+// making its origin distinct from direct user input. The body aligns beneath
+// the dimmed source label, matching the visual rhythm of other agent messages.
+func renderPeerMessageRow(text string, width int) string {
+	header, body, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	lines := []string{fitStyledLine(zeroTheme.faint.Render("› "+header), width)}
+	if body == "" {
+		return strings.Join(lines, "\n")
+	}
+	for _, line := range wrapPlainText(body, maxInt(16, width-2)) {
+		lines = append(lines, fitStyledLine("  "+zeroTheme.ink.Render(line), width))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // isCancellationNotice reports whether a system notice is the run-cancelled
 // marker (single line, written by the cancel path), so it renders amber.
 func isCancellationNotice(text string) bool {
@@ -1124,7 +1142,10 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	top := zeroTheme.permBadge.Render(" PERMISSION ")
 
 	body := fill(zeroTheme.amber).Bold(true).Render(name)
-	if request.ToolName == tools.RequestPermissionsToolName {
+	if request.ToolName == peerPermissionToolName {
+		top = zeroTheme.permBadge.Render(" PEER MESSAGE ")
+		body = fill(zeroTheme.amber).Bold(true).Render("Held message from another session")
+	} else if request.ToolName == tools.RequestPermissionsToolName {
 		body = fill(zeroTheme.amber).Bold(true).Render("Grant requested permissions?")
 	} else if request.SideEffect != "" {
 		body += fill(zeroTheme.ink).Render("  " + request.SideEffect)
@@ -1190,8 +1211,11 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 
 	lines = append(lines, "")
 	footer := "↑↓ move · enter or click to confirm · [esc] cancel run"
-	if request.ToolName == tools.RequestPermissionsToolName {
+	switch request.ToolName {
+	case tools.RequestPermissionsToolName:
 		footer = "↑↓ move · enter or click to confirm · [esc] continue without permissions"
+	case peerPermissionToolName:
+		footer = "↑↓ move · enter or click to confirm · [esc] deny"
 	}
 	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 
@@ -1199,6 +1223,9 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 }
 
 func permissionScopeLine(request agent.PermissionRequest, scope string) string {
+	if request.ToolName == peerPermissionToolName {
+		return "from: " + scope
+	}
 	if request.ToolName == tools.RequestPermissionsToolName {
 		return "permissions: " + scope
 	}
@@ -1209,6 +1236,16 @@ func permissionScopeLine(request agent.PermissionRequest, scope string) string {
 }
 
 func permissionOptionLabel(option permissionOption, request agent.PermissionRequest) string {
+	if request.ToolName == peerPermissionToolName {
+		switch option.choice {
+		case permissionDecisionDeny:
+			return "Deny — drop this message"
+		case permissionDecisionAllow:
+			return "Deliver this message to Zero"
+		default:
+			return option.label
+		}
+	}
 	if request.ToolName == tools.RequestPermissionsToolName {
 		switch option.choice {
 		case permissionDecisionAllow:

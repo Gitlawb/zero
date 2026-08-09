@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/term"
+
+	"github.com/Gitlawb/zero/internal/peermsg"
 )
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
@@ -57,11 +60,46 @@ func Run(ctx context.Context, options Options) int {
 		initialModel.mouseCapture = true
 	}
 	program = tea.NewProgram(initialModel, programOpts...)
+	peerStarted := false
+	if options.PeerService != nil {
+		options.PeerService.SetStatusHandler(func(event peermsg.StatusEvent) {
+			forward(peerStatusMsg{event: event})
+		})
+		options.PeerService.SetHeldEvictionHandler(func(messageID string) {
+			forward(peerApprovalExpiredMsg{messageID: messageID})
+		})
+		options.PeerService.SetHeldReleaseHandler(func(message peermsg.InboundMessage) {
+			forward(peerHeldReleasedMsg{message: message})
+		})
+		if err := options.PeerService.Start(func(message peermsg.InboundMessage) bool {
+			admit := make(chan bool, 1)
+			forward(peerMessageMsg{message: message, admit: admit})
+			select {
+			case accepted := <-admit:
+				return accepted
+			case <-time.After(4 * time.Second):
+				return false
+			}
+		}); err != nil {
+			forward(peerRuntimeErrorMsg{err: err})
+		} else {
+			peerStarted = true
+		}
+	}
 
-	if _, err := program.Run(); err != nil {
+	_, runErr := program.Run()
+	var closeErr error
+	if peerStarted {
+		closeErr = options.PeerService.Close()
+	}
+	if runErr != nil {
 		// Surface the failure: exiting 1 with zero diagnostics left users
 		// guessing why the default chat surface died.
-		fmt.Fprintln(os.Stderr, "zero: tui error:", err)
+		fmt.Fprintln(os.Stderr, "zero: tui error:", runErr)
+		return 1
+	}
+	if closeErr != nil {
+		fmt.Fprintln(os.Stderr, "zero: peer messaging cleanup error:", closeErr)
 		return 1
 	}
 	return 0

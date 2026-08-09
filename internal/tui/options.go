@@ -9,6 +9,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -52,6 +53,7 @@ type Options struct {
 	UsageTracker                *usage.Tracker
 	SessionCompactor            SessionCompactor
 	PrService                   *PrService
+	PeerService                 *peermsg.Service
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any

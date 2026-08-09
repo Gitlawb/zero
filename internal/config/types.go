@@ -340,46 +340,49 @@ func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 }
 
 type FileConfig struct {
-	ActiveProvider string             `json:"activeProvider,omitempty"`
-	Providers      []ProviderProfile  `json:"providers,omitempty"`
-	MaxTurns       int                `json:"maxTurns,omitempty"`
-	MCP            MCPConfig          `json:"mcp,omitempty"`
-	Sandbox        SandboxConfig      `json:"sandbox,omitempty"`
-	Notify         NotifyConfig       `json:"notify,omitempty"`
-	Tools          ToolsConfig        `json:"tools,omitempty"`
-	Swarm          SwarmConfig        `json:"swarm,omitempty"`
-	Preferences    PreferencesConfig  `json:"preferences,omitempty"`
-	KeyBindings    KeyBindingsConfig  `json:"keybindings,omitempty"`
-	LocalControl   LocalControlConfig `json:"localControl,omitempty"`
-	STT            STTConfig          `json:"stt,omitempty"`
+	ActiveProvider      string             `json:"activeProvider,omitempty"`
+	Providers           []ProviderProfile  `json:"providers,omitempty"`
+	MaxTurns            int                `json:"maxTurns,omitempty"`
+	MCP                 MCPConfig          `json:"mcp,omitempty"`
+	Sandbox             SandboxConfig      `json:"sandbox,omitempty"`
+	Notify              NotifyConfig       `json:"notify,omitempty"`
+	Tools               ToolsConfig        `json:"tools,omitempty"`
+	Swarm               SwarmConfig        `json:"swarm,omitempty"`
+	Preferences         PreferencesConfig  `json:"preferences,omitempty"`
+	KeyBindings         KeyBindingsConfig  `json:"keybindings,omitempty"`
+	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
+	STT                 STTConfig          `json:"stt,omitempty"`
+	CrossSessionInbound string             `json:"crossSessionInbound,omitempty"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	type rawConfig struct {
-		ActiveProvider string              `json:"activeProvider,omitempty"`
-		Providers      []ProviderProfile   `json:"providers,omitempty"`
-		MaxTurns       int                 `json:"maxTurns,omitempty"`
-		MCP            MCPConfig           `json:"mcp,omitempty"`
-		Sandbox        SandboxConfig       `json:"sandbox,omitempty"`
-		Notify         NotifyConfig        `json:"notify,omitempty"`
-		Tools          ToolsConfig         `json:"tools,omitempty"`
-		Swarm          SwarmConfig         `json:"swarm,omitempty"`
-		Preferences    PreferencesConfig   `json:"preferences,omitempty"`
-		KeyBindings    KeyBindingsConfig   `json:"keybindings,omitempty"`
-		LocalControl   *LocalControlConfig `json:"localControl,omitempty"`
-		STT            *STTConfig          `json:"stt,omitempty"`
+		ActiveProvider      string              `json:"activeProvider,omitempty"`
+		Providers           []ProviderProfile   `json:"providers,omitempty"`
+		MaxTurns            int                 `json:"maxTurns,omitempty"`
+		MCP                 MCPConfig           `json:"mcp,omitempty"`
+		Sandbox             SandboxConfig       `json:"sandbox,omitempty"`
+		Notify              NotifyConfig        `json:"notify,omitempty"`
+		Tools               ToolsConfig         `json:"tools,omitempty"`
+		Swarm               SwarmConfig         `json:"swarm,omitempty"`
+		Preferences         PreferencesConfig   `json:"preferences,omitempty"`
+		KeyBindings         KeyBindingsConfig   `json:"keybindings,omitempty"`
+		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
+		STT                 *STTConfig          `json:"stt,omitempty"`
+		CrossSessionInbound string              `json:"crossSessionInbound,omitempty"`
 	}
 	raw := rawConfig{
-		ActiveProvider: cfg.ActiveProvider,
-		Providers:      cfg.Providers,
-		MaxTurns:       cfg.MaxTurns,
-		MCP:            cfg.MCP,
-		Sandbox:        cfg.Sandbox,
-		Notify:         cfg.Notify,
-		Tools:          cfg.Tools,
-		Swarm:          cfg.Swarm,
-		Preferences:    cfg.Preferences,
-		KeyBindings:    cfg.KeyBindings,
+		ActiveProvider:      cfg.ActiveProvider,
+		Providers:           cfg.Providers,
+		MaxTurns:            cfg.MaxTurns,
+		MCP:                 cfg.MCP,
+		Sandbox:             cfg.Sandbox,
+		Notify:              cfg.Notify,
+		Tools:               cfg.Tools,
+		Swarm:               cfg.Swarm,
+		Preferences:         cfg.Preferences,
+		KeyBindings:         cfg.KeyBindings,
+		CrossSessionInbound: cfg.CrossSessionInbound,
 	}
 	if !cfg.LocalControl.Empty() {
 		raw.LocalControl = &cfg.LocalControl
@@ -404,33 +407,35 @@ type ResolveOptions struct {
 }
 
 type Overrides struct {
-	ActiveProvider string
-	Providers      []ProviderProfile
-	Provider       ProviderProfile
-	MaxTurns       int
-	MCP            MCPConfig
-	Sandbox        SandboxConfig
-	Notify         NotifyConfig
-	Tools          ToolsConfig
-	KeyBindings    KeyBindingsConfig
-	LocalControl   LocalControlConfig
-	STT            STTConfig
+	ActiveProvider      string
+	Providers           []ProviderProfile
+	Provider            ProviderProfile
+	MaxTurns            int
+	MCP                 MCPConfig
+	Sandbox             SandboxConfig
+	Notify              NotifyConfig
+	Tools               ToolsConfig
+	KeyBindings         KeyBindingsConfig
+	LocalControl        LocalControlConfig
+	STT                 STTConfig
+	CrossSessionInbound string
 }
 
 type ResolvedConfig struct {
-	ActiveProvider string
-	Providers      []ProviderProfile
-	Provider       ProviderProfile
-	MaxTurns       int
-	MCP            MCPConfig
-	Sandbox        SandboxConfig
-	Notify         NotifyConfig
-	Tools          ToolsConfig
-	Swarm          SwarmConfig
-	Preferences    PreferencesConfig
-	KeyBindings    KeyBindingsConfig
-	LocalControl   LocalControlConfig
-	STT            STTConfig
+	ActiveProvider      string
+	Providers           []ProviderProfile
+	Provider            ProviderProfile
+	MaxTurns            int
+	MCP                 MCPConfig
+	Sandbox             SandboxConfig
+	Notify              NotifyConfig
+	Tools               ToolsConfig
+	Swarm               SwarmConfig
+	Preferences         PreferencesConfig
+	KeyBindings         KeyBindingsConfig
+	LocalControl        LocalControlConfig
+	STT                 STTConfig
+	CrossSessionInbound string
 }
 
 type MCPConfig struct {
@@ -480,20 +485,21 @@ type MCPOAuthConfig struct {
 
 func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	type rawConfig struct {
-		ActiveProvider  string                     `json:"activeProvider"`
-		Providers       []ProviderProfile          `json:"providers"`
-		MaxTurns        int                        `json:"maxTurns"`
-		MCP             MCPConfig                  `json:"mcp"`
-		Sandbox         SandboxConfig              `json:"sandbox"`
-		Notify          NotifyConfig               `json:"notify"`
-		Tools           ToolsConfig                `json:"tools"`
-		Swarm           SwarmConfig                `json:"swarm"`
-		Preferences     PreferencesConfig          `json:"preferences"`
-		KeyBindings     KeyBindingsConfig          `json:"keybindings"`
-		LocalControl    LocalControlConfig         `json:"localControl"`
-		STT             STTConfig                  `json:"stt"`
-		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
-		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
+		ActiveProvider      string                     `json:"activeProvider"`
+		Providers           []ProviderProfile          `json:"providers"`
+		MaxTurns            int                        `json:"maxTurns"`
+		MCP                 MCPConfig                  `json:"mcp"`
+		Sandbox             SandboxConfig              `json:"sandbox"`
+		Notify              NotifyConfig               `json:"notify"`
+		Tools               ToolsConfig                `json:"tools"`
+		Swarm               SwarmConfig                `json:"swarm"`
+		Preferences         PreferencesConfig          `json:"preferences"`
+		KeyBindings         KeyBindingsConfig          `json:"keybindings"`
+		LocalControl        LocalControlConfig         `json:"localControl"`
+		STT                 STTConfig                  `json:"stt"`
+		CrossSessionInbound string                     `json:"crossSessionInbound"`
+		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
+		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
 	}
 
 	var raw rawConfig
@@ -520,6 +526,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
 	cfg.STT = raw.STT
+	cfg.CrossSessionInbound = raw.CrossSessionInbound
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

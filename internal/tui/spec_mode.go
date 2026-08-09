@@ -92,6 +92,7 @@ func (m model) createSpecDraftSession(task string) (model, error) {
 	}
 	m.activeSession = session
 	m.sessionEvents = []sessions.Event{}
+	m = m.syncPeerIdentity()
 	return m, nil
 }
 
@@ -199,6 +200,7 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.pendingSpecReview = nil
 	m.activeSession = impl
 	m.sessionEvents = append([]sessions.Event{}, events...)
+	m = m.syncPeerIdentity()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec approved. Starting implementation session " + impl.SessionID + "."})
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)

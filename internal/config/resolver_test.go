@@ -2199,3 +2199,40 @@ func TestResolveRequiresModelErrorIsSetupFixable(t *testing.T) {
 		t.Fatalf("error leaked API key: %q", err.Error())
 	}
 }
+
+func TestCrossSessionInboundProjectConfigCanOnlyTighten(t *testing.T) {
+	tests := []struct {
+		name    string
+		user    string
+		project string
+		want    string
+	}{
+		{name: "hold tightens accept", user: "accept", project: "hold", want: "hold"},
+		{name: "refuse stays refuse", user: "refuse", project: "accept", want: "refuse"},
+		{name: "accept cannot weaken parity", project: "accept", want: ""},
+		{name: "refuse tightens parity", project: "refuse", want: "refuse"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := FileConfig{CrossSessionInbound: test.user}
+			if err := mergeProjectConfig(&cfg, FileConfig{CrossSessionInbound: test.project}); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CrossSessionInbound != test.want {
+				t.Fatalf("crossSessionInbound = %q, want %q", cfg.CrossSessionInbound, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveRejectsInvalidCrossSessionInbound(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "openai",
+		"providers": [{"name":"openai","provider_kind":"openai","apiKey":"sk-x","model":"gpt-5"}],
+		"crossSessionInbound": "sometimes"
+	}`)
+	_, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err == nil || !strings.Contains(err.Error(), "expected accept, hold, or refuse") {
+		t.Fatalf("error = %v", err)
+	}
+}
