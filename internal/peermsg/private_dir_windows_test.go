@@ -5,6 +5,7 @@ package peermsg
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unsafe"
@@ -23,6 +24,9 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var pinner runtime.Pinner
+	pinner.Pin(worldSID)
+	defer pinner.Unpin()
 	broadDACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.GENERIC_ALL,
 		AccessMode:        windows.GRANT_ACCESS,

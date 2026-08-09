@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -72,6 +73,10 @@ func privateDirectoryDescriptor() (*windows.SECURITY_DESCRIPTOR, *windows.SID, *
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resolve Windows Local System SID: %w", err)
 	}
+	var pinner runtime.Pinner
+	pinner.Pin(sid)
+	pinner.Pin(systemSID)
+	defer pinner.Unpin()
 	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
 	for _, trustee := range []struct {
 		sid   *windows.SID
