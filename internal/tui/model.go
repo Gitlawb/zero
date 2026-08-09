@@ -5524,7 +5524,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			flushReasoning(m.now())
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventError,
-				Payload: map[string]any{"message": err.Error()},
+				Payload: sessions.ErrorEventPayload(err),
 			})
 			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
