@@ -44,6 +44,33 @@ func WindowsSandboxPrincipalOptIn(env map[string]string) bool {
 	return windowsSandboxIdentityEnabled(env)
 }
 
+// WindowsSandboxPrincipalInactiveReason explains why the sandbox principal will
+// NOT be used even though it is opted into, or returns empty when it will be.
+//
+// This is the single source of truth for that rule: windowsSandboxPrincipalEligible
+// asks it too, so the runtime and `zero doctor` cannot drift into disagreeing
+// about whether a principal is in play.
+//
+// It exists because the standdown is otherwise invisible. The runner cannot
+// announce it, being re-exec'd per command so the notice would land on the
+// stderr of essentially every tool call, and it is not per-command actionable
+// anyway. But an operator who set the opt-in and believes reads are confined,
+// when they are not, is holding a false picture of their own machine. Doctor is
+// read once, which is where a standing configuration fact belongs.
+//
+// Returns empty when the opt-in is off: that is not a standdown, it is simply
+// not asking for the backend.
+func WindowsSandboxPrincipalInactiveReason(optIn bool, network NetworkMode) string {
+	if !optIn {
+		return ""
+	}
+	if NormalizeNetworkMode(network) != NetworkDeny {
+		return ""
+	}
+	return "network denial is enforced by WFP filters keyed to the offline-marker SID, which a principal token cannot carry, " +
+		"so commands run on the restricted token instead and reads are not confined to the principal"
+}
+
 func windowsSandboxPrincipalOptInValue(optIn bool) string {
 	if optIn {
 		return "1"

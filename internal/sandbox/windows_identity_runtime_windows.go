@@ -65,7 +65,12 @@ func windowsSandboxPrincipalEligible(config WindowsSandboxCommandConfig) bool {
 	// network enforcement, which is a worse trade than the read confinement it
 	// buys. Fall back to the restricted token, which still enforces the network,
 	// until the filters are also keyed to the principal's own SID.
-	return config.PermissionProfile.Network.Mode != NetworkDeny
+	//
+	// Asked of the shared predicate rather than re-tested here, so `zero doctor`
+	// reports exactly the rule this path applies. Two copies would drift, and the
+	// failure mode of drift is doctor telling an operator reads are confined
+	// while commands quietly run on the restricted token.
+	return WindowsSandboxPrincipalInactiveReason(true, config.PermissionProfile.Network.Mode) == ""
 }
 
 // windowsSandboxPrincipalToken returns a token for this workspace's sandbox
