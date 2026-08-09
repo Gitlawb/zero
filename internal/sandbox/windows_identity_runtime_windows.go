@@ -418,8 +418,20 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	if err != nil {
 		return err
 	}
+	// A secret owned by another administrator's setup is not a reason to abandon
+	// the rest of teardown. Aborting here left the account, its logon rights, its
+	// ACEs and its ledger all installed because one file could not be unlinked,
+	// which is the worst of both outcomes: the operator asked for removal, got a
+	// failure, and kept a working principal.
+	//
+	// Remembered and reported at the end rather than swallowed, so the leftover
+	// secret is visible to whoever has to clean it up.
+	var secretErr error
 	if err := removeWindowsSandboxSecret(secretPath); err != nil {
-		return err
+		if !errors.Is(err, errWindowsSandboxSecretNotOurs) {
+			return err
+		}
+		secretErr = err
 	}
 	// Set when ACE revocation could not complete. Teardown continues regardless,
 	// but the ledger is kept and the error surfaced, so the residue stays
@@ -481,9 +493,12 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	// reportable leftover into permanent unfindable residue. Keeping a record
 	// that outlives its principal is the lesser problem, and the error says so.
 	if revokeErr != nil {
-		return fmt.Errorf("%w; the principal ACL ledger has been kept so the remaining ACEs can still be found", revokeErr)
+		return errors.Join(secretErr, fmt.Errorf("%w; the principal ACL ledger has been kept so the remaining ACEs can still be found", revokeErr))
 	}
-	return removeWindowsPrincipalACLLedger(config.SandboxHome, username)
+	// The account and its ACEs are gone either way. A secret left behind is
+	// residue worth naming, not a reason to keep the ledger: there are no ACEs
+	// left for it to describe.
+	return errors.Join(secretErr, removeWindowsPrincipalACLLedger(config.SandboxHome, username))
 }
 
 // setupWindowsSandboxRuntimeRoot resolves this workspace's runtime root and

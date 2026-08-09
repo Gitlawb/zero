@@ -61,6 +61,23 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 			}
 			return aclErr
 		}
+	} else if err := removeWindowsSandboxPrincipalForSetup(config.commandConfig()); err != nil {
+		// Opting out has to actually retire the principal, because that is what
+		// we tell people it does. ValidateWindowsSandboxSetupMarker sends an
+		// operator here in as many words: re-run setup from an elevated terminal
+		// without the opt-in to retire the principal. Until now this branch did
+		// not exist, so the marker flipped to opted-out while the account, its
+		// secret, its logon rights, its ACEs and its ledger all stayed exactly
+		// where they were. The instruction was a lie, and the leftovers were
+		// invisible, because nothing afterwards looks for a principal it believes
+		// was never provisioned.
+		//
+		// Not fatal. Teardown is idempotent and a machine that never had a
+		// principal passes straight through, so a failure here means genuine
+		// residue rather than a missing account: say so and carry on rather than
+		// refusing to complete a setup whose sandbox is otherwise fine.
+		fmt.Fprintf(stderr, "%s: opted out, but retiring the existing sandbox principal did not complete: %v\n",
+			WindowsSandboxSetupName, err)
 	}
 	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
