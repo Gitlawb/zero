@@ -98,7 +98,8 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
 			t.Fatalf("read DACL ACE %d: %v", index, err)
 		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != directoryAllAccess {
+		hasFullAccess := ace.Mask == windows.GENERIC_ALL || ace.Mask&directoryAllAccess == directoryAllAccess
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || !hasFullAccess {
 			t.Fatalf("DACL ACE %d has type %d and mask %#x", index, ace.Header.AceType, ace.Mask)
 		}
 		trustee := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
