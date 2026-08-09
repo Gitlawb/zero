@@ -190,7 +190,7 @@ func TestSecurePrivateDirectoryReportsDACLWriteFailure(t *testing.T) {
 }
 
 func TestClosePrivateWindowsHandleReportsFailure(t *testing.T) {
-	err := closePrivateWindowsHandle(windows.InvalidHandle, `C:\private`)
+	err := closePrivateWindowsHandle(windows.Handle(0), `C:\private`)
 	if err == nil || !strings.Contains(err.Error(), "close private runtime directory") {
 		t.Fatalf("close handle error = %v", err)
 	}
