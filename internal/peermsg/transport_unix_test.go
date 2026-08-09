@@ -66,12 +66,8 @@ func TestUnixTransportCanonicalizesSymlinkedRoot(t *testing.T) {
 
 func TestUnixTransportRejectsPathLongerThanFallback(t *testing.T) {
 	transport := unixTransport{}
-	oldTmp := os.Getenv("TMPDIR")
 	longTmp := filepath.Join(t.TempDir(), strings.Repeat("x", unixSocketPathMax))
-	if err := os.Setenv("TMPDIR", longTmp); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Setenv("TMPDIR", oldTmp) })
+	t.Setenv("TMPDIR", longTmp)
 	if _, err := transport.Endpoint(filepath.Join(t.TempDir(), strings.Repeat("y", unixSocketPathMax)), "0123456789abcdef", 4242); err == nil {
 		t.Fatal("expected too-long fallback path error")
 	}

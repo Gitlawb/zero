@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -351,6 +353,33 @@ func TestClosedServiceDisappearsFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestListReturnsCancellationInsteadOfPartialResults(t *testing.T) {
+	root := t.TempDir()
+	transport := newMemoryTransport()
+	service := newStartedService(t, root, transport, 9401, Identity{SessionID: "sender", Name: "sender"})
+	_ = newStartedService(t, root, transport, 9402, Identity{SessionID: "receiver", Name: "receiver"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	peers, err := service.List(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("List() error = %v, want context.Canceled", err)
+	}
+	if peers != nil {
+		t.Fatalf("List() peers = %#v, want nil after cancellation", peers)
+	}
+}
+
+func TestCloseReportsTransportCleanupFailure(t *testing.T) {
+	transport := &removeErrorTransport{memoryTransport: newMemoryTransport()}
+	service := newService(t, t.TempDir(), transport, 9403, Identity{SessionID: "sender", Name: "sender"})
+	if err := service.Start(func(InboundMessage) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err == nil || !strings.Contains(err.Error(), "forced remove failure") {
+		t.Fatalf("Close() error = %v, want transport cleanup failure", err)
+	}
+}
+
 func TestDiscoveryDoesNotDeleteRecordAfterTransientDialFailure(t *testing.T) {
 	root := t.TempDir()
 	transport := newMemoryTransport()
@@ -542,6 +571,121 @@ func TestHeldEvictionRepairsMissingOrderEntry(t *testing.T) {
 	}
 }
 
+func TestHeldEvictionReceiptDoesNotDelayInboundResponse(t *testing.T) {
+	root := t.TempDir()
+	transport := &slowEndpointTransport{memoryTransport: newMemoryTransport(), slowEndpoint: "memory:slow-sender"}
+	receiver := newService(t, root, transport, 9812, Identity{
+		SessionID: "receiver", PermissionClass: PermissionPrompting,
+	})
+	if err := receiver.Start(func(InboundMessage) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = receiver.Close() })
+	sender := Peer{
+		Identity: Identity{SessionID: "sender", PermissionClass: PermissionBypass},
+		Endpoint: transport.slowEndpoint,
+		PID:      9811,
+		Ref:      peerRef(transport.slowEndpoint),
+	}
+	record, err := json.Marshal(sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(receiver.registryDir(), "9811-sender.json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiver.mu.Lock()
+	for index := range peerMaxHeldMessages {
+		id := fmt.Sprintf("held-%d", index)
+		receiver.held[id] = InboundMessage{ID: id, From: sender, ReceivedAt: time.Unix(int64(index), 0)}
+		receiver.heldOrder = append(receiver.heldOrder, id)
+	}
+	receiver.mu.Unlock()
+
+	conn, err := transport.memoryTransport.Dial(context.Background(), receiver.Self().Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	frame := sendFrame{
+		Version: ProtocolVersion, Type: "message", ID: "new-held", From: sender,
+		To: receiver.Self().SessionID, Summary: "question", Body: "answer this", HopChain: []string{sender.Ref},
+	}
+	started := time.Now()
+	if err := json.NewEncoder(conn).Encode(frame); err != nil {
+		t.Fatal(err)
+	}
+	var response responseFrame
+	if err := decodeFrame(conn, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != DeliveryHeld {
+		t.Fatalf("response = %#v", response)
+	}
+	if elapsed := time.Since(started); elapsed >= peerReceiptTimeout/2 {
+		t.Fatalf("inbound response waited %s for an eviction receipt", elapsed)
+	}
+}
+
+func TestIdentityUpdateSkipsStaleHeldOrderEntries(t *testing.T) {
+	root := t.TempDir()
+	transport := newMemoryTransport()
+	service := newService(t, root, transport, 9822, Identity{SessionID: "receiver", PermissionClass: PermissionPrompting})
+	released := make(chan InboundMessage, 2)
+	service.SetHeldReleaseHandler(func(message InboundMessage) { released <- message })
+	if err := service.Start(func(InboundMessage) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	valid := InboundMessage{
+		ID: "valid", From: Peer{Identity: Identity{SessionID: "sender", PermissionClass: PermissionPrompting}, Endpoint: "memory:gone", Ref: peerRef("memory:gone")},
+	}
+	service.mu.Lock()
+	service.held[valid.ID] = valid
+	service.heldOrder = []string{"missing", valid.ID}
+	service.mu.Unlock()
+	if err := service.UpdateIdentity(Identity{SessionID: "receiver", PermissionClass: PermissionPrompting}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case message := <-released:
+		if message.ID != valid.ID {
+			t.Fatalf("released stale entry as %#v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("valid held message was not released")
+	}
+	select {
+	case message := <-released:
+		t.Fatalf("unexpected additional release: %#v", message)
+	default:
+	}
+}
+
+func TestSendStatusesGivesEveryReceiptAnIndependentDeadline(t *testing.T) {
+	transport := &receiptTransport{}
+	service := &Service{transport: transport, now: time.Now}
+	service.self = Peer{Identity: Identity{SessionID: "receiver"}, Endpoint: "receiver", Ref: peerRef("receiver")}
+	messages := make([]InboundMessage, 0, peerReceiptWorkers+1)
+	for index := range peerReceiptWorkers + 1 {
+		endpoint := fmt.Sprintf("fast-%d", index)
+		if index == 0 {
+			endpoint = "slow"
+		}
+		messages = append(messages, InboundMessage{ID: fmt.Sprint(index), From: Peer{
+			Identity: Identity{SessionID: fmt.Sprintf("sender-%d", index)}, Endpoint: endpoint, Ref: peerRef(endpoint),
+		}})
+	}
+	started := time.Now()
+	service.sendStatuses(messages, DeliveryExpired)
+	if elapsed := time.Since(started); elapsed > 2*peerReceiptTimeout {
+		t.Fatalf("receipt batch took %s; attempts appear serialized", elapsed)
+	}
+	if got, want := transport.fastDials.Load(), int32(len(messages)-1); got != want {
+		t.Fatalf("fast receipt attempts = %d, want %d", got, want)
+	}
+}
+
 func TestSenderGuardEvictsLeastRecentlyAcceptedSender(t *testing.T) {
 	now := time.Unix(1000, 0)
 	service := &Service{now: func() time.Time { return now }, guards: make(map[string]*senderGuard)}
@@ -618,6 +762,52 @@ type memoryTransport struct {
 	mu        sync.Mutex
 	listeners map[string]*memoryListener
 }
+
+type removeErrorTransport struct{ *memoryTransport }
+
+func (transport *removeErrorTransport) Remove(endpoint string) error {
+	_ = transport.memoryTransport.Remove(endpoint)
+	return errors.New("forced remove failure")
+}
+
+type slowEndpointTransport struct {
+	*memoryTransport
+	slowEndpoint string
+}
+
+func (transport *slowEndpointTransport) Dial(ctx context.Context, endpoint string) (net.Conn, error) {
+	if endpoint == transport.slowEndpoint {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return transport.memoryTransport.Dial(ctx, endpoint)
+}
+
+type receiptTransport struct{ fastDials atomic.Int32 }
+
+func (transport *receiptTransport) Endpoint(_ string, _ string, _ int) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (transport *receiptTransport) Listen(string) (net.Listener, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (transport *receiptTransport) Dial(ctx context.Context, endpoint string) (net.Conn, error) {
+	if endpoint == "slow" {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	transport.fastDials.Add(1)
+	client, server := net.Pipe()
+	go func() {
+		_, _ = io.Copy(io.Discard, server)
+		_ = server.Close()
+	}()
+	return client, nil
+}
+
+func (transport *receiptTransport) Remove(string) error { return nil }
 
 func newMemoryTransport() *memoryTransport {
 	return &memoryTransport{listeners: map[string]*memoryListener{}}
