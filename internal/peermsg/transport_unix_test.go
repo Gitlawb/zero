@@ -34,11 +34,15 @@ func TestUnixTransportFallbackAndSocketMode(t *testing.T) {
 }
 
 func TestUnixTransportCanonicalizesSymlinkedRoot(t *testing.T) {
-	root, err := os.MkdirTemp("", "zp-")
+	root, err := os.MkdirTemp("/tmp", "zp-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove temporary transport root: %v", err)
+		}
+	})
 	target := filepath.Join(root, "physical")
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
