@@ -433,6 +433,18 @@ func (m model) mcpManagerSelectionDetail(width int) []string {
 		lines := []string{
 			fillPaletteLine(zeroTheme.ink.Bold(true).Render(server.Name)+" "+zeroTheme.faint.Render(server.Transport+" · "+server.State), width, transparentSurface),
 		}
+		// Directly under the header, above the target, and through the same
+		// sanitizer mcpManagerServerLines uses.
+		//
+		// This overlay is what a bare /mcp opens, so it is the first place a user
+		// goes after a startup warning has scrolled away. It reported the state
+		// and stopped: "failed" on its own sends the reader to check their config
+		// when the answer is usually in the error, which is the whole point of
+		// recording it. The transcript path showed the reason and this one did
+		// not, so the fix only reached the surface people were not looking at.
+		if reason := sanitizeTerminalReason(server.Error); reason != "" {
+			lines = append(lines, fitStyledLine(zeroTheme.faint.Render(reason), width))
+		}
 		if target := strings.TrimSpace(server.Target); target != "" {
 			lines = append(lines, fitStyledLine(zeroTheme.faint.Render(target), width))
 		}
