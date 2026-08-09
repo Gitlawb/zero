@@ -229,9 +229,28 @@ func readWindowsSandboxSecret(path string) (string, error) {
 // removeWindowsSandboxSecret deletes a stored password. Called before the
 // account itself is removed so a secret never outlives the principal it
 // authenticates.
+// errWindowsSandboxSecretNotOurs reports a secret this account cannot delete
+// because another administrator's setup owns its DACL.
+//
+// Distinguishable so teardown can carry on. The alternative is what it used to
+// do: abort before removing the account, its logon rights, its ACEs and its
+// ledger, leaving a fully provisioned principal on the machine because one file
+// could not be unlinked.
+var errWindowsSandboxSecretNotOurs = errors.New("the sandbox secret belongs to a different administrator's setup")
+
 func removeWindowsSandboxSecret(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove sandbox secret: %w", err)
+	err := os.Remove(path)
+	if err == nil || os.IsNotExist(err) {
+		return nil
 	}
-	return nil
+	// The read path already treats permission-denied as unavailability rather
+	// than breakage, for the reason documented on readWindowsSandboxSecret: an
+	// operator who elevated with a separate administrative account gets a secret
+	// their ordinary account cannot open. Removal has to agree. It did not, so on
+	// exactly those machines teardown stopped at the first file and stranded
+	// everything after it.
+	if os.IsPermission(err) {
+		return fmt.Errorf("%w: %s", errWindowsSandboxSecretNotOurs, path)
+	}
+	return fmt.Errorf("remove sandbox secret: %w", err)
 }
