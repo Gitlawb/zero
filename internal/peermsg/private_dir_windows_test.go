@@ -13,7 +13,43 @@ import (
 )
 
 func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
+	const directoryAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+
 	path := filepath.Join(t.TempDir(), "zero", "peers", "registry")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	worldSID, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broadDACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(worldSID),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		broadDACL,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !windowsDirectoryDACLContains(t, path, worldSID) {
+		t.Fatal("test setup did not grant the broad Everyone ACE")
+	}
 	if err := ensurePrivateDir(path); err != nil {
 		t.Fatal(err)
 	}
@@ -40,8 +76,12 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !owner.Equals(user.User.Sid) {
-		t.Fatalf("runtime directory owner = %s, want %s", owner.String(), user.User.Sid.String())
+	tokenOwner, err := windowsTokenOwner(windows.GetCurrentProcessToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owner.Equals(user.User.Sid) && !owner.Equals(tokenOwner) {
+		t.Fatalf("runtime directory owner = %s, want user %s or token owner %s", owner.String(), user.User.Sid.String(), tokenOwner.String())
 	}
 	systemSID, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
@@ -58,7 +98,7 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
 			t.Fatalf("read DACL ACE %d: %v", index, err)
 		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != windows.GENERIC_ALL {
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != directoryAllAccess {
 			t.Fatalf("DACL ACE %d has type %d and mask %#x", index, ace.Header.AceType, ace.Mask)
 		}
 		trustee := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
@@ -80,6 +120,27 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 	}
 }
 
+func windowsDirectoryDACLContains(t *testing.T, path string, wanted *windows.SID) bool {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := uint32(0); ; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return false
+		}
+		if (*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(wanted) {
+			return true
+		}
+	}
+}
+
 func TestSecurePrivateDirectoryRejectsOwnerMismatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private")
 	if err := ensurePrivateDir(path); err != nil {
@@ -90,11 +151,11 @@ func TestSecurePrivateDirectoryRejectsOwnerMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(handle)
-	descriptor, _, err := privateDirectoryDescriptor()
+	descriptor, _, _, err := privateDirectoryDescriptor()
 	if err != nil {
 		t.Fatal(err)
 	}
-	unexpectedOwner, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	unexpectedOwner, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +174,11 @@ func TestSecurePrivateDirectoryReportsDACLWriteFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(handle)
-	descriptor, userSID, err := privateDirectoryDescriptor()
+	descriptor, userSID, tokenOwnerSID, err := privateDirectoryDescriptor()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := securePrivateDirectory(handle, path, descriptor, userSID); err == nil || !strings.Contains(err.Error(), "secure private runtime directory") {
+	if err := securePrivateDirectory(handle, path, descriptor, userSID, tokenOwnerSID); err == nil || !strings.Contains(err.Error(), "secure private runtime directory") {
 		t.Fatalf("DACL write error = %v", err)
 	}
 }

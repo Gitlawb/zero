@@ -17,7 +17,7 @@ func ensurePrivateDir(path string) error {
 	if err != nil {
 		return err
 	}
-	descriptor, userSID, err := privateDirectoryDescriptor()
+	descriptor, userSID, tokenOwnerSID, err := privateDirectoryDescriptor()
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func ensurePrivateDir(path string) error {
 		_ = windows.CloseHandle(parent)
 		parent = next
 	}
-	if err := securePrivateDirectory(parent, abs, descriptor, userSID); err != nil {
+	if err := securePrivateDirectory(parent, abs, descriptor, userSID, tokenOwnerSID); err != nil {
 		return err
 	}
 	_ = windows.CloseHandle(parent)
@@ -57,17 +57,43 @@ func ensurePrivateDir(path string) error {
 	return nil
 }
 
-func privateDirectoryDescriptor() (*windows.SECURITY_DESCRIPTOR, *windows.SID, error) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+func privateDirectoryDescriptor() (*windows.SECURITY_DESCRIPTOR, *windows.SID, *windows.SID, error) {
+	token := windows.GetCurrentProcessToken()
+	user, err := token.GetTokenUser()
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve current Windows user: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolve current Windows user: %w", err)
 	}
 	sid := user.User.Sid
+	tokenOwnerSID, err := windowsTokenOwner(token)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve current Windows token owner: %w", err)
+	}
 	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;OICI;GA;;;%s)(A;OICI;GA;;;SY)", sid.String(), sid.String()))
 	if err != nil {
-		return nil, nil, fmt.Errorf("build private Windows directory ACL: %w", err)
+		return nil, nil, nil, fmt.Errorf("build private Windows directory ACL: %w", err)
 	}
-	return descriptor, sid, nil
+	return descriptor, sid, tokenOwnerSID, nil
+}
+
+type windowsTokenOwnerInfo struct {
+	owner *windows.SID
+}
+
+func windowsTokenOwner(token windows.Token) (*windows.SID, error) {
+	var size uint32
+	err := windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size)
+	if err != windows.ERROR_INSUFFICIENT_BUFFER {
+		return nil, err
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &buffer[0], size, &size); err != nil {
+		return nil, err
+	}
+	owner := (*windowsTokenOwnerInfo)(unsafe.Pointer(&buffer[0])).owner
+	if owner == nil {
+		return nil, errors.New("Windows access token has no default owner")
+	}
+	return owner.Copy()
 }
 
 func openWindowsDirectory(path string, access uint32) (windows.Handle, error) {
@@ -154,7 +180,7 @@ func windowsDirectoryMissing(err error) bool {
 		errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
 }
 
-func securePrivateDirectory(handle windows.Handle, path string, desired *windows.SECURITY_DESCRIPTOR, userSID *windows.SID) error {
+func securePrivateDirectory(handle windows.Handle, path string, desired *windows.SECURITY_DESCRIPTOR, allowedOwners ...*windows.SID) error {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		return fmt.Errorf("inspect private runtime directory %q: %w", path, err)
@@ -170,7 +196,14 @@ func securePrivateDirectory(handle windows.Handle, path string, desired *windows
 	if err != nil {
 		return fmt.Errorf("read owner of private runtime directory %q: %w", path, err)
 	}
-	if !owner.Equals(userSID) {
+	ownedByCurrentToken := false
+	for _, allowedOwner := range allowedOwners {
+		if allowedOwner != nil && owner.Equals(allowedOwner) {
+			ownedByCurrentToken = true
+			break
+		}
+	}
+	if !ownedByCurrentToken {
 		return fmt.Errorf("refusing runtime directory %q not owned by the current user", path)
 	}
 	dacl, _, err := desired.DACL()
