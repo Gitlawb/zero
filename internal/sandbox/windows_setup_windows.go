@@ -17,6 +17,34 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": Administrator rights are required. Re-run `zero sandbox setup` from an elevated (Run as administrator) terminal.")
 		return 1
 	}
+	// Serialize the WHOLE transaction, not the individual writes.
+	//
+	// Setup rotates the principal's password, stores the secret,
+	// read-modify-writes the ACL ledger, installs WFP filters and writes the
+	// marker. Two setups for this workspace at once interleave those steps: the
+	// account ends up with one process's password while the stored secret is the
+	// other's, so every later command fails to log on, and the ledger's
+	// read-modify-write silently loses a path set. Each write being individually
+	// atomic does nothing about interleaving BETWEEN writes, which is the actual
+	// failure, so the lock is taken here and held to the end.
+	//
+	// Immediately after the elevation check, because acquiring a Global object
+	// needs the rights that check just confirmed.
+	lock, err := acquireWindowsSandboxSetupLock(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+	if err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
+	defer lock.release()
+	if lock.Abandoned() {
+		// The previous holder died somewhere inside the transaction, so this
+		// machine may be half set up. Setup is idempotent and re-running it is
+		// the repair, but say so: a silent recovery hides that something crashed
+		// while holding the machine's sandbox state open.
+		fmt.Fprintf(stderr, "%s: a previous setup for this workspace exited without finishing; re-running to repair it.\n",
+			WindowsSandboxSetupName)
+	}
+
 	plan, err := BuildWindowsACLPlan(config.commandConfig())
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
