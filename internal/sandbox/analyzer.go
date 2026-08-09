@@ -336,10 +336,10 @@ func pythonModuleUsesNetwork(words []string) bool {
 // is not EGRESS, not that dev tooling is inert. Anything that actually fetches
 // still matches commandUsesNetwork through its own program or subcommand.
 func commandRunsLocalServer(prog string, args []*syntax.Word) bool {
-	if localServerPrograms[prog] {
-		return true
-	}
 	words := literalWordTexts(args)
+	if localServerPrograms[prog] {
+		return frameworkSubcommandRunsLocalServer(prog, words)
+	}
 	switch prog {
 	case "python", "python2", "python3", "py":
 		return pythonModuleRunsLocalServer(words)
@@ -347,6 +347,37 @@ func commandRunsLocalServer(prog string, args []*syntax.Word) bool {
 		return packageManagerRunsLocalServer(words)
 	}
 	return false
+}
+
+// frameworkSubcommandRunsLocalServer decides whether a framework CLI is being
+// asked to SERVE or merely to compile.
+//
+// The program name alone is not enough. `next build`, `vite build`, `nuxt
+// generate` and `astro check` bind nothing, and classifying them as servers
+// makes the flag mean "some dev tool ran", which is not what a reader of it
+// would assume.
+//
+// Dedicated servers stay unconditional: running http-server or serve IS the
+// server. vite is also a server when bare, since bare `vite` starts the dev
+// server, whereas the multi-command frameworks print help when bare and so need
+// an explicit serving subcommand.
+func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
+	switch prog {
+	case "http-server", "serve":
+		return true
+	}
+	switch firstSubcommand(words, nil) {
+	case "dev", "start", "serve", "preview":
+		return true
+	case "build", "optimize", "generate", "check", "lint", "export":
+		return false
+	}
+	// No recognized subcommand: either a bare invocation, or firstSubcommand
+	// landed on an option VALUE, since it skips flags but not what they consume
+	// (`vite --host 127.0.0.1` yields "127.0.0.1"). Both mean "no subcommand was
+	// given", so fall back to what the program does when run bare: vite starts
+	// its dev server, while the multi-command frameworks print help.
+	return prog == "vite"
 }
 
 // packageManagerRunsLocalServer covers `npm run dev` and its siblings across the
