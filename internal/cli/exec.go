@@ -616,10 +616,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// approvals; it does not remove the OS sandbox, and a warning that implied
 	// otherwise would misdescribe what is actually happening.
 	if permissionMode == agent.PermissionModeFullAuto {
-		// Named generically for the flag path because either spelling reaches
-		// here and the bool does not record which one was typed. Claiming
-		// --full-auto when the caller passed --skip-permissions-unsafe would be a
-		// small lie in a warning, which is the wrong place for one.
+		// One bool backs both spellings, so which one was typed is not recoverable
+		// here. Naming both is the only accurate option: reporting "--full-auto"
+		// to someone who passed --skip-permissions-unsafe sends them looking for a
+		// flag they did not use, and a warning is the wrong place to be wrong
+		// about what the user did.
 		reason := "--auto high"
 		switch {
 		case options.skipPermissionsUnsafe:
