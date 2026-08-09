@@ -23,6 +23,7 @@ import (
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/observability"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -786,6 +787,26 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAsk
 	}
+	sessionStore := deps.newSessionStore()
+	peerClass := peermsg.PermissionPrompting
+	if permissionMode == agent.PermissionModeUnsafe {
+		peerClass = peermsg.PermissionBypass
+	}
+	peerService, peerErr := peermsg.New(peermsg.Options{
+		Identity: peermsg.Identity{
+			Cwd:             workspaceRoot,
+			PermissionClass: peerClass,
+		},
+		InboundPolicy: peermsg.InboundPolicy(resolved.CrossSessionInbound),
+	})
+	if peerErr != nil {
+		fmt.Fprintf(stderr, "warning: cross-session messaging unavailable: %s\n", peerErr)
+		peerService = nil
+	} else {
+		for _, tool := range tools.NewPeerSessionTools(peerService) {
+			registry.Register(tool)
+		}
+	}
 	// Activate deferred MCP-tool loading for the interactive run only when the
 	// VISIBLE deferred-eligible count meets the resolved threshold, matching exec.
 	// The registry is complete (core + specialist + MCP + plugins) here, so the
@@ -837,7 +858,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			return scratchFileWarning(workspaceRoot, scratchBaseline)
 		},
 		Registry:           registry,
-		SessionStore:       deps.newSessionStore(),
+		SessionStore:       sessionStore,
+		PeerService:        peerService,
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
 		MCPPermissionStore: mcpPermissionStore,

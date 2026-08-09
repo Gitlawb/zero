@@ -72,6 +72,7 @@ func (m model) renameActiveSession(title string) model {
 		kind: actionAppendSystem,
 		text: "Session renamed to " + updated.Title + ".",
 	})
+	m = m.syncPeerIdentity()
 	return m
 }
 

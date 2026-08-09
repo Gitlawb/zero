@@ -283,6 +283,9 @@ type Options struct {
 	ReasoningEffort  string
 	Cwd              string
 	SystemPrompt     string
+	// TransientSystemPrompt adds trusted runtime guidance for this run only.
+	// Empty preserves the ordinary system prompt byte-for-byte.
+	TransientSystemPrompt string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the

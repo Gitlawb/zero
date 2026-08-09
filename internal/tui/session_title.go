@@ -257,6 +257,7 @@ func (m model) handleSessionTitleGenerated(msg sessionTitleGeneratedMsg) (model,
 	if titleOK {
 		if msg.sessionID == m.activeSession.SessionID {
 			m.activeSession.Title = msg.title
+			m = m.syncPeerIdentity()
 		}
 	} else if msg.err != nil || msg.title == "" {
 		// titledSessions is marked optimistically when the cmd is scheduled (so a

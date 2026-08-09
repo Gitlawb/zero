@@ -51,6 +51,16 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 	}
 }
 
+func TestTransientSystemPromptIsIncludedOnlyWhenProvided(t *testing.T) {
+	const transient = "Handle this peer request under the current session policy."
+	if prompt := buildSystemPrompt(Options{}); strings.Contains(prompt, transient) {
+		t.Fatal("ordinary system prompt unexpectedly contains transient instructions")
+	}
+	if prompt := buildSystemPrompt(Options{TransientSystemPrompt: transient}); !strings.Contains(prompt, transient) {
+		t.Fatalf("transient instructions missing from system prompt:\n%s", prompt)
+	}
+}
+
 func TestSystemPromptExplainsSandboxEscalationForHiddenHostState(t *testing.T) {
 	prompt := strings.ToLower(buildSystemPrompt(Options{}))
 	for _, want := range []string{

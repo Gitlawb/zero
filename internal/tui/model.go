@@ -24,6 +24,7 @@ import (
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
@@ -86,6 +87,10 @@ type model struct {
 	// fall back to a per-run manager. Torn down in quit().
 	lspManager           *lsp.Manager
 	sessionStore         *sessions.Store
+	peerService          *peermsg.Service
+	peerInbox            []peermsg.InboundMessage
+	peerApprovalQueue    []peermsg.InboundMessage
+	peerPendingApproval  *peermsg.InboundMessage
 	sandboxStore         *sandbox.GrantStore
 	mcpConfig            config.MCPConfig
 	mcpPermissionStore   *internalmcp.PermissionStore
@@ -601,6 +606,26 @@ type agentResponseMsg struct {
 	ttft time.Duration
 }
 
+type peerMessageMsg struct {
+	message peermsg.InboundMessage
+	admit   chan<- bool
+}
+
+type peerStatusMsg struct{ event peermsg.StatusEvent }
+
+type peerHeldReleasedMsg struct{ message peermsg.InboundMessage }
+
+type peerDecisionMsg struct {
+	message peermsg.InboundMessage
+	allow   bool
+}
+
+type peerRuntimeErrorMsg struct{ err error }
+
+type peerReceiptErrorMsg struct{ err error }
+
+type peerApprovalExpiredMsg struct{ messageID string }
+
 type agentRowMsg struct {
 	runID int
 	row   transcriptRow
@@ -776,10 +801,11 @@ type pendingSpecReviewPrompt struct {
 }
 
 type tuiAgentRunOptions struct {
-	registry       *tools.Registry
-	permissionMode agent.PermissionMode
-	systemPrompt   string
-	specDraft      bool
+	registry              *tools.Registry
+	permissionMode        agent.PermissionMode
+	systemPrompt          string
+	transientSystemPrompt string
+	specDraft             bool
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -884,6 +910,7 @@ func newModel(ctx context.Context, options Options) model {
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
 		registry:                    registry,
 		sessionStore:                sessionStore,
+		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
 		mcpPermissionStore:          options.MCPPermissionStore,
@@ -1202,6 +1229,34 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	switch msg := msg.(type) {
+	case peerMessageMsg:
+		admitted := m.canAcceptPeerMessage(msg.message)
+		if msg.admit != nil {
+			msg.admit <- admitted
+		}
+		if !admitted {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "Dropped peer message because the inbound queue is full."})
+			return m, nil
+		}
+		return m.handlePeerMessage(msg.message)
+	case peerStatusMsg:
+		return m.handlePeerStatus(msg.event), nil
+	case peerHeldReleasedMsg:
+		return m.handleReleasedPeerMessage(msg.message)
+	case peerDecisionMsg:
+		return m.handlePeerDecision(msg.message, msg.allow)
+	case peerApprovalExpiredMsg:
+		return m.handlePeerApprovalExpired(msg.messageID)
+	case peerReceiptErrorMsg:
+		if msg.err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "peer receipt: " + msg.err.Error()})
+		}
+		return m, nil
+	case peerRuntimeErrorMsg:
+		if msg.err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "peer messaging unavailable: " + msg.err.Error()})
+		}
+		return m, nil
 	case composerBlinkMsg:
 		switch {
 		case !m.terminalFocused:
@@ -1519,6 +1574,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil && m.pendingPermission.request.ToolName == tools.RequestPermissionsToolName {
 				return m.resolvePermission(permissionDecisionDeny)
 			}
+			if m.pendingPermission != nil && m.pendingPermission.request.ToolName == peerPermissionToolName {
+				return m.resolvePermission(permissionDecisionDeny)
+			}
 			if m.providerWizard != nil {
 				// Delegate so multi-level surfaces (provider manager list → edit →
 				// field, manage-key step) can walk BACK one level; the wizard's own
@@ -1673,6 +1731,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// and let the key fall through to their own handlers below.
 			if m.noBlockingModal() {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
+				m = m.syncPeerIdentity()
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
@@ -2511,11 +2570,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		hadQueuedMessage := strings.TrimSpace(m.queuedMessage) != ""
 		next, queuedCmd := m.launchQueuedMessageIfReady()
+		var peerCmd tea.Cmd
+		if queuedCmd == nil {
+			next, peerCmd = next.launchQueuedPeerIfReady()
+		}
+		var peerApprovalCmd tea.Cmd
+		if queuedCmd == nil && peerCmd == nil {
+			next, peerApprovalCmd = next.openNextPeerApproval()
+		}
 		var goalCmd tea.Cmd
-		if msg.goalAware && !hadQueuedMessage && msg.specReview == nil {
+		if msg.goalAware && !hadQueuedMessage && peerCmd == nil && next.pendingPermission == nil && msg.specReview == nil {
 			next, goalCmd = next.launchGoalContinuationIfReady()
 		}
-		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, goalCmd)
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, peerCmd, peerApprovalCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapIdleMsg:
@@ -4171,7 +4238,7 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	// quiet-generation clock so resuming a long-blocked run does not immediately
 	// claim the model has been inactive for the entire approval interval.
 	m.lastStreamActivity = m.now()
-	return m, nil
+	return m.openNextPeerApproval()
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
@@ -4773,16 +4840,24 @@ func (m model) executeSlash(input string) (tea.Model, tea.Cmd) {
 // composer. Queued prompts use this path too, so session and image behavior
 // stays identical to immediate submissions.
 func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
+	return m.launchPromptInternal(prompt, nil)
+}
+
+func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage) (model, tea.Cmd) {
 	// Remember the verbatim prompt (before specialist/document expansion) so /retry
 	// and /edit can act on exactly what the user submitted. Snapshot the staged
 	// attachments too: launchPrompt clears the pending queues below, so /retry
 	// re-stages these to resend an identical vision/PDF-backed request rather than
 	// a degraded text-only one.
-	m.lastPrompt = prompt
-	m.lastImages = m.pendingImages
-	m.lastImageLabels = m.pendingImageLabels
-	m.lastDocuments = m.pendingDocuments
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
+	if peer == nil {
+		m.lastPrompt = prompt
+		m.lastImages = m.pendingImages
+		m.lastImageLabels = m.pendingImageLabels
+		m.lastDocuments = m.pendingDocuments
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
+	} else {
+		m.transcript = appendTranscriptRow(m.transcript, peerTranscriptRow(peerDisplayName(peer.From), peer.Body))
+	}
 	if m.provider == nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendAssistant,
@@ -4793,14 +4868,18 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// A leading "@specialist <task>" is expanded into an explicit Task-delegation
 	// directive for the agent only; the transcript above keeps the user's verbatim
 	// "@mention". Non-mentions and mid-message "@file" references are unchanged.
-	if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
-		prompt = expanded
+	if peer == nil {
+		if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
+			prompt = expanded
+		}
 	}
 	// Prepend any staged PDF document text as a model-facing preamble. The
 	// visible transcript above keeps the user's clean prompt; the agent (and the
 	// recorded session, for resume fidelity) sees the document text first.
-	if preamble := m.consumePendingDocuments(); preamble != "" {
-		prompt = preamble + prompt
+	if peer == nil {
+		if preamble := m.consumePendingDocuments(); preamble != "" {
+			prompt = preamble + prompt
+		}
 	}
 	var err error
 	m, err = m.ensureActiveSession(prompt)
@@ -4819,10 +4898,17 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			}
 		}
 		agentPrompt := m.sessionPrompt(prompt)
-		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+		messagePayload := map[string]any{
 			"role":    "user",
 			"content": prompt,
-		})
+		}
+		if peer != nil {
+			messagePayload["origin"] = "cross_session"
+			messagePayload["from"] = peerDisplayName(peer.From)
+			messagePayload["messageId"] = peer.ID
+			messagePayload["displayContent"] = peer.Body
+		}
+		m, err = m.appendSessionEvent(sessions.EventMessage, messagePayload)
 		if err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -4838,6 +4924,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// exec's drop+warn wording) rather than sending them to a model that
 	// rejects them. Pending state is cleared either way below.
 	turnImages := m.pendingImages
+	if peer != nil {
+		turnImages = nil
+	}
 	if len(turnImages) > 0 && !m.modelSupportsVisionTUI() {
 		name := m.modelName
 		if name == "" {
@@ -4849,11 +4938,22 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		})
 		turnImages = nil
 	}
-	m.pendingImages = nil
-	m.pendingImageLabels = nil
+	if peer == nil {
+		m.pendingImages = nil
+		m.pendingImageLabels = nil
+	}
 	runCtx, cancel := context.WithCancel(m.ctx)
+	if peer != nil {
+		runCtx = peermsg.WithInboundMessage(runCtx, *peer)
+	}
 	m = m.beginRun(cancel)
-	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+	agentCmd := m.runAgent(m.activeRunID, runCtx, prompt, turnImages)
+	if peer != nil {
+		agentCmd = m.runAgentWithOptions(m.activeRunID, runCtx, prompt, turnImages, tuiAgentRunOptions{
+			transientSystemPrompt: peerTurnSystemPrompt,
+		})
+	}
+	return m, tea.Batch(agentCmd, m.spinner.Tick)
 }
 
 // beginRun stamps the shared run-start state for a new agent turn: a fresh run
@@ -5102,12 +5202,21 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 		}
+		peerAwareRun := runOptions.transientSystemPrompt != "" || m.sessionContainsPeerMessages()
+		if peerAwareRun && m.peerService != nil {
+			options.Registry.Register(tools.NewPeerReplyTool(m.peerService))
+		}
 		options.PermissionMode = m.permissionMode
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
 		}
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
+		}
+		if runOptions.transientSystemPrompt != "" {
+			options.TransientSystemPrompt = runOptions.transientSystemPrompt
+		} else if peerAwareRun {
+			options.TransientSystemPrompt = peerTurnSystemPrompt
 		}
 		if goalAwareRun {
 			options.SystemPrompt = m.goalSystemPrompt(options.SystemPrompt)

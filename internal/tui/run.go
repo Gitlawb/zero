@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/term"
+
+	"github.com/Gitlawb/zero/internal/peermsg"
 )
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
@@ -57,6 +60,31 @@ func Run(ctx context.Context, options Options) int {
 		initialModel.mouseCapture = true
 	}
 	program = tea.NewProgram(initialModel, programOpts...)
+	if options.PeerService != nil {
+		options.PeerService.SetStatusHandler(func(event peermsg.StatusEvent) {
+			forward(peerStatusMsg{event: event})
+		})
+		options.PeerService.SetHeldEvictionHandler(func(messageID string) {
+			forward(peerApprovalExpiredMsg{messageID: messageID})
+		})
+		options.PeerService.SetHeldReleaseHandler(func(message peermsg.InboundMessage) {
+			forward(peerHeldReleasedMsg{message: message})
+		})
+		if err := options.PeerService.Start(func(message peermsg.InboundMessage) bool {
+			admit := make(chan bool, 1)
+			forward(peerMessageMsg{message: message, admit: admit})
+			select {
+			case accepted := <-admit:
+				return accepted
+			case <-time.After(4 * time.Second):
+				return false
+			}
+		}); err != nil {
+			forward(peerRuntimeErrorMsg{err: err})
+		} else {
+			defer options.PeerService.Close()
+		}
+	}
 
 	if _, err := program.Run(); err != nil {
 		// Surface the failure: exiting 1 with zero diagnostics left users

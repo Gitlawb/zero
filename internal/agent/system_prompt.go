@@ -95,6 +95,9 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 		core = fallbackSystemPrompt
 	}
 	sections := []string{core}
+	if transient := strings.TrimSpace(options.TransientSystemPrompt); transient != "" {
+		sections = append(sections, transient)
+	}
 	if addendum := modelPromptAddendum(options.Model); addendum != "" {
 		sections = append(sections, addendum)
 	}
