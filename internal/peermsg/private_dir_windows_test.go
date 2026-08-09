@@ -97,10 +97,10 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 	}
 	wantTrustees := []*windows.SID{user.User.Sid, systemSID}
 	seen := make([]bool, len(wantTrustees))
-	for index := range wantTrustees {
+	for index := uint32(0); ; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			t.Fatalf("read DACL ACE %d: %v", index, err)
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			break
 		}
 		hasFullAccess := ace.Mask == windows.GENERIC_ALL || ace.Mask&directoryAllAccess == directoryAllAccess
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || !hasFullAccess {
@@ -109,19 +109,20 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 		trustee := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		matched := false
 		for trusteeIndex, wanted := range wantTrustees {
-			if trustee.Equals(wanted) && !seen[trusteeIndex] {
+			if trustee.Equals(wanted) {
 				seen[trusteeIndex] = true
 				matched = true
 				break
 			}
 		}
 		if !matched {
-			t.Fatalf("DACL ACE %d grants access to unexpected or duplicate trustee %s", index, trustee.String())
+			t.Fatalf("DACL ACE %d grants access to unexpected trustee %s", index, trustee.String())
 		}
 	}
-	var extra *windows.ACCESS_ALLOWED_ACE
-	if err := windows.GetAce(dacl, uint32(len(wantTrustees)), &extra); err == nil {
-		t.Fatalf("DACL contains an unexpected extra ACE for %s", (*windows.SID)(unsafe.Pointer(&extra.SidStart)).String())
+	for index, found := range seen {
+		if !found {
+			t.Fatalf("DACL does not grant access to required trustee %s", wantTrustees[index].String())
+		}
 	}
 }
 

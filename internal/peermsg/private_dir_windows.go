@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"unsafe"
 
@@ -69,53 +68,9 @@ func privateDirectoryDescriptor() (*windows.SECURITY_DESCRIPTOR, *windows.SID, *
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resolve current Windows token owner: %w", err)
 	}
-	systemSID, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;OICI;GA;;;%s)(A;OICI;GA;;;SY)", sid.String(), sid.String()))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("resolve Windows Local System SID: %w", err)
-	}
-	var pinner runtime.Pinner
-	pinner.Pin(sid)
-	pinner.Pin(systemSID)
-	defer pinner.Unpin()
-	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
-	for _, trustee := range []struct {
-		sid   *windows.SID
-		type_ windows.TRUSTEE_TYPE
-	}{
-		{sid: sid, type_: windows.TRUSTEE_IS_USER},
-		{sid: systemSID, type_: windows.TRUSTEE_IS_WELL_KNOWN_GROUP},
-	} {
-		entries = append(entries, windows.EXPLICIT_ACCESS{
-			AccessPermissions: windows.GENERIC_ALL,
-			AccessMode:        windows.GRANT_ACCESS,
-			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-			Trustee: windows.TRUSTEE{
-				TrusteeForm:  windows.TRUSTEE_IS_SID,
-				TrusteeType:  trustee.type_,
-				TrusteeValue: windows.TrusteeValueFromSID(trustee.sid),
-			},
-		})
-	}
-	dacl, err := windows.ACLFromEntries(entries, nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build private Windows directory DACL: %w", err)
-	}
-	descriptor, err := windows.NewSecurityDescriptor()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("initialize private Windows directory descriptor: %w", err)
-	}
-	if err := descriptor.SetOwner(sid, false); err != nil {
-		return nil, nil, nil, fmt.Errorf("set private Windows directory owner: %w", err)
-	}
-	if err := descriptor.SetDACL(dacl, true, false); err != nil {
-		return nil, nil, nil, fmt.Errorf("set private Windows directory DACL: %w", err)
-	}
-	if err := descriptor.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
-		return nil, nil, nil, fmt.Errorf("protect private Windows directory DACL: %w", err)
-	}
-	descriptor, err = descriptor.ToSelfRelative()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("finalize private Windows directory descriptor: %w", err)
+		return nil, nil, nil, fmt.Errorf("build private Windows directory ACL: %w", err)
 	}
 	return descriptor, sid, tokenOwnerSID, nil
 }
