@@ -577,6 +577,8 @@ func TestHeldEvictionReceiptDoesNotDelayInboundResponse(t *testing.T) {
 	receiver := newService(t, root, transport, 9812, Identity{
 		SessionID: "receiver", PermissionClass: PermissionPrompting,
 	})
+	evicted := make(chan string, 1)
+	receiver.SetHeldEvictionHandler(func(messageID string) { evicted <- messageID })
 	if err := receiver.Start(func(InboundMessage) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
@@ -624,6 +626,14 @@ func TestHeldEvictionReceiptDoesNotDelayInboundResponse(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed >= peerReceiptTimeout/2 {
 		t.Fatalf("inbound response waited %s for an eviction receipt", elapsed)
+	}
+	select {
+	case messageID := <-evicted:
+		if messageID != "held-0" {
+			t.Fatalf("eviction callback message ID = %q, want held-0", messageID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for held-message eviction callback")
 	}
 }
 
