@@ -189,6 +189,13 @@ func TestSecurePrivateDirectoryReportsDACLWriteFailure(t *testing.T) {
 	}
 }
 
+func TestClosePrivateWindowsHandleReportsFailure(t *testing.T) {
+	err := closePrivateWindowsHandle(windows.InvalidHandle, `C:\private`)
+	if err == nil || !strings.Contains(err.Error(), "close private runtime directory") {
+		t.Fatalf("close handle error = %v", err)
+	}
+}
+
 func TestEnsurePrivateDirRejectsWindowsReparseParent(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")

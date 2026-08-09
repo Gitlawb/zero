@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func ensurePrivateDir(path string) error {
+func ensurePrivateDir(path string) (resultErr error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -27,9 +27,10 @@ func ensurePrivateDir(path string) error {
 	if err != nil {
 		return err
 	}
+	parentPath := current
 	defer func() {
 		if parent != 0 {
-			_ = windows.CloseHandle(parent)
+			resultErr = errors.Join(resultErr, closePrivateWindowsHandle(parent, parentPath))
 		}
 	}()
 	components := strings.Split(strings.TrimPrefix(abs[len(volume):], string(filepath.Separator)), string(filepath.Separator))
@@ -46,14 +47,26 @@ func ensurePrivateDir(path string) error {
 		if openErr != nil {
 			return fmt.Errorf("open private runtime path component %q: %w", current, openErr)
 		}
-		_ = windows.CloseHandle(parent)
+		if closeErr := closePrivateWindowsHandle(parent, parentPath); closeErr != nil {
+			return errors.Join(closeErr, closePrivateWindowsHandle(next, current))
+		}
 		parent = next
+		parentPath = current
 	}
 	if err := securePrivateDirectory(parent, abs, descriptor, userSID, tokenOwnerSID); err != nil {
 		return err
 	}
-	_ = windows.CloseHandle(parent)
+	if err := closePrivateWindowsHandle(parent, abs); err != nil {
+		return err
+	}
 	parent = 0
+	return nil
+}
+
+func closePrivateWindowsHandle(handle windows.Handle, path string) error {
+	if err := windows.CloseHandle(handle); err != nil {
+		return fmt.Errorf("close private runtime directory %q: %w", path, err)
+	}
 	return nil
 }
 
@@ -162,12 +175,13 @@ func openPrivateWindowsDirectoryAt(parent windows.Handle, name string, access, d
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		_ = windows.CloseHandle(handle)
-		return 0, err
+		return 0, errors.Join(err, closePrivateWindowsHandle(handle, name))
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		_ = windows.CloseHandle(handle)
-		return 0, fmt.Errorf("refusing non-directory or reparse-point component %q", name)
+		return 0, errors.Join(
+			fmt.Errorf("refusing non-directory or reparse-point component %q", name),
+			closePrivateWindowsHandle(handle, name),
+		)
 	}
 	return handle, nil
 }
