@@ -3,6 +3,7 @@
 package peermsg
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ func ensurePrivateDir(path string) error {
 	}
 	volume := filepath.VolumeName(abs)
 	current := volume + string(filepath.Separator)
-	parent, err := openWindowsDirectory(current, windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.SYNCHRONIZE)
+	parent, err := openWindowsDirectory(current, windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE|windows.SYNCHRONIZE)
 	if err != nil {
 		return err
 	}
@@ -37,7 +38,7 @@ func ensurePrivateDir(path string) error {
 			continue
 		}
 		current = filepath.Join(current, component)
-		access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.SYNCHRONIZE)
+		access := uint32(windows.FILE_READ_ATTRIBUTES | windows.FILE_TRAVERSE | windows.SYNCHRONIZE)
 		if index == len(components)-1 {
 			access |= windows.READ_CONTROL | windows.WRITE_DAC
 		}
@@ -90,6 +91,21 @@ func openWindowsDirectory(path string, access uint32) (windows.Handle, error) {
 }
 
 func openOrCreatePrivateWindowsDirectory(parent windows.Handle, name string, access uint32, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
+	handle, err := openPrivateWindowsDirectoryAt(parent, name, access, windows.FILE_OPEN, nil)
+	if err == nil {
+		return handle, nil
+	}
+	if !windowsDirectoryMissing(err) {
+		return 0, err
+	}
+	handle, err = openPrivateWindowsDirectoryAt(parent, name, access, windows.FILE_CREATE, descriptor)
+	if err == windows.STATUS_OBJECT_NAME_COLLISION || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return openPrivateWindowsDirectoryAt(parent, name, access, windows.FILE_OPEN, nil)
+	}
+	return handle, err
+}
+
+func openPrivateWindowsDirectoryAt(parent windows.Handle, name string, access, disposition uint32, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -110,7 +126,7 @@ func openOrCreatePrivateWindowsDirectory(parent windows.Handle, name string, acc
 		nil,
 		windows.FILE_ATTRIBUTE_DIRECTORY,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		windows.FILE_OPEN_IF,
+		disposition,
 		windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
 		0,
 		0,
@@ -128,6 +144,14 @@ func openOrCreatePrivateWindowsDirectory(parent windows.Handle, name string, acc
 		return 0, fmt.Errorf("refusing non-directory or reparse-point component %q", name)
 	}
 	return handle, nil
+}
+
+func windowsDirectoryMissing(err error) bool {
+	return err == windows.STATUS_NO_SUCH_FILE ||
+		err == windows.STATUS_OBJECT_NAME_NOT_FOUND ||
+		err == windows.STATUS_OBJECT_PATH_NOT_FOUND ||
+		errors.Is(err, windows.ERROR_FILE_NOT_FOUND) ||
+		errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
 }
 
 func securePrivateDirectory(handle windows.Handle, path string, desired *windows.SECURITY_DESCRIPTOR, userSID *windows.SID) error {

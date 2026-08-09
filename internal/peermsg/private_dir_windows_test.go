@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -42,9 +43,82 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 	if !owner.Equals(user.User.Sid) {
 		t.Fatalf("runtime directory owner = %s, want %s", owner.String(), user.User.Sid.String())
 	}
-	sddl := descriptor.String()
-	if !strings.Contains(sddl, user.User.Sid.String()) || strings.Contains(sddl, ";;;WD)") {
-		t.Fatalf("runtime directory ACL is not private: %s", sddl)
+	systemSID, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTrustees := []*windows.SID{user.User.Sid, systemSID}
+	seen := make([]bool, len(wantTrustees))
+	for index := range wantTrustees {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			t.Fatalf("read DACL ACE %d: %v", index, err)
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != windows.GENERIC_ALL {
+			t.Fatalf("DACL ACE %d has type %d and mask %#x", index, ace.Header.AceType, ace.Mask)
+		}
+		trustee := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		matched := false
+		for trusteeIndex, wanted := range wantTrustees {
+			if trustee.Equals(wanted) && !seen[trusteeIndex] {
+				seen[trusteeIndex] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("DACL ACE %d grants access to unexpected or duplicate trustee %s", index, trustee.String())
+		}
+	}
+	var extra *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, uint32(len(wantTrustees)), &extra); err == nil {
+		t.Fatalf("DACL contains an unexpected extra ACE for %s", (*windows.SID)(unsafe.Pointer(&extra.SidStart)).String())
+	}
+}
+
+func TestSecurePrivateDirectoryRejectsOwnerMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private")
+	if err := ensurePrivateDir(path); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := openWindowsDirectory(path, windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.SYNCHRONIZE|windows.READ_CONTROL|windows.WRITE_DAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	descriptor, _, err := privateDirectoryDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unexpectedOwner, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := securePrivateDirectory(handle, path, descriptor, unexpectedOwner); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("owner mismatch error = %v", err)
+	}
+}
+
+func TestSecurePrivateDirectoryReportsDACLWriteFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private")
+	if err := ensurePrivateDir(path); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := openWindowsDirectory(path, windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.SYNCHRONIZE|windows.READ_CONTROL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	descriptor, userSID, err := privateDirectoryDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := securePrivateDirectory(handle, path, descriptor, userSID); err == nil || !strings.Contains(err.Error(), "secure private runtime directory") {
+		t.Fatalf("DACL write error = %v", err)
 	}
 }
 
