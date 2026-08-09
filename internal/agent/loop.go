@@ -2718,7 +2718,34 @@ func permissionRequestFromEvent(event PermissionEvent, args map[string]any, opti
 		Grant:              event.Grant,
 		CommandPrefix:      append([]string(nil), event.CommandPrefix...),
 		AvailableDecisions: availablePermissionDecisions(event, args, options),
+		// Computed from the SAME conditions shellExecutionArgsForApproval uses,
+		// so the prompt cannot claim an escalation that will not happen or stay
+		// silent about one that will. Keeping the two in step matters more than
+		// the wording: a label that overstates gets ignored, and one that
+		// understates is the bug being fixed.
+		PrefixApprovalEscalates: shellPrefixApprovalEscalates(event.ToolName, args, options),
 	}
+}
+
+// shellPrefixApprovalEscalates reports whether approving a command prefix would
+// also take this command out of the sandbox.
+//
+// Deliberately mirrors shellExecutionArgsForApproval's guards rather than
+// re-deriving them: same tool test, same sandbox availability test, and the same
+// two opt-outs for a call that already asked for additional permissions or
+// escalation. Those already carry their own disclosure, so labelling them again
+// would be noise.
+func shellPrefixApprovalEscalates(toolName string, args map[string]any, options Options) bool {
+	if !isShellCommandTool(toolName) {
+		return false
+	}
+	if options.Sandbox == nil || !options.Sandbox.UnsandboxedExecutionAllowed() {
+		return false
+	}
+	if shellCommandAdditionalPermissionsRequested(args) || shellCommandRequiresEscalated(args) {
+		return false
+	}
+	return true
 }
 
 func availablePermissionDecisions(event PermissionEvent, args map[string]any, options Options) []PermissionDecisionAction {
