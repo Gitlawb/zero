@@ -119,6 +119,27 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 		})
 		return &result
 	}
+	// Setup is valid, but the principal can still be opted into and stand down.
+	// Under the DEFAULT network-deny policy it always does, so an operator who
+	// set the opt-in to confine reads gets the same-user restricted token and no
+	// read confinement at all. Nothing else tells them: the runner cannot warn
+	// per command without spamming every tool call, and the marker validates
+	// happily because setup really did provision the account.
+	//
+	// A warning rather than a failure. Commands run correctly and the network is
+	// still enforced; what is wrong is the operator's picture of what they have.
+	if reason := sandbox.WindowsSandboxPrincipalInactiveReason(setupConfig.PrincipalOptIn, profile.Network.Mode); reason != "" {
+		result := check("sandbox.principal", "Sandbox principal", StatusWarn,
+			fmt.Sprintf("Sandbox principal is opted in but inactive: %s.", reason), map[string]any{
+				"backend":     string(backend.Name),
+				"platform":    goos,
+				"optIn":       true,
+				"active":      false,
+				"networkMode": string(profile.Network.Mode),
+				"remedy":      "allow network for this workspace to use the principal, or unset the opt-in to stop expecting read confinement",
+			})
+		return &result
+	}
 	return nil
 }
 
