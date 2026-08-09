@@ -60,6 +60,7 @@ func Run(ctx context.Context, options Options) int {
 		initialModel.mouseCapture = true
 	}
 	program = tea.NewProgram(initialModel, programOpts...)
+	peerStarted := false
 	if options.PeerService != nil {
 		options.PeerService.SetStatusHandler(func(event peermsg.StatusEvent) {
 			forward(peerStatusMsg{event: event})
@@ -82,14 +83,23 @@ func Run(ctx context.Context, options Options) int {
 		}); err != nil {
 			forward(peerRuntimeErrorMsg{err: err})
 		} else {
-			defer options.PeerService.Close()
+			peerStarted = true
 		}
 	}
 
-	if _, err := program.Run(); err != nil {
+	_, runErr := program.Run()
+	var closeErr error
+	if peerStarted {
+		closeErr = options.PeerService.Close()
+	}
+	if runErr != nil {
 		// Surface the failure: exiting 1 with zero diagnostics left users
 		// guessing why the default chat surface died.
-		fmt.Fprintln(os.Stderr, "zero: tui error:", err)
+		fmt.Fprintln(os.Stderr, "zero: tui error:", runErr)
+		return 1
+	}
+	if closeErr != nil {
+		fmt.Fprintln(os.Stderr, "zero: peer messaging cleanup error:", closeErr)
 		return 1
 	}
 	return 0

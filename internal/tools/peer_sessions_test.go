@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -72,5 +73,30 @@ func TestPeerReplyToolIsEagerOnlyForPeerAwareTurns(t *testing.T) {
 	reply := NewPeerReplyTool(service)
 	if reply == nil || IsDeferred(reply) || reply.Name() != "send_message" {
 		t.Fatalf("peer reply tool should be eager: %#v", reply)
+	}
+}
+
+func TestPeerSessionToolsSurfaceServiceErrors(t *testing.T) {
+	service := &fakePeerSessionService{err: errors.New("service unavailable")}
+	toolset := NewPeerSessionTools(service)
+	if result := toolset[0].Run(context.Background(), map[string]any{}); result.Status != StatusError || !strings.Contains(result.Output, "service unavailable") {
+		t.Fatalf("list result = %#v", result)
+	}
+	if result := toolset[1].Run(context.Background(), map[string]any{"to": "peer", "summary": "test", "message": "hello"}); result.Status != StatusError || !strings.Contains(result.Output, "service unavailable") {
+		t.Fatalf("send result = %#v", result)
+	}
+}
+
+func TestSendMessageToolRejectsMissingAndInvalidArguments(t *testing.T) {
+	tool := NewPeerSessionTools(&fakePeerSessionService{})[1]
+	for _, args := range []map[string]any{
+		{},
+		{"to": 42, "summary": "test", "message": "hello"},
+		{"to": "peer", "summary": true, "message": "hello"},
+		{"to": "peer", "summary": "test", "message": []string{"hello"}},
+	} {
+		if result := tool.Run(context.Background(), args); result.Status != StatusError {
+			t.Fatalf("args %#v result = %#v", args, result)
+		}
 	}
 }

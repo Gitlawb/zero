@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -202,7 +204,12 @@ func TestHeldMessageResolutionSendsTerminalReceipt(t *testing.T) {
 	if err != nil || result.Status != DeliveryHeld {
 		t.Fatalf("send result = %#v, err = %v", result, err)
 	}
-	message := <-received
+	var message InboundMessage
+	select {
+	case message = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for held message")
+	}
 	if err := receiver.ResolveHeld(context.Background(), message.ID, DeliveryDelivered); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +242,12 @@ func TestPermissionModeChangeReleasesNewlyCompatibleHeldMessage(t *testing.T) {
 	if err != nil || result.Status != DeliveryHeld {
 		t.Fatalf("send result = %#v, err = %v", result, err)
 	}
-	message := <-held
+	var message InboundMessage
+	select {
+	case message = <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for held message")
+	}
 	if err := receiver.UpdateIdentity(Identity{SessionID: "receiver", Name: "reviewer", PermissionClass: PermissionBypass}); err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +351,33 @@ func TestClosedServiceDisappearsFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestDiscoveryDoesNotDeleteRecordAfterTransientDialFailure(t *testing.T) {
+	root := t.TempDir()
+	transport := newMemoryTransport()
+	service := newStartedService(t, root, transport, 9411, Identity{SessionID: "sender", Name: "sender"})
+	endpoint := "memory:temporarily-unreachable"
+	peer := Peer{Identity: Identity{SessionID: "receiver", Name: "receiver"}, Endpoint: endpoint, PID: 9412,
+		StartedAt: time.Now(), UpdatedAt: time.Now(), Ref: peerRef(endpoint)}
+	data, err := json.Marshal(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(service.registryDir(), "9412-test.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := service.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 0 {
+		t.Fatalf("unreachable peers = %#v", peers)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("transient failure removed registry record: %v", err)
+	}
+}
+
 func TestReceiverRefusesForgedSenderReference(t *testing.T) {
 	root := t.TempDir()
 	transport := newMemoryTransport()
@@ -384,6 +423,142 @@ func TestReceiverRefusesForgedSenderReference(t *testing.T) {
 	}
 }
 
+func TestReceiverRefusesUnregisteredSenderWithValidReference(t *testing.T) {
+	root := t.TempDir()
+	transport := newMemoryTransport()
+	receiver := newStartedService(t, root, transport, 9512, Identity{SessionID: "receiver", Name: "receiver"})
+	conn, err := transport.Dial(context.Background(), receiver.Self().Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	endpoint := "memory:unregistered"
+	frame := sendFrame{
+		Version: ProtocolVersion, Type: "message", ID: "forged-valid-ref",
+		From: Peer{Identity: Identity{SessionID: "attacker", PermissionClass: PermissionPrompting}, Endpoint: endpoint, Ref: peerRef(endpoint)},
+		To:   receiver.Self().SessionID, Summary: "spoof", Body: "must not arrive",
+	}
+	frame.HopChain = []string{frame.From.Ref}
+	if err := json.NewEncoder(conn).Encode(frame); err != nil {
+		t.Fatal(err)
+	}
+	var response responseFrame
+	if err := decodeFrame(conn, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != DeliveryRefused || !strings.Contains(response.Error, "not registered") {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestReceiverUsesRegisteredPermissionClass(t *testing.T) {
+	root := t.TempDir()
+	transport := newMemoryTransport()
+	received := make(chan InboundMessage, 1)
+	receiver := newService(t, root, transport, 9522, Identity{SessionID: "receiver", PermissionClass: PermissionPrompting})
+	if err := receiver.Start(func(message InboundMessage) bool { received <- message; return true }); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = receiver.Close() })
+	sender := newStartedService(t, root, transport, 9521, Identity{SessionID: "sender", PermissionClass: PermissionBypass})
+	conn, err := transport.Dial(context.Background(), receiver.Self().Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	claimed := sender.Self()
+	claimed.PermissionClass = PermissionPrompting
+	frame := sendFrame{Version: ProtocolVersion, Type: "message", ID: "permission-spoof", From: claimed,
+		To: receiver.Self().SessionID, Summary: "spoof", Body: "hold this", HopChain: []string{claimed.Ref}}
+	if err := json.NewEncoder(conn).Encode(frame); err != nil {
+		t.Fatal(err)
+	}
+	var response responseFrame
+	if err := decodeFrame(conn, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != DeliveryHeld {
+		t.Fatalf("status = %q, want held", response.Status)
+	}
+	select {
+	case message := <-received:
+		if message.From.PermissionClass != PermissionBypass || !message.RequiresApproval {
+			t.Fatalf("message = %#v", message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for held message")
+	}
+}
+
+func TestOutstandingMessagesAreBoundedAndExpired(t *testing.T) {
+	now := time.Unix(1000, 0)
+	service := &Service{outstanding: make(map[string]outstandingMessage)}
+	for index := range peerMaxOutstanding + 20 {
+		service.outstanding[fmt.Sprint(index)] = outstandingMessage{createdAt: now.Add(time.Duration(index) * time.Second)}
+	}
+	service.pruneOutstandingLocked(now.Add(peerOutstandingTTL + time.Hour))
+	if len(service.outstanding) != 0 {
+		t.Fatalf("expired outstanding entries = %d", len(service.outstanding))
+	}
+	for index := range peerMaxOutstanding + 20 {
+		service.outstanding[fmt.Sprint(index)] = outstandingMessage{createdAt: now.Add(time.Duration(index) * time.Second)}
+	}
+	service.pruneOutstandingLocked(now)
+	if len(service.outstanding) >= peerMaxOutstanding {
+		t.Fatalf("bounded outstanding entries = %d", len(service.outstanding))
+	}
+}
+
+func TestDuplicateAttemptsConsumeRateCapacityWithoutRefreshingActivity(t *testing.T) {
+	now := time.Unix(1000, 0)
+	service := &Service{now: func() time.Time { return now }, guards: make(map[string]*senderGuard)}
+	sender := Peer{Endpoint: "memory:sender"}
+	if reason := service.admitMessage(sender, "same", []string{"11111111"}, "22222222"); reason != "" {
+		t.Fatal(reason)
+	}
+	activity := service.guards[sender.Endpoint].lastActivity
+	for range int(peerBucketCapacity) - 1 {
+		if reason := service.admitMessage(sender, "same", []string{"11111111"}, "22222222"); !strings.Contains(reason, "duplicate") {
+			t.Fatalf("reason = %q", reason)
+		}
+	}
+	if reason := service.admitMessage(sender, "different", []string{"11111111"}, "22222222"); !strings.Contains(reason, "rate limit") {
+		t.Fatalf("reason = %q", reason)
+	}
+	if !service.guards[sender.Endpoint].lastActivity.Equal(activity) {
+		t.Fatal("rejected duplicates refreshed sender activity")
+	}
+}
+
+func TestHeldEvictionRepairsMissingOrderEntry(t *testing.T) {
+	service := &Service{held: make(map[string]InboundMessage)}
+	for index := range peerMaxHeldMessages {
+		id := fmt.Sprint(index)
+		service.held[id] = InboundMessage{ID: id, ReceivedAt: time.Unix(int64(index), 0)}
+	}
+	evicted := service.popOldestHeldLocked()
+	if evicted.ID != "0" || len(service.held) != peerMaxHeldMessages-1 {
+		t.Fatalf("evicted=%#v remaining=%d", evicted, len(service.held))
+	}
+}
+
+func TestSenderGuardEvictsLeastRecentlyAcceptedSender(t *testing.T) {
+	now := time.Unix(1000, 0)
+	service := &Service{now: func() time.Time { return now }, guards: make(map[string]*senderGuard)}
+	for index := range peerMaxTrackedSenders {
+		service.guards[fmt.Sprint(index)] = &senderGuard{lastActivity: now.Add(time.Duration(index) * time.Second)}
+	}
+	if reason := service.admitMessage(Peer{Endpoint: "new"}, "body", []string{"11111111"}, "22222222"); reason != "" {
+		t.Fatal(reason)
+	}
+	if _, exists := service.guards["0"]; exists {
+		t.Fatal("least-recently-active sender was not evicted")
+	}
+	if _, exists := service.guards["new"]; !exists {
+		t.Fatal("new sender was not tracked")
+	}
+}
+
 func TestResolvePeerRequiresReferenceForDuplicateNames(t *testing.T) {
 	peers := []Peer{
 		{Identity: Identity{SessionID: "one", Name: "worker"}, Ref: "11111111"},
@@ -407,6 +582,16 @@ func TestPlainTextNormalizationRemovesTerminalControls(t *testing.T) {
 	}
 	if got := normalizeSummary("  status\x1b[31m\nignored  "); got != "status[31m" {
 		t.Fatalf("normalized summary = %q", got)
+	}
+}
+
+func TestRemoteErrorNormalizationStripsControlsAndCapsLength(t *testing.T) {
+	got := normalizeRemoteError("\x1b[31m" + strings.Repeat("x", peerErrorMaxRunes+20))
+	if strings.ContainsRune(got, '\x1b') || len([]rune(got)) != peerErrorMaxRunes {
+		t.Fatalf("normalized remote error length=%d value=%q", len([]rune(got)), got)
+	}
+	if got := normalizeRemoteError("\x00\x1b"); got != "receiver rejected the message" {
+		t.Fatalf("empty remote error = %q", got)
 	}
 }
 

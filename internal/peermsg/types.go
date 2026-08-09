@@ -63,8 +63,8 @@ type Peer struct {
 	Ref       string    `json:"ref"`
 }
 
-// InboundMessage is delivered to the receiving application. RequiringApproval
-// is true when sender and receiver permission classes differ.
+// InboundMessage is delivered to the receiving application. RequiresApproval
+// is true when local policy requires the user to approve delivery.
 type InboundMessage struct {
 	ID               string
 	From             Peer

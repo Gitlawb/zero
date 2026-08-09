@@ -13,6 +13,8 @@ import (
 
 type unixTransport struct{}
 
+const unixSocketPathMax = 103
+
 func newPlatformTransport() localTransport { return unixTransport{} }
 
 func (unixTransport) Endpoint(root, nonce string, pid int) (string, error) {
@@ -22,14 +24,14 @@ func (unixTransport) Endpoint(root, nonce string, pid int) (string, error) {
 	}
 	path := filepath.Join(dir, fmt.Sprintf("%d-%s.sock", pid, nonce))
 	// macOS has the smallest supported sockaddr_un path (103 usable bytes).
-	if len(path) > 103 {
+	if len(path) > unixSocketPathMax {
 		dir = filepath.Join(os.TempDir(), fmt.Sprintf("zero-peers-%d", os.Getuid()))
 		if err := ensurePrivateDir(dir); err != nil {
 			return "", fmt.Errorf("peer messaging: create fallback socket directory: %w", err)
 		}
 		path = filepath.Join(dir, fmt.Sprintf("%d-%s.sock", pid, nonce))
 	}
-	if len(path) > 103 {
+	if len(path) > unixSocketPathMax {
 		return "", fmt.Errorf("peer messaging: socket path is too long: %s", path)
 	}
 	return path, nil

@@ -38,6 +38,12 @@ const (
 	peerMaxChainLength    = 28
 	peerMaxTrackedSenders = 256
 	peerMaxHeldMessages   = 100
+	peerMaxOutstanding    = 256
+	peerOutstandingTTL    = 6 * time.Minute
+	peerProbeWorkers      = 8
+	peerProbeTimeout      = 300 * time.Millisecond
+	peerRefHexLength      = 12
+	peerErrorMaxRunes     = 512
 )
 
 type inboundContextKey struct{}
@@ -48,6 +54,11 @@ type senderGuard struct {
 	lastBody     string
 	lastBodyAt   time.Time
 	lastActivity time.Time
+}
+
+type outstandingMessage struct {
+	peer      Peer
+	createdAt time.Time
 }
 
 type Options struct {
@@ -77,7 +88,7 @@ type Service struct {
 	evictionHandler HeldEvictionHandler
 	releaseHandler  HeldReleaseHandler
 	policy          InboundPolicy
-	outstanding     map[string]Peer
+	outstanding     map[string]outstandingMessage
 	held            map[string]InboundMessage
 	heldOrder       []string
 	guards          map[string]*senderGuard
@@ -97,6 +108,10 @@ func New(options Options) (*Service, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("peer messaging: resolve runtime directory: %w", err)
+	}
+	abs, err = canonicalRuntimePath(abs)
+	if err != nil {
+		return nil, fmt.Errorf("peer messaging: canonicalize runtime directory: %w", err)
 	}
 	nonce, err := randomHex(8)
 	if err != nil {
@@ -122,10 +137,38 @@ func New(options Options) (*Service, error) {
 		pid:         pid,
 		nonce:       nonce,
 		policy:      normalizeInboundPolicy(options.InboundPolicy),
-		outstanding: make(map[string]Peer),
+		outstanding: make(map[string]outstandingMessage),
 		held:        make(map[string]InboundMessage),
 		guards:      make(map[string]*senderGuard),
 	}, nil
+}
+
+func canonicalRuntimePath(path string) (string, error) {
+	missing := make([]string, 0, 4)
+	existing := filepath.Clean(path)
+	for {
+		_, err := os.Lstat(existing)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(existing))
+		existing = parent
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	for index := len(missing) - 1; index >= 0; index-- {
+		resolved = filepath.Join(resolved, missing[index])
+	}
+	return resolved, nil
 }
 
 // WithInboundMessage carries a peer message's relay chain through the agent
@@ -227,6 +270,8 @@ func (service *Service) Close() error {
 		held = append(held, message)
 	}
 	service.held = make(map[string]InboundMessage)
+	service.heldOrder = nil
+	service.outstanding = make(map[string]outstandingMessage)
 	service.listener = nil
 	service.mu.Unlock()
 
@@ -307,11 +352,9 @@ func (service *Service) UpdateIdentity(identity Identity) error {
 		if releaseHandler != nil {
 			releaseHandler(message)
 		}
-		go func(message InboundMessage) {
-			ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
-			defer cancel()
-			_ = service.sendStatus(ctx, message, DeliveryDelivered)
-		}(message)
+	}
+	if len(released) > 0 {
+		go service.sendStatuses(released, DeliveryDelivered)
 	}
 	return nil
 }
@@ -323,33 +366,53 @@ func (service *Service) Self() Peer {
 }
 
 func (service *Service) List(ctx context.Context) ([]Peer, error) {
-	entries, err := os.ReadDir(service.registryDir())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	candidates, err := service.registryPeers()
 	if err != nil {
-		return nil, fmt.Errorf("peer messaging: read registry: %w", err)
+		return nil, err
 	}
 	self := service.Self()
-	peers := make([]Peer, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
+	type probeResult struct {
+		peer      Peer
+		reachable bool
+	}
+	jobs := make(chan Peer)
+	results := make(chan probeResult, len(candidates))
+	workers := min(peerProbeWorkers, len(candidates))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for peer := range jobs {
+				if peer.Endpoint == self.Endpoint || peer.SessionID == "" {
+					continue
+				}
+				probeCtx, cancel := context.WithTimeout(ctx, peerProbeTimeout)
+				conn, dialErr := service.transport.Dial(probeCtx, peer.Endpoint)
+				cancel()
+				if dialErr == nil {
+					_ = conn.Close()
+				}
+				results <- probeResult{peer: peer, reachable: dialErr == nil}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, peer := range candidates {
+			select {
+			case jobs <- peer:
+			case <-ctx.Done():
+				return
+			}
 		}
-		path := filepath.Join(service.registryDir(), entry.Name())
-		peer, err := readPeerRecord(path)
-		if err != nil || peer.Endpoint == "" || peer.Endpoint == self.Endpoint || peer.SessionID == "" {
-			continue
+	}()
+	go func() { wg.Wait(); close(results) }()
+	peers := make([]Peer, 0, len(candidates))
+	for result := range results {
+		if result.reachable {
+			peers = append(peers, result.peer)
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
-		conn, dialErr := service.transport.Dial(probeCtx, peer.Endpoint)
-		cancel()
-		if dialErr != nil {
-			service.removeStaleRecord(path, peer.Endpoint)
-			continue
-		}
-		_ = conn.Close()
-		peers = append(peers, peer)
 	}
 	sort.Slice(peers, func(i, j int) bool {
 		if strings.EqualFold(peers[i].Name, peers[j].Name) {
@@ -358,6 +421,42 @@ func (service *Service) List(ctx context.Context) ([]Peer, error) {
 		return strings.ToLower(peers[i].Name) < strings.ToLower(peers[j].Name)
 	})
 	return peers, nil
+}
+
+func (service *Service) registryPeers() ([]Peer, error) {
+	entries, err := os.ReadDir(service.registryDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("peer messaging: read registry: %w", err)
+	}
+	peers := make([]Peer, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		peer, readErr := readPeerRecord(filepath.Join(service.registryDir(), entry.Name()))
+		if readErr == nil && peer.Endpoint != "" && peer.SessionID != "" {
+			peers = append(peers, peer)
+		}
+	}
+	return peers, nil
+}
+
+// registeredPeer replaces all sender-controlled identity metadata with the
+// record published by the live service that owns the claimed endpoint.
+func (service *Service) registeredPeer(claimed Peer) (Peer, error) {
+	peers, err := service.registryPeers()
+	if err != nil {
+		return Peer{}, err
+	}
+	for _, peer := range peers {
+		if peer.Endpoint == claimed.Endpoint && peer.SessionID == claimed.SessionID && peer.Ref == claimed.Ref {
+			return peer, nil
+		}
+	}
+	return Peer{}, errors.New("peer messaging: unregistered sender")
 }
 
 func (service *Service) Send(ctx context.Context, to, summary, body string) (SendResult, error) {
@@ -403,7 +502,8 @@ func (service *Service) Send(ctx context.Context, to, summary, body string) (Sen
 		HopChain: hopChain,
 	}
 	service.mu.Lock()
-	service.outstanding[id] = peer
+	service.pruneOutstandingLocked(service.now())
+	service.outstanding[id] = outstandingMessage{peer: peer, createdAt: service.now()}
 	service.mu.Unlock()
 	keepOutstanding := false
 	defer func() {
@@ -431,7 +531,7 @@ func (service *Service) Send(ctx context.Context, to, summary, body string) (Sen
 		return SendResult{}, errors.New("peer messaging: invalid delivery response")
 	}
 	if response.Error != "" {
-		return SendResult{}, errors.New(response.Error)
+		return SendResult{}, fmt.Errorf("peer messaging: receiver rejected message: %s", normalizeRemoteError(response.Error))
 	}
 	if response.Status != DeliveryAccepted && response.Status != DeliveryHeld && response.Status != DeliveryRefused {
 		return SendResult{}, errors.New("peer messaging: invalid delivery status")
@@ -442,6 +542,7 @@ func (service *Service) Send(ctx context.Context, to, summary, body string) (Sen
 
 func (service *Service) acceptLoop(listener net.Listener) {
 	defer service.wg.Done()
+	var retryDelay time.Duration
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -454,8 +555,17 @@ func (service *Service) acceptLoop(listener net.Listener) {
 			if closed {
 				return
 			}
+			if retryDelay == 0 {
+				retryDelay = 5 * time.Millisecond
+			} else {
+				retryDelay *= 2
+			}
+			retryDelay = min(retryDelay, time.Second)
+			timer := time.NewTimer(retryDelay)
+			<-timer.C
 			continue
 		}
+		retryDelay = 0
 		service.wg.Add(1)
 		go func() {
 			defer service.wg.Done()
@@ -480,11 +590,18 @@ func (service *Service) handleConn(conn net.Conn) {
 	}
 	response := responseFrame{Version: ProtocolVersion, Type: "delivery", ID: frame.ID, Status: DeliveryRefused}
 	if frame.Version != ProtocolVersion || frame.Type != "message" || frame.ID == "" ||
-		frame.From.SessionID == "" || frame.From.Endpoint == "" || frame.From.Ref != peerRef(frame.From.Endpoint) {
+		frame.From.SessionID == "" || frame.From.Endpoint == "" || !validPeerRef(frame.From.Endpoint, frame.From.Ref) {
 		response.Error = "peer messaging: invalid message envelope"
 		_ = json.NewEncoder(conn).Encode(response)
 		return
 	}
+	trustedSender, err := service.registeredPeer(frame.From)
+	if err != nil {
+		response.Error = "peer messaging: sender identity is not registered"
+		_ = json.NewEncoder(conn).Encode(response)
+		return
+	}
+	frame.From = trustedSender
 	if len([]byte(frame.Body)) == 0 || len([]byte(frame.Body)) > maxMessageBytes {
 		response.Error = "peer messaging: invalid message size"
 		_ = json.NewEncoder(conn).Encode(response)
@@ -545,10 +662,7 @@ func (service *Service) handleConn(conn net.Conn) {
 		var evictionHandler HeldEvictionHandler
 		service.mu.Lock()
 		if len(service.held) >= peerMaxHeldMessages {
-			oldestID := service.heldOrder[0]
-			service.heldOrder = service.heldOrder[1:]
-			evicted = service.held[oldestID]
-			delete(service.held, oldestID)
+			evicted = service.popOldestHeldLocked()
 			evictionHandler = service.evictionHandler
 		}
 		service.held[message.ID] = message
@@ -580,13 +694,18 @@ func (service *Service) handleConn(conn net.Conn) {
 
 func (service *Service) handleStatusFrame(frame sendFrame) {
 	if frame.Version != ProtocolVersion || frame.OrigID == "" || frame.From.SessionID == "" ||
-		frame.From.Endpoint == "" || frame.From.Ref != peerRef(frame.From.Endpoint) || !terminalDeliveryStatus(frame.Status) {
+		frame.From.Endpoint == "" || !validPeerRef(frame.From.Endpoint, frame.From.Ref) || !terminalDeliveryStatus(frame.Status) {
 		return
 	}
+	trustedSender, err := service.registeredPeer(frame.From)
+	if err != nil {
+		return
+	}
+	frame.From = trustedSender
 	service.mu.Lock()
 	self := service.self
-	peer, ok := service.outstanding[frame.OrigID]
-	if !ok || frame.To != self.SessionID || peer.Endpoint != frame.From.Endpoint || peer.SessionID != frame.From.SessionID {
+	outstanding, ok := service.outstanding[frame.OrigID]
+	if !ok || frame.To != self.SessionID || outstanding.peer.Endpoint != frame.From.Endpoint || outstanding.peer.SessionID != frame.From.SessionID {
 		service.mu.Unlock()
 		return
 	}
@@ -594,7 +713,7 @@ func (service *Service) handleStatusFrame(frame sendFrame) {
 	handler := service.statusHandler
 	service.mu.Unlock()
 	if handler != nil {
-		handler(StatusEvent{MessageID: frame.OrigID, Peer: peer, Status: frame.Status})
+		handler(StatusEvent{MessageID: frame.OrigID, Peer: outstanding.peer, Status: frame.Status})
 	}
 }
 
@@ -602,19 +721,9 @@ func (service *Service) sendStatus(ctx context.Context, message InboundMessage, 
 	if !terminalDeliveryStatus(status) {
 		return fmt.Errorf("peer messaging: invalid delivery status %q", status)
 	}
-	peers, err := service.List(ctx)
-	if err != nil {
-		return err
-	}
-	var target Peer
-	for _, peer := range peers {
-		if peer.Endpoint == message.From.Endpoint && peer.SessionID == message.From.SessionID && peer.Ref == message.From.Ref {
-			target = peer
-			break
-		}
-	}
-	if target.Endpoint == "" {
-		return errors.New("peer messaging: original sender is no longer reachable")
+	target := message.From
+	if target.Endpoint == "" || target.SessionID == "" || !validPeerRef(target.Endpoint, target.Ref) {
+		return errors.New("peer messaging: original sender identity is invalid")
 	}
 	self := service.Self()
 	frame := sendFrame{
@@ -635,6 +744,35 @@ func (service *Service) sendStatus(ctx context.Context, message InboundMessage, 
 		return fmt.Errorf("peer messaging: send status to %s: %w", displayPeer(target), err)
 	}
 	return nil
+}
+
+func (service *Service) sendStatuses(messages []InboundMessage, status DeliveryStatus) {
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	for _, message := range messages {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = service.sendStatus(ctx, message, status)
+	}
+}
+
+func (service *Service) pruneOutstandingLocked(now time.Time) {
+	for id, pending := range service.outstanding {
+		if now.Sub(pending.createdAt) >= peerOutstandingTTL {
+			delete(service.outstanding, id)
+		}
+	}
+	for len(service.outstanding) >= peerMaxOutstanding {
+		var oldestID string
+		var oldest time.Time
+		for id, pending := range service.outstanding {
+			if oldestID == "" || pending.createdAt.Before(oldest) {
+				oldestID, oldest = id, pending.createdAt
+			}
+		}
+		delete(service.outstanding, oldestID)
+	}
 }
 
 func (service *Service) inboundDecision(sender, receiver PermissionClass) (DeliveryStatus, HoldCause) {
@@ -691,10 +829,6 @@ func (service *Service) admitMessage(sender Peer, body string, chain []string, s
 		guard = &senderGuard{tokens: peerBucketCapacity, lastRefill: now}
 		service.guards[key] = guard
 	}
-	guard.lastActivity = now
-	if guard.lastBody == body && now.Sub(guard.lastBodyAt) < peerDedupWindow {
-		return "duplicate of a recent message from this sender"
-	}
 	elapsed := now.Sub(guard.lastRefill).Seconds()
 	if elapsed > 0 {
 		guard.tokens = min(peerBucketCapacity, guard.tokens+elapsed*peerRefillPerSecond)
@@ -704,6 +838,10 @@ func (service *Service) admitMessage(sender Peer, body string, chain []string, s
 		return "sender exceeded the peer message rate limit"
 	}
 	guard.tokens--
+	if guard.lastBody == body && now.Sub(guard.lastBodyAt) < peerDedupWindow {
+		return "duplicate of a recent message from this sender"
+	}
+	guard.lastActivity = now
 	guard.lastBody = body
 	guard.lastBodyAt = now
 	return ""
@@ -716,6 +854,28 @@ func (service *Service) removeHeldOrderLocked(messageID string) {
 			return
 		}
 	}
+}
+
+func (service *Service) popOldestHeldLocked() InboundMessage {
+	for len(service.heldOrder) > 0 {
+		messageID := service.heldOrder[0]
+		service.heldOrder = service.heldOrder[1:]
+		if message, ok := service.held[messageID]; ok {
+			delete(service.held, messageID)
+			return message
+		}
+	}
+	var oldestID string
+	var oldest InboundMessage
+	for messageID, message := range service.held {
+		if oldestID == "" || message.ReceivedAt.Before(oldest.ReceivedAt) {
+			oldestID, oldest = messageID, message
+		}
+	}
+	if oldestID != "" {
+		delete(service.held, oldestID)
+	}
+	return oldest
 }
 
 func inboundHopChain(ctx context.Context) []string {
@@ -731,7 +891,7 @@ func validateHopChain(chain []string) error {
 		return errors.New("peer messaging: invalid relay chain")
 	}
 	for _, ref := range chain {
-		if len(ref) != 8 {
+		if len(ref) < 8 || len(ref) > peerRefHexLength || len(ref)%2 != 0 {
 			return errors.New("peer messaging: invalid relay chain")
 		}
 		if _, err := hex.DecodeString(ref); err != nil {
@@ -817,7 +977,7 @@ func readPeerRecord(path string) (Peer, error) {
 	if err := json.Unmarshal(data, &peer); err != nil {
 		return Peer{}, err
 	}
-	if peer.PID <= 0 || peer.Endpoint == "" || peer.Ref != peerRef(peer.Endpoint) {
+	if peer.PID <= 0 || peer.Endpoint == "" || !validPeerRef(peer.Endpoint, peer.Ref) {
 		return Peer{}, errors.New("peer messaging: invalid registry record")
 	}
 	peer.Identity = normalizeIdentity(peer.Identity)
@@ -832,22 +992,27 @@ func (service *Service) removeOwnRecord(endpoint string) {
 	}
 }
 
-func (service *Service) removeStaleRecord(path, endpoint string) {
-	peer, err := readPeerRecord(path)
-	if err == nil && peer.Endpoint == endpoint {
-		_ = os.Remove(path)
-	}
-}
-
 func resolvePeer(peers []Peer, target string) (Peer, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return Peer{}, errors.New("peer messaging: recipient must not be empty")
 	}
 	for _, peer := range peers {
-		if peer.SessionID == target || strings.EqualFold(displayPeer(peer), target) {
+		if peer.SessionID == target {
 			return peer, nil
 		}
+	}
+	if name, ref, ok := splitPeerTarget(target); ok {
+		for _, peer := range peers {
+			peerName := strings.TrimSpace(peer.Name)
+			if peerName == "" {
+				peerName = "Zero session"
+			}
+			if strings.EqualFold(peer.Ref, ref) && strings.EqualFold(peerName, name) {
+				return peer, nil
+			}
+		}
+		return Peer{}, fmt.Errorf("peer messaging: no reachable session named %q", target)
 	}
 	matches := make([]Peer, 0, 2)
 	for _, peer := range peers {
@@ -864,6 +1029,22 @@ func resolvePeer(peers []Peer, target string) (Peer, error) {
 	return Peer{}, fmt.Errorf("peer messaging: no reachable session named %q", target)
 }
 
+func splitPeerTarget(target string) (name, ref string, ok bool) {
+	open := strings.LastIndex(target, " [")
+	if open <= 0 || !strings.HasSuffix(target, "]") {
+		return "", "", false
+	}
+	name = strings.TrimSpace(target[:open])
+	ref = target[open+2 : len(target)-1]
+	if name == "" || len(ref) < 8 || len(ref) > peerRefHexLength || len(ref)%2 != 0 {
+		return "", "", false
+	}
+	if _, err := hex.DecodeString(ref); err != nil {
+		return "", "", false
+	}
+	return name, ref, true
+}
+
 func displayPeer(peer Peer) string {
 	name := strings.TrimSpace(peer.Name)
 	if name == "" {
@@ -875,6 +1056,9 @@ func displayPeer(peer Peer) string {
 func normalizeIdentity(identity Identity) Identity {
 	identity.SessionID = truncateRunes(strings.TrimSpace(sanitizePlainText(identity.SessionID, false)), 256)
 	identity.Name = truncateRunes(strings.TrimSpace(sanitizePlainText(identity.Name, false)), 80)
+	if strings.ContainsAny(identity.Name, "[]") {
+		identity.Name = ""
+	}
 	identity.Cwd = truncateRunes(strings.TrimSpace(sanitizePlainText(identity.Cwd, false)), 4096)
 	switch identity.PermissionClass {
 	case PermissionPrompting, PermissionBypass:
@@ -906,6 +1090,14 @@ func normalizeBody(body string) string {
 	return strings.TrimSpace(sanitizePlainText(body, true))
 }
 
+func normalizeRemoteError(message string) string {
+	message = truncateRunes(strings.TrimSpace(sanitizePlainText(message, false)), peerErrorMaxRunes)
+	if message == "" {
+		return "receiver rejected the message"
+	}
+	return message
+}
+
 func sanitizePlainText(value string, multiline bool) string {
 	return strings.Map(func(char rune) rune {
 		if multiline && (char == '\n' || char == '\t') {
@@ -920,7 +1112,17 @@ func sanitizePlainText(value string, multiline bool) string {
 
 func peerRef(endpoint string) string {
 	sum := sha256.Sum256([]byte(endpoint))
-	return hex.EncodeToString(sum[:4])
+	return hex.EncodeToString(sum[:peerRefHexLength/2])
+}
+
+func validPeerRef(endpoint, ref string) bool {
+	if ref == peerRef(endpoint) {
+		return true
+	}
+	// Accept references from a process that was already running during an
+	// in-place upgrade. New sessions always publish the wider reference.
+	sum := sha256.Sum256([]byte(endpoint))
+	return ref == hex.EncodeToString(sum[:4])
 }
 
 func randomHex(bytes int) (string, error) {

@@ -163,6 +163,34 @@ func TestPeerApprovalWaitsUntilActiveRunCompletes(t *testing.T) {
 	}
 }
 
+func TestPeerApprovalDecisionWaitsForCompletionBeforeOpeningNext(t *testing.T) {
+	messages := make(chan any, 1)
+	m := newModel(context.Background(), Options{RuntimeMessageSink: func(message tea.Msg) { messages <- message }})
+	first := peermsg.InboundMessage{ID: "first", From: peermsg.Peer{Ref: "11111111"}, Body: "first", RequiresApproval: true}
+	second := peermsg.InboundMessage{ID: "second", From: peermsg.Peer{Ref: "22222222"}, Body: "second", RequiresApproval: true}
+	m, _ = m.handlePeerMessage(first)
+	m, _ = m.handlePeerMessage(second)
+	resolvedModel, _ := m.resolvePermission(permissionDecisionDeny)
+	resolved := resolvedModel.(model)
+	if resolved.pendingPermission != nil {
+		t.Fatal("next approval opened before peer decision completed")
+	}
+	if len(resolved.peerApprovalQueue) != 1 {
+		t.Fatalf("queue = %#v", resolved.peerApprovalQueue)
+	}
+	var decision peerDecisionMsg
+	select {
+	case raw := <-messages:
+		decision = raw.(peerDecisionMsg)
+	default:
+		t.Fatal("peer decision was not emitted")
+	}
+	next, _ := resolved.handlePeerDecision(decision.message, decision.allow)
+	if next.pendingPermission == nil || next.peerPendingApproval == nil || next.peerPendingApproval.ID != "second" {
+		t.Fatalf("next approval was not opened after completion: %#v", next.pendingPermission)
+	}
+}
+
 func TestPermissionModeReleaseReplacesHeldPromptWithDelivery(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.pending = true

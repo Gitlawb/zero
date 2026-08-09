@@ -4238,6 +4238,11 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	// quiet-generation clock so resuming a long-blocked run does not immediately
 	// claim the model has been inactive for the entire approval interval.
 	m.lastStreamActivity = m.now()
+	if pending.request.ToolName == peerPermissionToolName {
+		// Receipt delivery completes asynchronously. That completion advances
+		// the peer queue after this prompt is fully settled.
+		return m, nil
+	}
 	return m.openNextPeerApproval()
 }
 
@@ -4947,11 +4952,13 @@ func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage)
 		runCtx = peermsg.WithInboundMessage(runCtx, *peer)
 	}
 	m = m.beginRun(cancel)
-	agentCmd := m.runAgent(m.activeRunID, runCtx, prompt, turnImages)
+	var agentCmd tea.Cmd
 	if peer != nil {
 		agentCmd = m.runAgentWithOptions(m.activeRunID, runCtx, prompt, turnImages, tuiAgentRunOptions{
 			transientSystemPrompt: peerTurnSystemPrompt,
 		})
+	} else {
+		agentCmd = m.runAgent(m.activeRunID, runCtx, prompt, turnImages)
 	}
 	return m, tea.Batch(agentCmd, m.spinner.Tick)
 }

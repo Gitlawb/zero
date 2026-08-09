@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	winio "github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
@@ -42,7 +43,9 @@ func (windowsPipeTransport) Listen(endpoint string) (net.Listener, error) {
 }
 
 func (windowsPipeTransport) Dial(ctx context.Context, endpoint string) (net.Conn, error) {
-	return winio.DialPipeContext(ctx, endpoint)
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return winio.DialPipeContext(dialCtx, endpoint)
 }
 
 func (windowsPipeTransport) Remove(string) error { return nil }

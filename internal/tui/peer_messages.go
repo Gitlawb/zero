@@ -206,7 +206,11 @@ func (m model) resolvePeerReceiptCmd(messageID string, status peermsg.DeliverySt
 		return nil
 	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		parent := m.ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 		defer cancel()
 		return peerReceiptErrorMsg{err: service.ResolveHeld(ctx, messageID, status)}
 	}
