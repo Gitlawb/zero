@@ -331,6 +331,10 @@ func (request SandboxExecutionRequest) BackendPlan(policy Policy) BackendPlan {
 	}
 }
 
+// denyReadWarningHostGOOS is the host this process runs on, as far as the
+// DenyRead warning is concerned. A var so a test can drive both sides.
+var denyReadWarningHostGOOS = runtime.GOOS
+
 // windowsDenyReadWarnings reports that configuring DenyRead on Windows costs the
 // restricted token's write jail.
 //
@@ -347,6 +351,21 @@ func (request SandboxExecutionRequest) BackendPlan(policy Policy) BackendPlan {
 // reaches users who configured it. Tracked as #869; when that closes, this
 // warning goes with it.
 func windowsDenyReadWarnings(backend Backend, profile PermissionProfile) []string {
+	// The HOST has to be Windows, not merely the target backend.
+	//
+	// This describes a token the Windows command runner will build, and that
+	// runner only ever runs on Windows. A Windows-targeted plan built anywhere
+	// else is a cross-platform planning exercise, and its DenyRead does not come
+	// from a Windows user at all: credentialDenyReadPaths returns empty ON
+	// Windows and populates itself from the host everywhere else, so a plan built
+	// on Linux carries that machine's credential paths and would draw a warning
+	// about a token nothing will build.
+	//
+	// Indirected through a var so both sides stay testable from any host, the
+	// same reason windowsSandboxInitialized is one.
+	if denyReadWarningHostGOOS != "windows" {
+		return nil
+	}
 	if backend.Name != BackendWindowsRestrictedToken || !backend.NativeIsolation {
 		return nil
 	}
