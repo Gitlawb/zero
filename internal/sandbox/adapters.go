@@ -131,6 +131,13 @@ func unavailableBackend(goos string, message string) Backend {
 	}
 }
 
+// BuildPlan renders the plan for introspection (`zero sandbox policy`). It has
+// no command to describe, so the profile is built with no command context: the
+// credential baseline resolves relative token overrides against THIS process's
+// environment and working directory only. Execution goes through
+// BuildCommandPlan instead, which passes the command's own dir and env and can
+// therefore produce additional deny-if-exists entries. Callers exporting this
+// plan should say which of the two they are showing.
 func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPlan {
 	effectivePolicy := policy
 	if effectivePolicy.Mode == "" {
