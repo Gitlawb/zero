@@ -260,8 +260,9 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 	if !m.altScreen || m.height <= 0 || m.composerMouseSelectionBlocked() {
 		return 0, false
 	}
-	width := m.chatColumnWidth()
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	width := m.transcriptFooterWidth()
+	headerWidth := m.chatColumnWidth()
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(headerWidth), m.footerView(width))
 	localX, localY, ok := frame.composerRect.local(mouseX(msg), mouseY(msg))
 	if !ok {
 		return 0, false

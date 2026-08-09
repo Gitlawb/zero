@@ -27,6 +27,7 @@ const (
 	pickerSkill
 	pickerSTTModel
 	pickerSTTDownload
+	pickerPet
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
@@ -1029,10 +1030,14 @@ func (m model) newThemePicker() *commandPicker {
 // repaints the UI in the hovered palette. Safe to call with no picker open. Callers
 // mutate through m.picker (a pointer) and the global theme, so the value receiver
 // is fine.
-func (m model) pickerMoved(delta int) {
+func (m model) pickerMoved(delta int) (model, tea.Cmd) {
 	if m.picker == nil {
-		return
+		return m, nil
 	}
 	m.picker.move(delta)
 	m.previewSelectedTheme()
+	if m.picker.kind == pickerPet {
+		return m.schedulePetPreview()
+	}
+	return m, nil
 }

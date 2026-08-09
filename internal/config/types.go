@@ -112,6 +112,9 @@ type PreferencesConfig struct {
 	// name (e.g. "dracula"). Applied at startup below the --theme flag and
 	// ZERO_THEME, so a /theme choice survives restart. Empty = unset (defaults auto).
 	Theme string `json:"theme,omitempty"`
+	// Pet is the terminal companion selected through /pets. Empty leaves pets
+	// off until the user chooses one; "disabled" is the explicit off state.
+	Pet string `json:"pet,omitempty"`
 	// Recaps is a tri-state: nil (unset) defaults to ON; an explicit false means
 	// the user turned idle recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).

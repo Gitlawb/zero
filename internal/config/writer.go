@@ -591,6 +591,28 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 	return cfg, nil
 }
 
+// SetPet persists only the terminal-pet preference while preserving every
+// unrelated user setting through the config writer's atomic replace path.
+func SetPet(path string, pet string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg.Preferences.Pet = strings.TrimSpace(pet)
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
 // SetSTTModel persists the dictation model and its provider, mirroring
 // SetTheme (read-modify-atomic-write). provider must be one of the known STT
 // provider kinds; a local provider stores the model as stt.localModelPath,

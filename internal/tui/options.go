@@ -72,7 +72,10 @@ type Options struct {
 	// SavedTheme is the theme persisted in user config (Preferences.Theme). Applied
 	// at startup below --theme and ZERO_THEME, so a /theme choice survives restart.
 	SavedTheme string
-	UserAgent  string
+	// SavedPet is the persisted terminal companion id. Empty means no pet has
+	// been selected yet; "disabled" records an explicit opt-out.
+	SavedPet  string
+	UserAgent string
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig

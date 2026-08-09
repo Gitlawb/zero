@@ -322,6 +322,36 @@ func TestSidebarAutoHidesWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestSidebarAutoCollapsesIdleFileHistory(t *testing.T) {
+	m := filesPanelTestModel()
+	m.plan.clear()
+	m.pending = false
+	m.activeRunID = 0
+	if !m.sidebarHasContent() {
+		t.Fatal("touched files should remain available as sidebar history")
+	}
+	if m.sidebarActive() {
+		t.Fatal("idle file history should not keep an otherwise empty sidebar open")
+	}
+	updated, _ := m.Update(testKeyCtrl('b'))
+	m = updated.(model)
+	if !m.sidebarActive() {
+		t.Fatal("an explicit reveal should keep idle sidebar history visible")
+	}
+	updated, _ = m.Update(testKeyCtrl('b'))
+	m = updated.(model)
+	if m.sidebarActive() {
+		t.Fatal("a second explicit toggle should close idle sidebar history")
+	}
+
+	m.pending = true
+	m.activeRunID = 1
+	m.sidebarHidden = false
+	if !m.sidebarActive() {
+		t.Fatal("file activity during a live run should keep the sidebar visible")
+	}
+}
+
 func TestSidebarShowsSpawnedAgents(t *testing.T) {
 	m := sidebarTestModel()
 	now := time.Now()
@@ -624,6 +654,38 @@ func TestTwoColumnTranscriptViewWidth(t *testing.T) {
 		if w := lipgloss.Width(line); w != m.width {
 			t.Fatalf("two-column row %d width = %d, want full width %d", i, w, m.width)
 		}
+	}
+}
+
+func TestTwoColumnSidebarIsCompactAboveFullWidthFooter(t *testing.T) {
+	m := sidebarTestModel()
+	m.width, m.height = 120, 34
+	m.unpricedTokens = 10000
+	out := plainRender(t, m.twoColumnTranscriptView())
+	lines := strings.Split(out, "\n")
+
+	tokenRow := -1
+	composerTop := -1
+	for index, line := range lines {
+		if strings.Contains(line, "10K tokens") {
+			tokenRow = index
+		}
+		if strings.HasPrefix(line, "╭") {
+			composerTop = index
+		}
+	}
+	if tokenRow < 0 || tokenRow >= m.height/2 {
+		t.Fatalf("sidebar tokens should finish the compact top panel, row=%d height=%d\n%s", tokenRow, m.height, out)
+	}
+	if tokenRow+1 >= len(lines) || []rune(lines[tokenRow+1])[m.chatColumnWidth()+1] != '└' {
+		t.Fatalf("compact sidebar should end with a bottom edge, token row=%d\n%s", tokenRow, out)
+	}
+	if composerTop < 0 {
+		t.Fatalf("full-width composer missing:\n%s", out)
+	}
+	composerRunes := []rune(lines[composerTop])
+	if len(composerRunes) != m.width || composerRunes[m.width-1] != '╮' {
+		t.Fatalf("composer should span terminal width, got %q", lines[composerTop])
 	}
 }
 

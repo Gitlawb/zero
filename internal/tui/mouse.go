@@ -187,6 +187,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					return m.choosePicker()
 				}
 				m.lastMouseSelection = target
+				if m.picker.kind == pickerPet {
+					return m.schedulePetPreview()
+				}
 				return m, nil
 			}
 		case m.suggestionsActive():
@@ -233,8 +236,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if m.modelPickerIsLoading() {
 				return m, nil
 			}
-			m.pickerMoved(-1)
-			return m, nil
+			return m.pickerMoved(-1)
 		}
 		if m.suggestionsActive() {
 			m.moveSuggestion(-1)
@@ -265,8 +267,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if m.modelPickerIsLoading() {
 				return m, nil
 			}
-			m.pickerMoved(1)
-			return m, nil
+			return m.pickerMoved(1)
 		}
 		if m.suggestionsActive() {
 			m.moveSuggestion(1)
@@ -355,7 +356,8 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 		return false
 	}
 	width := m.chatColumnWidth()
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	footerWidth := m.transcriptFooterWidth()
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(footerWidth))
 	return frame.composerRect.contains(mouseX(msg), mouseY(msg))
 }
 
@@ -637,7 +639,7 @@ func (m model) overlayMouseRect(overlayHeight int, width int) tuiRect {
 		return tuiRect{}
 	}
 	if m.altScreen && m.height > 0 {
-		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(m.transcriptFooterWidth()))
 		visibleHeight := minInt(overlayHeight, frame.bodyRect.height)
 		if visibleHeight <= 0 {
 			return tuiRect{}

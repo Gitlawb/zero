@@ -172,14 +172,17 @@ func (m model) composerDividerLine(width int) string {
 	// footer for run-state), so they're not duplicated on this rule.
 	meta := zeroTheme.muted.Render(model)
 	metaWidth := lipgloss.Width(meta)
+	reserved := m.petComposerReservedColumns(width)
+	availableWidth := width - reserved
 	if width < 8 {
 		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))
 	}
-	if width < metaWidth+4 {
+	if availableWidth < metaWidth+4 {
 		return zeroTheme.lineStrong.Render("╰" + strings.Repeat("─", width-2) + "╯")
 	}
-	rule := strings.Repeat("─", width-metaWidth-4)
-	return zeroTheme.lineStrong.Render("╰"+rule+" ") + meta + zeroTheme.lineStrong.Render(" ╯")
+	rule := strings.Repeat("─", availableWidth-metaWidth-4)
+	line := zeroTheme.lineStrong.Render("╰"+rule+" ") + meta + zeroTheme.lineStrong.Render(" ╯")
+	return line + strings.Repeat(" ", reserved)
 }
 
 // statusLine renders the bottom readout as ` │ `-separated groups: the run-state
@@ -756,6 +759,9 @@ func (m model) pickerOverlay(width int) string {
 	}
 	if m.picker.kind == pickerModel {
 		return m.modelPickerOverlay(width)
+	}
+	if m.picker.kind == pickerPet {
+		return m.petPickerOverlay(width)
 	}
 	overlayWidth := minInt(width, pickerOverlayMaxWidth)
 	if overlayWidth < pickerOverlayMinWidth {

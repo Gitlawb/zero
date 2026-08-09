@@ -168,6 +168,22 @@ func TestResolveLoadsRecentModelsFromUserConfigOnly(t *testing.T) {
 	}
 }
 
+func TestResolveLoadsPetFromUserConfigOnly(t *testing.T) {
+	userPath := writeConfig(t, `{"preferences":{"pet":" boba "}}`)
+	projectPath := writeConfig(t, `{"preferences":{"pet":"project-pet"}}`)
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Preferences.Pet != "boba" {
+		t.Fatalf("Preferences.Pet = %q, want user preference boba", resolved.Preferences.Pet)
+	}
+}
+
 // recentModels must never be merged from project config (same posture as
 // favoriteModels): a project setting it with no corresponding user setting
 // should leave the resolved value empty, not pick up the project's list.
