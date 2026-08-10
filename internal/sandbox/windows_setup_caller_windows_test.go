@@ -14,14 +14,18 @@ import (
 // test can drive its control flow on an ordinary machine. Each seam defaults to
 // a benign success, and a test overrides only the one it is about.
 type windowsSetupSeams struct {
-	elevated       bool
-	aclRollback    func() error
-	retireErr      error
-	provisionErr   error
-	networkErr     error
-	markerErr      error
-	rollbackCalled *bool
-	markerWritten  *bool
+	elevated bool
+	// principalStillInstalled is what the account lookup reports AFTER retirement
+	// ran. It is the whole of the opt-out branch's fatality rule, so it is stated
+	// separately from retireErr rather than inferred from it.
+	principalStillInstalled bool
+	aclRollback             func() error
+	retireErr               error
+	provisionErr            error
+	networkErr              error
+	markerErr               error
+	rollbackCalled          *bool
+	markerWritten           *bool
 }
 
 func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
@@ -32,9 +36,11 @@ func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
 	originalACL := applyWindowsACLPlanFn
 	originalPrincipal := setupWindowsSandboxPrincipalFn
 	originalRetire := removeWindowsSandboxPrincipalForSetupFn
+	originalLookup := lookupWindowsSandboxIdentityFn
 	originalNetwork := applyWindowsNetworkPlanFn
 	originalMarker := writeWindowsSandboxSetupMarkerFn
 	t.Cleanup(func() {
+		lookupWindowsSandboxIdentityFn = originalLookup
 		windowsProcessIsElevatedFn = originalElevated
 		acquireWindowsSandboxSetupLockFn = originalLock
 		applyWindowsACLPlanFn = originalACL
@@ -69,6 +75,12 @@ func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
 	}
 	removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig) error {
 		return seams.retireErr
+	}
+	lookupWindowsSandboxIdentityFn = func(string) (windowsSandboxIdentity, error) {
+		if seams.principalStillInstalled {
+			return windowsSandboxIdentity{Username: "zero-sbx-stub"}, nil
+		}
+		return windowsSandboxIdentity{}, errWindowsSandboxIdentityUnavailable
 	}
 	applyWindowsNetworkPlanFn = func(WindowsNetworkPlan) error { return seams.networkErr }
 	writeWindowsSandboxSetupMarkerFn = func(config WindowsSandboxSetupConfig) (WindowsSandboxSetupMarker, error) {
@@ -116,10 +128,11 @@ func TestOptOutRetirementFailureFailsSetupAndWritesNoMarker(t *testing.T) {
 	markerWritten := false
 	rollbackCalled := false
 	withWindowsSetupSeams(t, windowsSetupSeams{
-		elevated:       true,
-		retireErr:      errors.New("sandbox principal zero-sbx-abc could not be deleted"),
-		markerWritten:  &markerWritten,
-		rollbackCalled: &rollbackCalled,
+		elevated:                true,
+		retireErr:               errors.New("sandbox principal zero-sbx-abc could not be deleted"),
+		principalStillInstalled: true,
+		markerWritten:           &markerWritten,
+		rollbackCalled:          &rollbackCalled,
 	})
 
 	var stderr bytes.Buffer
@@ -138,6 +151,46 @@ func TestOptOutRetirementFailureFailsSetupAndWritesNoMarker(t *testing.T) {
 	}
 	if _, err := os.Stat(WindowsSandboxSetupMarkerPath(config.SandboxHome)); !os.IsNotExist(err) {
 		t.Errorf("no marker file should exist on disk after a failed setup, stat error = %v", err)
+	}
+}
+
+// The other side of that rule, and a regression I introduced fixing the first
+// one: failing on ANY retirement error is wrong.
+//
+// removeWindowsSandboxPrincipalForSetup deliberately carries on past a secret
+// file owned by another administrator's setup (errWindowsSandboxSecretNotOurs
+// goes into secretErr and is reported at the end via errors.Join) so one
+// unlinkable file cannot strand the account, its logon rights and its ACEs. The
+// account is therefore already gone when that error is returned, and treating it
+// as fatal made `zero sandbox setup` fail permanently on such a machine, taking
+// the DEFAULT restricted-token sandbox down with it over inert residue.
+//
+// Setup must complete, and must still say what was left behind.
+func TestOptOutSucceedsWhenOnlyInertResidueSurvivesRetirement(t *testing.T) {
+	markerWritten := false
+	rollbackCalled := false
+	withWindowsSetupSeams(t, windowsSetupSeams{
+		elevated: true,
+		// What teardown reports when the only leftover is another administrator's
+		// secret file: the account, its rights, its ACEs and its ledger are gone.
+		retireErr:               errWindowsSandboxSecretNotOurs,
+		principalStillInstalled: false,
+		markerWritten:           &markerWritten,
+		rollbackCalled:          &rollbackCalled,
+	})
+
+	var stderr bytes.Buffer
+	if code := runWindowsSandboxSetup(windowsSetupTestConfig(t, false), &stderr); code != 0 {
+		t.Fatalf("setup failed over residue left behind by an already-retired principal, which makes the default sandbox unsetupable on this machine: %s", stderr.String())
+	}
+	if !markerWritten {
+		t.Error("setup that completed must write its marker")
+	}
+	if rollbackCalled {
+		t.Error("setup rolled back its ACL work over residue it had already reported as survivable")
+	}
+	if !strings.Contains(stderr.String(), "residue") {
+		t.Errorf("the leftover must still be named for whoever cleans it up, got %q", stderr.String())
 	}
 }
 
