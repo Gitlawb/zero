@@ -13,10 +13,12 @@ func summaryTexts(t *testing.T, events []sessions.AppendEventInput) []string {
 	t.Helper()
 	out := []string{}
 	for _, event := range events {
-		if event.Type != sessions.EventCompaction {
+		// Activity summaries are now assistant messages carrying the summary
+		// marker (see noteEvent), not EventCompaction.
+		if !NoteEventIsSummary(event.Payload) {
 			continue
 		}
-		out = append(out, str(t, event, "summary"))
+		out = append(out, str(t, event, "content"))
 	}
 	return out
 }
@@ -260,7 +262,7 @@ func TestSummaryEventsComeLastSoTheySitNearestTheNewRequest(t *testing.T) {
 	if len(events) < 2 {
 		t.Fatal("expected conversation events plus a summary")
 	}
-	if events[len(events)-1].Type != sessions.EventCompaction {
+	if !NoteEventIsSummary(events[len(events)-1].Payload) {
 		t.Errorf("last event is %s, want the summary last so it survives the "+
 			"80-event window and reads as a footer", events[len(events)-1].Type)
 	}

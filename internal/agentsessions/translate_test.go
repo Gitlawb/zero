@@ -59,7 +59,9 @@ func str(t *testing.T, event sessions.AppendEventInput, key string) string {
 func conversationEvents(events []sessions.AppendEventInput) []sessions.AppendEventInput {
 	out := make([]sessions.AppendEventInput, 0, len(events))
 	for _, event := range events {
-		if event.Type == sessions.EventCompaction {
+		// Zero-generated activity summaries (assistant messages carrying the
+		// summary marker) are not translated transcript turns.
+		if event.Type == sessions.EventCompaction || NoteEventIsSummary(event.Payload) {
 			continue
 		}
 		out = append(out, event)
@@ -76,7 +78,7 @@ func TestPayloadKeysMatchWhatTheTUIReads(t *testing.T) {
 		{"message", messageEvent("user", "hi"), []string{"content", "role"}},
 		{"tool call", toolCallEvent("Read", "toolu_1", "{}"), []string{"arguments", "name", "toolCallId"}},
 		{"tool result", toolResultEvent("Read", "toolu_1", "ok", "out"), []string{"name", "output", "status", "toolCallId"}},
-		{"note", noteEvent("trimmed"), []string{"summary"}},
+		{"note", noteEvent("trimmed"), []string{"content", "importedActivitySummary", "role"}},
 	}
 	for _, test := range cases {
 		got := keysOf(t, test.event)
@@ -156,8 +158,9 @@ func TestACallAndItsResultSharePairingID(t *testing.T) {
 		t.Fatal(err)
 	}
 	events = conversationEvents(events)
-	if len(events) != 2 {
-		t.Fatalf("got %d events, want 2", len(events))
+	// The call then its result lead; any activity-summary messages follow.
+	if len(events) < 2 || events[0].Type != sessions.EventToolCall || events[1].Type != sessions.EventToolResult {
+		t.Fatalf("want the call then its result as the first two events; got %+v", events)
 	}
 	call, result := str(t, events[0], "toolCallId"), str(t, events[1], "toolCallId")
 	if call == "" || call != result {
@@ -174,8 +177,9 @@ func TestAFailedToolCallKeepsItsErrorStatus(t *testing.T) {
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"exit status 1"}]}}`,
 	)
 	events := conversationEvents(mustTranslate(t, path))
-	if len(events) != 2 {
-		t.Fatalf("got %d events, want 2", len(events))
+	// The call then its result lead; any activity-summary messages follow.
+	if len(events) < 2 || events[0].Type != sessions.EventToolCall || events[1].Type != sessions.EventToolResult {
+		t.Fatalf("got %d events, want the call then its result", len(events))
 	}
 	if got := str(t, events[1], "status"); got != "error" {
 		t.Errorf("status = %q, want error — a failure that imports as a success "+
@@ -211,8 +215,14 @@ func TestSecretsInAForeignTranscriptAreRedacted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(conversationEvents(events)); got != 3 {
-		t.Fatalf("got %d conversation events, want 3", got)
+	// The three translated turns lead; the activity summary (now assistant
+	// messages, not EventCompaction — see noteEvent) follows them.
+	convo := conversationEvents(events)
+	if len(convo) < 3 {
+		t.Fatalf("got %d conversation events, want at least the 3 translated turns", len(convo))
+	}
+	if convo[0].Type != sessions.EventMessage || convo[1].Type != sessions.EventToolCall || convo[2].Type != sessions.EventToolResult {
+		t.Fatalf("first three events are not the translated turns: %+v", convo[:3])
 	}
 	// Every field that carries free text must be scrubbed, not just the obvious one.
 	encoded, err := json.Marshal(events)
@@ -258,11 +268,11 @@ func TestCappingKeepsTheTailAndSaysSo(t *testing.T) {
 	}
 	// The cap must never be silent: an import that looks complete but is not is
 	// how someone concludes the other agent never did the work.
-	if events[0].Type != sessions.EventCompaction {
+	if events[0].Type != sessions.EventMessage {
 		t.Errorf("first event = %s, want a note announcing the trim", events[0].Type)
 	}
-	if summary := str(t, events[0], "summary"); !strings.Contains(summary, "not imported") {
-		t.Errorf("trim note = %q, want it to say events were dropped", summary)
+	if content := str(t, events[0], "content"); !strings.Contains(content, "not imported") {
+		t.Errorf("trim note = %q, want it to say events were dropped", content)
 	}
 	// And what survives must be the END of the session, not the beginning.
 	last := str(t, events[len(events)-1], "content")

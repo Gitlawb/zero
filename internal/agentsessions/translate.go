@@ -23,18 +23,42 @@ import (
 // event through here means no future caller can add an unredacted path without
 // deleting a call they can see.
 
+// redact runs secret redaction on content-bearing fields. Every string this
+// package renders — including the structural ones (role, name, toolCallId) that
+// carry no secrets but still reach the terminal — additionally passes through
+// stripControl at its constructor, so no imported byte reaches a picker row or
+// transcript line as a live control sequence.
 func redact(value string) string {
 	if value == "" {
 		return ""
 	}
-	return redaction.RedactString(value, redaction.Options{})
+	return stripControl(redaction.RedactString(value, redaction.Options{}))
+}
+
+// stripControl removes terminal control bytes from imported text. A foreign
+// transcript is untrusted input (invariant #8): an ESC or NUL a title or
+// message carries repaints or corrupts the terminal once it lands in a picker
+// row or a transcript line — the class shipped in #835 (a forged row) and #876
+// (a NUL that panicked the TUI). Tab and newline are kept because a transcript
+// legitimately carries them; every other C0 byte, DEL, and C1 byte is dropped.
+func stripControl(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t' || r == '\n':
+			return r
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			return -1
+		default:
+			return r
+		}
+	}, value)
 }
 
 func messageEvent(role string, content string) sessions.AppendEventInput {
 	return sessions.AppendEventInput{
 		Type: sessions.EventMessage,
 		Payload: map[string]any{
-			"role":    role,
+			"role":    stripControl(role),
 			"content": redact(content),
 		},
 	}
@@ -44,11 +68,12 @@ func toolCallEvent(name string, callID string, arguments string) sessions.Append
 	return sessions.AppendEventInput{
 		Type: sessions.EventToolCall,
 		Payload: map[string]any{
-			"name": name,
+			"name": stripControl(name),
 			// The foreign agent's own call id is reused verbatim so a call and
 			// its result pair up: the TUI keys them together on this string
 			// (effectiveToolRowID), and inventing new ids would split every pair.
-			"toolCallId": callID,
+			// Stripped identically on both sides so the pairing survives.
+			"toolCallId": stripControl(callID),
 			"arguments":  redact(arguments),
 		},
 	}
@@ -58,18 +83,49 @@ func toolResultEvent(name string, callID string, status tools.Status, output str
 	return sessions.AppendEventInput{
 		Type: sessions.EventToolResult,
 		Payload: map[string]any{
-			"name":       name,
-			"toolCallId": callID,
+			"name":       stripControl(name),
+			"toolCallId": stripControl(callID),
 			"status":     string(status),
 			"output":     redact(output),
 		},
 	}
 }
 
+// noteEventSummaryKey marks a message as a Zero-generated activity summary
+// rather than a translated foreign-transcript turn. The TUI and the resume
+// digest read only "role" and "content", so this key is invisible to render and
+// to the model; it exists so a consumer that wants the imported transcript alone
+// can tell the two apart. NoteEventIsSummary reads it.
+const noteEventSummaryKey = "importedActivitySummary"
+
+// NoteEventIsSummary reports whether an event is a Zero-generated activity
+// summary message (see noteEvent) rather than a translated transcript turn. It
+// takes any so callers can pass an AppendEventInput.Payload directly.
+func NoteEventIsSummary(payload any) bool {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	flag, _ := m[noteEventSummaryKey].(bool)
+	return flag
+}
+
+// noteEvent carries an imported-session activity summary as an assistant
+// message. NOT EventCompaction: that type has a second contract on the replay
+// side. RehydrateEvents restructures the transcript around the last
+// EventCompaction, and an activity summary with no CompactionPayload bookkeeping
+// (no CompactableEvents, CompactedThroughSequence 0) makes rehydration hoist
+// this note to the FRONT of the transcript. EventMessage still passes
+// promptContextEvents — the resume digest — without that restructuring. The
+// summary marker keeps it distinguishable from a real assistant turn.
 func noteEvent(summary string) sessions.AppendEventInput {
 	return sessions.AppendEventInput{
-		Type:    sessions.EventCompaction,
-		Payload: map[string]any{"summary": redact(summary)},
+		Type: sessions.EventMessage,
+		Payload: map[string]any{
+			"role":              "assistant",
+			"content":           redact(summary),
+			noteEventSummaryKey: true,
+		},
 	}
 }
 
