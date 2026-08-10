@@ -173,6 +173,12 @@ type WindowsSandboxCommandConfig struct {
 	Env               map[string]string
 	SandboxLevel      WindowsSandboxLevel
 	Command           []string
+	// CallerSID names the Windows user whose sandbox principal this config plans
+	// against. Empty — the case for every ordinary command — means the process
+	// running it, which is already the invoking user. It is set only by the
+	// elevated setup half, which runs as somebody else under over-the-shoulder UAC
+	// and would otherwise provision an account the caller can never find.
+	CallerSID string
 }
 
 func BuildWindowsSandboxCommandArgs(options WindowsSandboxCommandArgsOptions) ([]string, error) {

@@ -5,15 +5,35 @@ package sandbox
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"golang.org/x/sys/windows"
+)
+
+// Seams for the setup transaction's external effects.
+//
+// Every step below needs something a test machine cannot be asked for: an
+// elevated token, a machine-global mutex, real DACLs, the WFP engine, a local
+// account. That left the ORDER of those steps and the handling of each failure
+// — which is where this function's bugs actually live — with no coverage at all.
+// Each var defaults to its production function and is only ever reassigned by a
+// test. removeWindowsSandboxPrincipalForSetupFn and applyWindowsACLPlanFn
+// already existed in windows_identity_windows.go for the same reason; the rest
+// follow them, and the ACL call below now goes through that one so a single stub
+// covers both plans.
+var (
+	windowsProcessIsElevatedFn       = windowsProcessIsElevated
+	acquireWindowsSandboxSetupLockFn = acquireWindowsSandboxSetupLock
+	applyWindowsNetworkPlanFn        = applyWindowsNetworkPlan
+	setupWindowsSandboxPrincipalFn   = setupWindowsSandboxPrincipal
+	writeWindowsSandboxSetupMarkerFn = WriteWindowsSandboxSetupMarker
 )
 
 func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) int {
 	// Applying the WFP network filters and workspace ACLs requires Administrator
 	// rights; without them WFP fails deep inside with a raw ACCESS_DENIED (0x5).
 	// Check up front and return an actionable message instead.
-	if !windowsProcessIsElevated() {
+	if !windowsProcessIsElevatedFn() {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": Administrator rights are required. Re-run `zero sandbox setup` from an elevated (Run as administrator) terminal.")
 		return 1
 	}
@@ -30,7 +50,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	//
 	// Immediately after the elevation check, because acquiring a Global object
 	// needs the rights that check just confirmed.
-	lock, err := acquireWindowsSandboxSetupLock(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+	lock, err := acquireWindowsSandboxSetupLockFn(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
@@ -43,6 +63,15 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		// while holding the machine's sandbox state open.
 		fmt.Fprintf(stderr, "%s: a previous setup for this workspace exited without finishing; re-running to repair it.\n",
 			WindowsSandboxSetupName)
+	}
+
+	// Before anything is provisioned: a principal this helper could not hand back
+	// to the caller must not be created at all.
+	if config.PrincipalOptIn {
+		if err := assertWindowsSetupRunsAsCaller(config.CallerSID); err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+			return 1
+		}
 	}
 
 	plan, err := BuildWindowsACLPlan(config.commandConfig())
@@ -58,7 +87,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
-	rollback, err := applyWindowsACLPlan(plan)
+	rollback, err := applyWindowsACLPlanFn(plan)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
@@ -69,7 +98,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// endpoint protection and enterprise policy object to. Without the opt-in the
 	// capability-SID backend above is the whole of setup, unchanged.
 	if windowsSandboxIdentityEnabled(config.commandConfig().Env) {
-		principalRollback, err := setupWindowsSandboxPrincipal(config.commandConfig())
+		principalRollback, err := setupWindowsSandboxPrincipalFn(config.commandConfig())
 		if err != nil {
 			if rollbackErr := rollback(); rollbackErr != nil {
 				fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
@@ -89,7 +118,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 			}
 			return aclErr
 		}
-	} else if err := removeWindowsSandboxPrincipalForSetup(config.commandConfig()); err != nil {
+	} else if err := removeWindowsSandboxPrincipalForSetupFn(config.commandConfig()); err != nil {
 		// Opting out has to actually retire the principal, because that is what
 		// we tell people it does. ValidateWindowsSandboxSetupMarker sends an
 		// operator here in as many words: re-run setup from an elevated terminal
@@ -100,14 +129,29 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		// invisible, because nothing afterwards looks for a principal it believes
 		// was never provisioned.
 		//
-		// Not fatal. Teardown is idempotent and a machine that never had a
-		// principal passes straight through, so a failure here means genuine
-		// residue rather than a missing account: say so and carry on rather than
-		// refusing to complete a setup whose sandbox is otherwise fine.
-		fmt.Fprintf(stderr, "%s: opted out, but retiring the existing sandbox principal did not complete: %v\n",
+		// Fatal, and the first cut of this branch had it wrong: it printed and
+		// carried on to write an opted-out marker and exit 0.
+		//
+		// The reasoning was that teardown is idempotent, so a machine that never
+		// had a principal passes straight through and a failure here means real
+		// residue rather than a missing account. Both halves are true; the
+		// conclusion does not follow. Real residue is precisely the case that must
+		// not be reported as success, because the marker then says "no principal"
+		// while the account, its secret, its logon right, its ACEs and its ledger
+		// are all still there — and nothing afterwards looks for a principal it
+		// believes was never provisioned, so the leftovers are permanent. Exiting
+		// non-zero is the only thing that keeps the operator in the loop, and
+		// re-running setup is the repair.
+		if rollbackErr := rollback(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: opted out, but retiring the existing sandbox principal failed: %v; rollback failed: %v\n",
+				WindowsSandboxSetupName, err, rollbackErr)
+			return 1
+		}
+		fmt.Fprintf(stderr, "%s: opted out, but retiring the existing sandbox principal failed: %v\n",
 			WindowsSandboxSetupName, err)
+		return 1
 	}
-	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
+	if err := applyWindowsNetworkPlanFn(networkPlan); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
 			return 1
@@ -115,7 +159,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
-	if _, err := WriteWindowsSandboxSetupMarker(config); err != nil {
+	if _, err := writeWindowsSandboxSetupMarkerFn(config); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
 			return 1
@@ -124,6 +168,47 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		return 1
 	}
 	return 0
+}
+
+// assertWindowsSetupRunsAsCaller refuses to provision a sandbox principal when
+// this elevated helper belongs to a different Windows user than the caller that
+// launched it.
+//
+// A principal is unusable across that boundary, and not for a reason more
+// plumbing can fix. Its password is sealed with CryptProtectData, which derives
+// its key from the CALLING user, so a blob written here is decryptable only by
+// this administrator; the caller's next command would find the account, find the
+// secret file, and fail to unseal it. Threading the caller's SID through the
+// setup args fixes the account NAME, the ledger and the ACEs — everything that
+// is merely named after the invoking user — but it cannot re-key DPAPI for a
+// user whose token this process does not hold.
+//
+// So the answer is to say so before anything exists, rather than provision an
+// account, a secret and a grant that resolve to a sandbox nobody can log into.
+//
+// Same-account elevation is unaffected: a UAC consent prompt splits the caller's
+// token but leaves the user SID identical, which is the ordinary path. Only
+// over-the-shoulder elevation and `runas /user:` land here. An unknown caller
+// SID (an older caller, or a token query that failed) is treated as a match:
+// that is the pre-existing behaviour, and refusing on absence would break setup
+// on machines where nothing is wrong.
+//
+// Scoped to the opt-in by its caller, deliberately. The default restricted-token
+// sandbox stores no secret and names no account after the user, so it works
+// perfectly well across this boundary and must keep doing so.
+func assertWindowsSetupRunsAsCaller(callerSID string) error {
+	caller := strings.TrimSpace(callerSID)
+	if caller == "" {
+		return nil
+	}
+	current := windowsCurrentUserSID()
+	if current == "" || strings.EqualFold(current, caller) {
+		return nil
+	}
+	return fmt.Errorf("this elevated setup is running as a different Windows user (%s) than the one that started it (%s), "+
+		"and a sandbox principal's password is sealed to the user that stores it, so the account provisioned here could never be used. "+
+		"Re-run `zero sandbox setup` from a terminal elevated as your own account, or unset %s to use the restricted-token sandbox",
+		current, caller, windowsSandboxIdentityEnv)
 }
 
 // windowsProcessIsElevated reports whether the current process runs with an

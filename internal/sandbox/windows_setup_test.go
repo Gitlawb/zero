@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -463,5 +464,79 @@ func TestWindowsACLPlanHashIsStableAcrossEntryOrder(t *testing.T) {
 	}
 	if left != right {
 		t.Fatalf("ACL plan hashes differ: %q vs %q", left, right)
+	}
+}
+
+// The caller's identity has to survive the UAC boundary for the same reason the
+// opt-in does: elevated setup is a separate process, and under over-the-shoulder
+// elevation it belongs to a different administrator. Every principal name, its
+// ACL ledger and its DPAPI secret are scoped to the invoking user, so a helper
+// left to sample its own token provisions for the wrong one.
+//
+// Runs on every GOOS. The identity is resolved before the boundary, so what is
+// pinned here is the transport, which is where it would silently go missing.
+func TestWindowsSandboxSetupArgsCarryTheCallerIdentity(t *testing.T) {
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
+		Network:    NetworkPolicy{Mode: NetworkDeny},
+	}
+	const callerSID = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+		SandboxHome:       `C:\home`,
+		CommandCWD:        `C:\workspace`,
+		WorkspaceRoots:    []string{`C:\workspace`},
+		PermissionProfile: profile,
+		CallerSID:         callerSID,
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
+	}
+	config, err := ParseWindowsSandboxSetupArgs(args)
+	if err != nil {
+		t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
+	}
+	if config.CallerSID != callerSID {
+		t.Fatalf("the caller identity did not survive the setup args: got %q, want %q", config.CallerSID, callerSID)
+	}
+	// And on to the command-shaped view the setup half actually plans against —
+	// the only place it changes what gets provisioned.
+	if got := config.commandConfig().CallerSID; got != callerSID {
+		t.Errorf("commandConfig dropped the caller identity: got %q, want %q", got, callerSID)
+	}
+}
+
+// A caller that cannot state its identity must not send an empty flag. Absence
+// means "this caller did not say", which the helper answers by sampling its own
+// token exactly as it did before the flag existed; an empty value would have to
+// be guessed at instead.
+func TestWindowsSandboxSetupArgsOmitAnUnknownCallerIdentity(t *testing.T) {
+	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+		SandboxHome:    `C:\home`,
+		CommandCWD:     `C:\workspace`,
+		WorkspaceRoots: []string{`C:\workspace`},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{Kind: FileSystemRestricted},
+			Network:    NetworkPolicy{Mode: NetworkDeny},
+		},
+		// Left unset. On non-Windows builds windowsCurrentUserSID also returns
+		// empty, which is the same case a Windows caller hits when its token query
+		// fails.
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		for _, arg := range args {
+			if arg == "--caller-sid" {
+				t.Fatalf("an unresolvable caller identity was still serialized: %v", args)
+			}
+		}
+	}
+	config, err := ParseWindowsSandboxSetupArgs(args)
+	if err != nil {
+		t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
+	}
+	if runtime.GOOS != "windows" && config.CallerSID != "" {
+		t.Errorf("CallerSID = %q, want empty so the helper falls back to its own token", config.CallerSID)
 	}
 }
