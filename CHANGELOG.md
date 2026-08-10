@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.7.0](https://github.com/Gitlawb/zero/compare/v0.6.0...v0.7.0) (2026-08-10)
+
+
+### Features
+
+* **agent:** add PermissionModePlan for interactive read-only planning ([#853](https://github.com/Gitlawb/zero/issues/853)) ([0176ee4](https://github.com/Gitlawb/zero/commit/0176ee49ffddcff6f7edf6ae2ade4967e5b22cc3))
+* **providers:** live model lists for OpenRouter and OpenGateway ([#860](https://github.com/Gitlawb/zero/issues/860)) ([fb4f293](https://github.com/Gitlawb/zero/commit/fb4f293c20eb860ca388a10d22fd566ce282ba1f))
+* **tools:** give tool results an image channel and add view_image ([#843](https://github.com/Gitlawb/zero/issues/843)) ([cd0eb19](https://github.com/Gitlawb/zero/commit/cd0eb194e4df4b844785796c0701216740a56344))
+* **tui:** replace /retitle with local /rename ([#826](https://github.com/Gitlawb/zero/issues/826)) ([5886354](https://github.com/Gitlawb/zero/commit/588635487f22ef4d62d350140a219b7b8bb24119))
+
+
+### Bug Fixes
+
+* **agent:** end the additional_permissions retry loop ([#864](https://github.com/Gitlawb/zero/issues/864)) ([4ca4fa7](https://github.com/Gitlawb/zero/commit/4ca4fa75d31b139dbe55a3badf17da86892ab001))
+* **agent:** tell the user a prefix approval leaves the sandbox ([#885](https://github.com/Gitlawb/zero/issues/885)) ([2ec5c3a](https://github.com/Gitlawb/zero/commit/2ec5c3ae6b8fb543887bdeafdb34c4da057b8d36))
+* **cli:** report MCP servers that failed to start ([#822](https://github.com/Gitlawb/zero/issues/822)) ([#827](https://github.com/Gitlawb/zero/issues/827)) ([021281e](https://github.com/Gitlawb/zero/commit/021281ebbab3f2bbe6a77b2dab4bf121bcfe6b52))
+* **lsp:** dispatch notifications off read loop ([#759](https://github.com/Gitlawb/zero/issues/759)) ([936aa4e](https://github.com/Gitlawb/zero/commit/936aa4e77cf49738560a89395b8ba4d22263a396))
+* **mcp:** name the non-text blocks a tool result drops ([#874](https://github.com/Gitlawb/zero/issues/874)) ([027a670](https://github.com/Gitlawb/zero/commit/027a67080bea511b876c284bc911ef011eceb308))
+* **sandbox:** deny reads of Zero credential stores ([#681](https://github.com/Gitlawb/zero/issues/681)) ([55fa05f](https://github.com/Gitlawb/zero/commit/55fa05f0ab5a01b495345d43464606cd19a31b4f))
+* **sandbox:** stop the Windows write jail honouring Everyone-granted paths ([#865](https://github.com/Gitlawb/zero/issues/865)) ([91b413c](https://github.com/Gitlawb/zero/commit/91b413c514cc1607d5b4e7936780d40569239814))
+* **secrets,worktrees:** fix secret redaction leakage and prune stale worktrees ([#855](https://github.com/Gitlawb/zero/issues/855)) ([ff62f73](https://github.com/Gitlawb/zero/commit/ff62f73b7f4dc5e2472db21acba43cf6140c06d1))
+* **specialist:** make overwrites atomic ([#757](https://github.com/Gitlawb/zero/issues/757)) ([30f6d8f](https://github.com/Gitlawb/zero/commit/30f6d8f591a0b81638b4182ff56c86c8a50a5c70))
+* suppress gosec G204 warning for trusted local config commands ([#848](https://github.com/Gitlawb/zero/issues/848)) ([c52db05](https://github.com/Gitlawb/zero/commit/c52db055b0b213758a33c5c5627a411e052f8de4))
+* **tui:** a copied NUL byte no longer panics the TUI on Windows ([#876](https://github.com/Gitlawb/zero/issues/876)) ([cae0269](https://github.com/Gitlawb/zero/commit/cae0269e77e7a0a493cf799b41c653c9ff9a19de)), closes [#875](https://github.com/Gitlawb/zero/issues/875)
+* **tui:** exclude permission waits from turn time ([#820](https://github.com/Gitlawb/zero/issues/820)) ([15eb16f](https://github.com/Gitlawb/zero/commit/15eb16f736f903c94203207032f98aacbcf06318))
+* **tui:** fall back to CellMotion where AllMotion is unreliable ([#872](https://github.com/Gitlawb/zero/issues/872)) ([7fbd864](https://github.com/Gitlawb/zero/commit/7fbd864e91433441489902571ea394ebc5b7bd0d))
+* **tui:** fill alt-screen frame with theme panel background ([#850](https://github.com/Gitlawb/zero/issues/850)) ([020c28e](https://github.com/Gitlawb/zero/commit/020c28eaf95e2f38853f99fc06a13cd1568bf3c9))
+* **tui:** hide unavailable sidebar shortcut ([#821](https://github.com/Gitlawb/zero/issues/821)) ([845df6c](https://github.com/Gitlawb/zero/commit/845df6c7d28e02f475e90acfe838733eb37e6aa2))
+* use OAuth credentials in provider health checks ([#828](https://github.com/Gitlawb/zero/issues/828)) ([d37de92](https://github.com/Gitlawb/zero/commit/d37de9214b1ba86542f4f5ef3b060bb96849763b))
+
+
+### Performance Improvements
+
+* compact common test output ([#846](https://github.com/Gitlawb/zero/issues/846)) ([edf660a](https://github.com/Gitlawb/zero/commit/edf660ab85131f90a452cee51dc2c3a5cf62d632))
+* improve harness context efficiency ([#838](https://github.com/Gitlawb/zero/issues/838)) ([8e26679](https://github.com/Gitlawb/zero/commit/8e266797a8305e689806eadcf9698da2796481ab))
+
 ## [0.6.0](https://github.com/Gitlawb/zero/compare/v0.5.0...v0.6.0) (2026-07-29)
 
 
