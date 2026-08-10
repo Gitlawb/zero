@@ -45,11 +45,18 @@ func TestTerminalPetFrameCache(t *testing.T) {
 	}
 
 	unavailable := func() (string, error) { return "", errors.New("unavailable") }
+	blank := func() (string, error) { return "", nil }
 	if got, want := terminalPetFrameCacheWith(Options{}, unavailable, cacheDir), filepath.Join(cacheRoot, "zero", "pets", "frame-cache"); canonicalTestPath(t, got) != canonicalTestPath(t, want) {
 		t.Fatalf("cache fallback = %q, want %q", got, want)
 	}
+	if got, want := terminalPetFrameCacheWith(Options{}, blank, cacheDir), filepath.Join(cacheRoot, "zero", "pets", "frame-cache"); canonicalTestPath(t, got) != canonicalTestPath(t, want) {
+		t.Fatalf("blank config root fallback = %q, want %q", got, want)
+	}
 	if got := terminalPetFrameCacheWith(Options{}, unavailable, unavailable); got != "" {
 		t.Fatalf("unavailable roots returned %q, want empty", got)
+	}
+	if got := terminalPetFrameCacheWith(Options{}, unavailable, blank); got != "" {
+		t.Fatalf("blank cache root returned %q, want empty", got)
 	}
 }
 

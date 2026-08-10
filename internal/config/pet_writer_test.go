@@ -68,8 +68,14 @@ func TestSetPetCreatesNestedConfigAndClearsEmptyPreferences(t *testing.T) {
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(root["preferences"]); !strings.Contains(got, `"pet":"boba"`) && !strings.Contains(got, `"pet": "boba"`) {
-		t.Fatalf("persisted preferences = %s", got)
+	var preferences struct {
+		Pet string `json:"pet"`
+	}
+	if err := json.Unmarshal(root["preferences"], &preferences); err != nil {
+		t.Fatal(err)
+	}
+	if preferences.Pet != "boba" {
+		t.Fatalf("persisted pet = %q, want %q", preferences.Pet, "boba")
 	}
 	root["future"] = json.RawMessage(`{"enabled":true}`)
 	encoded, err := json.Marshal(root)
@@ -93,7 +99,13 @@ func TestSetPetCreatesNestedConfigAndClearsEmptyPreferences(t *testing.T) {
 	if _, ok := root["preferences"]; ok {
 		t.Fatalf("empty preferences were retained: %s", data)
 	}
-	if !strings.Contains(string(root["future"]), `"enabled": true`) && !strings.Contains(string(root["future"]), `"enabled":true`) {
+	var future struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(root["future"], &future); err != nil {
+		t.Fatal(err)
+	}
+	if !future.Enabled {
 		t.Fatalf("unrelated future member was lost: %s", data)
 	}
 }
