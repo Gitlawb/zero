@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -24,6 +25,7 @@ import (
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
@@ -86,6 +88,10 @@ type model struct {
 	// fall back to a per-run manager. Torn down in quit().
 	lspManager           *lsp.Manager
 	sessionStore         *sessions.Store
+	peerService          *peermsg.Service
+	peerInbox            []peermsg.InboundMessage
+	peerApprovalQueue    []peermsg.InboundMessage
+	peerPendingApproval  *peermsg.InboundMessage
 	sandboxStore         *sandbox.GrantStore
 	mcpConfig            config.MCPConfig
 	mcpPermissionStore   *internalmcp.PermissionStore
@@ -126,8 +132,12 @@ type model struct {
 	agentOptions                agent.Options
 	notifier                    *notify.Notifier
 	permissionMode              agent.PermissionMode
-	selfCorrectTests            bool
-	reasoningEffort             modelregistry.ReasoningEffort
+	// permissionModeBeforePlan holds whatever mode was active when /plan on
+	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
+	// the execProfile displaced/applied pattern below).
+	permissionModeBeforePlan agent.PermissionMode
+	selfCorrectTests         bool
+	reasoningEffort          modelregistry.ReasoningEffort
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -601,6 +611,26 @@ type agentResponseMsg struct {
 	ttft time.Duration
 }
 
+type peerMessageMsg struct {
+	message peermsg.InboundMessage
+	admit   chan<- bool
+}
+
+type peerStatusMsg struct{ event peermsg.StatusEvent }
+
+type peerHeldReleasedMsg struct{ message peermsg.InboundMessage }
+
+type peerDecisionMsg struct {
+	message peermsg.InboundMessage
+	allow   bool
+}
+
+type peerRuntimeErrorMsg struct{ err error }
+
+type peerReceiptErrorMsg struct{ err error }
+
+type peerApprovalExpiredMsg struct{ messageID string }
+
 type agentRowMsg struct {
 	runID int
 	row   transcriptRow
@@ -776,10 +806,11 @@ type pendingSpecReviewPrompt struct {
 }
 
 type tuiAgentRunOptions struct {
-	registry       *tools.Registry
-	permissionMode agent.PermissionMode
-	systemPrompt   string
-	specDraft      bool
+	registry              *tools.Registry
+	permissionMode        agent.PermissionMode
+	systemPrompt          string
+	transientSystemPrompt string
+	specDraft             bool
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -884,6 +915,7 @@ func newModel(ctx context.Context, options Options) model {
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
 		registry:                    registry,
 		sessionStore:                sessionStore,
+		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
 		mcpPermissionStore:          options.MCPPermissionStore,
@@ -1202,6 +1234,34 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	switch msg := msg.(type) {
+	case peerMessageMsg:
+		admitted := m.canAcceptPeerMessage(msg.message)
+		if msg.admit != nil {
+			msg.admit <- admitted
+		}
+		if !admitted {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "Dropped peer message because the inbound queue is full."})
+			return m, nil
+		}
+		return m.handlePeerMessage(msg.message)
+	case peerStatusMsg:
+		return m.handlePeerStatus(msg.event), nil
+	case peerHeldReleasedMsg:
+		return m.handleReleasedPeerMessage(msg.message)
+	case peerDecisionMsg:
+		return m.handlePeerDecision(msg.message, msg.allow)
+	case peerApprovalExpiredMsg:
+		return m.handlePeerApprovalExpired(msg.messageID)
+	case peerReceiptErrorMsg:
+		if msg.err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "peer receipt: " + msg.err.Error()})
+		}
+		return m, nil
+	case peerRuntimeErrorMsg:
+		if msg.err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "peer messaging unavailable: " + msg.err.Error()})
+		}
+		return m, nil
 	case composerBlinkMsg:
 		switch {
 		case !m.terminalFocused:
@@ -1519,6 +1579,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil && m.pendingPermission.request.ToolName == tools.RequestPermissionsToolName {
 				return m.resolvePermission(permissionDecisionDeny)
 			}
+			if m.pendingPermission != nil && m.pendingPermission.request.ToolName == peerPermissionToolName {
+				return m.resolvePermission(permissionDecisionDeny)
+			}
 			if m.providerWizard != nil {
 				// Delegate so multi-level surfaces (provider manager list → edit →
 				// field, manage-key step) can walk BACK one level; the wizard's own
@@ -1673,6 +1736,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// and let the key fall through to their own handlers below.
 			if m.noBlockingModal() {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
+				m = m.syncPeerIdentity()
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
@@ -2511,11 +2575,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		hadQueuedMessage := strings.TrimSpace(m.queuedMessage) != ""
 		next, queuedCmd := m.launchQueuedMessageIfReady()
+		var peerCmd tea.Cmd
+		if queuedCmd == nil {
+			next, peerCmd = next.launchQueuedPeerIfReady()
+		}
+		var peerApprovalCmd tea.Cmd
+		if queuedCmd == nil && peerCmd == nil {
+			next, peerApprovalCmd = next.openNextPeerApproval()
+		}
 		var goalCmd tea.Cmd
-		if msg.goalAware && !hadQueuedMessage && msg.specReview == nil {
+		if msg.goalAware && !hadQueuedMessage && peerCmd == nil && next.pendingPermission == nil && msg.specReview == nil {
 			next, goalCmd = next.launchGoalContinuationIfReady()
 		}
-		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, goalCmd)
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, peerCmd, peerApprovalCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapIdleMsg:
@@ -2777,6 +2849,18 @@ func (m model) View() tea.View {
 	// background behind in the user's scrollback after exit.
 	if m.altScreen {
 		view.BackgroundColor = zeroTheme.bgPanel
+		// Also fill the frame content with the panel surface, not just the
+		// terminal's default background. Relying on view.BackgroundColor alone
+		// leaves blank/padding cells (and anything ClearScreen erases) on the
+		// terminal's own default, which is white on a light terminal — so light
+		// themes flash a blinding white instead of their cream surface. Wrapping
+		// the content paints every cell (including blank lines) with the theme
+		// panel, so the surface is uniform regardless of the terminal default and
+		// ClearScreen repaints to the theme color instead of white.
+		if m.width > 0 && m.height > 0 {
+			content = zeroTheme.panel.Width(m.width).Height(m.height).Render(content)
+			view.SetContent(content)
+		}
 	}
 	// Always requested, independent of the notifier: the composer cursor's
 	// focus/blink behavior (composerBlinkMsg above) needs tea.FocusMsg/BlurMsg
@@ -2788,23 +2872,14 @@ func (m model) View() tea.View {
 	// only when the value changes, so gating this costs nothing (§10).
 	view.KeyboardEnhancements.ReportEventTypes = m.dictation.voiceModeEnabled
 	if m.wantsMouseCapture() {
-		if isRunningUnderPRoot() {
-			// Under PRoot the AllMotion (1003) sequence doesn't work
-			// reliably, breaking touch-gesture scrolling. Fall back to
-			// CellMotion which still delivers wheel events, clicks, and
-			// drag — the only thing lost is hover-highlighting.
-			view.MouseMode = tea.MouseModeCellMotion
-		} else {
-			// AllMotion (not CellMotion) is required for hover highlighting:
-			// it reports cursor movement even with no button pressed.
-			// CellMotion only reports motion while a button is held (drag) —
-			// see bubbletea's MouseMode docs. AllMotion has marginally worse
-			// terminal compatibility but is well supported by the terminals
-			// this app targets; the existing 15ms mouse-event throttle
-			// (mouseEventThrottleInterval) already bounds the redraw rate
-			// from the extra motion events.
-			view.MouseMode = tea.MouseModeAllMotion
-		}
+		// AllMotion (1003) is what hover highlighting needs: it reports cursor
+		// movement with no button pressed, where CellMotion (1002) reports motion
+		// only while a button is held. mouseModeFor decides which is safe here,
+		// and documents why one is not simply better than the other: a terminal
+		// that does not implement 1003 sends nothing at all rather than degrading.
+		// The 15ms throttle (mouseEventThrottleInterval) already bounds the redraw
+		// rate from AllMotion's extra motion events.
+		view.MouseMode = mouseModeFor(runtime.GOOS, os.Getenv, isRunningUnderPRoot())
 	}
 	return view
 }
@@ -4171,7 +4246,12 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	// quiet-generation clock so resuming a long-blocked run does not immediately
 	// claim the model has been inactive for the entire approval interval.
 	m.lastStreamActivity = m.now()
-	return m, nil
+	if pending.request.ToolName == peerPermissionToolName {
+		// Receipt delivery completes asynchronously. That completion advances
+		// the peer queue after this prompt is fully settled.
+		return m, nil
+	}
+	return m.openNextPeerApproval()
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
@@ -4372,6 +4452,13 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	}
+	if m.permissionMode == agent.PermissionModePlan && planModeCommandUnavailable(command) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: command.name + " is unavailable in plan mode — it mutates the workspace or spawns a process outside the read-only gate. Exit with /plan off first.",
+		})
+		return m, nil
+	}
 	switch command.kind {
 	case commandEmpty:
 		return m, nil
@@ -4519,7 +4606,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
+		text := ""
+		m, text = m.handlePlanCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
@@ -4773,16 +4862,24 @@ func (m model) executeSlash(input string) (tea.Model, tea.Cmd) {
 // composer. Queued prompts use this path too, so session and image behavior
 // stays identical to immediate submissions.
 func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
+	return m.launchPromptInternal(prompt, nil)
+}
+
+func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage) (model, tea.Cmd) {
 	// Remember the verbatim prompt (before specialist/document expansion) so /retry
 	// and /edit can act on exactly what the user submitted. Snapshot the staged
 	// attachments too: launchPrompt clears the pending queues below, so /retry
 	// re-stages these to resend an identical vision/PDF-backed request rather than
 	// a degraded text-only one.
-	m.lastPrompt = prompt
-	m.lastImages = m.pendingImages
-	m.lastImageLabels = m.pendingImageLabels
-	m.lastDocuments = m.pendingDocuments
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
+	if peer == nil {
+		m.lastPrompt = prompt
+		m.lastImages = m.pendingImages
+		m.lastImageLabels = m.pendingImageLabels
+		m.lastDocuments = m.pendingDocuments
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
+	} else {
+		m.transcript = appendTranscriptRow(m.transcript, peerTranscriptRow(peerDisplayName(peer.From), peer.Body))
+	}
 	if m.provider == nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendAssistant,
@@ -4793,14 +4890,18 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// A leading "@specialist <task>" is expanded into an explicit Task-delegation
 	// directive for the agent only; the transcript above keeps the user's verbatim
 	// "@mention". Non-mentions and mid-message "@file" references are unchanged.
-	if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
-		prompt = expanded
+	if peer == nil {
+		if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
+			prompt = expanded
+		}
 	}
 	// Prepend any staged PDF document text as a model-facing preamble. The
 	// visible transcript above keeps the user's clean prompt; the agent (and the
 	// recorded session, for resume fidelity) sees the document text first.
-	if preamble := m.consumePendingDocuments(); preamble != "" {
-		prompt = preamble + prompt
+	if peer == nil {
+		if preamble := m.consumePendingDocuments(); preamble != "" {
+			prompt = preamble + prompt
+		}
 	}
 	var err error
 	m, err = m.ensureActiveSession(prompt)
@@ -4819,10 +4920,17 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			}
 		}
 		agentPrompt := m.sessionPrompt(prompt)
-		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+		messagePayload := map[string]any{
 			"role":    "user",
 			"content": prompt,
-		})
+		}
+		if peer != nil {
+			messagePayload["origin"] = "cross_session"
+			messagePayload["from"] = peerDisplayName(peer.From)
+			messagePayload["messageId"] = peer.ID
+			messagePayload["displayContent"] = peer.Body
+		}
+		m, err = m.appendSessionEvent(sessions.EventMessage, messagePayload)
 		if err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -4838,6 +4946,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// exec's drop+warn wording) rather than sending them to a model that
 	// rejects them. Pending state is cleared either way below.
 	turnImages := m.pendingImages
+	if peer != nil {
+		turnImages = nil
+	}
 	if len(turnImages) > 0 && !m.modelSupportsVisionTUI() {
 		name := m.modelName
 		if name == "" {
@@ -4849,11 +4960,24 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		})
 		turnImages = nil
 	}
-	m.pendingImages = nil
-	m.pendingImageLabels = nil
+	if peer == nil {
+		m.pendingImages = nil
+		m.pendingImageLabels = nil
+	}
 	runCtx, cancel := context.WithCancel(m.ctx)
+	if peer != nil {
+		runCtx = peermsg.WithInboundMessage(runCtx, *peer)
+	}
 	m = m.beginRun(cancel)
-	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+	var agentCmd tea.Cmd
+	if peer != nil {
+		agentCmd = m.runAgentWithOptions(m.activeRunID, runCtx, prompt, turnImages, tuiAgentRunOptions{
+			transientSystemPrompt: peerTurnSystemPrompt,
+		})
+	} else {
+		agentCmd = m.runAgent(m.activeRunID, runCtx, prompt, turnImages)
+	}
+	return m, tea.Batch(agentCmd, m.spinner.Tick)
 }
 
 // beginRun stamps the shared run-start state for a new agent turn: a fresh run
@@ -5102,12 +5226,21 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 		}
+		peerAwareRun := runOptions.transientSystemPrompt != "" || m.sessionContainsPeerMessages()
+		if peerAwareRun && m.peerService != nil {
+			options.Registry.Register(tools.NewPeerReplyTool(m.peerService))
+		}
 		options.PermissionMode = m.permissionMode
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
 		}
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
+		}
+		if runOptions.transientSystemPrompt != "" {
+			options.TransientSystemPrompt = runOptions.transientSystemPrompt
+		} else if peerAwareRun {
+			options.TransientSystemPrompt = peerTurnSystemPrompt
 		}
 		if goalAwareRun {
 			options.SystemPrompt = m.goalSystemPrompt(options.SystemPrompt)
@@ -5666,10 +5799,11 @@ func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage
 // (a code/diff preview) when present on a successful result, else the Output that
 // the model also saw. Error results keep their Output so the failure shows.
 func toolResultDetail(result agent.ToolResult) string {
-	if result.Status != tools.StatusError && strings.TrimSpace(result.Display.Preview) != "" {
-		return result.Display.Preview
+	display := result.HumanDisplay()
+	if strings.TrimSpace(display.Preview) != "" && (result.Status != tools.StatusError || result.Outcome.Finalized()) {
+		return display.Preview
 	}
-	return result.Output
+	return result.ModelOutput()
 }
 
 func toolResultRowText(result agent.ToolResult) string {
@@ -5677,5 +5811,5 @@ func toolResultRowText(result agent.ToolResult) string {
 	if status == "" {
 		status = tools.StatusOK
 	}
-	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.Output, tuiToolOutputLimit))
+	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.ModelOutput(), tuiToolOutputLimit))
 }

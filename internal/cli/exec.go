@@ -78,11 +78,18 @@ type execOptions struct {
 	// fill-only-if-unset rule, so precedence is explicit flag > mode > profile.
 	// Distinct from the mode preset also named "fast" (which picks a model) and
 	// from the legacy inert --profile above. See internal/execprofile.
-	execProfile           string
-	reasoningEffort       string
-	useSpec               bool
-	specModel             string
-	specReasoningEffort   string
+	execProfile         string
+	reasoningEffort     string
+	useSpec             bool
+	specModel           string
+	specReasoningEffort string
+	// plan selects PermissionModePlan for this run: the same read-only,
+	// in-session planning mode the TUI enters with /plan on. Unlike --use-spec
+	// (a separate draft session with its own review flow), this only swaps the
+	// permission mode for the run already being made — ToolAdvertised gates
+	// write/shell tools generically for any mode, so no other exec plumbing
+	// needs to know about it.
+	plan                  bool
 	maxTurns              int
 	cwd                   string
 	inputFormat           execInputFormat
@@ -104,6 +111,7 @@ type execOptions struct {
 	worktreeName          string
 	worktreeDir           string
 	skipPermissionsUnsafe bool
+	permissionMode        string
 	// allowEscalation opts the run into mid-run model escalation: it registers
 	// the escalate_model tool and wires agent.Options.ModelSwitcher. Off by
 	// default — a run without the flag is byte-identical to before (no tool, nil
@@ -199,11 +207,33 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			Name:    options.worktreeName,
 			BaseDir: options.worktreeDir,
 			Now:     deps.now,
+			// The worktree's lifetime is bound to this process (the deferred
+			// release below), so record the PID: if this process dies without
+			// releasing, Clean can expire the lease instead of skipping the
+			// locked worktree forever.
+			LeasePID: os.Getpid(),
 		})
 		if err != nil {
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
 		workspaceRoot = preparedWorktree.Path
+		// When this run's own Prepare call took the worktree lock, its
+		// lifetime is bound to this function: release the lock once it returns
+		// so Clean can reclaim the worktree later if it goes stale. A reused
+		// worktree whose lock an external `zero worktrees prepare` caller
+		// still holds reports LockAcquired=false; releasing it here would
+		// clear that caller's lease and expose its workspace to Clean, so the
+		// matching release stays that caller's responsibility. A failed unlock
+		// leaves a lock Clean will permanently skip, so it must not pass
+		// silently; the run's primary result has already been emitted by the
+		// time the defer runs, so surface it as a diagnostic.
+		if preparedWorktree.LockAcquired {
+			defer func() {
+				if releaseErr := deps.releaseWorktree(context.Background(), worktrees.Options{Cwd: trustRoot}, preparedWorktree.Path); releaseErr != nil {
+					fmt.Fprintf(stderr, "zero: failed to release worktree lock on %s: %s\n", redactCLIString(preparedWorktree.Path), redactCLIString(releaseErr.Error()))
+				}
+			}()
+		}
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
@@ -239,6 +269,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	if options.useSpec {
 		permissionMode = agent.PermissionModeSpecDraft
+	}
+	if options.plan {
+		permissionMode = agent.PermissionModePlan
 	}
 	var mcpRuntime mcpToolRuntime
 	var mcpSkip trustSkip
@@ -306,11 +339,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
 	}
 	executionRunner.SetPreparer(sandboxEngine)
-	mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+	if permissionMode != agent.PermissionModePlan {
+		mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
+		if err != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+		}
+		defer closeMCPRuntime(stderr, mcpRuntime)
 	}
-	defer closeMCPRuntime(stderr, mcpRuntime)
 	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	if err := validateExecToolFilters(options, registry); err != nil {
@@ -578,8 +613,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// warned, so --auto high silently ran without notice.
 	if permissionMode == agent.PermissionModeUnsafe {
 		reason := "--auto high"
-		if options.skipPermissionsUnsafe {
+		switch {
+		case options.skipPermissionsUnsafe:
 			reason = "--skip-permissions-unsafe"
+		case strings.EqualFold(strings.TrimSpace(options.permissionMode), "unsafe"),
+			strings.EqualFold(strings.TrimSpace(options.permissionMode), "high"):
+			reason = "--permission-mode unsafe"
 		}
 		writer.warning(fmt.Sprintf("Unsafe permissions are active for this run because %s was passed.", reason))
 		if writer.err != nil {

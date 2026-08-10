@@ -70,10 +70,16 @@ func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any
 	}
 	query = strings.TrimSpace(query)
 
-	// Honor the run's operator filters so an operator-hidden deferred tool is
-	// invisible to tool_search: it never resolves via select:, never ranks for a
-	// keyword query, and is omitted from the no-match listing.
-	deferred := tool.visibleDeferredTools(options.EnabledTools, options.DisabledTools)
+	// Honor the run's operator filters AND the run's permission-mode visibility
+	// so an operator-hidden OR mode-hidden deferred tool is invisible to
+	// tool_search: it never resolves via select:, never ranks for a keyword
+	// query, and is omitted from the no-match listing. The mode filter matters
+	// even though tool_search itself is denied at dispatch in plan/spec-draft
+	// today (its own Safety carries no side effect, so it fails the same
+	// advertisement gate) — it is defense-in-depth so a deferred write/mutator
+	// tool's name, description, and schema can never leak through this loader
+	// if that outer gate is ever loosened independently of this one.
+	deferred := tool.visibleDeferredTools(options.EnabledTools, options.DisabledTools, options.PermissionMode)
 
 	var matches []Tool
 	if rest, ok := strings.CutPrefix(query, "select:"); ok {
@@ -87,7 +93,7 @@ func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any
 	// update_plan) otherwise falls through to a misleading "no tools matched" —
 	// a common confusion that leaves weaker models looping. Redirect the model to
 	// call those tools directly instead.
-	alreadyAvailable := tool.eagerToolsForQuery(query, options.EnabledTools, options.DisabledTools)
+	alreadyAvailable := tool.eagerToolsForQuery(query, options.EnabledTools, options.DisabledTools, options.PermissionMode)
 
 	if len(matches) == 0 {
 		if len(alreadyAvailable) > 0 {
@@ -112,12 +118,15 @@ func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any
 }
 
 // visibleDeferredTools returns the registry's deferred-eligible tools that pass
-// the operator allow/deny filters, sorted by name so keyword ranking and
-// listings stay deterministic. A nil/empty filter pair admits every deferred
-// tool (the pre-filter behavior). The allow/deny semantics mirror the agent's
-// ToolAllowedByFilters: denied if in disabled; if enabled is non-empty, the tool
-// must be listed in it.
-func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []string) []Tool {
+// the operator allow/deny filters and the run's permission-mode visibility,
+// sorted by name so keyword ranking and listings stay deterministic. A
+// nil/empty filter pair admits every deferred tool on the operator axis (the
+// pre-filter behavior); permissionMode "" admits every deferred tool on the
+// mode axis (matches every mode but plan/spec-draft, which never restricted
+// tool_search's candidates before this filter existed). The allow/deny
+// semantics mirror the agent's ToolAllowedByFilters: denied if in disabled; if
+// enabled is non-empty, the tool must be listed in it.
+func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []string, permissionMode string) []Tool {
 	var deferred []Tool
 	if tool.registry != nil {
 		for _, candidate := range tool.registry.All() {
@@ -125,6 +134,9 @@ func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []str
 				continue
 			}
 			if !toolAllowedByFilters(candidate.Name(), enabled, disabled) {
+				continue
+			}
+			if !toolAdvertisedForPermissionMode(candidate, permissionMode) {
 				continue
 			}
 			deferred = append(deferred, candidate)
@@ -137,9 +149,10 @@ func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []str
 }
 
 // visibleEagerToolNames returns the names of tools the model ALREADY has in its
-// list this run: registered, NOT deferred, passing the operator filters, and not
-// tool_search itself. These never need (and never resolve through) tool_search.
-func (tool toolSearchTool) visibleEagerToolNames(enabled []string, disabled []string) map[string]bool {
+// list this run: registered, NOT deferred, passing the operator filters and the
+// run's permission-mode visibility, and not tool_search itself. These never
+// need (and never resolve through) tool_search.
+func (tool toolSearchTool) visibleEagerToolNames(enabled []string, disabled []string, permissionMode string) map[string]bool {
 	names := map[string]bool{}
 	if tool.registry == nil {
 		return names
@@ -151,6 +164,9 @@ func (tool toolSearchTool) visibleEagerToolNames(enabled []string, disabled []st
 		if !toolAllowedByFilters(candidate.Name(), enabled, disabled) {
 			continue
 		}
+		if !toolAdvertisedForPermissionMode(candidate, permissionMode) {
+			continue
+		}
 		names[candidate.Name()] = true
 	}
 	return names
@@ -160,8 +176,8 @@ func (tool toolSearchTool) visibleEagerToolNames(enabled []string, disabled []st
 // tool_search query refers to: exact names for a "select:" query, or eager tools
 // whose name matches a keyword otherwise. Used to steer the model back to calling
 // a tool it already has instead of fruitlessly searching for it.
-func (tool toolSearchTool) eagerToolsForQuery(query string, enabled []string, disabled []string) []string {
-	eager := tool.visibleEagerToolNames(enabled, disabled)
+func (tool toolSearchTool) eagerToolsForQuery(query string, enabled []string, disabled []string, permissionMode string) []string {
+	eager := tool.visibleEagerToolNames(enabled, disabled, permissionMode)
 	if len(eager) == 0 {
 		return nil
 	}
@@ -213,6 +229,59 @@ func toolAllowedByFilters(name string, enabled []string, disabled []string) bool
 		return false
 	}
 	return !containsName(disabled, name)
+}
+
+// PlanMode and SpecDraftMode are the string values of agent.PermissionModePlan
+// and agent.PermissionModeSpecDraft. RunOptions.PermissionMode is already a
+// plain string (set from agent.PermissionMode via string(permissionMode)), so
+// this package owns the literals rather than importing the agent type (which
+// would create an import cycle). agent.ToolAdvertised delegates plan/spec-draft
+// decisions here so tool_search and the dispatch gate stay identical.
+const (
+	PlanMode      = "plan"
+	SpecDraftMode = "spec-draft"
+)
+
+// ToolAdvertisedForPermissionMode is the single source of truth for whether a
+// tool may be advertised under a given permission mode string. agent.ToolAdvertised
+// calls this for plan/spec-draft after its own PermissionDeny short-circuit;
+// tool_search applies it to deferred candidates so a mutator cannot leak through
+// load_tools. Modes other than plan/spec-draft only apply the PermissionDeny
+// gate here (auto/member-auto/ask/unsafe advertisement rules stay in agent).
+func ToolAdvertisedForPermissionMode(tool Tool, permissionMode string) bool {
+	// A denied tool is never advertised in any mode (mirrors agent.ToolAdvertised).
+	if tool.Safety().Permission == PermissionDeny {
+		return false
+	}
+	switch permissionMode {
+	case PlanMode:
+		if tool.Name() == "lsp_navigate" {
+			return false
+		}
+		safety := tool.Safety()
+		return safety.SideEffect == SideEffectRead && safety.Permission == PermissionAllow
+	case SpecDraftMode:
+		// Never trust control-tool names alone (a re-registered spoof can carry
+		// arbitrary Safety).
+		safety := tool.Safety()
+		switch tool.Name() {
+		case "update_plan":
+			return false
+		case "ask_user":
+			return safety.SideEffect == SideEffectRead && safety.Permission == PermissionAllow
+		case "submit_spec":
+			return safety.SideEffect == SideEffectWrite && safety.Permission == PermissionAllow
+		}
+		return safety.SideEffect == SideEffectRead && safety.Permission == PermissionAllow
+	default:
+		return true
+	}
+}
+
+// toolAdvertisedForPermissionMode is the unexported name used by tool_search
+// internals; keep it as a thin alias so call sites stay short.
+func toolAdvertisedForPermissionMode(tool Tool, permissionMode string) bool {
+	return ToolAdvertisedForPermissionMode(tool, permissionMode)
 }
 
 func containsName(names []string, name string) bool {

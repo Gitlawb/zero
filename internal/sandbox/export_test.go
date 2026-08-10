@@ -2,12 +2,27 @@
 package sandbox
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
 
 func FormatGrantList(grants []Grant) string {
 	return FormatGrantListWithCommandPrefixes(grants, nil)
+}
+
+// PinProcessCredentialBaseDir re-pins the directory relative credential
+// overrides resolve against, and restores it when the test ends.
+//
+// Production pins this once during package initialization, which is what makes
+// it equal the directory the token stores resolved against when they opened. A
+// test that chdirs to simulate a process running elsewhere has to move the pin
+// with it — re-reading the working directory per call is exactly the drift this
+// seam exists to keep out of the production path.
+func PinProcessCredentialBaseDir(t interface{ Cleanup(func()) }, dir string) {
+	previous := processCredentialBaseDir
+	processCredentialBaseDir = filepath.Clean(dir)
+	t.Cleanup(func() { processCredentialBaseDir = previous })
 }
 
 func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
@@ -58,7 +73,12 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
 		}
 	}
-	fs.DenyRead = dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...))
+	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
+	credentials := finalizeCredentialDenyPaths(credentialDenyReadPaths(policy, "", os.Environ(), nil), fs.DenyRead)
+	fs.DenyReadIfExists = credentials.Paths
+	fs.DenyReadCarveouts = credentials.Carveouts
+	fs.EnsureDenyReadDirs = credentials.EnsureDirs
+	fs.ProcessTrustedDenyReadFiles = credentials.ProcessTrustedFinalFiles
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,

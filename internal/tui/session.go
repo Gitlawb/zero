@@ -52,6 +52,7 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 		}
 		m.titledSessions[session.SessionID] = true
 	}
+	m = m.syncPeerIdentity()
 	return m, nil
 }
 
@@ -119,6 +120,7 @@ func (m model) startNewSession() model {
 		m = updated
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", cleared)})
 	}
+	m = m.syncPeerIdentity()
 	return m
 }
 
@@ -254,6 +256,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// frontier sends the whole resumed history to native scrollback in one
 	// batch — scrollable, selectable, and O(1) for every later frame.
 	m.resetFlushFrontier("· resumed ·")
+	m = m.syncPeerIdentity()
 	return m, ""
 }
 
@@ -554,6 +557,15 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 		switch event.Type {
 		case sessions.EventMessage:
 			role := strings.ToLower(payloadString(payload, "role"))
+			if role == "user" && payloadString(payload, "origin") == "cross_session" {
+				from := payloadString(payload, "from")
+				content := payloadString(payload, "displayContent")
+				if content == "" {
+					content = payloadString(payload, "content")
+				}
+				rows = append(rows, peerTranscriptRow(from, content))
+				continue
+			}
 			switch role {
 			case "ask_user":
 				rows = append(rows, askUserTranscriptRow(askUserRequestFromPayload(payload)))

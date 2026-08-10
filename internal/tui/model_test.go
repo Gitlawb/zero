@@ -193,6 +193,9 @@ func TestParseCommand(t *testing.T) {
 		{input: "/resume", kind: commandResume},
 		{input: "/sessions", kind: commandResume},
 		{input: "/spec add review flow", kind: commandSpec, text: "add review flow"},
+		{input: "/plan", kind: commandPlan},
+		{input: "/plan on", kind: commandPlan, text: "on"},
+		{input: "/plan off", kind: commandPlan, text: "off"},
 		{input: "/compact", kind: commandCompact},
 		{input: "/effort high", kind: commandEffort, text: "high"},
 		{input: "/style concise", kind: commandStyle, text: "concise"},
@@ -372,7 +375,7 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 	if _, err := store.Grant(sandbox.GrantInput{
 		ToolName: "bash",
 		Decision: sandbox.GrantAllow,
-		Reason:   "sk-proj-sensitive trusted shell",
+		Reason:   "sk-proj-sensitive-credential-value trusted shell",
 	}); err != nil {
 		t.Fatalf("Grant bash returned error: %v", err)
 	}
@@ -406,7 +409,7 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 	} {
 		assertContains(t, text, want)
 	}
-	assertNotContains(t, text, "sk-proj-sensitive")
+	assertNotContains(t, text, "sk-proj-sensitive-credential-value")
 	assertNotContains(t, text, "status: ok")
 	assertNotContains(t, text, "Permission mode:")
 }

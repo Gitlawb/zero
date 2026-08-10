@@ -25,7 +25,7 @@ func buildPermissionOptions(req agent.PermissionRequest) []PermissionOption {
 	}
 	options := make([]PermissionOption, 0, len(actions))
 	for _, action := range actions {
-		kind, name := optionKindFor(action)
+		kind, name := optionKindFor(action, req.PrefixApprovalEscalates)
 		if kind == "" {
 			continue // skip actions that have no clean ACP option (e.g. cancel)
 		}
@@ -41,18 +41,24 @@ func buildPermissionOptions(req agent.PermissionRequest) []PermissionOption {
 // optionKindFor maps a ZERO decision action to an ACP PermissionOptionKind and a
 // human label. Returns an empty kind for actions that ACP expresses through the
 // outcome rather than an option (cancel).
-func optionKindFor(action agent.PermissionDecisionAction) (kind, name string) {
+//
+// escalates reports that approving a command prefix will also run the command
+// outside the sandbox. The two prefix options say so in their label, since the
+// label is all an ACP client shows and the option id carries no room for it. An
+// editor user is deciding on exactly the same terms as a terminal user, so the
+// disclosure cannot be TUI-only.
+func optionKindFor(action agent.PermissionDecisionAction, escalates bool) (kind, name string) {
 	switch action {
 	case agent.PermissionDecisionAllow, agent.PermissionDecisionAllowStrict:
 		return PermAllowOnce, "Allow"
 	case agent.PermissionDecisionAllowForSession:
 		return PermAllowAlways, "Allow for this session"
 	case agent.PermissionDecisionAllowPrefix:
-		return PermAllowAlways, "Allow this command for the session"
+		return PermAllowAlways, withSandboxEscalationNote("Allow this command for the session", escalates)
 	case agent.PermissionDecisionAlwaysAllow:
 		return PermAllowAlways, "Always allow"
 	case agent.PermissionDecisionAlwaysAllowPrefix:
-		return PermAllowAlways, "Always allow this command"
+		return PermAllowAlways, withSandboxEscalationNote("Always allow this command", escalates)
 	case agent.PermissionDecisionDeny:
 		return PermRejectOnce, "Reject"
 	case agent.PermissionDecisionCancel:
@@ -122,4 +128,14 @@ func rawInputBytes(data []byte) json.RawMessage {
 		return nil
 	}
 	return json.RawMessage(data)
+}
+
+// withSandboxEscalationNote appends the escalation disclosure to a prefix
+// option's label. Kept parallel to the TUI's wording so the same consequence is
+// not described two different ways depending on which client the user runs.
+func withSandboxEscalationNote(name string, escalates bool) string {
+	if !escalates {
+		return name
+	}
+	return name + " (runs outside the sandbox)"
 }

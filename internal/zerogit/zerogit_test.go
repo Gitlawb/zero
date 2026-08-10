@@ -23,7 +23,7 @@ func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
 		{},
 		{},
 		{Stdout: " internal/verify/verify.go | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"},
-		{Stdout: "diff --git a/internal/verify/verify.go b/internal/verify/verify.go\n+token sk-proj-abcdefghijklmnopqrstuvwxyz\n"},
+		{Stdout: "diff --git a/internal/verify/verify.go b/internal/verify/verify.go\n+token sk-proj-abcdefghijklmnopqrstuvwxyz0\n"},
 	}}
 
 	summary, err := Inspect(context.Background(), InspectOptions{
@@ -50,7 +50,7 @@ func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
 	if summary.Files[1].Path != "internal/zerogit/zerogit.go" || summary.Files[1].Status != "untracked" || !summary.Files[1].Untracked {
 		t.Fatalf("unexpected untracked file summary: %#v", summary.Files[1])
 	}
-	if strings.Contains(summary.Diff, "sk-proj-abcdefghijklmnopqrstuvwxyz") || !strings.Contains(summary.Diff, "[REDACTED]") {
+	if strings.Contains(summary.Diff, "sk-proj-abcdefghijklmnopqrstuvwxyz0") || !strings.Contains(summary.Diff, "[REDACTED]") {
 		t.Fatalf("expected redacted diff, got %q", summary.Diff)
 	}
 	if !summary.Truncated {
@@ -279,8 +279,8 @@ func TestInspectBaseRefUsesThreeDotDiff(t *testing.T) {
 		{Stdout: "feature/m5\n"},         // rev-parse --abbrev-ref HEAD
 		{Stdout: "abc1234\n"},            // rev-parse --short HEAD
 		{Stdout: "M\ta.txt\nA\tb.txt\n"}, // diff --name-status main...HEAD
-		{Stdout: " a.txt | 1 +\n b.txt | 1 +\n 2 files changed, 2 insertions(+)\n"},                                                     // diff --stat main...HEAD
-		{Stdout: "diff --git a/internal/changes/changes.go b/internal/changes/changes.go\n+token sk-proj-abcdefghijklmnopqrstuvwxyz\n"}, // diff main...HEAD
+		{Stdout: " a.txt | 1 +\n b.txt | 1 +\n 2 files changed, 2 insertions(+)\n"},                                                      // diff --stat main...HEAD
+		{Stdout: "diff --git a/internal/changes/changes.go b/internal/changes/changes.go\n+token sk-proj-abcdefghijklmnopqrstuvwxyz0\n"}, // diff main...HEAD
 	}}
 
 	summary, err := Inspect(context.Background(), InspectOptions{
@@ -311,7 +311,7 @@ func TestInspectBaseRefUsesThreeDotDiff(t *testing.T) {
 	if summary.Files[1].Path != "b.txt" || summary.Files[1].Status != "added" {
 		t.Fatalf("unexpected second file: %#v", summary.Files[1])
 	}
-	if strings.Contains(summary.Diff, "sk-proj-abcdefghijklmnopqrstuvwxyz") || !strings.Contains(summary.Diff, "[REDACTED]") {
+	if strings.Contains(summary.Diff, "sk-proj-abcdefghijklmnopqrstuvwxyz0") || !strings.Contains(summary.Diff, "[REDACTED]") {
 		t.Fatalf("expected redacted diff, got %q", summary.Diff)
 	}
 	if !summary.Truncated {

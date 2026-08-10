@@ -166,6 +166,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if backend.Name == "" {
 		backend = Backend{Name: BackendUnavailable, Message: "native sandbox backend was not selected"}
 	}
+	backend = inferBackendCapabilities(backend)
 	preference := SandboxPreferenceAuto
 	// Re-entrancy guard: a command spawned by a process we already wrapped (both
 	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
@@ -178,7 +179,14 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if policy.Mode == ModeDisabled {
 		preference = SandboxPreferenceForbid
 	}
-	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
+	profile := permissionProfileFromPolicy(workspaceRoot, policy, engine.scope, spec.Dir, spec.Env)
+	// Validate in the main process before creating runtime state or launching a
+	// potentially version-skewed helper. Keep the helper check as defense in depth.
+	if preference != SandboxPreferenceForbid && backend.Name == BackendLinuxBwrap && backend.Available && backend.CommandWrapping && backend.NativeIsolation {
+		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+			return CommandPlan{}, err
+		}
+	}
 	var runtimeCleanup func()
 	if preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled {
 		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot)
@@ -661,6 +669,15 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 		writeRule,
 	}
 	rules = append(rules, denyReadRules(profile.FileSystem)...)
+	// SBPL is last-match-wins, so the carveouts MUST follow the deny rules above:
+	// they re-include the supported non-secret subtrees of a directory-level
+	// credential deny (Zero's user plugin/specialist/command roots).
+	rules = append(rules, denyReadCarveoutRules(profile.FileSystem)...)
+	// A token override may live below a carveout. Reapply only those nested
+	// denies after the broad allow so credentials remain protected under
+	// Seatbelt's last-match-wins evaluation without hiding ordinary extension
+	// files.
+	rules = append(rules, denyReadRulesInsideCarveouts(profile.FileSystem)...)
 	rules = append(rules, writeRootCarveoutDenyRules(profile.FileSystem)...)
 	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
@@ -788,7 +805,66 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 }
 
 func denyReadRules(fs FileSystemPolicy) []string {
-	return denySeatbeltPathRules("file-read*", fs.DenyRead)
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	rules := denySeatbeltPathRules("file-read*", denied)
+	// Process-trusted final names have already had only their parent
+	// canonicalized. Preserve that terminal pathname here: normalizing it again
+	// would follow a terminal symlink and lose the atomic-replacement deny. The
+	// command-supplied finals get the same treatment: seatbelt denies a pathname
+	// whether or not it exists, so unlike bubblewrap it has no reason to refuse
+	// the command over them.
+	finals := dedupeStrings(append(append([]string{}, fs.ProcessTrustedDenyReadFiles...), fs.CommandDenyReadFinalFiles...))
+	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", finals)...))
+}
+
+// denyReadCarveoutRules re-allows reads for the non-secret subtrees of a denied
+// credential directory. Writes are untouched: the credential directory is not a
+// write root, so the profile's write rule keeps denying them. Only
+// DenyReadCarveouts entries are emitted, and the profile builder derives those
+// exclusively from Zero's own config directory (never from a user-configured
+// DenyRead root), so no user deny is weakened here.
+func denyReadCarveoutRules(fs FileSystemPolicy) []string {
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	resolved := credentialCarveoutPaths(denied, fs.DenyReadCarveouts)
+	if len(resolved) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(resolved)+1)
+	for _, path := range resolved {
+		escaped := sandboxProfileString(path)
+		out = append(out,
+			`(allow file-read* file-test-existence (subpath "`+escaped+`"))`,
+			`(allow file-read* file-test-existence (literal "`+escaped+`"))`,
+		)
+	}
+	// Resolving a path into the carveout also needs stat on its ancestors, and the
+	// deny rule above covers the denied directory itself. This grants metadata
+	// only, so the denied directory stays unreadable and unlistable — the same
+	// split seatbeltReadRule already relies on for deeply nested read roots.
+	if ancestors := seatbeltAncestorMetadataRule(resolved); ancestors != "" {
+		out = append(out, ancestors)
+	}
+	return out
+}
+
+func denyReadRulesInsideCarveouts(fs FileSystemPolicy) []string {
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	carveouts := credentialCarveoutPaths(denied, fs.DenyReadCarveouts)
+	if len(carveouts) == 0 {
+		return nil
+	}
+	inside := func(paths []string) []string {
+		var out []string
+		for _, path := range paths {
+			if credentialPathReincluded(carveouts, path) {
+				out = append(out, path)
+			}
+		}
+		return out
+	}
+	rules := denySeatbeltNormalizedPathRules("file-read*", inside(normalizeProfilePaths(denied)))
+	finals := dedupeStrings(append(append([]string{}, fs.ProcessTrustedDenyReadFiles...), fs.CommandDenyReadFinalFiles...))
+	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", inside(finals))...))
 }
 
 func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {
@@ -824,12 +900,16 @@ func denyWriteRulesFromPaths(paths []string) []string {
 }
 
 func denySeatbeltPathRules(action string, paths []string) []string {
-	resolved := normalizeProfilePaths(paths)
-	if len(resolved) == 0 {
+	return denySeatbeltNormalizedPathRules(action, normalizeProfilePaths(paths))
+}
+
+func denySeatbeltNormalizedPathRules(action string, paths []string) []string {
+	paths = dedupeStrings(paths)
+	if len(paths) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(resolved)*2)
-	for _, path := range resolved {
+	out := make([]string, 0, len(paths)*2)
+	for _, path := range paths {
 		filters := []string{`(subpath "` + sandboxProfileString(path) + `")`}
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			filters = []string{`(literal "` + sandboxProfileString(path) + `")`}

@@ -140,17 +140,14 @@ func writeNewSecretFile(path string) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
 		return nil, fmt.Errorf("oauth: generate token secret: %w", err)
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	// The encryption key is published exactly like the token blob: through the
+	// protected per-store directory, under a random name a sandboxed process
+	// cannot guess, wait for, or rename away.
+	tmp, tmpPath, err := createPublicationFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("oauth: create token secret temp file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("oauth: chmod token secret temp file: %w", err)
-	}
 	if _, werr := tmp.Write(secret); werr != nil {
 		_ = tmp.Close()
 		return nil, fmt.Errorf("oauth: write token secret: %w", werr)

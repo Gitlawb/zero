@@ -170,7 +170,7 @@ func TestStoreCanPlanCompactionWithoutBuildingLegacyPrompt(t *testing.T) {
 }
 
 func TestStoreCompactionShapesSensitivePermissionEvents(t *testing.T) {
-	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0"
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	session, err := store.Create(CreateInput{SessionID: "compactsafe"})
 	if err != nil {

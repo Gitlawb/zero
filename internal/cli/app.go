@@ -23,6 +23,7 @@ import (
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/observability"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -81,6 +82,7 @@ type appDeps struct {
 	runSandboxSetupHelper  func(path string, args []string, stdout io.Writer, stderr io.Writer) error
 	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
 	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
+	releaseWorktree        func(context.Context, worktrees.Options, string) error
 	detectVerifyPlan       func(string) (verify.Plan, error)
 	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
 	runSelfVerify          func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
@@ -187,6 +189,7 @@ func defaultAppDeps() appDeps {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
 		prepareWorktree:  worktrees.Prepare,
+		releaseWorktree:  worktrees.Release,
 		detectVerifyPlan: verify.DetectPlan,
 		runVerify:        verify.Run,
 		runSelfVerify:    selfverify.Run,
@@ -532,6 +535,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.prepareWorktree == nil {
 		deps.prepareWorktree = defaults.prepareWorktree
 	}
+	if deps.releaseWorktree == nil {
+		deps.releaseWorktree = defaults.releaseWorktree
+	}
 	if deps.detectVerifyPlan == nil {
 		deps.detectVerifyPlan = defaults.detectVerifyPlan
 	}
@@ -786,6 +792,26 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAsk
 	}
+	sessionStore := deps.newSessionStore()
+	peerClass := peermsg.PermissionPrompting
+	if permissionMode == agent.PermissionModeUnsafe {
+		peerClass = peermsg.PermissionBypass
+	}
+	peerService, peerErr := peermsg.New(peermsg.Options{
+		Identity: peermsg.Identity{
+			Cwd:             workspaceRoot,
+			PermissionClass: peerClass,
+		},
+		InboundPolicy: peermsg.InboundPolicy(resolved.CrossSessionInbound),
+	})
+	if peerErr != nil {
+		fmt.Fprintf(stderr, "warning: cross-session messaging unavailable: %s\n", peerErr)
+		peerService = nil
+	} else {
+		for _, tool := range tools.NewPeerSessionTools(peerService) {
+			registry.Register(tool)
+		}
+	}
 	// Activate deferred MCP-tool loading for the interactive run only when the
 	// VISIBLE deferred-eligible count meets the resolved threshold, matching exec.
 	// The registry is complete (core + specialist + MCP + plugins) here, so the
@@ -837,7 +863,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			return scratchFileWarning(workspaceRoot, scratchBaseline)
 		},
 		Registry:           registry,
-		SessionStore:       deps.newSessionStore(),
+		SessionStore:       sessionStore,
+		PeerService:        peerService,
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
 		MCPPermissionStore: mcpPermissionStore,
@@ -1199,7 +1226,8 @@ Commands:
   mcp        Manage MCP backend settings
   auth       Log in to model providers via OAuth
   sandbox    Inspect sandbox policy and persistent grants
-  update     Check for Zero CLI updates
+  update     Check or apply Zero CLI updates (requires --check or --apply)
+  upgrade    Download, verify, and install available Zero CLI updates
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
   eval       Validate offline agent eval suites
@@ -1361,6 +1389,10 @@ Flags:
       --spec-model <model>           Override the draft model when --use-spec is set
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
+      --plan                         Read-only planning mode: write and shell tools are hidden
+      --permission-mode <mode>       Set permission mode directly (plan, spec-draft, auto, member,
+                                    ask, unsafe). Outranks --auto; prefer --plan / --auto for
+                                    interactive use. Used by specialist/swarm child processes.
       --max-turns <number>           Override the maximum agent loop turns
       --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
                                     posture only (turn budget, effort, self-correction, escalation);

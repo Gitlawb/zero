@@ -87,7 +87,7 @@ func TestRunHooksAddRejectsUnknownEvent(t *testing.T) {
 
 func TestRunHooksAddJSONRedactsSecretArgs(t *testing.T) {
 	cwd := t.TempDir()
-	secret := "sk-proj-" + strings.Repeat("z", 24)
+	secret := "sk-proj-" + strings.Repeat("z", 23) + "0"
 	var stdout, stderr bytes.Buffer
 	code := runHooksAdd([]string{"h1", "--event", "beforeTool", "--command", "sh", "--arg", "-c", "--arg", "echo " + secret, "--json"}, &stdout, &stderr, hooksManageDeps(cwd))
 	if code != exitSuccess {

@@ -689,7 +689,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			messages = append(messages, zeroruntime.Message{
 				Role:         zeroruntime.MessageRoleTool,
-				Content:      toolResult.Output,
+				Content:      toolResult.ModelOutput(),
 				ToolCallID:   toolResult.ToolCallID,
 				IsError:      toolResult.Status == tools.StatusError,
 				ChangedFiles: append([]string(nil), toolResult.ChangedFiles...),
@@ -721,7 +721,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
 				messages = append(messages, toolImageMessages...)
-				result.FinalAnswer = toolResult.Output
+				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
 				return result, nil
@@ -734,7 +734,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
-			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.Output)
+			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput())
 			posture.observeToolOutcome(outcome, toolResult)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
@@ -750,7 +750,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				return result, nil
 			}
 			if outcome.InjectHint && failureHint == "" {
-				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.Output)
+				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.ModelOutput())
 			}
 
 			// Collect the files this successful mutating tool changed. Self-correct
@@ -920,6 +920,21 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 func recordOutputBudgetTrace(recorder *trace.Recorder, result ToolResult) {
 	if recorder == nil || result.Meta["output_budget_category"] == "" {
+		return
+	}
+	if result.Outcome.Finalized() {
+		diagnostics := result.Outcome.Diagnostics
+		recorder.EmitOutputBudget(trace.OutputBudgetEvent{
+			Tool:                    result.Name,
+			Category:                diagnostics.Category,
+			OriginalBytes:           diagnostics.OriginalBytes,
+			RetainedBytes:           diagnostics.ModelBytes,
+			EstimatedOriginalTokens: diagnostics.EstimatedOriginalTokens,
+			EstimatedRetainedTokens: diagnostics.EstimatedModelTokens,
+			Truncated:               diagnostics.Truncated,
+			Reason:                  diagnostics.Reason,
+			SpillCreated:            result.Outcome.Artifact != nil,
+		})
 		return
 	}
 	parseInt := func(key string) int {
@@ -1119,12 +1134,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}, nil
 	}
 	tool, toolFound := registry.Get(call.Name)
-	if permissionMode == PermissionModeSpecDraft && toolFound && !ToolAdvertised(tool, permissionMode) {
+	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
+		modeName := string(permissionMode)
 		return ToolResult{
 			ToolCallID:   call.ID,
 			Name:         call.Name,
 			Status:       tools.StatusError,
-			Output:       `Error: Tool "` + call.Name + `" is not available in spec-draft mode.`,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + modeName + ` mode.`,
 			DenialReason: DenialFiltered,
 		}, nil
 	}
@@ -1457,14 +1473,15 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ToolCallID:      call.ID,
 		Name:            call.Name,
 		Status:          result.Status,
-		Output:          result.Output,
+		Output:          result.ModelOutput(),
 		Truncated:       result.Truncated,
 		Meta:            result.Meta,
 		Images:          result.Images,
 		Redacted:        result.Redacted,
 		ChangedFiles:    result.ChangedFiles,
 		ChangeSummaries: result.ChangeSummaries,
-		Display:         result.Display,
+		Display:         result.HumanDisplay(),
+		Outcome:         result.Outcome,
 		LoadedTools:     loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
@@ -1802,9 +1819,31 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 }
 
+// hooksSuppressed reports whether advisory (non-veto) hooks must not run for
+// this run's permission mode. Plan mode promises a read-only turn, but
+// sessionStart/sessionEnd/afterTool hooks execute configured host commands
+// outside the advertised-tool and sandbox gates, so dispatching them would let
+// merely starting a plan session or finishing a read mutate the workspace.
+//
+// beforeTool is intentionally NOT suppressed: a non-zero exit is a deny gate,
+// and skipping it fails open (operators who block secret-file reads via
+// beforeTool would lose that protection under /plan on). See dispatchBeforeTool.
+//
+// Spec-draft keeps the existing trust-gated hook model: project hooks still
+// fire when the workspace (or its worktree trust root) is trusted. That is
+// intentional; trust inheritance for --use-spec --worktree is covered by
+// TestExecSpecWorktreeInheritsTrustEndToEnd.
+func hooksSuppressed(options Options) bool {
+	return options.PermissionMode == PermissionModePlan
+}
+
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
 // that exits non-zero vetoes the call: the returned bool is true and the tool
 // must not run. A nil dispatcher (no hooks wired) is a no-op.
+//
+// Unlike advisory hooks, beforeTool still runs under plan mode. Suppressing it
+// would fail open: a project policy that blocks reads of secrets via
+// beforeTool would silently stop applying the moment permission mode is plan.
 func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
 	if options.Hooks == nil {
 		return hooks.DispatchOutcome{}, false
@@ -1829,7 +1868,7 @@ func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, arg
 // returns any advisory output (e.g. a formatter or vet result) to surface back
 // to the model. afterTool hooks never block. A nil dispatcher is a no-op.
 func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) string {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return ""
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1853,7 +1892,7 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 // model turn. Lifecycle hooks are advisory: dispatcher failures are audited but
 // never block the run.
 func dispatchSessionStart(ctx context.Context, options Options) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1874,7 +1913,7 @@ func dispatchSessionStart(ctx context.Context, options Options) {
 // dispatchSessionEnd runs configured sessionEnd hooks once when the agent run
 // exits, including early error returns. Lifecycle hooks are advisory.
 func dispatchSessionEnd(ctx context.Context, options Options, result Result, runErr error) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	payload := map[string]any{
@@ -2061,13 +2100,14 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			ToolCallID:      call.ID,
 			Name:            call.Name,
 			Status:          result.Status,
-			Output:          result.Output,
+			Output:          result.ModelOutput(),
 			Truncated:       result.Truncated,
 			Meta:            result.Meta,
 			Redacted:        result.Redacted,
 			ChangedFiles:    result.ChangedFiles,
 			ChangeSummaries: result.ChangeSummaries,
-			Display:         result.Display,
+			Display:         result.HumanDisplay(),
+			Outcome:         result.Outcome,
 		}
 	}
 	return ToolResult{
@@ -2173,6 +2213,20 @@ type requestPermissionsArgs struct {
 }
 
 func executeRequestPermissions(ctx context.Context, call ToolCall, args map[string]any, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	// request_permissions is dispatched by name above, before the registry-based
+	// ToolAdvertised gate runs, so a read-only mode's registry omitting this tool
+	// (rather than registering it as denied) must not fall through to a real
+	// grant. Deny it here unconditionally for spec-draft/plan, independent of
+	// whether the caller's registry happens to contain the tool.
+	if permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan {
+		return ToolResult{
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusError,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + string(permissionMode) + ` mode.`,
+			DenialReason: DenialFiltered,
+		}, nil
+	}
 	parsed, err := parseRequestPermissionsArgs(args)
 	if err != nil {
 		return ToolResult{
@@ -2718,7 +2772,34 @@ func permissionRequestFromEvent(event PermissionEvent, args map[string]any, opti
 		Grant:              event.Grant,
 		CommandPrefix:      append([]string(nil), event.CommandPrefix...),
 		AvailableDecisions: availablePermissionDecisions(event, args, options),
+		// Computed from the SAME conditions shellExecutionArgsForApproval uses,
+		// so the prompt cannot claim an escalation that will not happen or stay
+		// silent about one that will. Keeping the two in step matters more than
+		// the wording: a label that overstates gets ignored, and one that
+		// understates is the bug being fixed.
+		PrefixApprovalEscalates: shellPrefixApprovalEscalates(event.ToolName, args, options),
 	}
+}
+
+// shellPrefixApprovalEscalates reports whether approving a command prefix would
+// also take this command out of the sandbox.
+//
+// Deliberately mirrors shellExecutionArgsForApproval's guards rather than
+// re-deriving them: same tool test, same sandbox availability test, and the same
+// two opt-outs for a call that already asked for additional permissions or
+// escalation. Those already carry their own disclosure, so labelling them again
+// would be noise.
+func shellPrefixApprovalEscalates(toolName string, args map[string]any, options Options) bool {
+	if !isShellCommandTool(toolName) {
+		return false
+	}
+	if options.Sandbox == nil || !options.Sandbox.UnsandboxedExecutionAllowed() {
+		return false
+	}
+	if shellCommandAdditionalPermissionsRequested(args) || shellCommandRequiresEscalated(args) {
+		return false
+	}
+	return true
 }
 
 func availablePermissionDecisions(event PermissionEvent, args map[string]any, options Options) []PermissionDecisionAction {
@@ -3202,11 +3283,17 @@ func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
 }
 
 func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
+	// Denied tools are never advertised in any mode. Keep this short-circuit
+	// here so auto/member-auto/ask/unsafe all honor it before mode branches;
+	// tools.ToolAdvertisedForPermissionMode repeats it for the tool_search path
+	// which never enters this function.
 	if tool.Safety().Permission == tools.PermissionDeny {
 		return false
 	}
-	if permissionMode == PermissionModeSpecDraft {
-		return toolAdvertisedInSpecDraft(tool)
+	// plan/spec-draft policy lives in tools so tool_search and the dispatch
+	// gate cannot drift. PermissionDeny was already checked above.
+	if permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan {
+		return tools.ToolAdvertisedForPermissionMode(tool, string(permissionMode))
 	}
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
@@ -3227,17 +3314,6 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 		return false
 	}
 	return true
-}
-
-func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
-	switch tool.Name() {
-	case "ask_user", "submit_spec":
-		return true
-	case "update_plan":
-		return false
-	}
-	safety := tool.Safety()
-	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
 }
 
 func stopReasonFromToolResult(result ToolResult) StopReason {

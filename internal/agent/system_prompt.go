@@ -95,6 +95,9 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 		core = fallbackSystemPrompt
 	}
 	sections := []string{core}
+	if transient := strings.TrimSpace(options.TransientSystemPrompt); transient != "" {
+		sections = append(sections, transient)
+	}
 	if addendum := modelPromptAddendum(options.Model); addendum != "" {
 		sections = append(sections, addendum)
 	}
@@ -117,6 +120,9 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 	project := workspaceContext(options.Cwd)
 	if project != "" {
 		sections = append(sections, project)
+	}
+	if modeCtx := permissionModeContext(options); modeCtx != "" {
+		sections = append(sections, modeCtx)
 	}
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)
@@ -678,4 +684,13 @@ func gitBranchForPrompt(cwd string) string {
 		return ref[:7]
 	}
 	return ref
+}
+
+func permissionModeContext(options Options) string {
+	switch options.PermissionMode {
+	case PermissionModePlan:
+		return "Plan mode is active on this session. Your role is read-only exploration and planning: inspect the workspace and shape the plan with update_plan, but do not make changes to files or execute commands."
+	default:
+		return ""
+	}
 }

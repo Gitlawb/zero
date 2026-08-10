@@ -234,10 +234,11 @@ directory.
 
 ## Updating
 
-Check for a newer release:
+Check for a newer release, then download, verify, and install it in place:
 
 ```bash
 zero update --check
+zero upgrade
 ```
 
-Then reinstall with npm or rerun the install script for the version you want.
+See the [update guide](UPDATE.md) for update modes, flags, and platform details.

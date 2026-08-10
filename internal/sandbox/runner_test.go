@@ -508,6 +508,128 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	}
 }
 
+// TestSeatbeltProfileRendersCredentialBaselineAndCarveouts pins the rendering of
+// the credential baseline, which the struct-level tests do not cover: a
+// DenyReadIfExists entry must reach the profile as a real deny rule (dropping
+// the field from denyReadRules would silently make every credential store
+// readable again on macOS), and a DenyReadCarveouts entry must be re-allowed
+// AFTER it, since SBPL is last-match-wins.
+func TestSeatbeltProfileRendersCredentialBaselineAndCarveouts(t *testing.T) {
+	credentialDir := filepath.Join(t.TempDir(), "zero")
+	pluginRoot := filepath.Join(credentialDir, "plugins")
+	if err := os.MkdirAll(pluginRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{"/"},
+			WriteRoots:        []WritableRoot{{Root: "/repo"}},
+			DenyReadIfExists:  []string{credentialDir},
+			DenyReadCarveouts: []string{pluginRoot},
+			AllowTemp:         true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	denyRule := `(deny file-read* (subpath "` + sandboxProfileString(normalizeProfilePath(credentialDir)) + `"))`
+	allowRule := `(allow file-read* file-test-existence (subpath "` + sandboxProfileString(normalizeProfilePath(pluginRoot)) + `"))`
+	denyIdx := strings.Index(sbpl, denyRule)
+	allowIdx := strings.Index(sbpl, allowRule)
+	if denyIdx < 0 {
+		t.Fatalf("Seatbelt profile missing credential baseline deny %q:\n%s", denyRule, sbpl)
+	}
+	if allowIdx < 0 {
+		t.Fatalf("Seatbelt profile missing carveout allow %q:\n%s", allowRule, sbpl)
+	}
+	if allowIdx < denyIdx {
+		t.Fatalf("carveout allow (%d) must follow the deny (%d) to win under last-match-wins:\n%s", allowIdx, denyIdx, sbpl)
+	}
+}
+
+func TestSeatbeltProfileReappliesCredentialDeniesInsideCarveouts(t *testing.T) {
+	credentialDir := filepath.Join(t.TempDir(), "zero")
+	var carveouts []string
+	var denied []string
+	for _, name := range []string{"plugins", "specialists", "commands"} {
+		root := filepath.Join(credentialDir, name)
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		carveouts = append(carveouts, root)
+		for _, path := range []string{filepath.Join(root, "tokens.json"), filepath.Join(root, "tokens.json.secret")} {
+			if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			denied = append(denied, path)
+		}
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                        FileSystemRestricted,
+			ReadRoots:                   []string{"/"},
+			DenyReadIfExists:            append([]string{credentialDir}, denied...),
+			DenyReadCarveouts:           carveouts,
+			ProcessTrustedDenyReadFiles: denied,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	for _, root := range carveouts {
+		allowRule := `(allow file-read* file-test-existence (subpath "` + sandboxProfileString(normalizeProfilePath(root)) + `"))`
+		allowIdx := strings.Index(sbpl, allowRule)
+		if allowIdx < 0 {
+			t.Fatalf("Seatbelt profile missing carveout allow %q:\n%s", allowRule, sbpl)
+		}
+		for _, path := range []string{filepath.Join(root, "tokens.json"), filepath.Join(root, "tokens.json.secret")} {
+			denyRule := `(deny file-read* (literal "` + sandboxProfileString(normalizeProfilePath(path)) + `"))`
+			if denyIdx := strings.LastIndex(sbpl, denyRule); denyIdx < allowIdx {
+				t.Fatalf("nested credential deny %q must follow carveout allow (deny=%d allow=%d):\n%s", denyRule, denyIdx, allowIdx, sbpl)
+			}
+		}
+		ordinary := filepath.Join(root, "extension.json")
+		if strings.Contains(sbpl, `(deny file-read* (literal "`+sandboxProfileString(normalizeProfilePath(ordinary))+`"))`) {
+			t.Fatalf("ordinary extension file under %q must remain readable:\n%s", root, sbpl)
+		}
+	}
+}
+
+func TestSeatbeltProfileDoesNotRenderSymlinkCarveout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	credentialDir := filepath.Join(t.TempDir(), "zero")
+	if err := os.MkdirAll(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(credentialDir, "oauth-tokens.json")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pluginRoot := filepath.Join(credentialDir, "plugins")
+	if err := os.Symlink(secret, pluginRoot); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{"/"},
+			DenyReadIfExists:  []string{credentialDir},
+			DenyReadCarveouts: []string{pluginRoot},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	for _, path := range []string{pluginRoot, secret, normalizeProfilePath(pluginRoot), normalizeProfilePath(secret)} {
+		allow := `(allow file-read* file-test-existence (subpath "` + sandboxProfileString(path) + `"))`
+		if strings.Contains(sbpl, allow) {
+			t.Fatalf("Seatbelt profile re-allowed symlink carveout path %q:\n%s", path, sbpl)
+		}
+	}
+}
+
 // TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig locks in the fix for
 // git subprocesses (fetch, commit, add, ...) failing under the sandbox: the
 // default profile must stop write-denying the whole .git tree and only carve
@@ -576,6 +698,24 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 	off := seatbeltCommandPlanWithProfile(spec, "/ws", seatbeltCompatibilityPermissionProfile([]string{"/ws"}, offPolicy), offPolicy, backend)
 	if off.MonitorTag != "" {
 		t.Fatalf("a non-monitored plan must carry no tag, got %q", off.MonitorTag)
+	}
+}
+
+func TestSeatbeltCompatibilityProfileUsesCredentialEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	override := filepath.Join(t.TempDir(), "mcp-tokens.json")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", override)
+
+	profile := seatbeltCompatibilityPermissionProfile([]string{"/ws"}, DefaultPolicy())
+	for _, want := range []string{
+		override,
+		override + ".migrated",
+	} {
+		if !stringSliceContains(profile.FileSystem.DenyReadIfExists, normalizeProfilePath(want)) {
+			t.Fatalf("DenyReadIfExists = %#v, want environment override sibling %q", profile.FileSystem.DenyReadIfExists, want)
+		}
 	}
 }
 
@@ -655,6 +795,11 @@ func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	workspace := t.TempDir()
 	extra := tempDirOutsideDefaultTemp(t)
+	credentialHome := filepath.Join(workspace, "credential-home")
+	configHome := filepath.Join(credentialHome, "config")
+	if err := os.MkdirAll(filepath.Join(configHome, "zero"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -666,7 +811,7 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	resolvedExtra := scope.Roots()[1]
-	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: extra})
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: extra, Env: []string{"HOME=" + credentialHome, "XDG_CONFIG_HOME=" + configHome}})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}

@@ -138,3 +138,45 @@ output or stop a still-running task by id.
 If Zero is restarted while a background task is still marked `running`, the new
 manager marks that task `error` and clears its PID. This avoids sending
 `TaskStop` to a stale PID that may now belong to an unrelated process.
+
+## Recovering an Interrupted Overwrite
+
+Zero writes and flushes a complete temporary file before publishing an overwrite,
+so a write failure before publication leaves the existing manifest unchanged
+instead of truncating it. On Unix, publication uses a same-directory rename and
+preserves the existing file's permission bits.
+
+On Windows, Zero uses `ReplaceFileW` to preserve the destination DACL instead of
+silently replacing it with the temporary file's inherited DACL. `ReplaceFileW`
+is not observer-atomic: another process can briefly observe the destination path
+as absent during replacement. Zero serializes specialist loads and managed
+mutations within one process, but cannot synchronize external processes or
+editors.
+
+Windows errors 1176 (`ERROR_UNABLE_TO_MOVE_REPLACEMENT`) and 1177
+(`ERROR_UNABLE_TO_MOVE_REPLACEMENT_2`) are partial replacement failures. With
+Zero's managed backup, 1176 leaves the original names intact and needs no manual
+recovery. For 1177, Zero has moved the original aside and tries to move it back.
+That rollback almost always succeeds, and the failed write changes nothing.
+
+If the rollback itself fails — typically because another process is holding a
+lock on the file — the original is not lost, but it is left under a name Zero
+does not read:
+
+```text
+<specialist dir>/.zero-replace-<random>.backup
+```
+
+Only `*.md` files are loaded as specialists, so until that file is renamed the
+specialist will not appear in `zero specialist list` or resolve by name. Zero's
+error message includes both the backup path and destination path. Recover by
+closing whatever holds the lock and renaming the backup back:
+
+```powershell
+Move-Item .zero-replace-<random>.backup <name>.md
+```
+
+A `.zero-replace-*.backup` can also linger after a *successful* overwrite if the
+backup could not be deleted afterward. That case is reported as a warning rather
+than an error — the new manifest is already in place, and the leftover file is
+safe to delete.

@@ -1,15 +1,20 @@
 package specialist
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 type Storage struct {
-	paths Paths
+	paths            Paths
+	writeReplacement func(string, string) error
 }
 
 type CreateInput struct {
@@ -63,25 +68,28 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("specialist %q requires a system prompt", manifest.Metadata.Name)
 	}
 	content := FormatMarkdown(manifest)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	specialistFilesMu.Lock()
+	defer specialistFilesMu.Unlock()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Manifest{}, fmt.Errorf("create specialist directory: %w", err)
 	}
 	if input.Overwrite {
-		info, err := os.Lstat(path)
-		if err != nil && !os.IsNotExist(err) {
-			return Manifest{}, fmt.Errorf("inspect specialist file: %w", err)
+		writeReplacement := storage.writeReplacement
+		if writeReplacement == nil {
+			writeReplacement = writeSpecialistReplacement
 		}
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return Manifest{}, fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
+		if err := writeReplacement(path, content); err != nil {
+			var cleanupErr *fsutil.CommittedReplacementCleanupError
+			if errors.As(err, &cleanupErr) {
+				manifest.Warnings = append(manifest.Warnings, fmt.Sprintf("specialist was updated, but replacement backup %s could not be removed: %v", cleanupErr.BackupPath, cleanupErr.Cause))
+				return manifest, nil
+			}
+			return Manifest{}, err
 		}
+		return manifest, nil
 	}
-	flags := os.O_WRONLY | os.O_CREATE
-	if input.Overwrite {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_EXCL
-	}
-	file, err := os.OpenFile(path, flags, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
 			return Manifest{}, fmt.Errorf("specialist already exists: %s", manifest.Metadata.Name)
@@ -98,12 +106,95 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 	return manifest, nil
 }
 
+func writeSpecialistReplacement(path string, content string) error {
+	return writeSpecialistReplacementWith(path, content, nil, syncSpecialistDir)
+}
+
+func writeSpecialistReplacementWith(path string, content string, rename func(string, string) error, syncDir func(string) error) (err error) {
+	temp, err := os.CreateTemp(filepath.Dir(path), ".specialist-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary specialist file: %w", err)
+	}
+	tempPath := temp.Name()
+	// The temporary file never survives this function, on any path: a successful
+	// replace has already consumed it, and every failure — including the Windows
+	// partial-replace recoveries in fsutil — discards it here. Recovery from a
+	// failed overwrite is therefore always about the ORIGINAL (which fsutil either
+	// rolls back or names in its error), never about this file, and no error text
+	// should tell an operator to go looking for it.
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+	}()
+
+	if err := temp.Chmod(0o600); err != nil {
+		return fmt.Errorf("set temporary specialist file permissions: %w", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect specialist file: %w", err)
+	}
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
+		}
+		if runtime.GOOS != "windows" {
+			// The old in-place overwrite retained manually configured Unix modes.
+			// Preserve that behavior when publishing a replacement inode.
+			if err := temp.Chmod(info.Mode().Perm()); err != nil {
+				return fmt.Errorf("preserve specialist file permissions: %w", err)
+			}
+		}
+	}
+	if _, err := temp.WriteString(content); err != nil {
+		return fmt.Errorf("write temporary specialist file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		return fmt.Errorf("sync temporary specialist file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close temporary specialist file: %w", err)
+	}
+
+	// On Unix, the same-directory rename publishes the complete file atomically.
+	// On Windows, ReplaceFileW is used to preserve the destination DACL rather
+	// than publishing the temporary file's inherited DACL. ReplaceFileW can
+	// briefly leave the destination name absent; specialistFilesMu prevents
+	// Zero-managed loads in this process from observing that window, but external
+	// processes and editors are not synchronized.
+	if err := fsutil.ReplaceWithRetry(tempPath, path, rename); err != nil {
+		return fmt.Errorf("replace specialist file: %w", err)
+	}
+	// The replacement is committed at this point. As in the sessions store,
+	// opening/fsyncing the parent directory only improves crash durability and
+	// must not turn a successful overwrite into an API failure.
+	_ = syncDir(filepath.Dir(path))
+	return nil
+}
+
+func syncSpecialistDir(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
+}
+
 func (storage *Storage) Delete(input DeleteInput) (string, error) {
 	location := normalizeWritableLocation(input.Location)
 	path, err := storage.path(input.Name, location)
 	if err != nil {
 		return "", err
 	}
+	specialistFilesMu.Lock()
+	defer specialistFilesMu.Unlock()
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("specialist not found: %s", strings.TrimSpace(input.Name))

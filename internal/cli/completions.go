@@ -24,7 +24,8 @@ var completionRoot = completionNode{
 	children: []completionNode{
 		{names: []string{"exec"}, flags: []string{
 			"-h", "--help", "-f", "--file", "--image", "--add-dir", "--mode", "-m", "--model",
-			"--use-spec", "--spec-model", "--spec-reasoning-effort", "--max-turns", "--exec-profile",
+			"--use-spec", "--spec-model", "--spec-reasoning-effort", "--plan", "--permission-mode",
+			"--max-turns", "--exec-profile",
 			"--auto", "--enabled-tools", "--disabled-tools", "--list-tools", "--profile", "-r",
 			"--reasoning-effort", "-C", "--cwd", "-w", "--worktree", "--worktree-dir", "-i",
 			"--input-format", "-o", "--output-format", "--prompt", "--resume", "--fork",
@@ -84,7 +85,7 @@ var completionRoot = completionNode{
 		}},
 		{names: []string{"update"}},
 		{names: []string{"upgrade"}},
-		{names: []string{"worktrees", "worktree"}, children: leafNodes("prepare")},
+		{names: []string{"worktrees", "worktree"}, children: leafNodes("prepare", "release")},
 		{names: []string{"verify"}},
 		{names: []string{"trust"}, children: leafNodes("list", "remove")},
 		{names: []string{"eval"}, children: leafNodes("validate", "run", "bench")},

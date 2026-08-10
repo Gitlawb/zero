@@ -123,6 +123,21 @@ func TestComputePrefixFingerprintCoversEverySystemPromptSection(t *testing.T) {
 	}
 }
 
+func TestComputePrefixFingerprintCoversTransientSystemPrompt(t *testing.T) {
+	base := Options{Cwd: t.TempDir(), SystemPrompt: "core"}
+	changed := base
+	changed.TransientSystemPrompt = "turn-only guidance"
+
+	fpBase := ComputePrefixFingerprint(base, nil)
+	fpChanged := ComputePrefixFingerprint(changed, nil)
+	if fpBase.SystemPromptHash == fpChanged.SystemPromptHash {
+		t.Fatal("SystemPromptHash must change for transient system guidance")
+	}
+	if fpBase.CompletePrefixHash == fpChanged.CompletePrefixHash {
+		t.Fatal("CompletePrefixHash must cover transient system guidance")
+	}
+}
+
 // TestBuildPromptSubstringsDefaultOptions asserts the invariants of the
 // substrings helper for default Options: which substrings are non-empty,
 // which are empty, and that the substring-to-hash round-trip is lossless.

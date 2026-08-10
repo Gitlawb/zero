@@ -104,9 +104,21 @@ func (tool *GenerateTool) Run(ctx context.Context, args map[string]any) tools.Re
 	if err != nil {
 		return taskError(err)
 	}
+	return generateToolResult(manifest)
+}
+
+func generateToolResult(manifest Manifest) tools.Result {
+	lines := []string{
+		fmt.Sprintf("specialist: %s", manifest.Metadata.Name),
+		fmt.Sprintf("location: %s", manifest.Location),
+		fmt.Sprintf("path: %s", manifest.FilePath),
+	}
+	for _, warning := range manifest.Warnings {
+		lines = append(lines, "warning: "+warning)
+	}
 	return tools.Result{
 		Status: tools.StatusOK,
-		Output: fmt.Sprintf("specialist: %s\nlocation: %s\npath: %s", manifest.Metadata.Name, manifest.Location, manifest.FilePath),
+		Output: strings.Join(lines, "\n"),
 		Meta: map[string]string{
 			"name":     manifest.Metadata.Name,
 			"location": string(manifest.Location),

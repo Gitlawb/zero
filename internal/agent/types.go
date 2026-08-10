@@ -26,6 +26,15 @@ const (
 	PermissionModeAsk       PermissionMode = "ask"
 	PermissionModeUnsafe    PermissionMode = "unsafe"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	// PermissionModePlan is an interactive, read-only planning mode. It applies
+	// to the CURRENT session (unlike spec-draft, which drafts in a separate
+	// session): the agent may inspect the workspace and shape the plan with
+	// update_plan/ask_user, but no mutating tool is advertised, so it cannot
+	// write files, run shell, or implement while planning. Entry points:
+	// the TUI's /plan on (exit with /plan off, which restores whatever mode
+	// was active before), `zero exec --plan`, and the ACP session mode
+	// selector ("plan").
+	PermissionModePlan PermissionMode = "plan"
 	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
 	// advertises the in-workspace mutators a member needs to build (write/edit +
 	// shell) on top of the Auto set, while the sandbox engine still gates them at
@@ -79,6 +88,7 @@ type ToolResult struct {
 	// command execution; callers must not schedule per-file work from them.
 	ChangeSummaries []execution.Change
 	Display         tools.Display
+	Outcome         tools.ToolOutcome
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory
@@ -97,6 +107,24 @@ type ToolResult struct {
 	// for every normal tool result; the Run loop performs the switch when it is
 	// set and Options.ModelSwitcher is wired.
 	RequestedModel string
+}
+
+// ModelOutput returns the bounded provider-facing result while preserving
+// compatibility with synthetic and restored results created before outcomes
+// were finalized.
+func (result ToolResult) ModelOutput() string {
+	if result.Outcome.Finalized() {
+		return result.Outcome.ModelView
+	}
+	return result.Output
+}
+
+// HumanDisplay returns the presentation intended for interactive surfaces.
+func (result ToolResult) HumanDisplay() tools.Display {
+	if result.Outcome.Finalized() {
+		return result.Outcome.HumanView
+	}
+	return result.Display
 }
 
 // DenialCategory classifies why a tool call was blocked before it executed.
@@ -176,6 +204,22 @@ type PermissionRequest struct {
 	Grant              *sandbox.Grant             `json:"grant,omitempty"`
 	CommandPrefix      []string                   `json:"commandPrefix,omitempty"`
 	AvailableDecisions []PermissionDecisionAction `json:"availableDecisions,omitempty"`
+	// PrefixApprovalEscalates reports that approving a command prefix will also
+	// run the command OUTSIDE the sandbox, not merely stop asking about it.
+	//
+	// It exists because that consequence was real but invisible. Approving a
+	// prefix rewrites the call to sandbox_permissions: require_escalated, which
+	// resolves to a nil engine and genuinely unsandboxed execution, and the
+	// engine's own escalation prompt is then satisfied by the approval just
+	// given for the sandboxed form. So the operator authorized one thing and got
+	// a wider one, having been shown only "allow command prefix for session".
+	//
+	// The escalation itself is deliberate and guarded: proposedCommandPrefix
+	// refuses to offer a prefix while any other segment of the command is not
+	// known-safe, precisely so an unreviewed segment cannot ride out of the
+	// sandbox on it. What was missing was telling the person deciding, so this
+	// surfaces it rather than removing it.
+	PrefixApprovalEscalates bool `json:"prefixApprovalEscalates,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -283,6 +327,9 @@ type Options struct {
 	ReasoningEffort  string
 	Cwd              string
 	SystemPrompt     string
+	// TransientSystemPrompt adds trusted runtime guidance for this run only.
+	// Empty preserves the ordinary system prompt byte-for-byte.
+	TransientSystemPrompt string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the
