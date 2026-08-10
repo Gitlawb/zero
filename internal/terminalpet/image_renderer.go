@@ -283,7 +283,26 @@ func clearRenderedImage(writer io.Writer, key imageDrawKey) error {
 	if key.protocol != ImageProtocolSixel {
 		return nil
 	}
-	if _, err := io.WriteString(writer, "\x1b[s"); err != nil {
+	// Sixel is the only protocol here that erases by PAINTING CHARACTERS. Kitty
+	// hands the terminal an id and the placement goes away; a sixel is already in
+	// the cell grid, so the only way to remove it is to write over it. That makes
+	// this the one path where the caller's SGR state matters, and it was not
+	// being normalised.
+	//
+	// The spaces below are ordinary characters, so they carry whatever background
+	// the TUI last set. Every erase therefore stamped a filled block in the
+	// ambient colour, and since a drag erases and repaints on every pixel, that
+	// block was continuously refreshed over the interface. It stayed invisible on
+	// a terminal whose ambient background matched its theme, which is why it
+	// never appeared on the Kitty-protocol terminals — ghostty, kitty, WezTerm,
+	// iTerm — that do not reach this code at all. Windows Terminal is the only
+	// mainstream terminal that lands here.
+	//
+	// DECSC/DECRC rather than CSI s/u: this now has to put back the SGR state as
+	// well as the cursor, and only DECSC saves attributes. Restoring them matters
+	// because the erase is emitted mid-frame, between styled writes the TUI has
+	// already started.
+	if _, err := io.WriteString(writer, "\x1b7\x1b[0m"); err != nil {
 		return err
 	}
 	for row := 0; row < key.rows; row++ {
@@ -291,7 +310,7 @@ func clearRenderedImage(writer io.Writer, key imageDrawKey) error {
 			return err
 		}
 	}
-	_, err := io.WriteString(writer, "\x1b[u")
+	_, err := io.WriteString(writer, "\x1b8")
 	return err
 }
 
