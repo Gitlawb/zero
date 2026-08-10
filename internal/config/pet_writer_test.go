@@ -217,6 +217,18 @@ func TestSetPetMinimallyEditsExistingJSON(t *testing.T) {
 			pet:      "",
 			want:     "{\"preferences\":{\"pet\":\"cat\"},\"preferences\":{}}\n",
 		},
+		{
+			name:     "do not expose an older duplicate behind null",
+			original: "{\"preferences\":{\"pet\":\"cat\"},\"preferences\":null}\n",
+			pet:      "",
+			want:     "{\"preferences\":{\"pet\":\"cat\"},\"preferences\":null}\n",
+		},
+		{
+			name:     "preserve multiline empty preferences layout",
+			original: "{\n  \"preferences\": {\n  },\n  \"activeProvider\": \"test\"\n}\n",
+			pet:      "boba",
+			want:     "{\n  \"preferences\": {\n    \"pet\": \"boba\"\n  },\n  \"activeProvider\": \"test\"\n}\n",
+		},
 	}
 
 	for _, test := range tests {

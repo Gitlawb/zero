@@ -7,6 +7,7 @@ import (
 )
 
 type jsonObjectSpan struct {
+	start   int
 	end     int
 	members []jsonMemberSpan
 }
@@ -45,6 +46,9 @@ func setPetPreferenceJSON(data []byte, pet string) ([]byte, error) {
 	preferenceValue := bytes.TrimSpace(data[preferenceMember.valueStart:preferenceMember.valueEnd])
 	if bytes.Equal(preferenceValue, []byte("null")) {
 		if pet == "" {
+			if lastJSONMember(root.members[:preferencesIndex], "preferences") >= 0 {
+				return data, nil
+			}
 			return removeJSONMember(data, root, preferencesIndex), nil
 		}
 		encodedPet, err := json.Marshal(pet)
@@ -100,7 +104,7 @@ func parseJSONObject(data []byte, start int) (jsonObjectSpan, error) {
 	if start < 0 || start >= len(data) || data[start] != '{' {
 		return jsonObjectSpan{}, fmt.Errorf("expected JSON object")
 	}
-	object := jsonObjectSpan{}
+	object := jsonObjectSpan{start: start}
 	leadingStart := start + 1
 	for {
 		i := skipJSONSpace(data, leadingStart)
@@ -262,6 +266,20 @@ func insertJSONMember(data []byte, object jsonObjectSpan, key string, value []by
 	encodedKey, _ := json.Marshal(key)
 	entry := append(append(encodedKey, ':', ' '), value...)
 	if len(object.members) == 0 {
+		interior := data[object.start+1 : object.end]
+		if newline := bytes.LastIndexByte(interior, '\n'); newline >= 0 {
+			closingIndent := interior[newline+1:]
+			indentUnit := []byte("  ")
+			if bytes.Contains(closingIndent, []byte("\t")) {
+				indentUnit = []byte("\t")
+			}
+			lineBreak := []byte("\n")
+			if newline > 0 && interior[newline-1] == '\r' {
+				lineBreak = []byte("\r\n")
+			}
+			insert := append(append(append(lineBreak, closingIndent...), indentUnit...), entry...)
+			return replaceJSONRange(data, object.start+1, object.start+1, insert)
+		}
 		return replaceJSONRange(data, object.end, object.end, entry)
 	}
 	last := object.members[len(object.members)-1]
