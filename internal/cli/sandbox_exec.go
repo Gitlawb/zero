@@ -61,26 +61,35 @@ func runSandboxExec(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeAppError(stderr, fmt.Sprintf("resolve sandbox write roots: %v", err), exitCrash)
 	}
 
-	manager := zeroSandbox.NewSandboxManager(zeroSandbox.SandboxManagerOptions{
-		Backend: deps.selectSandboxBackend(zeroSandbox.BackendOptions{}),
-	})
-	plan, err := manager.BuildCommandPlan(zeroSandbox.SandboxManagerRequest{
+	// Through the ENGINE, not a SandboxManager built here.
+	//
+	// The engine is what a real tool call goes through, and it does more than
+	// hand the manager a request: it resolves the permission profile, calls
+	// prepareSandboxRuntime, and folds the runtime state into that profile
+	// before planning. Building a manager directly skipped all of it, so the
+	// command ran without the runtime write root, and cache or temp writes could
+	// pass or fail differently from the sandboxed command this exists to imitate.
+	// A harness that exercises the wrong path is worse than no harness, because
+	// its result still reads as evidence.
+	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
-		Command: zeroSandbox.CommandSpec{
-			Name: command[0],
-			Args: command[1:],
-			Dir:  workspaceRoot,
-			Env:  os.Environ(),
-		},
-		Policy: policy,
-		Scope:  scope,
-		// Ask for validation rather than a best-effort plan: a harness asserting
-		// that a write was refused needs to know the sandbox was really there.
-		ValidateExecution: true,
+		Policy:        policy,
+		Scope:         scope,
+		Backend:       deps.selectSandboxBackend(zeroSandbox.BackendOptions{}),
+	})
+	plan, err := engine.BuildCommandPlan(zeroSandbox.CommandSpec{
+		Name: command[0],
+		Args: command[1:],
+		Dir:  workspaceRoot,
+		Env:  os.Environ(),
 	})
 	if err != nil {
 		return writeAppError(stderr, fmt.Sprintf("build sandbox command plan: %v", err), exitCrash)
 	}
+	// The plan owns resources beyond its construction: on Linux it allocates a
+	// policy-report file and registers the removal here, so without this every
+	// invocation leaves a /tmp/zero-sandbox-report-* behind.
+	defer plan.Cleanup()
 
 	// Printed before the command runs and on stderr, so it survives a command
 	// that writes to stdout and stays greppable by a test harness. A downgrade
@@ -126,20 +135,35 @@ var errSandboxExecHelp = errors.New("help requested")
 // parseSandboxExecArgs takes everything after `--` as the command, so the
 // command's own flags are never mistaken for ours.
 func parseSandboxExecArgs(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, errors.New("usage: zero sandbox exec -- <command> [args...]")
+	}
+	// The separator is located FIRST, before any help flag is interpreted.
+	//
+	// Everything after `--` belongs to the child, help flags included, so a
+	// single pass that treated `-h`/`--help`/`help` as ours wherever it found
+	// them would answer for a command it was supposed to be running. Scanning
+	// for the separator up front keeps that promise structural rather than
+	// dependent on which token happens to come first.
 	for index, arg := range args {
-		switch arg {
-		case "-h", "--help", "help":
-			return nil, errSandboxExecHelp
-		case "--":
+		if arg == "--" {
 			command := args[index+1:]
 			if len(command) == 0 {
 				return nil, errors.New("usage: zero sandbox exec -- <command> [args...]")
 			}
 			return command, nil
 		}
-	}
-	if len(args) == 0 {
-		return nil, errors.New("usage: zero sandbox exec -- <command> [args...]")
+		// Only the wrapper's own arguments, meaning those before the separator,
+		// can ask for the wrapper's help.
+		switch arg {
+		case "-h", "--help", "help":
+			return nil, errSandboxExecHelp
+		}
+		// The first non-flag token starts the command in the tolerated
+		// separator-less form, so nothing after it is ours to read. Without this
+		// `zero sandbox exec mycmd --help` printed OUR help and never ran mycmd,
+		// which is the same contract break as reading past `--`.
+		return args, nil
 	}
 	// Tolerated without the separator for interactive use, but the separator is
 	// what the help shows, because anything with a leading dash needs it.

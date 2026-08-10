@@ -232,3 +232,42 @@ func TestPrincipalBackendDefersToRestrictedTokenWhenNetworkDenied(t *testing.T) 
 		t.Fatal("principal backend eligible without the opt-in")
 	}
 }
+
+// The account key has to separate USERS, not only workspaces.
+//
+// The name is machine-wide while the DPAPI secret and the ACL ledger both live
+// under the invoking user's sandbox home. Keyed on the workspace alone, two
+// Windows users sharing one path derive the same account with private
+// bookkeeping: the second finds no ledger of its own and either retires the
+// first user's working principal or adopts it and rotates the password while
+// storing only its own secret. The first user's marker still validates and its
+// next command cannot log on.
+//
+// Asserting the principal key DIFFERS from the workspace key is what pins that.
+// It is the cheapest observable difference; a test that only checked the key was
+// stable would pass against the broken version.
+func TestPrincipalKeyIsScopedToTheUserNotOnlyTheWorkspace(t *testing.T) {
+	roots := []string{`C:\ws\shared`}
+	workspace := windowsSandboxWorkspaceKey(roots)
+	principal := windowsSandboxPrincipalKey(roots)
+
+	if principal == workspace {
+		t.Fatal("the principal key equals the workspace key, so two users sharing this workspace would derive one account with separate secrets and ledgers")
+	}
+	if principal != windowsSandboxPrincipalKey(roots) {
+		t.Error("the principal key is not stable for one user, so a second setup would not find its own account")
+	}
+	if other := windowsSandboxPrincipalKey([]string{`C:\ws\other`}); other == principal {
+		t.Error("two workspaces derived the same principal key, so they would share one account")
+	}
+}
+
+// The setup lock must stay keyed to the WORKSPACE alone. Two users setting up
+// one shared workspace now provision separate accounts, but they still write
+// DACLs on the same paths, so they have to keep serializing against each other.
+func TestSetupLockStaysWorkspaceScoped(t *testing.T) {
+	roots := []string{`C:\ws\shared`}
+	if windowsSandboxWorkspaceKey(roots) == windowsSandboxPrincipalKey(roots) {
+		t.Fatal("the lock key and the principal key are the same, so making the account per-user also made the lock per-user")
+	}
+}

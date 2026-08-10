@@ -138,7 +138,7 @@ func TestSetupRetiresAPrincipalWithNoRecordOfItsGrants(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := stubWindowsPrincipalSetup(t)
-			username := windowsSandboxUserName(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+			username := windowsSandboxUserName(windowsSandboxPrincipalKey(config.WorkspaceRoots))
 			if testCase.seedRecord {
 				if err := writeWindowsPrincipalACLLedger(config.SandboxHome, username, []string{`C:\ws\recorded`}); err != nil {
 					t.Fatalf("seed the record: %v", err)
@@ -202,7 +202,7 @@ func TestTeardownRevokesRecordedPathsTheCurrentPolicyNoLongerNames(t *testing.T)
 			},
 		},
 	}
-	username := windowsSandboxUserName(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+	username := windowsSandboxUserName(windowsSandboxPrincipalKey(config.WorkspaceRoots))
 	if err := writeWindowsPrincipalACLLedger(home, username, []string{dropped}); err != nil {
 		t.Fatalf("seed the record: %v", err)
 	}
