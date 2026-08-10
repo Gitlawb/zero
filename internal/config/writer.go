@@ -599,46 +599,20 @@ func SetPet(path string, pet string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
 	cfg := FileConfig{}
-	raw := make(map[string]json.RawMessage)
-	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &cfg); err != nil {
+	data := []byte("{}")
+	if existing, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(existing, &cfg); err != nil {
 			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 		}
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-		}
+		data = existing
 	} else if !os.IsNotExist(err) {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	pet = strings.TrimSpace(pet)
 	cfg.Preferences.Pet = pet
-	preferences := make(map[string]json.RawMessage)
-	if data := raw["preferences"]; len(data) > 0 && string(data) != "null" {
-		if err := json.Unmarshal(data, &preferences); err != nil {
-			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-		}
-	}
-	if pet == "" {
-		delete(preferences, "pet")
-	} else {
-		encodedPet, err := json.Marshal(pet)
-		if err != nil {
-			return FileConfig{}, fmt.Errorf("encode pet preference: %w", err)
-		}
-		preferences["pet"] = encodedPet
-	}
-	if len(preferences) == 0 {
-		delete(raw, "preferences")
-	} else {
-		encodedPreferences, err := json.Marshal(preferences)
-		if err != nil {
-			return FileConfig{}, fmt.Errorf("encode pet preferences: %w", err)
-		}
-		raw["preferences"] = encodedPreferences
-	}
-	data, err := json.MarshalIndent(raw, "", "  ")
+	data, err := setPetPreferenceJSON(data, pet)
 	if err != nil {
-		return FileConfig{}, fmt.Errorf("encode config JSON: %w", err)
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 	if err := writeConfigData(path, data); err != nil {
 		return FileConfig{}, err
@@ -805,7 +779,9 @@ func writeConfigData(path string, data []byte) error {
 			return fmt.Errorf("create config directory %s: %w", dir, err)
 		}
 	}
-	data = append(data, '\n')
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
 	// Write-to-temp + rename: an in-place write interrupted mid-way (crash,
 	// disk full) would leave the user's only config truncated or corrupt.
 	tmp, err := os.CreateTemp(dir, ".zero-config-*.tmp")
