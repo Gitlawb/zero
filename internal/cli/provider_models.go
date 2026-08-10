@@ -245,6 +245,34 @@ func livePlanProvider(workspaceRoot string, captured config.ProviderProfile) con
 	if err != nil {
 		return captured
 	}
+	// Nothing to re-resolve FROM, which is not the same as a failure and is why
+	// the error branches cannot catch it.
+	//
+	// With no config file on either path, no provider command and no
+	// ZERO_PROVIDER, config.Resolve still SUCCEEDS: it falls back to a built-in
+	// default provider. That default is not a decision anyone made. Treating it
+	// as a provider switch discards a captured profile carrying --provider,
+	// --base-url and an inline --api-key, and points discovery at the default
+	// endpoint with none of the caller's credentials — this function's own
+	// failure mode arriving from the other direction. A headless run on a machine
+	// with no config file, a fresh CI container being the obvious one, hits it
+	// every time.
+	//
+	// Read off the OPTIONS rather than by stat-ing again: DefaultResolveOptions
+	// already leaves a path empty when the file is absent, so this uses the
+	// answer it computed instead of asking a second time and risking a different
+	// one.
+	//
+	// ZERO_PROVIDER is deliberately NOT part of this test, though it looks like
+	// it belongs. With no config file there are no profiles to select from, so a
+	// ZERO_PROVIDER naming one resolves to ErrNoActiveProvider and the error
+	// branch below already returns the captured profile. Adding it here would
+	// read as a meaningful case while changing no outcome.
+	if strings.TrimSpace(options.UserConfigPath) == "" &&
+		strings.TrimSpace(options.ProjectConfigPath) == "" &&
+		strings.TrimSpace(options.ProviderCommand) == "" {
+		return captured
+	}
 	// Env deliberately left nil: config.Resolve then reads the live process
 	// environment, which is where switchProviderModel wrote ZERO_PROVIDER.
 	resolved, err := config.Resolve(options)
