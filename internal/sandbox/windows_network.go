@@ -70,13 +70,22 @@ func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNe
 	// synthetic capability SID. So the same filters additionally match a real
 	// local group that network-denied principals belong to.
 	//
-	// Resolved rather than assumed, and absent until the group exists, so a
-	// machine that has never provisioned principals computes exactly the plan it
-	// computed before this existed. That matters because the plan is hashed into
-	// the setup marker and compared on every command: an identity set that
-	// differed between setup and the command path would fail every command with
-	// "setup is out of date".
-	if resolveWindowsSandboxOfflineGroupSIDHook != nil {
+	// Gated on THIS home's opt-in, not merely on the group existing.
+	//
+	// The group is machine-global, so keying off its existence meant the first
+	// workspace to opt in changed the computed plan for every OTHER sandbox home
+	// on the machine. The plan is hashed into the setup marker and compared on
+	// every command, so those homes started failing every command with "setup is
+	// out of date" until each was re-run from an elevated terminal, having never
+	// opted into anything. Existing markers have to keep validating.
+	//
+	// Reading the opt-in instead keeps an opted-out home computing exactly the
+	// plan it computed before any of this existed. An opted-in home records the
+	// group in its own marker, and setup and the command path both derive the
+	// flag from the same environment, so they agree. Opting in AFTER setup does
+	// invalidate that home's marker, which is correct: it has no principals yet
+	// and setup is genuinely required.
+	if windowsSandboxIdentityEnabled(config.Env) && resolveWindowsSandboxOfflineGroupSIDHook != nil {
 		groupSID, err := resolveWindowsSandboxOfflineGroupSIDHook()
 		if err != nil {
 			return WindowsNetworkPlan{}, err

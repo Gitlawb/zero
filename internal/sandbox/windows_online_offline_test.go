@@ -51,7 +51,11 @@ func TestBuildWindowsNetworkInfraPlanIsModeIndependent(t *testing.T) {
 
 	mk := func(mode NetworkMode) WindowsSandboxCommandConfig {
 		return WindowsSandboxCommandConfig{
-			SandboxHome:    home,
+			SandboxHome: home,
+			// Opted in, because the offline group only enters the plan for a home
+			// that asked for principals. Without this the plan is the pre-principal
+			// one and the group assertions below have nothing to find.
+			Env:            map[string]string{windowsSandboxIdentityEnv: "1"},
 			CommandCWD:     `C:\ws`,
 			WorkspaceRoots: []string{`C:\ws`},
 			PermissionProfile: PermissionProfile{

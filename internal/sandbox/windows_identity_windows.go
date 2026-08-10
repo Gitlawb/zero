@@ -300,6 +300,26 @@ func resolveWindowsSandboxOfflineGroupSID() (string, error) {
 	if accountType != windows.SidTypeAlias && accountType != windows.SidTypeGroup {
 		return "", fmt.Errorf("%s resolves to a non-group account (type %d)", windowsSandboxOfflineGroupName, accountType)
 	}
+	// Being a group is not enough: it has to be OUR group.
+	//
+	// The ownership check used to live only on the principal-provisioning path,
+	// so an opt-out setup reached here and adopted whatever carried the name.
+	// applyWindowsNetworkPlan turns every SID in the plan into an allowed-to-match
+	// WFP descriptor, so adopting a foreign group installs global deny filters
+	// against every one of ITS members: someone who happens to have a local group
+	// by this name loses the network for those accounts because we ran setup.
+	//
+	// Refused rather than skipped. Returning "" would build a plan whose filters
+	// cover no principal at all while reporting a successful setup, and a network
+	// deny that silently covers nothing is the failure this backend exists to
+	// prevent. A squatted name is an operator problem and has to say so.
+	owned, err := windowsLocalGroupOwnedByZero(windowsSandboxOfflineGroupName, windowsSandboxOfflineGroupComment)
+	if err != nil {
+		return "", err
+	}
+	if !owned {
+		return "", fmt.Errorf("%s exists but is not the group this setup manages; rename or remove it, then re-run `zero sandbox setup`", windowsSandboxOfflineGroupName)
+	}
 	return sid.String(), nil
 }
 
