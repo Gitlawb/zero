@@ -599,15 +599,48 @@ func SetPet(path string, pet string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
 	cfg := FileConfig{}
+	raw := make(map[string]json.RawMessage)
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
 			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 		}
 	} else if !os.IsNotExist(err) {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	cfg.Preferences.Pet = strings.TrimSpace(pet)
-	if err := writeConfigFile(path, cfg); err != nil {
+	pet = strings.TrimSpace(pet)
+	cfg.Preferences.Pet = pet
+	preferences := make(map[string]json.RawMessage)
+	if data := raw["preferences"]; len(data) > 0 && string(data) != "null" {
+		if err := json.Unmarshal(data, &preferences); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	}
+	if pet == "" {
+		delete(preferences, "pet")
+	} else {
+		encodedPet, err := json.Marshal(pet)
+		if err != nil {
+			return FileConfig{}, fmt.Errorf("encode pet preference: %w", err)
+		}
+		preferences["pet"] = encodedPet
+	}
+	if len(preferences) == 0 {
+		delete(raw, "preferences")
+	} else {
+		encodedPreferences, err := json.Marshal(preferences)
+		if err != nil {
+			return FileConfig{}, fmt.Errorf("encode pet preferences: %w", err)
+		}
+		raw["preferences"] = encodedPreferences
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("encode config JSON: %w", err)
+	}
+	if err := writeConfigData(path, data); err != nil {
 		return FileConfig{}, err
 	}
 	return cfg, nil
@@ -758,15 +791,19 @@ func NormalizeRecentModels(entries []RecentModelEntry) []RecentModelEntry {
 }
 
 func writeConfigFile(path string, cfg FileConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config JSON: %w", err)
+	}
+	return writeConfigData(path, data)
+}
+
+func writeConfigData(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create config directory %s: %w", dir, err)
 		}
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode config JSON: %w", err)
 	}
 	data = append(data, '\n')
 	// Write-to-temp + rename: an in-place write interrupted mid-way (crash,

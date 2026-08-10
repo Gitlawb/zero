@@ -178,7 +178,8 @@ func (m model) composerDividerLine(width int) string {
 		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))
 	}
 	if availableWidth < metaWidth+4 {
-		return zeroTheme.lineStrong.Render("╰" + strings.Repeat("─", width-2) + "╯")
+		line := zeroTheme.lineStrong.Render("╰" + strings.Repeat("─", availableWidth-2) + "╯")
+		return line + strings.Repeat(" ", reserved)
 	}
 	rule := strings.Repeat("─", availableWidth-metaWidth-4)
 	line := zeroTheme.lineStrong.Render("╰"+rule+" ") + meta + zeroTheme.lineStrong.Render(" ╯")

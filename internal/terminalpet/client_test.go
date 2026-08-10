@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestCatalogPreviewInstallAndOfflineReload(t *testing.T) {
@@ -80,6 +81,120 @@ func TestCatalogPreviewInstallAndOfflineReload(t *testing.T) {
 	}
 }
 
+func TestInstallUsesPetMetadataSpriteVersionWhenManifestIsStale(t *testing.T) {
+	atlas := encodedPNG(t, 24*atlasColumns, 26*11)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/pets/luffy/sprite.webp":
+			_, _ = writer.Write(atlas)
+		case "/pets/luffy/petjson.json":
+			_, _ = writer.Write([]byte(`{
+				"spriteVersionNumber":2,
+				"atlasRows":11,
+				"interactions":{"click":{"animations":["bajrang-gun"],"mode":"cycle"}},
+				"animations":{"bajrang-gun":{"sourceRowIndex":3,"frameCount":8,"timingMs":[100,110,120,130,140,150,160,320]}}
+			}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	client := testClient(t, t.TempDir(), server)
+	entry := Entry{
+		Slug:           "luffy",
+		DisplayName:    "Luffy Gear 5",
+		SpritesheetURL: server.URL + "/pets/luffy/sprite.webp",
+		PetJSONURL:     server.URL + "/pets/luffy/petjson.json",
+		SpriteVersion:  1,
+	}
+	animation, err := client.Install(context.Background(), entry)
+	if err != nil {
+		t.Fatalf("Install() with corrected pet metadata: %v", err)
+	}
+	if animation.Frame(Review, 0) == nil {
+		t.Fatal("Install() did not load the version 2 review row")
+	}
+	customState := State("bajrang-gun")
+	if _, key := animation.frame(customState, 7); key.index != 7 {
+		t.Fatalf("custom waving final frame index = %d, want 7", key.index)
+	}
+	if got := animation.FrameDelay(customState, 7); got != 320*time.Millisecond {
+		t.Fatalf("custom waving final frame delay = %s, want 320ms", got)
+	}
+	if got := animation.PrimaryDuration(customState); got != 1230*time.Millisecond {
+		t.Fatalf("custom waving duration = %s, want unchanged 1.23s", got)
+	}
+	if got := animation.FrameDelay(customState, 8); got != 1680*time.Millisecond {
+		t.Fatalf("custom one-shot fallback delay = %s, want first idle frame at 1.68s", got)
+	}
+	if got, ok := animation.ClickAnimation(0); !ok || got != customState {
+		t.Fatalf("click animation = %q, %v; want %q", got, ok, customState)
+	}
+	installed, err := client.InstalledEntry(entry.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.SpriteVersion != 2 {
+		t.Fatalf("persisted sprite version = %d, want 2", installed.SpriteVersion)
+	}
+	if _, err := client.LoadInstalled(entry.Slug); err != nil {
+		t.Fatalf("LoadInstalled() with corrected sprite version: %v", err)
+	}
+}
+
+func TestPetMetadataAllowsSeveralNamedAnimationsOnOneRow(t *testing.T) {
+	row := 0
+	document := petMetadata{Animations: map[string]petAnimationMetadata{
+		"blink": {SourceRowIndex: &row, FrameCount: 4, TimingMS: []int{100, 100, 100, 100}},
+		"idle":  {SourceRow: json.RawMessage(`"idle"`), FrameCount: 6, TimingMS: []int{200, 200, 200, 200, 200, 400}},
+	}}
+	tracks, err := document.atlasTracks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tracks[Idle].count; got != 6 {
+		t.Fatalf("idle frame count = %d, want six", got)
+	}
+	if got := tracks[State("blink")].count; got != 4 {
+		t.Fatalf("blink frame count = %d, want four", got)
+	}
+}
+
+func TestPetMetadataAlwaysLoopsIdleAnimation(t *testing.T) {
+	row := 0
+	document := petMetadata{Animations: map[string]petAnimationMetadata{
+		"idle": {
+			SourceRowIndex: &row,
+			FrameCount:     2,
+			TimingMS:       []int{100, 200},
+			Playback:       "once",
+		},
+	}}
+	tracks, err := document.atlasTracks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle := tracks[Idle]
+	if !idle.loop || idle.fallbackIdle {
+		t.Fatalf("idle track = %#v, want looping without fallback", idle)
+	}
+}
+
+func TestPetMetadataAcceptsNamedAndNumericSourceRows(t *testing.T) {
+	document := petMetadata{Animations: map[string]petAnimationMetadata{
+		"dash":  {SourceRow: json.RawMessage(`"running-right"`), FrameCount: 8},
+		"skill": {SourceRow: json.RawMessage(`3`), FrameCount: 8},
+	}}
+	tracks, err := document.atlasTracks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracks[State("dash")].row != 1 || tracks[State("skill")].row != 3 {
+		t.Fatalf("normalized rows = dash:%d skill:%d", tracks[State("dash")].row, tracks[State("skill")].row)
+	}
+}
+
 func TestCatalogRejectsUntrustedAssetHost(t *testing.T) {
 	client := NewClient(t.TempDir())
 	manifest := compactManifest{
@@ -92,6 +207,27 @@ func TestCatalogRejectsUntrustedAssetHost(t *testing.T) {
 	data, _ := json.Marshal(manifest)
 	if _, err := client.decodeCatalog(data); err == nil {
 		t.Fatal("decodeCatalog accepted an untrusted asset host")
+	}
+}
+
+func TestCatalogSkipsMalformedRowWhenValidRowsRemain(t *testing.T) {
+	client := NewClient(t.TempDir())
+	manifest := compactManifest{
+		Version:   2,
+		AssetBase: "https://assets.petdex.dev",
+		Fields:    []string{"slug", "displayName", "kind", "submittedBy", "spritesheet", "petJson", "spriteVersionNumber"},
+	}
+	invalid, _ := json.Marshal([]any{"broken slug", "Broken", "creature", "tester", "pets/broken/sprite.webp", "", 2})
+	valid, _ := json.Marshal([]any{"boba", "Boba", "creature", "tester", "pets/boba/sprite.webp", "", 2})
+	manifest.Pets = []json.RawMessage{invalid, valid}
+	data, _ := json.Marshal(manifest)
+
+	entries, err := client.decodeCatalog(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entrySlugs(entries); !slices.Equal(got, []string{"boba"}) {
+		t.Fatalf("catalog entries = %v, want [boba]", got)
 	}
 }
 
@@ -205,6 +341,64 @@ func TestAtlasAnimationUsesPerStateFrameCounts(t *testing.T) {
 	_, _, _, alpha := animation.Frame(Idle, 6).At(0, 0).RGBA()
 	if alpha == 0 {
 		t.Fatal("idle phase 6 selected an unused transparent atlas column")
+	}
+}
+
+func TestAtlasAnimationRunningRepeatsThreeTimesThenLoopsIdle(t *testing.T) {
+	atlas := image.NewNRGBA(image.Rect(0, 0, 192, 26*9))
+	for x := 0; x < 6*24; x++ {
+		for y := 0; y < 26; y++ {
+			atlas.SetNRGBA(x, y, color.NRGBA{R: 255, A: 255})
+			atlas.SetNRGBA(x, 7*26+y, color.NRGBA{B: 255, A: 255})
+		}
+	}
+	animation, err := AtlasAnimation(atlas, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The six-frame running row is authored to play three times. The next
+	// frame is idle, and subsequent phases loop only the appended idle row.
+	running := color.NRGBAModel.Convert(animation.Frame(Running, 17).At(0, 0)).(color.NRGBA)
+	settled := color.NRGBAModel.Convert(animation.Frame(Running, 18).At(0, 0)).(color.NRGBA)
+	looped := color.NRGBAModel.Convert(animation.Frame(Running, 24).At(0, 0)).(color.NRGBA)
+	if running.B != 255 || settled.R != 255 || looped.R != 255 {
+		t.Fatalf("running transition colors = running:%#v settled:%#v looped:%#v", running, settled, looped)
+	}
+	if got := animation.FrameDelay(Running, 18); got != 1680*time.Millisecond {
+		t.Fatalf("first fallback idle delay = %s, want 1.68s", got)
+	}
+	if got := animation.PrimaryDuration(Waving); got != 2100*time.Millisecond {
+		t.Fatalf("waving primary duration = %s, want 2.1s", got)
+	}
+	if got := animation.PrimaryDuration(Jumping); got != 2520*time.Millisecond {
+		t.Fatalf("jumping primary duration = %s, want 2.52s", got)
+	}
+}
+
+func TestAtlasAnimationSuppliesDefaultTimingForMetadataWithoutTiming(t *testing.T) {
+	atlas := image.NewNRGBA(image.Rect(0, 0, 192, 26*9))
+	animation, err := atlasAnimation(atlas, 1, map[State]atlasTrack{
+		State("dash"): {row: 1, count: 3, fallbackIdle: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := animation.FrameDelay(State("dash"), 0); got <= 0 {
+		t.Fatalf("metadata animation delay = %s, want a positive default", got)
+	}
+}
+
+func TestAtlasAnimationIncludesInteractiveStates(t *testing.T) {
+	atlas := image.NewNRGBA(image.Rect(0, 0, 192, 26*9))
+	animation, err := AtlasAnimation(atlas, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []State{MoveRight, MoveLeft, Waving, Jumping} {
+		if frame := animation.Frame(state, 0); frame == nil {
+			t.Fatalf("interactive state %q has no frame", state)
+		}
 	}
 }
 

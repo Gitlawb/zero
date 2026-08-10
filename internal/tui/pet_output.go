@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/Gitlawb/zero/internal/terminalpet"
 )
 
@@ -43,11 +45,11 @@ func (o *petImageOutput) Write(value []byte) (int, error) {
 			return 0, err
 		}
 	}
-	written, err := o.output.Write(value)
-	if err != nil {
-		return written, err
-	}
 	if leavingAltScreen {
+		written, err := o.output.Write(value)
+		if err != nil {
+			return written, err
+		}
 		if kittyImage {
 			if err := o.writeImageUpdate(o.renderer.Clear); err != nil {
 				return written, err
@@ -55,10 +57,69 @@ func (o *petImageOutput) Write(value []byte) (int, error) {
 		}
 		return written, nil
 	}
-	if err := o.writeImageUpdate(o.renderer.Render); err != nil {
-		return written, err
+	if bytes.Contains(value, []byte(ansi.EraseEntireScreen)) ||
+		bytes.Contains(value, []byte(ansi.SetModeAltScreenSaveCursor)) {
+		o.renderer.Invalidate()
 	}
-	return written, nil
+
+	var imageUpdate bytes.Buffer
+	if err := o.renderer.Render(&imageUpdate); err != nil {
+		return 0, err
+	}
+	if imageUpdate.Len() == 0 {
+		return o.output.Write(value)
+	}
+
+	// Bubble Tea encloses supported terminal frames in synchronized-output
+	// markers. Keep the pet placement inside that same transaction so the
+	// terminal never presents the text frame and image movement separately.
+	if syncEnd := bytes.LastIndex(value, []byte(terminalSyncEnd)); syncEnd >= 0 {
+		var frame bytes.Buffer
+		frame.Grow(len(value) + imageUpdate.Len())
+		frame.Write(value[:syncEnd])
+		frame.Write(imageUpdate.Bytes())
+		frame.Write(value[syncEnd:])
+		written, err := o.output.Write(frame.Bytes())
+		consumed := originalBytesWritten(written, syncEnd, imageUpdate.Len(), len(value))
+		if err == nil && written != frame.Len() {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return consumed, err
+		}
+		return len(value), nil
+	}
+
+	if _, err := io.WriteString(o.output, terminalSyncStart); err != nil {
+		return 0, err
+	}
+	written, writeErr := o.output.Write(value)
+	if writeErr == nil {
+		_, writeErr = o.output.Write(imageUpdate.Bytes())
+	}
+	_, endErr := io.WriteString(o.output, terminalSyncEnd)
+	if writeErr != nil {
+		return written, writeErr
+	}
+	return written, endErr
+}
+
+// originalBytesWritten maps progress through an expanded synchronized frame
+// back to bytes consumed from the caller's original buffer. Bytes belonging
+// to the injected image update must never be reported as caller bytes.
+func originalBytesWritten(written, prefixLength, injectedLength, originalLength int) int {
+	if written <= 0 {
+		return 0
+	}
+	if written <= prefixLength {
+		return written
+	}
+	consumed := prefixLength
+	suffixWritten := written - prefixLength - injectedLength
+	if suffixWritten > 0 {
+		consumed += min(suffixWritten, originalLength-prefixLength)
+	}
+	return min(consumed, originalLength)
 }
 
 func (o *petImageOutput) writeImageUpdate(render func(io.Writer) error) error {
@@ -92,6 +153,9 @@ func (o *petImageOutput) clearImage() error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.writeImageUpdate(func(writer io.Writer) error {
+		if _, err := io.WriteString(writer, ansi.ResetModeMouseExtSgrPixel); err != nil {
+			return err
+		}
 		if err := o.renderer.Clear(writer); err != nil {
 			return err
 		}

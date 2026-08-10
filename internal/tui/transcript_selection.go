@@ -1134,7 +1134,7 @@ func (m model) transcriptHitTestBlocked() bool {
 // (nearest-line fallback for scroll-driven selection extension).
 func (m model) transcriptHitTestLayout() (frame transcriptFrameLayout, window transcriptViewportWindow, layout transcriptBodyLayout) {
 	header, items, width := m.transcriptHitTestSource()
-	footer := m.footerView(m.transcriptFooterWidth())
+	footer := m.footerView(width)
 	if m.transcriptDetailed {
 		footer = m.detailedTranscriptFooter(width)
 	}

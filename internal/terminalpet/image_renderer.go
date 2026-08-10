@@ -72,6 +72,8 @@ type ImageDraw struct {
 	Phase        int
 	X            int
 	Y            int
+	OffsetX      int
+	OffsetY      int
 	Columns      int
 	Rows         int
 	HeightPixels int
@@ -84,6 +86,8 @@ type imageDrawKey struct {
 	frame     frameCacheKey
 	x         int
 	y         int
+	offsetX   int
+	offsetY   int
 	columns   int
 	rows      int
 	height    int
@@ -126,6 +130,15 @@ func (r *ImageRenderer) Set(draw *ImageDraw) {
 	r.desired = &copyValue
 }
 
+func (r *ImageRenderer) Invalidate() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.last = nil
+}
+
 func (r *ImageRenderer) Render(writer io.Writer) error {
 	if r == nil || writer == nil {
 		return nil
@@ -147,11 +160,20 @@ func (r *ImageRenderer) Render(writer io.Writer) error {
 		}
 		desiredKey = &imageDrawKey{
 			protocol: r.support.Protocol, id: r.desired.ID, animation: r.desired.Animation, frame: frameKey,
-			x: r.desired.X, y: r.desired.Y, columns: r.desired.Columns, rows: r.desired.Rows,
+			x: r.desired.X, y: r.desired.Y, offsetX: r.desired.OffsetX, offsetY: r.desired.OffsetY,
+			columns: r.desired.Columns, rows: r.desired.Rows,
 			height: r.desired.HeightPixels,
 		}
 	}
 	if imageKeysEqual(r.last, desiredKey) {
+		return nil
+	}
+	if kittyImageContentEqual(r.last, desiredKey) {
+		if _, err := fmt.Fprintf(writer, "\x1b[s\x1b[%d;%dH%s\x1b[u", desiredKey.y+1, desiredKey.x+1, kittyPlace(desiredKey.id, desiredKey.columns, desiredKey.rows, desiredKey.offsetX, desiredKey.offsetY)); err != nil {
+			return err
+		}
+		copyKey := *desiredKey
+		r.last = &copyKey
 		return nil
 	}
 	if r.last != nil {
@@ -169,7 +191,7 @@ func (r *ImageRenderer) Render(writer io.Writer) error {
 	}
 	switch r.support.Protocol {
 	case ImageProtocolKitty:
-		if _, err := io.WriteString(writer, kittyTransmitPNG(pngBytes, desiredKey.id, desiredKey.columns, desiredKey.rows)); err != nil {
+		if _, err := io.WriteString(writer, kittyTransmitPNG(pngBytes, desiredKey.id, desiredKey.columns, desiredKey.rows, desiredKey.offsetX, desiredKey.offsetY)); err != nil {
 			return err
 		}
 	case ImageProtocolKittyLocalFile:
@@ -177,7 +199,7 @@ func (r *ImageRenderer) Render(writer io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if _, err := io.WriteString(writer, kittyTransmitPNGFile(path, desiredKey.id, desiredKey.columns, desiredKey.rows)); err != nil {
+		if _, err := io.WriteString(writer, kittyTransmitPNGFile(path, desiredKey.id, desiredKey.columns, desiredKey.rows, desiredKey.offsetX, desiredKey.offsetY)); err != nil {
 			return err
 		}
 	case ImageProtocolSixel:
@@ -234,6 +256,21 @@ func imageKeysEqual(left, right *imageDrawKey) bool {
 	return *left == *right
 }
 
+func kittyImageContentEqual(left, right *imageDrawKey) bool {
+	if left == nil || right == nil || left.protocol != right.protocol {
+		return false
+	}
+	if left.protocol != ImageProtocolKitty && left.protocol != ImageProtocolKittyLocalFile {
+		return false
+	}
+	leftValue, rightValue := *left, *right
+	leftValue.x, leftValue.y = 0, 0
+	leftValue.offsetX, leftValue.offsetY = 0, 0
+	rightValue.x, rightValue.y = 0, 0
+	rightValue.offsetX, rightValue.offsetY = 0, 0
+	return leftValue == rightValue
+}
+
 func kittyDelete(id uint32) string {
 	return fmt.Sprintf("\x1b_Ga=d,d=I,i=%d,q=2;\x1b\\", id)
 }
@@ -258,9 +295,20 @@ func clearRenderedImage(writer io.Writer, key imageDrawKey) error {
 	return err
 }
 
-func kittyTransmitPNGFile(path string, id uint32, columns, rows int) string {
+func kittyTransmitPNGFile(path string, id uint32, columns, rows, offsetX, offsetY int) string {
 	payload := base64.StdEncoding.EncodeToString([]byte(path))
-	return fmt.Sprintf("\x1b_Ga=T,t=f,f=100,c=%d,r=%d,q=2,i=%d;%s\x1b\\", columns, rows, id, payload)
+	return fmt.Sprintf("\x1b_Ga=T,t=f,f=100,c=%d,r=%d%s,q=2,C=1,i=%d,p=%d;%s\x1b\\", columns, rows, kittyOffsetControl(offsetX, offsetY), id, id, payload)
+}
+
+func kittyPlace(id uint32, columns, rows, offsetX, offsetY int) string {
+	return fmt.Sprintf("\x1b_Ga=p,i=%d,p=%d,c=%d,r=%d%s,q=2,C=1;\x1b\\", id, id, columns, rows, kittyOffsetControl(offsetX, offsetY))
+}
+
+func kittyOffsetControl(offsetX, offsetY int) string {
+	if offsetX == 0 && offsetY == 0 {
+		return ""
+	}
+	return fmt.Sprintf(",X=%d,Y=%d", offsetX, offsetY)
 }
 
 func cachePNGFrame(cacheDir string, pngBytes []byte) (string, error) {
@@ -331,7 +379,7 @@ func renderSixel(frame image.Image, heightPixels int) ([]byte, error) {
 	return encodeSixel(scaled)
 }
 
-func kittyTransmitPNG(pngBytes []byte, id uint32, columns, rows int) string {
+func kittyTransmitPNG(pngBytes []byte, id uint32, columns, rows, offsetX, offsetY int) string {
 	payload := base64.StdEncoding.EncodeToString(pngBytes)
 	var output strings.Builder
 	for offset := 0; offset < len(payload); offset += kittyChunkSize {
@@ -341,7 +389,7 @@ func kittyTransmitPNG(pngBytes []byte, id uint32, columns, rows int) string {
 			more = 1
 		}
 		if offset == 0 {
-			fmt.Fprintf(&output, "\x1b_Ga=T,t=d,f=100,c=%d,r=%d,q=2,i=%d,m=%d;%s\x1b\\", columns, rows, id, more, payload[offset:end])
+			fmt.Fprintf(&output, "\x1b_Ga=T,t=d,f=100,c=%d,r=%d%s,q=2,C=1,i=%d,p=%d,m=%d;%s\x1b\\", columns, rows, kittyOffsetControl(offsetX, offsetY), id, id, more, payload[offset:end])
 		} else {
 			fmt.Fprintf(&output, "\x1b_Gm=%d;%s\x1b\\", more, payload[offset:end])
 		}

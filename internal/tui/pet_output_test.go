@@ -1,15 +1,30 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/terminalpet"
+	"github.com/charmbracelet/x/ansi"
 )
+
+type shortTerminalOutput struct {
+	limit int
+	err   error
+}
+
+func (o *shortTerminalOutput) Read([]byte) (int, error) { return 0, io.EOF }
+func (o *shortTerminalOutput) Close() error             { return nil }
+func (o *shortTerminalOutput) Fd() uintptr              { return 0 }
+func (o *shortTerminalOutput) Write(value []byte) (int, error) {
+	return min(o.limit, len(value)), o.err
+}
 
 func TestPetImageOutputAppendsScheduledImageAfterFrame(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "pet-output-*")
@@ -34,14 +49,208 @@ func TestPetImageOutputAppendsScheduledImageAfterFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
-	if !strings.HasPrefix(got, "bubbletea-frame") || !strings.Contains(got, "_Ga=T,t=d,f=100,c=4,r=3") {
+	if !strings.HasPrefix(got, terminalSyncStart+"bubbletea-frame") || !strings.Contains(got, "_Ga=T,t=d,f=100,c=4,r=3") {
 		t.Fatalf("output did not append image after frame: %q", got)
 	}
 	syncStart := strings.Index(got, "\x1b[?2026h")
+	frameAt := strings.Index(got, "bubbletea-frame")
 	imageAt := strings.Index(got, "_Ga=T,t=d,f=100,c=4,r=3")
 	syncEnd := strings.LastIndex(got, "\x1b[?2026l")
-	if syncStart < 0 || imageAt < syncStart || syncEnd < imageAt {
-		t.Fatalf("image update was not synchronized: %q", got)
+	if syncStart < 0 || frameAt < syncStart || imageAt < frameAt || syncEnd < imageAt {
+		t.Fatalf("frame and image update were not synchronized together: %q", got)
+	}
+}
+
+func TestPetImageOutputKeepsImageInsideBubbleTeaSynchronizedFrame(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "pet-output-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	frame := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	animation, _ := terminalpet.ThumbnailAnimation(frame)
+	renderer := terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	renderer.Set(&terminalpet.ImageDraw{ID: 7, Animation: animation, State: terminalpet.Idle, Columns: 4, Rows: 3})
+	output := newPetImageOutput(file, renderer)
+	bubbleTeaFrame := terminalSyncStart + "streamed-text-frame" + terminalSyncEnd
+	if _, err := output.Write([]byte(bubbleTeaFrame)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if count := strings.Count(got, terminalSyncStart); count != 1 {
+		t.Fatalf("got %d synchronized-output starts, want 1: %q", count, got)
+	}
+	if count := strings.Count(got, terminalSyncEnd); count != 1 {
+		t.Fatalf("got %d synchronized-output ends, want 1: %q", count, got)
+	}
+	frameAt := strings.Index(got, "streamed-text-frame")
+	imageAt := strings.Index(got, "_Ga=T,t=d,f=100,c=4,r=3")
+	syncEnd := strings.Index(got, terminalSyncEnd)
+	if frameAt < 0 || imageAt < frameAt || syncEnd < imageAt {
+		t.Fatalf("pet update was presented outside the Bubble Tea frame: %q", got)
+	}
+}
+
+func TestPetImageOutputMapsPartialSynchronizedWriteToOriginalBytes(t *testing.T) {
+	frame := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	animation, _ := terminalpet.ThumbnailAnimation(frame)
+	renderer := terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	renderer.Set(&terminalpet.ImageDraw{ID: 7, Animation: animation, State: terminalpet.Idle, Columns: 4, Rows: 3})
+	bubbleTeaFrame := terminalSyncStart + "streamed-text-frame" + terminalSyncEnd
+	prefixLength := strings.Index(bubbleTeaFrame, terminalSyncEnd)
+	wantErr := errors.New("partial terminal write")
+	sink := &shortTerminalOutput{limit: prefixLength + 3, err: wantErr}
+
+	written, err := newPetImageOutput(sink, renderer).Write([]byte(bubbleTeaFrame))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Write error = %v, want %v", err, wantErr)
+	}
+	if written != prefixLength {
+		t.Fatalf("Write reported %d original bytes, want %d", written, prefixLength)
+	}
+}
+
+func TestPetImageOutputReportsNilErrorShortWrite(t *testing.T) {
+	frame := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	animation, _ := terminalpet.ThumbnailAnimation(frame)
+	renderer := terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	renderer.Set(&terminalpet.ImageDraw{ID: 7, Animation: animation, State: terminalpet.Idle, Columns: 4, Rows: 3})
+	bubbleTeaFrame := terminalSyncStart + "streamed-text-frame" + terminalSyncEnd
+	prefixLength := strings.Index(bubbleTeaFrame, terminalSyncEnd)
+	sink := &shortTerminalOutput{limit: prefixLength + 3}
+
+	written, err := newPetImageOutput(sink, renderer).Write([]byte(bubbleTeaFrame))
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Write error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if written != prefixLength {
+		t.Fatalf("Write reported %d original bytes, want %d", written, prefixLength)
+	}
+}
+
+func TestPetImageOutputKeepsDraggedPlacementInsideStreamingFrame(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "pet-output-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	frame := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	animation, _ := terminalpet.ThumbnailAnimation(frame)
+	renderer := terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	draw := terminalpet.ImageDraw{ID: 7, Animation: animation, State: terminalpet.Idle, X: 2, Y: 3, Columns: 4, Rows: 3}
+	renderer.Set(&draw)
+	output := newPetImageOutput(file, renderer)
+	if _, err := output.Write([]byte(terminalSyncStart + "initial-frame" + terminalSyncEnd)); err != nil {
+		t.Fatal(err)
+	}
+	start, err := file.Seek(0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draw.X = 8
+	draw.Y = 6
+	renderer.Set(&draw)
+	if _, err := output.Write([]byte(terminalSyncStart + "streamed-delta" + terminalSyncEnd)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data[start:])
+	if count := strings.Count(got, terminalSyncStart); count != 1 {
+		t.Fatalf("got %d synchronized-output starts, want 1: %q", count, got)
+	}
+	if count := strings.Count(got, terminalSyncEnd); count != 1 {
+		t.Fatalf("got %d synchronized-output ends, want 1: %q", count, got)
+	}
+	textAt := strings.Index(got, "streamed-delta")
+	moveAt := strings.Index(got, "\x1b[7;9H\x1b_Ga=p")
+	syncEnd := strings.Index(got, terminalSyncEnd)
+	if textAt < 0 || moveAt < textAt || syncEnd < moveAt {
+		t.Fatalf("dragged pet placement was presented outside the streaming frame: %q", got)
+	}
+	if strings.Contains(got, "_Ga=T") {
+		t.Fatalf("dragging retransmitted image data instead of moving its placement: %q", got)
+	}
+}
+
+func TestPetImageOutputFlushesMovedPlacementWithoutTextChange(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "pet-output-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	frame := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	animation, _ := terminalpet.ThumbnailAnimation(frame)
+	renderer := terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	draw := terminalpet.ImageDraw{ID: 7, Animation: animation, State: terminalpet.Idle, X: 2, Y: 3, Columns: 4, Rows: 3}
+	renderer.Set(&draw)
+	output := newPetImageOutput(file, renderer)
+	if _, err := output.Write([]byte(terminalSyncStart + "initial-frame" + terminalSyncEnd)); err != nil {
+		t.Fatal(err)
+	}
+	start, err := file.Seek(0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draw.X = 8
+	draw.Y = 6
+	renderer.Set(&draw)
+	if _, err := output.Write([]byte(terminalSyncStart + terminalSyncEnd)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data[start:])
+	moveAt := strings.Index(got, "\x1b[7;9H\x1b_Ga=p")
+	syncEnd := strings.Index(got, terminalSyncEnd)
+	if moveAt < 0 || syncEnd < moveAt {
+		t.Fatalf("idle drag flush did not place the pet inside its empty frame: %q", got)
+	}
+	if strings.Contains(got, "_Ga=T") {
+		t.Fatalf("idle drag flush retransmitted image data: %q", got)
+	}
+}
+
+func TestPetImageOutputRetransmitsAfterFullScreenClear(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "pet-output-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	frame := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	animation, _ := terminalpet.ThumbnailAnimation(frame)
+	renderer := terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	renderer.Set(&terminalpet.ImageDraw{ID: 7, Animation: animation, State: terminalpet.Idle, X: 2, Y: 3, Columns: 4, Rows: 3})
+	output := newPetImageOutput(file, renderer)
+	if _, err := output.Write([]byte(terminalSyncStart + "initial-frame" + terminalSyncEnd)); err != nil {
+		t.Fatal(err)
+	}
+	start, err := file.Seek(0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearFrame := terminalSyncStart + ansi.EraseEntireScreen + "resized-frame" + terminalSyncEnd
+	if _, err := output.Write([]byte(clearFrame)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data[start:])
+	clearAt := strings.Index(got, ansi.EraseEntireScreen)
+	transmitAt := strings.Index(got, "_Ga=T,t=d,f=100,c=4,r=3")
+	syncEnd := strings.Index(got, terminalSyncEnd)
+	if clearAt < 0 || transmitAt < clearAt || syncEnd < transmitAt {
+		t.Fatalf("pet was not restored inside the full-screen redraw: %q", got)
 	}
 }
 
@@ -108,6 +317,9 @@ func TestPetImageOutputFinalCleanupRepeatsAllKittyDeletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleanup := string(data[cleanupStart:])
+	if !strings.Contains(cleanup, ansi.ResetModeMouseExtSgrPixel) {
+		t.Fatalf("final cleanup did not reset pixel mouse mode: %q", cleanup)
+	}
 	for _, id := range []uint32{petAmbientImageID, petPreviewImageID} {
 		want := fmt.Sprintf("_Ga=d,d=I,i=%d,q=2", id)
 		if !strings.Contains(cleanup, want) {

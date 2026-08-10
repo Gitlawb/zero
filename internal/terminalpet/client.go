@@ -18,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,6 +63,25 @@ type installedMetadata struct {
 	InstalledAt time.Time `json:"installedAt"`
 }
 
+type petMetadata struct {
+	SpriteVersion int                             `json:"spriteVersionNumber"`
+	Animations    map[string]petAnimationMetadata `json:"animations"`
+	Interactions  struct {
+		Click struct {
+			Animations []string `json:"animations"`
+		} `json:"click"`
+	} `json:"interactions"`
+}
+
+type petAnimationMetadata struct {
+	SourceRow      json.RawMessage `json:"sourceRow"`
+	SourceRowIndex *int            `json:"sourceRowIndex"`
+	FrameCount     int             `json:"frameCount"`
+	TimingMS       []int           `json:"timingMs"`
+	Playback       string          `json:"playback"`
+	Loop           bool            `json:"loop"`
+}
+
 func NewClient(rootDir string) *Client {
 	client := &Client{
 		RootDir:     rootDir,
@@ -90,6 +110,10 @@ func (c *Client) Catalog(ctx context.Context) ([]Entry, error) {
 		return entries, nil
 	}
 	return nil, errors.Join(remoteErr, localErr)
+}
+
+func (c *Client) InstalledEntries() ([]Entry, error) {
+	return c.localCatalog()
 }
 
 type rankingPayload struct {
@@ -205,11 +229,9 @@ func (c *Client) Install(ctx context.Context, entry Entry) (*Animation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode spritesheet: %w", err)
 	}
-	animation, err := AtlasAnimation(sheet, entry.SpriteVersion)
-	if err != nil {
-		return nil, err
-	}
 	var petJSON []byte
+	var animationTracks map[State]atlasTrack
+	var document petMetadata
 	if strings.TrimSpace(entry.PetJSONURL) != "" {
 		petURL, urlErr := c.trustedAssetURL(entry.PetJSONURL)
 		if urlErr != nil {
@@ -219,11 +241,25 @@ func (c *Client) Install(ctx context.Context, entry Entry) (*Animation, error) {
 		if err != nil {
 			return nil, fmt.Errorf("download pet metadata: %w", err)
 		}
-		var document any
 		if err := json.Unmarshal(petJSON, &document); err != nil {
 			return nil, fmt.Errorf("invalid pet metadata: %w", err)
 		}
+		if document.SpriteVersion != 0 {
+			if document.SpriteVersion != 1 && document.SpriteVersion != 2 {
+				return nil, fmt.Errorf("invalid pet metadata: unsupported sprite version %d", document.SpriteVersion)
+			}
+			entry.SpriteVersion = document.SpriteVersion
+		}
+		animationTracks, err = document.atlasTracks()
+		if err != nil {
+			return nil, fmt.Errorf("invalid pet metadata: %w", err)
+		}
 	}
+	animation, err := atlasAnimation(sheet, entry.SpriteVersion, animationTracks)
+	if err != nil {
+		return nil, err
+	}
+	animation.setClickAnimations(document.Interactions.Click.Animations)
 
 	root := c.installedDir()
 	stage, cleanup, err := installtxn.StageDir(root)
@@ -278,7 +314,98 @@ func (c *Client) LoadInstalled(slug string) (*Animation, error) {
 	if err != nil {
 		return nil, err
 	}
-	return AtlasAnimation(sheet, entry.SpriteVersion)
+	var animationTracks map[State]atlasTrack
+	var document petMetadata
+	if petJSON, readErr := os.ReadFile(filepath.Join(dir, "pet.json")); readErr == nil {
+		if decodeErr := json.Unmarshal(petJSON, &document); decodeErr != nil {
+			return nil, fmt.Errorf("read installed pet metadata: %w", decodeErr)
+		}
+		if document.SpriteVersion != 0 {
+			entry.SpriteVersion = document.SpriteVersion
+		}
+		animationTracks, err = document.atlasTracks()
+		if err != nil {
+			return nil, fmt.Errorf("read installed pet metadata: %w", err)
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("read installed pet metadata: %w", readErr)
+	}
+	animation, err := atlasAnimation(sheet, entry.SpriteVersion, animationTracks)
+	if err != nil {
+		return nil, err
+	}
+	animation.setClickAnimations(document.Interactions.Click.Animations)
+	return animation, nil
+}
+
+func (m petMetadata) atlasTracks() (map[State]atlasTrack, error) {
+	names := make([]string, 0, len(m.Animations))
+	for name := range m.Animations {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tracks := make(map[State]atlasTrack)
+	for _, name := range names {
+		spec := m.Animations[name]
+		state := State(strings.ToLower(strings.TrimSpace(name)))
+		if state == "" {
+			return nil, fmt.Errorf("animation name is empty")
+		}
+		if spec.FrameCount < 1 || spec.FrameCount > atlasColumns {
+			return nil, fmt.Errorf("animation %q has invalid frame count %d", name, spec.FrameCount)
+		}
+		if len(spec.TimingMS) != 0 && len(spec.TimingMS) != spec.FrameCount {
+			return nil, fmt.Errorf("animation %q has %d timings for %d frames", name, len(spec.TimingMS), spec.FrameCount)
+		}
+		row, err := spec.rowIndex()
+		if err != nil {
+			return nil, fmt.Errorf("animation %q: %w", name, err)
+		}
+		// Idle must always cycle. Treating an authored idle track as one-shot
+		// leaves the companion frozen on its final frame indefinitely.
+		loop := state == Idle || spec.Loop || strings.EqualFold(strings.TrimSpace(spec.Playback), "loop")
+		track := atlasTrack{row: row, count: spec.FrameCount, loop: loop, fallbackIdle: !loop}
+		if len(spec.TimingMS) > 0 {
+			track.durations = make([]time.Duration, len(spec.TimingMS))
+			for index, milliseconds := range spec.TimingMS {
+				if milliseconds < 16 || milliseconds > 10_000 {
+					return nil, fmt.Errorf("animation %q has invalid frame timing %dms", name, milliseconds)
+				}
+				track.durations[index] = time.Duration(milliseconds) * time.Millisecond
+			}
+		}
+		tracks[state] = track
+	}
+	return tracks, nil
+}
+
+func (m petAnimationMetadata) rowIndex() (int, error) {
+	if m.SourceRowIndex != nil {
+		return *m.SourceRowIndex, nil
+	}
+	if len(m.SourceRow) == 0 || string(m.SourceRow) == "null" {
+		return 0, fmt.Errorf("source row is missing")
+	}
+	var numeric int
+	if err := json.Unmarshal(m.SourceRow, &numeric); err == nil {
+		return numeric, nil
+	}
+	var name string
+	if err := json.Unmarshal(m.SourceRow, &name); err != nil {
+		return 0, fmt.Errorf("source row is invalid")
+	}
+	rows := map[string]int{
+		"idle": 0, "running-right": 1, "running-left": 2, "waving": 3,
+		"jumping": 4, "failed": 5, "waiting": 6, "running": 7, "review": 8,
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if row, ok := rows[normalized]; ok {
+		return row, nil
+	}
+	if row, err := strconv.Atoi(normalized); err == nil {
+		return row, nil
+	}
+	return 0, fmt.Errorf("unknown source row %q", name)
 }
 
 func (c *Client) InstalledEntry(slug string) (Entry, error) {
@@ -350,62 +477,77 @@ func (c *Client) decodeCatalog(data []byte) ([]Entry, error) {
 	}
 	entries := make([]Entry, 0, len(manifest.Pets))
 	seen := map[string]bool{}
+	var firstRowError error
 	for _, rawRow := range manifest.Pets {
-		var row []json.RawMessage
-		if err := json.Unmarshal(rawRow, &row); err != nil {
-			return nil, fmt.Errorf("decode pet catalog row: %w", err)
-		}
-		value := func(field string, target any) error {
-			index := wanted[field]
-			if index >= len(row) {
-				return fmt.Errorf("pet catalog row is missing %q", field)
+		entry, rowErr := func() (Entry, error) {
+			var row []json.RawMessage
+			if err := json.Unmarshal(rawRow, &row); err != nil {
+				return Entry{}, fmt.Errorf("decode pet catalog row: %w", err)
 			}
-			return json.Unmarshal(row[index], target)
-		}
-		var entry Entry
-		if err := value("slug", &entry.Slug); err != nil {
-			return nil, err
-		}
-		if err := validateSlug(entry.Slug); err != nil {
-			return nil, err
+			value := func(field string, target any) error {
+				index := wanted[field]
+				if index >= len(row) {
+					return fmt.Errorf("pet catalog row is missing %q", field)
+				}
+				return json.Unmarshal(row[index], target)
+			}
+			var entry Entry
+			if err := value("slug", &entry.Slug); err != nil {
+				return Entry{}, err
+			}
+			if err := validateSlug(entry.Slug); err != nil {
+				return Entry{}, err
+			}
+			if err := value("displayName", &entry.DisplayName); err != nil {
+				return Entry{}, err
+			}
+			if err := value("kind", &entry.Kind); err != nil {
+				return Entry{}, err
+			}
+			// submittedBy is nullable in the public manifest; null intentionally maps
+			// to an empty creator label.
+			_ = value("submittedBy", &entry.SubmittedBy)
+			if err := value("spritesheet", &entry.SpritesheetURL); err != nil {
+				return Entry{}, err
+			}
+			if err := value("petJson", &entry.PetJSONURL); err != nil {
+				return Entry{}, err
+			}
+			if err := value("spriteVersionNumber", &entry.SpriteVersion); err != nil {
+				return Entry{}, err
+			}
+			if entry.SpriteVersion != 1 && entry.SpriteVersion != 2 {
+				return Entry{}, fmt.Errorf("pet %q has unsupported sprite version %d", entry.Slug, entry.SpriteVersion)
+			}
+			entry.AssetBase = assetBase
+			resolved, err := c.resolveAssetURL(assetBase, entry.SpritesheetURL)
+			if err != nil {
+				return Entry{}, fmt.Errorf("pet %q: %w", entry.Slug, err)
+			}
+			entry.SpritesheetURL = resolved
+			if strings.TrimSpace(entry.PetJSONURL) != "" {
+				resolved, err = c.resolveAssetURL(assetBase, entry.PetJSONURL)
+				if err != nil {
+					return Entry{}, fmt.Errorf("pet %q: %w", entry.Slug, err)
+				}
+				entry.PetJSONURL = resolved
+			}
+			return entry, nil
+		}()
+		if rowErr != nil {
+			if firstRowError == nil {
+				firstRowError = rowErr
+			}
+			continue
 		}
 		if seen[entry.Slug] {
 			continue
 		}
 		seen[entry.Slug] = true
-		if err := value("displayName", &entry.DisplayName); err != nil {
-			return nil, err
-		}
-		if err := value("kind", &entry.Kind); err != nil {
-			return nil, err
-		}
-		// submittedBy is nullable in the public manifest; null intentionally maps
-		// to an empty creator label.
-		_ = value("submittedBy", &entry.SubmittedBy)
-		if err := value("spritesheet", &entry.SpritesheetURL); err != nil {
-			return nil, err
-		}
-		if err := value("petJson", &entry.PetJSONURL); err != nil {
-			return nil, err
-		}
-		if err := value("spriteVersionNumber", &entry.SpriteVersion); err != nil {
-			return nil, err
-		}
-		if entry.SpriteVersion != 1 && entry.SpriteVersion != 2 {
-			return nil, fmt.Errorf("pet %q has unsupported sprite version %d", entry.Slug, entry.SpriteVersion)
-		}
-		entry.AssetBase = assetBase
-		entry.SpritesheetURL, err = c.resolveAssetURL(assetBase, entry.SpritesheetURL)
-		if err != nil {
-			return nil, fmt.Errorf("pet %q: %w", entry.Slug, err)
-		}
-		if strings.TrimSpace(entry.PetJSONURL) != "" {
-			entry.PetJSONURL, err = c.resolveAssetURL(assetBase, entry.PetJSONURL)
-			if err != nil {
-				return nil, fmt.Errorf("pet %q: %w", entry.Slug, err)
-			}
-		}
 		entries = append(entries, entry)
+	}
+	if len(entries) == 0 && firstRowError != nil {
+		return nil, firstRowError
 	}
 	sort.Slice(entries, func(i, j int) bool { return strings.ToLower(entries[i].Label()) < strings.ToLower(entries[j].Label()) })
 	return entries, nil

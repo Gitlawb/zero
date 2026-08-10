@@ -44,7 +44,7 @@ func sidebarWidth(total int) int {
 // sidebarActive reports whether the two-column layout should render right now:
 // the sidebar is available AND the user hasn't collapsed it with Ctrl+B.
 func (m model) sidebarActive() bool {
-	return (!m.sidebarHidden || m.sidebarForcedOpen) && m.sidebarAvailable()
+	return !m.sidebarHidden && m.sidebarAvailable()
 }
 
 // sidebarToggleAllowed reports whether the toggle-sidebar keybinding should
@@ -121,29 +121,14 @@ func (m model) sidebarAvailable() bool {
 	if m.transcriptEmpty() {
 		return false
 	}
-	// Historical files and activity remain available through Ctrl+B, but should
-	// not permanently consume a column after a run finishes. Live work opens the
-	// panel automatically; an explicit reveal keeps idle history visible.
+	// Auto-hide when the panel has nothing to show (no sub-agents and no active
+	// plan): a fixed-width column of mostly empty space is wasted, so reclaim it
+	// for the full-width chat. The panel returns the moment an agent spawns or a
+	// plan starts. (Ctrl+B still force-hides it when there IS content.)
 	if !m.sidebarHasContent() {
 		return false
 	}
-	if !m.sidebarForcedOpen && !m.sidebarHasLiveContent() {
-		return false
-	}
 	return true
-}
-
-func (m model) sidebarHasLiveContent() bool {
-	if len(m.sidebarSpecialists()) > 0 || len(m.swarmSpawnedAgents()) > 0 {
-		return true
-	}
-	if !m.plan.isEmpty() && m.plan.visible(m.planNow()) {
-		return true
-	}
-	if m.pending || m.activeRunID != 0 {
-		return len(m.touchedFiles()) > 0 || m.liveEditingPath() != ""
-	}
-	return false
 }
 
 // sidebarHasContent reports whether the context sidebar has anything worth a
@@ -618,7 +603,7 @@ var nameFillerWords = map[string]bool{
 
 // renderContextSidebar builds the sidebar block: exactly height lines, each
 // exactly width cells (after fitStyledLine + padding). Sections render top to
-// bottom, ending with the token readout. Each
+// bottom — FILES, PLAN — with the token readout pinned to the bottom line. Each
 // section header is a faint uppercase label; items use ink/muted. Empty
 // sections render a quiet placeholder rather than vanishing so the layout stays
 // stable.
@@ -672,16 +657,16 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, activityLines...)
 	}
 
-	// Keep tokens with the rest of the compact context instead of pinning them to
-	// the terminal floor and leaving a tall empty column above them.
+	// Token readout pinned to the bottom.
 	tokenLine := m.sidebarTokenLine(width)
-	if strings.TrimSpace(ansi.Strip(tokenLine)) != "" {
+	// Reserve the bottom row for tokens; pad the gap so it sits at the floor.
+	for len(lines) < height-1 {
 		add("")
-		add(tokenLine)
 	}
-	if len(lines) > height {
-		lines = lines[:height]
+	if len(lines) > height-1 {
+		lines = lines[:height-1]
 	}
+	add(tokenLine)
 
 	// Hover highlight: resolved by STABLE IDENTITY (sessionID / stepIndex), not a
 	// cached line offset — see hoveredSidebarLineOffset. A row whose identity no
@@ -970,36 +955,6 @@ func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string 
 		left = padStyledLine(left, chatW)
 		right = padStyledLine(right, sidebarW)
 		out[i] = left + divider + right
-	}
-	return out
-}
-
-func joinCompactColumns(chat []string, sidebar []string, chatW, sidebarW int) []string {
-	lastSidebarRow := -1
-	for index, line := range sidebar {
-		if strings.TrimSpace(ansi.Strip(line)) != "" {
-			lastSidebarRow = index
-		}
-	}
-	rows := len(chat)
-	out := make([]string, rows)
-	divider := " " + zeroTheme.line.Render("│") + " "
-	bottomEdge := " " + zeroTheme.line.Render("└"+strings.Repeat("─", sidebarW+1))
-	for index := range rows {
-		left := padStyledLine(chat[index], chatW)
-		if index <= lastSidebarRow {
-			right := ""
-			if index < len(sidebar) {
-				right = sidebar[index]
-			}
-			out[index] = left + divider + padStyledLine(right, sidebarW)
-			continue
-		}
-		if index == lastSidebarRow+1 {
-			out[index] = left + bottomEdge
-			continue
-		}
-		out[index] = left + strings.Repeat(" ", 3+sidebarW)
 	}
 	return out
 }

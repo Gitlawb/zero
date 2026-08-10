@@ -151,6 +151,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if mouseRightPress(msg) {
 		return m, pasteFromClipboardCmd()
 	}
+	if next, cmd, handled := m.handlePetMouse(msg); handled {
+		return next, cmd
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:
@@ -356,8 +359,7 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 		return false
 	}
 	width := m.chatColumnWidth()
-	footerWidth := m.transcriptFooterWidth()
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(footerWidth))
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	return frame.composerRect.contains(mouseX(msg), mouseY(msg))
 }
 
@@ -639,7 +641,7 @@ func (m model) overlayMouseRect(overlayHeight int, width int) tuiRect {
 		return tuiRect{}
 	}
 	if m.altScreen && m.height > 0 {
-		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(m.transcriptFooterWidth()))
+		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 		visibleHeight := minInt(overlayHeight, frame.bodyRect.height)
 		if visibleHeight <= 0 {
 			return tuiRect{}

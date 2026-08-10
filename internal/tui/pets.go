@@ -16,18 +16,21 @@ import (
 )
 
 const (
-	petAmbientImageID  uint32 = 0xC0DE
-	petPreviewImageID  uint32 = 0xC0DF
-	petPreviewDelay           = 140 * time.Millisecond
-	petFrameDelay             = 180 * time.Millisecond
-	petImageColumns           = 9
-	petImageRows              = 5
-	petWrapGapColumns         = 2
-	petReservedColumns        = petImageColumns + petWrapGapColumns
-	petOutcomeHold            = 2200 * time.Millisecond
-	petPickerMaxWidth         = 58
-	petSidePreviewMin         = 50
-	petPreviewPaneGap         = 2
+	petAmbientImageID        uint32 = 0xC0DE
+	petPreviewImageID        uint32 = 0xC0DF
+	petPreviewDelay                 = 140 * time.Millisecond
+	petFrameDelay                   = 180 * time.Millisecond
+	petImageColumns                 = 9
+	petImageRows                    = 5
+	petWrapGapColumns               = 2
+	petReservedColumns              = petImageColumns + petWrapGapColumns
+	petOutcomeHold                  = 2200 * time.Millisecond
+	petDoubleClickWindow            = 350 * time.Millisecond
+	petDockSnapColumns              = 2
+	petResizeEdgeAnchorCells        = 2
+	petPickerMaxWidth               = 58
+	petSidePreviewMin               = 50
+	petPreviewPaneGap               = 2
 )
 
 type petCatalogLoadedMsg struct {
@@ -53,10 +56,14 @@ type petInstalledMsg struct {
 	err       error
 }
 
-type petTickMsg struct{}
+type petTickMsg struct{ seq uint64 }
 
-func petTickCmd() tea.Cmd {
-	return tea.Tick(petFrameDelay, func(time.Time) tea.Msg { return petTickMsg{} })
+func petTickCmd(seq uint64, delays ...time.Duration) tea.Cmd {
+	delay := petFrameDelay
+	if len(delays) > 0 && delays[0] > 0 {
+		delay = delays[0]
+	}
+	return tea.Tick(delay, func(time.Time) tea.Msg { return petTickMsg{seq: seq} })
 }
 
 func (m model) handlePetsCommand(argument string) (tea.Model, tea.Cmd) {
@@ -78,14 +85,23 @@ func (m model) handlePetsCommand(argument string) (tea.Model, tea.Cmd) {
 		m.petAnimation = nil
 		m.petPreview = nil
 		m.picker = nil
+		m.petTickSeq++
 		return m.appendSystemNotice("Terminal companion hidden. Run /pets to choose another."), nil
 	}
 	m.petRequestedSlug = argument
-	m.picker = &commandPicker{kind: pickerPet, title: "Choose a companion", loading: true}
-	return m, func() tea.Msg {
+	localEntries, _ := m.petClient.InstalledEntries()
+	var items []pickerItem
+	m.petEntries, items = petPickerItems(localEntries)
+	m.picker = &commandPicker{
+		kind: pickerPet, title: "Choose a companion", loading: true,
+		items: items, allItems: append([]pickerItem{}, items...), selected: selectedPetPickerItem(items, m.petID),
+	}
+	m, previewCmd := m.schedulePetPreview()
+	catalogCmd := func() tea.Msg {
 		entries, err := m.petClient.Catalog(m.ctx)
 		return petCatalogLoadedMsg{entries: entries, err: err}
 	}
+	return m, batchCommands(previewCmd, catalogCmd)
 }
 
 func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
@@ -96,17 +112,8 @@ func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
 		m.picker = nil
 		return m.appendSystemNotice("Could not load the pet catalog: " + msg.err.Error()), nil
 	}
-	m.petEntries = make(map[string]terminalpet.Entry, len(msg.entries))
-	items := make([]pickerItem, 0, len(msg.entries)+1)
-	items = append(items, pickerItem{Label: "No companion", Value: terminalpet.DisabledID, Meta: "off"})
-	for _, entry := range msg.entries {
-		m.petEntries[entry.Slug] = entry
-		group := "Discover"
-		if entry.Local {
-			group = "Installed"
-		}
-		items = append(items, pickerItem{Group: group, Label: entry.Label(), Value: entry.Slug, Local: entry.Local, Remote: !entry.Local})
-	}
+	var items []pickerItem
+	m.petEntries, items = petPickerItems(msg.entries)
 	if requested := strings.TrimSpace(m.petRequestedSlug); requested != "" {
 		m.petRequestedSlug = ""
 		if requested == terminalpet.DisabledID {
@@ -118,15 +125,37 @@ func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.installPet(requested)
 	}
-	selected := 0
+	query := m.picker.query
+	m.picker = &commandPicker{
+		kind: pickerPet, title: "Choose a companion", items: items,
+		allItems: append([]pickerItem{}, items...), query: query, selected: selectedPetPickerItem(items, m.petID),
+	}
+	m.picker.applyQuery()
+	return m.schedulePetPreview()
+}
+
+func petPickerItems(entries []terminalpet.Entry) (map[string]terminalpet.Entry, []pickerItem) {
+	entryBySlug := make(map[string]terminalpet.Entry, len(entries))
+	items := make([]pickerItem, 0, len(entries)+1)
+	items = append(items, pickerItem{Label: "No companion", Value: terminalpet.DisabledID, Meta: "off"})
+	for _, entry := range entries {
+		entryBySlug[entry.Slug] = entry
+		group := "Discover"
+		if entry.Local {
+			group = "Installed"
+		}
+		items = append(items, pickerItem{Group: group, Label: entry.Label(), Value: entry.Slug, Local: entry.Local, Remote: !entry.Local})
+	}
+	return entryBySlug, items
+}
+
+func selectedPetPickerItem(items []pickerItem, petID string) int {
 	for index, item := range items {
-		if item.Value == m.petID {
-			selected = index
-			break
+		if item.Value == petID {
+			return index
 		}
 	}
-	m.picker = &commandPicker{kind: pickerPet, title: "Choose a companion", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
-	return m.schedulePetPreview()
+	return 0
 }
 
 func (m model) schedulePetPreview() (model, tea.Cmd) {
@@ -207,6 +236,7 @@ func (m model) installPet(slug string) (tea.Model, tea.Cmd) {
 		m.petID = terminalpet.DisabledID
 		m.petName = ""
 		m.petAnimation = nil
+		m.petTickSeq++
 		return m.appendSystemNotice("Terminal companion hidden. Run /pets to choose another."), nil
 	}
 	entry, ok := m.petEntries[slug]
@@ -231,12 +261,15 @@ func (m model) applyPetInstall(msg petInstalledMsg) (tea.Model, tea.Cmd) {
 	m.petName = msg.entry.Label()
 	m.petAnimation = msg.animation
 	m.petPhase = 0
+	m.petTickSeq++
+	m.petPlaybackState = terminalpet.Idle
+	m.petClickAnimationIndex = 0
 	m.petOutcome = terminalpet.Idle
 	m = m.appendSystemNotice(msg.entry.Label() + " is now your terminal companion. Use /pets off to hide it.")
 	if m.reducedMotion {
 		return m, nil
 	}
-	return m, petTickCmd()
+	return m, petTickCmd(m.petTickSeq, m.petFrameDelay())
 }
 
 func (m model) petPickerOverlay(width int) string {
@@ -271,9 +304,7 @@ func (m model) petPickerOverlay(width int) string {
 	}
 	lines := []string{renderPickerSearchLine(m.picker.query, "search companions…", innerWidth), zeroTheme.line.Render(strings.Repeat("─", innerWidth))}
 	listStartRow := len(lines)
-	if m.picker.loading {
-		lines = append(lines, listLine(zeroTheme.faint.Render("Fetching the pet catalog…")))
-	} else if len(m.picker.items) == 0 {
+	if len(m.picker.items) == 0 {
 		lines = append(lines, listLine(zeroTheme.faint.Render("  no matching companions")))
 	} else {
 		lastGroup := ""
@@ -292,6 +323,10 @@ func (m model) petPickerOverlay(width int) string {
 			name := truncatePetPickerColumn(item.Label, maxInt(1, listWidth-lipgloss.Width(marker)))
 			lines = append(lines, listLine(surface(zeroTheme.accent).Render(marker)+surface(zeroTheme.ink).Render(name)))
 		}
+	}
+	if m.picker.loading {
+		lines = append(lines, listLine(zeroTheme.accent.Render("Discover")))
+		lines = append(lines, listLine(zeroTheme.faint.Render("  Fetching companions…")))
 	}
 	if sidePreview && m.petPreview != nil {
 		for len(lines)-listStartRow < petImageRows {
@@ -362,14 +397,26 @@ func (m model) petLayoutActive() bool {
 	if !m.altScreen || layoutWidth < petImageColumns+4 || m.height < petImageRows+8 || m.subchat.active || m.transcriptDetailed {
 		return false
 	}
-	if !m.noBlockingModal() || m.suggestionsActive() || m.setup.visible || m.helpOverlay || m.leaderHelpOverlay {
+	if m.petObscuringModalActive() || m.suggestionsActive() || m.setup.visible || m.helpOverlay || m.leaderHelpOverlay {
 		return false
 	}
 	return true
 }
 
+// A permission prompt replaces the composer but does not take over the whole
+// viewport, so the ambient companion can remain visible beside it. Other modal
+// surfaces own or cover the viewport and continue to suppress the companion.
+func (m model) petObscuringModalActive() bool {
+	return m.pendingAskUser != nil || m.pendingSpecReview != nil || m.providerWizard != nil ||
+		m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil ||
+		m.sttKeyPrompt != nil || m.renamePrompt != nil
+}
+
 func (m model) petComposerReservedColumns(width int) int {
 	if !m.petLayoutRendering && !m.petLayoutActive() {
+		return 0
+	}
+	if m.petPositionSet || (m.petDragActive && !m.petDragStartedDocked) {
 		return 0
 	}
 	return minInt(petReservedColumns, maxInt(0, width-8))
@@ -389,6 +436,19 @@ func (m model) floatingPetTranscriptView() string {
 
 func (m model) reservePetImageSlot(lines []string, width int) []string {
 	chat := append([]string(nil), lines...)
+	if m.petSupportsAlphaOverlay() {
+		return chat
+	}
+	if m.petPositionSet || m.petDragActive {
+		x, y := m.ambientPetPosition(width, m.height)
+		for row := y; row < minInt(len(chat), y+petImageRows); row++ {
+			line := fitStyledLine(chat[row], width)
+			left := padStyledLine(ansi.Cut(line, 0, x), x)
+			right := ansi.Cut(line, minInt(width, x+petImageColumns), width)
+			chat[row] = fitStyledLine(left+strings.Repeat(" ", petImageColumns)+right, width)
+		}
+		return chat
+	}
 	start := maxInt(0, len(chat)-petImageRows-1)
 	rightStart := maxInt(0, width-petReservedColumns)
 	for row := start; row < minInt(len(chat)-1, start+petImageRows); row++ {
@@ -396,6 +456,18 @@ func (m model) reservePetImageSlot(lines []string, width int) []string {
 		chat[row] = padStyledLine(ansi.Cut(line, 0, rightStart), rightStart) + strings.Repeat(" ", width-rightStart)
 	}
 	return chat
+}
+
+func (m model) petSupportsAlphaOverlay() bool {
+	if m.petRenderer == nil {
+		return false
+	}
+	switch m.petRenderer.Support().Protocol {
+	case terminalpet.ImageProtocolKitty, terminalpet.ImageProtocolKittyLocalFile:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m model) petImageDraw(content string) *terminalpet.ImageDraw {
@@ -415,12 +487,371 @@ func (m model) petImageDraw(content string) *terminalpet.ImageDraw {
 	if !m.petLayoutActive() {
 		return nil
 	}
-	y := maxInt(0, len(viewLines(content))-petImageRows-1)
-	x := maxInt(0, m.width-petImageColumns-2)
-	return &terminalpet.ImageDraw{
-		ID: petAmbientImageID, Animation: m.petAnimation, State: m.petState(), Phase: m.petPhase,
-		X: x, Y: y, Columns: petImageColumns, Rows: petImageRows, HeightPixels: 75,
+	x, y := m.ambientPetPosition(m.width, m.height)
+	offsetX, offsetY := m.ambientPetOffset(x, y, m.width, m.height)
+	phase := m.petPhase
+	if state := m.petState(); state != m.petPlaybackState {
+		// State changes are visible before the timer for the previous state fires.
+		// Start the new track at its first frame instead of briefly rendering it
+		// at the old track's phase.
+		phase = 0
 	}
+	return &terminalpet.ImageDraw{
+		ID: petAmbientImageID, Animation: m.petAnimation, State: m.petState(), Phase: phase,
+		X: x, Y: y, OffsetX: offsetX, OffsetY: offsetY,
+		Columns: petImageColumns, Rows: petImageRows, HeightPixels: 75,
+	}
+}
+
+func (m model) ambientPetPosition(width, height int) (int, int) {
+	maxX := maxInt(0, width-petImageColumns)
+	maxY := maxInt(0, height-petImageRows)
+	if m.petDragActive {
+		return clampInt(m.petDragTargetX, 0, maxX), clampInt(m.petDragTargetY, 0, maxY)
+	}
+	if m.petPositionSet {
+		return clampInt(m.petPositionX, 0, maxX), clampInt(m.petPositionY, 0, maxY)
+	}
+	return m.petHomePosition(width, height)
+}
+
+func (m *model) resizeFreePetPosition(oldWidth, oldHeight, newWidth, newHeight int) {
+	if !m.petPositionSet || oldWidth <= 0 || oldHeight <= 0 {
+		return
+	}
+	oldMaxX := maxInt(0, oldWidth-petImageColumns)
+	oldMaxY := maxInt(0, oldHeight-petImageRows)
+	newMaxX := maxInt(0, newWidth-petImageColumns)
+	newMaxY := maxInt(0, newHeight-petImageRows)
+	if m.petCellPixelWidth > 0 && m.petCellPixelHeight > 0 {
+		x := m.petPositionX*m.petCellPixelWidth + m.petPositionOffsetX
+		y := m.petPositionY*m.petCellPixelHeight + m.petPositionOffsetY
+		x = resizePetCoordinate(x, oldMaxX*m.petCellPixelWidth, newMaxX*m.petCellPixelWidth, petResizeEdgeAnchorCells*m.petCellPixelWidth)
+		y = resizePetCoordinate(y, oldMaxY*m.petCellPixelHeight, newMaxY*m.petCellPixelHeight, petResizeEdgeAnchorCells*m.petCellPixelHeight)
+		m.petPositionX, m.petPositionOffsetX = x/m.petCellPixelWidth, x%m.petCellPixelWidth
+		m.petPositionY, m.petPositionOffsetY = y/m.petCellPixelHeight, y%m.petCellPixelHeight
+		return
+	}
+	m.petPositionX = resizePetCoordinate(m.petPositionX, oldMaxX, newMaxX, petResizeEdgeAnchorCells)
+	m.petPositionY = resizePetCoordinate(m.petPositionY, oldMaxY, newMaxY, petResizeEdgeAnchorCells)
+}
+
+func resizePetCoordinate(value, oldMaximum, newMaximum, edgeThreshold int) int {
+	if newMaximum <= 0 {
+		return 0
+	}
+	if oldMaximum <= 0 {
+		return clampInt(value, 0, newMaximum)
+	}
+	value = clampInt(value, 0, oldMaximum)
+	if value <= edgeThreshold {
+		return clampInt(value, 0, newMaximum)
+	}
+	if gap := oldMaximum - value; gap <= edgeThreshold {
+		return clampInt(newMaximum-gap, 0, newMaximum)
+	}
+	return clampInt(value+newMaximum/2-oldMaximum/2, 0, newMaximum)
+}
+
+func (m model) petHomePosition(width, height int) (int, int) {
+	if m.sidebarActive() {
+		width = m.chatColumnWidth()
+	}
+	maxX := maxInt(0, width-petImageColumns)
+	maxY := maxInt(0, height-petImageRows)
+	return clampInt(width-petImageColumns-2, 0, maxX), clampInt(height-petImageRows-1, 0, maxY)
+}
+
+func (m model) ambientPetOffset(x, y, width, height int) (int, int) {
+	offsetX, offsetY := 0, 0
+	if m.petDragActive {
+		offsetX, offsetY = m.petDragTargetOffsetX, m.petDragTargetOffsetY
+	} else if m.petPositionSet {
+		offsetX, offsetY = m.petPositionOffsetX, m.petPositionOffsetY
+	}
+	if x >= maxInt(0, width-petImageColumns) {
+		offsetX = 0
+	}
+	if y >= maxInt(0, height-petImageRows) {
+		offsetY = 0
+	}
+	return maxInt(0, offsetX), maxInt(0, offsetY)
+}
+
+func (m model) petPixelProtocolSupported() bool {
+	if m.petRenderer == nil {
+		return false
+	}
+	switch m.petRenderer.Support().Protocol {
+	case terminalpet.ImageProtocolKitty, terminalpet.ImageProtocolKittyLocalFile:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m model) petPixelDragAvailable() bool {
+	return m.petPixelProtocolSupported() && m.petCellPixelWidth > 0 && m.petCellPixelHeight > 0
+}
+
+func petPixelMouseEnableCmd() tea.Cmd {
+	return tea.Raw(ansi.SetModeMouseExtSgrPixel)
+}
+
+func petPixelMouseDisableCmd() tea.Cmd {
+	return tea.Raw(ansi.ResetModeMouseExtSgrPixel + ansi.SetModeMouseExtSgr)
+}
+
+func petImageFlushCmd() tea.Cmd {
+	return tea.Raw(terminalSyncStart + terminalSyncEnd)
+}
+
+func petPixelMouseDisableAndFlushCmd() tea.Cmd {
+	return tea.Raw(ansi.ResetModeMouseExtSgrPixel + ansi.SetModeMouseExtSgr + terminalSyncStart + terminalSyncEnd)
+}
+
+func (m model) petHit(x, y int) bool {
+	// Permission choices own all pointer input even though the companion remains
+	// visible. It must never intercept an approval or denial click.
+	if m.pendingPermission != nil || !m.petLayoutActive() {
+		return false
+	}
+	petX, petY := m.ambientPetPosition(m.width, m.height)
+	return x >= petX && x < petX+petImageColumns && y >= petY && y < petY+petImageRows
+}
+
+func (m model) handlePetMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
+	x, y := mouseX(msg), mouseY(msg)
+	switch {
+	case mouseLeftPress(msg) && m.petHit(x, y):
+		petX, petY := m.ambientPetPosition(m.width, m.height)
+		petOffsetX, petOffsetY := m.ambientPetOffset(petX, petY, m.width, m.height)
+		m.petDragActive = true
+		m.petDragMoved = false
+		m.petDragStartedDocked = !m.petPositionSet
+		m.petDragOffsetX = x - petX
+		m.petDragOffsetY = y - petY
+		m.petDragTargetX = petX
+		m.petDragTargetY = petY
+		m.petDragTargetOffsetX = petOffsetX
+		m.petDragTargetOffsetY = petOffsetY
+		m.petDragState = terminalpet.Idle
+		m.petPixelDrag = m.petPixelDragAvailable()
+		m.petPixelAnchorSet = false
+		if m.petPixelDrag {
+			return m, petPixelMouseEnableCmd(), true
+		}
+		return m, nil, true
+	case mouseMotion(msg) && m.petDragActive && m.petPixelDrag:
+		previousState := m.petDragState
+		leavePixelMode := m.updatePixelPetTarget(x, y)
+		animationCmd := m.restartPetDragPlayback(previousState)
+		if leavePixelMode {
+			return m.leavePixelPetDrag(), batchCommands(petPixelMouseDisableAndFlushCmd(), animationCmd), true
+		}
+		return m, batchCommands(petImageFlushCmd(), animationCmd), true
+	case mouseMotion(msg) && m.petDragActive:
+		oldX, oldY := m.petDragTargetX, m.petDragTargetY
+		newX := clampInt(x-m.petDragOffsetX, 0, maxInt(0, m.width-petImageColumns))
+		newY := clampInt(y-m.petDragOffsetY, 0, maxInt(0, m.height-petImageRows))
+		if newX == oldX && newY == oldY {
+			return m, nil, true
+		}
+		m.petDragTargetX = newX
+		m.petDragTargetY = newY
+		m.petDragTargetOffsetX = 0
+		m.petDragTargetOffsetY = 0
+		m.petDragMoved = true
+		previousState := m.petDragState
+		m.petDragState = petMovementState(oldX, newX, previousState)
+		return m, batchCommands(petImageFlushCmd(), m.restartPetDragPlayback(previousState)), true
+	case mouseRelease(msg) && m.petDragActive && m.petPixelDrag:
+		_ = m.updatePixelPetTarget(x, y)
+		return m.finishPetDrag(petPixelMouseDisableAndFlushCmd())
+	case mouseRelease(msg) && m.petDragActive:
+		return m.finishPetDrag(nil)
+	default:
+		return m, nil, false
+	}
+}
+
+func (m *model) updatePixelPetTarget(pointerX, pointerY int) bool {
+	cellWidth, cellHeight := m.petCellPixelWidth, m.petCellPixelHeight
+	if cellWidth <= 0 || cellHeight <= 0 {
+		return false
+	}
+	if !m.petPixelAnchorSet {
+		m.petDragOffsetPixelX = m.petDragOffsetX*cellWidth + positiveRemainder(pointerX, cellWidth)
+		m.petDragOffsetPixelY = m.petDragOffsetY*cellHeight + positiveRemainder(pointerY, cellHeight)
+		m.petPixelAnchorSet = true
+	}
+	oldAbsoluteX, oldAbsoluteY := m.petDragAbsolutePosition()
+	maxAbsoluteX := maxInt(0, (m.width-petImageColumns)*cellWidth)
+	maxAbsoluteY := maxInt(0, (m.height-petImageRows)*cellHeight)
+	newAbsoluteX := clampInt(pointerX-m.petDragOffsetPixelX, 0, maxAbsoluteX)
+	newAbsoluteY := clampInt(pointerY-m.petDragOffsetPixelY, 0, maxAbsoluteY)
+	terminalPixelWidth := m.width * cellWidth
+	terminalPixelHeight := m.height * cellHeight
+	nearEdge := pointerX <= cellWidth || pointerY <= cellHeight ||
+		terminalPixelWidth-pointerX <= cellWidth || terminalPixelHeight-pointerY <= cellHeight
+	if newAbsoluteX == oldAbsoluteX && newAbsoluteY == oldAbsoluteY {
+		return nearEdge
+	}
+	m.setPetDragAbsolutePosition(newAbsoluteX, newAbsoluteY)
+	m.petDragMoved = true
+	m.petDragState = petMovementState(oldAbsoluteX, newAbsoluteX, m.petDragState)
+	return nearEdge
+}
+
+func petMovementState(oldX, newX int, current terminalpet.State) terminalpet.State {
+	switch {
+	case newX > oldX:
+		return terminalpet.MoveRight
+	case newX < oldX:
+		return terminalpet.MoveLeft
+	case current == terminalpet.MoveLeft || current == terminalpet.MoveRight:
+		return current
+	default:
+		// A vertical-only drag still represents movement. With no prior facing
+		// direction, use the right-running row as the stable default.
+		return terminalpet.MoveRight
+	}
+}
+
+func (m *model) restartPetDragPlayback(previous terminalpet.State) tea.Cmd {
+	if m.petDragState == previous {
+		return nil
+	}
+	m.petPhase = 0
+	m.petPlaybackState = m.petDragState
+	if m.reducedMotion || m.petAnimation == nil {
+		return nil
+	}
+	m.petTickSeq++
+	return petTickCmd(m.petTickSeq, m.petFrameDelay())
+}
+
+func (m model) leavePixelPetDrag() model {
+	if m.petCellPixelWidth > 0 {
+		m.petDragOffsetX = clampInt(m.petDragOffsetPixelX/m.petCellPixelWidth, 0, petImageColumns-1)
+	}
+	if m.petCellPixelHeight > 0 {
+		m.petDragOffsetY = clampInt(m.petDragOffsetPixelY/m.petCellPixelHeight, 0, petImageRows-1)
+	}
+	m.petPixelDrag = false
+	m.petPixelAnchorSet = false
+	return m
+}
+
+func (m model) petDragAbsolutePosition() (int, int) {
+	return m.petDragTargetX*m.petCellPixelWidth + m.petDragTargetOffsetX,
+		m.petDragTargetY*m.petCellPixelHeight + m.petDragTargetOffsetY
+}
+
+func (m *model) setPetDragAbsolutePosition(x, y int) {
+	if m.petCellPixelWidth <= 0 || m.petCellPixelHeight <= 0 {
+		return
+	}
+	m.petDragTargetX, m.petDragTargetOffsetX = x/m.petCellPixelWidth, x%m.petCellPixelWidth
+	m.petDragTargetY, m.petDragTargetOffsetY = y/m.petCellPixelHeight, y%m.petCellPixelHeight
+}
+
+func positiveRemainder(value, divisor int) int {
+	if divisor <= 0 {
+		return 0
+	}
+	remainder := value % divisor
+	if remainder < 0 {
+		remainder += divisor
+	}
+	return remainder
+}
+
+func (m model) finishPetDrag(modeCmd tea.Cmd) (model, tea.Cmd, bool) {
+	m.petDragActive = false
+	m.petPixelDrag = false
+	m.petPixelAnchorSet = false
+	m.petDragState = terminalpet.Idle
+	if m.petDragMoved {
+		m.commitPetDragPosition()
+		m.petDragStartedDocked = false
+		return m, modeCmd, true
+	}
+	now := m.now()
+	if action, ok := m.petAnimation.ClickAnimation(m.petClickAnimationIndex); ok {
+		m.petOutcome = action
+		m.petClickAnimationIndex++
+		m.petLastClickAt = time.Time{}
+	} else if !m.petLastClickAt.IsZero() && now.Sub(m.petLastClickAt) <= petDoubleClickWindow {
+		m.petOutcome = terminalpet.Jumping
+		m.petLastClickAt = time.Time{}
+	} else {
+		m.petOutcome = terminalpet.Waving
+		m.petLastClickAt = now
+	}
+	m.petPhase = 0
+	if m.petOutcome == terminalpet.Waving {
+		// The default waving row begins with the same neutral stance as idle.
+		// Start on its first visibly active frame so a click feels immediate;
+		// later repeated passes still include the neutral transition frame.
+		m.petPhase = 1
+	}
+	m.petPlaybackState = m.petOutcome
+	m.petOutcomeAt = now
+	m.petDragStartedDocked = false
+	if m.reducedMotion || m.petAnimation == nil {
+		return m, modeCmd, true
+	}
+	// The existing ticker may still be sleeping on a long idle-frame delay.
+	// Replace it so the click action advances at its authored cadence from the
+	// moment the user releases the pet.
+	m.petTickSeq++
+	return m, batchCommands(modeCmd, petTickCmd(m.petTickSeq, m.petFrameDelay())), true
+}
+
+func (m *model) commitPetDragPosition() {
+	if m.petDragTargetIsDocked() {
+		m.petPositionSet = false
+		m.petPositionX, m.petPositionY = 0, 0
+		m.petPositionOffsetX, m.petPositionOffsetY = 0, 0
+	} else {
+		m.petPositionSet = true
+		m.petPositionX = m.petDragTargetX
+		m.petPositionY = m.petDragTargetY
+		m.petPositionOffsetX = m.petDragTargetOffsetX
+		m.petPositionOffsetY = m.petDragTargetOffsetY
+	}
+	m.petDragMoved = false
+	m.petLastClickAt = time.Time{}
+}
+
+func (m model) petDragTargetIsDocked() bool {
+	homeX, homeY := m.petHomePosition(m.width, m.height)
+	if m.petCellPixelWidth > 0 && m.petCellPixelHeight > 0 {
+		targetX := m.petDragTargetX*m.petCellPixelWidth + m.petDragTargetOffsetX
+		targetY := m.petDragTargetY*m.petCellPixelHeight + m.petDragTargetOffsetY
+		verticalDelta := targetY - homeY*m.petCellPixelHeight
+		return petAbs(targetX-homeX*m.petCellPixelWidth) <= petDockSnapColumns*m.petCellPixelWidth &&
+			verticalDelta >= -m.petCellPixelHeight && verticalDelta <= maxInt(1, m.petCellPixelHeight/2)
+	}
+	return petAbs(m.petDragTargetX-homeX) <= petDockSnapColumns &&
+		m.petDragTargetY >= homeY-1 && m.petDragTargetY <= homeY
+}
+
+func petAbs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func (m *model) cancelPetDrag() {
+	m.petDragActive = false
+	m.petPixelDrag = false
+	m.petPixelAnchorSet = false
+	m.petDragMoved = false
+	m.petDragStartedDocked = false
+	m.petDragState = terminalpet.Idle
 }
 
 func petPickerImagePosition(content string, columns, rows int) (int, int, bool) {
@@ -434,7 +865,18 @@ func petPickerImagePosition(content string, columns, rows int) (int, int, bool) 
 		if search < 0 && strings.Contains(plain, "search >") {
 			search = index
 			if top < 0 {
-				top = maxInt(0, index-1)
+				top = index
+				if index > 0 {
+					previous := ansi.Strip(lines[index-1])
+					searchLeft := len(plain) - len(strings.TrimLeft(plain, " "))
+					previousLeft := len(previous) - len(strings.TrimLeft(previous, " "))
+					if previousLeft == searchLeft {
+						// Narrow stacked previews use the border row immediately above
+						// search for their full modal width. A clipped picker may instead
+						// expose a transcript separator there, whose indentation differs.
+						top = index - 1
+					}
+				}
 			}
 		}
 		if top >= 0 && strings.Contains(plain, "↑/↓ preview") {
@@ -442,7 +884,7 @@ func petPickerImagePosition(content string, columns, rows int) (int, int, bool) 
 			break
 		}
 	}
-	if top < 0 || footer < top || footer-rows-2 < 0 {
+	if top < 0 {
 		return 0, 0, false
 	}
 	topLine := ansi.Strip(lines[top])
@@ -452,8 +894,12 @@ func petPickerImagePosition(content string, columns, rows int) (int, int, bool) 
 		return 0, 0, false
 	}
 	if overlayWidth-4 >= petSidePreviewMin && search >= 0 {
+		scanEnd := len(lines)
+		if footer >= 0 {
+			scanEnd = footer
+		}
 		firstRule, secondRule := -1, -1
-		for index := search + 1; index < footer; index++ {
+		for index := search + 1; index < scanEnd; index++ {
 			if strings.Count(ansi.Strip(lines[index]), "─") < columns {
 				continue
 			}
@@ -471,18 +917,54 @@ func petPickerImagePosition(content string, columns, rows int) (int, int, bool) 
 			return x, y, true
 		}
 	}
+	if footer < top || footer-rows-2 < 0 {
+		return 0, 0, false
+	}
 	return left + (overlayWidth-columns)/2, footer - rows - 2, true
 }
 
 func (m model) petState() terminalpet.State {
+	if m.petDragActive && m.petDragState != terminalpet.Idle {
+		return m.petDragState
+	}
 	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
 		return terminalpet.Waiting
 	}
 	if m.pending {
 		return terminalpet.Running
 	}
-	if m.petOutcome != "" && m.now().Sub(m.petOutcomeAt) < petOutcomeHold {
-		return m.petOutcome
+	if m.petOutcome != "" {
+		hold := petOutcomeHold
+		if duration, customClick := m.petAnimation.ClickDuration(m.petOutcome); customClick && duration > 0 {
+			hold = duration
+		} else if duration := m.petAnimation.PrimaryDuration(m.petOutcome); duration > hold {
+			hold = duration
+		}
+		if m.now().Sub(m.petOutcomeAt) < hold {
+			return m.petOutcome
+		}
 	}
 	return terminalpet.Idle
+}
+
+func (m model) petPlayback() (*terminalpet.Animation, terminalpet.State) {
+	if m.picker != nil && m.picker.kind == pickerPet && m.petPreview != nil {
+		return m.petPreview, terminalpet.Idle
+	}
+	return m.petAnimation, m.petState()
+}
+
+func (m model) petFrameDelay() time.Duration {
+	animation, state := m.petPlayback()
+	if animation == nil {
+		return petFrameDelay
+	}
+	phase := m.petPhase
+	if state != m.petPlaybackState {
+		phase = 0
+	}
+	if delay := animation.FrameDelay(state, phase); delay > 0 {
+		return delay
+	}
+	return petFrameDelay
 }

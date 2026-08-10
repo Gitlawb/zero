@@ -16,6 +16,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -171,9 +172,34 @@ type model struct {
 	petPreviewCancel              context.CancelFunc
 	petRequestedSlug              string
 	petPhase                      int
+	petTickSeq                    uint64
+	petPlaybackState              terminalpet.State
+	petClickAnimationIndex        int
 	petOutcome                    terminalpet.State
 	petOutcomeAt                  time.Time
 	petLayoutRendering            bool
+	petPositionSet                bool
+	petPositionX                  int
+	petPositionY                  int
+	petDragActive                 bool
+	petDragMoved                  bool
+	petDragStartedDocked          bool
+	petDragOffsetX                int
+	petDragOffsetY                int
+	petDragTargetX                int
+	petDragTargetY                int
+	petDragTargetOffsetX          int
+	petDragTargetOffsetY          int
+	petPositionOffsetX            int
+	petPositionOffsetY            int
+	petCellPixelWidth             int
+	petCellPixelHeight            int
+	petPixelDrag                  bool
+	petPixelAnchorSet             bool
+	petDragOffsetPixelX           int
+	petDragOffsetPixelY           int
+	petDragState                  terminalpet.State
+	petLastClickAt                time.Time
 	keyBindings                   keyBindings
 	themeMode                     themeMode // palette preference: auto (default), dark, light
 	hasDarkBg                     bool      // last terminal background-detection result (auto mode)
@@ -313,9 +339,6 @@ type model struct {
 	// sidebar; when set, the chat reflows to full width. Distinct from the
 	// availability conditions in sidebarAvailable (geometry / mode / overlays).
 	sidebarHidden bool
-	// sidebarForcedOpen records an explicit Ctrl+B reveal while only historical
-	// context remains. Live work opens automatically; idle history does not.
-	sidebarForcedOpen bool
 	// selectedFile is the touched file selected by clicking its FILES sidebar
 	// row: its edit cards tint in the chat (rowTouchesSelectedFile) and a second
 	// click opens the drill-in file view. "" when nothing is selected; Esc clears.
@@ -1074,7 +1097,10 @@ func composerBlinkCmd() tea.Cmd {
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd()}
 	if m.petAnimation != nil && !m.reducedMotion {
-		cmds = append(cmds, petTickCmd())
+		cmds = append(cmds, petTickCmd(m.petTickSeq, m.petFrameDelay()))
+	}
+	if m.petPixelProtocolSupported() {
+		cmds = append(cmds, tea.Raw(ansi.WindowOp(16)))
 	}
 	// Bubble Tea documents an initial WindowSizeMsg as delivered automatically
 	// on program start, so m.height/m.width are normally set before the first
@@ -1277,6 +1303,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	switch msg := msg.(type) {
+	case uv.CellSizeEvent:
+		if msg.Width > 0 && msg.Height > 0 {
+			m.petCellPixelWidth = msg.Width
+			m.petCellPixelHeight = msg.Height
+		}
+		return m, nil
 	case peerMessageMsg:
 		admitted := m.canAcceptPeerMessage(msg.message)
 		if msg.admit != nil {
@@ -1439,6 +1471,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.petDragActive {
+			pixelDrag := m.petPixelDrag
+			if !keyIs(msg, tea.KeyEsc) && !keyCtrl(msg, 'c') {
+				return m, nil
+			}
+			m.cancelPetDrag()
+			m.lastKeyTime = time.Time{}
+			m.burstCount = 0
+			if pixelDrag {
+				return m, petPixelMouseDisableCmd()
+			}
+			return m, nil
+		}
 		// Paste-detection timing trackers. MUST run before any early return
 		// so burst counting stays accurate regardless of which branch fires.
 		now := m.now()
@@ -1820,11 +1865,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.transcriptDetailed && m.noBlockingModal() && m.sidebarToggleAllowed() {
 				// Just show/hide — no transcript notice. The reflow IS the feedback,
 				// and emitting a line every toggle piled up noise in the chat.
-				wasActive := m.sidebarActive()
 				m.sidebarHidden = !m.sidebarHidden
-				m.sidebarForcedOpen = !wasActive
 				m.lineAges = nil
-				m.input.SetWidth(maxInt(20, m.transcriptFooterWidth()-14))
+				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
 				return m, nil
 			}
 		case keyCtrl(msg, 'v'), keySuper(msg, 'v'):
@@ -2139,12 +2182,22 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.BlurMsg:
+		var petMouseCmd tea.Cmd
+		if m.petDragActive {
+			pixelDrag := m.petPixelDrag
+			m.cancelPetDrag()
+			m.lastKeyTime = time.Time{}
+			m.burstCount = 0
+			if pixelDrag {
+				petMouseCmd = petPixelMouseDisableCmd()
+			}
+		}
 		m.terminalFocused = false
 		m.composerCursorVisible = false
 		if m.notifier != nil {
 			m.notifier.SetFocused(false)
 		}
-		return m, nil
+		return m, petMouseCmd
 	case toolCallStreamStartMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -2315,6 +2368,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
+		m.resizeFreePetPosition(m.width, m.height, msg.Width, msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
 		// A resize re-wraps content at a new width, shifting every row's bodyY;
@@ -2874,17 +2928,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case petPreviewLoadedMsg:
 		m = m.applyPetPreview(msg)
 		if m.petPreview != nil && m.petAnimation == nil && !m.reducedMotion {
-			return m, petTickCmd()
+			m.petTickSeq++
+			return m, petTickCmd(m.petTickSeq, m.petFrameDelay())
 		}
 		return m, nil
 	case petInstalledMsg:
 		return m.applyPetInstall(msg)
 	case petTickMsg:
+		if msg.seq != m.petTickSeq {
+			return m, nil
+		}
 		if (m.petAnimation == nil && (m.picker == nil || m.petPreview == nil)) || m.reducedMotion {
 			return m, nil
 		}
-		m.petPhase++
-		return m, petTickCmd()
+		_, state := m.petPlayback()
+		if state != m.petPlaybackState {
+			m.petPlaybackState = state
+			m.petPhase = 0
+		} else {
+			m.petPhase++
+		}
+		return m, petTickCmd(m.petTickSeq, m.petFrameDelay())
 	case ollamaContextWindowDiscoveredMsg:
 		if msg.err == nil && msg.contextWindow > 0 {
 			if m.ollamaContextWindowByModel == nil {
@@ -3088,29 +3152,16 @@ func (m model) twoColumnTranscriptView() string {
 
 	suggestionOverlay := m.suggestionOverlay(width)
 	bodyItems := m.transcriptBodyItems(width, "", false)
-	footerWidth := m.transcriptFooterWidth()
-	footer := m.footerView(footerWidth)
+	footer := m.footerView(width)
 	overlayForViewport := suggestionOverlay
 	if m.transcriptEmpty() && !m.pending {
 		overlayForViewport = ""
 	}
 
 	header := m.pinnedTitleBar(width)
-	frame := m.scrollableTranscriptFrame(header, footer)
 	chatBlock := viewLines(m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport))
-	footerRows := len(frame.footerLines)
-	contentRows := len(chatBlock) - footerRows
-	if contentRows < 0 {
-		contentRows = 0
-	}
-	sidebar := m.renderContextSidebar(sidebarW, contentRows)
-	rows := joinCompactColumns(chatBlock[:contentRows], sidebar, chatW, sidebarW)
-	for _, line := range frame.footerLines {
-		rows = append(rows, fitStyledLine(line, footerWidth))
-	}
-	if m.petLayoutActive() {
-		rows = m.reservePetImageSlot(rows, footerWidth)
-	}
+	sidebar := m.renderContextSidebar(sidebarW, len(chatBlock))
+	rows := joinColumns(chatBlock, sidebar, chatW, sidebarW)
 	return strings.Join(rows, "\n")
 }
 
@@ -3198,13 +3249,6 @@ func (m model) footerView(width int) string {
 	footer.WriteString("\n")
 	footer.WriteString(m.footerStatusLine(width))
 	return footer.String()
-}
-
-func (m model) transcriptFooterWidth() int {
-	if m.sidebarActive() && !m.subchat.active {
-		return chatWidth(m.width)
-	}
-	return m.chatColumnWidth()
 }
 
 // composerIdleHint returns a faint one-line key-shortcut hint shown above the
@@ -3337,21 +3381,20 @@ func (m model) scrollableTranscriptFrame(header string, footer string) transcrip
 		bodyHeight = 1
 	}
 	width := m.chatColumnWidth()
-	footerWidth := m.transcriptFooterWidth()
 	footerTop := len(headerLines) + bodyHeight
 	frame := transcriptFrameLayout{
 		width:           width,
 		height:          m.height,
 		headerRect:      tuiRect{width: width, height: len(headerLines)},
 		bodyRect:        tuiRect{y: len(headerLines), width: width, height: bodyHeight},
-		footerRect:      tuiRect{y: footerTop, width: footerWidth, height: len(footerLines)},
+		footerRect:      tuiRect{y: footerTop, width: width, height: len(footerLines)},
 		headerLines:     headerLines,
 		bodyHeight:      bodyHeight,
 		footerLines:     footerLines,
 		fullFooterLines: fullFooterLines,
 		footerClip:      maxInt(0, len(fullFooterLines)-len(footerLines)),
 	}
-	frame.composerRect = frame.footerSubrect(viewLines(m.composerBox(footerWidth)))
+	frame.composerRect = frame.footerSubrect(viewLines(m.composerBox(width)))
 	if len(fullFooterLines) > 0 {
 		frame.statusRect = frame.footerLineRect(len(fullFooterLines) - 1)
 	}
@@ -3373,7 +3416,7 @@ func (f transcriptFrameLayout) footerSubrect(sequence []string) tuiRect {
 	}
 	return tuiRect{
 		y:      f.footerRect.y + visibleTop - f.footerClip,
-		width:  f.footerRect.width,
+		width:  f.width,
 		height: visibleBottom - visibleTop,
 	}
 }
@@ -3384,7 +3427,7 @@ func (f transcriptFrameLayout) footerLineRect(line int) tuiRect {
 	}
 	return tuiRect{
 		y:      f.footerRect.y + line - f.footerClip,
-		width:  f.footerRect.width,
+		width:  f.width,
 		height: 1,
 	}
 }
@@ -3562,7 +3605,7 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 	}
 	items := m.transcriptBodyItems(width, "", false)
 	body := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(m.transcriptFooterWidth()))
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
 }
 
@@ -5119,7 +5162,6 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// hide was for the OLD context — reset it so the new run's sidebar isn't
 	// suppressed by a stale preference.
 	m.sidebarHidden = false
-	m.sidebarForcedOpen = false
 	m.turnStartedAt = m.now()
 	m.turnTimer = newActiveTurnTimer(m.turnStartedAt)
 	m.lastStreamActivity = m.turnStartedAt
