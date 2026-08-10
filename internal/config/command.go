@@ -197,8 +197,10 @@ func shellCommand(command string) *exec.Cmd {
 		if strings.HasPrefix(strings.TrimSpace(command), `"`) {
 			command = "call " + command
 		}
+		/* #nosec G204 -- Provider commands are intentionally evaluated by a shell to support features like pipes and env expansions. The command string originates from the user's trusted local config. */
 		return exec.Command("cmd", "/C", command)
 	}
+	/* #nosec G204 -- Provider commands are intentionally evaluated by a shell to support features like pipes and env expansions. The command string originates from the user's trusted local config. */
 	return exec.Command("sh", "-c", command)
 }
 
