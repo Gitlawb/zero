@@ -71,7 +71,10 @@ func windowsSandboxPrincipalEligible(config WindowsSandboxCommandConfig) bool {
 // deliberate. A mode this does not recognise should lose the network, not keep
 // it.
 func windowsSandboxRoleForNetwork(mode NetworkMode) windowsSandboxRole {
-	if mode == NetworkAllow {
+	// Delegated so this and `zero doctor` answer from one rule. Doctor reporting a
+	// different account than the runtime actually uses is the drift that made the
+	// old inactive-reason helper wrong.
+	if WindowsSandboxPrincipalRoleForNetwork(mode) == string(windowsSandboxRoleOnline) {
 		return windowsSandboxRoleOnline
 	}
 	return windowsSandboxRoleOffline

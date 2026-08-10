@@ -44,33 +44,6 @@ func WindowsSandboxPrincipalOptIn(env map[string]string) bool {
 	return windowsSandboxIdentityEnabled(env)
 }
 
-// WindowsSandboxPrincipalInactiveReason explains why the sandbox principal will
-// NOT be used even though it is opted into, or returns empty when it will be.
-//
-// This is the single source of truth for that rule: windowsSandboxPrincipalEligible
-// asks it too, so the runtime and `zero doctor` cannot drift into disagreeing
-// about whether a principal is in play.
-//
-// It exists because the standdown is otherwise invisible. The runner cannot
-// announce it, being re-exec'd per command so the notice would land on the
-// stderr of essentially every tool call, and it is not per-command actionable
-// anyway. But an operator who set the opt-in and believes reads are confined,
-// when they are not, is holding a false picture of their own machine. Doctor is
-// read once, which is where a standing configuration fact belongs.
-//
-// Returns empty when the opt-in is off: that is not a standdown, it is simply
-// not asking for the backend.
-func WindowsSandboxPrincipalInactiveReason(optIn bool, network NetworkMode) string {
-	if !optIn {
-		return ""
-	}
-	if NormalizeNetworkMode(network) != NetworkDeny {
-		return ""
-	}
-	return "network denial is enforced by WFP filters keyed to the offline-marker SID, which a principal token cannot carry, " +
-		"so commands run on the restricted token instead and reads are not confined to the principal"
-}
-
 func windowsSandboxPrincipalOptInValue(optIn bool) string {
 	if optIn {
 		return "1"
@@ -711,4 +684,30 @@ func shortWindowsACLPlanHash(hash string) string {
 // command runner is exactly such a process: it takes the profile it is handed.
 func WindowsSandboxProfileWithRuntimeRoots(profile PermissionProfile, workspaceRoots []string) PermissionProfile {
 	return windowsSandboxProfileWithRuntime(profile, workspaceRoots)
+}
+
+// WindowsSandboxPrincipalRoleForNetwork names the principal a command in this
+// network mode runs as.
+//
+// Exported and portable so `zero doctor` and the Windows runtime answer from ONE
+// rule. The helper this replaces existed for that reason and said so, and the
+// thing it was protecting against happened anyway once dual-role provisioning
+// changed the behaviour under NetworkDeny: the runtime started using an offline
+// principal while doctor still reported the old restricted-token standdown, so
+// operators were told their reads were unconfined when they were confined.
+// windowsSandboxRoleForNetwork delegates here rather than repeating the switch.
+//
+// Anything that is not an EXACT allow is offline: a mode this does not recognise
+// should lose the network, not keep it.
+//
+// Deliberately not normalized first. NormalizeNetworkMode case-folds, so routing
+// through it made "ALLOW" select the online principal where the runtime required
+// an exact match and failed closed to offline. Sharing one rule is only an
+// improvement if it shares the STRICTER one; a shared rule that quietly widened
+// the runtime would be worse than the drift it fixes.
+func WindowsSandboxPrincipalRoleForNetwork(network NetworkMode) string {
+	if network == NetworkAllow {
+		return "online"
+	}
+	return "offline"
 }

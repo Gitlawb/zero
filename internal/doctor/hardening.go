@@ -122,24 +122,34 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 		})
 		return &result
 	}
-	// Setup is valid, but the principal can still be opted into and stand down.
-	// Under the DEFAULT network-deny policy it always does, so an operator who
-	// set the opt-in to confine reads gets the same-user restricted token and no
-	// read confinement at all. Nothing else tells them: the runner cannot warn
-	// per command without spamming every tool call, and the marker validates
-	// happily because setup really did provision the account.
+	// Setup is valid and the opt-in is set, so report which principal a command
+	// will actually run as.
 	//
-	// A warning rather than a failure. Commands run correctly and the network is
-	// still enforced; what is wrong is the operator's picture of what they have.
-	if reason := sandbox.WindowsSandboxPrincipalInactiveReason(setupConfig.PrincipalOptIn, profile.Network.Mode); reason != "" {
-		result := check("sandbox.principal", "Sandbox principal", StatusWarn,
-			fmt.Sprintf("Sandbox principal is opted in but inactive: %s.", reason), map[string]any{
+	// This used to warn that the principal stood down under the DEFAULT
+	// network-deny policy, which was true while network denial could only be
+	// expressed on the restricted token: a principal token cannot carry the
+	// synthetic offline-marker SID the WFP filters matched. Dual-role provisioning
+	// removed that limit by giving each workspace an offline account whose real
+	// group membership the same filters match, so deny mode now runs on a
+	// principal exactly as allow mode does. Leaving the warning would have doctor
+	// telling operators their reads are unconfined while they are confined.
+	//
+	// Naming the role rather than just saying "active" is the useful part. The two
+	// accounts differ only in that membership, so an operator debugging network
+	// behaviour needs to know which one this workspace picks.
+	if setupConfig.PrincipalOptIn {
+		// Asked of the shared rule rather than re-derived here, so doctor and the
+		// runtime cannot disagree about which account a command runs as. Two
+		// copies drifting is what produced the wrong report this replaces.
+		role := sandbox.WindowsSandboxPrincipalRoleForNetwork(profile.Network.Mode)
+		result := check("sandbox.principal", "Sandbox principal", StatusPass,
+			fmt.Sprintf("Sandbox principal is active; commands run as the %s principal for this workspace.", role), map[string]any{
 				"backend":     string(backend.Name),
 				"platform":    goos,
 				"optIn":       true,
-				"active":      false,
+				"active":      true,
+				"role":        role,
 				"networkMode": string(profile.Network.Mode),
-				"remedy":      "allow network for this workspace to use the principal, or unset the opt-in to stop expecting read confinement",
 			})
 		return &result
 	}
