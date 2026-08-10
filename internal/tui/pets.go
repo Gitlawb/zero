@@ -163,6 +163,11 @@ func (m model) schedulePetPreview() (model, tea.Cmd) {
 	m.petPreviewSeq++
 	m.petPreview = nil
 	m.petPreviewError = ""
+	if m.picker == nil {
+		m.petPreviewLoading = false
+		m.petPreviewSlug = ""
+		return m, nil
+	}
 	item, ok := m.picker.current()
 	if !ok || item.Value == terminalpet.DisabledID {
 		m.petPreviewLoading = false
@@ -481,7 +486,8 @@ func (m model) petImageDraw(content string) *terminalpet.ImageDraw {
 		}
 		return &terminalpet.ImageDraw{
 			ID: petPreviewImageID, Animation: m.petPreview, State: terminalpet.Idle, Phase: m.petPhase,
-			X: x, Y: y, Columns: petImageColumns, Rows: petImageRows, HeightPixels: 75,
+			X: x, Y: y, Columns: petImageColumns, Rows: petImageRows,
+			HeightPixels: m.petImageHeightPixels(m.petPreview, terminalpet.Idle, m.petPhase),
 		}
 	}
 	if !m.petLayoutActive() {
@@ -499,8 +505,26 @@ func (m model) petImageDraw(content string) *terminalpet.ImageDraw {
 	return &terminalpet.ImageDraw{
 		ID: petAmbientImageID, Animation: m.petAnimation, State: m.petState(), Phase: phase,
 		X: x, Y: y, OffsetX: offsetX, OffsetY: offsetY,
-		Columns: petImageColumns, Rows: petImageRows, HeightPixels: 75,
+		Columns: petImageColumns, Rows: petImageRows,
+		HeightPixels: m.petImageHeightPixels(m.petAnimation, m.petState(), phase),
 	}
+}
+
+func (m model) petImageHeightPixels(animation *terminalpet.Animation, state terminalpet.State, phase int) int {
+	const preferredHeight = 75
+	if m.petRenderer == nil || m.petRenderer.Support().Protocol != terminalpet.ImageProtocolSixel || m.petCellPixelHeight <= 0 {
+		return preferredHeight
+	}
+	height := minInt(preferredHeight, petImageRows*m.petCellPixelHeight)
+	if m.petCellPixelWidth <= 0 || animation == nil {
+		return maxInt(1, height)
+	}
+	frame := animation.Frame(state, phase)
+	if frame == nil || frame.Bounds().Dx() <= 0 || frame.Bounds().Dy() <= 0 {
+		return maxInt(1, height)
+	}
+	widthLimitedHeight := petImageColumns * m.petCellPixelWidth * frame.Bounds().Dy() / frame.Bounds().Dx()
+	return maxInt(1, minInt(height, widthLimitedHeight))
 }
 
 func (m model) ambientPetPosition(width, height int) (int, int) {

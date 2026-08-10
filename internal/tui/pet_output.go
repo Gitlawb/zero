@@ -21,9 +21,10 @@ type terminalOutputFile interface {
 }
 
 type petImageOutput struct {
-	output   terminalOutputFile
-	renderer *terminalpet.ImageRenderer
-	mu       sync.Mutex
+	output         terminalOutputFile
+	renderer       *terminalpet.ImageRenderer
+	renderDisabled bool
+	mu             sync.Mutex
 }
 
 func newPetImageOutput(output terminalOutputFile, renderer *terminalpet.ImageRenderer) *petImageOutput {
@@ -63,17 +64,24 @@ func (o *petImageOutput) Write(value []byte) (int, error) {
 	}
 
 	var imageUpdate bytes.Buffer
-	if err := o.renderer.Render(&imageUpdate); err != nil {
-		return 0, err
+	if !o.renderDisabled {
+		if err := o.renderer.Render(&imageUpdate); err != nil {
+			// Companions are decorative. Disable them for this output session after
+			// a renderer failure instead of terminating the interactive shell.
+			o.renderDisabled = true
+			imageUpdate.Reset()
+		}
 	}
 	if imageUpdate.Len() == 0 {
-		return o.output.Write(value)
+		return writeChecked(o.output, value)
 	}
 
 	// Bubble Tea encloses supported terminal frames in synchronized-output
 	// markers. Keep the pet placement inside that same transaction so the
 	// terminal never presents the text frame and image movement separately.
-	if syncEnd := bytes.LastIndex(value, []byte(terminalSyncEnd)); syncEnd >= 0 {
+	syncStart := bytes.LastIndex(value, []byte(terminalSyncStart))
+	syncEnd := bytes.LastIndex(value, []byte(terminalSyncEnd))
+	if syncEnd >= 0 && syncEnd > syncStart {
 		var frame bytes.Buffer
 		frame.Grow(len(value) + imageUpdate.Len())
 		frame.Write(value[:syncEnd])
@@ -89,19 +97,35 @@ func (o *petImageOutput) Write(value []byte) (int, error) {
 		}
 		return len(value), nil
 	}
+	if syncStart > syncEnd {
+		written, writeErr := writeChecked(o.output, value)
+		if writeErr != nil {
+			return written, writeErr
+		}
+		_, imageErr := writeChecked(o.output, imageUpdate.Bytes())
+		return written, imageErr
+	}
 
 	if _, err := io.WriteString(o.output, terminalSyncStart); err != nil {
 		return 0, err
 	}
-	written, writeErr := o.output.Write(value)
+	written, writeErr := writeChecked(o.output, value)
 	if writeErr == nil {
-		_, writeErr = o.output.Write(imageUpdate.Bytes())
+		_, writeErr = writeChecked(o.output, imageUpdate.Bytes())
 	}
 	_, endErr := io.WriteString(o.output, terminalSyncEnd)
 	if writeErr != nil {
 		return written, writeErr
 	}
 	return written, endErr
+}
+
+func writeChecked(writer io.Writer, value []byte) (int, error) {
+	written, err := writer.Write(value)
+	if err == nil && written != len(value) {
+		err = io.ErrShortWrite
+	}
+	return written, err
 }
 
 // originalBytesWritten maps progress through an expanded synchronized frame

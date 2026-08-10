@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -20,13 +22,18 @@ import (
 func TestCatalogPreviewInstallAndOfflineReload(t *testing.T) {
 	preview := encodedPNG(t, 24*previewFrameCount, 26)
 	atlas := encodedPNG(t, 24*atlasColumns, 26*11)
-	var server *httptest.Server
-	server = httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	var assetBase atomic.Pointer[string]
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/manifest":
+			base := assetBase.Load()
+			if base == nil {
+				http.Error(writer, "server not ready", http.StatusServiceUnavailable)
+				return
+			}
 			manifest := compactManifest{
 				Version:   2,
-				AssetBase: server.URL,
+				AssetBase: *base,
 				Fields:    []string{"slug", "displayName", "kind", "submittedBy", "spritesheet", "petJson", "zip", "spriteVersionNumber"},
 			}
 			row := []any{"boba", "Boba", "animal", "tester", "pets/boba/sprite.webp", "pets/boba/petjson.json", "pets/boba/archive.zip", 2}
@@ -45,6 +52,8 @@ func TestCatalogPreviewInstallAndOfflineReload(t *testing.T) {
 			http.NotFound(writer, request)
 		}
 	}))
+	serverURL := server.URL
+	assetBase.Store(&serverURL)
 	defer server.Close()
 
 	root := t.TempDir()
@@ -245,15 +254,20 @@ func TestCatalogOrdersRankedPetsBeforeAlphabeticalRemainder(t *testing.T) {
 		encoded, _ := json.Marshal(row)
 		manifest.Pets = append(manifest.Pets, encoded)
 	}
-	var rankingFails bool
-	var server *httptest.Server
-	server = httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	var rankingFails atomic.Bool
+	var assetBase atomic.Pointer[string]
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/manifest":
-			manifest.AssetBase = server.URL
+			base := assetBase.Load()
+			if base == nil {
+				http.Error(writer, "server not ready", http.StatusServiceUnavailable)
+				return
+			}
+			manifest.AssetBase = *base
 			_ = json.NewEncoder(writer).Encode(manifest)
 		case "/ranking":
-			if rankingFails {
+			if rankingFails.Load() {
 				http.Error(writer, "unavailable", http.StatusServiceUnavailable)
 				return
 			}
@@ -262,6 +276,8 @@ func TestCatalogOrdersRankedPetsBeforeAlphabeticalRemainder(t *testing.T) {
 			http.NotFound(writer, request)
 		}
 	}))
+	serverURL := server.URL
+	assetBase.Store(&serverURL)
 	defer server.Close()
 
 	client := testClient(t, t.TempDir(), server)
@@ -273,7 +289,7 @@ func TestCatalogOrdersRankedPetsBeforeAlphabeticalRemainder(t *testing.T) {
 		t.Fatalf("ranked catalog = %v", got)
 	}
 
-	rankingFails = true
+	rankingFails.Store(true)
 	fallback := testClient(t, t.TempDir(), server)
 	entries, err = fallback.Catalog(context.Background())
 	if err != nil {
@@ -314,6 +330,33 @@ func TestAssetRedirectToUntrustedHostIsRejectedBeforeFollowing(t *testing.T) {
 	client.TrustedAssetHosts = map[string]bool{parsed.Hostname(): true}
 	if _, err := client.fetchAsset(context.Background(), redirect.URL+"/pets/boba/sprite.webp", maxSpriteBytes); err == nil {
 		t.Fatal("fetchAsset followed a redirect to an untrusted host")
+	}
+}
+
+func TestResolveAssetURLRejectsPathsOutsideCatalogRoots(t *testing.T) {
+	client := NewClient(t.TempDir())
+	for _, reference := range []string{"../secret.png", "/other/sprite.webp", `pets\\boba\\sprite.webp`} {
+		if _, err := client.resolveAssetURL("https://assets.petdex.dev", reference); err == nil {
+			t.Errorf("resolveAssetURL(%q) unexpectedly succeeded", reference)
+		}
+	}
+}
+
+func TestFetchAssetRejectsOversizedDownload(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("12345"))
+	}))
+	defer server.Close()
+	client := testClient(t, t.TempDir(), server)
+	if _, err := client.fetchAsset(context.Background(), server.URL+"/pets/boba/sprite.webp", 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized fetch error = %v", err)
+	}
+}
+
+func TestDecodeImageRejectsOversizedDimensions(t *testing.T) {
+	data := encodedPNG(t, maxImageSide+1, 1)
+	if _, err := decodeImage(data); err == nil || !strings.Contains(err.Error(), "dimensions") {
+		t.Fatalf("oversized image error = %v", err)
 	}
 }
 

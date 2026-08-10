@@ -797,6 +797,20 @@ func TestAmbientSixelPetRetainsDockedComposerFallbackSlot(t *testing.T) {
 	}
 }
 
+func TestSixelPetFitsItsReservedTerminalRows(t *testing.T) {
+	m := interactivePetTestModel(t)
+	m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolSixel})
+	m.petCellPixelHeight = 10
+	draw := m.petImageDraw(m.transcriptView())
+	if draw == nil {
+		t.Fatal("Sixel pet draw is unavailable")
+	}
+	want := petImageRows * m.petCellPixelHeight
+	if draw.HeightPixels != want {
+		t.Fatalf("Sixel height = %dpx, want reserved height %dpx", draw.HeightPixels, want)
+	}
+}
+
 func TestAmbientPetRemainsVisibleButNotInteractiveDuringPermissionPrompt(t *testing.T) {
 	m := sidebarTestModel()
 	frame := image.NewNRGBA(image.Rect(0, 0, 12, 12))
@@ -990,11 +1004,25 @@ func petCommandIncludesRaw(cmd tea.Cmd, want any) bool {
 				}
 			}
 		}
-	case <-time.After(20 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		// Animation ticks are deliberately delayed and are not raw terminal
 		// commands, so do not wait for them while inspecting a batch.
 	}
 	return false
+}
+
+func TestSchedulePetPreviewWithoutPicker(t *testing.T) {
+	m := interactivePetTestModel(t)
+	m.picker = nil
+	m.petPreviewLoading = true
+	m.petPreviewSlug = "stale"
+	next, cmd := m.schedulePetPreview()
+	if cmd != nil {
+		t.Fatal("schedulePetPreview scheduled work without a picker")
+	}
+	if next.petPreviewLoading || next.petPreviewSlug != "" {
+		t.Fatalf("stale preview state was retained: loading=%v slug=%q", next.petPreviewLoading, next.petPreviewSlug)
+	}
 }
 
 func TestAmbientPetPixelDragReleaseCommitsWithoutGap(t *testing.T) {
@@ -1039,10 +1067,9 @@ func TestAmbientPetPixelDragFallsBackBeforeTerminalBoundary(t *testing.T) {
 	if !handled || !m.petDragActive || m.petPixelDrag || cmd == nil {
 		t.Fatal("approaching the terminal edge should keep dragging but leave pixel mouse mode")
 	}
-	raw, ok := cmd().(tea.RawMsg)
 	want := ansi.ResetModeMouseExtSgrPixel + ansi.SetModeMouseExtSgr + terminalSyncStart + terminalSyncEnd
-	if !ok || raw.Msg != want {
-		t.Fatalf("edge fallback command = %#v, want %q", raw, want)
+	if !petCommandIncludesRaw(cmd, want) {
+		t.Fatalf("edge fallback command did not include %q", want)
 	}
 }
 

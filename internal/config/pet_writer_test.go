@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,62 @@ func TestSetPetPreservesUnrelatedConfig(t *testing.T) {
 	}
 	if reloaded.Preferences.Pet != "boba" || reloaded.Preferences.Theme != "dracula" || reloaded.ActiveProvider != "test" || len(reloaded.Providers) != 1 {
 		t.Fatalf("persisted config lost fields: %#v", reloaded)
+	}
+}
+
+func TestSetPetRejectsInvalidInputs(t *testing.T) {
+	if _, err := SetPet("  ", "boba"); err == nil {
+		t.Fatal("SetPet accepted a blank config path")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"preferences":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetPet(path, "boba"); err == nil || !strings.Contains(err.Error(), "invalid config JSON") {
+		t.Fatalf("SetPet malformed JSON error = %v", err)
+	}
+}
+
+func TestSetPetCreatesNestedConfigAndClearsEmptyPreferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "zero", "config.json")
+	if _, err := SetPet(path, " boba "); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(root["preferences"]); !strings.Contains(got, `"pet":"boba"`) && !strings.Contains(got, `"pet": "boba"`) {
+		t.Fatalf("persisted preferences = %s", got)
+	}
+	root["future"] = json.RawMessage(`{"enabled":true}`)
+	encoded, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetPet(path, " "); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = nil
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := root["preferences"]; ok {
+		t.Fatalf("empty preferences were retained: %s", data)
+	}
+	if !strings.Contains(string(root["future"]), `"enabled": true`) && !strings.Contains(string(root["future"]), `"enabled":true`) {
+		t.Fatalf("unrelated future member was lost: %s", data)
 	}
 }
 

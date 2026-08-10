@@ -105,23 +105,36 @@ func Run(ctx context.Context, options Options) int {
 		fmt.Fprintln(os.Stderr, "zero: tui error:", runErr)
 		return 1
 	}
-	if clearErr != nil {
-		fmt.Fprintln(os.Stderr, "zero: terminal companion cleanup error:", clearErr)
-		return 1
-	}
 	if closeErr != nil {
 		fmt.Fprintln(os.Stderr, "zero: peer messaging cleanup error:", closeErr)
 		return 1
+	}
+	if clearErr != nil {
+		fmt.Fprintln(os.Stderr, "zero: terminal companion cleanup error:", clearErr)
 	}
 	return 0
 }
 
 func terminalPetFrameCache(options Options) string {
+	return terminalPetFrameCacheWith(options, os.UserConfigDir, os.UserCacheDir)
+}
+
+func terminalPetFrameCacheWith(options Options, userConfigDir, userCacheDir func() (string, error)) string {
 	root := ""
-	if configPath := strings.TrimSpace(options.UserConfigPath); configPath != "" {
-		root = filepath.Dir(configPath)
-	} else if configDir, err := os.UserConfigDir(); err == nil {
-		root = filepath.Join(configDir, "zero")
+	if configPath := strings.TrimSpace(options.UserConfigPath); filepath.IsAbs(configPath) {
+		root = filepath.Dir(filepath.Clean(configPath))
+	}
+	if root == "" {
+		configDir, err := userConfigDir()
+		if err == nil && strings.TrimSpace(configDir) != "" {
+			root = filepath.Join(configDir, "zero")
+		}
+	}
+	if root == "" {
+		cacheDir, err := userCacheDir()
+		if err == nil && strings.TrimSpace(cacheDir) != "" {
+			root = filepath.Join(cacheDir, "zero")
+		}
 	}
 	if root == "" {
 		return ""

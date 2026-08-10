@@ -123,7 +123,10 @@ func TestImageRendererMovesExistingKittyPlacementWithoutRetransmitting(t *testin
 func TestImageRendererEmitsSixelForSixelTerminal(t *testing.T) {
 	frame := image.NewNRGBA(image.Rect(0, 0, 2, 2))
 	frame.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 255})
-	animation, _ := ThumbnailAnimation(frame)
+	animation, err := ThumbnailAnimation(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
 	renderer := NewImageRenderer(ImageSupport{Protocol: ImageProtocolSixel})
 	renderer.Set(&ImageDraw{ID: 9, Animation: animation, State: Idle, Columns: 4, Rows: 3, HeightPixels: 12})
 	var output bytes.Buffer
@@ -142,7 +145,10 @@ func TestImageRendererEmitsSixelForSixelTerminal(t *testing.T) {
 func TestImageRendererUsesLocalPNGForIterm(t *testing.T) {
 	frame := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	frame.SetNRGBA(0, 0, color.NRGBA{G: 255, A: 255})
-	animation, _ := ThumbnailAnimation(frame)
+	animation, err := ThumbnailAnimation(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
 	renderer := NewImageRendererWithCache(ImageSupport{Protocol: ImageProtocolKittyLocalFile}, t.TempDir())
 	renderer.Set(&ImageDraw{ID: 11, Animation: animation, State: Idle, Columns: 4, Rows: 3})
 	var output bytes.Buffer
