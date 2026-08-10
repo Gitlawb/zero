@@ -76,6 +76,14 @@ func runSandboxExec(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		Policy:        policy,
 		Scope:         scope,
 		Backend:       deps.selectSandboxBackend(zeroSandbox.BackendOptions{}),
+		// The same scrub list a real tool call gets. Without it the engine keeps an
+		// empty set, and only the hardcoded names plus the provider catalog's own
+		// AuthEnvVars are removed from the child's environment: a key named by
+		// `apiKeyEnv` in the user's config would be scrubbed for every sandboxed
+		// tool call and handed to this one. Reproducing the production environment
+		// is the entire point of the command, and a credential is the last part of
+		// it that may differ.
+		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	})
 	plan, err := engine.BuildCommandPlan(zeroSandbox.CommandSpec{
 		Name: command[0],
@@ -138,35 +146,34 @@ func parseSandboxExecArgs(args []string) ([]string, error) {
 	if len(args) == 0 {
 		return nil, errors.New("usage: zero sandbox exec -- <command> [args...]")
 	}
-	// The separator is located FIRST, before any help flag is interpreted.
+	// Only the FIRST token is ours to interpret. Everything from the second
+	// onwards belongs to the child, help flags included.
 	//
-	// Everything after `--` belongs to the child, help flags included, so a
-	// single pass that treated `-h`/`--help`/`help` as ours wherever it found
-	// them would answer for a command it was supposed to be running. Scanning
-	// for the separator up front keeps that promise structural rather than
-	// dependent on which token happens to come first.
-	for index, arg := range args {
-		if arg == "--" {
-			command := args[index+1:]
-			if len(command) == 0 {
-				return nil, errors.New("usage: zero sandbox exec -- <command> [args...]")
-			}
-			return command, nil
+	// Written as a straight-line decision on args[0] rather than a loop, because
+	// a loop here is a lie. An earlier version scanned for `--` "up front" and
+	// said so in its comment, but every branch of its body returned, so it only
+	// ever examined index 0 and the promised scan did not exist. The rule below
+	// is what that code actually implemented, and it is the rule we want: it is
+	// the wrapper's own prefix that can ask for the wrapper's help, and the
+	// prefix is at most one token long.
+	switch args[0] {
+	case "--":
+		// Everything after the separator is the command, verbatim, including
+		// `--help`. That is the documented contract: `zero sandbox exec -- cmd
+		// --help` must run cmd's help, not ours.
+		command := args[1:]
+		if len(command) == 0 {
+			return nil, errors.New("usage: zero sandbox exec -- <command> [args...]")
 		}
-		// Only the wrapper's own arguments, meaning those before the separator,
-		// can ask for the wrapper's help.
-		switch arg {
-		case "-h", "--help", "help":
-			return nil, errSandboxExecHelp
-		}
-		// The first non-flag token starts the command in the tolerated
-		// separator-less form, so nothing after it is ours to read. Without this
-		// `zero sandbox exec mycmd --help` printed OUR help and never ran mycmd,
-		// which is the same contract break as reading past `--`.
-		return args, nil
+		return command, nil
+	case "-h", "--help", "help":
+		return nil, errSandboxExecHelp
 	}
-	// Tolerated without the separator for interactive use, but the separator is
-	// what the help shows, because anything with a leading dash needs it.
+	// The separator-less form, tolerated for interactive use: the first token is
+	// the command, so nothing after it is ours to read. Without this,
+	// `zero sandbox exec mycmd --help` printed OUR help and never ran mycmd,
+	// which is the same contract break as reading past `--`. The help text still
+	// shows the separator, because anything with a leading dash needs it.
 	return args, nil
 }
 
