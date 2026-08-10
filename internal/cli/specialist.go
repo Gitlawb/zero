@@ -286,7 +286,11 @@ func runSpecialistCreate(paths specialist.Paths, name string, options specialist
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	if options.json {
+	return writeSpecialistCreateResult(manifest, options.json, stdout, stderr)
+}
+
+func writeSpecialistCreateResult(manifest specialist.Manifest, jsonOutput bool, stdout io.Writer, stderr io.Writer) int {
+	if jsonOutput {
 		if err := writePrettyJSON(stdout, manifest); err != nil {
 			return exitCrash
 		}
@@ -294,6 +298,11 @@ func runSpecialistCreate(paths specialist.Paths, name string, options specialist
 	}
 	if _, err := fmt.Fprintf(stdout, "Created specialist %s at %s\n", manifest.Metadata.Name, manifest.FilePath); err != nil {
 		return exitCrash
+	}
+	for _, warning := range manifest.Warnings {
+		if _, err := fmt.Fprintf(stderr, "warning: %s\n", warning); err != nil {
+			return exitCrash
+		}
 	}
 	return exitSuccess
 }
