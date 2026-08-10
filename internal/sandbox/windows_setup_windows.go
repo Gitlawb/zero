@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -129,27 +130,41 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		// invisible, because nothing afterwards looks for a principal it believes
 		// was never provisioned.
 		//
-		// Fatal, and the first cut of this branch had it wrong: it printed and
-		// carried on to write an opted-out marker and exit 0.
+		// Fatal only when the ACCOUNT survived, which is a narrower rule than
+		// either of the two this branch has had.
 		//
-		// The reasoning was that teardown is idempotent, so a machine that never
-		// had a principal passes straight through and a failure here means real
-		// residue rather than a missing account. Both halves are true; the
-		// conclusion does not follow. Real residue is precisely the case that must
-		// not be reported as success, because the marker then says "no principal"
-		// while the account, its secret, its logon right, its ACEs and its ledger
-		// are all still there — and nothing afterwards looks for a principal it
-		// believes was never provisioned, so the leftovers are permanent. Exiting
-		// non-zero is the only thing that keeps the operator in the loop, and
-		// re-running setup is the repair.
-		if rollbackErr := rollback(); rollbackErr != nil {
-			fmt.Fprintf(stderr, "%s: opted out, but retiring the existing sandbox principal failed: %v; rollback failed: %v\n",
-				WindowsSandboxSetupName, err, rollbackErr)
+		// It first printed and carried on, which was wrong: a marker that says "no
+		// principal" while the account is still installed is a lie nothing
+		// afterwards can detect, because nothing looks for a principal it believes
+		// was never provisioned.
+		//
+		// Then it failed on any error at all, which was wrong in the other
+		// direction. removeWindowsSandboxPrincipalForSetup deliberately continues
+		// past a secret file owned by ANOTHER administrator's setup and reports it
+		// at the end, so that one unlinkable file does not strand the account, its
+		// logon rights and its ACEs. Treating that report as fatal made the whole
+		// default sandbox unsetupable on such a machine, permanently, over inert
+		// residue: the account is already gone and the leftover is a file with a
+		// DACL we do not own.
+		//
+		// So the question is not whether teardown reported a problem, it is
+		// whether the thing the marker is about to deny is still there. Asked of
+		// the account rather than inferred from the error, because the error is
+		// a join and its parts are not separable at this distance.
+		if windowsSandboxPrincipalIsInstalled(config.commandConfig()) {
+			if rollbackErr := rollback(); rollbackErr != nil {
+				fmt.Fprintf(stderr, "%s: opted out, but the existing sandbox principal is still installed: %v; rollback failed: %v\n",
+					WindowsSandboxSetupName, err, rollbackErr)
+				return 1
+			}
+			fmt.Fprintf(stderr, "%s: opted out, but the existing sandbox principal is still installed: %v\n",
+				WindowsSandboxSetupName, err)
 			return 1
 		}
-		fmt.Fprintf(stderr, "%s: opted out, but retiring the existing sandbox principal failed: %v\n",
+		// Retired, with something inert left over. Named rather than swallowed:
+		// whoever has to clean it up needs to know it is there.
+		fmt.Fprintf(stderr, "%s: opted out; the sandbox principal was retired, but some of its residue could not be removed: %v\n",
 			WindowsSandboxSetupName, err)
-		return 1
 	}
 	if err := applyWindowsNetworkPlanFn(networkPlan); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
@@ -170,6 +185,19 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	return 0
 }
 
+// windowsSandboxPrincipalIsInstalled reports whether this workspace's principal
+// account still resolves.
+//
+// Fails CLOSED. Only an outright "not provisioned" counts as gone; a name that
+// resolves to something unexpected, or a lookup that fails for its own reasons,
+// is treated as still installed. The consumer uses this to decide whether an
+// opted-out marker would be a lie, and the expensive mistake there is claiming a
+// principal is gone when nobody actually checked.
+func windowsSandboxPrincipalIsInstalled(config WindowsSandboxCommandConfig) bool {
+	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxPrincipalKey(config))
+	return !errors.Is(err, errWindowsSandboxIdentityUnavailable)
+}
+
 // assertWindowsSetupRunsAsCaller refuses to provision a sandbox principal when
 // this elevated helper belongs to a different Windows user than the caller that
 // launched it.
@@ -187,11 +215,32 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 // account, a secret and a grant that resolve to a sandbox nobody can log into.
 //
 // Same-account elevation is unaffected: a UAC consent prompt splits the caller's
-// token but leaves the user SID identical, which is the ordinary path. Only
-// over-the-shoulder elevation and `runas /user:` land here. An unknown caller
-// SID (an older caller, or a token query that failed) is treated as a match:
-// that is the pre-existing behaviour, and refusing on absence would break setup
-// on machines where nothing is wrong.
+// token but leaves the user SID identical, which is the ordinary path. An
+// unknown caller SID (an older caller, or a token query that failed) is treated
+// as a match: that is the pre-existing behaviour, and refusing on absence would
+// break setup on machines where nothing is wrong.
+//
+// What this does NOT do, stated plainly because the name suggests otherwise:
+// it cannot fire on any path Zero itself takes. Zero never elevates the helper.
+// runSandboxSetupHelper (internal/cli/app.go) is a plain exec.Command with no
+// token work, and runWindowsSandboxSetup refuses unless the process is ALREADY
+// elevated, so the operator supplies elevation by opening an elevated terminal.
+// Both halves then run in that terminal: BuildWindowsSandboxSetupArgs resolves
+// the caller SID from the very process that later becomes the helper, so the two
+// are equal by construction and this returns nil every time.
+//
+// It is kept rather than deleted because it is a correctness assertion, not a
+// no-op. It becomes load-bearing the moment anyone adds a ShellExecute "runas"
+// path, which is the natural way this command grows, and it already covers a
+// helper .exe invoked directly with hand-written args. What it must not do is be
+// mistaken for a live defence against over-the-shoulder elevation today.
+//
+// The residual hazard that boundary was supposed to describe is real but has a
+// different shape: an operator who elevates a terminal as a DIFFERENT
+// administrator runs both halves as that administrator, so setup provisions into
+// THAT account's sandbox home. Their own unelevated session resolves its own
+// home, finds no marker, and is told to run setup. Loud, not silent, and not a
+// weakened sandbox.
 //
 // Scoped to the opt-in by its caller, deliberately. The default restricted-token
 // sandbox stores no secret and names no account after the user, so it works
