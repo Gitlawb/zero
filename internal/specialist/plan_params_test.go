@@ -13,7 +13,7 @@ func paramPlan(t *testing.T, dir string) {
 		map[string]any{"id": "judge", "prompt": "Judge whether ${scope} holds the ${property} guarantee.",
 			"depends_on": []any{"trace"}},
 	}, okBudget(), readOnlyLimits())
-	if _, err := SavePlan(dir, "sweep", plan); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", plan); err != nil {
 		t.Fatalf("SavePlan: %v", err)
 	}
 }
@@ -107,7 +107,7 @@ func TestParamMismatchesAreRefused(t *testing.T) {
 	})
 	t.Run("params for a plan that takes none", func(t *testing.T) {
 		plain := t.TempDir()
-		if _, err := SavePlan(plain, "sweep", savedPlanFixture(t)); err != nil {
+		if _, err := SavePlan(plain, plain, "sweep", savedPlanFixture(t)); err != nil {
 			t.Fatal(err)
 		}
 		_, err := resolveSaved(t, plain, map[string]any{"params": map[string]any{"scope": "x"}})
@@ -195,7 +195,7 @@ func TestParamValuesMustBeStrings(t *testing.T) {
 // inert for every plan saved before it existed.
 func TestAPlanWithoutPlaceholdersIsUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", savedPlanFixture(t)); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := resolveSaved(t, dir, map[string]any{})

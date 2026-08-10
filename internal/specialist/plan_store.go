@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/pathjail"
 )
 
 // Named plans: a plan that ran once, saved and run again.
@@ -45,17 +47,25 @@ const planTempExt = ".tmp"
 
 // PlanPaths are the directories scanned for saved plans, project first.
 type PlanPaths struct {
-	ProjectDir string
-	UserDir    string
+	// ProjectRoot and UserRoot are the containment boundaries for the two
+	// directories below. Saving is performed relative to a handle on the
+	// matching root, so no component of the directory can redirect the write
+	// outside it.
+	ProjectRoot string
+	UserRoot    string
+	ProjectDir  string
+	UserDir     string
 }
 
 // DefaultPlanPaths returns the project and user plan directories.
 func DefaultPlanPaths(workspaceRoot, userConfigDir string) PlanPaths {
 	var paths PlanPaths
 	if strings.TrimSpace(workspaceRoot) != "" {
+		paths.ProjectRoot = workspaceRoot
 		paths.ProjectDir = filepath.Join(workspaceRoot, ".zero", "plans")
 	}
 	if strings.TrimSpace(userConfigDir) != "" {
+		paths.UserRoot = userConfigDir
 		paths.UserDir = filepath.Join(userConfigDir, "zero", "plans")
 	}
 	return paths
@@ -108,21 +118,24 @@ func validPlanName(name string) bool {
 // plan is written into a repo-checked-in location, and a `.zero/plans/x.json`
 // symlinked at ~/.ssh/config would otherwise make "save my plan" a file
 // overwrite primitive.
-func SavePlan(dir, name string, plan Plan) (string, error) {
+func SavePlan(root, dir, name string, plan Plan) (string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return "", fmt.Errorf("no directory to save plans in")
 	}
 	if !validPlanName(name) {
 		return "", fmt.Errorf("plan name %q must use only letters, digits, hyphen and underscore, and be at most 64 characters", name)
 	}
-	if err := refuseSymlink(dir); err != nil {
+	handle, relative, err := pathjail.Open(root, dir)
+	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	defer handle.Close()
+	if err := handle.MkdirAll(relative, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, name+planFileExt)
-	if err := refuseSymlink(path); err != nil {
+	relativePath := filepath.Join(relative, name+planFileExt)
+	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
 		return "", err
 	}
 	body, err := json.MarshalIndent(plan.Args(), "", "  ")
@@ -150,11 +163,10 @@ func SavePlan(dir, name string, plan Plan) (string, error) {
 	// The random suffix keeps the ".tmp" extension, and ListPlans matches
 	// planFileExt exactly, so a temp file left by a crash is never listed as a
 	// plan.
-	file, err := os.CreateTemp(dir, name+".*"+planTempExt)
+	file, temp, err := pathjail.CreateTemp(handle, relative, name, planTempExt)
 	if err != nil {
 		return "", fmt.Errorf("create a temporary file in %s: %w", dir, err)
 	}
-	temp := file.Name()
 	// Named before any early return: every failure below has to remove it.
 	writeErr := func() error {
 		if _, err := file.Write(append(body, '\n')); err != nil {
@@ -164,18 +176,14 @@ func SavePlan(dir, name string, plan Plan) (string, error) {
 	}()
 	if writeErr != nil {
 		_ = file.Close()
-		_ = os.Remove(temp)
+		_ = handle.Remove(temp)
 		return "", writeErr
 	}
 	// CreateTemp makes the file 0600 already; this is belt-and-braces against a
 	// umask-sensitive platform, and it runs before the rename so the plan is
 	// never briefly world-readable under its real name.
-	if err := os.Chmod(temp, 0o600); err != nil {
-		_ = os.Remove(temp)
-		return "", fmt.Errorf("set permissions on %s: %w", path, err)
-	}
-	if err := os.Rename(temp, path); err != nil {
-		_ = os.Remove(temp)
+	if err := handle.Rename(temp, relativePath); err != nil {
+		_ = handle.Remove(temp)
 		return "", fmt.Errorf("save %s: %w", path, err)
 	}
 	return path, nil

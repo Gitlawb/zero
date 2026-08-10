@@ -122,7 +122,7 @@ func TestTasksCannotBeUsedToRewriteTheAdmittedPlan(t *testing.T) {
 func TestASavedPlanKeepsTheCallersExecutionDirectives(t *testing.T) {
 	dir := t.TempDir()
 	stored := mustPlan(t, []any{task("a", "x")}, okBudget(), readOnlyLimits())
-	if _, err := SavePlan(dir, "sweep", stored); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", stored); err != nil {
 		t.Fatalf("SavePlan: %v", err)
 	}
 	tool := &OrchestrateTool{Plans: PlanPaths{UserDir: dir}}
@@ -160,7 +160,7 @@ func TestASavedPlanKeepsTheCallersExecutionDirectives(t *testing.T) {
 // asserted too, not just the failure.
 func TestASavedPlanStillRefusesInlineContent(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", savedPlanFixture(t)); err != nil {
 		t.Fatalf("seed the saved plan: %v", err)
 	}
 	tool := &OrchestrateTool{Plans: PlanPaths{UserDir: dir}}

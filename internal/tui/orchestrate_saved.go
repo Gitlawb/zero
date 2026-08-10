@@ -121,7 +121,7 @@ func (m model) savePlanText(name string) string {
 	if err != nil {
 		return planControlNotice("warning", "That plan no longer validates, so it was not saved: "+err.Error())
 	}
-	path, err := specialist.SavePlan(dir, name, plan)
+	path, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, name, plan)
 	if err != nil {
 		return planControlNotice("warning", "Could not save the plan: "+err.Error())
 	}
@@ -444,7 +444,7 @@ func (m model) resumeLastPlan() (tea.Model, tea.Cmd) {
 	if dir == "" {
 		return m.appendPlansNotice(planControlNotice("warning", "There is nowhere to stage the plan in this run.")), nil
 	}
-	if _, err := specialist.SavePlan(dir, resumePlanName, remaining); err != nil {
+	if _, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, resumePlanName, remaining); err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the remaining plan: "+err.Error())), nil
 	}
 	label := planName
@@ -516,7 +516,7 @@ func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 		return m.appendPlansNotice(planControlNotice("warning",
 			"There is nowhere to stage the plan in this run.")), nil
 	}
-	if _, err := specialist.SavePlan(dir, restartPlanName, plan); err != nil {
+	if _, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, restartPlanName, plan); err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the plan: "+err.Error())), nil
 	}
 	label := planName
@@ -595,7 +595,7 @@ func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice
 	// sweep-resume-1, -2, -3 would leave a directory of near-identical plans
 	// nobody can tell apart, and only the newest is ever the right one.
 	resumeName := stored.Name + "_resume"
-	if _, err := specialist.SavePlan(dir, resumeName, remaining); err != nil {
+	if _, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, resumeName, remaining); err != nil {
 		return "", planControlNotice("warning", "Could not stage the remaining plan: "+err.Error()), false
 	}
 	// WHY there is work left, not just how much. A plan that RAN TO THE END with

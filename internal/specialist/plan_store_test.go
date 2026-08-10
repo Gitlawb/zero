@@ -80,13 +80,18 @@ func TestASavedPlanPinsTheDefaultsThatWereInForce(t *testing.T) {
 
 func TestSavedPlansAreWrittenAndListedByScope(t *testing.T) {
 	root := t.TempDir()
-	userDir := filepath.Join(t.TempDir(), "zero", "plans")
-	paths := PlanPaths{ProjectDir: filepath.Join(root, ".zero", "plans"), UserDir: userDir}
+	userRoot := t.TempDir()
+	paths := PlanPaths{
+		ProjectRoot: root,
+		ProjectDir:  filepath.Join(root, ".zero", "plans"),
+		UserRoot:    userRoot,
+		UserDir:     filepath.Join(userRoot, "zero", "plans"),
+	}
 
-	if _, err := SavePlan(paths.ProjectDir, "sweep", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(paths.ProjectRoot, paths.ProjectDir, "sweep", savedPlanFixture(t)); err != nil {
 		t.Fatalf("SavePlan project: %v", err)
 	}
-	if _, err := SavePlan(paths.UserDir, "personal", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(paths.UserRoot, paths.UserDir, "personal", savedPlanFixture(t)); err != nil {
 		t.Fatalf("SavePlan user: %v", err)
 	}
 
@@ -117,15 +122,18 @@ func TestSavedPlansAreWrittenAndListedByScope(t *testing.T) {
 // repo's own plan is the one its contributors get.
 func TestAProjectPlanShadowsAUserPlanOfTheSameName(t *testing.T) {
 	root := t.TempDir()
+	userRoot := t.TempDir()
 	paths := PlanPaths{
-		ProjectDir: filepath.Join(root, ".zero", "plans"),
-		UserDir:    filepath.Join(t.TempDir(), "zero", "plans"),
+		ProjectRoot: root,
+		ProjectDir:  filepath.Join(root, ".zero", "plans"),
+		UserRoot:    userRoot,
+		UserDir:     filepath.Join(userRoot, "zero", "plans"),
 	}
-	if _, err := SavePlan(paths.UserDir, "sweep", mustPlan(t,
+	if _, err := SavePlan(paths.UserRoot, paths.UserDir, "sweep", mustPlan(t,
 		[]any{task("u", "user version")}, okBudget(), readOnlyLimits())); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SavePlan(paths.ProjectDir, "sweep", mustPlan(t,
+	if _, err := SavePlan(paths.ProjectRoot, paths.ProjectDir, "sweep", mustPlan(t,
 		[]any{task("p1", "project"), task("p2", "project")}, okBudget(), readOnlyLimits())); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +156,7 @@ func TestPlanNamesAreAnAllowListAndCannotTraverse(t *testing.T) {
 		"../escape", "..", ".", "a/b", `a\b`, "a b", "a.json", "", strings.Repeat("x", 65),
 		"~/evil", "a;b", "a\x00b",
 	} {
-		if _, err := SavePlan(dir, name, savedPlanFixture(t)); err == nil {
+		if _, err := SavePlan(dir, dir, name, savedPlanFixture(t)); err == nil {
 			t.Errorf("SavePlan accepted %q", name)
 		}
 		if _, err := FindSavedPlan(PlanPaths{ProjectDir: dir}, name); err == nil {
@@ -157,7 +165,7 @@ func TestPlanNamesAreAnAllowListAndCannotTraverse(t *testing.T) {
 	}
 	// ...and the ordinary shapes still work.
 	for _, name := range []string{"sweep", "pre-release", "audit_2", "A1"} {
-		if _, err := SavePlan(dir, name, savedPlanFixture(t)); err != nil {
+		if _, err := SavePlan(dir, dir, name, savedPlanFixture(t)); err != nil {
 			t.Errorf("SavePlan rejected %q: %v", name, err)
 		}
 	}
@@ -179,7 +187,7 @@ func TestSavingRefusesToWriteThroughASymlink(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err == nil {
+	if _, err := SavePlan(dir, dir, "sweep", savedPlanFixture(t)); err == nil {
 		t.Fatal("SavePlan wrote through a symlink")
 	}
 	body, err := os.ReadFile(target)
@@ -196,7 +204,7 @@ func TestSavingRefusesToWriteThroughASymlink(t *testing.T) {
 	if err := os.Symlink(dir, linkedDir); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, err := SavePlan(linkedDir, "other", savedPlanFixture(t)); err == nil {
+	if _, err := SavePlan(base, linkedDir, "other", savedPlanFixture(t)); err == nil {
 		t.Fatal("SavePlan wrote into a symlinked directory")
 	}
 }
@@ -258,7 +266,7 @@ func TestASavedPlanIsRevalidatedAgainstTheRunningLimits(t *testing.T) {
 	plan := mustPlan(t, []any{
 		task("a", "x"), task("b", "y"), task("c", "z"), task("d", "w"), task("e", "v"), task("f", "u"),
 	}, okBudget(), readOnlyLimits())
-	if _, err := SavePlan(dir, "big", plan); err != nil {
+	if _, err := SavePlan(dir, dir, "big", plan); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := FindSavedPlan(PlanPaths{ProjectDir: dir}, "big")
@@ -273,7 +281,7 @@ func TestASavedPlanIsRevalidatedAgainstTheRunningLimits(t *testing.T) {
 	// And a grant it no longer holds is refused too.
 	narrow := mustPlan(t, []any{map[string]any{"id": "a", "prompt": "x", "tools": []any{"grep"}}},
 		okBudget(), readOnlyLimits())
-	if _, err := SavePlan(dir, "narrow", narrow); err != nil {
+	if _, err := SavePlan(dir, dir, "narrow", narrow); err != nil {
 		t.Fatal(err)
 	}
 	storedNarrow, err := FindSavedPlan(PlanPaths{ProjectDir: dir}, "narrow")
@@ -289,7 +297,7 @@ func TestASavedPlanIsRevalidatedAgainstTheRunningLimits(t *testing.T) {
 // second way to run a plan.
 func TestTheToolRunsASavedPlanThroughTheSameValidation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "plans")
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", savedPlanFixture(t)); err != nil {
 		t.Fatal(err)
 	}
 	tool := &OrchestrateTool{Plans: PlanPaths{ProjectDir: dir}}
@@ -311,7 +319,7 @@ func TestTheToolRunsASavedPlanThroughTheSameValidation(t *testing.T) {
 // "run the sweep plan" ran something else while the transcript still said sweep.
 func TestASavedReferenceRefusesInlineOverrides(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "plans")
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", savedPlanFixture(t)); err != nil {
 		t.Fatal(err)
 	}
 	tool := &OrchestrateTool{Plans: PlanPaths{ProjectDir: dir}}
@@ -352,7 +360,7 @@ func TestAnInlinePlanIsUnaffectedBySavedPlans(t *testing.T) {
 // a stored plan must not become a way round the gate.
 func TestASavedPlanCannotRunWithThePostureOff(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "plans")
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", savedPlanFixture(t)); err != nil {
 		t.Fatal(err)
 	}
 	tool := &OrchestrateTool{Plans: PlanPaths{ProjectDir: dir}}
@@ -425,7 +433,7 @@ func TestABundledPlanIsShadowedByOneOnDisk(t *testing.T) {
 	name := bundled[0].Name
 	dir := filepath.Join(t.TempDir(), "plans")
 	mine := mustPlan(t, []any{task("mine", "my own version")}, okBudget(), readOnlyLimits())
-	if _, err := SavePlan(dir, name, mine); err != nil {
+	if _, err := SavePlan(dir, dir, name, mine); err != nil {
 		t.Fatal(err)
 	}
 
@@ -611,7 +619,7 @@ func TestSavingNeverWritesThroughASymlinkedTempFile(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+	if _, err := SavePlan(dir, dir, "sweep", savedPlanFixture(t)); err != nil {
 		t.Fatalf("SavePlan: %v", err)
 	}
 	body, err := os.ReadFile(target)
@@ -639,7 +647,7 @@ func TestConcurrentSavesOfOnePlanDoNotCorruptIt(t *testing.T) {
 		wait.Add(1)
 		go func(i int) {
 			defer wait.Done()
-			_, errs[i] = SavePlan(dir, "sweep", plan)
+			_, errs[i] = SavePlan(dir, dir, "sweep", plan)
 		}(i)
 	}
 	wait.Wait()

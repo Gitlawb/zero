@@ -16,9 +16,12 @@ import (
 func savedPlanModel(t *testing.T) (model, specialist.PlanPaths) {
 	t.Helper()
 	root := t.TempDir()
+	userRoot := t.TempDir()
 	paths := specialist.PlanPaths{
-		ProjectDir: filepath.Join(root, ".zero", "plans"),
-		UserDir:    filepath.Join(t.TempDir(), "zero", "plans"),
+		ProjectRoot: root,
+		ProjectDir:  filepath.Join(root, ".zero", "plans"),
+		UserRoot:    userRoot,
+		UserDir:     filepath.Join(userRoot, "zero", "plans"),
 	}
 	m := model{planProgress: NewPlanProgressBridge(), planPaths: paths}
 	m.planProgress.Attach(func(tea.Msg) {}, 1, nil, "")
@@ -194,7 +197,7 @@ func resumeModel(t *testing.T) (model, specialist.PlanPaths, specialist.Plan) {
 	m.planProgress.Attach(func(tea.Msg) {}, 1, store, session.SessionID)
 
 	plan := samplePlan(t)
-	if _, err := specialist.SavePlan(paths.ProjectDir, "sweep", plan); err != nil {
+	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, "sweep", plan); err != nil {
 		t.Fatalf("SavePlan: %v", err)
 	}
 	return m, paths, plan
@@ -402,7 +405,7 @@ func TestRestartRefusesWhileAPlanIsRunning(t *testing.T) {
 // other.
 func TestRestartIgnoresProgressWhereResumeHonoursIt(t *testing.T) {
 	m, paths, plan := resumeModel(t)
-	if _, err := specialist.SavePlan(paths.ProjectDir, "sweep", plan); err != nil {
+	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, "sweep", plan); err != nil {
 		t.Fatal(err)
 	}
 	m.planProgress.PlanAdmitted(plan)

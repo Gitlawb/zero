@@ -129,7 +129,7 @@ func TestResumeSavedPlanNamesAnEditedTaskInItsNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := specialist.SavePlan(paths.ProjectDir, "sweep", plan); err != nil {
+	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, "sweep", plan); err != nil {
 		t.Fatal(err)
 	}
 

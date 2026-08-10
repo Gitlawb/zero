@@ -12,10 +12,11 @@
 // is nothing here for a second store to contradict.
 //
 // THE SAFETY RULES ARE PLAN_STORE'S, deliberately reused rather than rewritten:
-// an allow-list name that cannot spell a traversal component, symlink refusal on
-// the directory and on the file, and an O_EXCL temp file renamed into place. A
-// note store is a write primitive pointed at a path the model chooses, which is
-// the same shape as "save my plan" and needs the same answers.
+// an allow-list name that cannot spell a traversal component, containment of
+// every operation to a handle on the workspace (internal/pathjail), and an
+// O_EXCL temp file renamed into place. A note store is a write primitive pointed
+// at a path the model chooses, which is the same shape as "save my plan" and
+// needs the same answers.
 package memory
 
 import (
@@ -26,6 +27,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/pathjail"
 )
 
 // Scope is where a note lives, and who else sees it.
@@ -44,6 +47,10 @@ const (
 // meant to be readable by the person whose repo it is sitting in.
 const fileExt = ".md"
 
+// tempExt is what an in-progress write carries. Deliberately not fileExt, so a
+// temp file a crash left behind is never listed as a note.
+const tempExt = ".tmp"
+
 // maxNoteBytes bounds one note. Generous for prose, small enough that a runaway
 // write cannot quietly fill a repo.
 const maxNoteBytes = 64 << 10
@@ -54,18 +61,27 @@ const maxNoteBytes = 64 << 10
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 var (
-	ErrBadName   = errors.New("a memory name may use only letters, digits, hyphen and underscore, and be at most 64 characters")
-	ErrNoStore   = errors.New("memory is not available in this run")
-	ErrTooLarge  = fmt.Errorf("a memory note may be at most %d bytes", maxNoteBytes)
-	ErrNotFound  = errors.New("no such memory")
-	ErrBadScope  = errors.New(`scope must be "project" or "local"`)
-	ErrIsSymlink = errors.New("refusing to write through a symlink")
+	ErrBadName  = errors.New("a memory name may use only letters, digits, hyphen and underscore, and be at most 64 characters")
+	ErrNoStore  = errors.New("memory is not available in this run")
+	ErrTooLarge = fmt.Errorf("a memory note may be at most %d bytes", maxNoteBytes)
+	ErrNotFound = errors.New("no such memory")
+	ErrBadScope = errors.New(`scope must be "project" or "local"`)
+	// ErrIsSymlink is pathjail's refusal, kept under this package's own name so
+	// callers testing for it keep working. It now covers a Windows junction as
+	// well as a symlink, which the old ModeSymlink-only check did not.
+	ErrIsSymlink = pathjail.ErrReparse
 )
 
 // Paths locates the two scopes. An empty directory means that scope is simply
 // unavailable, and a write to it is refused with a reason rather than silently
 // written somewhere else.
 type Paths struct {
+	// Root is the containment boundary. Every operation below is performed
+	// relative to a handle on it, so no component of ProjectDir or LocalDir can
+	// redirect a write or a delete outside the tree. Empty means no store: a
+	// boundary is not optional, because without one the directories below are
+	// just strings the filesystem re-resolves on every syscall.
+	Root       string
 	ProjectDir string
 	LocalDir   string
 }
@@ -77,7 +93,7 @@ func DefaultPaths(workspaceRoot string) Paths {
 		return Paths{}
 	}
 	base := filepath.Join(workspaceRoot, ".zero", "memory")
-	return Paths{ProjectDir: base, LocalDir: filepath.Join(base, "local")}
+	return Paths{Root: workspaceRoot, ProjectDir: base, LocalDir: filepath.Join(base, "local")}
 }
 
 func (paths Paths) dirFor(scope Scope) (string, error) {
@@ -95,6 +111,27 @@ func (paths Paths) dirFor(scope Scope) (string, error) {
 	default:
 		return "", ErrBadScope
 	}
+}
+
+// openScope opens a handle on the containment root and returns the scope's
+// store directory relative to it. The caller closes the handle.
+//
+// Every filesystem operation in this file goes through here. The store used to
+// Lstat its own directory and file and then hand those same strings to
+// MkdirAll, CreateTemp, Rename and Remove, which re-resolve every ancestor: a
+// link anywhere above the store redirected the write, and the checks passed
+// because they were looking at the wrong components. On Windows they also
+// missed a junction outright, since a junction is a reparse point but not a
+// symlink.
+func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
+	dir, err := paths.dirFor(scope)
+	if err != nil {
+		return nil, "", err
+	}
+	if strings.TrimSpace(paths.Root) == "" {
+		return nil, "", ErrNoStore
+	}
+	return pathjail.Open(paths.Root, dir)
 }
 
 // Note is one stored memory.
@@ -122,11 +159,18 @@ func ValidName(name string) bool {
 func List(paths Paths) []Note {
 	var out []Note
 	for _, scope := range []Scope{ScopeProject, ScopeLocal} {
-		dir, err := paths.dirFor(scope)
+		handle, relative, err := paths.openScope(scope)
 		if err != nil {
 			continue
 		}
-		entries, err := os.ReadDir(dir)
+		directory, err := handle.Open(relative)
+		if err != nil {
+			handle.Close()
+			continue
+		}
+		entries, err := directory.ReadDir(-1)
+		directory.Close()
+		handle.Close()
 		if err != nil {
 			continue
 		}
@@ -153,11 +197,15 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 	if !ValidName(name) {
 		return Note{}, ErrBadName
 	}
-	dir, err := paths.dirFor(scope)
+	handle, relative, err := paths.openScope(scope)
 	if err != nil {
 		return Note{}, err
 	}
-	body, err := os.ReadFile(filepath.Join(dir, name+fileExt))
+	defer handle.Close()
+	// Reads are confined too. A note read through a link is an exfiltration
+	// primitive in a tool the model can call by name, which is the same hole as
+	// the write with the arrow reversed.
+	body, err := handle.ReadFile(filepath.Join(relative, name+fileExt))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Note{}, ErrNotFound
@@ -170,10 +218,11 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 
 // Write stores a note, replacing any note of the same name in the same scope.
 //
-// The write path is plan_store's: refuse a symlinked directory or file, create
-// an O_EXCL temp file with an unpredictable name, rename into place. An edit is
-// therefore atomic, and a crash mid-write leaves the previous note rather than a
-// half-written one.
+// Every step runs against a handle on the containment root, so the directory
+// this lands in cannot be changed underneath it: create the tree, refuse a link
+// at the destination, write an O_EXCL temp file with an unpredictable name,
+// rename into place. An edit is therefore atomic, and a crash mid-write leaves
+// the previous note rather than a half-written one.
 func Write(paths Paths, scope Scope, name, description, body string) (string, error) {
 	if !ValidName(name) {
 		return "", ErrBadName
@@ -186,21 +235,23 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	if len(content) > maxNoteBytes {
 		return "", ErrTooLarge
 	}
-	if err := refuseSymlink(dir); err != nil {
+	handle, relative, err := paths.openScope(scope)
+	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	defer handle.Close()
+	if err := handle.MkdirAll(relative, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, name+fileExt)
-	if err := refuseSymlink(path); err != nil {
+	relativePath := filepath.Join(relative, name+fileExt)
+	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
 		return "", err
 	}
-	file, err := os.CreateTemp(dir, name+".*.tmp")
+	file, temp, err := pathjail.CreateTemp(handle, relative, name, tempExt)
 	if err != nil {
 		return "", fmt.Errorf("create a temporary file in %s: %w", dir, err)
 	}
-	temp := file.Name()
 	writeErr := func() error {
 		if _, err := file.WriteString(content); err != nil {
 			return err
@@ -209,15 +260,11 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	}()
 	if writeErr != nil {
 		_ = file.Close()
-		_ = os.Remove(temp)
+		_ = handle.Remove(temp)
 		return "", fmt.Errorf("write %s: %w", path, writeErr)
 	}
-	if err := os.Chmod(temp, 0o600); err != nil {
-		_ = os.Remove(temp)
-		return "", err
-	}
-	if err := os.Rename(temp, path); err != nil {
-		_ = os.Remove(temp)
+	if err := handle.Rename(temp, relativePath); err != nil {
+		_ = handle.Remove(temp)
 		return "", fmt.Errorf("save %s: %w", path, err)
 	}
 	return path, nil
@@ -229,33 +276,19 @@ func Forget(paths Paths, scope Scope, name string) error {
 	if !ValidName(name) {
 		return ErrBadName
 	}
-	dir, err := paths.dirFor(scope)
+	handle, relative, err := paths.openScope(scope)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, name+fileExt)
-	if err := refuseSymlink(path); err != nil {
+	defer handle.Close()
+	// A delete is the sharpest of these: a write lands a file, a delete removes
+	// somebody else's. Same handle, same reason.
+	relativePath := filepath.Join(relative, name+fileExt)
+	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := handle.Remove(relativePath); err != nil && !os.IsNotExist(err) {
 		return err
-	}
-	return nil
-}
-
-// refuseSymlink mirrors plan_store's: Lstat, never Stat, because Stat follows
-// the link and reports the target's kind — which is the whole thing being
-// guarded against.
-func refuseSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("inspect %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s: %w", path, ErrIsSymlink)
 	}
 	return nil
 }
