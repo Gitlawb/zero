@@ -79,6 +79,7 @@ type ToolResult struct {
 	// command execution; callers must not schedule per-file work from them.
 	ChangeSummaries []execution.Change
 	Display         tools.Display
+	Outcome         tools.ToolOutcome
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory
@@ -97,6 +98,24 @@ type ToolResult struct {
 	// for every normal tool result; the Run loop performs the switch when it is
 	// set and Options.ModelSwitcher is wired.
 	RequestedModel string
+}
+
+// ModelOutput returns the bounded provider-facing result while preserving
+// compatibility with synthetic and restored results created before outcomes
+// were finalized.
+func (result ToolResult) ModelOutput() string {
+	if result.Outcome.Finalized() {
+		return result.Outcome.ModelView
+	}
+	return result.Output
+}
+
+// HumanDisplay returns the presentation intended for interactive surfaces.
+func (result ToolResult) HumanDisplay() tools.Display {
+	if result.Outcome.Finalized() {
+		return result.Outcome.HumanView
+	}
+	return result.Display
 }
 
 // DenialCategory classifies why a tool call was blocked before it executed.

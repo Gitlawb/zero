@@ -689,7 +689,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			messages = append(messages, zeroruntime.Message{
 				Role:         zeroruntime.MessageRoleTool,
-				Content:      toolResult.Output,
+				Content:      toolResult.ModelOutput(),
 				ToolCallID:   toolResult.ToolCallID,
 				IsError:      toolResult.Status == tools.StatusError,
 				ChangedFiles: append([]string(nil), toolResult.ChangedFiles...),
@@ -721,7 +721,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
 				messages = append(messages, toolImageMessages...)
-				result.FinalAnswer = toolResult.Output
+				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
 				return result, nil
@@ -734,7 +734,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
-			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.Output)
+			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput())
 			posture.observeToolOutcome(outcome, toolResult)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
@@ -750,7 +750,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				return result, nil
 			}
 			if outcome.InjectHint && failureHint == "" {
-				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.Output)
+				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.ModelOutput())
 			}
 
 			// Collect the files this successful mutating tool changed. Self-correct
@@ -920,6 +920,21 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 func recordOutputBudgetTrace(recorder *trace.Recorder, result ToolResult) {
 	if recorder == nil || result.Meta["output_budget_category"] == "" {
+		return
+	}
+	if result.Outcome.Finalized() {
+		diagnostics := result.Outcome.Diagnostics
+		recorder.EmitOutputBudget(trace.OutputBudgetEvent{
+			Tool:                    result.Name,
+			Category:                diagnostics.Category,
+			OriginalBytes:           diagnostics.OriginalBytes,
+			RetainedBytes:           diagnostics.ModelBytes,
+			EstimatedOriginalTokens: diagnostics.EstimatedOriginalTokens,
+			EstimatedRetainedTokens: diagnostics.EstimatedModelTokens,
+			Truncated:               diagnostics.Truncated,
+			Reason:                  diagnostics.Reason,
+			SpillCreated:            result.Outcome.Artifact != nil,
+		})
 		return
 	}
 	parseInt := func(key string) int {
@@ -1457,14 +1472,15 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ToolCallID:      call.ID,
 		Name:            call.Name,
 		Status:          result.Status,
-		Output:          result.Output,
+		Output:          result.ModelOutput(),
 		Truncated:       result.Truncated,
 		Meta:            result.Meta,
 		Images:          result.Images,
 		Redacted:        result.Redacted,
 		ChangedFiles:    result.ChangedFiles,
 		ChangeSummaries: result.ChangeSummaries,
-		Display:         result.Display,
+		Display:         result.HumanDisplay(),
+		Outcome:         result.Outcome,
 		LoadedTools:     loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
@@ -2061,13 +2077,14 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			ToolCallID:      call.ID,
 			Name:            call.Name,
 			Status:          result.Status,
-			Output:          result.Output,
+			Output:          result.ModelOutput(),
 			Truncated:       result.Truncated,
 			Meta:            result.Meta,
 			Redacted:        result.Redacted,
 			ChangedFiles:    result.ChangedFiles,
 			ChangeSummaries: result.ChangeSummaries,
-			Display:         result.Display,
+			Display:         result.HumanDisplay(),
+			Outcome:         result.Outcome,
 		}
 	}
 	return ToolResult{
