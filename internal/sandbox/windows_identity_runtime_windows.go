@@ -100,7 +100,7 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 		// surface read once — `zero doctor`, which carries the opt-in now.
 		return 0, false, nil
 	}
-	key := windowsSandboxPrincipalKey(config.WorkspaceRoots)
+	key := windowsSandboxPrincipalKey(config)
 	identity, err := lookupWindowsSandboxPrincipalForCommand(key)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
@@ -195,7 +195,7 @@ var windowsSandboxPrincipalNotUsedWarnOnce sync.Once
 // that fails partway leaves a principal that can at least be logged on and
 // therefore cleaned up, rather than an account nothing holds the secret for.
 func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) (windowsSandboxIdentity, bool, error) {
-	key := windowsSandboxPrincipalKey(config.WorkspaceRoots)
+	key := windowsSandboxPrincipalKey(config)
 	identity, password, created, err := provisionWindowsSandboxIdentityFn(key)
 
 	// Undo whatever this run actually did, in reverse, on any failure after the
@@ -310,7 +310,7 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 // naming a SID that no longer resolves, which is the orphaned-entry residue this
 // model exists to avoid.
 func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() error, error) {
-	username := windowsSandboxUserName(windowsSandboxPrincipalKey(config.WorkspaceRoots))
+	username := windowsSandboxUserName(windowsSandboxPrincipalKey(config))
 	// Retire a principal whose grants were never recorded, BEFORE provisioning
 	// adopts it.
 	//
@@ -397,7 +397,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 // there is nothing that could be holding an ACE, so a missing record is simply
 // a machine where setup has not run yet.
 func retireUnrecordedWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) error {
-	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxPrincipalKey(config.WorkspaceRoots))
+	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxPrincipalKey(config))
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			return nil
@@ -412,7 +412,7 @@ func retireUnrecordedWindowsSandboxPrincipal(config WindowsSandboxCommandConfig)
 // then the account itself. Everything keyed to the SID has to go while the SID
 // still resolves.
 func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) error {
-	key := windowsSandboxPrincipalKey(config.WorkspaceRoots)
+	key := windowsSandboxPrincipalKey(config)
 	username := windowsSandboxUserName(key)
 	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, username)
 	if err != nil {
@@ -442,7 +442,7 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	// which is the same orphaned residue the trustee-keyed ACE revocation exists
 	// to avoid. A principal that was never provisioned has no SID to resolve and
 	// nothing to revoke, so that case is not an error.
-	if identity, err := lookupWindowsSandboxIdentity(windowsSandboxPrincipalKey(config.WorkspaceRoots)); err == nil {
+	if identity, err := lookupWindowsSandboxIdentity(windowsSandboxPrincipalKey(config)); err == nil {
 		// ACEs first, for the same reason: once the account is gone its SID stops
 		// resolving and every ACE naming it becomes an orphaned raw-SID entry on
 		// the user's own tree, which is precisely the residue the capability-SID
@@ -774,7 +774,7 @@ func windowsPrincipalRevocationPaths(config WindowsSandboxCommandConfig, princip
 		return nil, err
 	}
 	recorded, _ := readWindowsPrincipalACLLedger(
-		config.SandboxHome, windowsSandboxUserName(windowsSandboxPrincipalKey(config.WorkspaceRoots)))
+		config.SandboxHome, windowsSandboxUserName(windowsSandboxPrincipalKey(config)))
 	return unionWindowsPrincipalACLPaths(recorded, current), nil
 }
 
@@ -812,6 +812,19 @@ func windowsACLPlanPaths(plan WindowsACLPlan) []string {
 	return paths
 }
 
+// windowsCurrentUserSID returns the SID of the user this process runs as, or
+// empty when the token cannot be read. Elevation does not change it: a UAC
+// consent prompt splits the caller's token but keeps the user, so this differs
+// from the caller's SID only when a DIFFERENT account supplied the credentials
+// (over-the-shoulder elevation, or `runas /user:`).
+func windowsCurrentUserSID() string {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return ""
+	}
+	return user.User.Sid.String()
+}
+
 // windowsSandboxPrincipalKey derives the key a principal ACCOUNT is named after,
 // scoped to the invoking user as well as the workspace.
 //
@@ -829,16 +842,28 @@ func windowsACLPlanPaths(plan WindowsACLPlan) []string {
 // paths, so they must continue to serialize against each other even though they
 // now provision separate accounts.
 //
-// Falls back to the workspace-only key when the token user cannot be read. That
-// is the pre-existing behaviour rather than a new failure mode, and refusing to
-// derive a name at all would break setup on a machine whose token query fails
-// for unrelated reasons.
-func windowsSandboxPrincipalKey(workspaceRoots []string) string {
-	workspace := windowsSandboxWorkspaceKey(workspaceRoots)
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
+// The invoking user is config.CallerSID when the caller supplied one, and only
+// then the current process token. Those are the same identity for an ordinary
+// command, which runs as the caller. They are NOT the same inside elevated
+// setup: over-the-shoulder UAC runs the helper as whichever administrator typed
+// the credentials, so sampling its own token here named the account after the
+// administrator while every later command derived the ordinary user's name,
+// found nothing, and fell back to the restricted token — leaving an admin-keyed
+// account, secret and ledger that nothing afterwards would ever reclaim.
+//
+// Falls back to the workspace-only key when neither is available. That is the
+// pre-existing behaviour rather than a new failure mode, and refusing to derive
+// a name at all would break setup on a machine whose token query fails for
+// unrelated reasons.
+func windowsSandboxPrincipalKey(config WindowsSandboxCommandConfig) string {
+	workspace := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
+	sid := strings.TrimSpace(config.CallerSID)
+	if sid == "" {
+		sid = windowsCurrentUserSID()
+	}
+	if sid == "" {
 		return workspace
 	}
-	digest := sha256.Sum256([]byte(workspace + "\x00" + user.User.Sid.String()))
+	digest := sha256.Sum256([]byte(workspace + "\x00" + sid))
 	return hex.EncodeToString(digest[:])
 }
