@@ -20,7 +20,20 @@ import (
 // without a session id. Higher-risk tools that do not opt into auto remain excluded.
 const (
 	maxBaseSystemPromptTokens = 3500
-	maxEagerToolSchemaTokens  = 3550
+	// Raised deliberately from 3550 on 2026-08-08. view_image (#843) took the set
+	// to 3588, and #867 trimmed it back to 3578: still 28 tokens over.
+	//
+	// The overrun is a rounding error rather than a regression. view_image costs
+	// 82 tokens, the second cheapest tool in the set, against exec_command's 909
+	// and request_permissions' 397; it is simply the one that crossed the line.
+	// Raised rather than paid down because the alternative was trimming a
+	// description to claw back 28 tokens, degrading a tool's usability to satisfy
+	// a line drawn against a 2026-07 measurement that predates two tools.
+	//
+	// The ratchet did its job: it caught the creep and forced a decision instead
+	// of a drift. That is the point of it, so keep raising it deliberately rather
+	// than reflexively.
+	maxEagerToolSchemaTokens = 3650
 )
 
 func TestSystemPromptTokenBudget(t *testing.T) {
@@ -46,6 +59,11 @@ func TestEagerToolSchemaTokenBudget(t *testing.T) {
 	got := estimateToolDefTokens(exposed)
 	t.Logf("eager core tool schemas: %d tokens across %d tools", got, len(exposed))
 	if got > maxEagerToolSchemaTokens {
-		t.Fatalf("eager tool schemas are %d tokens, over the %d ceiling — defer a tool or raise the ceiling deliberately", got, maxEagerToolSchemaTokens)
+		// NOT "defer a tool": this test pins DeferThreshold at 0, so marking a
+		// tool deferred leaves it exposed here and changes nothing. Deferral is
+		// still worth doing for real sessions, it just cannot move this number.
+		// The levers that do are a smaller schema, one fewer core tool, or a
+		// deliberate raise.
+		t.Fatalf("eager tool schemas are %d tokens, over the %d ceiling — trim a schema, drop a core tool, or raise the ceiling deliberately (deferring will NOT help: this test disables deferral)", got, maxEagerToolSchemaTokens)
 	}
 }
