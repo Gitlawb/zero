@@ -1099,7 +1099,12 @@ func (m model) Init() tea.Cmd {
 	if m.petAnimation != nil && !m.reducedMotion {
 		cmds = append(cmds, petTickCmd(m.petTickSeq, m.petFrameDelay()))
 	}
-	if m.petPixelProtocolSupported() {
+	// Every image protocol wants this, not just the ones that support pixel
+	// dragging. Sixel needs it most: it erases itself by writing over cells, so
+	// without the pixels-per-cell figure it cannot know how many cells it
+	// covered, and falls back to constants describing the reserved area rather
+	// than the image.
+	if m.petCellMetricsWanted() {
 		cmds = append(cmds, tea.Raw(ansi.WindowOp(16)))
 	}
 	// Bubble Tea documents an initial WindowSizeMsg as delivered automatically

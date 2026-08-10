@@ -484,10 +484,12 @@ func (m model) petImageDraw(content string) *terminalpet.ImageDraw {
 		if !ok {
 			return nil
 		}
+		heightPixels := m.petImageHeightPixels(m.petPreview, terminalpet.Idle, m.petPhase)
+		columns, rows := m.petImageCells(m.petPreview, terminalpet.Idle, m.petPhase, heightPixels)
 		return &terminalpet.ImageDraw{
 			ID: petPreviewImageID, Animation: m.petPreview, State: terminalpet.Idle, Phase: m.petPhase,
-			X: x, Y: y, Columns: petImageColumns, Rows: petImageRows,
-			HeightPixels: m.petImageHeightPixels(m.petPreview, terminalpet.Idle, m.petPhase),
+			X: x, Y: y, Columns: columns, Rows: rows,
+			HeightPixels: heightPixels,
 		}
 	}
 	if !m.petLayoutActive() {
@@ -502,12 +504,55 @@ func (m model) petImageDraw(content string) *terminalpet.ImageDraw {
 		// at the old track's phase.
 		phase = 0
 	}
+	heightPixels := m.petImageHeightPixels(m.petAnimation, m.petState(), phase)
+	columns, rows := m.petImageCells(m.petAnimation, m.petState(), phase, heightPixels)
 	return &terminalpet.ImageDraw{
 		ID: petAmbientImageID, Animation: m.petAnimation, State: m.petState(), Phase: phase,
 		X: x, Y: y, OffsetX: offsetX, OffsetY: offsetY,
-		Columns: petImageColumns, Rows: petImageRows,
-		HeightPixels: m.petImageHeightPixels(m.petAnimation, m.petState(), phase),
+		Columns: columns, Rows: rows,
+		HeightPixels: heightPixels,
 	}
+}
+
+// petImageCells reports the cell footprint to record for an image.
+//
+// For Kitty this is the placement REQUEST, so the constants are the answer: the
+// terminal scales the image into that many cells and owns the region.
+//
+// For sixel it is what will later be ERASED, so it has to describe what was
+// actually painted, and the constants are wrong for that. The rendered height is
+// clamped to preferredHeight, so the true row count is ceil(height/cellHeight),
+// which equals petImageRows only when a cell happens to be exactly 15 pixels
+// tall. At a 20-pixel cell it is 4 rows while the erase blanked 5, taking a row
+// of interface with it every time the companion moved.
+func (m model) petImageCells(animation *terminalpet.Animation, state terminalpet.State, phase, heightPixels int) (int, int) {
+	if m.petRenderer == nil || m.petRenderer.Support().Protocol != terminalpet.ImageProtocolSixel {
+		return petImageColumns, petImageRows
+	}
+	if m.petCellPixelWidth <= 0 || m.petCellPixelHeight <= 0 || heightPixels <= 0 {
+		return petImageColumns, petImageRows
+	}
+	rows := ceilDivInt(heightPixels, m.petCellPixelHeight)
+	columns := petImageColumns
+	if animation != nil {
+		if frame := animation.Frame(state, phase); frame != nil && frame.Bounds().Dy() > 0 && frame.Bounds().Dx() > 0 {
+			widthPixels := heightPixels * frame.Bounds().Dx() / frame.Bounds().Dy()
+			columns = ceilDivInt(widthPixels, m.petCellPixelWidth)
+		}
+	}
+	// Never beyond the reserved area: the layout keeps that many cells clear and
+	// the drag clamps to it, so erasing past it would reach live interface even
+	// when the arithmetic above says the image is larger.
+	return clampInt(columns, 1, petImageColumns), clampInt(rows, 1, petImageRows)
+}
+
+// ceilDivInt rounds up, because a sixel covering part of a cell still dirties
+// the whole cell and the erase has to cover it.
+func ceilDivInt(value, divisor int) int {
+	if divisor <= 0 {
+		return 0
+	}
+	return (value + divisor - 1) / divisor
 }
 
 func (m model) petImageHeightPixels(animation *terminalpet.Animation, state terminalpet.State, phase int) int {
@@ -616,6 +661,34 @@ func (m model) petPixelProtocolSupported() bool {
 
 func (m model) petPixelDragAvailable() bool {
 	return m.petPixelProtocolSupported() && m.petCellPixelWidth > 0 && m.petCellPixelHeight > 0
+}
+
+// petCellMetricsWanted reports whether to ask the terminal for its cell size.
+//
+// Kept SEPARATE from petPixelProtocolSupported, which gates pixel-precise
+// dragging, because the two questions only looked like one. Dragging is a Kitty
+// feature; the measurement is needed by every image protocol, and by sixel most
+// of all.
+//
+// Sixel was excluded from the request, so on a sixel terminal the reply never
+// arrived, petCellPixelHeight stayed zero, petImageHeightPixels fell to its
+// blind preferredHeight, and the erase kept using the petImageColumns and
+// petImageRows constants. Those constants describe the RESERVED area, not what
+// was painted: at a 20-pixel cell a 75-pixel sprite is 4 rows, so the erase
+// blanked a fifth row of live interface every time the companion moved.
+//
+// Windows Terminal answers this request, so it was never a question of terminal
+// support. Nothing asked it.
+func (m model) petCellMetricsWanted() bool {
+	if m.petRenderer == nil {
+		return false
+	}
+	switch m.petRenderer.Support().Protocol {
+	case terminalpet.ImageProtocolKitty, terminalpet.ImageProtocolKittyLocalFile, terminalpet.ImageProtocolSixel:
+		return true
+	default:
+		return false
+	}
 }
 
 func petPixelMouseEnableCmd() tea.Cmd {
