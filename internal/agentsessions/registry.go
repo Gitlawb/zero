@@ -135,7 +135,8 @@ type ImportResult struct {
 // import is a SNAPSHOT of another agent's transcript at a moment in time, and
 // that session may well be continued in its own tool afterwards; a second
 // import is therefore a legitimate second snapshot, not a mistake to be refused.
-// Provenance lives in the tag ("imported:claude-code") and in the title.
+// Provenance lives in the tag ("imported:claude-code:<foreign session id>") and
+// in the title.
 //
 // Nothing is written to the foreign store at any point.
 func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptions) (ImportResult, error) {
@@ -152,7 +153,12 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	}
 
 	created, err := store.Create(sessions.CreateInput{
-		Title:   source.Title,
+		// stripControl, not redact: the title is a foreign-authored label that
+		// becomes a /resume picker row, so its control bytes are the injection
+		// vector (#835/#876). Secret redaction is intentionally left to display,
+		// matching how native titles are handled (createSessionTitle stores the
+		// raw prompt; `zero sessions list` redacts on the way out).
+		Title:   stripControl(source.Title),
 		Cwd:     source.Cwd,
 		ModelID: source.ModelID,
 		Tag:     ImportTag(adapter.Name(), id),

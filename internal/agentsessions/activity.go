@@ -22,9 +22,15 @@ import (
 //
 // This file closes that gap without touching the shared filter: while
 // translating, it records what the tools actually did and emits the result as
-// EventCompaction, a type the filter already passes.
+// an assistant EventMessage, a type the filter already passes.
 //
-// Zero's own compaction was the obvious alternative and is strictly worse here:
+// EventCompaction also passes the filter and was the first choice, but it
+// carries a second contract on the replay side — RehydrateEvents restructures
+// the transcript around the last one — so a summary with no CompactionPayload
+// bookkeeping is hoisted to the front on resume. EventMessage passes the digest
+// with no such side effect; see noteEvent.
+//
+// Zero's own compaction was the other alternative and is strictly worse here:
 // sessions.toolPayloadPreview allow-lists id/name/toolName/status and drops
 // "arguments" and "output", so a compaction summariser learns that a Read failed
 // but never which file or why. At translation time those values are still in
@@ -250,7 +256,7 @@ func firstStringField(fields map[string]any, keys ...string) string {
 	return ""
 }
 
-// summaryEvents renders the log as EventCompaction events, one per category.
+// summaryEvents renders the log as assistant EventMessage events, one per category.
 //
 // Several small events rather than one large one, because the resume digest
 // truncates each event at 500 characters — a single combined summary would lose
