@@ -204,6 +204,22 @@ type PermissionRequest struct {
 	Grant              *sandbox.Grant             `json:"grant,omitempty"`
 	CommandPrefix      []string                   `json:"commandPrefix,omitempty"`
 	AvailableDecisions []PermissionDecisionAction `json:"availableDecisions,omitempty"`
+	// PrefixApprovalEscalates reports that approving a command prefix will also
+	// run the command OUTSIDE the sandbox, not merely stop asking about it.
+	//
+	// It exists because that consequence was real but invisible. Approving a
+	// prefix rewrites the call to sandbox_permissions: require_escalated, which
+	// resolves to a nil engine and genuinely unsandboxed execution, and the
+	// engine's own escalation prompt is then satisfied by the approval just
+	// given for the sandboxed form. So the operator authorized one thing and got
+	// a wider one, having been shown only "allow command prefix for session".
+	//
+	// The escalation itself is deliberate and guarded: proposedCommandPrefix
+	// refuses to offer a prefix while any other segment of the command is not
+	// known-safe, precisely so an unreviewed segment cannot ride out of the
+	// sandbox on it. What was missing was telling the person deciding, so this
+	// surfaces it rather than removing it.
+	PrefixApprovalEscalates bool `json:"prefixApprovalEscalates,omitempty"`
 }
 
 type PermissionDecision struct {
