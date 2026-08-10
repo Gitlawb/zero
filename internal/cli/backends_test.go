@@ -23,7 +23,7 @@ import (
 
 func TestRunBackendsJSONUsesLifecycleSnapshotWithoutConnectingMCP(t *testing.T) {
 	cwd := t.TempDir()
-	secret := "sk-proj-" + strings.Repeat("a", 24)
+	secret := "sk-proj-" + strings.Repeat("a", 23) + "0"
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
@@ -161,7 +161,7 @@ func TestRunBackendsTextAndHelp(t *testing.T) {
 
 func TestRunBackendsDoctorJSONAndTextWithoutConnectingMCP(t *testing.T) {
 	cwd := t.TempDir()
-	secret := "sk-proj-" + strings.Repeat("b", 24)
+	secret := "sk-proj-" + strings.Repeat("b", 23) + "0"
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -67,16 +68,32 @@ var sensitiveKeys = map[string]struct{}{
 	"zero_api_key":          {},
 }
 
+// openaiKeyPattern mirrors secrets.Scan's broad sk- body. Known OpenAI
+// prefixes (sk-proj-/sk-svcacct-/sk-admin-) are always redacted; other sk-
+// digit-free matches with an interior hyphen are left alone (kebab-case false
+// positives), while digit-free legacy sk- credentials are still redacted.
+// Applied via ReplaceAllStringFunc rather than the plain list below.
+var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
+
+// textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
+// shared high-confidence shapes. A leading \b keeps each pattern from firing
+// mid-word; a trailing \b is omitted so a secret followed by more word
+// characters outside its body class (e.g. AKIA…EXAMPLEEXTRA) still matches,
+// and a secret that ends in "-" (allowed by some body classes) is fully
+// redacted rather than leaving the hyphen behind. glpat is redaction-only
+// (not in secrets.Scan); ASIA temporary access keys are kept alongside AKIA.
+// openai keys are handled separately (digit filter). JWT has a strict form
+// (both segments start with eyJ) and a looser three-segment form.
 var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9._-]{12,}\b`),
-	regexp.MustCompile(`\bsk-ant-api\d{2}-[A-Za-z0-9._-]{12,}\b`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{12,}\b`),
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9_]{12,}\b`),
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}\b`),
-	regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{12,}\b`),
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{12,}\b`),
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`),
+	regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
+	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
+	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
+	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
+	regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`),
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 }
 
 var (
@@ -156,9 +173,15 @@ func keyLooksSensitive(normalized string) bool {
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
 	redacted := value
-	for _, secret := range options.ExtraSecretValues {
-		if strings.TrimSpace(secret) != "" {
-			redacted = strings.ReplaceAll(redacted, secret, replacement)
+	if len(options.ExtraSecretValues) > 0 {
+		secrets := append([]string{}, options.ExtraSecretValues...)
+		sort.SliceStable(secrets, func(i, j int) bool {
+			return len(secrets[i]) > len(secrets[j])
+		})
+		for _, secret := range secrets {
+			if strings.TrimSpace(secret) != "" {
+				redacted = strings.ReplaceAll(redacted, secret, replacement)
+			}
 		}
 	}
 
@@ -201,10 +224,37 @@ func RedactString(value string, options Options) string {
 		}
 		return parts[1] + parts[2] + "=" + replacement
 	})
+	// openai keys first so the filter can drop kebab-case false positives
+	// before any other pattern rewrites nearby text.
+	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) &&
+			strings.Contains(strings.TrimPrefix(match, "sk-"), "-") {
+			return match
+		}
+		return replacement
+	})
 	for _, pattern := range textSecretPatterns {
 		redacted = pattern.ReplaceAllString(redacted, replacement)
 	}
 	return redacted
+}
+
+// knownOpenAIKeyPrefix is the redaction-side twin of secrets.knownOpenAIKeyPrefix:
+// known OpenAI-issued forms redact even with an alphabet-only body.
+func knownOpenAIKeyPrefix(match string) bool {
+	return strings.HasPrefix(match, "sk-proj-") ||
+		strings.HasPrefix(match, "sk-svcacct-") ||
+		strings.HasPrefix(match, "sk-admin-")
+}
+
+// secretMatchHasDigit is the redaction-side twin of secrets.containsDigit.
+func secretMatchHasDigit(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func RedactValue(value any, options Options) any {
