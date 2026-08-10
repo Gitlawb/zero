@@ -249,15 +249,16 @@ func TestPrincipalBackendDefersToRestrictedTokenWhenNetworkDenied(t *testing.T) 
 func TestPrincipalKeyIsScopedToTheUserNotOnlyTheWorkspace(t *testing.T) {
 	roots := []string{`C:\ws\shared`}
 	workspace := windowsSandboxWorkspaceKey(roots)
-	principal := windowsSandboxPrincipalKey(roots)
+	config := WindowsSandboxCommandConfig{WorkspaceRoots: roots}
+	principal := windowsSandboxPrincipalKey(config)
 
 	if principal == workspace {
 		t.Fatal("the principal key equals the workspace key, so two users sharing this workspace would derive one account with separate secrets and ledgers")
 	}
-	if principal != windowsSandboxPrincipalKey(roots) {
+	if principal != windowsSandboxPrincipalKey(config) {
 		t.Error("the principal key is not stable for one user, so a second setup would not find its own account")
 	}
-	if other := windowsSandboxPrincipalKey([]string{`C:\ws\other`}); other == principal {
+	if other := windowsSandboxPrincipalKey(WindowsSandboxCommandConfig{WorkspaceRoots: []string{`C:\ws\other`}}); other == principal {
 		t.Error("two workspaces derived the same principal key, so they would share one account")
 	}
 }
@@ -267,7 +268,7 @@ func TestPrincipalKeyIsScopedToTheUserNotOnlyTheWorkspace(t *testing.T) {
 // DACLs on the same paths, so they have to keep serializing against each other.
 func TestSetupLockStaysWorkspaceScoped(t *testing.T) {
 	roots := []string{`C:\ws\shared`}
-	if windowsSandboxWorkspaceKey(roots) == windowsSandboxPrincipalKey(roots) {
+	if windowsSandboxWorkspaceKey(roots) == windowsSandboxPrincipalKey(WindowsSandboxCommandConfig{WorkspaceRoots: roots}) {
 		t.Fatal("the lock key and the principal key are the same, so making the account per-user also made the lock per-user")
 	}
 }

@@ -103,6 +103,32 @@ type WindowsSandboxSetupArgsOptions struct {
 	// map, or a test pinning a value); leave it nil to mean "whatever this shell
 	// says", which is what `zero sandbox setup` and `zero doctor` want.
 	PrincipalOptIn *bool
+	// CallerSID identifies the Windows user setup was invoked BY, serialized into
+	// the args for the same reason PrincipalOptIn is: elevated setup runs in its
+	// own process, and under over-the-shoulder UAC (or `runas`) that process
+	// belongs to a DIFFERENT administrator than the caller.
+	//
+	// Everything a principal needs is scoped to the invoking user — the account
+	// name, its ACL ledger and its DPAPI secret all key off that identity — so a
+	// helper that sampled its own token would provision an account for the
+	// administrator who typed the credentials while every later command looked for
+	// one named after the ordinary user, found nothing, fell back to the restricted
+	// token, and left an admin-keyed account nothing would ever reclaim.
+	//
+	// Empty means "resolve from the process building the args", which IS the
+	// caller: these args are built before the UAC boundary is crossed.
+	CallerSID string
+}
+
+// callerSID resolves the invoking user, in the caller's own process, before the
+// args cross the UAC boundary. Empty when the token cannot be read (and on
+// non-Windows builds), which leaves the elevated helper on its pre-existing
+// behaviour of sampling its own token rather than inventing an identity.
+func (options WindowsSandboxSetupArgsOptions) callerSID() string {
+	if sid := strings.TrimSpace(options.CallerSID); sid != "" {
+		return sid
+	}
+	return windowsCurrentUserSID()
 }
 
 // principalOptIn resolves the tri-state. It runs inside
@@ -122,6 +148,10 @@ type WindowsSandboxSetupConfig struct {
 	WorkspaceRoots    []string
 	PermissionProfile PermissionProfile
 	PrincipalOptIn    bool
+	// CallerSID is the invoking user this setup is provisioning FOR. See
+	// WindowsSandboxSetupArgsOptions.CallerSID. Empty means the caller did not
+	// say, and the helper falls back to its own token.
+	CallerSID string
 }
 
 type WindowsSandboxSetupMarker struct {
@@ -187,6 +217,12 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 		// nothing", and only the first of those is safe to run silently.
 		"--sandbox-principal", windowsSandboxPrincipalOptInValue(options.principalOptIn()),
 	}
+	// Omitted rather than sent empty when the caller's identity cannot be read:
+	// absence means "this caller did not say", which the helper answers by
+	// sampling its own token exactly as it did before this flag existed.
+	if callerSID := options.callerSID(); callerSID != "" {
+		args = append(args, "--caller-sid", callerSID)
+	}
 	for _, root := range workspaceRoots {
 		args = append(args, "--workspace-root", root)
 	}
@@ -247,6 +283,13 @@ func ParseWindowsSandboxSetupArgs(args []string) (WindowsSandboxSetupConfig, err
 				return WindowsSandboxSetupConfig{}, fmt.Errorf("invalid --sandbox-principal %q, want 0 or 1", value)
 			}
 			index = next
+		case "--caller-sid":
+			value, next, err := nextWindowsSandboxFlagValue(args, index)
+			if err != nil {
+				return WindowsSandboxSetupConfig{}, err
+			}
+			config.CallerSID = strings.TrimSpace(value)
+			index = next
 		default:
 			return WindowsSandboxSetupConfig{}, fmt.Errorf("unknown windows sandbox setup flag %q", arg)
 		}
@@ -292,6 +335,10 @@ func (config WindowsSandboxSetupConfig) commandConfig() WindowsSandboxCommandCon
 		PermissionProfile: config.PermissionProfile,
 		Env:               map[string]string{windowsSandboxIdentityEnv: windowsSandboxPrincipalOptInValue(config.PrincipalOptIn)},
 		SandboxLevel:      WindowsSandboxLevelRestrictedToken,
+		// Carried through for the same reason as the opt-in above: every principal
+		// name, ledger and secret path the setup half plans is derived from the
+		// invoking user, and that is the caller's identity, not this process's.
+		CallerSID: config.CallerSID,
 	}
 }
 
@@ -305,6 +352,7 @@ func WindowsSandboxSetupConfigFromCommand(config WindowsSandboxCommandConfig) Wi
 		WorkspaceRoots:    cloneStrings(config.WorkspaceRoots),
 		PermissionProfile: config.PermissionProfile,
 		PrincipalOptIn:    windowsSandboxIdentityEnabled(config.Env),
+		CallerSID:         config.CallerSID,
 	}
 }
 
