@@ -43,8 +43,14 @@ func TestTheKeepPreferenceSeedsTheAgentsPanel(t *testing.T) {
 	}
 }
 
-// The click-toggle round-trips through config, so a UI choice survives restart —
-// the same contract /recaps has.
+// The click-toggle round-trips through the WRITER, so a UI choice reaches disk
+// and reads back.
+//
+// That is half the contract. Surviving a restart also needs the key to survive
+// config.Resolve, which this never calls, so it stayed green while mergeConfig
+// silently dropped the preference on every launch. The other half is pinned by
+// TestKeepFinishedAgentsSurvivesResolve in internal/config, next to the merge it
+// is about.
 func TestTogglingKeepFinishedAgentsPersists(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.json"
