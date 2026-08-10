@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -398,8 +399,16 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	path = normalizeProfilePath(path)
+	if !slices.Contains(protectedCredentialPaths(), path) {
+		path = normalizeProfilePath(path)
+	}
 	if path == "" {
+		return args
+	}
+	// Bubblewrap cannot mount over a symlink destination. Protected daemon-token
+	// paths include both the lexical link and its resolved target; the target is
+	// materialized by its own entry, while Seatbelt can still deny both names.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return args
 	}
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {

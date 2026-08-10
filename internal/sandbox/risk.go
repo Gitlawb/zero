@@ -261,7 +261,40 @@ func applyPatchRequestPaths(args map[string]any) []string {
 	}
 	cwd := firstArgString(args, "cwd")
 	var paths []string
-	for _, path := range applyPatchPaths(patch) {
+1: 	for _, path := range PatchHeaderPaths(patch) {
+2: 	for _, path := range PatchHeaderPaths(patch) {
+3: // PatchHeaderPaths returns every source and destination path declared by a
+// patch. Keeping this parser shared with apply_patch ensures the sandbox gate
+// and the tool's own path validation agree on what the executor will read or write.
+func PatchHeaderPaths(patch string) []string {
+	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
+		return structuredPatchHeaderPaths(patch)
+	}
+	return patchHeaderPaths(patch)
+}
+
+// structuredPatchHeaderPaths is intentionally a small, conservative scanner for
+// the sandbox boundary. The executor validates the complete hunk grammar before
+// writing; the sandbox only needs every possible target path so it can reject an
+// unsafe request before the tool runs.
+func structuredPatchHeaderPaths(patch string) []string {
+	var paths []string
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "} {
+			if path, ok := strings.CutPrefix(trimmed, prefix); ok {
+				path = strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(path)), "\\", "/")
+				if path != "" {
+					paths = append(paths, path)
+				}
+				break
+			}
+		}
+	}
+	return paths
+}
+
+func patchHeaderPaths(patch string) []string {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -281,7 +314,40 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	if patch == "" {
 		return nil
 	}
-	for _, path := range applyPatchPaths(patch) {
+1: 	for _, path := range PatchHeaderPaths(patch) {
+2: 	for _, path := range PatchHeaderPaths(patch) {
+3: // PatchHeaderPaths returns every source and destination path declared by a
+// patch. Keeping this parser shared with apply_patch ensures the sandbox gate
+// and the tool's own path validation agree on what the executor will read or write.
+func PatchHeaderPaths(patch string) []string {
+	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
+		return structuredPatchHeaderPaths(patch)
+	}
+	return patchHeaderPaths(patch)
+}
+
+// structuredPatchHeaderPaths is intentionally a small, conservative scanner for
+// the sandbox boundary. The executor validates the complete hunk grammar before
+// writing; the sandbox only needs every possible target path so it can reject an
+// unsafe request before the tool runs.
+func structuredPatchHeaderPaths(patch string) []string {
+	var paths []string
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "} {
+			if path, ok := strings.CutPrefix(trimmed, prefix); ok {
+				path = strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(path)), "\\", "/")
+				if path != "" {
+					paths = append(paths, path)
+				}
+				break
+			}
+		}
+	}
+	return paths
+}
+
+func patchHeaderPaths(patch string) []string {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -296,7 +362,12 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	return nil
 }
 
-func applyPatchPaths(patch string) []string {
+1: 	for _, path := range PatchHeaderPaths(patch) {
+2: 	for _, path := range PatchHeaderPaths(patch) {
+3: // PatchHeaderPaths returns every source and destination path declared by a
+// patch. Keeping this parser shared with apply_patch ensures the sandbox gate
+// and the tool's own path validation agree on what the executor will read or write.
+func PatchHeaderPaths(patch string) []string {
 	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
 		return structuredPatchHeaderPaths(patch)
 	}
@@ -345,21 +416,176 @@ func patchHeaderPaths(patch string) []string {
 		inHunk = false
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
-			fields := strings.Fields(line)
-			if len(fields) >= 4 {
-				paths = append(paths, stripPatchPrefix(fields[2]), stripPatchPrefix(fields[3]))
+			if source, destination, ok := parseDiffGitPaths(line[len("diff --git "):]); ok {
+				paths = append(paths, stripPatchPrefix(source), stripPatchPrefix(destination))
+			}
+		case strings.HasPrefix(line, "copy from "):
+			if path, ok := parseExtendedGitPath(line[len("copy from "):]); ok {
+				paths = append(paths, filepath.ToSlash(path))
+			}
+		case strings.HasPrefix(line, "copy to "):
+			if path, ok := parseExtendedGitPath(line[len("copy to "):]); ok {
+				paths = append(paths, filepath.ToSlash(path))
+			}
+		case strings.HasPrefix(line, "rename from "):
+			if path, ok := parseExtendedGitPath(line[len("rename from "):]); ok {
+				paths = append(paths, filepath.ToSlash(path))
+			}
+		case strings.HasPrefix(line, "rename to "):
+			if path, ok := parseExtendedGitPath(line[len("rename to "):]); ok {
+				paths = append(paths, filepath.ToSlash(path))
+			}
+		case strings.HasPrefix(line, "rename old "):
+			if path, ok := parseExtendedGitPath(line[len("rename old "):]); ok {
+				paths = append(paths, filepath.ToSlash(path))
+			}
+		case strings.HasPrefix(line, "rename new "):
+			if path, ok := parseExtendedGitPath(line[len("rename new "):]); ok {
+				paths = append(paths, filepath.ToSlash(path))
 			}
 		case strings.HasPrefix(line, "@@"):
 			oldRemaining, newRemaining = parsePatchHunkCounts(line)
 			inHunk = oldRemaining > 0 || newRemaining > 0
 		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				paths = append(paths, stripPatchPrefix(fields[1]))
+			if path := patchFileHeaderPath(line); path != "" {
+				paths = append(paths, stripPatchPrefix(path))
 			}
 		}
 	}
 	return paths
+}
+
+func parseDiffGitPaths(line string) (string, string, bool) {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "\"") {
+		source, rest, ok := consumeGitPath(line)
+		if !ok {
+			return "", "", false
+		}
+		destination, ok := parseWholeGitPath(rest)
+		return source, destination, ok
+	}
+
+	// When only the destination is quoted, its opening quote uniquely separates
+	// the two operands even if the unquoted source contains ordinary spaces.
+	for separator := strings.Index(line, " \""); separator >= 0; {
+		if destination, ok := parseWholeGitPath(line[separator+1:]); ok {
+			return line[:separator], destination, true
+		}
+		next := strings.Index(line[separator+1:], " \"")
+		if next < 0 {
+			break
+		}
+		separator += next + 1
+	}
+
+	// Git commonly leaves ordinary spaces unquoted. For a non-rename diff, the
+	// synthetic a/ and b/ operands name the same path, which identifies the split
+	// without treating a filename space as an operand separator.
+	for separator := 0; separator < len(line); {
+		next := strings.IndexByte(line[separator:], ' ')
+		if next < 0 {
+			break
+		}
+		separator += next
+		source, destination := line[:separator], strings.TrimLeft(line[separator:], " ")
+		if strings.HasPrefix(source, "a/") && strings.HasPrefix(destination, "b/") && source[2:] == destination[2:] {
+			return source, destination, true
+		}
+		separator++
+	}
+
+	// Different unquoted names are disambiguated by the copy/rename headers. Keep
+	// the simple no-space form for ordinary diffs with distinct path operands.
+	fields := strings.Fields(line)
+	if len(fields) == 2 {
+		return fields[0], fields[1], true
+	}
+	return "", "", false
+}
+
+func parseWholeGitPath(input string) (string, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", false
+	}
+	if input[0] != '"' {
+		return input, true
+	}
+	path, rest, ok := consumeGitPath(input)
+	return path, ok && strings.TrimSpace(rest) == ""
+}
+
+// Extended copy/rename headers consume the whole unquoted remainder as the
+// pathname, including leading spaces. For a C-quoted name Git consumes the
+// first complete quoted string, so trailing header text is not pathname data.
+func parseExtendedGitPath(input string) (string, bool) {
+	if input == "" {
+		return "", false
+	}
+	if input[0] != '"' {
+		return input, true
+	}
+	path, _, ok := consumeGitPath(input)
+	return path, ok
+}
+
+// consumeGitPath reads one diff --git path operand. Git uses C-style quoted
+// strings for paths containing characters that need escaping; strconv.Unquote
+// handles its escaped quotes, backslashes, control characters, and octal bytes.
+func consumeGitPath(input string) (string, string, bool) {
+	input = strings.TrimLeft(input, " \t")
+	if input == "" {
+		return "", "", false
+	}
+	if input[0] != '"' {
+		end := strings.IndexAny(input, " \t")
+		if end < 0 {
+			return input, "", true
+		}
+		return input[:end], input[end:], true
+	}
+
+	escaped := false
+	for i := 1; i < len(input); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[i] == '\\':
+			escaped = true
+		case input[i] == '"':
+			path, err := strconv.Unquote(input[:i+1])
+			if err != nil {
+				return "", "", false
+			}
+			return path, input[i+1:], true
+		}
+	}
+	return "", "", false
+}
+
+// patchFileHeaderPath mirrors the apply_patch parser's handling of unified-diff
+// file headers: paths may be C-quoted and may contain spaces, while an optional
+// timestamp is separated by a tab.
+//
+// Only the tab is header formatting. Git's own parser takes every remaining byte
+// of an unquoted operand as pathname data, so a name with a leading or trailing
+// space is written verbatim; trimming here would make the token gate evaluate
+// `bridge-token` while git patches the live `bridge-token ` beside it.
+func patchFileHeaderPath(line string) string {
+	rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
+	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
+		rest = rest[:tab]
+	}
+	if strings.HasPrefix(rest, `"`) {
+		// A quoted operand ends at its closing quote; git allows nothing but the
+		// (already removed) timestamp after it, so a trailing remainder means the
+		// line is not the quoted form and the raw bytes are the pathname.
+		if path, remainder, ok := consumeGitPath(rest); ok && remainder == "" {
+			return path
+		}
+	}
+	return rest
 }
 
 func parsePatchHunkCounts(line string) (int, int) {
@@ -394,7 +620,6 @@ func patchHunkCount(spec string) int {
 }
 
 func stripPatchPrefix(path string) string {
-	path = strings.TrimSpace(path)
 	if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {
 		path = path[2:]
 	}

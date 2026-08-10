@@ -228,8 +228,15 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	if request.ValidateExecution && preference == SandboxPreferenceRequire && backend.SupportLevel() != BackendSupportNative {
 		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
-	if request.ValidateExecution && preference != SandboxPreferenceForbid && backend.SupportLevel() != BackendSupportNative && policyHasExplicitDeny(policy) {
-		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny_read or deny_write rules cannot be enforced")
+	protectedCredentials := protectedCredentialPaths()
+	protectedCredentialNeedsNative := policy.Mode != ModeDisabled && len(protectedCredentials) > 0
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && backend.SupportLevel() != BackendSupportNative &&
+		(policyHasExplicitDeny(policy) || protectedCredentialNeedsNative) {
+		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny rules or protected credentials cannot be enforced")
+	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "darwin" &&
+		protectedCredentialInWritableMacOSRoot(profile, protectedCredentials) {
+		return SandboxExecutionRequest{}, errors.New("macOS sandbox cannot protect the remote token file inside a shell-writable root; move the token file outside the workspace and temporary directories")
 	}
 	// Windows: the FULL OS sandbox needs a one-time elevated `zero sandbox setup`
 	// (it applies WFP network filters + workspace ACLs and writes a marker).
@@ -288,6 +295,56 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 
 func policyHasExplicitDeny(policy Policy) bool {
 	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
+}
+
+func protectedCredentialInWritableMacOSRoot(profile PermissionProfile, protected []string) bool {
+	if len(protected) == 0 {
+		return false
+	}
+	if profile.FileSystem.Kind == FileSystemUnrestricted {
+		return true
+	}
+	if profile.FileSystem.Kind != FileSystemRestricted {
+		return false
+	}
+	writeRoots := make([]string, 0, len(profile.FileSystem.WriteRoots)+len(sandboxWritableSubpaths))
+	for _, root := range profile.FileSystem.WriteRoots {
+		writeRoots = append(writeRoots, normalizeProfilePath(root.Root))
+	}
+	if profile.FileSystem.AllowTemp {
+		writeRoots = append(writeRoots, normalizeProfilePaths(sandboxWritableSubpaths)...)
+	}
+	for _, credential := range protected {
+		credential = filepath.Clean(credential)
+		if credential == "." || credential == "" {
+			continue
+		}
+		for _, root := range writeRoots {
+			if pathWithinMacOSRoot(root, credential) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathWithinMacOSRoot(root, candidate string) bool {
+	if pathWithinRoot(root, candidate) || pathWithinRoot(strings.ToLower(root), strings.ToLower(candidate)) {
+		return true
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return false
+	}
+	for current := candidate; ; current = filepath.Dir(current) {
+		if info, err := os.Stat(current); err == nil && os.SameFile(rootInfo, info) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+	}
 }
 
 func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest) (CommandPlan, error) {

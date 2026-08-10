@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 type applyPatchTool struct {
@@ -88,7 +90,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	if options.FileTracker != nil {
 		createdTargets = missingPatchTargets(applyRoot, patch)
 		fullySuppliedTargets = completeCreatedPatchTargets(applyRoot, patch)
-		for _, path := range patchHeaderPaths(patch) {
+		for _, path := range sandbox.PatchHeaderPaths(patch) {
 			if path == "" || path == "/dev/null" {
 				continue
 			}
@@ -147,7 +149,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 func missingPatchTargets(root string, patch string) []string {
 	seen := map[string]bool{}
 	var missing []string
-	for _, path := range patchHeaderPaths(patch) {
+	for _, path := range sandbox.PatchHeaderPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -243,7 +245,7 @@ func recordCreatedPatchTargets(tracker *FileTracker, missingBefore []string) {
 func changedFilesFromPatch(relativeRoot string, patch string) []string {
 	seen := map[string]bool{}
 	var paths []string
-	for _, path := range patchHeaderPaths(patch) {
+	for _, path := range sandbox.PatchHeaderPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -261,7 +263,7 @@ func changedFilesFromPatch(relativeRoot string, patch string) []string {
 }
 
 func validatePatchPaths(root string, patch string) error {
-	for _, path := range patchHeaderPaths(patch) {
+	for _, path := range sandbox.PatchHeaderPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -276,7 +278,7 @@ func validatePatchPaths(root string, patch string) error {
 }
 
 func recheckPatchWriteTargets(root string, patch string) error {
-	for _, path := range patchHeaderPaths(patch) {
+	for _, path := range sandbox.PatchHeaderPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -285,50 +287,6 @@ func recheckPatchWriteTargets(root string, patch string) error {
 		}
 	}
 	return nil
-}
-
-// patchHeaderPaths returns the file paths declared in a unified diff's headers
-// (`diff --git` and `---`/`+++` lines). It tracks hunk state by counting body
-// lines from each `@@ -a,b +c,d @@` header, so a removed/added content line that
-// merely begins with "--- "/"+++ " (e.g. the removal of a markdown line "-- x")
-// is NOT mistaken for a file header. This mirrors how `git apply` parses hunks,
-// so a line this skips is content git won't write to either — no security gap.
-func patchHeaderPaths(patch string) []string {
-	var paths []string
-	oldRemaining, newRemaining := 0, 0
-	inHunk := false
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
-		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
-			switch {
-			case strings.HasPrefix(line, "-"):
-				oldRemaining--
-			case strings.HasPrefix(line, "+"):
-				newRemaining--
-			case strings.HasPrefix(line, "\\"):
-				// "\ No newline at end of file" — not a content line.
-			default: // context line (" ...") or a blank context line
-				oldRemaining--
-				newRemaining--
-			}
-			continue
-		}
-		inHunk = false
-		switch {
-		case strings.HasPrefix(line, "diff --git "):
-			fields := strings.Fields(line)
-			if len(fields) >= 4 {
-				paths = append(paths, stripPatchPrefix(fields[2]), stripPatchPrefix(fields[3]))
-			}
-		case strings.HasPrefix(line, "@@"):
-			oldRemaining, newRemaining = parseHunkCounts(line)
-			inHunk = oldRemaining > 0 || newRemaining > 0
-		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			if p := patchFileHeaderPath(line); p != "" && p != "/dev/null" {
-				paths = append(paths, stripPatchPrefix(p))
-			}
-		}
-	}
-	return paths
 }
 
 func patchFileHeaderPath(line string) string {

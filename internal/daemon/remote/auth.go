@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/daemon"
@@ -66,13 +67,30 @@ func (a *TokenAuthenticator) Authenticate(token string) error {
 	return ErrUnauthorized
 }
 
+// TokenFilePathFromEnv returns the configured token-file pointer exactly as the
+// operator set it, or "" when the variable is unset or holds only whitespace.
+//
+// The value is a PATHNAME, and every consumer of it — os.ReadFile here, the
+// canonicalization below, the sandbox's protected-credential list — must agree
+// on which bytes name the file. A filename may legitimately begin or end with a
+// space, so trimming the value would make this boundary read one file while the
+// deny rules protect another. A value that is only whitespace still reads as
+// unset, which is what a blank variable means.
+func TokenFilePathFromEnv() string {
+	configured := os.Getenv(EnvTokenFile)
+	if strings.TrimSpace(configured) == "" {
+		return ""
+	}
+	return configured
+}
+
 // TokenFromEnv resolves the bridge token from EnvToken, or a file named by
 // EnvTokenFile. It never logs the token.
 func TokenFromEnv() (string, error) {
 	if t := strings.TrimSpace(os.Getenv(EnvToken)); t != "" {
 		return t, nil
 	}
-	if file := strings.TrimSpace(os.Getenv(EnvTokenFile)); file != "" {
+	if file := TokenFilePathFromEnv(); file != "" {
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return "", fmt.Errorf("remote: read token file: %w", err)
@@ -84,6 +102,47 @@ func TokenFromEnv() (string, error) {
 		return t, nil
 	}
 	return "", fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
+}
+
+// CanonicalizeTokenFileEnv rewrites EnvTokenFile in this process's environment
+// to the absolute, symlink-resolved path TokenFromEnv actually reads, so every
+// child process — and the sandbox profile derived for it — refers to the same
+// file this bridge authenticated against. `zero daemon serve-remote` calls it
+// before it starts serving.
+//
+// Two mismatches motivate it. TokenFromEnv passes the value to os.ReadFile, so a
+// relative value resolves against the STARTING process's working directory,
+// while a worker inherits the same string and resolves it against its own
+// session directory — the profile would then protect a path that holds no token
+// while the real bearer file stays readable. Resolving symlinks up front also
+// keeps a link pathname out of the derived deny rules, which matters because
+// bubblewrap cannot mount over a symlink destination.
+//
+// It is a deliberate no-op when EnvToken supplies the token: TokenFromEnv
+// prefers the inline value, so an unused (even dangling) file pointer must not
+// change the outcome or fail the start.
+func CanonicalizeTokenFileEnv() error {
+	if strings.TrimSpace(os.Getenv(EnvToken)) != "" {
+		return nil
+	}
+	configured := TokenFilePathFromEnv()
+	if configured == "" {
+		return nil
+	}
+	absolute, err := filepath.Abs(configured)
+	if err != nil {
+		return fmt.Errorf("remote: resolve token file %q: %w", configured, err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		// TokenFromEnv would fail on the same path a moment later; reporting it here
+		// names the resolution step that failed.
+		return fmt.Errorf("remote: resolve token file %q: %w", configured, err)
+	}
+	if resolved == configured {
+		return nil
+	}
+	return os.Setenv(EnvTokenFile, resolved)
 }
 
 // Attestation is an optional post-token hook (e.g. workload attestation). The

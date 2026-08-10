@@ -263,6 +263,126 @@ func TestSandboxManagerDegradesUnavailableCommandPlan(t *testing.T) {
 	}
 }
 
+func TestSandboxManagerRejectsUnavailableBackendForProtectedToken(t *testing.T) {
+	workspace, _ := protectedTokenFixture(t)
+	policy := DefaultPolicy()
+	backend := Backend{Name: BackendUnavailable, Platform: "linux", Fallback: true, Message: "native sandbox unavailable"}
+	_, err := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "protected credentials cannot be enforced") {
+		t.Fatalf("BuildCommandPlan error = %v, want protected-credential enforcement failure", err)
+	}
+}
+
+func TestSandboxManagerRejectsMacOSTokenInsideWritableWorkspace(t *testing.T) {
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, "/workspace/bridge-token")
+	workspace := "/workspace"
+	policy := DefaultPolicy()
+	backend := Backend{
+		Name:            BackendMacOSSeatbelt,
+		Available:       true,
+		Executable:      "/usr/bin/sandbox-exec",
+		Platform:        "darwin",
+		CommandWrapping: true,
+		NativeIsolation: true,
+	}
+	_, err := NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "inside a shell-writable root") {
+		t.Fatalf("BuildCommandPlan error = %v, want macOS writable-token failure", err)
+	}
+}
+
+func TestProtectedCredentialInWritableMacOSRootMatchesSeatbeltWrites(t *testing.T) {
+	restricted := PermissionProfile{FileSystem: FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: "/Users/Test/Workspace"}},
+	}}
+	if !protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/users/test/workspace/token")}) {
+		t.Fatal("case-variant token under a macOS write root should be rejected")
+	}
+	if protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/Users/Test/Credentials/token")}) {
+		t.Fatal("token outside every macOS write root should remain allowed")
+	}
+	restricted.FileSystem.AllowTemp = true
+	if !protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/private/tmp/bridge-token")}) {
+		t.Fatal("token under an allowed temporary root should be rejected")
+	}
+	unrestricted := PermissionProfile{FileSystem: FileSystemPolicy{Kind: FileSystemUnrestricted}}
+	if !protectedCredentialInWritableMacOSRoot(unrestricted, []string{"/credentials/token"}) {
+		t.Fatal("an unrestricted macOS filesystem makes every token path shell-writable")
+	}
+
+	writable := t.TempDir()
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "token")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(writable, "token-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	symlinkProfile := PermissionProfile{FileSystem: FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: writable}},
+	}}
+	if !protectedCredentialInWritableMacOSRoot(symlinkProfile, []string{link, target}) {
+		t.Fatal("selected symlink inside a write root must be rejected even when its target is outside")
+	}
+}
+
+func TestSandboxManagerLeavesProtectedTokenShellOpenWhenSandboxDisabled(t *testing.T) {
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, "/workspace/bridge-token")
+	policy := DefaultPolicy()
+	policy.Mode = ModeDisabled
+	backend := Backend{Name: BackendUnavailable, Platform: "darwin", Fallback: true, Message: "native sandbox unavailable"}
+	request, err := NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildExecutionRequest disabled policy: %v", err)
+	}
+	if request.EnforcementLevel != EnforcementDisabled || request.CommandWrapped {
+		t.Fatalf("disabled request = %#v, want intentionally open shell", request)
+	}
+
+	policy = DefaultPolicy()
+	request, err = NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceForbid,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildExecutionRequest forbidden sandbox preference: %v", err)
+	}
+	if request.EnforcementLevel != EnforcementDisabled || request.CommandWrapped {
+		t.Fatalf("forbidden-sandbox request = %#v, want intentionally open shell", request)
+	}
+}
+
 func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -454,12 +574,17 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	daemonTokenFile := filepath.Join(home, "daemon-token")
+	if err := os.WriteFile(daemonTokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	options := credentialPathOptions{
 		Homes:              []string{home},
 		ConfigDirs:         []string{configDir},
 		CloudSDKConfigDirs: []string{gcloudDir},
 		GoogleCredentials:  []string{keyFile},
+		DaemonTokenFiles:   []string{daemonTokenFile},
 		NPMUserConfigs:     []string{npmrc},
 		GHConfigDirs:       []string{filepath.Dir(ghHosts)},
 		Netrcs:             []string{netrc},
@@ -474,6 +599,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		awsDir,
 		gcloudDir,
 		keyFile,
+		daemonTokenFile,
 		npmrc,
 		ghHosts,
 		netrc,
@@ -533,7 +659,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 
 	// An explicit AllowRead entry covering a store is an opt-out.
-	optedOut := credentialDenyReadPathsIn(options, []string{awsDir, zeroDir})
+	optedOut := credentialDenyReadPathsIn(options, []string{awsDir, zeroDir, daemonTokenFile})
 	if stringSliceContains(optedOut.Paths, normalizeProfilePaths([]string{awsDir})[0]) {
 		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut.Paths)
 	}
@@ -549,6 +675,13 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 	if stringSliceContains(optedOut.Carveouts, normalizeProfilePaths([]string{filepath.Join(zeroDir, "plugins")})[0]) {
 		t.Errorf("credential carveouts = %#v, want no allow-back inside an opted-out deny", optedOut.Carveouts)
+	}
+	// The bridge bearer token is the exception: the in-process tool boundary
+	// (protectedCredentialPaths) refuses to re-include it through AllowRead, so
+	// the OS-sandbox profile must not either — otherwise the guarantee would
+	// depend on whether a wrapped shell command or a built-in tool reads it.
+	if !stringSliceContains(optedOut.Paths, normalizeProfilePaths([]string{daemonTokenFile})[0]) {
+		t.Errorf("credential deny paths = %#v, want the daemon token file denied despite AllowRead", optedOut.Paths)
 	}
 
 	if got := credentialDenyReadPathsIn(credentialPathOptions{}, nil); len(got.Paths) != 0 {
@@ -1569,6 +1702,50 @@ func TestPermissionProfileIncludesZeroCredentialPaths(t *testing.T) {
 	}
 }
 
+// TestPermissionProfileDeniesAbsentDaemonTokenFile covers the window an external
+// secret rotation opens: the token file is gone, but the pathname is still the
+// one the next `serve-remote` start will read. Existence-filtering it out of the
+// profile would let a sandboxed process recreate it with an attacker-chosen
+// bearer, so the mandatory entry survives the file's absence for backend
+// enforcement.
+func TestPermissionProfileDeniesAbsentDaemonTokenFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read paths are disabled on Windows pending the ACL model")
+	}
+	workspace := t.TempDir()
+	tokenFile := filepath.Join(workspace, "daemon-token")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, tokenFile)
+
+	// Rotation removes the file after the bridge has already loaded its token.
+	if err := os.Remove(tokenFile); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil)
+	want := normalizeProfilePaths([]string{tokenFile})[0]
+	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, want) {
+		t.Fatalf("DenyReadIfExists = %#v, want the absent token path %q still denied", profile.FileSystem.DenyReadIfExists, want)
+	}
+
+	// Seatbelt must also deny writes because the workspace root is otherwise
+	// writable. The replacement is read by the next bridge start, not this one.
+	rules := credentialDenyWriteRules(profile.FileSystem, DefaultPolicy())
+	if !slices.ContainsFunc(rules, func(rule string) bool { return strings.Contains(rule, want) }) {
+		t.Fatalf("seatbelt credential write rules = %#v, want a deny for %q", rules, want)
+	}
+
+	// Bubblewrap has no target to bind for a missing path, so the fallback must
+	// still produce an unreadable, unwritable mount rather than nothing.
+	args := appendUnreadableLinuxPathArgs(nil, want, nil)
+	if !slices.Contains(args, "--tmpfs") || !slices.Contains(args, want) {
+		t.Fatalf("bubblewrap args for the absent token = %#v, want an unreadable tmpfs at %q", args, want)
+	}
+}
+
 func TestCredentialDenyReadPathsForEnvironmentHonorsConfigOverrides(t *testing.T) {
 	root := t.TempDir()
 	configHome := filepath.Join(root, "xdg")
@@ -1676,5 +1853,31 @@ func TestCredentialPathOptionsFromEnvironmentResolvesToolPathLists(t *testing.T)
 	}
 	if !stringSliceContains(credentials.Paths, normalizeProfilePath(absoluteKubeConfig)) {
 		t.Errorf("credential deny paths = %#v, want absolute KUBECONFIG entry %q", credentials.Paths, absoluteKubeConfig)
+	}
+}
+
+func TestPermissionProfileDeniesDaemonTokenFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read paths are disabled on Windows pending the ACL model")
+	}
+	tokenFile := filepath.Join(t.TempDir(), "daemon-token")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, tokenFile)
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	want := normalizeProfilePaths([]string{tokenFile})[0]
+	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, want daemon token file %q", profile.FileSystem.DenyRead, want)
+	}
+
+	// TokenFromEnv selects the inline token when both variables are set, so the
+	// unused file pointer must not become an automatic OS-sandbox deny.
+	t.Setenv(daemonRemoteTokenEnv, "from-env")
+	profile = PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	if stringSliceContains(profile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, must not protect unused token file %q when the inline token takes precedence", profile.FileSystem.DenyRead, want)
 	}
 }

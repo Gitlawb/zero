@@ -221,15 +221,19 @@ type credentialDenyPaths struct {
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
 // credential stores, including tool configuration files discoverable through
-// the preserved caller environment and Zero's own config/token stores. Four
-// deliberate limits:
+// the preserved caller environment, Zero's own config/token stores, and the
+// selected daemon remote token file. Four deliberate limits:
 //
 //   - Windows is skipped: a non-empty profile DenyRead switches the Windows
 //     runner onto the capability-SID/ACL deny path and away from the
 //     WRITE_RESTRICTED token, which the unelevated tier depends on. Revisit
 //     once the Windows deny-read model is settled.
 //   - A candidate nested under a user-configured AllowRead entry is dropped,
-//     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
+//     so `allowRead: ["~/.aws"]` remains an explicit opt-out. The bridge bearer
+//     token is the one exception: the in-process tool boundary
+//     (protectedCredentialPaths) treats it as non-overrideable, and the
+//     guarantee must not depend on whether a wrapped shell command or a built-in
+//     tool does the reading.
 //   - Candidates are emitted whether or not they currently exist on disk.
 //     Pathname-policy backends such as Seatbelt can enforce future paths;
 //     mount-based Linux masks a path only if it exists when the namespace is
@@ -437,11 +441,16 @@ func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) crede
 			kubeConfigs = append(kubeConfigs, filepath.Join(home, ".kube", "config"))
 		}
 	}
+	var daemonTokenFiles []string
+	if strings.TrimSpace(credentialEnvValue(env, "ZERO_DAEMON_REMOTE_TOKEN")) == "" {
+		daemonTokenFiles = daemonTokenDenyPaths(credentialEnvValue(env, "ZERO_DAEMON_REMOTE_TOKEN_FILE"))
+	}
 	return credentialPathOptions{
 		Homes:              homes,
 		ConfigDirs:         dedupeStrings(configDirs),
 		CloudSDKConfigDirs: dedupeStrings(cloudSDKConfigDirs),
 		GoogleCredentials:  resolveCredentialOverridePaths(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDirs),
+		DaemonTokenFiles:   daemonTokenFiles,
 		NPMUserConfigs:     dedupeStrings(npmUserConfigs),
 		GHConfigDirs:       dedupeStrings(ghConfigDirs),
 		Netrcs:             dedupeStrings(netrcs),
@@ -469,6 +478,7 @@ type credentialPathOptions struct {
 	ConfigDirs         []string
 	CloudSDKConfigDirs []string
 	GoogleCredentials  []string
+	DaemonTokenFiles   []string
 	NPMUserConfigs     []string
 	GHConfigDirs       []string
 	Netrcs             []string
@@ -595,14 +605,26 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// atomic writer or create publication directories it never uses.
 		candidates = append(candidates, tokenPath, tokenPath+".migrated")
 	}
+	// The bridge bearer token grants control of this daemon, so unlike the
+	// opt-outable credential stores above it stays denied even when AllowRead
+	// covers it — matching protectedCredentialPaths at the in-process boundary.
+	mandatory := dedupeStrings(options.DaemonTokenFiles)
 	allowRoots := normalizeProfilePaths(allowRead)
-	out := make([]string, 0, len(candidates))
+	out := make([]string, 0, len(candidates)+len(mandatory))
 	for _, path := range normalizeProfilePaths(candidates) {
 		if credentialPathReincluded(allowRoots, path) {
 			continue
 		}
 		out = append(out, path)
 	}
+	// Unlike the candidates above, the token path is NOT existence-filtered. The
+	// entry protects a future write target as much as a current secret: after an
+	// external rotation deletes the file, dropping the rule would let a sandboxed
+	// process recreate it with an attacker-chosen bearer that the next
+	// `serve-remote` start would then accept. Each enforcing backend materializes
+	// a missing target fail-closed.
+	out = append(out, mandatory...)
+	out = dedupeStrings(out)
 	return credentialDenyPaths{
 		Paths:      out,
 		Carveouts:  credentialCarveoutPaths(out, carveouts),
