@@ -421,7 +421,7 @@ func (m model) petComposerReservedColumns(width int) int {
 	if !m.petLayoutRendering && !m.petLayoutActive() {
 		return 0
 	}
-	if m.petPositionSet || (m.petDragActive && !m.petDragStartedDocked) {
+	if m.petSupportsAlphaOverlay() && (m.petPositionSet || (m.petDragActive && !m.petDragStartedDocked)) {
 		return 0
 	}
 	return minInt(petReservedColumns, maxInt(0, width-8))
@@ -442,16 +442,6 @@ func (m model) floatingPetTranscriptView() string {
 func (m model) reservePetImageSlot(lines []string, width int) []string {
 	chat := append([]string(nil), lines...)
 	if m.petSupportsAlphaOverlay() {
-		return chat
-	}
-	if m.petPositionSet || m.petDragActive {
-		x, y := m.ambientPetPosition(width, m.height)
-		for row := y; row < minInt(len(chat), y+petImageRows); row++ {
-			line := fitStyledLine(chat[row], width)
-			left := padStyledLine(ansi.Cut(line, 0, x), x)
-			right := ansi.Cut(line, minInt(width, x+petImageColumns), width)
-			chat[row] = fitStyledLine(left+strings.Repeat(" ", petImageColumns)+right, width)
-		}
 		return chat
 	}
 	start := maxInt(0, len(chat)-petImageRows-1)
@@ -575,11 +565,13 @@ func (m model) petImageHeightPixels(animation *terminalpet.Animation, state term
 func (m model) ambientPetPosition(width, height int) (int, int) {
 	maxX := maxInt(0, width-petImageColumns)
 	maxY := maxInt(0, height-petImageRows)
-	if m.petDragActive {
-		return clampInt(m.petDragTargetX, 0, maxX), clampInt(m.petDragTargetY, 0, maxY)
-	}
-	if m.petPositionSet {
-		return clampInt(m.petPositionX, 0, maxX), clampInt(m.petPositionY, 0, maxY)
+	if m.petSupportsAlphaOverlay() {
+		if m.petDragActive {
+			return clampInt(m.petDragTargetX, 0, maxX), clampInt(m.petDragTargetY, 0, maxY)
+		}
+		if m.petPositionSet {
+			return clampInt(m.petPositionX, 0, maxX), clampInt(m.petPositionY, 0, maxY)
+		}
 	}
 	return m.petHomePosition(width, height)
 }
@@ -633,10 +625,12 @@ func (m model) petHomePosition(width, height int) (int, int) {
 
 func (m model) ambientPetOffset(x, y, width, height int) (int, int) {
 	offsetX, offsetY := 0, 0
-	if m.petDragActive {
-		offsetX, offsetY = m.petDragTargetOffsetX, m.petDragTargetOffsetY
-	} else if m.petPositionSet {
-		offsetX, offsetY = m.petPositionOffsetX, m.petPositionOffsetY
+	if m.petSupportsAlphaOverlay() {
+		if m.petDragActive {
+			offsetX, offsetY = m.petDragTargetOffsetX, m.petDragTargetOffsetY
+		} else if m.petPositionSet {
+			offsetX, offsetY = m.petPositionOffsetX, m.petPositionOffsetY
+		}
 	}
 	if x >= maxInt(0, width-petImageColumns) {
 		offsetX = 0
@@ -747,6 +741,10 @@ func (m model) handlePetMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
 			return m.leavePixelPetDrag(), batchCommands(petPixelMouseDisableAndFlushCmd(), animationCmd), true
 		}
 		return m, batchCommands(petImageFlushCmd(), animationCmd), true
+	case mouseMotion(msg) && m.petDragActive && !m.petSupportsAlphaOverlay():
+		// Sixel images are part of the terminal cell grid. Keep them in the
+		// dedicated dock so moving one can never overwrite cells Bubble Tea owns.
+		return m, nil, true
 	case mouseMotion(msg) && m.petDragActive:
 		oldX, oldY := m.petDragTargetX, m.petDragTargetY
 		newX := clampInt(x-m.petDragOffsetX, 0, maxInt(0, m.width-petImageColumns))

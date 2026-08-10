@@ -2,6 +2,8 @@ package terminalpet
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -55,14 +57,45 @@ func TestSixelEraseStillCoversEveryClaimedCell(t *testing.T) {
 	}
 	got := out.String()
 	for row := 0; row < key.rows; row++ {
-		if !strings.Contains(got, "\x1b[3;41H") && row == 0 {
-			t.Fatalf("erase does not start at the image origin: %q", got)
+		position := fmt.Sprintf("\x1b[%d;%dH", key.y+row+1, key.x+1)
+		erase := position + strings.Repeat(" ", key.columns)
+		if !strings.Contains(got, erase) {
+			t.Fatalf("erase does not position row %d at %q: %q", row, position, got)
 		}
 	}
 	if strings.Count(got, strings.Repeat(" ", key.columns)) != key.rows {
 		t.Errorf("erase covered %d rows of %d columns, want %d rows: %q",
 			strings.Count(got, strings.Repeat(" ", key.columns)), key.columns, key.rows, got)
 	}
+}
+
+func TestSixelEraseRestoresTerminalStateAfterRowWriteFailure(t *testing.T) {
+	rowErr := errors.New("row write failed")
+	writer := &failOnceWriter{failOnWrite: 2, err: rowErr}
+	key := imageDrawKey{protocol: ImageProtocolSixel, x: 4, y: 2, columns: 3, rows: 2}
+
+	err := clearRenderedImage(writer, key)
+	if !errors.Is(err, rowErr) {
+		t.Fatalf("clearRenderedImage error = %v, want primary row error", err)
+	}
+	if !strings.HasSuffix(writer.String(), "\x1b8") {
+		t.Fatalf("terminal state was not restored after row failure: %q", writer.String())
+	}
+}
+
+type failOnceWriter struct {
+	bytes.Buffer
+	writes      int
+	failOnWrite int
+	err         error
+}
+
+func (w *failOnceWriter) Write(value []byte) (int, error) {
+	w.writes++
+	if w.writes == w.failOnWrite {
+		return 0, w.err
+	}
+	return w.Buffer.Write(value)
 }
 
 // Kitty must NOT gain the character-painting erase: it deletes by image id, and

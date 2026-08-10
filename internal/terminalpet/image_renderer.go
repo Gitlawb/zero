@@ -275,7 +275,7 @@ func kittyDelete(id uint32) string {
 	return fmt.Sprintf("\x1b_Ga=d,d=I,i=%d,q=2;\x1b\\", id)
 }
 
-func clearRenderedImage(writer io.Writer, key imageDrawKey) error {
+func clearRenderedImage(writer io.Writer, key imageDrawKey) (err error) {
 	if key.protocol == ImageProtocolKitty || key.protocol == ImageProtocolKittyLocalFile {
 		_, err := io.WriteString(writer, kittyDelete(key.id))
 		return err
@@ -302,16 +302,20 @@ func clearRenderedImage(writer io.Writer, key imageDrawKey) error {
 	// well as the cursor, and only DECSC saves attributes. Restoring them matters
 	// because the erase is emitted mid-frame, between styled writes the TUI has
 	// already started.
-	if _, err := io.WriteString(writer, "\x1b7\x1b[0m"); err != nil {
+	if _, err = io.WriteString(writer, "\x1b7\x1b[0m"); err != nil {
 		return err
 	}
+	defer func() {
+		if _, restoreErr := io.WriteString(writer, "\x1b8"); err == nil {
+			err = restoreErr
+		}
+	}()
 	for row := 0; row < key.rows; row++ {
-		if _, err := fmt.Fprintf(writer, "\x1b[%d;%dH%s", key.y+row+1, key.x+1, strings.Repeat(" ", key.columns)); err != nil {
+		if _, err = fmt.Fprintf(writer, "\x1b[%d;%dH%s", key.y+row+1, key.x+1, strings.Repeat(" ", key.columns)); err != nil {
 			return err
 		}
 	}
-	_, err := io.WriteString(writer, "\x1b8")
-	return err
+	return nil
 }
 
 func kittyTransmitPNGFile(path string, id uint32, columns, rows, offsetX, offsetY int) string {

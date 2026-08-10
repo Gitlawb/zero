@@ -797,6 +797,49 @@ func TestAmbientSixelPetRetainsDockedComposerFallbackSlot(t *testing.T) {
 	}
 }
 
+func TestAmbientSixelPetCannotLeaveReservedDock(t *testing.T) {
+	m := interactivePetTestModel(t)
+	m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolSixel})
+	m.petPositionSet = true
+	m.petPositionX, m.petPositionY = 3, 2
+	homeX, homeY := m.petHomePosition(m.width, m.height)
+
+	if x, y := m.ambientPetPosition(m.width, m.height); x != homeX || y != homeY {
+		t.Fatalf("Sixel pet position = (%d,%d), want reserved dock (%d,%d)", x, y, homeX, homeY)
+	}
+	m.petPositionSet = false
+	m, _, handled := m.handlePetMouse(testMouseClick(tea.MouseLeft, homeX+2, homeY+2))
+	if !handled || !m.petDragActive {
+		t.Fatal("Sixel pet press should remain available for click animations")
+	}
+	m, _, handled = m.handlePetMouse(testMouseMotion(tea.MouseLeft, 2, 2))
+	if !handled || m.petDragMoved {
+		t.Fatal("Sixel pet motion must not move it out of the reserved dock")
+	}
+	m, _, handled = m.handlePetMouse(testMouseRelease(tea.MouseLeft, 2, 2))
+	if !handled || m.petPositionSet || m.petDragActive {
+		t.Fatal("Sixel pet release must keep the reserved dock without leaving drag state")
+	}
+	if got := m.petComposerReservedColumns(m.width); got != petReservedColumns {
+		t.Fatalf("Sixel dock reservation = %d, want %d", got, petReservedColumns)
+	}
+}
+
+func TestAmbientKittyPetStillSupportsFreePositioning(t *testing.T) {
+	m := interactivePetTestModel(t)
+	homeX, homeY := m.ambientPetPosition(m.width, m.height)
+	m, _, _ = m.handlePetMouse(testMouseClick(tea.MouseLeft, homeX+2, homeY+2))
+	m, _, _ = m.handlePetMouse(testMouseMotion(tea.MouseLeft, 2, 2))
+	m, _, _ = m.handlePetMouse(testMouseRelease(tea.MouseLeft, 2, 2))
+
+	if !m.petPositionSet {
+		t.Fatal("Kitty pet no longer supports free positioning")
+	}
+	if x, y := m.ambientPetPosition(m.width, m.height); x == homeX && y == homeY {
+		t.Fatal("Kitty pet remained docked after a free-positioning drag")
+	}
+}
+
 func TestSixelPetFitsItsReservedTerminalRows(t *testing.T) {
 	m := interactivePetTestModel(t)
 	m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolSixel})
