@@ -120,17 +120,28 @@ func discoverFamily1(
 		return nil, nil
 	}
 
+	// findTranscript resolves an id against globSessionDirs, which Lstat-skips a
+	// symlinked project directory (following one could descend into a credential
+	// tree). The slug fast path must narrow WITHIN that same set, not join
+	// root/slug on its own: joining independently would glob through a symlinked
+	// candidate that findTranscript then skips, so Discover would list a session
+	// Read refuses to import — list-then-refuse.
+	sessionDirs := globSessionDirs(root)
 	dirs := []string{}
 	if strings.TrimSpace(cwd) != "" {
+		wanted := map[string]bool{}
 		for _, slug := range slugCandidates(cwd) {
-			candidate := filepath.Join(root, slug)
-			if len(globTranscripts(filepath.Join(candidate, "*"+transcriptExt))) > 0 {
-				dirs = append(dirs, candidate)
+			wanted[slug] = true
+		}
+		for _, dir := range sessionDirs {
+			if wanted[filepath.Base(dir)] &&
+				len(globTranscripts(filepath.Join(dir, "*"+transcriptExt))) > 0 {
+				dirs = append(dirs, dir)
 			}
 		}
 	}
 	if len(dirs) == 0 {
-		dirs = globSessionDirs(root)
+		dirs = sessionDirs
 	}
 
 	found := []ForeignSession{}

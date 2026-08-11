@@ -23,11 +23,13 @@ import (
 // event through here means no future caller can add an unredacted path without
 // deleting a call they can see.
 
-// redact runs secret redaction on content-bearing fields. Every string this
-// package renders — including the structural ones (role, name, toolCallId) that
-// carry no secrets but still reach the terminal — additionally passes through
-// stripControl at its constructor, so no imported byte reaches a picker row or
-// transcript line as a live control sequence.
+// redact runs secret redaction AND control-stripping on imported text. Every
+// field a foreign transcript supplies routes through here — the content-bearing
+// ones and the structural ones (role, name, toolCallId) alike — because a
+// malicious transcript can hide a credential in any of them and Zero then
+// persists and renders it. This is the redaction chokepoint (invariant #6): no
+// imported byte reaches a picker row or transcript line as a secret or as a live
+// control sequence.
 func redact(value string) string {
 	if value == "" {
 		return ""
@@ -58,7 +60,7 @@ func messageEvent(role string, content string) sessions.AppendEventInput {
 	return sessions.AppendEventInput{
 		Type: sessions.EventMessage,
 		Payload: map[string]any{
-			"role":    stripControl(role),
+			"role":    redact(role),
 			"content": redact(content),
 		},
 	}
@@ -68,12 +70,13 @@ func toolCallEvent(name string, callID string, arguments string) sessions.Append
 	return sessions.AppendEventInput{
 		Type: sessions.EventToolCall,
 		Payload: map[string]any{
-			"name": stripControl(name),
+			"name": redact(name),
 			// The foreign agent's own call id is reused verbatim so a call and
 			// its result pair up: the TUI keys them together on this string
 			// (effectiveToolRowID), and inventing new ids would split every pair.
-			// Stripped identically on both sides so the pairing survives.
-			"toolCallId": stripControl(callID),
+			// redact is deterministic, so both sides transform the id identically
+			// and the pairing survives.
+			"toolCallId": redact(callID),
 			"arguments":  redact(arguments),
 		},
 	}
@@ -83,8 +86,8 @@ func toolResultEvent(name string, callID string, status tools.Status, output str
 	return sessions.AppendEventInput{
 		Type: sessions.EventToolResult,
 		Payload: map[string]any{
-			"name":       stripControl(name),
-			"toolCallId": stripControl(callID),
+			"name":       redact(name),
+			"toolCallId": redact(callID),
 			"status":     string(status),
 			"output":     redact(output),
 		},
@@ -246,14 +249,18 @@ func capEvents(events []sessions.AppendEventInput, max int) []sessions.AppendEve
 	if max <= 0 || len(events) <= max {
 		return events
 	}
-	dropped := len(events) - max
-	kept := events[dropped:]
-	// The note occupies one of the kept slots so the result never exceeds max.
+	// The note itself occupies one of the max slots, so one more original event
+	// (the oldest of the tail) is dropped to make room for it. The reported
+	// count must include that event: len(events)-max alone understates the loss
+	// by one, and a truncation that reads as smaller than it was is how someone
+	// concludes the other agent did less than it did.
+	shown := events[len(events)-max+1:]
+	dropped := len(events) - len(shown)
 	out := make([]sessions.AppendEventInput, 0, max)
 	out = append(out, noteEvent(plural(dropped, "earlier event")+
 		" from this session were not imported; the most recent "+
-		itoaEvents(len(kept)-1)+" are shown."))
-	return append(out, kept[1:]...)
+		itoaEvents(len(shown))+" are shown."))
+	return append(out, shown...)
 }
 
 func itoaEvents(value int) string { return strconv.Itoa(value) }

@@ -62,10 +62,13 @@ type activityLog struct {
 	searches []string
 	failures []string
 
-	// pendingPath maps a call id to the bucket and value it contributed, so a
-	// call that turns out to have FAILED can be withdrawn. Without this a Read
-	// of a path that does not exist still appears under "Files read", which
-	// reads as fact and is exactly the wrong thing to tell the next model.
+	// pendingPath maps a call id to the file claim it would contribute, held
+	// until the call's RESULT is known. A path is committed to its bucket only
+	// once a success result confirms the tool ran: a Read of a path that does
+	// not exist must not appear under "Files read", and a Write whose result
+	// never arrives (an interrupted final call) must not appear under "Files
+	// changed" — both read as fact and are exactly the wrong thing to tell the
+	// next model. A claim still pending when the transcript ends is discarded.
 	pendingPath map[string]pathClaim
 
 	// toolCounts is the fallback when nothing could be extracted from a tool's
@@ -76,8 +79,8 @@ type activityLog struct {
 	seen map[string]bool
 }
 
-// pathClaim is a file path a call contributed, remembered until its result is
-// known.
+// pathClaim is a file path a call would contribute to a bucket, remembered until
+// its result is known and only then committed.
 type pathClaim struct {
 	bucket string
 	value  string
@@ -92,19 +95,17 @@ func newActivityLog(cwd string) *activityLog {
 	}
 }
 
-// withdraw removes a value a failed call had contributed.
-func (log *activityLog) withdraw(claim pathClaim) {
+// commitClaim records a pending file claim now that its call has succeeded.
+// Committing on success rather than withdrawing on failure is what keeps the
+// keying correct: a successful Write of a path and a later FAILED Edit of the
+// same path each carry their own call id, so the failure simply never commits
+// and cannot erase the success — the withdraw-by-value it replaced could.
+func (log *activityLog) commitClaim(claim pathClaim) {
 	list := &log.read
 	if claim.bucket == "changed" {
 		list = &log.changed
 	}
-	for index, value := range *list {
-		if value == claim.value {
-			*list = append((*list)[:index], (*list)[index+1:]...)
-			break
-		}
-	}
-	delete(log.seen, claim.bucket+"\x00"+claim.value)
+	log.add(claim.bucket, list, claim.value)
 }
 
 // add appends value to list unless an equal value is already recorded under
@@ -159,32 +160,36 @@ func (log *activityLog) observeCall(callID string, name string, arguments string
 		return
 	}
 	if path := firstStringField(fields, "file_path", "filePath", "path", "notebook_path", "target_file"); path != "" {
-		bucket, list := "read", &log.read
+		bucket := "read"
 		if isMutatingToolName(trimmedName) {
-			bucket, list = "changed", &log.changed
+			bucket = "changed"
 		}
-		value := log.relative(path)
-		log.add(bucket, list, value)
-		log.pendingPath[callID] = pathClaim{bucket: bucket, value: value}
+		// Hold the claim, do not record it yet: it is committed only when this
+		// call's result confirms success (observeResult). A failed call never
+		// commits, and a call whose result never arrives stays pending and is
+		// dropped, so neither can claim a file it may not have touched.
+		log.pendingPath[callID] = pathClaim{bucket: bucket, value: log.relative(path)}
 		return
 	}
 	log.toolCounts[trimmedName]++
 }
 
-// observeResult records a tool's outcome. Only failures are kept: a successful
-// result is already implied by the call, while a failure is the single most
-// useful thing to carry forward — it is what the next model would otherwise
-// repeat.
+// observeResult records a tool's outcome. A success commits the call's held
+// file claim (see observeCall); a failure drops it and is itself recorded in the
+// failures bucket — the single most useful thing to carry forward, since it is
+// what the next model would otherwise repeat.
 func (log *activityLog) observeResult(callID string, name string, status tools.Status, output string) {
+	claim, hadClaim := log.pendingPath[callID]
+	delete(log.pendingPath, callID)
 	if status != tools.StatusError {
-		delete(log.pendingPath, callID)
+		// Success confirms the call ran: only now is its path recorded.
+		if hadClaim {
+			log.commitClaim(claim)
+		}
 		return
 	}
-	// The call did not do what it claimed, so withdraw the claim.
-	if claim, ok := log.pendingPath[callID]; ok {
-		log.withdraw(claim)
-		delete(log.pendingPath, callID)
-	}
+	// The call did not do what it claimed, so its pending claim is dropped
+	// (never committed) and the failure itself is recorded below.
 	log.failed++
 	trimmedName := strings.TrimSpace(name)
 	if trimmedName == "" {
