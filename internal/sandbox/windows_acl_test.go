@@ -73,10 +73,19 @@ func TestBuildWindowsACLPlanUsesReadOnlySIDWithoutWriteRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsACLPlan: %v", err)
 	}
-	if len(plan.Entries) != 1 {
-		t.Fatalf("ACL entries = %#v, want one deny-read entry", plan.Entries)
+	// Two deny entries, one per SID the token can carry here. ReadOnly is the
+	// only capability a profile with no write roots gets, and ReadAllow is the
+	// read grant a DenyRead profile's strict token carries: denying just one of
+	// them leaves the carveout readable through the other.
+	if len(plan.Entries) != 2 {
+		t.Fatalf("ACL entries = %#v, want a deny-read entry per capability SID", plan.Entries)
 	}
 	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, caps.ReadOnly, true)
+	readSID, err := WindowsReadAllowSID(home)
+	if err != nil {
+		t.Fatalf("WindowsReadAllowSID: %v", err)
+	}
+	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, readSID, true)
 }
 
 func TestBuildWindowsACLPlanRejectsUnrestrictedProfiles(t *testing.T) {
