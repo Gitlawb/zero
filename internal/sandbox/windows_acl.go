@@ -114,6 +114,31 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 			})
 		}
 	}
+	// Read roots, granted to the read-capability SID.
+	//
+	// A profile carrying DenyRead runs the command on a strict token rather than a
+	// WRITE_RESTRICTED one, and the strict token applies the restricted-SID check
+	// to reads. Read roots reached that check granted only to the principal's own
+	// account SID, which the write jail keeps out of the restricting set on
+	// purpose, so every read failed it — including opening the executable. The
+	// principal plan still grants the account SID; this is the other half of the
+	// same grant, so the allow-list and the restriction now come from one place.
+	readSID, err := windowsReadAllowCapabilitySID(config)
+	if err != nil {
+		return WindowsACLPlan{}, err
+	}
+	if readSID != "" {
+		for _, path := range config.PermissionProfile.FileSystem.ReadRoots {
+			if path = strings.TrimSpace(path); path == "" {
+				continue
+			}
+			entries = append(entries, WindowsACLEntry{
+				Action:     WindowsACLAllowRead,
+				Path:       path,
+				Capability: readSID,
+			})
+		}
+	}
 	writeSIDs := windowsWriteCapabilitySIDs(writeCapabilities)
 	for _, path := range config.PermissionProfile.FileSystem.DenyWrite {
 		path = strings.TrimSpace(path)
@@ -206,17 +231,32 @@ func windowsWriteCapabilitySIDs(capabilities []windowsWriteRootCapability) []str
 }
 
 func windowsReadDenyCapabilitySIDs(config WindowsSandboxCommandConfig, writeSIDs []string) ([]string, error) {
-	if len(writeSIDs) > 0 {
-		return writeSIDs, nil
-	}
 	if len(config.PermissionProfile.FileSystem.DenyRead) == 0 {
 		return nil, nil
 	}
-	caps, err := LoadOrCreateWindowsCapabilitySIDs(config.SandboxHome)
+	// The read-capability SID must be denied here as well as granted above. It
+	// holds read on the read roots, and those start at the filesystem root, so a
+	// carveout sitting inside one of them would stay readable through that grant
+	// and the deny list would quietly stop meaning anything.
+	// Every SID the token can carry has to be denied, not just the newest one.
+	// With no write roots the token's only capability is ReadOnly, so dropping it
+	// here would leave the deny naming a SID the command never holds.
+	denySIDs := append([]string{}, writeSIDs...)
+	if len(denySIDs) == 0 {
+		caps, err := LoadOrCreateWindowsCapabilitySIDs(config.SandboxHome)
+		if err != nil {
+			return nil, err
+		}
+		denySIDs = append(denySIDs, caps.ReadOnly)
+	}
+	readSID, err := windowsReadAllowCapabilitySID(config)
 	if err != nil {
 		return nil, err
 	}
-	return []string{caps.ReadOnly}, nil
+	if readSID != "" {
+		denySIDs = append(denySIDs, readSID)
+	}
+	return denySIDs, nil
 }
 
 func planWindowsDenyReadPaths(paths []string) []string {
@@ -258,4 +298,20 @@ func dedupeWindowsACLEntries(entries []WindowsACLEntry) []WindowsACLEntry {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// windowsReadAllowCapabilitySID returns the read-capability SID when this profile
+// will run on a strict token, and "" otherwise.
+//
+// Gated on DenyRead because that is exactly what selects the strict token in the
+// runner: with no DenyRead the token stays WRITE_RESTRICTED, reads skip the
+// restricted-SID check entirely, and granting read on roots as broad as the
+// filesystem root would add ACEs that buy nothing. Derived purely from the
+// profile, so the setup half and the command half reach the same answer without
+// consulting anything ambient.
+func windowsReadAllowCapabilitySID(config WindowsSandboxCommandConfig) (string, error) {
+	if len(config.PermissionProfile.FileSystem.DenyRead) == 0 {
+		return "", nil
+	}
+	return WindowsReadAllowSID(config.SandboxHome)
 }
