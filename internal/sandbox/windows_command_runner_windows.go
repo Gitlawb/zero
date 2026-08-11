@@ -101,15 +101,35 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 		// permitting writes only to the workspace could still write anywhere
 		// BATCH or BUILTIN\Users may — C:\Users\Public\Documents, for one.
 		//
-		// The principal's own SID joins the capability SIDs because the ACL plan
-		// grants the workspace to that SID; leaving it out jails the principal
-		// out of the tree it is supposed to own.
+		// The principal's own SID is deliberately NOT a restricting SID, and that
+		// is the whole of the write jail on this path.
+		//
+		// WRITE_RESTRICTED allows a write only when BOTH the normal token and the
+		// restricting-SID list allow it. The account SID is already enabled in the
+		// normal token, so listing it as a restricting SID makes the second check
+		// a formality for anything granted to that account: every path carrying a
+		// direct principal ACE passes both halves and is writable wherever it
+		// sits. The principal's own profile directory, which Windows creates on
+		// first logon with exactly such an ACE, is outside every configured write
+		// root and was writable for that reason.
+		//
+		// Same defect as the World SID in the restricted list (#865), with the
+		// account SID in place of Everyone: a SID already carried by the normal
+		// token cannot also serve as the restriction on it.
+		//
+		// Confining to the capability SIDs alone restores the intersection the
+		// jail is supposed to be. A configured write root carries BOTH a principal
+		// ACE, from the principal plan, satisfying the normal token, AND a
+		// capability ACE, from BuildWindowsACLPlan which setup applies on every
+		// path, satisfying the restriction. So the principal keeps the tree it
+		// owns, while anything holding only a principal ACE now fails the
+		// restricted check.
 		principalUser, err := principalToken.GetTokenUser()
 		if err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": read sandbox principal SID: "+err.Error())
 			return 1
 		}
-		jailSIDs := append(append([]string{}, tokenSIDs...), principalUser.User.Sid.String())
+		jailSIDs := windowsPrincipalJailSIDs(tokenSIDs, principalUser.User.Sid.String())
 		jailedToken, err := restrictWindowsTokenForCapabilitySIDs(principalToken, jailSIDs, writeRestricted)
 		if err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
@@ -213,4 +233,28 @@ func windowsACLPlanDeniedPath(err error) string {
 		return ""
 	}
 	return strings.TrimSpace(rest[:end])
+}
+
+// windowsPrincipalJailSIDs returns the restricting SIDs for a principal command.
+//
+// A named function with its own test rather than an inline slice literal,
+// because the defect it encodes was invisible: the production composition added
+// the account's own SID while the only jail test granted a GROUP, so the
+// configuration that shipped was never the configuration under test.
+//
+// accountSID is taken and DELIBERATELY EXCLUDED rather than simply not passed.
+// Naming it here makes the exclusion the function's stated contract instead of an
+// omission a later edit could undo without noticing, and it also removes the SID
+// should it ever arrive through capabilitySIDs, which is the same route the World
+// SID took in #865.
+func windowsPrincipalJailSIDs(capabilitySIDs []string, accountSID string) []string {
+	account := strings.TrimSpace(accountSID)
+	jail := make([]string, 0, len(capabilitySIDs))
+	for _, sid := range capabilitySIDs {
+		if account != "" && strings.EqualFold(strings.TrimSpace(sid), account) {
+			continue
+		}
+		jail = append(jail, sid)
+	}
+	return jail
 }
