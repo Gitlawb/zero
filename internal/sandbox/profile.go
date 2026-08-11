@@ -134,6 +134,29 @@ type gitMetadataCarveout struct {
 // set. gitMetadataWriteCarveouts derives its list from this so a path can never
 // be added in one place and have its shape forgotten in the other.
 func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
+	gitPath := filepath.Join(root, ".git")
+	// A LINKED WORKTREE OR SUBMODULE HAS .git AS A FILE, NOT A DIRECTORY.
+	//
+	// It holds a `gitdir:` pointer to the real control directory, which lives
+	// outside this write root. Naming .git/config and .git/hooks there asks the
+	// Windows plan to materialize them by descending through .git as a directory,
+	// which cannot open a child beneath a regular file, so opted-in elevated setup
+	// aborts and the sandbox is unusable in any worktree. Zero's own development
+	// worktrees are exactly this shape.
+	//
+	// Deny the pointer file itself instead. It is the right protection rather than
+	// a lesser one: a principal that can rewrite `gitdir:` repoints the whole
+	// repository at a control directory it chooses, which subsumes editing config
+	// or dropping a hook. The real control directory is outside the write root, so
+	// the principal has no inherited access to it and needs no carveout there.
+	//
+	// Stat, not a lexical guess. Whether .git is a file is a property of the
+	// checkout, and the two layouts want different ACEs. A missing .git (git has
+	// not run yet) keeps the directory-shaped carveouts, which is what makes them
+	// materialize before git first runs.
+	if info, err := os.Lstat(gitPath); err == nil && !info.IsDir() {
+		return []gitMetadataCarveout{{Path: gitPath, IsFile: true}}
+	}
 	return []gitMetadataCarveout{
 		{Path: filepath.Join(root, ".git", "hooks")},
 		{Path: filepath.Join(root, ".git", "config"), IsFile: true},
