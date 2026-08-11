@@ -444,7 +444,7 @@ var dunePalette = palette{
 	muted:     "#473e32",
 	faint:     "#554a3a",
 	faintest:  "#655648",
-	accent:    "#724028", // darkened from #8f5215 for AA on selBg (5.46:1) that also survives ANSI-256 downsampling (quantizes to #444444, 6.47:1 on quantized selBg)
+	accent:    "#5f4b30", // darkened from #8f5215 for AA on selBg (5.46:1) that also survives ANSI-256 downsampling (quantizes to #444444, 6.47:1 on quantized selBg)
 	green:     "#38572a",
 	red:       "#872d24", // darkened from #963328 so delBg contrast survives ANSI-256 downsampling
 	amber:     "#6d4600",
