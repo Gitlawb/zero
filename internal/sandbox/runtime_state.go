@@ -21,11 +21,6 @@ const (
 	sandboxRuntimeMaxRoots = 64
 )
 
-var fallbackSandboxRuntimes = struct {
-	sync.Mutex
-	roots map[string]string
-}{roots: make(map[string]string)}
-
 type SandboxRuntime struct {
 	Root  string `json:"root,omitempty"`
 	Cache string `json:"cache,omitempty"`
@@ -50,15 +45,12 @@ func sandboxRuntimeRootFor(workspaceRoot string, cacheRoot string) (string, erro
 }
 
 // deterministicSandboxRuntimeRoot returns the cache-derived runtime root and
-// whether it is usable, meaning it lands outside the workspace. It creates
-// nothing, which sandboxRuntimeRootFor cannot promise: its fallback calls
-// os.MkdirTemp.
+// whether it is usable, meaning it lands outside the workspace.
 //
-// Callers that only need to NAME the tree — teardown, working out which paths a
-// principal could hold an ACE on — have to use this. Going through
-// sandboxRuntimeRootFor there would create a fresh temp directory on the way
-// out, and a useless one at that, since the fallback root is random per process
-// and would never match the one the commands actually used.
+// Neither this nor the fallback creates anything now, so a caller that only
+// needs to NAME the tree can safely go through sandboxRuntimeRootFor and get the
+// answer commands will actually use. This remains separate for callers that need
+// to distinguish the cache-derived root from the temp-derived one.
 func deterministicSandboxRuntimeRoot(workspaceRoot string, cacheRoot string) (string, bool) {
 	digest := sha256.Sum256([]byte(workspaceRoot))
 	root := filepath.Join(cacheRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
@@ -209,22 +201,37 @@ func combineSandboxCleanups(cleanups ...func()) func() {
 	}
 }
 
+// fallbackSandboxRuntimeRoot returns the runtime root for a workspace whose
+// cache-derived root would land inside itself.
+//
+// DERIVED, not minted, and that is the whole of the fix. It used to call
+// os.MkdirTemp and remember the answer in a process-global map, which made the
+// result private to whichever process asked first. Elevated Windows setup
+// granted the sandbox principal write access to the directory IT created, then
+// every later __windows-command-runner process created a DIFFERENT one and
+// pointed TMP, GOCACHE, npm and the rest at it. Those directories are created by
+// the calling user and carry no ACE for the principal, so ordinary cache and
+// temp writes failed with a bare ACCESS_DENIED and nothing naming the sandbox.
+//
+// sandboxRuntimeRootFor already documents that both callers must agree exactly.
+// Hashing the workspace, the same way the cache-derived root does, is what makes
+// that true for this branch too: every process reaches the same path without
+// having to share any state.
+//
+// It creates nothing, so deterministicSandboxRuntimeRoot's promise about naming
+// a tree without materializing it now holds for the fallback as well.
 func fallbackSandboxRuntimeRoot(workspaceRoot string) (string, error) {
-	fallbackSandboxRuntimes.Lock()
-	defer fallbackSandboxRuntimes.Unlock()
-	if root := fallbackSandboxRuntimes.roots[workspaceRoot]; root != "" {
-		return root, nil
-	}
-	parent, err := os.MkdirTemp("", "zero-runtime-")
-	if err != nil {
-		return "", fmt.Errorf("create fallback sandbox runtime: %w", err)
-	}
-	root := filepath.Join(parent, "runtime")
+	digest := sha256.Sum256([]byte(workspaceRoot))
+	root := filepath.Join(os.TempDir(), "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
 	if pathWithinRoot(workspaceRoot, root) {
-		_ = os.RemoveAll(parent)
-		return "", fmt.Errorf("fallback sandbox runtime root %q must be outside workspace %q", root, workspaceRoot)
+		// Both candidates land inside the workspace, so there is nowhere left to
+		// put a runtime tree the workspace's own policy does not govern. Refused
+		// rather than pointed somewhere arbitrary: a runtime root inside the
+		// workspace makes the sandbox's own cache writes indistinguishable from
+		// the work it is meant to be confining.
+		return "", fmt.Errorf("sandbox runtime root %q would fall inside workspace %q; "+
+			"open the workspace somewhere other than the cache or temp directory", root, workspaceRoot)
 	}
-	fallbackSandboxRuntimes.roots[workspaceRoot] = root
 	return root, nil
 }
 

@@ -541,9 +541,9 @@ func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, 
 // tree without creating anything, and returns "" when that tree is unusable
 // because it would land inside the workspace.
 //
-// Teardown needs this rather than windowsSandboxRuntimeRootPath: that one ends
-// in sandboxRuntimeRootFor, whose fallback calls os.MkdirTemp, so merely asking
-// for the name would make a directory on the way out.
+// Kept distinct from windowsSandboxRuntimeRootPath so a caller can tell the
+// cache-derived tree from the temp-derived fallback. Neither creates anything,
+// so naming either is free.
 func windowsSandboxDeterministicRuntimeRootPath(config WindowsSandboxCommandConfig) (string, error) {
 	workspaceRoot := ""
 	for _, candidate := range config.WorkspaceRoots {
@@ -731,16 +731,16 @@ func applyWindowsPrincipalACLs(sandboxHome string, username string, principalSID
 // windowsPrincipalTeardownPaths names every path this principal could hold an
 // ACE on: the policy's roots plus the per-workspace runtime tree.
 //
-// The runtime root is derived through deterministicSandboxRuntimeRoot rather
-// than the resolver setup uses, because teardown must create nothing on its way
-// out and that resolver's fallback calls os.MkdirTemp. When the deterministic
-// root is unusable there is simply no runtime tree to revoke: the fallback root
-// commands used was random and per-process, so nothing here could name it
-// anyway.
+// The runtime root is derived through the same resolver setup uses, so teardown
+// revokes ACEs on the tree commands actually wrote to. That was not possible
+// while the fallback minted a random per-process directory: nothing here could
+// name it, so an opted-out machine kept principal ACEs on whatever tree the
+// fallback had produced. Both branches are creation-free now, so teardown can
+// ask for the real answer without materializing anything on its way out.
 func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principalSID string) ([]string, error) {
 	filesystem := config.PermissionProfile.FileSystem
 	writeRoots := filesystem.WriteRoots
-	runtimeRoot, err := windowsSandboxDeterministicRuntimeRootPath(config)
+	runtimeRoot, err := windowsSandboxRuntimeRootPath(config)
 	if err != nil {
 		return nil, err
 	}
