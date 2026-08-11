@@ -775,7 +775,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
 				messages = append(messages, toolImageMessages...)
-				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Varied)
+				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Varied, outcome.Refused)
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}
