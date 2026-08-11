@@ -1,8 +1,12 @@
 package sandbox
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAnalyzeCommand(t *testing.T) {
+	t.Setenv("ZERO_TEST_ENV_COMMAND", "curl")
 	cases := []struct {
 		name        string
 		script      string
@@ -85,6 +89,122 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "git clone", script: "git clone https://example.com/repo.git", network: true},
 		{name: "git fetch", script: "git fetch origin", network: true},
 		{name: "git status is offline", script: "git status", network: false},
+		{name: "git pull", script: "git pull origin main", network: true},
+		{name: "git push custom transport", script: "git push gitlawb://example.com/repo.git main", network: true},
+		{name: "git ls-remote", script: "git ls-remote origin", network: true},
+		{name: "git remote archive", script: "git archive --remote=origin HEAD", network: true},
+		{name: "git remote archive separated value", script: "git archive --remote origin HEAD", network: true},
+		// Only --remote leaves the machine; a local archive streams the object
+		// store and must not cost a network prompt (issue #703 review).
+		{name: "git local archive", script: "git archive HEAD", network: false},
+		{name: "git -C local archive", script: "git -C repo archive HEAD -o out.tar", network: false},
+		// After `--` every token is a pathspec, so this archives a tree entry
+		// named "--remote" from the local object store (issue #703 review).
+		{name: "git archive pathspec named --remote", script: "git archive HEAD -- --remote", network: false},
+		{name: "git -C archive pathspec named --remote", script: "git -C repo archive HEAD -- --remote=origin", network: false},
+		{name: "git archive missing remote operand", script: "git archive HEAD --remote", network: false},
+		{name: "git archive post-tree --remote value", script: "git archive HEAD --remote=origin", network: true},
+		// A real --remote before the separator still is one.
+		{name: "git remote archive with pathspec", script: "git archive --remote=origin HEAD -- src", network: true},
+		{name: "git remote archive after output option", script: "git archive -o out.tar --remote origin HEAD", network: true},
+		{name: "git remote archive after mtime option", script: "git archive --mtime 2024-01-01 --remote origin HEAD", network: true},
+		{name: "git remote archive after format without value", script: "git archive --format --remote=origin HEAD", network: true},
+		{name: "git remote archive after mtime without value", script: "git archive --mtime --remote=origin HEAD", network: true},
+		{name: "git output consumes --remote", script: "git archive -o --remote HEAD", network: false},
+		{name: "git joined output named --remote", script: "git archive --output=--remote HEAD", network: false},
+		{name: "git global -C consumes --remote", script: "git -C --remote archive HEAD", network: false},
+		{name: "git output consumes separator before remote", script: "git archive -o -- --remote=origin HEAD", network: true},
+		{name: "bash clustered login command", script: `bash -lc 'curl https://x.test'`, network: true},
+		{name: "bash clustered command erexit", script: `bash -ce 'git push origin main'`, network: true},
+		{name: "dash clustered command erexit", script: `dash -ce 'curl https://x.test'`, network: true},
+		{name: "bash long command flag is invalid", script: `bash --command 'curl https://x.test'`, network: false},
+		{name: "bash args after command payload are positional", script: `bash -c 'echo ok' curl https://x.test`, network: false},
+		{name: "bash script makes later command flag positional", script: `bash /dev/null -c 'curl https://x.test'`, network: false},
+		{name: "bash option terminator makes command flag positional", script: `bash -- -c 'curl https://x.test'`, network: false},
+		{name: "bash invalid command cluster", script: `bash -Zc 'curl https://x.test'`, network: false},
+		{name: "bash noexec command cluster", script: `bash -nc 'curl https://x.test'`, network: false},
+		{name: "bash plus option before command", script: `bash +n -c 'curl https://x.test'`, network: true},
+		{name: "bash plus command flag", script: `bash +c 'curl https://x.test'`, network: true},
+		{name: "bash dump strings does not execute", script: `bash --dump-strings -c 'curl https://x.test'`, network: false},
+		{name: "shell dynamic command payload fails closed", script: `sh -c "$ZERO_TEST_SHELL_COMMAND"`, network: true},
+		{name: "nested shell dynamic command payload fails closed", script: `sh -c 'sh -c "$1"' sh 'curl https://x.test'`, network: true},
+		{name: "PowerShell slash command", script: `powershell /Command Invoke-WebRequest https://x.test`, network: true},
+		{name: "PowerShell abbreviated command", script: `pwsh -co iwr https://x.test`, network: true},
+		{name: "PowerShell local command", script: `pwsh /Command Get-ChildItem`, network: false},
+		{name: "PowerShell abbreviated execution policy", script: `powershell -ep RemoteSigned curl https://x.test`, network: true},
+		{name: "pwsh abbreviated execution policy before command", script: `pwsh -ep Bypass -Command curl https://x.test`, network: true},
+		{name: "Windows PowerShell bare command", script: `powershell Invoke-WebRequest https://x.test`, network: true},
+		{name: "pwsh bare token is file mode", script: `pwsh Invoke-WebRequest https://x.test`, network: false},
+		{name: "PowerShell joined command flag is invalid", script: `powershell -Command:Invoke-WebRequest https://x.test`, network: false},
+		{name: "pwsh command with args", script: `pwsh -CommandWithArgs Invoke-WebRequest https://x.test`, network: true},
+		{name: "pwsh abbreviated command with args", script: `pwsh -cwa Invoke-RestMethod https://x.test`, network: true},
+		{name: "PowerShell invalid startup option", script: `powershell -DefinitelyInvalid Invoke-WebRequest https://x.test`, network: false},
+		{name: "env split curl argv", script: `env -S 'curl https://x.test'`, network: true},
+		{name: "env joined split git argv", script: `env --split-string='git push origin main'`, network: true},
+		{name: "env clustered split option", script: `env -iS 'curl https://x.test'`, network: true},
+		{name: "env split introduces split option", script: `env -S '-S "curl https://x.test"'`, network: true},
+		{name: "env split introduces nested env", script: `env -S 'env -S "curl https://x.test"'`, network: true},
+		{name: "env split underscore separator", script: `env -S 'curl\_https://x.test'`, network: true},
+		{name: "env split environment executable", script: `env -S '${ZERO_TEST_ENV_COMMAND} https://x.test'`, network: true},
+		{name: "env split metacharacters stay arguments", script: `env -S 'printf x; curl https://x.test'`, network: false},
+		{name: "env split trailing args stay arguments", script: `env -S 'printf ok' curl https://x.test`, network: false},
+		{name: "env split environment argument", script: `env -S 'printf ${ZERO_TEST_ENV_COMMAND}'`, network: false},
+		{name: "env split shell command", script: `env -S 'sh -c "curl https://x.test"'`, network: true},
+		{name: "env split argv0 before curl", script: `env -S '--argv0 harmless curl https://x.test'`, network: true},
+		{name: "env split argv0 named curl", script: `env -S '--argv0 curl printf ok'`, network: false},
+		// GNU env accepts unambiguous long-option abbreviations: "--split" and
+		// "--split-strin" name --split-string exactly like the full spelling does,
+		// so the launcher's argv reconstruction must not depend on that one spelling.
+		{name: "env abbreviated split option", script: `env --split 'curl https://x.test'`, network: true},
+		{name: "env abbreviated split option with value", script: `env --split='curl https://x.test'`, network: true},
+		{name: "env minimal abbreviated split option", script: `env --s 'curl https://x.test'`, network: true},
+		{name: "env near-full abbreviated split option", script: `env --split-strin 'curl https://x.test'`, network: true},
+		{name: "env abbreviated split metacharacters stay arguments", script: `env --split 'printf x; curl https://x.test'`, network: false},
+		{name: "env non-split long option is not split-string", script: `env --unset FOO curl https://x.test`, network: true},
+		{name: "env non-split long option leaves literal payload alone", script: `env --chdir=/tmp printf ok`, network: false},
+		{name: "busybox wget applet", script: `busybox wget https://x.test`, network: true},
+		{name: "busybox shell command", script: `busybox sh -c 'curl https://x.test'`, network: true},
+		{name: "busybox echo network text", script: `busybox echo wget https://x.test`, network: false},
+		{name: "busybox has no option terminator", script: `busybox -- curl https://x.test`, network: false},
+		{name: "busybox unknown option", script: `busybox -x curl https://x.test`, network: false},
+		// The applet name comes from a shell expansion this scan cannot read
+		// statically; wordText silently drops it, so the AST resolver must fail
+		// closed here rather than reading the blanked token as a clean unknown.
+		{name: "busybox dynamic applet fails closed", script: `APPLET=curl; busybox "$APPLET" https://x.test`, network: true},
+		{name: "busybox literal applet stays classified on content", script: `busybox echo "not a program" https://x.test`, network: false},
+		{name: "strace curl command", script: `strace -f -o trace.log curl https://x.test`, network: true},
+		{name: "strace shell command", script: `strace sh -c 'git push origin main'`, network: true},
+		{name: "strace trace path before curl", script: `strace -P /tmp curl https://x.test`, network: true},
+		{name: "strace trace path named curl", script: `strace -P curl true`, network: false},
+		{name: "strace attach and curl", script: `strace -p 123 curl https://x.test`, network: true},
+		{name: "strace long trace option", script: `strace --trace network curl https://x.test`, network: true},
+		{name: "strace tips traces curl", script: `strace --tips curl https://x.test`, network: true},
+		{name: "strace joined tips traces git", script: `strace --tips=full git push origin main`, network: true},
+		{name: "strace clustered options", script: `strace -fqo trace.log curl https://x.test`, network: true},
+		{name: "strace output named curl", script: `strace -o curl true`, network: false},
+		{name: "strace invalid option", script: `strace --definitely-invalid curl https://x.test`, network: false},
+		// The traced command comes from a shell expansion this scan cannot read
+		// statically; straceSourceDynamic must fail closed the same way
+		// busyboxSourceDynamic does above, rather than reading the blanked token
+		// as a clean unknown command.
+		{name: "strace dynamic child fails closed", script: `APPLET=curl; strace "$APPLET" https://x.test`, network: true},
+		{name: "strace literal child stays classified on content", script: `strace true "not a program" https://x.test`, network: false},
+		{name: "git local commit", script: `git commit -m "local change"`, network: false},
+		// git's value-taking global options put their value in the NEXT token, so a
+		// generic "first non-dash token" scan reads the value as the subcommand and
+		// misses the network verb entirely (issue #703 review).
+		{name: "git -C push", script: "git -C repo push origin main", network: true},
+		{name: "git -c config push", script: "git -c http.sslVerify=false push origin main", network: true},
+		{name: "git --git-dir fetch", script: "git --git-dir /repo/.git fetch origin", network: true},
+		{name: "git --work-tree pull", script: "git --work-tree /repo pull origin main", network: true},
+		{name: "git --attr-source push", script: "git --attr-source HEAD push origin main", network: true},
+		{name: "git -C local commit", script: `git -C repo commit -m "local change"`, network: false},
+		{name: "git help topic is offline", script: "git --help push", network: false},
+		{name: "git -C help topic is offline", script: "git -C repo --help push", network: false},
+		{name: "git -c version topic is offline", script: "git -c user.name=test --version push", network: false},
+		{name: "git.exe push", script: "git.exe push origin main", network: true},
+		{name: "git.cmd push", script: "git.cmd push origin main", network: true},
+		{name: "git.exe local commit", script: `git.exe commit -m "local change"`, network: false},
 		{name: "gh release download", script: "gh release download v1.0.0", network: true},
 		{name: "no network", script: "ls -la && echo done", network: false},
 		{name: "process pattern is not network", script: `pkill -f "python3 -m http.server 8000"`, network: false},
@@ -101,6 +221,16 @@ func TestAnalyzeCommand(t *testing.T) {
 					tc.script, got, tc.interactive, tc.destructive, tc.network, tc.tooComplex)
 			}
 		})
+	}
+}
+
+func TestAnalyzeCommandFailsClosedAtShellLauncherDepthLimit(t *testing.T) {
+	command := "curl https://x.test"
+	for range maxAnalyzerDepth + 1 {
+		command = "sh -c '" + strings.ReplaceAll(command, "'", `'"'"'`) + "'"
+	}
+	if got := AnalyzeCommand(command); !got.Network {
+		t.Fatalf("AnalyzeCommand(%q) = %#v; want network", command, got)
 	}
 }
 

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -404,6 +405,16 @@ func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
 		if got != tc.interactive {
 			t.Errorf("DetectInteractiveCommand(%q).Interactive = %v, want %v", tc.command, got, tc.interactive)
 		}
+	}
+}
+
+func TestDetectInteractiveCommandBoundsNestedShellLaunchers(t *testing.T) {
+	command := "vim file"
+	for range maxAnalyzerDepth + 2 {
+		command = "bash -c " + strconv.Quote(command)
+	}
+	if got := DetectInteractiveCommand(command, "linux"); got.Interactive {
+		t.Fatalf("DetectInteractiveCommand(deep shell chain) = %+v; want bounded inspection", got)
 	}
 }
 
