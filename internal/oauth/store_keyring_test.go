@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1051,8 +1052,7 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 // TestKeyringLockPathIsPerUser covers the lock path used for every keyring
 // Store regardless of file-backend config. It must not be the single shared
 // temp path that any account on a multi-user host could pre-create or hold,
-// and the last-resort temp name must be scoped by uid so different users
-// never collide on one lock file.
+// and it must not vary with the ambient HOME/USERPROFILE environment.
 func TestKeyringLockPathIsPerUser(t *testing.T) {
 	// Observe real OS identity, not the TestMain isolation stub.
 	previous := currentOSUser
@@ -1075,14 +1075,6 @@ func TestKeyringLockPathIsPerUser(t *testing.T) {
 		if want := filepath.Join(home, ".cache", "zero", name); got != want {
 			t.Fatalf("lock path = %q, want per-user home-anchored path %q", got, want)
 		}
-	}
-	tempName := keyringTempLockName(keyringService, keyringIndexAccount)
-	if uid := os.Getuid(); uid >= 0 {
-		if !strings.Contains(tempName, fmt.Sprintf("%d", uid)) {
-			t.Fatalf("temp lock name %q is not scoped by uid %d", tempName, uid)
-		}
-	} else if tempName == "" {
-		t.Fatal("temp lock name is empty")
 	}
 }
 
@@ -1294,7 +1286,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapChunks(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("%s-%d", long, i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0, false); err == nil {
+	if _, err := b.writeKeyIndex(keys, 0, nil); err == nil {
 		t.Fatal("writeKeyIndex published an index readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -1314,7 +1306,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapKeys(t *testing.T) {
 		// would not catch this over-cap set.
 		keys[i] = fmt.Sprintf("p%d", i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0, false); err == nil {
+	if _, err := b.writeKeyIndex(keys, 0, nil); err == nil {
 		t.Fatal("writeKeyIndex published a key count readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -2331,6 +2323,83 @@ func TestStoreKeyringTombstonesOutgrowLiveCredentialCap(t *testing.T) {
 	}
 }
 
+// TestStoreKeyringTombstoneBoundaryDoesNotBrickSaves is the regression for
+// [P2] Bound or retire tombstones without bricking future saves (2026-08-09):
+// the tombstone set used to be capped by the raw count (16,384) while the
+// chunked writer's real capacity for maximum-length keys is far smaller.
+// Reaching that boundary made writeTombstones fail before the rest of every
+// Save or Delete, including a re-login that could otherwise clear a marker.
+// The set must now be bounded at the true writable capacity, and hitting the
+// boundary must leave unrelated Saves working and re-login able to retire a
+// marker.
+func TestStoreKeyringTombstoneBoundaryDoesNotBrickSaves(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := s.blob.(keyringBlob)
+
+	// Maximum-length valid keys are the worst case for the chunked writer:
+	// each key costs len+8 = 145 bytes of a 2700-byte chunk, so one chunk
+	// holds 18 and maxKeyringIndexChunks holds maxKeyringTombstoneKeys.
+	maxKey := func(i int) string {
+		return KeyPrefixProvider + fmt.Sprintf("k%04d", i) + strings.Repeat("x", 128-len(fmt.Sprintf("k%04d", i)))
+	}
+	if err := ValidateKey(maxKey(0)); err != nil {
+		t.Fatalf("fixture key invalid: %v", err)
+	}
+	tombstones := make(map[string]bool, maxKeyringTombstoneKeys)
+	for i := 0; i < maxKeyringTombstoneKeys; i++ {
+		tombstones[maxKey(i)] = true
+	}
+	if err := blob.writeTombstones(tombstones); err != nil {
+		t.Fatalf("write %d max-length tombstones: %v", len(tombstones), err)
+	}
+	got, err := blob.readTombstones()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxKeyringTombstoneKeys {
+		t.Fatalf("read %d tombstones, want %d", len(got), maxKeyringTombstoneKeys)
+	}
+
+	// An unrelated Save must still work at the boundary (the marker set is
+	// unchanged and fits the writer).
+	if err := s.Save(ProviderKey("fresh"), Token{AccessToken: "f"}); err != nil {
+		t.Fatalf("Save at tombstone boundary: %v", err)
+	}
+	if tok, ok, err := s.Load(ProviderKey("fresh")); err != nil || !ok || tok.AccessToken != "f" {
+		t.Fatalf("Load(fresh) = %#v ok=%v err=%v", tok, ok, err)
+	}
+
+	// A Delete that would add a brand-new marker past the writable bound must
+	// fail with the clear bound error instead of bricking the store, and the
+	// credential must remain usable (the logout did not silently succeed).
+	removed, err := s.Delete(ProviderKey("fresh"))
+	if err == nil {
+		t.Fatalf("Delete past tombstone bound succeeded (removed=%v); want a clear bound error", removed)
+	}
+	if !strings.Contains(err.Error(), "writable bound") {
+		t.Fatalf("Delete error = %v, want the tombstone writable-bound error", err)
+	}
+	if tok, ok, err := s.Load(ProviderKey("fresh")); err != nil || !ok || tok.AccessToken != "f" {
+		t.Fatalf("credential lost after failed over-bound Delete: %#v ok=%v err=%v", tok, ok, err)
+	}
+	// Retiring markers (re-login of tombstoned keys) frees slots, so the same
+	// Delete then succeeds: the boundary is recoverable, not a permanent brick.
+	if err := s.Save(maxKey(0), Token{AccessToken: "relogged"}); err != nil {
+		t.Fatalf("re-login at tombstone boundary: %v", err)
+	}
+	if err := s.Save(maxKey(1), Token{AccessToken: "relogged2"}); err != nil {
+		t.Fatalf("re-login to retire a second marker: %v", err)
+	}
+	if removed, err := s.Delete(ProviderKey("fresh")); err != nil || !removed {
+		t.Fatalf("Delete after retiring markers: removed=%v err=%v", removed, err)
+	}
+}
+
 func TestKeyringLockPathUserLookupFallbackIgnoresAmbientHome(t *testing.T) {
 	previous := currentOSUser
 	currentOSUser = func() (*user.User, error) { return nil, fmt.Errorf("lookup unavailable") }
@@ -2351,9 +2420,71 @@ func TestKeyringLockPathUserLookupFallbackIgnoresAmbientHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(fallbackDir, keyringTempLockName(keyringService, keyringIndexAccount))
+	want := filepath.Join(fallbackDir, keyringLockFileName(keyringService, keyringIndexAccount))
 	if gotA != want {
-		t.Fatalf("fallback lock = %q, want UID-scoped temporary %q", gotA, want)
+		t.Fatalf("fallback lock = %q, want identity-stable fallback %q", gotA, want)
+	}
+}
+
+// TestKeyringLockPathFallbackStableAcrossTMPDIROverrides is the regression for
+// [P1] Keep the fallback keyring lock path stable across TMPDIR overrides
+// (2026-08-09): the last-resort lock directory used to be anchored on
+// os.TempDir(), which honors the per-process TMPDIR environment override. Two
+// same-UID processes with different TMPDIR values (sandboxes, CI, launchers)
+// chose different zero-oauth-locks-<uid> directories while both wrote the same
+// fixed keyring index, so they could race it. Every branch of lock-path
+// resolution must be identity-stable, and the fallback must fail closed rather
+// than fall back to a process-specific temp root.
+func TestKeyringLockPathFallbackStableAcrossTMPDIROverrides(t *testing.T) {
+	previousUser := currentOSUser
+	currentOSUser = func() (*user.User, error) { return nil, fmt.Errorf("lookup unavailable") }
+	defer func() { currentOSUser = previousUser }()
+	previousLookup := lookupUserID
+	lookupUserID = func(string) (*user.User, error) { return nil, fmt.Errorf("user db unavailable") }
+	defer func() { lookupUserID = previousLookup }()
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	t.Setenv("TMPDIR", dirA)
+	storeA, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", dirB)
+	storeB, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobA := storeA.blob.(keyringBlob)
+	blobB := storeB.blob.(keyringBlob)
+	if blobA.lockPath == "" || blobB.lockPath == "" {
+		t.Fatal("keyring store has no lock path in the fallback branch")
+	}
+	if blobA.lockPath != blobB.lockPath {
+		t.Fatalf("fallback lock path changed with TMPDIR: %q vs %q (they can race the shared keyring index)", blobA.lockPath, blobB.lockPath)
+	}
+	if strings.Contains(blobA.lockPath, dirA) || strings.Contains(blobA.lockPath, dirB) {
+		t.Fatalf("fallback lock path %q is still derived from TMPDIR", blobA.lockPath)
+	}
+
+	// Prove the two stores actually serialize on the same lock file: hold the
+	// lock and verify a Save through the other store blocks until released.
+	unlock, _, err := acquireFileLock(blobA.lockPath, time.Now)
+	if err != nil {
+		t.Fatalf("acquire lock for serialization proof: %v", err)
+	}
+	saveDone := make(chan error, 1)
+	go func() {
+		saveDone <- storeB.Save(ProviderKey("alpha"), Token{AccessToken: "a"})
+	}()
+	select {
+	case err := <-saveDone:
+		t.Fatalf("storeB.Save completed while storeA held the lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+	if err := <-saveDone; err != nil {
+		t.Fatalf("storeB.Save after release: %v", err)
 	}
 }
 
@@ -2435,6 +2566,130 @@ func TestLeaseRefreshStopsWhenLockReplaced(t *testing.T) {
 	}
 }
 
+// TestWithLeasedLocksSkipsFnWhenLeaseLostWhileWaiting is the regression for
+// [P1] Abort before the keyring mutation when a leased lock is lost
+// (2026-08-09): withLeasedLocks used to invoke fn after acquisition and report
+// a lost lease only afterward. That is reachable while the first, global index
+// lock is held and the caller blocks on legacyLockPath: a reclaimed first lock
+// can coexist with the resumed caller's mutation. The critical callback must
+// never run once any lease is lost before fn starts.
+func TestWithLeasedLocksSkipsFnWhenLeaseLostWhileWaiting(t *testing.T) {
+	prevRefresh := fileLockRefreshInterval
+	fileLockRefreshInterval = 20 * time.Millisecond
+	defer func() { fileLockRefreshInterval = prevRefresh }()
+
+	lock1 := filepath.Join(t.TempDir(), "one.lock")
+	lock2 := filepath.Join(t.TempDir(), "two.lock")
+
+	// Simulate a peer holding lock2, so withLeasedLocks blocks after acquiring
+	// lock1 while waiting for lock2.
+	unlock2, _, err := acquireFileLock(lock2, time.Now)
+	if err != nil {
+		t.Fatalf("acquire simulated peer lock: %v", err)
+	}
+
+	var fnCalled atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		done <- withLeasedLocks([]string{lock1, lock2}, time.Now, func() error {
+			fnCalled.Store(true)
+			return nil
+		})
+	}()
+
+	// Wait for lock1 to be acquired and its lease started.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(lock1); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lock1 was never acquired")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// A peer reclaims lock1 while we still wait on lock2.
+	if err := os.WriteFile(lock1, []byte("replacement-holder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Give the lease refresher a tick to observe the replacement.
+	time.Sleep(80 * time.Millisecond)
+	// Release lock2 so acquisition completes and the pre-fn fencing check runs.
+	unlock2()
+
+	err = <-done
+	if err == nil || !strings.Contains(err.Error(), "lost token lock lease") {
+		t.Fatalf("withLeasedLocks err = %v, want lost-lease error", err)
+	}
+	if fnCalled.Load() {
+		t.Fatal("critical callback ran despite a lost lease before fn")
+	}
+	// The reclaiming peer's lock file must not be removed by our release.
+	if data, rerr := os.ReadFile(lock1); rerr == nil && string(data) != "replacement-holder" {
+		t.Fatalf("lock1 content = %q, want the peer's replacement preserved", data)
+	}
+	_ = os.Remove(lock1)
+}
+
+// TestWithLeasedLocksSkipsFnWhenChtimesFails is the failure-injection half of
+// the same fencing finding: a failed renewal (os.Chtimes error) must be
+// treated as an immediate fencing failure, not silently discarded. The lock
+// would retain its token but stop advancing its mtime, go stale, and be
+// reclaimed by a peer starting a conflicting keyring read-modify-write.
+func TestWithLeasedLocksSkipsFnWhenChtimesFails(t *testing.T) {
+	prevRefresh := fileLockRefreshInterval
+	fileLockRefreshInterval = 20 * time.Millisecond
+	defer func() { fileLockRefreshInterval = prevRefresh }()
+	prevChtimes := chtimesLockFile
+	chtimesLockFile = func(string, time.Time, time.Time) error { return errKRInjected }
+	defer func() { chtimesLockFile = prevChtimes }()
+
+	lock1 := filepath.Join(t.TempDir(), "one.lock")
+	lock2 := filepath.Join(t.TempDir(), "two.lock")
+
+	unlock2, _, err := acquireFileLock(lock2, time.Now)
+	if err != nil {
+		t.Fatalf("acquire simulated peer lock: %v", err)
+	}
+
+	var fnCalled atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		done <- withLeasedLocks([]string{lock1, lock2}, time.Now, func() error {
+			fnCalled.Store(true)
+			return nil
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(lock1); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lock1 was never acquired")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Let the lease refresher hit the injected Chtimes failure while we wait
+	// on lock2, marking lock1 lost before fn could run.
+	time.Sleep(80 * time.Millisecond)
+	unlock2()
+
+	err = <-done
+	if err == nil || !strings.Contains(err.Error(), "lost token lock lease") {
+		t.Fatalf("withLeasedLocks err = %v, want lost-lease error", err)
+	}
+	if fnCalled.Load() {
+		t.Fatal("critical callback ran despite a failed lease renewal before fn")
+	}
+	// Our own release is ownership-aware: lock1 still holds our token, so it
+	// must have been removed.
+	if _, statErr := os.Stat(lock1); !os.IsNotExist(statErr) {
+		t.Fatalf("lock1 still present after fencing failure release: %v", statErr)
+	}
+}
+
 // TestAcquireFileLockTimesOutOnFutureMtime rejects a lock whose mtime is in
 // the future as a healthy lease: without the non-negative age guard, every
 // wait loop extends idleDeadline forever.
@@ -2493,12 +2748,12 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	// Damage: drop chunk-1.
 	delete(kr.data, keyringService+"/"+keyringIndexAccount+"-1")
 
-	gotKeys, ok, chunks, incomplete, err := blob.readKeyIndex()
+	gotKeys, ok, chunks, missing, err := blob.readKeyIndex()
 	if err != nil || !ok {
 		t.Fatalf("readKeyIndex: ok=%v err=%v", ok, err)
 	}
-	if !incomplete {
-		t.Fatal("expected incomplete=true when chunk-1 is missing")
+	if len(missing) != 1 || missing[0] != 1 {
+		t.Fatalf("expected chunk-1 reported missing, got %v", missing)
 	}
 	if chunks != 2 {
 		t.Fatalf("chunks = %d, want 2", chunks)
@@ -2523,15 +2778,15 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; !ok {
 		t.Fatal("beta entry was deleted despite missing index chunk; orphan risk path")
 	}
-	afterKeys, _, afterChunks, afterIncomplete, err := blob.readKeyIndex()
+	afterKeys, _, afterChunks, afterMissing, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if afterChunks != 2 {
 		t.Fatalf("post-write chunks = %d, want 2 (preserve missing-chunk advertisement)", afterChunks)
 	}
-	if !afterIncomplete {
-		t.Fatal("post-write index should still be incomplete until chunk-1 returns")
+	if len(afterMissing) != 1 || afterMissing[0] != 1 {
+		t.Fatalf("post-write missing chunks = %v, want [1] until chunk-1 returns", afterMissing)
 	}
 	found := map[string]bool{}
 	for _, k := range afterKeys {
@@ -2543,11 +2798,11 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	// Restoring the missing chunk must surface beta again (the point of preserving
 	// the advertisement instead of shrinking to a complete 1-chunk index).
 	kr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
-	restored, _, _, incomplete, err := blob.readKeyIndex()
+	restored, _, _, restoredMissing, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if incomplete {
+	if len(restoredMissing) != 0 {
 		t.Fatal("expected complete index after restoring chunk-1")
 	}
 	restoredFound := map[string]bool{}
@@ -2556,5 +2811,141 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	}
 	if !restoredFound[ProviderKey("beta")] {
 		t.Fatalf("restored keys = %v, want beta recoverable from chunk-1", restored)
+	}
+}
+
+// TestWritePreservesMissingMiddleChunkSlot is the regression for [P1] Do not
+// overwrite a recoverable missing index chunk (2026-08-09): writeKeyIndex used
+// to preserve only the old header count, not the identity of the missing
+// accounts. A missing MIDDLE continuation chunk was overwritten with newly
+// packed unrelated keys on the next save, so restoring the original chunk could
+// no longer make its per-key credentials reachable. New continuation chunks
+// must be remapped around protected slots, and the protected account must stay
+// untouched (and still advertised) so a later restore reconciles its tokens.
+func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
+	kr := newFakeKR()
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+
+	// Three-chunk index: header [alpha], chunk-1 [beta], chunk-2 [gamma].
+	header, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 3, Keys: []string{ProviderKey("alpha")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk1, err := json.Marshal([]string{ProviderKey("beta")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk2, err := json.Marshal([]string{ProviderKey("gamma")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	kr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
+	kr.data[keyringService+"/"+keyringIndexAccount+"-2"] = base64.StdEncoding.EncodeToString(chunk2)
+	// Entries for every key.
+	for _, k := range []string{ProviderKey("alpha"), ProviderKey("beta"), ProviderKey("gamma")} {
+		raw, _ := json.Marshal(Token{AccessToken: "tok-" + k})
+		kr.data[keyringService+"/"+k] = base64.StdEncoding.EncodeToString(raw)
+	}
+	// Damage: drop the MIDDLE continuation chunk (chunk-1).
+	delete(kr.data, keyringService+"/"+keyringIndexAccount+"-1")
+
+	gotKeys, ok, chunks, missing, err := blob.readKeyIndex()
+	if err != nil || !ok {
+		t.Fatalf("readKeyIndex: ok=%v err=%v", ok, err)
+	}
+	if chunks != 3 {
+		t.Fatalf("chunks = %d, want 3", chunks)
+	}
+	if len(missing) != 1 || missing[0] != 1 {
+		t.Fatalf("missing = %v, want chunk-1 only", missing)
+	}
+	if len(gotKeys) != 2 {
+		t.Fatalf("keys = %v, want header + chunk-2 keys (beta unreachable)", gotKeys)
+	}
+
+	// Save a state whose union needs at least one continuation chunk: many
+	// keys so the packed index overflows the header budget. The union includes
+	// livePrior (alpha, gamma) plus the new set.
+	state := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "tok-alpha"},
+		ProviderKey("gamma"): {AccessToken: "tok-gamma"},
+	}}
+	for i := 0; i < 120; i++ {
+		state.Tokens[ProviderKey(fmt.Sprintf("fill-%03d", i))] = Token{AccessToken: "tok-fill"}
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := blob.write(data, map[string]bool{ProviderKey("fill-000"): false}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// The protected middle slot must still be absent (never overwritten) and
+	// still advertised, so restoring chunk-1 can reconcile beta later.
+	if _, exists := kr.data[keyringService+"/"+keyringIndexAccount+"-1"]; exists {
+		t.Fatal("write overwrote the protected missing chunk-1 slot")
+	}
+	afterKeys, ok, afterChunks, afterMissing, err := blob.readKeyIndex()
+	if err != nil || !ok {
+		t.Fatalf("post-write readKeyIndex: ok=%v err=%v", ok, err)
+	}
+	if afterChunks < 3 {
+		t.Fatalf("post-write chunks = %d, want >= 3 (protected slot still advertised)", afterChunks)
+	}
+	if len(afterMissing) != 1 || afterMissing[0] != 1 {
+		t.Fatalf("post-write missing = %v, want chunk-1 only", afterMissing)
+	}
+	found := map[string]bool{}
+	for _, k := range afterKeys {
+		found[k] = true
+	}
+	for k := range state.Tokens {
+		if !found[k] {
+			t.Fatalf("post-write keys missing %q (union must stay readable)", k)
+		}
+	}
+	// beta's entry must not have been deleted (it was unreachable, so it was
+	// not in livePrior and must stay resident for later recovery).
+	if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; !ok {
+		t.Fatal("beta entry was deleted despite missing chunk; recovery impossible")
+	}
+
+	// Restore the original missing chunk: beta must become discoverable and
+	// deletable again.
+	kr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
+	restored, ok, _, restoredMissing, err := blob.readKeyIndex()
+	if err != nil || !ok {
+		t.Fatalf("restored readKeyIndex: ok=%v err=%v", ok, err)
+	}
+	if len(restoredMissing) != 0 {
+		t.Fatalf("restored missing = %v, want complete", restoredMissing)
+	}
+	restoredFound := map[string]bool{}
+	for _, k := range restored {
+		restoredFound[k] = true
+	}
+	for k := range state.Tokens {
+		if !restoredFound[k] {
+			t.Fatalf("restored keys missing %q", k)
+		}
+	}
+	if !restoredFound[ProviderKey("beta")] {
+		t.Fatalf("restored keys = %v, want beta recoverable from restored chunk-1", restored)
+	}
+
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := s.Load(ProviderKey("beta")); err != nil || !ok || got.AccessToken != "tok-"+ProviderKey("beta") {
+		t.Fatalf("Load(beta) after restore = %#v ok=%v err=%v", got, ok, err)
+	}
+	if removed, err := s.Delete(ProviderKey("beta")); err != nil || !removed {
+		t.Fatalf("Delete(beta) after restore: removed=%v err=%v", removed, err)
+	}
+	if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; ok {
+		t.Fatal("beta entry still resident after Delete; not deletable")
 	}
 }

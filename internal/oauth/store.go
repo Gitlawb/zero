@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,10 @@ const (
 var keyPattern = regexp.MustCompile(`^(provider|mcp):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 var currentOSUser = user.Current
+
+// lookupUserID resolves an OS account by uid; a var so the keyring-lock
+// fallback can be tested hermetically without touching the real user database.
+var lookupUserID = user.LookupId
 
 // ValidateKey reports whether key is a well-formed namespaced token key.
 func ValidateKey(key string) error {
@@ -305,23 +310,34 @@ func keyringLockPath(env map[string]string, service, account string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("oauth: keyring lock fallback dir: %w", err)
 	}
-	return filepath.Join(dir, keyringTempLockName(service, account)), nil
+	return filepath.Join(dir, keyringLockFileName(service, account)), nil
 }
 
 // keyringFallbackLockDir returns a private directory for last-resort keyring
-// locks when the OS user home cannot be resolved. On Windows the process temp
-// dir is already per-user. Elsewhere a UID-scoped 0700 directory under the
-// process temp root is created and validated so a co-tenant cannot pre-create
-// the lock file (or a world-writable parent) and permanently deny OAuth.
+// locks when user.Current cannot resolve a home. It first tries the OS user
+// database by uid (identity-stable, independent of HOME/XDG/TMPDIR env) so the
+// fallback lands on the SAME home-anchored cache dir as the primary branch,
+// giving every process of the user one lock file. If even that lookup fails,
+// it falls back to a uid-scoped 0700 directory under the FIXED /tmp root —
+// never os.TempDir(), which honors the per-process TMPDIR override: two
+// same-user processes with different TMPDIR values would otherwise compute
+// different lock directories while writing the same keyring index and race it.
+// Ownership and mode of the /tmp directory are validated so a co-tenant cannot
+// pre-create it and deny OAuth. Windows temp is already per-user.
 func keyringFallbackLockDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		return os.TempDir(), nil
+	}
+	if uid := os.Getuid(); uid >= 0 {
+		if u, err := lookupUserID(strconv.Itoa(uid)); err == nil && strings.TrimSpace(u.HomeDir) != "" {
+			return filepath.Join(u.HomeDir, ".cache", "zero"), nil
+		}
 	}
 	name := "zero-oauth-locks"
 	if uid := os.Getuid(); uid >= 0 {
 		name = fmt.Sprintf("zero-oauth-locks-%d", uid)
 	}
-	dir := filepath.Join(os.TempDir(), name)
+	dir := filepath.Join("/tmp", name)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -378,17 +394,6 @@ var lockComponentSafe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 func sanitizeLockComponent(s string) string {
 	return lockComponentSafe.ReplaceAllString(s, "_")
-}
-
-// keyringTempLockName names the last-resort temp lock file, scoping it by uid so
-// concurrently running different users do not share one path. os.Getuid returns
-// -1 where uids do not apply (Windows), where os.TempDir is already per-user.
-func keyringTempLockName(service, account string) string {
-	name := keyringLockFileName(service, account)
-	if uid := os.Getuid(); uid >= 0 {
-		return fmt.Sprintf("zero-%d-%s", uid, name)
-	}
-	return "zero-" + name
 }
 
 // FilePath returns the resolved token store location (a path for the file
@@ -877,10 +882,11 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
 	}
-	priorKeys, indexExisted, priorChunks, indexIncomplete, err := b.readKeyIndex()
+	priorKeys, indexExisted, priorChunks, missingChunks, err := b.readKeyIndex()
 	if err != nil {
 		return err
 	}
+	indexIncomplete := len(missingChunks) > 0
 	prior := make(map[string]bool, len(priorKeys))
 	for _, key := range priorKeys {
 		prior[key] = true
@@ -1000,7 +1006,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 		}
 		sort.Strings(union)
 	}
-	unionChunks, err := b.writeKeyIndex(union, priorChunks, indexIncomplete)
+	unionChunks, err := b.writeKeyIndex(union, priorChunks, missingChunks)
 	if err != nil {
 		return err
 	}
@@ -1025,7 +1031,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	// Skip shrink when the prior index was incomplete: a shrink to `keys` would
 	// drop the preserved chunk advertisements and strand unlisted entries.
 	if !indexIncomplete {
-		if _, err := b.writeKeyIndex(keys, unionChunks, false); err != nil {
+		if _, err := b.writeKeyIndex(keys, unionChunks, nil); err != nil {
 			return err
 		}
 	}
@@ -1097,7 +1103,7 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
 		return nil
 	}
 	if len(tombstones) > maxKeyringTombstoneKeys {
-		return errKeyringIndexTooManyKeys(len(tombstones), maxKeyringTombstoneKeys)
+		return fmt.Errorf("oauth: keyring token tombstones list %d logged-out keys, over the %d-key writable bound; re-login to a retired provider to free a marker slot", len(tombstones), maxKeyringTombstoneKeys)
 	}
 	keys := make([]string, 0, len(tombstones))
 	for key := range tombstones {
@@ -1107,7 +1113,7 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, err := tb.writeKeyIndex(keys, priorChunks, false); err != nil {
+	if _, err := tb.writeKeyIndex(keys, priorChunks, nil); err != nil {
 		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
 	}
 	return nil
@@ -1155,9 +1161,22 @@ const maxKeyringIndexChunks = 128
 // maxKeyringIndexChunks) while still rejecting a damaged index promptly.
 const maxKeyringIndexKeys = 512
 
-// Tombstones do not fan out into per-key keyring reads, so they can use the
-// codec's bounded raw capacity without imposing the live credential cap.
-const maxKeyringTombstoneKeys = maxRawKeyringIndexKeys
+// maxKeyringKeyBytes is the longest ValidateKey-shaped key: "provider:" (or
+// "mcp:") plus a leading alphanumeric plus up to 127 safe characters.
+const maxKeyringKeyBytes = 137
+
+// maxKeyringTombstoneKeys bounds the durable logout-marker set to what the
+// chunked index writer can ALWAYS serialize, even with maximum-length keys:
+// each key costs len+8 = 145 bytes of a 2700-byte chunk, so one chunk holds 18
+// and the 128-chunk reader cap holds 2304. The previous bound of 16,384 was
+// only reachable with tiny keys; a tombstone set using long provider keys
+// exhausted the chunk budget first, and once writeKeyIndex rejected it every
+// later Save/Delete failed (including the re-login that could otherwise clear
+// the marker), permanently disabling keyring-backed persistence. With the
+// writable bound, the logout that would overflow the set fails with a clear
+// error instead of bricking the store, and re-login retires a marker to free
+// a slot.
+const maxKeyringTombstoneKeys = maxKeyringIndexChunks * (maxKeyringIndexChunkBytes / (maxKeyringKeyBytes + 8))
 
 // maxRawKeyringIndexKeys bounds the raw decoded element count before
 // deduplication or map preallocation, guarding against DoS from duplicate keys.
@@ -1211,86 +1230,87 @@ func decodeKeyringIndexPayload(enc string, what string) ([]byte, error) {
 }
 
 // readKeyIndex returns the indexed keys, whether an index exists at all,
-// how many chunk entries it currently occupies, and whether a referenced
-// continuation chunk was missing. A missing chunk (external keychain damage
-// or a torn write outside this code's write order) is skipped so reads stay
-// available, but incomplete is true so write() can refuse to shrink the
-// index and strand the unlisted entries as undeletable orphans.
-func (b keyringBlob) readKeyIndex() (keys []string, ok bool, chunks int, incomplete bool, err error) {
+// how many chunk entries it currently occupies, and the indexes of any
+// advertised continuation chunks that are missing. A missing chunk (external
+// keychain damage or a torn write outside this code's write order) is skipped
+// so reads stay available, but its index is remembered so write() can refuse
+// to shrink the index (stranding the unlisted entries as undeletable orphans)
+// and can refuse to overwrite that account with unrelated new chunk data.
+func (b keyringBlob) readKeyIndex() (keys []string, ok bool, chunks int, missing []int, err error) {
 	enc, ok, err := b.kr.Get(b.service, b.indexAccount)
 	if err != nil {
-		return nil, false, 0, false, err
+		return nil, false, 0, nil, err
 	}
 	if !ok {
-		return nil, false, 0, false, nil
+		return nil, false, 0, nil, nil
 	}
 	raw, err := decodeKeyringIndexPayload(enc, "keyring token index")
 	if err != nil {
-		return nil, false, 0, false, err
+		return nil, false, 0, nil, err
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if strings.HasPrefix(trimmed, "[") {
 		var rawKeys []string
 		if err := json.Unmarshal(raw, &rawKeys); err != nil {
-			return nil, false, 0, false, fmt.Errorf("oauth: decode keyring token index: %w", err)
+			return nil, false, 0, nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
 		}
 		if len(rawKeys) > maxRawKeyringIndexKeys {
-			return nil, false, 0, false, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
+			return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 		}
 		keys := dedupeValidKeys(rawKeys)
 		if len(keys) > b.indexKeyLimit() {
-			return nil, false, 0, false, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
+			return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 		}
-		return keys, true, 1, false, nil
+		return keys, true, 1, nil, nil
 	}
 	var header keyIndexHeader
 	if err := json.Unmarshal(raw, &header); err != nil {
-		return nil, false, 0, false, fmt.Errorf("oauth: decode keyring token index: %w", err)
+		return nil, false, 0, nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
 	}
 	// Reject an unsupported or corrupt header before looping: an out-of-range
 	// Chunks would otherwise drive up to that many blocking keyring lookups
 	// (each up to the 10s command timeout) while the store lock is held, wedging
 	// every Load/Status/Save/Delete instead of failing promptly.
 	if header.Version != 1 {
-		return nil, false, 0, false, fmt.Errorf("oauth: unsupported keyring token index version %d", header.Version)
+		return nil, false, 0, nil, fmt.Errorf("oauth: unsupported keyring token index version %d", header.Version)
 	}
 	if header.Chunks < 1 || header.Chunks > maxKeyringIndexChunks {
-		return nil, false, 0, false, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
+		return nil, false, 0, nil, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
 	}
 	rawKeys := header.Keys
 	if len(rawKeys) > maxRawKeyringIndexKeys {
-		return nil, false, 0, false, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
+		return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 	}
-	incomplete = false
 	for i := 1; i < header.Chunks; i++ {
 		chunkEnc, chunkOK, err := b.kr.Get(b.service, b.chunkAccount(i))
 		if err != nil {
-			return nil, false, 0, false, err
+			return nil, false, 0, nil, err
 		}
 		if !chunkOK {
-			// Skip so Load/Status stay available, but remember the damage so
-			// write() does not shrink away the unlisted keys' entries.
-			incomplete = true
+			// Skip so Load/Status stay available, but remember which account is
+			// damaged so write() neither shrinks away the unlisted keys' entries
+			// nor overwrites this account with unrelated new chunk data.
+			missing = append(missing, i)
 			continue
 		}
 		chunkRaw, err := decodeKeyringIndexPayload(chunkEnc, fmt.Sprintf("keyring token index chunk %d", i))
 		if err != nil {
-			return nil, false, 0, false, err
+			return nil, false, 0, nil, err
 		}
 		var more []string
 		if err := json.Unmarshal(chunkRaw, &more); err != nil {
-			return nil, false, 0, false, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
+			return nil, false, 0, nil, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
 		}
 		if len(rawKeys)+len(more) > maxRawKeyringIndexKeys {
-			return nil, false, 0, false, errKeyringIndexTooManyKeys(len(rawKeys)+len(more), maxRawKeyringIndexKeys)
+			return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys)+len(more), maxRawKeyringIndexKeys)
 		}
 		rawKeys = append(rawKeys, more...)
 	}
 	keys = dedupeValidKeys(rawKeys)
 	if len(keys) > b.indexKeyLimit() {
-		return nil, false, 0, false, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
+		return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 	}
-	return keys, true, header.Chunks, incomplete, nil
+	return keys, true, header.Chunks, missing, nil
 }
 
 // dedupeValidKeys drops duplicates and malformed entries from a decoded
@@ -1327,12 +1347,14 @@ func dedupeValidKeys(keys []string) []string {
 // previously larger index are removed only after the header stops referencing
 // them (best-effort: an unreferenced chunk is never read).
 //
-// keepMissingChunks is set when readKeyIndex reported a missing continuation
-// chunk. In that mode the header keeps advertising at least priorChunks so a
-// later-restored chunk remains reachable, and chunk accounts in that range are
-// not deleted (overwriting or removing them would turn recoverable damage into
-// permanent orphans).
-func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, keepMissingChunks bool) (int, error) {
+// missingChunks lists the continuation-chunk accounts readKeyIndex reported as
+// missing. Those slots are protected: the credentials they listed may still
+// exist in the keyring, so overwriting the account with unrelated new chunk
+// data would permanently orphan them even if the original chunk is later
+// restored. New continuation chunks are therefore remapped around protected
+// slots, the header keeps advertising at least priorChunks so a later-restored
+// chunk remains reachable, and protected accounts are never deleted.
+func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks []int) (int, error) {
 	// Refuse to publish an index the reader would reject: readKeyIndex caps both
 	// total keys and chunk count, and a header beyond either would make every
 	// later Load/Status/Save/Delete fail before it could recover. Check the key
@@ -1345,19 +1367,40 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, keepMissingCh
 	if len(chunks) > maxKeyringIndexChunks {
 		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", len(chunks), maxKeyringIndexChunks)
 	}
-	// Only write content chunks we produced. When preserving a damaged prior
-	// index, higher-numbered accounts may still hold recoverable key lists.
+	protected := make(map[int]bool, len(missingChunks))
+	maxProtected := 0
+	for _, c := range missingChunks {
+		protected[c] = true
+		if c > maxProtected {
+			maxProtected = c
+		}
+	}
+	// Write each new continuation chunk into the next account that is not a
+	// protected (missing) slot, so recoverable chunk data is never overwritten.
+	slot := 1
+	advertised := len(chunks)
 	for i := 1; i < len(chunks); i++ {
+		for protected[slot] {
+			slot++
+		}
 		chunkData, err := json.Marshal(chunks[i])
 		if err != nil {
 			return 0, err
 		}
-		if err := b.kr.Set(b.service, b.chunkAccount(i), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
+		if err := b.kr.Set(b.service, b.chunkAccount(slot), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
 			return 0, err
 		}
+		if slot+1 > advertised {
+			advertised = slot + 1
+		}
+		slot++
 	}
-	advertised := len(chunks)
-	if keepMissingChunks && priorChunks > advertised {
+	// Keep advertising protected slots (a restored chunk is read by walking
+	// every account below the advertised count) and the prior chunk count.
+	if len(missingChunks) > 0 && maxProtected+1 > advertised {
+		advertised = maxProtected + 1
+	}
+	if len(missingChunks) > 0 && priorChunks > advertised {
 		advertised = priorChunks
 	}
 	if advertised > maxKeyringIndexChunks {
@@ -1370,7 +1413,9 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, keepMissingCh
 	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
 		return 0, err
 	}
-	if !keepMissingChunks {
+	// Remove stale chunks only when nothing is protected: deleting a protected
+	// account would destroy the last chance to recover the keys it listed.
+	if len(missingChunks) == 0 {
 		for i := len(chunks); i < priorChunks; i++ {
 			_, _ = b.kr.Delete(b.service, b.chunkAccount(i))
 		}
@@ -1405,6 +1450,12 @@ func chunkIndexKeys(keys []string) [][]string {
 // could reclaim the live lock and resume the token-loss race the lock
 // exists to prevent. A var so tests can shorten it.
 var fileLockRefreshInterval = 10 * time.Second
+
+// chtimesLockFile stamps a lock file's mtime for lease refresh. A var so tests
+// can inject renewal failures (fencing regression): a failed Chtimes leaves
+// the lock token intact but stops its mtime advancing, so a peer can reclaim
+// it as stale and start a conflicting critical section.
+var chtimesLockFile = os.Chtimes
 
 // leasedPath is one acquired lock whose mtime is refreshed until stop is
 // closed. Lease ownership starts at acquisition, not after every path is
@@ -1454,7 +1505,15 @@ func startLease(path, token string, unlock func()) *leasedPath {
 					return
 				}
 				at := time.Now()
-				_ = os.Chtimes(path, at, at)
+				if err := chtimesLockFile(path, at, at); err != nil {
+					// A failed renewal stops advancing the lock's mtime, so the
+					// lock will look stale and a peer can reclaim it
+					// mid-critical-section. Treat it as an immediate fencing
+					// failure: stop refreshing so withLeasedLocks aborts before
+					// (or surfaces the error after) the keyring mutation.
+					l.lost.Store(true)
+					return
+				}
 				if !ownLockFile(path, token) {
 					l.lost.Store(true)
 					return
@@ -1508,6 +1567,17 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func() error) erro
 		return fn()
 	}
 	defer releaseAll()
+	// Fencing: if any lease was already lost while later locks were still
+	// being acquired (e.g. the first, global index lock reclaimed as stale
+	// while the caller blocks on legacyLockPath), do not enter the critical
+	// section at all. A mutation under a lost lock would run concurrently with
+	// the peer that reclaimed it, reviving the token-loss race the locks exist
+	// to prevent.
+	for _, l := range leases {
+		if l.lost.Load() {
+			return fmt.Errorf("oauth: lost token lock lease on %s", filepath.Base(l.path))
+		}
+	}
 	err := fn()
 	for _, l := range leases {
 		if l.lost.Load() {
