@@ -187,7 +187,7 @@ func (m model) composerDividerLine(width int) string {
 }
 
 // statusLine renders the bottom readout as ` │ `-separated groups: the run-state
-// chip (permission mode + effort) on the left, a flexible gap, then the
+// chip (permission mode + effort/fast tier) on the left, a flexible gap, then the
 // context-fill gauge and token/cost usage on the right. The provider lives in the
 // title bar and is NOT duplicated here. Groups drop with the width tier.
 func (m model) statusLine(width int) string {
@@ -224,6 +224,9 @@ func (m model) statusLine(width int) string {
 	// Non-tiny: append the active reasoning effort (brand lime, omitted on auto).
 	if m.reasoningEffort != "" {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
+	}
+	if m.activeServiceTier() == "priority" {
+		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render("fast")
 	}
 	if m.exitConfirmActive {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)

@@ -231,10 +231,17 @@ func TestTurnSessionFingerprintDriftOnToolsAndEffort(t *testing.T) {
 	// Unrecognized efforts normalize to omitted — same as empty.
 	droppedEffort := session.computeFingerprint(zeroruntime.CompletionRequest{
 		Tools:           []zeroruntime.ToolDefinition{{Name: "read_file", Parameters: map[string]any{"type": "object"}}},
-		ReasoningEffort: "xhigh",
+		ReasoningEffort: "bogus",
 	})
 	if base != droppedEffort {
 		t.Fatal("an effort the wire would omit must fingerprint like no effort")
+	}
+	changedTier := session.computeFingerprint(zeroruntime.CompletionRequest{
+		Tools:       []zeroruntime.ToolDefinition{{Name: "read_file", Parameters: map[string]any{"type": "object"}}},
+		ServiceTier: "priority",
+	})
+	if base == changedTier {
+		t.Fatal("fingerprint did not drift on a changed service tier")
 	}
 }
 

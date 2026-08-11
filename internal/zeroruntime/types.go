@@ -205,6 +205,10 @@ type CompletionRequest struct {
 	// Anthropic/Gemini thinking budgets) and ignores it for models that do not
 	// support reasoning. Empty means "let the provider decide".
 	ReasoningEffort string
+	// ServiceTier selects an optional provider-advertised request tier. Empty
+	// means the provider default; "priority" is the wire value used by fast mode.
+	// Callers must only set a tier advertised for the active provider/model.
+	ServiceTier string
 	// PromptCacheKey, when non-empty, is an opaque stable identifier for the
 	// conversation (the session ID). Providers with server-side prefix-cache
 	// routing forward it — OpenAI `prompt_cache_key` — so consecutive requests

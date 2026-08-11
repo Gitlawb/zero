@@ -492,6 +492,31 @@ func TestCodexProviderForwardsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestCodexProviderForwardsPriorityServiceTier(t *testing.T) {
+	var rec codexRequest
+	srv := newCodexTestServer(t, &rec)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5-codex"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:    []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ServiceTier: "priority",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	drainCodexEvents(t, stream)
+	if got := rec.body["service_tier"]; got != "priority" {
+		t.Fatalf("body.service_tier = %#v, want priority", got)
+	}
+}
+
 func TestCodexProviderStreamsReasoningSummaryDeltas(t *testing.T) {
 	// reasoning_summary_text deltas must surface as StreamEventReasoning (live
 	// "thinking"), in order, alongside the normal text output. Without this a long

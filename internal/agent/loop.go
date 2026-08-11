@@ -186,6 +186,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	planner := newContextPlanner(contextPlannerConfig{
 		contextWindow:  options.ContextWindow,
 		promptCacheKey: options.SessionID,
+		serviceTier:    options.ServiceTier,
 		promptParts:    promptParts,
 	})
 	messages := zeroruntime.SeedMessagesWithImages(promptParts.prompt, prompt, options.Images)

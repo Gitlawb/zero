@@ -8,17 +8,21 @@ import (
 )
 
 type Model struct {
-	ID               string
-	Description      string
-	ContextWindow    int
-	ToolCall         bool
-	Reasoning        bool
-	InputModalities  []string
-	OutputModalities []string
-	InputCost        float64
-	OutputCost       float64
-	Tags             []string
-	Source           string
+	ID                     string
+	Description            string
+	ContextWindow          int
+	ToolCall               bool
+	Reasoning              bool
+	ReasoningEfforts       []string
+	DefaultReasoningEffort string
+	ServiceTiers           []string
+	DefaultServiceTier     string
+	InputModalities        []string
+	OutputModalities       []string
+	InputCost              float64
+	OutputCost             float64
+	Tags                   []string
+	Source                 string
 }
 
 const minimaxModelSource = "https://platform.minimax.io/docs/api-reference/api-overview"

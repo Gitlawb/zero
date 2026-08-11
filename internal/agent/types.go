@@ -325,6 +325,7 @@ type Options struct {
 	ProviderName     string
 	Model            string
 	ReasoningEffort  string
+	ServiceTier      string
 	Cwd              string
 	SystemPrompt     string
 	// TransientSystemPrompt adds trusted runtime guidance for this run only.

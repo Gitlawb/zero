@@ -860,6 +860,33 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionSendsPriorityServiceTier(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:    []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ServiceTier: "priority",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	drain(stream)
+	if got := gotBody["service_tier"]; got != "priority" {
+		t.Fatalf("service_tier = %#v, want priority", got)
+	}
+}
+
 func TestStreamCompletionOmitsReasoningEffortWhenUnsetOrInvalid(t *testing.T) {
 	for _, effort := range []string{"", "none", "bogus"} {
 		var gotBody map[string]any
