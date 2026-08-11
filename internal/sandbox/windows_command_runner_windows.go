@@ -130,6 +130,20 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 			return 1
 		}
 		jailSIDs := windowsPrincipalJailSIDs(tokenSIDs, principalUser.User.Sid.String())
+		// A strict token restricts READS too, and the account SID that carries the
+		// read roots was just removed above. Without the read capability the jail
+		// stops being a write jail and becomes a total one: no read root, no
+		// executable, nothing. BuildWindowsACLPlan grants this same SID on every
+		// read root and denies it on every DenyRead path, so the allow-list and the
+		// restriction stay one decision.
+		if !writeRestricted {
+			readSID, err := WindowsReadAllowSID(config.SandboxHome)
+			if err != nil {
+				fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": resolve sandbox read capability: "+err.Error())
+				return 1
+			}
+			jailSIDs = append(jailSIDs, readSID)
+		}
 		jailedToken, err := restrictWindowsTokenForCapabilitySIDs(principalToken, jailSIDs, writeRestricted)
 		if err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
