@@ -194,6 +194,26 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		}
 		if commandRunsLocalServer(prog, rest) {
 			result.LocalServer = true
+			// LocalServer is ADDITIVE, not a replacement for Network, and that is
+			// the whole of this line.
+			//
+			// Nothing consumes LocalServer yet: no policy or runner code reads it,
+			// so classifying a serving command as local-only did not grant it a
+			// scoped host listener, it only removed the network approval it used to
+			// get. The command then ran under the default deny profile, which on
+			// Linux is a network namespace and on macOS is (deny network*), so
+			// `python -m http.server` and `vite` started without a prompt and could
+			// not serve a preview to the operator's browser.
+			//
+			// It is also unsound for the package managers. `npm run dev` is matched
+			// by SCRIPT NAME, and the repository decides what `dev` and `predev`
+			// actually do; either can curl before anything binds a port. On Windows
+			// the approval gate IS the network protection, so inferring "no egress"
+			// from a name there lets that egress run unprompted.
+			//
+			// The classification is kept, because a scoped host-listener path will
+			// want it, and the approval path is kept until that path exists.
+			result.Network = true
 		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
