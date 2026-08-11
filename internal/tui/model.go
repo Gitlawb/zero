@@ -929,6 +929,14 @@ func newModel(ctx context.Context, options Options) model {
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAuto
 	}
+	// Normalized HERE, not only inside agent.Run. The TUI makes its own
+	// mode-specific decisions before the run starts, and it tests for the
+	// canonical PermissionModeFullAuto. An entry point handed the accepted legacy
+	// "unsafe" spelling therefore rejected ! shell escapes, published a prompting
+	// peer identity and chose low self-correction, while agent.Run normalized the
+	// very same run to full-auto. One value, two behaviours, decided by which
+	// layer looked at it.
+	permissionMode = agent.NormalizePermissionMode(permissionMode)
 
 	input := textinput.New()
 	input.Prompt = "❯ "
