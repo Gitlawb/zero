@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -105,6 +106,54 @@ func TestWindowsSandboxRuntimeRootsAreInTheCapabilityPlan(t *testing.T) {
 	for _, candidate := range candidates {
 		if _, ok := granted[windowsCapabilityPathKey(candidate)]; !ok {
 			t.Fatalf("capability ACL plan has no entry for runtime root %s; writes there fail the restricting-SID check", candidate)
+		}
+	}
+}
+
+// EVERY write root the capability plan grants must exist by the time setup
+// applies it.
+//
+// The capability plan deliberately refuses to materialize a write root, so a
+// granted path that is merely absent fails the entire setup run with
+//
+//	windows ACL target does not exist: ...\zero\runtime\v1\<hash>
+//
+// which is exactly what an elevated run hit: the runtime candidates were added
+// to the plan while only the selected one was ever created, and `zero sandbox
+// setup` stopped working altogether. The two halves are separate functions, so
+// nothing but this test stops one from growing a candidate without the other.
+func TestWindowsSandboxSetupProvisionsEveryGrantedWriteRoot(t *testing.T) {
+	config := runtimeRootTestConfig(t)
+	candidates := windowsSandboxRuntimeCandidates(config.WorkspaceRoots)
+	if len(candidates) == 0 {
+		t.Fatal("windowsSandboxRuntimeCandidates returned none, so this test proves nothing")
+	}
+	// The workspace is unique per run, and the roots are derived from it, so these
+	// cannot pre-exist. Assert that rather than trust it: if they did, the test
+	// would pass with the provisioning step deleted.
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			t.Fatalf("runtime root %s already exists before provisioning, so this test proves nothing", candidate)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(candidate) })
+	}
+
+	if err := ensureWindowsSandboxRuntimeCandidates(config.WorkspaceRoots); err != nil {
+		t.Fatalf("ensureWindowsSandboxRuntimeCandidates: %v", err)
+	}
+
+	setup := WindowsSandboxSetupConfigFromCommand(config)
+	plan, err := BuildWindowsACLPlan(setup.commandConfig())
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+	for _, entry := range plan.Entries {
+		if entry.Action != WindowsACLAllowWrite || entry.Materialize {
+			continue
+		}
+		if _, err := os.Stat(entry.Path); err != nil {
+			t.Errorf("capability plan grants write on %s but nothing created it, so setup fails with "+
+				"\"windows ACL target does not exist\": %v", entry.Path, err)
 		}
 	}
 }
