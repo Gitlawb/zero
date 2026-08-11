@@ -53,6 +53,11 @@ const (
 	// times after the hint while converging — stopping at 4 cut those runs short.
 	// The streak still resets the moment the tool succeeds or hits a different
 	// error, so this only affects true same-error loops.
+	// denialSignaturePrefix marks a record keyed on a denial CATEGORY rather than
+	// an error signature, so the stop answer can avoid calling refusals of
+	// different paths the same error.
+	denialSignaturePrefix = "denial:"
+
 	toolFailureStopAt = 6
 
 	// toolFailureAnyErrorStopAt halts a tool that keeps failing with DIFFERENT
@@ -354,11 +359,21 @@ type toolFailureOutcome struct {
 	InjectHint bool
 	Stop       bool
 	Count      int
-	// Varied reports that the stop came from the content-blind bound, i.e. Count
-	// failures with DIFFERENT errors rather than the same one repeated. The final
-	// answer says so, because "failed 12 times with the same error" would be a
-	// plainly false description of a tool that failed 12 different ways.
+	// Varied reports that the stop came from the content-blind bound.
+	//
+	// It means the failures did NOT all share a signature, which is as much as
+	// the counter establishes: reaching 12 without 6 consecutive matches proves
+	// no signature repeated six times, not that every failure differed. Five A,
+	// five B and two C trips this bound while three of the errors were shared, so
+	// the answer says varying rather than each different.
 	Varied bool
+	// Refused reports that the streak was keyed on a denial CATEGORY rather than
+	// an error signature.
+	//
+	// The category is a small closed enum, and the prose behind it embeds the
+	// path or command refused, so it differs on every call. Calling that the same
+	// error would be false in the other direction from Varied.
+	Refused bool
 }
 
 // errorSignature normalizes a tool error to a short, comparable signature so
@@ -384,12 +399,22 @@ func toolFailureHint(toolName, schemaJSON, errOutput string) string {
 
 // toolFailureStopAnswer is the final answer when the repeated-failure guard halts
 // a run.
-func toolFailureStopAnswer(toolName string, count int, varied bool) string {
+func toolFailureStopAnswer(toolName string, count int, varied bool, refused bool) string {
+	// Each branch claims only what its counter established. The previous wording
+	// overclaimed in both directions: the content-blind bound said every failure
+	// differed, which it does not track, and the signature bound said the same
+	// error, which is false for a denial streak whose category covers refusals of
+	// different paths.
+	verb := " tool failed "
 	cause := " times in a row with the same error, "
-	if varied {
-		cause = " times in a row, each with a different error, "
+	switch {
+	case varied:
+		cause = " times in a row with varying errors, "
+	case refused:
+		verb = " tool was refused "
+		cause = " times in a row, "
 	}
-	return "Agent stopped: the `" + toolName + "` tool failed " + strconv.Itoa(count) +
+	return "Agent stopped: the `" + toolName + "`" + verb + strconv.Itoa(count) +
 		cause + "so I halted instead of looping further. " +
 		"Please check the request or adjust the tool arguments."
 }
@@ -522,7 +547,7 @@ func (state *guardState) observeToolResult(name string, failed bool, hintable bo
 	// a small closed enum the loop already sets on the result.
 	sig := errorSignature(output)
 	if denial != DenialNone {
-		sig = "denial:" + string(denial)
+		sig = denialSignaturePrefix + string(denial)
 	}
 	record := state.toolFailures[name]
 	if record == nil {
@@ -544,6 +569,7 @@ func (state *guardState) observeToolResult(name string, failed bool, hintable bo
 	switch {
 	case record.count >= toolFailureStopAt:
 		outcome.Stop = true
+		outcome.Refused = strings.HasPrefix(record.errSig, denialSignaturePrefix)
 		return outcome
 	case record.anyErrorCount >= toolFailureAnyErrorStopAt:
 		// Report the counter that actually tripped. record.count is the
