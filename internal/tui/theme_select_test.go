@@ -400,33 +400,12 @@ func hexChannels(t *testing.T, hexColor string) (int, int, int) {
 	return int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff)
 }
 
-// xterm256Hex returns the nearest xterm-256 color (the 6x6x6 cube plus the
-// 24-step grayscale ramp, by squared RGB distance): how a terminal without
-// truecolor support downsamples the palette's hex tokens before rendering.
+// xterm256Hex returns the hex of a color after colorprofile.ANSI256 conversion.
 func xterm256Hex(t *testing.T, hexColor string) string {
 	t.Helper()
-	r, g, b := hexChannels(t, hexColor)
-	levels := []int{0, 95, 135, 175, 215, 255}
-	bestR, bestG, bestB := 0, 0, 0
-	bestDistance := math.MaxFloat64
-	try := func(cr, cg, cb int) {
-		d := float64((r-cr)*(r-cr) + (g-cg)*(g-cg) + (b-cb)*(b-cb))
-		if d < bestDistance {
-			bestDistance, bestR, bestG, bestB = d, cr, cg, cb
-		}
-	}
-	for _, cr := range levels {
-		for _, cg := range levels {
-			for _, cb := range levels {
-				try(cr, cg, cb)
-			}
-		}
-	}
-	for i := 0; i < 24; i++ {
-		gray := 8 + 10*i
-		try(gray, gray, gray)
-	}
-	return fmt.Sprintf("#%02x%02x%02x", bestR, bestG, bestB)
+	c := colorprofile.ANSI256.Convert(lipgloss.Color(hexColor))
+	r, g, b, _ := c.RGBA()
+	return fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
 }
 
 // Hex-level AA does not guarantee the rendered pairs hold on a 256-color
