@@ -342,13 +342,27 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 		level = WindowsSandboxLevelUnelevated
 	}
 	args, err := BuildWindowsSandboxCommandArgs(WindowsSandboxCommandArgsOptions{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        spec.Dir,
-		WorkspaceRoots:    []string{execRequest.WorkspaceRoot},
-		PermissionProfile: execRequest.PermissionProfile,
-		Env:               childEnv,
-		SandboxLevel:      level,
-		Command:           append([]string{spec.Name}, spec.Args...),
+		SandboxHome:    sandboxHome,
+		CommandCWD:     spec.Dir,
+		WorkspaceRoots: []string{execRequest.WorkspaceRoot},
+		// Augmented HERE, in the parent, because this is the last process whose
+		// TEMP is the operator's.
+		//
+		// The runner cannot derive the runtime candidates itself: the child env it
+		// runs with has TEMP and TMP pointed at the sandbox runtime temp, so
+		// os.TempDir() inside it returns the redirected value and the temp-derived
+		// candidate comes out rooted under the runtime tree instead of under the
+		// real temp. Setup, whose TEMP is untouched, derived the other spelling —
+		// same number of roots, different paths — and every command died on
+		// "permission roots or deny lists changed" with two 12-entry plans that
+		// disagreed.
+		PermissionProfile: windowsSandboxProfileWithRuntime(
+			execRequest.PermissionProfile,
+			[]string{execRequest.WorkspaceRoot},
+		),
+		Env:          childEnv,
+		SandboxLevel: level,
+		Command:      append([]string{spec.Name}, spec.Args...),
 	})
 	if err != nil {
 		return CommandPlan{}, err
