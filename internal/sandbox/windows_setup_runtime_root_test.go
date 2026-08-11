@@ -44,7 +44,10 @@ func runtimeRootTestConfig(t *testing.T) WindowsSandboxCommandConfig {
 // every machine that falls back.
 func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
 	config := runtimeRootTestConfig(t)
+	// The setup half, as BuildWindowsSandboxSetupArgs prepares it in the
+	// operator's shell before the elevated helper ever runs.
 	setup := WindowsSandboxSetupConfigFromCommand(config)
+	setup.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(setup.PermissionProfile, config.WorkspaceRoots)
 	if _, err := WriteWindowsSandboxSetupMarker(setup); err != nil {
 		t.Fatalf("WriteWindowsSandboxSetupMarker: %v", err)
 	}
@@ -55,14 +58,43 @@ func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
 	}
 	for _, candidate := range candidates {
 		augmented := config
-		augmented.PermissionProfile = permissionProfileWithRuntime(
-			config.PermissionProfile,
-			SandboxRuntime{Root: candidate},
+		// The command half, in the same order the real path builds it: the engine
+		// appends the SELECTED root, then the Windows plan folds in the candidate
+		// set before serializing the profile to the runner.
+		augmented.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(
+			permissionProfileWithRuntime(config.PermissionProfile, SandboxRuntime{Root: candidate}),
+			config.WorkspaceRoots,
 		)
 		err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(augmented))
 		if err != nil {
 			t.Fatalf("ValidateWindowsSandboxSetupMarker with runtime root %s: %v", candidate, err)
 		}
+	}
+
+	// THE RUNNER'S TEMP IS NOT THE OPERATOR'S.
+	//
+	// sandboxRuntimeEnvironment points TMPDIR/TMP/TEMP at the sandbox runtime
+	// temp for everything the sandbox launches, and the command runner inherits
+	// that env. While the runner derived the candidate set itself, os.TempDir()
+	// there returned the redirected value, so it produced a temp-derived root
+	// under the runtime tree while setup produced one under the real temp: two
+	// plans with the SAME entry count and different hashes, and every sandboxed
+	// command refused to run with "permission roots or deny lists changed".
+	//
+	// Validation must not move when that variable does.
+	// Augmented FIRST, standing in for the parent, whose TEMP is still real.
+	runner := config
+	runner.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(
+		permissionProfileWithRuntime(config.PermissionProfile, SandboxRuntime{Root: candidates[0]}),
+		config.WorkspaceRoots,
+	)
+	// Only THEN does the environment become the runner's. Anything downstream of
+	// this line that re-derives a runtime root gets the redirected answer, which
+	// is precisely the defect: validation has to be settled before here.
+	t.Setenv("TEMP", t.TempDir())
+	t.Setenv("TMP", os.Getenv("TEMP"))
+	if err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(runner)); err != nil {
+		t.Fatalf("ValidateWindowsSandboxSetupMarker with a redirected TEMP: %v", err)
 	}
 
 	// The guard has to still bite, or the test above passes for the wrong reason
@@ -95,6 +127,7 @@ func TestWindowsSandboxRuntimeRootsAreInTheCapabilityPlan(t *testing.T) {
 	}
 
 	setup := WindowsSandboxSetupConfigFromCommand(config)
+	setup.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(setup.PermissionProfile, config.WorkspaceRoots)
 	plan, err := BuildWindowsACLPlan(setup.commandConfig())
 	if err != nil {
 		t.Fatalf("BuildWindowsACLPlan: %v", err)
@@ -143,6 +176,7 @@ func TestWindowsSandboxSetupProvisionsEveryGrantedWriteRoot(t *testing.T) {
 	}
 
 	setup := WindowsSandboxSetupConfigFromCommand(config)
+	setup.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(setup.PermissionProfile, config.WorkspaceRoots)
 	plan, err := BuildWindowsACLPlan(setup.commandConfig())
 	if err != nil {
 		t.Fatalf("BuildWindowsACLPlan: %v", err)
