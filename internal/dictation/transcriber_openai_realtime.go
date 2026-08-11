@@ -107,7 +107,16 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			case chunk, ok := <-chunks:
 				if !ok {
 					// Commit the buffered audio to force final transcription.
-					writeErrCh <- o.writeJSON(ctx, conn, map[string]any{"type": "input_audio_buffer.commit"})
+					if err := o.writeJSON(ctx, conn, map[string]any{"type": "input_audio_buffer.commit"}); err != nil {
+						writeErrCh <- err
+						// Unblock the reader: without a close, conn.Read stays
+						// parked on a silent peer and the error is never drained
+						// from writeErrCh. CloseNow aborts instead of waiting on
+						// the close handshake, which a silent peer never answers.
+						conn.CloseNow()
+						return
+					}
+					writeErrCh <- nil
 					return
 				}
 				appendMsg := map[string]any{
@@ -116,6 +125,10 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 				}
 				if err := o.writeJSON(ctx, conn, appendMsg); err != nil {
 					writeErrCh <- err
+					// Same unblocking close as the commit path: a server that
+					// goes silent after session setup would otherwise leave the
+					// reader blocked in conn.Read with the error undrained.
+					conn.CloseNow()
 					return
 				}
 			}

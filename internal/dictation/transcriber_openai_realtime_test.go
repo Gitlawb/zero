@@ -156,6 +156,62 @@ func TestOpenAIRealtimeWriterFailureRedactsKey(t *testing.T) {
 	}
 }
 
+// Writer failure with a silent server: the peer never sends a frame after
+// session setup, so the reader is parked in conn.Read. The writer must close
+// the connection on failure or the writeErrCh error is never observed and
+// StreamTranscribe blocks forever.
+func TestOpenAIRealtimeWriterFailureUnblocksSilentServer(t *testing.T) {
+	const key = "sk-test-silent-writer-key-abcdef"
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		// Hold the connection open without ever writing a frame.
+		<-ctx.Done()
+	})
+
+	var writes atomic.Int32
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{
+		APIKey:  key,
+		BaseURL: url,
+		writeErrInjector: func() error {
+			// First write is session.update; fail the subsequent append write.
+			if writes.Add(1) == 1 {
+				return nil
+			}
+			return errors.New("invalid API key " + key)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := make(chan []byte, 1)
+	chunks <- make([]byte, 480)
+	// Leave the channel open: the writer must fail on the append, not the commit.
+	done := make(chan error, 1)
+	go func() {
+		_, ferr := tr.StreamTranscribe(context.Background(), chunks, func(string, bool) {})
+		done <- ferr
+	}()
+
+	select {
+	case ferr := <-done:
+		if ferr == nil {
+			t.Fatal("expected writer failure")
+		}
+		if errors.Is(ferr, context.Canceled) {
+			t.Fatalf("writer failure should not be context.Canceled: %v", ferr)
+		}
+		if strings.Contains(ferr.Error(), key) {
+			t.Errorf("API key leaked from writer failure: %v", ferr)
+		}
+		if !strings.Contains(ferr.Error(), "OpenAI Realtime stream error") {
+			t.Errorf("expected stream/writer error prefix, got: %v", ferr)
+		}
+	case <-time.After(5 * time.Second):
+		close(chunks)
+		t.Fatal("StreamTranscribe did not unblock after writer failure with a silent server")
+	}
+}
+
 func TestOpenAIRealtimeStreamTranscribeErrorRedaction(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
 		defer c.Close(websocket.StatusNormalClosure, "")
