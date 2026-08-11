@@ -830,6 +830,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					_ = session.Prewarm(ctx)
 					provider = sessionProvider{session: session}
 					options.Model = turnRequestedModel
+					// Service tiers are model capabilities. A successful escalation may
+					// target a model that does not support the tier selected before the
+					// switch, so let the destination use its default.
+					options.ServiceTier = ""
+					planner.config.serviceTier = ""
 					options.Trace.Counter(trace.CounterModelSwitches, 1)
 					// KNOWN LIMITATION (deferred): the compactor's context-window budget
 					// is fixed at run start from options.ContextWindow and is NOT updated

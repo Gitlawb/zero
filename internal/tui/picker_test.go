@@ -1168,6 +1168,18 @@ func TestEffortPickerPrefersLiveProviderReasoningLevels(t *testing.T) {
 	}
 }
 
+func TestEffortPickerDoesNotFallbackWhenLiveModelAdvertisesNoSelectableEfforts(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-5.5"})
+	m.providerProfile = config.ProviderProfile{CatalogID: "test-provider"}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"test-provider": {{ID: "gpt-5.5", ReasoningEfforts: []string{"none"}}},
+	}
+
+	if got := m.availableReasoningEfforts(); len(got) != 0 {
+		t.Fatalf("live model with only none exposed efforts %#v, want none", got)
+	}
+}
+
 func TestEffortPickerAutoSelectionKeepsEffortUnset(t *testing.T) {
 	// Picking "auto" on a model without effort controls clears any stale
 	// preference and emits the success status text (handleEffortCommand("auto")).

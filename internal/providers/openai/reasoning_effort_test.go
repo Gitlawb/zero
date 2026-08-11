@@ -12,3 +12,23 @@ func TestOpenAIReasoningEffortPreservesKnownProviderTiers(t *testing.T) {
 		t.Fatalf("unknown effort = %q, want omitted", got)
 	}
 }
+
+func TestOpenAIServiceTierNormalizesKnownValues(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "priority", want: "priority"},
+		{input: "flex", want: "flex"},
+		{input: " PRIORITY ", want: "priority"},
+		{input: "FlEx", want: "flex"},
+		{input: "", want: ""},
+		{input: "standard", want: ""},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			if got := openAIServiceTier(test.input); got != test.want {
+				t.Fatalf("openAIServiceTier(%q) = %q, want %q", test.input, got, test.want)
+			}
+		})
+	}
+}

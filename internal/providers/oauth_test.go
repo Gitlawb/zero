@@ -40,3 +40,29 @@ func TestOAuthLoginForProfileBindsBearerAndAccountToSameLogin(t *testing.T) {
 		t.Fatalf("account resolution = (%q, %v, %v)", account, ok, err)
 	}
 }
+
+func TestOAuthLoginForProfileReturnsNoResolverWithoutUsableLogin(t *testing.T) {
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "oauth-tokens.json"))
+
+	for _, test := range []struct {
+		name    string
+		profile config.ProviderProfile
+	}{
+		{
+			name:    "profile with its own credential has no OAuth candidates",
+			profile: config.ProviderProfile{Name: "openai", CatalogID: "openai", APIKey: "sk-configured"},
+		},
+		{
+			name:    "candidate has no stored login",
+			profile: config.ProviderProfile{Name: "chatgpt", CatalogID: "chatgpt"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolver, key := OAuthLoginForProfile(test.profile)
+			if resolver != nil || key != "" {
+				t.Fatalf("OAuthLoginForProfile() = (%v, %q), want (nil, empty)", resolver != nil, key)
+			}
+		})
+	}
+}

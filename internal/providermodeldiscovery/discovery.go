@@ -560,10 +560,17 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 			}
 			if len(live.ReasoningEfforts) > 0 {
 				catalog.ReasoningEfforts = append([]string{}, live.ReasoningEfforts...)
+			}
+			if live.DefaultReasoningEffort != "" {
 				catalog.DefaultReasoningEffort = live.DefaultReasoningEffort
+			}
+			if live.Reasoning || len(live.ReasoningEfforts) > 0 || live.DefaultReasoningEffort != "" {
+				catalog.Reasoning = true
 			}
 			if len(live.ServiceTiers) > 0 {
 				catalog.ServiceTiers = append([]string{}, live.ServiceTiers...)
+			}
+			if live.DefaultServiceTier != "" {
 				catalog.DefaultServiceTier = live.DefaultServiceTier
 			}
 			catalog.Source = firstDiscoverySource(catalog.Source, "live")

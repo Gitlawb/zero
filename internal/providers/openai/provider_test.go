@@ -860,30 +860,48 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestStreamCompletionSendsPriorityServiceTier(t *testing.T) {
-	var gotBody map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode request body: %v", err)
-		}
-		writeSSE(w, `[DONE]`)
-	}))
-	defer server.Close()
+func TestStreamCompletionNormalizesServiceTier(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "priority", input: "priority", want: "priority"},
+		{name: "flex with surrounding whitespace", input: " FlEx ", want: "flex"},
+		{name: "unsupported omitted", input: "standard", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeSSE(w, `[DONE]`)
+			}))
+			defer server.Close()
 
-	provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test"})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
-		Messages:    []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
-		ServiceTier: "priority",
-	})
-	if err != nil {
-		t.Fatalf("StreamCompletion: %v", err)
-	}
-	drain(stream)
-	if got := gotBody["service_tier"]; got != "priority" {
-		t.Fatalf("service_tier = %#v, want priority", got)
+			provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:    []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				ServiceTier: test.input,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion: %v", err)
+			}
+			drain(stream)
+			if test.want == "" {
+				if _, ok := gotBody["service_tier"]; ok {
+					t.Fatalf("service_tier = %#v, want omitted", gotBody["service_tier"])
+				}
+				return
+			}
+			if got := gotBody["service_tier"]; got != test.want {
+				t.Fatalf("service_tier = %#v, want %q", got, test.want)
+			}
+		})
 	}
 }
 

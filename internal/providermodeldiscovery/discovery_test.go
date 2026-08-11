@@ -139,6 +139,31 @@ func TestMergeChatGPTModelsKeepsLiveOnlyEntries(t *testing.T) {
 	}
 }
 
+func TestMergeLiveModelsUsesLiveDefaultsAndReasoningCapability(t *testing.T) {
+	models := mergeLiveModels(
+		providercatalog.Descriptor{ID: "chatgpt"},
+		[]Model{{
+			ID:                     "gpt-live",
+			Reasoning:              true,
+			DefaultReasoningEffort: "high",
+			DefaultServiceTier:     "priority",
+		}},
+		[]Model{{
+			ID:                     "gpt-live",
+			Reasoning:              false,
+			DefaultReasoningEffort: "low",
+			DefaultServiceTier:     "standard",
+		}},
+	)
+	if len(models) != 1 {
+		t.Fatalf("merged models = %#v, want one model", models)
+	}
+	got := models[0]
+	if !got.Reasoning || got.DefaultReasoningEffort != "high" || got.DefaultServiceTier != "priority" {
+		t.Fatalf("merged live metadata = %#v", got)
+	}
+}
+
 func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 	// Catalog and live endpoints return distinct payloads so the merge must keep
 	// live-only ids that are absent from the remote catalog response.

@@ -322,7 +322,7 @@ func (m model) availableReasoningEfforts() []modelregistry.ReasoningEffort {
 	if strings.TrimSpace(m.modelName) == "" {
 		return nil
 	}
-	if efforts := m.discoveredReasoningEfforts(); len(efforts) > 0 {
+	if efforts, found := m.discoveredReasoningEfforts(); found {
 		return efforts
 	}
 	registry, err := modelregistry.DefaultRegistry()
@@ -332,14 +332,11 @@ func (m model) availableReasoningEfforts() []modelregistry.ReasoningEffort {
 	return registry.ReasoningEfforts(m.modelName)
 }
 
-func (m model) discoveredReasoningEfforts() []modelregistry.ReasoningEffort {
-	if efforts := reasoningEffortsFromModels(m.discoveredModelsForActiveProvider(), m.modelName); len(efforts) > 0 {
-		return efforts
-	}
-	return nil
+func (m model) discoveredReasoningEfforts() ([]modelregistry.ReasoningEffort, bool) {
+	return reasoningEffortsFromModels(m.discoveredModelsForActiveProvider(), m.modelName)
 }
 
-func reasoningEffortsFromModels(models []providermodeldiscovery.Model, modelName string) []modelregistry.ReasoningEffort {
+func reasoningEffortsFromModels(models []providermodeldiscovery.Model, modelName string) ([]modelregistry.ReasoningEffort, bool) {
 	for _, discovered := range models {
 		if !strings.EqualFold(strings.TrimSpace(discovered.ID), strings.TrimSpace(modelName)) {
 			continue
@@ -354,9 +351,9 @@ func reasoningEffortsFromModels(models []providermodeldiscovery.Model, modelName
 			seen[effort] = true
 			efforts = append(efforts, effort)
 		}
-		return efforts
+		return efforts, true
 	}
-	return nil
+	return nil, false
 }
 
 func (m model) effortDisplay() string {

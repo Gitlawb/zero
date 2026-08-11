@@ -144,9 +144,10 @@ func TestRunSwitchesProviderOnEscalationRequest(t *testing.T) {
 	var switchedTo string
 	switchCount := 0
 	result, err := Run(context.Background(), "go", firstProvider, Options{
-		Registry: registry,
-		Model:    "claude-sonnet-4.5",
-		MaxTurns: 4,
+		Registry:    registry,
+		Model:       "claude-sonnet-4.5",
+		ServiceTier: "priority",
+		MaxTurns:    4,
 		ModelSwitcher: func(_ context.Context, modelID string) (Provider, error) {
 			switchCount++
 			switchedTo = modelID
@@ -169,6 +170,9 @@ func TestRunSwitchesProviderOnEscalationRequest(t *testing.T) {
 	}
 	if len(secondProvider.requests) != 1 {
 		t.Fatalf("expected second provider to handle the post-switch turn, got %d requests", len(secondProvider.requests))
+	}
+	if got := secondProvider.requests[0].ServiceTier; got != "" {
+		t.Fatalf("post-switch request retained service tier %q", got)
 	}
 	if result.FinalAnswer != "answered on the upgraded model" {
 		t.Fatalf("expected final answer from the swapped provider, got %q", result.FinalAnswer)
