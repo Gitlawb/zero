@@ -55,6 +55,7 @@ const (
 	commandGoal
 	commandVoice
 	commandSTTModel
+	commandPets
 	commandUnknown
 )
 
@@ -368,6 +369,14 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupMeta,
 		description: "Show available commands.",
 		kind:        commandHelp,
+	},
+	{
+		name:        "/pets",
+		aliases:     []string{"/pet"},
+		usage:       "/pets [name|off]",
+		group:       commandGroupMeta,
+		description: "Choose, preview, or hide a terminal companion.",
+		kind:        commandPets,
 	},
 	{
 		name:        "/doctor",
