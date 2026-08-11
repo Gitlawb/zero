@@ -264,20 +264,19 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
-	// Same identity resolution the login path uses: a catalog-default name yields
-	// to the row already saved for that catalog provider.
-	profile, err = config.AdoptPersistedCatalogProviderName(configPath, profile)
+	// Same identity resolution the login path uses, as one serialized transaction:
+	// a catalog-default name yields to the row already saved for that catalog
+	// provider, a colliding spelling is rejected, and the key moves into the
+	// encrypted credential store as the row is persisted. The returned profile
+	// keeps the key for this run's immediate use.
+	committed, err := config.CommitProviderProfile(configPath, config.ProviderCommit{
+		Profile:   profile,
+		SetActive: true,
+	})
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
-	if err := config.PreflightProviderWrite(configPath, profile.Name); err != nil {
-		return tui.SetupResult{}, err
-	}
-	// Persist with the key moved into the encrypted credential store (capture flip);
-	// the returned profile keeps the key for this run's immediate use.
-	if _, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), true); err != nil {
-		return tui.SetupResult{}, err
-	}
+	profile.Name = committed.Persisted.Name
 	return tui.SetupResult{ConfigPath: configPath, Provider: profile}, nil
 }
 

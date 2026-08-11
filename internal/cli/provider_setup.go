@@ -53,22 +53,20 @@ func runProvidersAdd(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	// Retarget a catalog-default name at the row that already owns that catalog
-	// identity, so re-running setup for a provider saved under different casing
-	// updates it instead of failing the collision check.
-	profile, err = config.AdoptPersistedCatalogProviderName(configPath, profile)
+	// One serialized transaction: retarget a catalog-default name at the row that
+	// already owns that catalog identity (so re-running setup for a provider saved
+	// under different casing updates it instead of colliding), reject a colliding
+	// spelling, move the key into the encrypted credential store, and persist. The
+	// local profile keeps the key for this run's immediate use.
+	committed, err := config.CommitProviderProfile(configPath, config.ProviderCommit{
+		Profile:   profile,
+		SetActive: options.setActive,
+	})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	if err := config.PreflightProviderWrite(configPath, profile.Name); err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	// Persist with the key moved into the encrypted credential store (capture flip);
-	// the local profile keeps the key for the verification build below.
-	cfg, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), options.setActive)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
+	cfg := committed.Config
+	profile.Name = committed.Persisted.Name
 
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{

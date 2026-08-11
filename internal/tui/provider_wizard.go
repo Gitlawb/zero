@@ -1299,38 +1299,27 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		nextProvider = built
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
-		// A catalog-default name yields to the row that already owns that catalog
-		// identity, matching the CLI login path; a user-chosen name still collides.
-		adopted, adoptErr := config.AdoptPersistedCatalogProviderName(m.userConfigPath, profile)
-		if adoptErr != nil {
-			wizard.err = adoptErr.Error()
-			if provider.OAuthMintsKey && strings.TrimSpace(wizard.apiKey) != "" {
-				wizard.err = oauthMintedKeySaveError(wizard.err, wizard.apiKey)
-			}
-			return m, nil
-		}
-		profile = adopted
-		if err := config.PreflightProviderWrite(m.userConfigPath, profile.Name); err != nil {
-			wizard.err = err.Error()
-			if provider.OAuthMintsKey && strings.TrimSpace(wizard.apiKey) != "" {
-				wizard.err = oauthMintedKeySaveError(wizard.err, wizard.apiKey)
-			}
-			return m, nil
-		}
-		// Capture flip: move the freshly entered key into the encrypted credential
-		// store before persisting, so config.json never holds the cleartext. The
-		// provider was already built above from runtimeProfile, which has the key.
+		// One serialized transaction, matching the CLI login path: a catalog-default
+		// name yields to the row that already owns that catalog identity (a
+		// user-chosen name still collides), the capture flip moves the freshly
+		// entered key into the encrypted credential store so config.json never holds
+		// the cleartext, and the row is persisted. A rejected write restores the
+		// credential entry the capture displaced. The provider was already built
+		// above from runtimeProfile, which has the key.
 		secret := profile.APIKey
-		if !preserveExistingCredentialReference {
-			profile = config.SecureProviderProfile(profile, m.userConfigPath)
-		}
-		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
+		committed, err := config.CommitProviderProfile(m.userConfigPath, config.ProviderCommit{
+			Profile:       profile,
+			SetActive:     true,
+			KeepStoredKey: preserveExistingCredentialReference,
+		})
+		if err != nil {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			if provider.OAuthMintsKey && strings.TrimSpace(secret) != "" {
 				wizard.err = oauthMintedKeySaveError(wizard.err, secret)
 			}
 			return m, nil // nothing committed to live state yet
 		}
+		profile = committed.Persisted
 	}
 
 	// Both succeeded — commit the live provider, profile, model, and the child
