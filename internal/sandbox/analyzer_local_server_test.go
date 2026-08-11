@@ -46,10 +46,36 @@ func TestLocalServerDistinguishesServingFromBuilding(t *testing.T) {
 // The point of the distinction is that binding is not egress, so neither form
 // may be mistaken for network access. A build that genuinely fetches is caught
 // by the network rules for its own program, not by this flag.
-func TestNeitherServingNorBuildingCountsAsNetworkEgress(t *testing.T) {
-	for _, command := range []string{"next dev", "next build", "vite", "vite build", "http-server"} {
+func TestBuildingDoesNotCountAsNetworkEgress(t *testing.T) {
+	for _, command := range []string{"next build", "vite build"} {
 		if AnalyzeCommand(command).Network {
-			t.Errorf("%q was classified as network egress; binding or compiling locally is neither", command)
+			t.Errorf("%q was classified as network egress; compiling locally is not", command)
+		}
+	}
+}
+
+// SERVING KEEPS ITS NETWORK APPROVAL until something consumes LocalServer.
+//
+// The classification alone grants nothing: no policy or runner code reads
+// LocalServer, so treating a serving command as local-only only removed the
+// approval it used to get, and the command then ran under the default deny
+// profile. On Linux that is a network namespace and on macOS it is
+// (deny network*), so the server started unprompted and could not serve a
+// preview to the operator's browser.
+//
+// The package-manager cases are the sharper half. "npm run dev" is matched by
+// SCRIPT NAME, and the repository decides what "dev" and "predev" actually do;
+// either can curl before anything binds a port. On Windows the approval gate IS
+// the network protection, so inferring no-egress from a name lets that through
+// unprompted.
+func TestServingStillRequiresNetworkApproval(t *testing.T) {
+	for _, command := range []string{"next dev", "vite", "http-server", "npm run dev", "pnpm dev", "python -m http.server"} {
+		analysis := AnalyzeCommand(command)
+		if !analysis.LocalServer {
+			t.Errorf("%q was not recognised as a local server", command)
+		}
+		if !analysis.Network {
+			t.Errorf("%q lost its network approval, so it runs under the deny profile and cannot serve a preview", command)
 		}
 	}
 }
