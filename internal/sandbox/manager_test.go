@@ -574,17 +574,11 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	daemonTokenFile := filepath.Join(home, "daemon-token")
-	if err := os.WriteFile(daemonTokenFile, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	options := credentialPathOptions{
 		Homes:              []string{home},
 		ConfigDirs:         []string{configDir},
 		CloudSDKConfigDirs: []string{gcloudDir},
 		GoogleCredentials:  []string{keyFile},
-		DaemonTokenFiles:   []string{daemonTokenFile},
 		NPMUserConfigs:     []string{npmrc},
 		GHConfigDirs:       []string{filepath.Dir(ghHosts)},
 		Netrcs:             []string{netrc},
@@ -599,7 +593,6 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		awsDir,
 		gcloudDir,
 		keyFile,
-		daemonTokenFile,
 		npmrc,
 		ghHosts,
 		netrc,
@@ -659,7 +652,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 
 	// An explicit AllowRead entry covering a store is an opt-out.
-	optedOut := credentialDenyReadPathsIn(options, []string{awsDir, zeroDir, daemonTokenFile})
+	optedOut := credentialDenyReadPathsIn(options, []string{awsDir, zeroDir})
 	if stringSliceContains(optedOut.Paths, normalizeProfilePaths([]string{awsDir})[0]) {
 		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut.Paths)
 	}
@@ -676,14 +669,6 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	if stringSliceContains(optedOut.Carveouts, normalizeProfilePaths([]string{filepath.Join(zeroDir, "plugins")})[0]) {
 		t.Errorf("credential carveouts = %#v, want no allow-back inside an opted-out deny", optedOut.Carveouts)
 	}
-	// The bridge bearer token is the exception: the in-process tool boundary
-	// (protectedCredentialPaths) refuses to re-include it through AllowRead, so
-	// the OS-sandbox profile must not either — otherwise the guarantee would
-	// depend on whether a wrapped shell command or a built-in tool reads it.
-	if !stringSliceContains(optedOut.Paths, normalizeProfilePaths([]string{daemonTokenFile})[0]) {
-		t.Errorf("credential deny paths = %#v, want the daemon token file denied despite AllowRead", optedOut.Paths)
-	}
-
 	if got := credentialDenyReadPathsIn(credentialPathOptions{}, nil); len(got.Paths) != 0 {
 		t.Errorf("credential deny paths for blank home = %#v, want none", got.Paths)
 	}
@@ -1107,7 +1092,7 @@ func TestKeyringOAuthOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
 			t.Fatalf("keyring override must not make bubblewrap fail closed: %v", err)
 		}
-		_ = buildLinuxBwrapFilesystemPlan(profile)
+		_, _ = buildLinuxBwrapFilesystemPlan(profile)
 		for _, publicationDir := range credentialPublicationDirs(tokenPath) {
 			if _, err := os.Stat(publicationDir); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("keyring planning created unused publication directory %q: %v", publicationDir, err)
@@ -1163,7 +1148,7 @@ func TestCommandCredentialDirectoriesFailClosedWithoutHostMutation(t *testing.T)
 	if err := validateLinuxBwrapPermissionProfile(profile); err == nil || !strings.Contains(err.Error(), "created after launch") {
 		t.Fatalf("validateLinuxBwrapPermissionProfile error = %v, want future-directory failure", err)
 	}
-	_ = buildLinuxBwrapFilesystemPlan(profile)
+	_, _ = buildLinuxBwrapFilesystemPlan(profile)
 	if _, err := os.Stat(commandConfig); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("planning created command-controlled directory %q: %v", commandConfig, err)
 	}
@@ -1183,7 +1168,7 @@ func TestCommandCredentialDirectoriesFailClosedWithoutHostMutation(t *testing.T)
 	if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
 		t.Fatalf("existing command credential directory must remain maskable: %v", err)
 	}
-	plan := buildLinuxBwrapFilesystemPlan(profile)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	if !strings.Contains(strings.Join(plan.Args, "\x00"), "--perms\x00000\x00--tmpfs\x00"+normalizeProfilePath(existingRoot)) {
 		t.Fatalf("existing command credential directory was not masked: %#v", plan.Args)
 	}
@@ -1214,7 +1199,7 @@ func TestCommandCredentialSettingsDoNotMaskAllowedRoots(t *testing.T) {
 	if !stringSliceContains(fs.DenyReadIfExists, serviceAccount) {
 		t.Fatalf("non-overlapping credential file was dropped: %#v", fs.DenyReadIfExists)
 	}
-	bwrap := buildLinuxBwrapFilesystemPlan(profile)
+	bwrap := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	if strings.Contains(strings.Join(bwrap.Args, "\x00"), "--perms\x00000\x00--tmpfs\x00"+normalizeProfilePath(workspace)) {
 		t.Fatalf("bwrap overlaid an unreadable mask on the workspace: %#v", bwrap.Args)
 	}
@@ -1353,7 +1338,7 @@ func TestLegacyMCPOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 			if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
 				t.Fatalf("legacy MCP migration input must not make Bubblewrap fail closed: %v", err)
 			}
-			args := buildLinuxBwrapFilesystemPlan(profile).Args
+			args := mustBuildLinuxBwrapFilesystemPlan(t, profile).Args
 			foundMask := false
 			for i := 0; i+2 < len(args); i++ {
 				if args[i] == "--ro-bind" && args[i+1] == "/dev/null" && args[i+2] == normalizeProfilePath(legacy) {
@@ -1618,7 +1603,7 @@ func TestPermissionProfileDropsAutomaticMasksCoveredByUserDeny(t *testing.T) {
 		t.Fatalf("automatic credential fields beneath user deny were retained: paths=%#v carveouts=%#v ensure=%#v", fs.DenyReadIfExists, fs.DenyReadCarveouts, fs.EnsureDenyReadDirs)
 	}
 	zeroDir := filepath.Join(home, ".config", "zero")
-	plan := buildLinuxBwrapFilesystemPlan(profile)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	if stringSliceContains(plan.Args, zeroDir) {
 		t.Fatalf("bwrap args contain a nested automatic mount beneath user deny %q: %#v", home, plan.Args)
 	}
@@ -1726,9 +1711,12 @@ func TestPermissionProfileDeniesAbsentDaemonTokenFile(t *testing.T) {
 	}
 
 	profile := PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil)
-	want := normalizeProfilePaths([]string{tokenFile})[0]
+	want := tokenFile
 	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, want) {
 		t.Fatalf("DenyReadIfExists = %#v, want the absent token path %q still denied", profile.FileSystem.DenyReadIfExists, want)
+	}
+	if !stringSliceContains(profile.FileSystem.MandatoryDenyReadPaths, want) {
+		t.Fatalf("MandatoryDenyReadPaths = %#v, want absent token path %q", profile.FileSystem.MandatoryDenyReadPaths, want)
 	}
 
 	// Seatbelt must also deny writes because the workspace root is otherwise
@@ -1738,11 +1726,48 @@ func TestPermissionProfileDeniesAbsentDaemonTokenFile(t *testing.T) {
 		t.Fatalf("seatbelt credential write rules = %#v, want a deny for %q", rules, want)
 	}
 
-	// Bubblewrap has no target to bind for a missing path, so the fallback must
-	// still produce an unreadable, unwritable mount rather than nothing.
-	args := appendUnreadableLinuxPathArgs(nil, want, nil)
-	if !slices.Contains(args, "--tmpfs") || !slices.Contains(args, want) {
-		t.Fatalf("bubblewrap args for the absent token = %#v, want an unreadable tmpfs at %q", args, want)
+	// The complete Bubblewrap planner must distinguish this mandatory path from
+	// absent optional stores and fail closed instead of creating a host mountpoint
+	// or silently omitting the deny.
+	if _, err := buildLinuxBwrapFilesystemPlan(profile); err == nil || !strings.Contains(err.Error(), "missing mandatory credential path") {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan error = %v, want missing mandatory-path failure", err)
+	}
+}
+
+func TestMandatoryDaemonTokenSurvivesOptionalCredentialParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read paths are disabled on Windows pending the ACL model")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	tokenFile := filepath.Join(home, ".aws", "daemon-token")
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, tokenFile)
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, tokenFile) {
+		t.Fatalf("DenyReadIfExists = %#v, optional parent must not collapse mandatory child %q", profile.FileSystem.DenyReadIfExists, tokenFile)
+	}
+	if !stringSliceContains(profile.FileSystem.MandatoryDenyReadPaths, tokenFile) {
+		t.Fatalf("MandatoryDenyReadPaths = %#v, want %q", profile.FileSystem.MandatoryDenyReadPaths, tokenFile)
+	}
+}
+
+func TestCommandEnvironmentCannotNominateMandatoryDaemonTokenPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read paths are disabled on Windows pending the ACL model")
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, "")
+	workspace := t.TempDir()
+	nominated := filepath.Join(workspace, "command-selected-token")
+	profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, []string{
+		daemonRemoteTokenFileEnv + "=" + nominated,
+	})
+	if stringSliceContains(profile.FileSystem.MandatoryDenyReadPaths, nominated) {
+		t.Fatalf("command environment nominated mandatory host path %q: %#v", nominated, profile.FileSystem.MandatoryDenyReadPaths)
 	}
 }
 
@@ -1857,9 +1882,6 @@ func TestCredentialPathOptionsFromEnvironmentResolvesToolPathLists(t *testing.T)
 }
 
 func TestPermissionProfileDeniesDaemonTokenFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("credential deny-read paths are disabled on Windows pending the ACL model")
-	}
 	tokenFile := filepath.Join(t.TempDir(), "daemon-token")
 	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1868,16 +1890,37 @@ func TestPermissionProfileDeniesDaemonTokenFile(t *testing.T) {
 	t.Setenv(daemonRemoteTokenFileEnv, tokenFile)
 
 	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
-	want := normalizeProfilePaths([]string{tokenFile})[0]
-	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
-		t.Fatalf("DenyRead = %#v, want daemon token file %q", profile.FileSystem.DenyRead, want)
+	if runtime.GOOS == "windows" {
+		if stringSliceContains(profile.FileSystem.DenyRead, tokenFile) ||
+			stringSliceContains(profile.FileSystem.DenyReadIfExists, tokenFile) ||
+			stringSliceContains(profile.FileSystem.MandatoryDenyReadPaths, tokenFile) {
+			t.Fatalf("Windows automatic profile denies = %#v, ACL enforcement is deliberately deferred", profile.FileSystem)
+		}
+		return
+	}
+	wants := []string{tokenFile}
+	if resolved, err := filepath.EvalSymlinks(tokenFile); err == nil && resolved != tokenFile {
+		wants = append(wants, resolved)
+	}
+	for _, want := range wants {
+		if stringSliceContains(profile.FileSystem.DenyRead, want) {
+			t.Fatalf("DenyRead = %#v, automatic token path must stay separate from user policy", profile.FileSystem.DenyRead)
+		}
+		if !stringSliceContains(profile.FileSystem.DenyReadIfExists, want) {
+			t.Fatalf("DenyReadIfExists = %#v, want daemon token file %q", profile.FileSystem.DenyReadIfExists, want)
+		}
+		if !stringSliceContains(profile.FileSystem.MandatoryDenyReadPaths, want) {
+			t.Fatalf("MandatoryDenyReadPaths = %#v, want daemon token file %q", profile.FileSystem.MandatoryDenyReadPaths, want)
+		}
 	}
 
 	// TokenFromEnv selects the inline token when both variables are set, so the
 	// unused file pointer must not become an automatic OS-sandbox deny.
 	t.Setenv(daemonRemoteTokenEnv, "from-env")
 	profile = PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
-	if stringSliceContains(profile.FileSystem.DenyRead, want) {
-		t.Fatalf("DenyRead = %#v, must not protect unused token file %q when the inline token takes precedence", profile.FileSystem.DenyRead, want)
+	for _, want := range wants {
+		if stringSliceContains(profile.FileSystem.DenyReadIfExists, want) || stringSliceContains(profile.FileSystem.MandatoryDenyReadPaths, want) {
+			t.Fatalf("automatic denies = %#v, must not protect unused token file %q when inline token takes precedence", profile.FileSystem, want)
+		}
 	}
 }

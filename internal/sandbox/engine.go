@@ -333,6 +333,12 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	request.SideEffect = NormalizeSideEffect(request.SideEffect)
 	scope := engine.scopeFor(request.WorkspaceRoot)
 	risk := classifyWithScope(request, scope)
+	// Patch targets must be established before every policy short-circuit,
+	// including ModeDisabled: the automatic daemon-token boundary still applies
+	// to in-process tools when user sandboxing is off.
+	if block := applyPatchPathBlock(request); block != nil {
+		return deny(request, risk, block.Code, block.Path, block.Reason, false)
+	}
 
 	if policy.Mode == ModeDisabled {
 		// Disabling the sandbox drops every user-configured restriction, but not the
@@ -387,9 +393,6 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// workspace boundary itself needs a root, so it is gated on having one. Mode is
 	// already known to be enforcing here (ModeDisabled returned above).
 	enforceWorkspace := policy.EnforceWorkspace && request.WorkspaceRoot != ""
-	if block := applyPatchPathBlock(request); block != nil {
-		return deny(request, risk, block.Code, block.Path, block.Reason, false)
-	}
 	var promptableBlock *pathBlock
 	for _, requested := range requestPaths(request) {
 		if block := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); block != nil {

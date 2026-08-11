@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -189,7 +188,10 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 		"--new-session",
 		"--die-with-parent",
 	}
-	filesystemPlan := buildLinuxBwrapFilesystemPlan(config.PermissionProfile)
+	filesystemPlan, err := buildLinuxBwrapFilesystemPlan(config.PermissionProfile)
+	if err != nil {
+		return linuxSandboxBwrapPlan{}, err
+	}
 	args = append(args, filesystemPlan.Args...)
 	if pathExists(helperPath) {
 		args = append(args, "--ro-bind", helperPath, helperPath)
@@ -222,6 +224,9 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 }
 
 func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
+	if err := validateLinuxMandatoryDenyReadPaths(profile.FileSystem); err != nil {
+		return err
+	}
 	if files := profile.FileSystem.ProcessTrustedDenyReadFiles; len(files) > 0 {
 		return fmt.Errorf("bubblewrap cannot securely deny credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
 	}
@@ -245,12 +250,48 @@ func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
 	return nil
 }
 
-func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
-	return buildLinuxBwrapFilesystemPlan(profile).Args
+func validateLinuxMandatoryDenyReadPaths(fs FileSystemPolicy) error {
+	baseline := make(map[string]struct{}, len(fs.DenyReadIfExists))
+	for _, path := range fs.DenyReadIfExists {
+		baseline[path] = struct{}{}
+	}
+	mandatory := make(map[string]struct{}, len(fs.MandatoryDenyReadPaths))
+	for _, path := range fs.MandatoryDenyReadPaths {
+		if path == "" || !filepath.IsAbs(path) {
+			return fmt.Errorf("invalid mandatory deny-read path %q: path must be absolute", path)
+		}
+		if _, ok := baseline[path]; !ok {
+			return fmt.Errorf("invalid mandatory deny-read path %q: path is not in denyReadIfExists", path)
+		}
+		mandatory[path] = struct{}{}
+	}
+	for path := range mandatory {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("bubblewrap cannot enforce missing mandatory credential path %q; restore the daemon token file before running sandboxed commands", path)
+			}
+			return fmt.Errorf("inspect mandatory credential path %q: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("resolve mandatory credential symlink %q: %w", path, err)
+		}
+		if _, ok := mandatory[resolved]; !ok {
+			return fmt.Errorf("bubblewrap cannot enforce mandatory credential symlink %q without its resolved target %q", path, resolved)
+		}
+	}
+	return nil
 }
 
-func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesystemPlan {
+func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) (linuxBwrapFilesystemPlan, error) {
 	fs := profile.FileSystem
+	if err := validateLinuxMandatoryDenyReadPaths(fs); err != nil {
+		return linuxBwrapFilesystemPlan{}, err
+	}
 	if fs.Kind == FileSystemUnrestricted {
 		// Disabled filesystem policy means no write jail: expose the host root
 		// read-write, including the host /dev tree, rather than synthesizing a
@@ -261,7 +302,7 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 				args = append(args, "--bind", root.Root, root.Root)
 			}
 		}
-		return linuxBwrapFilesystemPlan{Args: args}
+		return linuxBwrapFilesystemPlan{Args: args}, nil
 	}
 
 	args := []string{}
@@ -311,8 +352,13 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 	// here. Command-controlled credential roots remain deny-if-present and must
 	// never cause host filesystem mutations before sandbox launch.
 	ensureLinuxDenyReadDirs(fs.EnsureDenyReadDirs)
+	mandatory := make(map[string]struct{}, len(fs.MandatoryDenyReadPaths))
+	for _, path := range fs.MandatoryDenyReadPaths {
+		mandatory[path] = struct{}{}
+	}
 	for _, path := range fs.DenyReadIfExists {
-		if !pathExists(path) {
+		_, required := mandatory[path]
+		if !required && !pathExists(path) {
 			// A baseline credential path is emitted for every run, so an absent
 			// entry is the common case on a fresh machine — a third-party store
 			// such as ~/.aws that Zero must not create. The read-all profile starts
@@ -322,12 +368,20 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 			// (seatbelt) still deny these paths before they exist.
 			continue
 		}
-		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
+		if required {
+			var err error
+			args, err = appendMandatoryUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
+			if err != nil {
+				return linuxBwrapFilesystemPlan{}, err
+			}
+		} else {
+			args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
+		}
 	}
 	return linuxBwrapFilesystemPlan{
 		Args:                   args,
 		ProtectedCreateTargets: dedupeStrings(protectedCreateTargets),
-	}
+	}, nil
 }
 
 func linuxWriteRootsWithTemp(fs FileSystemPolicy) []WritableRoot {
@@ -399,24 +453,34 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	if !slices.Contains(protectedCredentialPaths(), path) {
-		path = normalizeProfilePath(path)
-	}
+	args, _ = appendUnreadableLinuxPathArgsForPath(args, normalizeProfilePath(path), carveouts, true)
+	return args
+}
+
+func appendMandatoryUnreadableLinuxPathArgs(args []string, path string, carveouts []string) ([]string, error) {
+	return appendUnreadableLinuxPathArgsForPath(args, path, carveouts, false)
+}
+
+func appendUnreadableLinuxPathArgsForPath(args []string, path string, carveouts []string, allowMissing bool) ([]string, error) {
 	if path == "" {
-		return args
+		return args, nil
 	}
 	// Bubblewrap cannot mount over a symlink destination. Protected daemon-token
 	// paths include both the lexical link and its resolved target; the target is
 	// materialized by its own entry, while Seatbelt can still deny both names.
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return args
+		return args, nil
 	}
-	if info, err := os.Stat(path); err == nil && !info.IsDir() {
-		return append(args, "--ro-bind", "/dev/null", path)
+	if info, err := os.Stat(path); err == nil {
+		if !info.IsDir() {
+			return append(args, "--ro-bind", "/dev/null", path), nil
+		}
+	} else if !allowMissing {
+		return nil, fmt.Errorf("bubblewrap cannot enforce missing mandatory credential path %q: %w", path, err)
 	}
 	nested := nestedCarveoutPaths(path, carveouts)
 	if len(nested) == 0 {
-		return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
+		return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path), nil
 	}
 	// A carveout has to stay reachable, and traversing into a directory needs the
 	// execute bit, so the mask is 111 (--x--x--x) instead of 000: the directory's
@@ -429,7 +493,7 @@ func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []strin
 			args = append(args, "--ro-bind", carveout, carveout)
 		}
 	}
-	return append(args, "--remount-ro", path)
+	return append(args, "--remount-ro", path), nil
 }
 
 // nestedCarveoutPaths returns the carveouts that sit strictly inside root,

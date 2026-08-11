@@ -28,8 +28,13 @@ type FileSystemPolicy struct {
 	DenyRead   []string             `json:"denyRead,omitempty"`
 	// DenyReadIfExists contains best-effort baseline paths. Backends with
 	// path-based policies can protect future paths; mount-based Linux only
-	// masks entries that exist when the namespace is assembled.
+	// masks optional entries that exist when the namespace is assembled.
 	DenyReadIfExists []string `json:"denyReadIfExists,omitempty"`
+	// MandatoryDenyReadPaths is the exact subset of DenyReadIfExists that names
+	// the selected remote-daemon bearer token. Unlike optional credential-store
+	// candidates, these paths must not disappear from a mount-based plan merely
+	// because rotation has temporarily removed the file.
+	MandatoryDenyReadPaths []string `json:"mandatoryDenyReadPaths,omitempty"`
 	// DenyReadCarveouts are subtrees that stay readable INSIDE a denied root.
 	// They exist so a directory-level credential deny can also cover the files
 	// a store publishes (arbitrary temporary names, files created later in the
@@ -151,6 +156,7 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			WriteRoots:                  writeRoots,
 			DenyRead:                    userDenyRead,
 			DenyReadIfExists:            credentials.Paths,
+			MandatoryDenyReadPaths:      credentials.MandatoryPaths,
 			DenyReadCarveouts:           credentials.Carveouts,
 			EnsureDenyReadDirs:          credentials.EnsureDirs,
 			ProcessTrustedDenyReadFiles: credentials.ProcessTrustedFinalFiles,
@@ -207,6 +213,7 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 // Zero-owned directories a mount-based backend may create so its mask exists.
 type credentialDenyPaths struct {
 	Paths                    []string
+	MandatoryPaths           []string
 	Carveouts                []string
 	EnsureDirs               []string
 	Dirs                     []string
@@ -264,6 +271,11 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 		processOptions,
 		policy.AllowRead,
 	)
+	// The daemon-token path is selected by this Zero process, not by a command's
+	// supplied environment. Keep it as an exact mandatory subset so a command
+	// cannot nominate an arbitrary host path for fail-closed materialization.
+	trusted.MandatoryPaths = protectedCredentialPaths()
+	trusted.Paths = dedupeStrings(append(trusted.Paths, trusted.MandatoryPaths...))
 	processFinalFiles := credentialFinalTokenFiles(processOptions)
 	allowRoots := normalizeProfilePaths(policy.AllowRead)
 	for _, file := range processFinalFiles {
@@ -441,16 +453,11 @@ func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) crede
 			kubeConfigs = append(kubeConfigs, filepath.Join(home, ".kube", "config"))
 		}
 	}
-	var daemonTokenFiles []string
-	if strings.TrimSpace(credentialEnvValue(env, "ZERO_DAEMON_REMOTE_TOKEN")) == "" {
-		daemonTokenFiles = daemonTokenDenyPaths(credentialEnvValue(env, "ZERO_DAEMON_REMOTE_TOKEN_FILE"))
-	}
 	return credentialPathOptions{
 		Homes:              homes,
 		ConfigDirs:         dedupeStrings(configDirs),
 		CloudSDKConfigDirs: dedupeStrings(cloudSDKConfigDirs),
 		GoogleCredentials:  resolveCredentialOverridePaths(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDirs),
-		DaemonTokenFiles:   daemonTokenFiles,
 		NPMUserConfigs:     dedupeStrings(npmUserConfigs),
 		GHConfigDirs:       dedupeStrings(ghConfigDirs),
 		Netrcs:             dedupeStrings(netrcs),
@@ -478,7 +485,6 @@ type credentialPathOptions struct {
 	ConfigDirs         []string
 	CloudSDKConfigDirs []string
 	GoogleCredentials  []string
-	DaemonTokenFiles   []string
 	NPMUserConfigs     []string
 	GHConfigDirs       []string
 	Netrcs             []string
@@ -605,28 +611,16 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// atomic writer or create publication directories it never uses.
 		candidates = append(candidates, tokenPath, tokenPath+".migrated")
 	}
-	// The bridge bearer token grants control of this daemon, so unlike the
-	// opt-outable credential stores above it stays denied even when AllowRead
-	// covers it — matching protectedCredentialPaths at the in-process boundary.
-	mandatory := dedupeStrings(options.DaemonTokenFiles)
 	allowRoots := normalizeProfilePaths(allowRead)
-	out := make([]string, 0, len(candidates)+len(mandatory))
+	out := make([]string, 0, len(candidates))
 	for _, path := range normalizeProfilePaths(candidates) {
 		if credentialPathReincluded(allowRoots, path) {
 			continue
 		}
 		out = append(out, path)
 	}
-	// Unlike the candidates above, the token path is NOT existence-filtered. The
-	// entry protects a future write target as much as a current secret: after an
-	// external rotation deletes the file, dropping the rule would let a sandboxed
-	// process recreate it with an attacker-chosen bearer that the next
-	// `serve-remote` start would then accept. Each enforcing backend materializes
-	// a missing target fail-closed.
-	out = append(out, mandatory...)
-	out = dedupeStrings(out)
 	return credentialDenyPaths{
-		Paths:      out,
+		Paths:      dedupeStrings(out),
 		Carveouts:  credentialCarveoutPaths(out, carveouts),
 		EnsureDirs: credentialRetainedDirs(out, normalizeProfilePaths(ensureDirs)),
 		Dirs:       credentialRetainedDirs(out, normalizeProfilePaths(dirs)),
@@ -795,12 +789,24 @@ func credentialRetainedDirs(denied []string, dirs []string) []string {
 // carveout re-allows that subtree.
 func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead []string) credentialDenyPaths {
 	credentials.Paths = pathsOutsideRoots(credentials.Paths, userDenyRead)
+	credentials.MandatoryPaths = pathsOutsideRoots(credentials.MandatoryPaths, userDenyRead)
 	credentials.Carveouts = pathsOutsideOverlappingRoots(credentials.Carveouts, userDenyRead)
 	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
 	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)
 
+	mandatory := make(map[string]struct{}, len(credentials.MandatoryPaths))
+	for _, path := range credentials.MandatoryPaths {
+		mandatory[path] = struct{}{}
+	}
 	var paths []string
 	for _, path := range credentials.Paths {
+		// An optional automatic directory is not durable coverage for a mandatory
+		// child: Linux may skip that directory when it is absent. Keep the exact
+		// daemon-token pathname so the backend can enforce or reject it separately.
+		if _, ok := mandatory[path]; ok {
+			paths = append(paths, path)
+			continue
+		}
 		covered := false
 		for _, dir := range credentials.Dirs {
 			if path != dir && pathWithinRoot(dir, path) && !credentialPathReincluded(credentials.Carveouts, path) {
@@ -813,6 +819,17 @@ func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead [
 		}
 	}
 	credentials.Paths = dedupeStrings(paths)
+	retainedPaths := make(map[string]struct{}, len(credentials.Paths))
+	for _, path := range credentials.Paths {
+		retainedPaths[path] = struct{}{}
+	}
+	var retainedMandatory []string
+	for _, path := range credentials.MandatoryPaths {
+		if _, ok := retainedPaths[path]; ok {
+			retainedMandatory = append(retainedMandatory, path)
+		}
+	}
+	credentials.MandatoryPaths = dedupeStrings(retainedMandatory)
 	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
 	credentials.CommandDirs = credentialRetainedDirs(credentials.Paths, credentials.CommandDirs)
 	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)

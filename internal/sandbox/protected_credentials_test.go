@@ -253,6 +253,9 @@ func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
 	token := filepath.Join(workspace, "bridge-token ")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
 	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, token)
 
@@ -272,10 +275,8 @@ func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
 		}
 	}
 
-	args := appendUnreadableLinuxPathArgs(nil, token, nil)
-	if !stringSliceContains(args, "--tmpfs") || !stringSliceContains(args, token) {
-		t.Fatalf("bubblewrap args = %#v, want unreadable tmpfs at exact pathname %q", args, token)
-	}
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
+	assertArgsContainSequence(t, plan.Args, "--ro-bind", "/dev/null", token)
 
 	if !protectedCredentialInWritableMacOSRoot(profile, protectedCredentialPaths()) {
 		t.Fatalf("spaced token %q under writable root %q must fail macOS preflight", token, workspace)
@@ -295,12 +296,18 @@ func TestUnreadableLinuxPathSkipsProtectedSymlinkDestination(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	if got := appendUnreadableLinuxPathArgs(nil, link, nil); len(got) != 0 {
-		t.Fatalf("bubblewrap args for symlink destination = %#v, want no mount", got)
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, link)
+	profile := PermissionProfileFromPolicy(dir, DefaultPolicy(), nil)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
+	if stringSliceContains(plan.Args, link) {
+		t.Fatalf("bubblewrap plan attempted to mount over symlink destination %q: %#v", link, plan.Args)
 	}
-	if got := appendUnreadableLinuxPathArgs(nil, target, nil); !stringSliceContains(got, target) {
-		t.Fatalf("bubblewrap args for resolved target = %#v, want target bind", got)
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("EvalSymlinks target: %v", err)
 	}
+	assertArgsContainSequence(t, plan.Args, "--ro-bind", "/dev/null", resolvedTarget)
 }
 
 // TestProtectedCredentialsSurviveDisabledPolicy covers the one route that skips

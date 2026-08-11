@@ -236,6 +236,15 @@ func firstArgString(args map[string]any, keys ...string) string {
 	return ""
 }
 
+func firstExactStringArg(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := args[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func requestPaths(request Request) []string {
 	paths := []string{}
 	// Keep this aligned with the path-arg alias lists the tools accept (see
@@ -255,46 +264,17 @@ func requestPaths(request Request) []string {
 }
 
 func applyPatchRequestPaths(args map[string]any) []string {
-	patch := firstArgString(args, "patch", "diff")
+	patch := firstExactStringArg(args, "patch", "diff")
 	if patch == "" {
 		return nil
 	}
 	cwd := firstArgString(args, "cwd")
 	var paths []string
-1: 	for _, path := range PatchHeaderPaths(patch) {
-2: 	for _, path := range PatchHeaderPaths(patch) {
-3: // PatchHeaderPaths returns every source and destination path declared by a
-// patch. Keeping this parser shared with apply_patch ensures the sandbox gate
-// and the tool's own path validation agree on what the executor will read or write.
-func PatchHeaderPaths(patch string) []string {
-	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
-		return structuredPatchHeaderPaths(patch)
+	parsed, err := PatchHeaderPaths(patch)
+	if err != nil {
+		return nil
 	}
-	return patchHeaderPaths(patch)
-}
-
-// structuredPatchHeaderPaths is intentionally a small, conservative scanner for
-// the sandbox boundary. The executor validates the complete hunk grammar before
-// writing; the sandbox only needs every possible target path so it can reject an
-// unsafe request before the tool runs.
-func structuredPatchHeaderPaths(patch string) []string {
-	var paths []string
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		for _, prefix := range []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "} {
-			if path, ok := strings.CutPrefix(trimmed, prefix); ok {
-				path = strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(path)), "\\", "/")
-				if path != "" {
-					paths = append(paths, path)
-				}
-				break
-			}
-		}
-	}
-	return paths
-}
-
-func patchHeaderPaths(patch string) []string {
+	for _, path := range parsed {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -310,44 +290,18 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	if request.ToolName != "apply_patch" {
 		return nil
 	}
-	patch := firstArgString(request.Args, "patch", "diff")
+	patch := firstExactStringArg(request.Args, "patch", "diff")
 	if patch == "" {
 		return nil
 	}
-1: 	for _, path := range PatchHeaderPaths(patch) {
-2: 	for _, path := range PatchHeaderPaths(patch) {
-3: // PatchHeaderPaths returns every source and destination path declared by a
-// patch. Keeping this parser shared with apply_patch ensures the sandbox gate
-// and the tool's own path validation agree on what the executor will read or write.
-func PatchHeaderPaths(patch string) []string {
-	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
-		return structuredPatchHeaderPaths(patch)
-	}
-	return patchHeaderPaths(patch)
-}
-
-// structuredPatchHeaderPaths is intentionally a small, conservative scanner for
-// the sandbox boundary. The executor validates the complete hunk grammar before
-// writing; the sandbox only needs every possible target path so it can reject an
-// unsafe request before the tool runs.
-func structuredPatchHeaderPaths(patch string) []string {
-	var paths []string
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		for _, prefix := range []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "} {
-			if path, ok := strings.CutPrefix(trimmed, prefix); ok {
-				path = strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(path)), "\\", "/")
-				if path != "" {
-					paths = append(paths, path)
-				}
-				break
-			}
+	paths, err := PatchHeaderPaths(patch)
+	if err != nil {
+		return &pathBlock{
+			Code:   BlockDenied,
+			Reason: "patch paths cannot be established safely: " + err.Error(),
 		}
 	}
-	return paths
-}
-
-func patchHeaderPaths(patch string) []string {
+	for _, path := range paths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -362,14 +316,14 @@ func patchHeaderPaths(patch string) []string {
 	return nil
 }
 
-1: 	for _, path := range PatchHeaderPaths(patch) {
-2: 	for _, path := range PatchHeaderPaths(patch) {
-3: // PatchHeaderPaths returns every source and destination path declared by a
+// PatchHeaderPaths returns every source and destination path declared by a
 // patch. Keeping this parser shared with apply_patch ensures the sandbox gate
-// and the tool's own path validation agree on what the executor will read or write.
-func PatchHeaderPaths(patch string) []string {
+// and the tool's own path validation agree on what the executor will read or write. A
+// path-bearing git header that cannot be interpreted exactly rejects the patch:
+// silently omitting it would let git operate on a path the policy never saw.
+func PatchHeaderPaths(patch string) ([]string, error) {
 	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
-		return structuredPatchHeaderPaths(patch)
+		return structuredPatchHeaderPaths(patch), nil
 	}
 	return patchHeaderPaths(patch)
 }
@@ -395,10 +349,68 @@ func structuredPatchHeaderPaths(patch string) []string {
 	return paths
 }
 
-func patchHeaderPaths(patch string) []string {
+func patchHeaderPaths(patch string) ([]string, error) {
 	var paths []string
 	oldRemaining, newRemaining := 0, 0
 	inHunk := false
+	type diffSection struct {
+		rawDiff               string
+		diffParsed            bool
+		extendedSource        string
+		extendedDestination   string
+		hasExtendedSource     bool
+		hasExtendedDest       bool
+		unifiedSource         string
+		unifiedDestination    string
+		hasUnifiedSource      bool
+		hasUnifiedDestination bool
+	}
+	var section diffSection
+	flushSection := func() error {
+		if section.rawDiff == "" {
+			return nil
+		}
+		if section.hasExtendedSource != section.hasExtendedDest {
+			return fmt.Errorf("incomplete copy or rename path headers")
+		}
+		if section.hasUnifiedSource != section.hasUnifiedDestination {
+			return fmt.Errorf("incomplete unified file path headers")
+		}
+		if section.diffParsed {
+			return nil
+		}
+		var source, destination string
+		switch {
+		case section.hasExtendedSource && section.hasExtendedDest:
+			source = "a/" + section.extendedSource
+			destination = "b/" + section.extendedDestination
+		case section.hasUnifiedSource && section.hasUnifiedDestination && section.unifiedSource != "/dev/null" && section.unifiedDestination != "/dev/null":
+			source = section.unifiedSource
+			destination = section.unifiedDestination
+		default:
+			return fmt.Errorf("ambiguous diff --git path operands")
+		}
+		if !diffGitLineMatchesPaths(section.rawDiff, source, destination) {
+			return fmt.Errorf("diff --git paths disagree with the file path headers")
+		}
+		paths = append(paths, stripPatchPrefix(source), stripPatchPrefix(destination))
+		return nil
+	}
+	setExtendedPath := func(source bool, path string) error {
+		if source {
+			if section.hasExtendedSource && section.extendedSource != path {
+				return fmt.Errorf("conflicting copy or rename source paths")
+			}
+			section.extendedSource, section.hasExtendedSource = path, true
+		} else {
+			if section.hasExtendedDest && section.extendedDestination != path {
+				return fmt.Errorf("conflicting copy or rename destination paths")
+			}
+			section.extendedDestination, section.hasExtendedDest = path, true
+		}
+		paths = append(paths, filepath.ToSlash(path))
+		return nil
+	}
 	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
 		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
 			switch {
@@ -416,61 +428,109 @@ func patchHeaderPaths(patch string) []string {
 		inHunk = false
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
+			if err := flushSection(); err != nil {
+				return nil, err
+			}
+			section = diffSection{rawDiff: line[len("diff --git "):]}
 			if source, destination, ok := parseDiffGitPaths(line[len("diff --git "):]); ok {
 				paths = append(paths, stripPatchPrefix(source), stripPatchPrefix(destination))
+				section.diffParsed = true
 			}
 		case strings.HasPrefix(line, "copy from "):
-			if path, ok := parseExtendedGitPath(line[len("copy from "):]); ok {
-				paths = append(paths, filepath.ToSlash(path))
+			path, ok := parseExtendedGitPath(line[len("copy from "):])
+			if !ok || section.rawDiff == "" {
+				return nil, fmt.Errorf("invalid copy source path header")
+			}
+			if err := setExtendedPath(true, path); err != nil {
+				return nil, err
 			}
 		case strings.HasPrefix(line, "copy to "):
-			if path, ok := parseExtendedGitPath(line[len("copy to "):]); ok {
-				paths = append(paths, filepath.ToSlash(path))
+			path, ok := parseExtendedGitPath(line[len("copy to "):])
+			if !ok || section.rawDiff == "" {
+				return nil, fmt.Errorf("invalid copy destination path header")
+			}
+			if err := setExtendedPath(false, path); err != nil {
+				return nil, err
 			}
 		case strings.HasPrefix(line, "rename from "):
-			if path, ok := parseExtendedGitPath(line[len("rename from "):]); ok {
-				paths = append(paths, filepath.ToSlash(path))
+			path, ok := parseExtendedGitPath(line[len("rename from "):])
+			if !ok || section.rawDiff == "" {
+				return nil, fmt.Errorf("invalid rename source path header")
+			}
+			if err := setExtendedPath(true, path); err != nil {
+				return nil, err
 			}
 		case strings.HasPrefix(line, "rename to "):
-			if path, ok := parseExtendedGitPath(line[len("rename to "):]); ok {
-				paths = append(paths, filepath.ToSlash(path))
+			path, ok := parseExtendedGitPath(line[len("rename to "):])
+			if !ok || section.rawDiff == "" {
+				return nil, fmt.Errorf("invalid rename destination path header")
+			}
+			if err := setExtendedPath(false, path); err != nil {
+				return nil, err
 			}
 		case strings.HasPrefix(line, "rename old "):
-			if path, ok := parseExtendedGitPath(line[len("rename old "):]); ok {
-				paths = append(paths, filepath.ToSlash(path))
+			path, ok := parseExtendedGitPath(line[len("rename old "):])
+			if !ok || section.rawDiff == "" {
+				return nil, fmt.Errorf("invalid rename source path header")
+			}
+			if err := setExtendedPath(true, path); err != nil {
+				return nil, err
 			}
 		case strings.HasPrefix(line, "rename new "):
-			if path, ok := parseExtendedGitPath(line[len("rename new "):]); ok {
-				paths = append(paths, filepath.ToSlash(path))
+			path, ok := parseExtendedGitPath(line[len("rename new "):])
+			if !ok || section.rawDiff == "" {
+				return nil, fmt.Errorf("invalid rename destination path header")
+			}
+			if err := setExtendedPath(false, path); err != nil {
+				return nil, err
 			}
 		case strings.HasPrefix(line, "@@"):
 			oldRemaining, newRemaining = parsePatchHunkCounts(line)
 			inHunk = oldRemaining > 0 || newRemaining > 0
 		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			if path := patchFileHeaderPath(line); path != "" {
+			path, ok := patchFileHeaderPath(line)
+			if !ok {
+				return nil, fmt.Errorf("invalid unified file path header")
+			}
+			if path != "" {
 				paths = append(paths, stripPatchPrefix(path))
+				if section.rawDiff != "" {
+					if strings.HasPrefix(line, "--- ") {
+						section.unifiedSource, section.hasUnifiedSource = path, true
+					} else {
+						section.unifiedDestination, section.hasUnifiedDestination = path, true
+					}
+				}
 			}
 		}
 	}
-	return paths
+	if err := flushSection(); err != nil {
+		return nil, err
+	}
+	return paths, nil
 }
 
 func parseDiffGitPaths(line string) (string, string, bool) {
-	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", "", false
+	}
 	if strings.HasPrefix(line, "\"") {
 		source, rest, ok := consumeGitPath(line)
-		if !ok {
+		if !ok || len(rest) < 2 || rest[0] != ' ' {
 			return "", "", false
 		}
-		destination, ok := parseWholeGitPath(rest)
-		return source, destination, ok
+		destination, ok := parseWholeGitPath(rest[1:])
+		return source, destination, ok && validDiffGitPaths(source, destination)
 	}
 
 	// When only the destination is quoted, its opening quote uniquely separates
 	// the two operands even if the unquoted source contains ordinary spaces.
 	for separator := strings.Index(line, " \""); separator >= 0; {
 		if destination, ok := parseWholeGitPath(line[separator+1:]); ok {
-			return line[:separator], destination, true
+			source := line[:separator]
+			if validDiffGitPaths(source, destination) {
+				return source, destination, true
+			}
 		}
 		next := strings.Index(line[separator+1:], " \"")
 		if next < 0 {
@@ -479,33 +539,36 @@ func parseDiffGitPaths(line string) (string, string, bool) {
 		separator += next + 1
 	}
 
-	// Git commonly leaves ordinary spaces unquoted. For a non-rename diff, the
-	// synthetic a/ and b/ operands name the same path, which identifies the split
-	// without treating a filename space as an operand separator.
-	for separator := 0; separator < len(line); {
-		next := strings.IndexByte(line[separator:], ' ')
-		if next < 0 {
-			break
+	// For unquoted operands, only a space immediately followed by the synthetic
+	// b/ prefix can be the separator. Preserve exactly one separator byte: any
+	// preceding or trailing spaces remain filename data.
+	type candidate struct{ source, destination string }
+	var candidates []candidate
+	for separator := 0; separator+1 < len(line); separator++ {
+		if line[separator] != ' ' || !strings.HasPrefix(line[separator+1:], "b/") {
+			continue
 		}
-		separator += next
-		source, destination := line[:separator], strings.TrimLeft(line[separator:], " ")
-		if strings.HasPrefix(source, "a/") && strings.HasPrefix(destination, "b/") && source[2:] == destination[2:] {
-			return source, destination, true
+		source, destination := line[:separator], line[separator+1:]
+		if validDiffGitPaths(source, destination) {
+			candidates = append(candidates, candidate{source: source, destination: destination})
 		}
-		separator++
 	}
-
-	// Different unquoted names are disambiguated by the copy/rename headers. Keep
-	// the simple no-space form for ordinary diffs with distinct path operands.
-	fields := strings.Fields(line)
-	if len(fields) == 2 {
-		return fields[0], fields[1], true
+	if len(candidates) == 1 {
+		return candidates[0].source, candidates[0].destination, true
+	}
+	var same []candidate
+	for _, candidate := range candidates {
+		if candidate.source[2:] == candidate.destination[2:] {
+			same = append(same, candidate)
+		}
+	}
+	if len(same) == 1 {
+		return same[0].source, same[0].destination, true
 	}
 	return "", "", false
 }
 
 func parseWholeGitPath(input string) (string, bool) {
-	input = strings.TrimSpace(input)
 	if input == "" {
 		return "", false
 	}
@@ -513,7 +576,20 @@ func parseWholeGitPath(input string) (string, bool) {
 		return input, true
 	}
 	path, rest, ok := consumeGitPath(input)
-	return path, ok && strings.TrimSpace(rest) == ""
+	return path, ok && rest == ""
+}
+
+func validDiffGitPaths(source, destination string) bool {
+	return len(source) > 2 && len(destination) > 2 && strings.HasPrefix(source, "a/") && strings.HasPrefix(destination, "b/")
+}
+
+func diffGitLineMatchesPaths(line, source, destination string) bool {
+	for separator := 0; separator < len(line); separator++ {
+		if line[separator] == ' ' && line[:separator] == source && line[separator+1:] == destination {
+			return true
+		}
+	}
+	return false
 }
 
 // Extended copy/rename headers consume the whole unquoted remainder as the
@@ -526,15 +602,14 @@ func parseExtendedGitPath(input string) (string, bool) {
 	if input[0] != '"' {
 		return input, true
 	}
-	path, _, ok := consumeGitPath(input)
-	return path, ok
+	path, rest, ok := consumeGitPath(input)
+	return path, ok && rest == ""
 }
 
 // consumeGitPath reads one diff --git path operand. Git uses C-style quoted
 // strings for paths containing characters that need escaping; strconv.Unquote
 // handles its escaped quotes, backslashes, control characters, and octal bytes.
 func consumeGitPath(input string) (string, string, bool) {
-	input = strings.TrimLeft(input, " \t")
 	if input == "" {
 		return "", "", false
 	}
@@ -572,20 +647,19 @@ func consumeGitPath(input string) (string, string, bool) {
 // of an unquoted operand as pathname data, so a name with a leading or trailing
 // space is written verbatim; trimming here would make the token gate evaluate
 // `bridge-token` while git patches the live `bridge-token ` beside it.
-func patchFileHeaderPath(line string) string {
+func patchFileHeaderPath(line string) (string, bool) {
 	rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
 	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
 		rest = rest[:tab]
 	}
 	if strings.HasPrefix(rest, `"`) {
-		// A quoted operand ends at its closing quote; git allows nothing but the
-		// (already removed) timestamp after it, so a trailing remainder means the
-		// line is not the quoted form and the raw bytes are the pathname.
-		if path, remainder, ok := consumeGitPath(rest); ok && remainder == "" {
-			return path
+		path, remainder, ok := consumeGitPath(rest)
+		if !ok || remainder != "" {
+			return "", false
 		}
+		return path, true
 	}
-	return rest
+	return rest, rest != ""
 }
 
 func parsePatchHunkCounts(line string) (int, int) {

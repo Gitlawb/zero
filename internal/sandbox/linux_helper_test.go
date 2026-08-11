@@ -7,8 +7,18 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
+
+func mustBuildLinuxBwrapFilesystemPlan(t *testing.T, profile PermissionProfile) linuxBwrapFilesystemPlan {
+	t.Helper()
+	plan, err := buildLinuxBwrapFilesystemPlan(profile)
+	if err != nil {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan: %v", err)
+	}
+	return plan
+}
 
 func TestBuildLinuxSandboxCommandArgsSerializesPermissionProfile(t *testing.T) {
 	profile := PermissionProfile{
@@ -190,7 +200,7 @@ func TestLinuxBwrapRootReadUsesReadOnlyHostRoot(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkAllow},
 	}
 
-	args := linuxBwrapFilesystemArgs(profile)
+	args := mustBuildLinuxBwrapFilesystemPlan(t, profile).Args
 	assertArgsContainSequence(t, args, "--ro-bind", "/", "/")
 	if argsContainSequence(args, "--tmpfs", "/") {
 		t.Fatalf("root-read profile must not start from an empty root: %#v", args)
@@ -217,7 +227,7 @@ func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkAllow},
 	}
 
-	args := linuxBwrapFilesystemArgs(profile)
+	args := mustBuildLinuxBwrapFilesystemPlan(t, profile).Args
 	if argsContainSequence(args, "--tmpfs", "/tmp") {
 		t.Fatalf("workspace-write temp access must bind host /tmp, not create private tmpfs: %#v", args)
 	}
@@ -256,7 +266,7 @@ func TestLinuxBwrapFilesystemPlanPreservesMissingProtectedMetadata(t *testing.T)
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	plan := buildLinuxBwrapFilesystemPlan(profile)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	assertArgsContainSequence(t, plan.Args, "--ro-bind", existing, existing)
 	if argsContainSequence(plan.Args, "--tmpfs", missing) || argsContainSequence(plan.Args, "--ro-bind", missing, missing) {
 		t.Fatalf("missing protected metadata must remain absent inside the sandbox: %#v", plan.Args)
@@ -279,7 +289,7 @@ func TestLinuxBwrapSkipsMissingCredentialBaselines(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	plan := buildLinuxBwrapFilesystemPlan(profile)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	if stringSliceContains(plan.Args, missingCredential) {
 		t.Fatalf("absent credential baseline must not become a mount target: %#v", plan.Args)
 	}
@@ -293,9 +303,28 @@ func TestLinuxBwrapSkipsMissingCredentialBaselines(t *testing.T) {
 	if err := os.MkdirAll(missingCredential, 0o700); err != nil {
 		t.Fatalf("MkdirAll credential dir: %v", err)
 	}
-	plan = buildLinuxBwrapFilesystemPlan(profile)
+	plan = mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	normalizedCredential := normalizeProfilePath(missingCredential)
 	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", normalizedCredential, "--remount-ro", normalizedCredential)
+}
+
+func TestLinuxBwrapRejectsMandatoryPathOutsideDenyBaseline(t *testing.T) {
+	mandatory := filepath.Join(t.TempDir(), "daemon-token")
+	if err := os.WriteFile(mandatory, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                   FileSystemRestricted,
+			ReadRoots:              []string{string(filepath.Separator)},
+			MandatoryDenyReadPaths: []string{mandatory},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	if _, err := buildLinuxBwrapFilesystemPlan(profile); err == nil || !strings.Contains(err.Error(), "not in denyReadIfExists") {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan error = %v, want mandatory-subset validation", err)
+	}
 }
 
 // TestLinuxBwrapCreatesOwnedCredentialDirsBeforeMasking covers the long-lived
@@ -318,7 +347,7 @@ func TestLinuxBwrapCreatesOwnedCredentialDirsBeforeMasking(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	plan := buildLinuxBwrapFilesystemPlan(profile)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	if info, err := os.Stat(ownedDir); err != nil || !info.IsDir() {
 		t.Fatalf("owned credential dir was not created: err=%v", err)
 	}
@@ -354,7 +383,7 @@ func TestLinuxBwrapKeepsCarveoutsReachableInsideMaskedDir(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	plan := buildLinuxBwrapFilesystemPlan(profile)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	normalizedCredentialDir := normalizeProfilePath(credentialDir)
 	normalizedPluginRoot := normalizeCredentialCarveoutPath(pluginRoot)
 	// 111 rather than 000: a 000 directory cannot be traversed, so the re-bound
@@ -397,7 +426,7 @@ func TestLinuxBwrapDoesNotBindSymlinkCarveout(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	plan := buildLinuxBwrapFilesystemPlan(profile)
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	normalizedCredentialDir := normalizeProfilePath(credentialDir)
 	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", normalizedCredentialDir, "--remount-ro", normalizedCredentialDir)
 	if argsContainSequence(plan.Args, "--ro-bind", pluginRoot, pluginRoot) || argsContainSequence(plan.Args, "--ro-bind", secret, secret) {
@@ -414,7 +443,7 @@ func TestLinuxBwrapUnrestrictedFilesystemUsesWritableHostRoot(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	args := linuxBwrapFilesystemArgs(profile)
+	args := mustBuildLinuxBwrapFilesystemPlan(t, profile).Args
 	assertArgsContainSequence(t, args, "--bind", "/", "/")
 	if argsContainSequence(args, "--ro-bind", "/", "/") {
 		t.Fatalf("unrestricted filesystem profile must not make host root read-only: %#v", args)

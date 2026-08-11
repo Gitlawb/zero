@@ -61,7 +61,11 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	if isStructuredPatch(patch) {
 		return tool.runStructuredPatch(applyRoot, relativeRoot, patch, options)
 	}
-	if err := validatePatchPaths(applyRoot, patch); err != nil {
+	patchPaths, err := sandbox.PatchHeaderPaths(patch)
+	if err != nil {
+		return errorResult("Error applying patch: patch paths cannot be established safely: " + err.Error())
+	}
+	if err := validatePatchPaths(applyRoot, patchPaths); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
 
@@ -81,16 +85,16 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 		return errorResult("Error applying patch: " + err.Error())
 	}
 
-	if err := recheckPatchWriteTargets(applyRoot, patch); err != nil {
+	if err := recheckPatchWriteTargets(applyRoot, patchPaths); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
 	var createdTargets []string
 	var fullySuppliedTargets []string
 	wholeBefore := map[string]bool{}
 	if options.FileTracker != nil {
-		createdTargets = missingPatchTargets(applyRoot, patch)
+		createdTargets = missingPatchTargets(applyRoot, patchPaths)
 		fullySuppliedTargets = completeCreatedPatchTargets(applyRoot, patch)
-		for _, path := range sandbox.PatchHeaderPaths(patch) {
+		for _, path := range patchPaths {
 			if path == "" || path == "/dev/null" {
 				continue
 			}
@@ -116,7 +120,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 		summary = "Patch applied successfully in " + relativeRoot + "."
 	}
 	result := okResult(summary)
-	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
+	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patchPaths)
 	result.Display = Display{Summary: summary, Kind: "diff", Preview: capPreviewDiff(patch)}
 	fullySupplied := make(map[string]bool, len(fullySuppliedTargets))
 	for _, absolute := range fullySuppliedTargets {
@@ -146,10 +150,10 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	return result
 }
 
-func missingPatchTargets(root string, patch string) []string {
+func missingPatchTargets(root string, patchPaths []string) []string {
 	seen := map[string]bool{}
 	var missing []string
-	for _, path := range sandbox.PatchHeaderPaths(patch) {
+	for _, path := range patchPaths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -242,10 +246,10 @@ func recordCreatedPatchTargets(tracker *FileTracker, missingBefore []string) {
 // extra write root, resolveScopedPath returns the absolute path as relativeRoot;
 // in that case the entries in the returned slice are absolute paths, since
 // workspace-relative would be ambiguous there.
-func changedFilesFromPatch(relativeRoot string, patch string) []string {
+func changedFilesFromPatch(relativeRoot string, patchPaths []string) []string {
 	seen := map[string]bool{}
 	var paths []string
-	for _, path := range sandbox.PatchHeaderPaths(patch) {
+	for _, path := range patchPaths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -262,8 +266,8 @@ func changedFilesFromPatch(relativeRoot string, patch string) []string {
 	return paths
 }
 
-func validatePatchPaths(root string, patch string) error {
-	for _, path := range sandbox.PatchHeaderPaths(patch) {
+func validatePatchPaths(root string, patchPaths []string) error {
+	for _, path := range patchPaths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -277,8 +281,8 @@ func validatePatchPaths(root string, patch string) error {
 	return nil
 }
 
-func recheckPatchWriteTargets(root string, patch string) error {
-	for _, path := range sandbox.PatchHeaderPaths(patch) {
+func recheckPatchWriteTargets(root string, patchPaths []string) error {
+	for _, path := range patchPaths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -297,7 +301,7 @@ func patchFileHeaderPath(line string) string {
 	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
 		rest = rest[:tab]
 	}
-	return strings.TrimSpace(unquoteGitPath(rest))
+	return unquoteGitPath(rest)
 }
 
 // parseHunkCounts reads the old/new line counts from a "@@ -a,b +c,d @@" header.
@@ -345,7 +349,6 @@ func hunkCount(spec string) int {
 // double quotes and backslash-escapes special bytes (spaces, tabs, high bytes as
 // octal) when it contains anything unusual; an unquoted path is returned as-is.
 func unquoteGitPath(s string) string {
-	s = strings.TrimSpace(s)
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		if unquoted, err := strconv.Unquote(s); err == nil {
 			return unquoted
@@ -355,7 +358,6 @@ func unquoteGitPath(s string) string {
 }
 
 func stripPatchPrefix(path string) string {
-	path = strings.TrimSpace(path)
 	// A unified-diff path carries exactly one of the a/ or b/ prefixes; strip a
 	// single one so a real directory literally named "a" or "b" is preserved.
 	if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {

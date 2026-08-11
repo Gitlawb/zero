@@ -269,35 +269,51 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 				"ecmYc)%1lX5)h$j<E=nz7$S=xF&&*5A;Q|0@YY2b<\n\n",
 			wantControlSource: []byte("attacker-data\x00modified\n"),
 		},
+		{
+			name:      "binary modification preserves trailing space",
+			tokenName: "bridge-token ",
+			patch: "diff --git a/bridge-token  b/bridge-token \n" +
+				"index 6e4018bb778ca15e70706fe1f7a4c22e762f37b6..d3eae57ec6ad245ec7ab173e28141ac2f87cca68 100644\n" +
+				"GIT binary patch\n" +
+				"literal 23\n" +
+				"ecmYc+DM?JuPA$?+Ni0cZ$jwj5Ov_A7;Q|0@R|sMN\n\n" +
+				"literal 23\n" +
+				"ecmYc)%1lX5)h$j<E=nz7$S=xF&&*5A;Q|0@YY2b<\n\n",
+			wantControlSource: []byte("attacker-data\x00modified\n"),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Prove the fixture is a valid patch with the stated effect. The protected
 			// case below is rejected before git runs, so without this control an
 			// accidentally invalid regression fixture could pass vacuously.
-			control := t.TempDir()
-			if err := os.WriteFile(filepath.Join(control, tc.tokenName), original, 0o600); err != nil {
-				t.Fatalf("write control token: %v", err)
-			}
-			controlRegistry := NewRegistry()
-			controlRegistry.Register(NewScopedApplyPatchTool(control, nil))
-			controlResult := controlRegistry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
-				"patch": tc.patch,
-			}, RunOptions{PermissionGranted: true})
-			if controlResult.Status != StatusOK {
-				t.Fatalf("control patch is invalid: %s", controlResult.Output)
-			}
-			controlSource, sourceErr := os.ReadFile(filepath.Join(control, tc.tokenName))
-			if tc.wantControlSource == nil {
-				if !os.IsNotExist(sourceErr) {
-					t.Fatalf("control source still exists after rename: contents=%q err=%v", controlSource, sourceErr)
+			// Git for Windows rejects trailing-space paths, but the protected case
+			// must still exercise our parser and deny the exact header before Git runs.
+			if runtime.GOOS != "windows" || !strings.HasSuffix(tc.tokenName, " ") {
+				control := t.TempDir()
+				if err := os.WriteFile(filepath.Join(control, tc.tokenName), original, 0o600); err != nil {
+					t.Fatalf("write control token: %v", err)
 				}
-			} else if sourceErr != nil || string(controlSource) != string(tc.wantControlSource) {
-				t.Fatalf("control source: contents=%q err=%v", controlSource, sourceErr)
-			}
-			if tc.destination != "" {
-				controlTarget, err := os.ReadFile(filepath.Join(control, tc.destination))
-				if err != nil || string(controlTarget) != string(tc.wantControlTarget) {
-					t.Fatalf("control target: contents=%q err=%v", controlTarget, err)
+				controlRegistry := NewRegistry()
+				controlRegistry.Register(NewScopedApplyPatchTool(control, nil))
+				controlResult := controlRegistry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+					"patch": tc.patch,
+				}, RunOptions{PermissionGranted: true})
+				if controlResult.Status != StatusOK {
+					t.Fatalf("control patch is invalid: %s", controlResult.Output)
+				}
+				controlSource, sourceErr := os.ReadFile(filepath.Join(control, tc.tokenName))
+				if tc.wantControlSource == nil {
+					if !os.IsNotExist(sourceErr) {
+						t.Fatalf("control source still exists after rename: contents=%q err=%v", controlSource, sourceErr)
+					}
+				} else if sourceErr != nil || string(controlSource) != string(tc.wantControlSource) {
+					t.Fatalf("control source: contents=%q err=%v", controlSource, sourceErr)
+				}
+				if tc.destination != "" {
+					controlTarget, err := os.ReadFile(filepath.Join(control, tc.destination))
+					if err != nil || string(controlTarget) != string(tc.wantControlTarget) {
+						t.Fatalf("control target: contents=%q err=%v", controlTarget, err)
+					}
 				}
 			}
 
@@ -378,47 +394,35 @@ func TestApplyPatchDeniesTrailingSpaceDaemonTokenPath(t *testing.T) {
 	}
 }
 
-// TestAmbiguousGitHeaderIsNotAnApplicablePatch pins the residual assumption in
-// the shared header parser: for a `diff --git` line whose two operands both
-// contain unquoted spaces and name DIFFERENT files, no split is recoverable
-// from the line alone, so PatchHeaderPaths yields nothing for it. That is only
-// safe because git cannot resolve the line either — every real patch of that
-// shape carries the copy/rename headers (parsed separately) that disambiguate
-// it. Without those headers git refuses the patch outright, so there is nothing
-// for the token gate to miss.
-//
-// If a future git ever accepted this form, this test fails and the parser needs
-// a real split rule rather than the current heuristics.
-func TestAmbiguousGitHeaderIsNotAnApplicablePatch(t *testing.T) {
-	patch := "diff --git a/bridge token b/exposed token\n" +
+// An unresolved diff header must fail before git runs; security must not depend
+// on whether the installed git version happens to reject the same ambiguity.
+func TestAmbiguousGitHeaderFailsClosedBeforeApply(t *testing.T) {
+	patch := "diff --git a/bridge b/token b/exposed-token\n" +
 		"GIT binary patch\n" +
 		"literal 5\n" +
 		"LcmZQzU|<4=0Rj{Q\n\n" +
 		"literal 0\n" +
 		"HcmV?d00001\n\n"
-	if paths := sandbox.PatchHeaderPaths(patch); len(paths) != 0 {
-		t.Fatalf("PatchHeaderPaths = %q; this test only means anything while the line is unresolvable", paths)
+	if paths, err := sandbox.PatchHeaderPaths(patch); err == nil {
+		t.Fatalf("PatchHeaderPaths = %q, want ambiguous-path error", paths)
 	}
 
 	workspace := t.TempDir()
-	const original = "bridge-secret\n"
-	if err := os.WriteFile(filepath.Join(workspace, "bridge token"), []byte(original), 0o600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
 	registry := NewRegistry()
 	registry.Register(NewScopedApplyPatchTool(workspace, nil))
-	result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
-		"patch": patch,
-	}, RunOptions{PermissionGranted: true})
-
-	if result.Status == StatusOK {
-		t.Fatalf("git applied an ambiguous header patch: %q", result.Output)
-	}
-	if contents, err := os.ReadFile(filepath.Join(workspace, "bridge token")); err != nil || string(contents) != original {
-		t.Fatalf("token changed: contents=%q err=%v", contents, err)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, "exposed token")); !os.IsNotExist(err) {
-		t.Fatalf("ambiguous patch created a destination file: err=%v", err)
+	for _, options := range []RunOptions{
+		{PermissionGranted: true},
+		{PermissionGranted: true, Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: workspace,
+			Policy:        sandbox.Policy{Mode: sandbox.ModeDisabled},
+		})},
+	} {
+		result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+			"patch": patch,
+		}, options)
+		if result.Status == StatusOK || !strings.Contains(result.Output, "cannot be established safely") {
+			t.Fatalf("ambiguous patch: status=%s output=%q, want pre-apply parse denial", result.Status, result.Output)
+		}
 	}
 }
 
