@@ -70,7 +70,9 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 		default:
 			if err, ok := failures[name]; ok {
 				state = "failed"
-				message = redaction.ErrorMessage(err, redaction.Options{})
+				message = redaction.ErrorMessage(err, redaction.Options{
+					ExtraSecretValues: mcpServerSecretValues(raw),
+				})
 				if strings.TrimSpace(message) == "" {
 					message = "server did not start"
 				}
@@ -501,4 +503,45 @@ func mcpPermissionTarget(grant mcp.PermissionGrant) string {
 		return "*"
 	}
 	return serverName + "/*"
+}
+
+// mcpServerSecretValues collects the configured values a failing server could
+// echo back at us.
+//
+// The generic redaction patterns match shapes they recognise, like an
+// `Authorization:` header or a key-looking token. A remote MCP server is
+// configured with ARBITRARY headers, so a value under a name nobody can predict
+// (`X-Workspace-Credential`, say) matches no pattern at all. A server that
+// returns the request it failed on then puts that value straight into
+// MCPServerView.Error, which this PR newly renders in both /mcp surfaces and the
+// session transcript. Passing the values themselves redacts by equality rather
+// than by shape, so the name does not have to be guessable.
+//
+// It also removes the dependence on the syntactic matcher, which terminal
+// control bytes can split before the later sanitizer strips them.
+//
+// Short values are skipped. A configured "1" or "true" is not a credential, and
+// redacting it by equality would punch holes through unrelated text, which is
+// its own way of making an error message useless.
+func mcpServerSecretValues(raw config.MCPServerConfig) []string {
+	const shortestSecret = 8
+	values := make([]string, 0, len(raw.Headers)+len(raw.Env)+2)
+	add := func(value string) {
+		if trimmed := strings.TrimSpace(value); len(trimmed) >= shortestSecret {
+			values = append(values, trimmed)
+		}
+	}
+	for _, value := range raw.Headers {
+		add(value)
+	}
+	// Env carries the same risk for a stdio server: the child is launched with
+	// these, and a startup failure often reports the environment it was given.
+	for _, value := range raw.Env {
+		add(value)
+	}
+	add(raw.Auth)
+	if raw.OAuth != nil {
+		add(raw.OAuth.ClientSecret)
+	}
+	return values
 }
