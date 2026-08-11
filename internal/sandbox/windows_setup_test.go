@@ -190,7 +190,7 @@ func TestWindowsSandboxSetupPrincipalOptInSurvivesElevatedEnvironment(t *testing
 				WorkspaceRoots: []string{`C:\workspace`},
 				// The parent folds in the runtime roots before the runner sees the profile,
 				// so a command half that skips it no longer matches the setup half.
-				PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:workspace`}),
+				PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:\workspace`}),
 				PrincipalOptIn:    &optIn,
 			})
 			if err != nil {
@@ -260,7 +260,7 @@ func TestWindowsSandboxSetupMarkerRejectsPrincipalOptInMismatch(t *testing.T) {
 			WorkspaceRoots: []string{`C:\workspace`},
 			// The parent folds in the runtime roots before the runner sees the profile,
 			// so a command half that skips it no longer matches the setup half.
-			PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:workspace`}),
+			PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:\workspace`}),
 			Env:               env,
 			SandboxLevel:      WindowsSandboxLevelRestrictedToken,
 			Command:           []string{"cmd.exe", "/c", "echo"},
@@ -294,7 +294,7 @@ func TestWindowsSandboxSetupMarkerRejectsPrincipalOptInMismatch(t *testing.T) {
 				WorkspaceRoots: []string{`C:\workspace`},
 				// The parent folds in the runtime roots before the runner sees the profile,
 				// so a command half that skips it no longer matches the setup half.
-				PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:workspace`}),
+				PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:\workspace`}),
 				PrincipalOptIn:    testCase.setupOptIn,
 			}
 			marker, err := WriteWindowsSandboxSetupMarker(setupConfig)
@@ -380,7 +380,7 @@ func TestWindowsSandboxSetupArgsUnsetPrincipalOptInConsultsEnvironment(t *testin
 			WorkspaceRoots: []string{`C:\workspace`},
 			// The parent folds in the runtime roots before the runner sees the profile,
 			// so a command half that skips it no longer matches the setup half.
-			PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:workspace`}),
+			PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:\workspace`}),
 			SandboxLevel:      WindowsSandboxLevelRestrictedToken,
 			Command:           []string{"cmd.exe", "/c", "echo"},
 		}
@@ -394,9 +394,10 @@ func TestWindowsSandboxSetupArgsUnsetPrincipalOptInConsultsEnvironment(t *testin
 			SandboxHome:    home,
 			CommandCWD:     `C:\workspace`,
 			WorkspaceRoots: []string{`C:\workspace`},
-			// The parent folds in the runtime roots before the runner sees the profile,
-			// so a command half that skips it no longer matches the setup half.
-			PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:workspace`}),
+			// Deliberately NOT pre-augmented. BuildWindowsSandboxSetupArgs folds the
+			// runtime roots in itself, and passing them in here would hide it from
+			// this test if it ever stopped.
+			PermissionProfile: profile,
 			PrincipalOptIn:    optIn,
 		})
 		if err != nil {
@@ -497,7 +498,7 @@ func TestWindowsSandboxSetupArgsCarryTheCallerIdentity(t *testing.T) {
 		WorkspaceRoots: []string{`C:\workspace`},
 		// The parent folds in the runtime roots before the runner sees the profile,
 		// so a command half that skips it no longer matches the setup half.
-		PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:workspace`}),
+		PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{`C:\workspace`}),
 		CallerSID:         callerSID,
 	})
 	if err != nil {
