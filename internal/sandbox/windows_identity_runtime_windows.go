@@ -481,7 +481,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 // under its own record, so retiring both because one lost its record would
 // destroy a principal there is nothing wrong with.
 func retireUnrecordedWindowsSandboxPrincipal(config WindowsSandboxCommandConfig, role windowsSandboxRole) error {
-	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxWorkspaceKey(config.WorkspaceRoots), role)
+	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxPrincipalKey(config), role)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			return nil
@@ -863,7 +863,7 @@ func windowsPrincipalRevocationPaths(config WindowsSandboxCommandConfig, princip
 	// This role's record, not the workspace's: the other role is a separate
 	// trustee whose recorded paths are none of this revocation's business.
 	recorded, _ := readWindowsPrincipalACLLedger(
-		config.SandboxHome, windowsSandboxUserName(windowsSandboxWorkspaceKey(config.WorkspaceRoots), role))
+		config.SandboxHome, windowsSandboxUserName(windowsSandboxPrincipalKey(config), role))
 	return unionWindowsPrincipalACLPaths(recorded, current), nil
 }
 

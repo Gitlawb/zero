@@ -35,7 +35,8 @@ func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
 	originalLock := acquireWindowsSandboxSetupLockFn
 	originalACL := applyWindowsACLPlanFn
 	originalPrincipal := setupWindowsSandboxPrincipalFn
-	originalRetire := removeWindowsSandboxPrincipalForSetupFn
+	originalRetire := removeWindowsSandboxPrincipalsForSetupFn
+	originalGroupSID := resolveWindowsSandboxOfflineGroupSIDHook
 	originalLookup := lookupWindowsSandboxIdentityFn
 	originalNetwork := applyWindowsNetworkPlanFn
 	originalMarker := writeWindowsSandboxSetupMarkerFn
@@ -45,7 +46,8 @@ func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
 		acquireWindowsSandboxSetupLockFn = originalLock
 		applyWindowsACLPlanFn = originalACL
 		setupWindowsSandboxPrincipalFn = originalPrincipal
-		removeWindowsSandboxPrincipalForSetupFn = originalRetire
+		removeWindowsSandboxPrincipalsForSetupFn = originalRetire
+		resolveWindowsSandboxOfflineGroupSIDHook = originalGroupSID
 		applyWindowsNetworkPlanFn = originalNetwork
 		writeWindowsSandboxSetupMarkerFn = originalMarker
 	})
@@ -73,9 +75,12 @@ func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
 		}
 		return func() error { return nil }, nil
 	}
-	removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig, windowsSandboxRole) error {
+	removeWindowsSandboxPrincipalsForSetupFn = func(WindowsSandboxCommandConfig) error {
 		return seams.retireErr
 	}
+	// Dual-role setup asserts the block filters name the offline group, which a
+	// stubbed provisioning never creates.
+	resolveWindowsSandboxOfflineGroupSIDHook = func() (string, error) { return "S-1-5-32-999", nil }
 	lookupWindowsSandboxIdentityFn = func(string, windowsSandboxRole) (windowsSandboxIdentity, error) {
 		if seams.principalStillInstalled {
 			return windowsSandboxIdentity{Username: "zero-sbx-stub"}, nil

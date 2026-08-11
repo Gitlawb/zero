@@ -201,7 +201,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// at all (line 36). The offline group is created inside provisioning, so on
 	// an opt-out machine it legitimately does not exist, and asserting there
 	// would refuse a setup that has nothing to get wrong.
-	if err := assertWindowsNetworkPlanCoversOfflineGroup(networkPlan, resolveWindowsSandboxOfflineGroupSID,
+	if err := assertWindowsNetworkPlanCoversOfflineGroup(networkPlan, resolveWindowsSandboxOfflineGroupSIDHook,
 		windowsSandboxIdentityEnabled(config.commandConfig().Env)); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
@@ -242,6 +242,9 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 // workspace is clean while the other account is still on the machine, which is
 // the exact lie this guard exists to prevent.
 func windowsSandboxPrincipalIsInstalled(config WindowsSandboxCommandConfig) bool {
+	// BOTH roles, because dual-role setup provisions two accounts and retiring
+	// one while the other survives is exactly the half-done teardown an
+	// opted-out marker must not claim to have completed.
 	key := windowsSandboxPrincipalKey(config)
 	for _, role := range []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline} {
 		if _, err := lookupWindowsSandboxIdentityFn(key, role); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
