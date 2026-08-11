@@ -748,9 +748,24 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// refused tool loops until the turn limit. Passing retriableFailure for
 			// both is what let that happen: observeToolResult took its success
 			// branch and deleted the record before it could key on the category.
-			countedFailure := retriableFailure || toolResult.DenialReason != DenialNone
+			// isPolicyRefusal rather than DenialReason alone: the categories are
+			// only attached where a typed denial is built, so a headless prompt
+			// refusal and an uncategorized sandbox block were counted as SUCCESS
+			// and cleared the record they were supposed to accumulate.
+			policyRefusal := isPolicyRefusal(toolResult)
+			countedFailure := retriableFailure || policyRefusal
 			outcome := guards.observeToolResult(call.Name, countedFailure, retriableFailure, toolResult.ModelOutput(), toolResult.DenialReason)
-			posture.observeToolOutcome(outcome, toolResult)
+			// The profile's failure-streak trigger is for RETRIABLE failures: it
+			// restores the displaced turn budget and reasoning effort on the theory
+			// that the tool is struggling and needs room. A policy refusal is not a
+			// struggling tool, it is an answer, and spending the one-shot
+			// escalation on one contradicts that trigger's own contract. Denials
+			// still count for the halt above; they just do not buy more budget.
+			if policyRefusal {
+				posture.observeToolOutcome(toolFailureOutcome{}, toolResult)
+			} else {
+				posture.observeToolOutcome(outcome, toolResult)
+			}
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
 				// the guard halts mid-turn so the calls after this one never run.
@@ -2007,11 +2022,32 @@ func isRetriableToolError(result ToolResult) bool {
 	// A categorized denial (filtered / permission / sandbox) is a policy decision,
 	// not a transient failure — never retry it. This is robust to message wording
 	// (the text checks below remain as a fallback for results lacking the field).
+	return !isPolicyRefusal(result)
+}
+
+// isPolicyRefusal reports a result the run refused on policy grounds: a
+// permission gate, a filter, a sandbox preflight, or a hook.
+//
+// Split out of isRetriableToolError so the two questions cannot drift apart,
+// which is exactly what they had done. The halt guard asked
+// `DenialReason != DenialNone`, and a category is only attached on the paths
+// that build a TYPED denial. A headless run leaves OnPermissionRequest nil, so
+// the loop never reaches its typed-denial branch and the registry returns a bare
+// `Error: Permission required ...` carrying no category. A sandbox preflight
+// denial on a non-shell tool loses its SandboxDecision converting to ToolResult
+// and arrives as an uncategorized `Sandbox block`.
+//
+// Both are refusals, and both were counted as SUCCESS, so observeToolResult
+// cleared the record and the same refused call could repeat to MaxTurns. That is
+// the loop this guard exists to stop. The text checks below already enumerated
+// these outcomes for the retriable question; they simply were not reachable from
+// the counting one.
+func isPolicyRefusal(result ToolResult) bool {
 	if result.DenialReason != DenialNone {
-		return false
+		return true
 	}
 	if result.Meta["permission_action"] == string(PermissionActionDeny) {
-		return false
+		return true
 	}
 	switch {
 	case strings.Contains(result.Output, "is not enabled for this run"),
@@ -2019,9 +2055,9 @@ func isRetriableToolError(result ToolResult) bool {
 		strings.Contains(result.Output, "Permission required for "),
 		strings.Contains(result.Output, "Sandbox block"),
 		strings.Contains(result.Output, "Sandbox approval required for "):
-		return false
+		return true
 	}
-	return true
+	return false
 }
 
 // scrubInterceptedOutput mirrors the registry's scrubResultSecrets boundary for
