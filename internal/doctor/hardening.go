@@ -100,10 +100,13 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 	}
 	profile := sandbox.PermissionProfileFromPolicy(workspaceRoot, doctorSandboxPolicy(sandboxConfig), scope)
 	setupConfig := sandbox.WindowsSandboxSetupConfig{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        workspaceRoot,
-		WorkspaceRoots:    []string{workspaceRoot},
-		PermissionProfile: profile,
+		SandboxHome:    sandboxHome,
+		CommandCWD:     workspaceRoot,
+		WorkspaceRoots: []string{workspaceRoot},
+		// Same augmentation the setup args and the command plan apply, so doctor
+		// fingerprints what a real command fingerprints. Safe here: doctor runs in
+		// the operator's shell, not behind the sandbox's TEMP redirection.
+		PermissionProfile: sandbox.WindowsSandboxProfileWithRuntimeRoots(profile, []string{workspaceRoot}),
 		// Same opt-in a command would resolve, so doctor reports the principal
 		// mismatch as out-of-date setup instead of passing a check the next command
 		// will fail.
