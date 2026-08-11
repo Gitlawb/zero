@@ -382,7 +382,7 @@ func TestRunStopsARepeatedlyDeniedToolAtTheFailureBound(t *testing.T) {
 	if tool.ran != 0 {
 		t.Errorf("the denied tool executed %d times; the denial must precede execution", tool.ran)
 	}
-	want := toolFailureStopAnswer("bash", toolFailureStopAt, false)
+	want := toolFailureStopAnswer("bash", toolFailureStopAt, false, true)
 	if result.FinalAnswer != want {
 		t.Errorf("final answer =\n  %q\nwant\n  %q", result.FinalAnswer, want)
 	}
@@ -410,8 +410,8 @@ func TestVariedFailureStopAnswerReportsTheRightCounter(t *testing.T) {
 	if outcome.Count != toolFailureAnyErrorStopAt {
 		t.Errorf("Count = %d, want the counter that tripped (%d)", outcome.Count, toolFailureAnyErrorStopAt)
 	}
-	answer := toolFailureStopAnswer("bash", outcome.Count, outcome.Varied)
-	if !strings.Contains(answer, "each with a different error") {
+	answer := toolFailureStopAnswer("bash", outcome.Count, outcome.Varied, outcome.Refused)
+	if !strings.Contains(answer, "varying errors") {
 		t.Errorf("stop answer describes the wrong cause: %q", answer)
 	}
 	if strings.Contains(answer, "with the same error") {
