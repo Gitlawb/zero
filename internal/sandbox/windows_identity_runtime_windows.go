@@ -537,39 +537,6 @@ func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, 
 	return sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
 }
 
-// windowsSandboxDeterministicRuntimeRootPath names the cache-derived runtime
-// tree without creating anything, and returns "" when that tree is unusable
-// because it would land inside the workspace.
-//
-// Kept distinct from windowsSandboxRuntimeRootPath so a caller can tell the
-// cache-derived tree from the temp-derived fallback. Neither creates anything,
-// so naming either is free.
-func windowsSandboxDeterministicRuntimeRootPath(config WindowsSandboxCommandConfig) (string, error) {
-	workspaceRoot := ""
-	for _, candidate := range config.WorkspaceRoots {
-		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
-			workspaceRoot = canonicalSandboxWorkspaceRoot(trimmed)
-			break
-		}
-	}
-	if workspaceRoot == "" {
-		return "", nil
-	}
-	cacheRoot, err := sandboxUserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache directory for sandbox runtime: %w", err)
-	}
-	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
-	if cacheRoot == "" || cacheRoot == "." {
-		return "", errors.New("user cache directory is unavailable for sandbox runtime")
-	}
-	root, ok := deterministicSandboxRuntimeRoot(workspaceRoot, cacheRoot)
-	if !ok {
-		return "", nil
-	}
-	return root, nil
-}
-
 // setupWindowsSandboxRuntimeRoot resolves the runtime root AND creates it.
 // Teardown wants the name without the side effect, so the derivation lives in
 // windowsSandboxRuntimeRootPath above and this only adds the mkdir.
