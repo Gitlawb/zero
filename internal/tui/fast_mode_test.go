@@ -40,8 +40,30 @@ func TestFastCommandRejectsUnsupportedModel(t *testing.T) {
 	if next.activeServiceTier() != "" || next.serviceTier != "" {
 		t.Fatalf("unsupported model retained fast tier: %#v", next.serviceTier)
 	}
-	if !strings.Contains(text, "does not advertise") {
+	if !strings.Contains(text, "ChatGPT subscription") {
 		t.Fatalf("unsupported response = %q", text)
+	}
+}
+
+func TestFastCommandRejectsMeteredPriorityTier(t *testing.T) {
+	m := model{
+		modelName:       "gpt-metered",
+		providerProfile: config.ProviderProfile{CatalogID: "openai"},
+		modelPickerLiveByProvider: map[string][]providermodeldiscovery.Model{
+			"openai": {{ID: "gpt-metered", ServiceTiers: []string{"priority"}}},
+		},
+		serviceTier: "priority",
+	}
+
+	next, text := m.handleFastCommand("")
+	if got := next.activeServiceTier(); got != "" {
+		t.Fatalf("metered profile forwarded service tier %q", got)
+	}
+	if next.serviceTier != "" {
+		t.Fatalf("metered profile retained service tier %q", next.serviceTier)
+	}
+	if !strings.Contains(text, "ChatGPT subscription") {
+		t.Fatalf("metered response = %q", text)
 	}
 }
 

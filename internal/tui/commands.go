@@ -281,7 +281,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/fast",
 		usage:       "/fast",
 		group:       commandGroupModel,
-		description: "Toggle the provider's fast service tier when supported.",
+		description: "Toggle fast mode for supported ChatGPT subscription models.",
 		kind:        commandFast,
 	},
 	{
