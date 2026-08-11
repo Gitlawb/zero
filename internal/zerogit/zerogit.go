@@ -1087,6 +1087,10 @@ func IsUnbornRemote(ctx context.Context, cwd, remote string, runGit Runner) (boo
 	return strings.TrimSpace(out) == "", nil
 }
 
+// currentUser is an indirection over os/user.Current so tests can force the
+// final fallback tier of CurrentGitUser without depending on the host account.
+var currentUser = user.Current
+
 // CurrentGitUser resolves an identity to prefix generated branch names with:
 // git config user.name, falling back to the OS account username, falling
 // back to the literal "user" so BuildBranchName always gets a non-empty
@@ -1096,7 +1100,7 @@ func CurrentGitUser(ctx context.Context, cwd string, runGit Runner) string {
 	if name, err := gitOutput(ctx, runGit, cwd, "config", "user.name"); err == nil && name != "" {
 		return name
 	}
-	if u, err := user.Current(); err == nil && u.Username != "" {
+	if u, err := currentUser(); err == nil && u.Username != "" {
 		return u.Username
 	}
 	return "user"

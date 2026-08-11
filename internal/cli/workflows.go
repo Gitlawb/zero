@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1163,6 +1163,14 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 	return msg, nil
 }
 
+type featureBranchOptions struct {
+	JSONMode           bool
+	AllowDefaultBranch bool
+	DryRun             bool
+	AutoNaming         bool
+	MaxDiffBytes       int
+}
+
 // ensureFeatureBranch is the branch-naming step `zero changes push`/`pr` run
 // before pushing: pushing straight to the default branch is refused deeper in
 // zerogit.Push, so rather than surface that as a dead end, create and switch
@@ -1201,14 +1209,10 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // The working tree must be clean and HEAD must be ahead of the resolved
 // remote branch; both are verified before any branch is created. The
 // inspectChanges, commitsAhead, headCommitSubject, currentGitUser, and
-type featureBranchOptions struct {
-	JSONMode           bool
-	AllowDefaultBranch bool
-	DryRun             bool
-	AutoNaming         bool
-	MaxDiffBytes       int
-}
-
+// createBranch dependencies are required on the default-branch path and are
+// called without nil guards; fillAppDeps populates all of them. The
+// refreshTrackingRef, isUnbornRemote, branchUpstreamRef, resetBranchRef, and
+// deleteBranch dependencies are optional and are skipped when nil.
 func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot string, requestedRemote string, opts featureBranchOptions, deps appDeps) (string, string, bool, error) {
 	if opts.AllowDefaultBranch || opts.DryRun {
 		return "", strings.TrimSpace(requestedRemote), false, nil
@@ -1392,7 +1396,9 @@ func fallbackBranchSlug(summary zerogit.ChangeSummary) string {
 	case 0:
 		return "changes"
 	case 1:
-		return zerogit.SlugifyBranchComponent(filepath.Base(summary.Files[0].Path))
+		// Git paths are always slash-separated regardless of platform, so
+		// path.Base (not filepath.Base) extracts the filename portably.
+		return zerogit.SlugifyBranchComponent(path.Base(summary.Files[0].Path))
 	default:
 		return fmt.Sprintf("update-%d-files", len(summary.Files))
 	}

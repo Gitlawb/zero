@@ -1291,6 +1291,28 @@ func TestExtractBranchSlug(t *testing.T) {
 	}
 }
 
+func TestFallbackBranchSlug(t *testing.T) {
+	// Git paths are slash-separated on every platform; the filename must be
+	// extracted with path.Base semantics so Windows cannot mangle a path.
+	for _, tc := range []struct {
+		name  string
+		files []zerogit.FileChange
+		want  string
+	}{
+		{"NoFiles", nil, "changes"},
+		{"RootFile", []zerogit.FileChange{{Path: "README.md", Status: "modified"}}, "readme-md"},
+		{"SlashSeparatedPath", []zerogit.FileChange{{Path: "docs/guide.md", Status: "modified"}}, "guide-md"},
+		{"DeepGitStylePath", []zerogit.FileChange{{Path: "internal/cli/workflows.go", Status: "modified"}}, "workflows-go"},
+		{"MultipleFiles", []zerogit.FileChange{{Path: "a.md", Status: "added"}, {Path: "b.md", Status: "added"}}, "update-2-files"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fallbackBranchSlug(zerogit.ChangeSummary{Files: tc.files}); got != tc.want {
+				t.Fatalf("fallbackBranchSlug(%#v) = %q, want %q", tc.files, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnsureFeatureBranchExtractsSlugFromMessyLLMReplies(t *testing.T) {
 	// End-to-end: a preamble line or a code fence around the slug must still
 	// yield the intended branch name, not one derived from the preamble or a
@@ -2567,6 +2589,10 @@ func TestRunChangesBareRemotePushThenPRUsable(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
+	// The fixture relies on `git init --bare -b main` to point the bare
+	// remote's HEAD at main; older git (before 2.28) lacks -b on init and
+	// would leave the remote on master, failing the test for the wrong reason.
+	requireGitAtLeast(t, 2, 28)
 
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
@@ -2677,6 +2703,29 @@ func runWorkflowGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(out))
 	}
 	return string(out)
+}
+
+// requireGitAtLeast skips the test when the installed Git predates the given
+// version, for tests that rely on newer git features (for example
+// `git init --bare -b main`, added in 2.28).
+func requireGitAtLeast(t *testing.T, wantMajor, wantMinor int) {
+	t.Helper()
+	out, err := exec.Command("git", "--version").Output()
+	if err != nil {
+		t.Skipf("cannot determine git version: %v", err)
+	}
+	version := strings.TrimSpace(string(out))
+	rest, ok := strings.CutPrefix(version, "git version ")
+	if !ok {
+		t.Skipf("cannot parse git version %q", version)
+	}
+	var major, minor int
+	if n, err := fmt.Sscanf(rest, "%d.%d", &major, &minor); err != nil || n != 2 {
+		t.Skipf("cannot parse git version %q", version)
+	}
+	if major < wantMajor || (major == wantMajor && minor < wantMinor) {
+		t.Skipf("git %d.%d+ required, have %s", wantMajor, wantMinor, version)
+	}
 }
 
 func writeWorkflowFile(t *testing.T, path, content string) {

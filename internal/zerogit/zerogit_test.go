@@ -2,6 +2,8 @@ package zerogit
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
@@ -467,6 +469,29 @@ func runGitCommand(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
 	}
 	return string(output)
+}
+
+// requireGitAtLeast skips the test when the installed Git predates the given
+// version, for tests that rely on newer git features (for example
+// branch.autoSetupMerge=inherit, added in 2.35).
+func requireGitAtLeast(t *testing.T, wantMajor, wantMinor int) {
+	t.Helper()
+	out, err := exec.Command("git", "--version").Output()
+	if err != nil {
+		t.Skipf("cannot determine git version: %v", err)
+	}
+	version := strings.TrimSpace(string(out))
+	rest, ok := strings.CutPrefix(version, "git version ")
+	if !ok {
+		t.Skipf("cannot parse git version %q", version)
+	}
+	var major, minor int
+	if n, err := fmt.Sscanf(rest, "%d.%d", &major, &minor); err != nil || n != 2 {
+		t.Skipf("cannot parse git version %q", version)
+	}
+	if major < wantMajor || (major == wantMajor && minor < wantMinor) {
+		t.Skipf("git %d.%d+ required, have %s", wantMajor, wantMinor, version)
+	}
 }
 
 func writeTestFile(t *testing.T, path string, content string) {
@@ -1272,9 +1297,8 @@ func TestCurrentGitUser(t *testing.T) {
 // TestCurrentGitUserFallsBackToOSUsername covers the second of CurrentGitUser's
 // three fallback tiers: when `git config user.name` fails or returns nothing,
 // it falls back to the OS account username. The third tier (the literal
-// "user") only triggers when os/user.Current itself fails, which isn't
-// practical to force here without adding an injectable seam for it solely for
-// this coverage gap.
+// "user") is covered by TestCurrentGitUserFallsBackToLiteralUser via the
+// currentUser seam.
 func TestCurrentGitUserFallsBackToOSUsername(t *testing.T) {
 	root := t.TempDir()
 	want, err := user.Current()
@@ -1296,6 +1320,27 @@ func TestCurrentGitUserFallsBackToOSUsername(t *testing.T) {
 				t.Fatalf("unexpected command: %q", got)
 			}
 		})
+	}
+}
+
+// TestCurrentGitUserFallsBackToLiteralUser covers the final fallback tier: when
+// both `git config user.name` and the OS account lookup fail, CurrentGitUser
+// must return the literal "user" so BuildBranchName always gets a non-empty
+// identity to prefix generated branches with.
+func TestCurrentGitUserFallsBackToLiteralUser(t *testing.T) {
+	original := currentUser
+	currentUser = func() (*user.User, error) { return nil, errors.New("no OS user") }
+	t.Cleanup(func() { currentUser = original })
+
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{ExitCode: 1, Stderr: "fatal: unable to read config"},
+	}}
+	if got := CurrentGitUser(context.Background(), root, runner.Run); got != "user" {
+		t.Fatalf("CurrentGitUser = %q, want %q", got, "user")
+	}
+	if got := runner.commandLine(0); got != "git config user.name" {
+		t.Fatalf("unexpected command: %q", got)
 	}
 }
 
@@ -1602,6 +1647,10 @@ func TestHasUpstreamRejectsInheritedMainUpstream(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
+	// branch.autoSetupMerge=inherit (which makes checkout -b copy the source
+	// branch's upstream) was added in git 2.35; older git would silently run
+	// the test against plain default behavior and fail the assertions.
+	requireGitAtLeast(t, 2, 35)
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
