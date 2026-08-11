@@ -75,6 +75,23 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		}
 	}
 
+	// Create the runtime roots BEFORE building the plan that grants them.
+	//
+	// The capability plan deliberately does not materialize a write root: an
+	// entry whose path is absent is a typo or a stale config, and inventing the
+	// tree would silently grant write on a directory nobody asked for. So every
+	// write root in the plan has to exist by the time it is applied, and the
+	// runtime roots are the only ones setup owns rather than receives.
+	//
+	// Both of them, not the one this process would select. Setup grants the whole
+	// candidate set so a later command that falls back still lands on a
+	// provisioned tree, and granting a path setup never created fails the entire
+	// run with "windows ACL target does not exist".
+	if err := ensureWindowsSandboxRuntimeCandidates(config.WorkspaceRoots); err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
+
 	plan, err := BuildWindowsACLPlan(config.commandConfig())
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())

@@ -641,3 +641,23 @@ func windowsSandboxProfileWithRuntime(profile PermissionProfile, workspaceRoots 
 	profile.FileSystem.WriteRoots = writeRoots
 	return profile
 }
+
+// ensureWindowsSandboxRuntimeCandidates creates every runtime root setup grants.
+//
+// Paired with windowsSandboxProfileWithRuntime: that function puts the candidates
+// into the ACL plan, and this one makes them exist. Splitting the two is what
+// broke elevated setup once already, because the capability plan refuses to
+// materialize a write root and fails the whole run on a path that is merely
+// absent. Whenever one of these grows a candidate, so must the other.
+//
+// Called on the setup side only. A command must never create these: setup is the
+// gate that decides which trees the sandbox may write to, and a command that
+// created its own root would be granting itself one.
+func ensureWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
+	for _, root := range windowsSandboxRuntimeCandidates(workspaceRoots) {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return fmt.Errorf("create sandbox runtime root %s: %w", root, err)
+		}
+	}
+	return nil
+}
