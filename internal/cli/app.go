@@ -104,7 +104,7 @@ type appDeps struct {
 	currentGitBranch       func(context.Context, string) string
 	currentBranchTip       func(context.Context, string) string
 	deleteBranch           func(context.Context, string, string, string) error
-	resetBranchRef         func(context.Context, string, string, string) error
+	resetBranchRef         func(context.Context, string, string, string, string) error
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)

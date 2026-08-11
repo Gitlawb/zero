@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
