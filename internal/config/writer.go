@@ -591,6 +591,35 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 	return cfg, nil
 }
 
+// SetPet persists only the terminal-pet preference while preserving every
+// unrelated user setting through the config writer's atomic replace path.
+func SetPet(path string, pet string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	cfg := FileConfig{}
+	data := []byte("{}")
+	if existing, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(existing, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+		data = existing
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	pet = strings.TrimSpace(pet)
+	cfg.Preferences.Pet = pet
+	data, err := setPetPreferenceJSON(data, pet)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	if err := writeConfigData(path, data); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
 // SetSTTModel persists the dictation model and its provider, mirroring
 // SetTheme (read-modify-atomic-write). provider must be one of the known STT
 // provider kinds; a local provider stores the model as stt.localModelPath,
@@ -736,17 +765,23 @@ func NormalizeRecentModels(entries []RecentModelEntry) []RecentModelEntry {
 }
 
 func writeConfigFile(path string, cfg FileConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config JSON: %w", err)
+	}
+	return writeConfigData(path, data)
+}
+
+func writeConfigData(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create config directory %s: %w", dir, err)
 		}
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode config JSON: %w", err)
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		data = append(data, '\n')
 	}
-	data = append(data, '\n')
 	// Write-to-temp + rename: an in-place write interrupted mid-way (crash,
 	// disk full) would leave the user's only config truncated or corrupt.
 	tmp, err := os.CreateTemp(dir, ".zero-config-*.tmp")

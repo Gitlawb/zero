@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -11,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/term"
 
 	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Gitlawb/zero/internal/terminalpet"
 )
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
@@ -41,11 +44,13 @@ func Run(ctx context.Context, options Options) int {
 	// text first, keeping order intact.
 	options.RuntimeMessageSink = newTextCoalescer(forward).send
 	options.AltScreen = useAltScreen(options)
+	petRenderer := terminalpet.NewImageRendererWithCache(terminalpet.DetectImageSupport(os.Getenv), terminalPetFrameCache(options))
+	petOutput := newPetImageOutput(os.Stdout, petRenderer)
 
 	programOpts := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
-		tea.WithOutput(os.Stdout),
+		tea.WithOutput(petOutput),
 		tea.WithFilter(mouseEventFilter()),
 	}
 	// Honor the no-color.org spec ourselves: NO_COLOR set to ANY non-empty value
@@ -56,6 +61,7 @@ func Run(ctx context.Context, options Options) int {
 		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	initialModel := newModel(ctx, options)
+	initialModel.petRenderer = petRenderer
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true
 	}
@@ -88,6 +94,7 @@ func Run(ctx context.Context, options Options) int {
 	}
 
 	_, runErr := program.Run()
+	clearErr := petOutput.clearImage()
 	var closeErr error
 	if peerStarted {
 		closeErr = options.PeerService.Close()
@@ -102,7 +109,37 @@ func Run(ctx context.Context, options Options) int {
 		fmt.Fprintln(os.Stderr, "zero: peer messaging cleanup error:", closeErr)
 		return 1
 	}
+	if clearErr != nil {
+		fmt.Fprintln(os.Stderr, "zero: terminal companion cleanup error:", clearErr)
+	}
 	return 0
+}
+
+func terminalPetFrameCache(options Options) string {
+	return terminalPetFrameCacheWith(options, os.UserConfigDir, os.UserCacheDir)
+}
+
+func terminalPetFrameCacheWith(options Options, userConfigDir, userCacheDir func() (string, error)) string {
+	root := ""
+	if configPath := strings.TrimSpace(options.UserConfigPath); filepath.IsAbs(configPath) {
+		root = filepath.Dir(filepath.Clean(configPath))
+	}
+	if root == "" {
+		configDir, err := userConfigDir()
+		if err == nil && strings.TrimSpace(configDir) != "" {
+			root = filepath.Join(configDir, "zero")
+		}
+	}
+	if root == "" {
+		cacheDir, err := userCacheDir()
+		if err == nil && strings.TrimSpace(cacheDir) != "" {
+			root = filepath.Join(cacheDir, "zero")
+		}
+	}
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "pets", "frame-cache")
 }
 
 func useAltScreen(_ Options) bool {

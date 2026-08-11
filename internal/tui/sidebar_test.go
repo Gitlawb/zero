@@ -627,6 +627,41 @@ func TestTwoColumnTranscriptViewWidth(t *testing.T) {
 	}
 }
 
+func TestTwoColumnSidebarRemainsFullHeightBesideFooter(t *testing.T) {
+	m := sidebarTestModel()
+	m.width, m.height = 120, 34
+	m.unpricedTokens = 10000
+	out := plainRender(t, m.twoColumnTranscriptView())
+	lines := strings.Split(out, "\n")
+
+	tokenRow := -1
+	composerTop := -1
+	for index, line := range lines {
+		if strings.Contains(line, "10K tokens") {
+			tokenRow = index
+		}
+		if strings.HasPrefix(line, "╭") {
+			composerTop = index
+		}
+	}
+	if tokenRow != len(lines)-1 {
+		t.Fatalf("sidebar token summary should remain pinned to the bottom, row=%d last=%d\n%s", tokenRow, len(lines)-1, out)
+	}
+	if composerTop < 0 {
+		t.Fatalf("chat composer missing:\n%s", out)
+	}
+	composerRunes := []rune(lines[composerTop])
+	if len(composerRunes) != m.width || composerRunes[m.chatColumnWidth()-1] != '╮' {
+		t.Fatalf("composer should retain the chat-column width, got %q", lines[composerTop])
+	}
+	for index, line := range lines {
+		runes := []rune(line)
+		if len(runes) != m.width || runes[m.chatColumnWidth()+1] != '│' {
+			t.Fatalf("sidebar divider ended early on row %d: %q", index, line)
+		}
+	}
+}
+
 // stripSidebar joins sidebar lines and strips ANSI for content assertions.
 func stripSidebar(lines []string) string {
 	return ansiPattern.ReplaceAllString(strings.Join(lines, "\n"), "")
