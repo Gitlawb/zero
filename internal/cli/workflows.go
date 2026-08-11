@@ -1350,11 +1350,16 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// --remote selects the push destination; restore must not rewrite local
 	// main to upstream/main when main still tracks origin/main (fork setups).
 	restoreTip := ""
+	expectedRestoreTip := ""
 	if deps.branchUpstreamRef != nil {
 		restoreTip = deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch)
 	}
 	if restoreTip == "" {
 		restoreTip = remote + "/" + currentBranch
+	}
+
+	if deps.currentBranchTip != nil {
+		expectedRestoreTip = deps.currentBranchTip(ctx, workspaceRoot)
 	}
 
 	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
@@ -1371,7 +1376,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// Failure-safe: if the restore fails, delete the feature branch and
 	// check the default branch back out so the tree is not left half-moved.
 	if deps.resetBranchRef != nil {
-		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, restoreTip); err != nil {
+		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, restoreTip, expectedRestoreTip); err != nil {
 			var rollbackErr error
 			if deps.deleteBranch != nil {
 				rollbackErr = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)

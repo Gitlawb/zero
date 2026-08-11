@@ -102,6 +102,7 @@ type appDeps struct {
 	branchUpstreamRef      func(context.Context, string, string) string
 	remoteHasBranch        func(context.Context, string, string, string) (bool, error)
 	currentGitBranch       func(context.Context, string) string
+	currentBranchTip       func(context.Context, string) string
 	deleteBranch           func(context.Context, string, string, string) error
 	resetBranchRef         func(context.Context, string, string, string) error
 	runTUI                 func(context.Context, tui.Options) int
@@ -240,11 +241,14 @@ func defaultAppDeps() appDeps {
 		currentGitBranch: func(ctx context.Context, cwd string) string {
 			return zerogit.CurrentBranch(ctx, cwd, nil)
 		},
+		currentBranchTip: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentBranchTip(ctx, cwd, nil)
+		},
 		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
 			return zerogit.DeleteBranch(ctx, cwd, fallbackBranch, branchToDelete, nil)
 		},
-		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
-			return zerogit.ResetBranchRef(ctx, cwd, branch, newTip, nil)
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
+			return zerogit.ResetBranchRef(ctx, cwd, branch, newTip, nil, expectedOld)
 		},
 		runTUI:      tui.Run,
 		runEditor:   openEditor,

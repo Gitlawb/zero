@@ -930,6 +930,11 @@ func RemoteHasBranch(ctx context.Context, cwd, remote, branch string, runGit Run
 			continue
 		}
 		if _, got, ok := strings.Cut(line, "\t"); ok && strings.TrimSpace(got) == ref {
+			remoteTip := strings.TrimSpace(strings.TrimSuffix(line, "\t"+got))
+			localTip, localErr := gitOutput(ctx, runGit, cwd, "rev-parse", "--verify", "HEAD^{commit}")
+			if localErr != nil || strings.TrimSpace(localTip) != remoteTip {
+				return false, nil
+			}
 			return true, nil
 		}
 	}
@@ -1018,6 +1023,15 @@ func DeleteBranch(ctx context.Context, cwd, fallbackBranch, branchToDelete strin
 // configured upstream (for example the --yes unborn-remote preflight) use this
 // instead of IsDefaultBranch so a remote-HEAD lookup failure does not block
 // remote resolution.
+func CurrentBranchTip(ctx context.Context, cwd string, runGit Runner) string {
+	runGit, _ = resolveRunners(runGit, nil)
+	out, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 func CurrentBranch(ctx context.Context, cwd string, runGit Runner) string {
 	runGit, _ = resolveRunners(runGit, nil)
 	out, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", "HEAD")
@@ -1040,7 +1054,7 @@ func CurrentBranch(ctx context.Context, cwd string, runGit Runner) string {
 // (origin/main) that CommitsAhead already used. Refuses to move the currently
 // checked-out branch so callers must have already switched to the feature
 // branch.
-func ResetBranchRef(ctx context.Context, cwd, branch, newTip string, runGit Runner) error {
+func ResetBranchRef(ctx context.Context, cwd, branch, newTip string, runGit Runner, expectedOld ...string) error {
 	runGit, _ = resolveRunners(runGit, nil)
 	branch = strings.TrimSpace(branch)
 	newTip = strings.TrimSpace(newTip)
@@ -1063,7 +1077,11 @@ func ResetBranchRef(ctx context.Context, cwd, branch, newTip string, runGit Runn
 	if err != nil {
 		return fmt.Errorf("resolve tip %q: %w", newTip, err)
 	}
-	if _, err := gitOutput(ctx, runGit, cwd, "update-ref", "refs/heads/"+branch, strings.TrimSpace(tipSHA)); err != nil {
+	args := []string{"update-ref", "refs/heads/" + branch, strings.TrimSpace(tipSHA)}
+	if len(expectedOld) > 0 && strings.TrimSpace(expectedOld[0]) != "" {
+		args = append(args, strings.TrimSpace(expectedOld[0]))
+	}
+	if _, err := gitOutput(ctx, runGit, cwd, args...); err != nil {
 		return fmt.Errorf("update-ref refs/heads/%s: %w", branch, err)
 	}
 	return nil

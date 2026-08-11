@@ -2314,7 +2314,7 @@ func TestEnsureFeatureBranchRestoresDefaultBranchAfterCreate(t *testing.T) {
 			createdName = options.Name
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
-		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
 			resetBranch = branch
 			resetTip = newTip
 			return nil
@@ -2349,7 +2349,7 @@ func TestEnsureFeatureBranchRollsBackWhenDefaultRestoreFails(t *testing.T) {
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
-		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
 			return errors.New("update-ref failed")
 		},
 		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
@@ -2384,7 +2384,7 @@ func TestEnsureFeatureBranchReportsRollbackFailureWhenDeleteAlsoFails(t *testing
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
-		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
 			return errors.New("update-ref failed")
 		},
 		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
@@ -2435,7 +2435,7 @@ func TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote(t *testing.T) {
 			}
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
-		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
 			resetBranch = branch
 			resetTip = newTip
 			return nil
@@ -2474,7 +2474,7 @@ func TestRunChangesPushRestoresDefaultBranchOnAutoBranchPath(t *testing.T) {
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
-		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
 			resetBranch = branch
 			resetTip = newTip
 			return nil

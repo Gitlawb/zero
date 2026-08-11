@@ -1693,3 +1693,29 @@ func TestHasUpstreamRejectsInheritedMainUpstream(t *testing.T) {
 		t.Fatal("HasUpstream must accept exact origin/user/slug after push -u")
 	}
 }
+
+func TestResetBranchRefRefusesConcurrentDefaultAdvance(t *testing.T) {
+	root := initGitRepo(t, true)
+	runGitCommand(t, root, "branch", "-M", "main")
+	base := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
+	writeTestFile(t, filepath.Join(root, "feature.txt"), "feature\n")
+	runGitCommand(t, root, "add", "feature.txt")
+	runGitCommand(t, root, "-c", "user.name=Zero", "-c", "user.email=zero@example.invalid", "commit", "-m", "feature")
+	featureTip := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
+	runGitCommand(t, root, "checkout", "-b", "someone/feature")
+	writeTestFile(t, filepath.Join(root, "concurrent.txt"), "concurrent\n")
+	runGitCommand(t, root, "add", "concurrent.txt")
+	runGitCommand(t, root, "-c", "user.name=Zero", "-c", "user.email=zero@example.invalid", "commit", "-m", "concurrent")
+	concurrentTip := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
+	runGitCommand(t, root, "update-ref", "refs/heads/main", concurrentTip)
+	if err := ResetBranchRef(context.Background(), root, "main", base, nil, base); err == nil {
+		t.Fatal("expected concurrent default-branch update to reject restoration")
+	}
+	got := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "refs/heads/main"))
+	if got != concurrentTip {
+		t.Fatalf("main tip = %s, want concurrent tip %s", got, concurrentTip)
+	}
+	if featureTip == concurrentTip {
+		t.Fatal("test setup failed to create distinct tips")
+	}
+}
