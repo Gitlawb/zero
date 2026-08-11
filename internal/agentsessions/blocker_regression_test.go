@@ -77,3 +77,28 @@ func TestActivitySummaryIsAMessageNotACompaction(t *testing.T) {
 		t.Fatal("activity summary carries no marker, so nothing can tell it from a real assistant turn")
 	}
 }
+
+// TestStructuralFieldsAreRedacted covers CodeRabbit's finding: role, name, and
+// toolCallId come from the foreign transcript too, so a credential hidden in any
+// of them must be redacted, not merely stripped of control bytes.
+func TestStructuralFieldsAreRedacted(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("A", 40)
+	events := []sessions.AppendEventInput{
+		messageEvent(secret, "hi"),                   // malicious role
+		toolCallEvent(secret, secret, "{}"),          // malicious tool name + call id
+		toolResultEvent(secret, secret, "ok", "out"), // malicious tool name + result id
+	}
+	encoded, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Errorf("a secret in a structural field (role/name/toolCallId) survived translation:\n%s", encoded)
+	}
+	// Redaction is deterministic, so the call and its result must still pair up.
+	call := events[1].Payload.(map[string]any)["toolCallId"].(string)
+	result := events[2].Payload.(map[string]any)["toolCallId"].(string)
+	if call == "" || call != result {
+		t.Errorf("redacted call/result ids diverged and broke pairing: %q vs %q", call, result)
+	}
+}
