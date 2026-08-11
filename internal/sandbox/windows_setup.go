@@ -204,6 +204,10 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	if len(workspaceRoots) == 0 {
 		workspaceRoots = []string{commandCWD}
 	}
+	// Augmented here, in the caller's shell, before the args cross into the
+	// elevated helper. Same reason the opt-in and caller SID are: the value has to
+	// be resolved where the environment is the operator's.
+	options.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(options.PermissionProfile, workspaceRoots)
 	profileJSON, err := json.Marshal(options.PermissionProfile)
 	if err != nil {
 		return nil, fmt.Errorf("marshal windows sandbox setup permission profile: %w", err)
@@ -329,10 +333,16 @@ func RunWindowsSandboxSetup(args []string, stderr io.Writer) int {
 // inherit from the shell the user typed in.
 func (config WindowsSandboxSetupConfig) commandConfig() WindowsSandboxCommandConfig {
 	return WindowsSandboxCommandConfig{
-		SandboxHome:       config.SandboxHome,
-		CommandCWD:        config.CommandCWD,
-		WorkspaceRoots:    cloneStrings(config.WorkspaceRoots),
-		PermissionProfile: windowsSandboxProfileWithRuntime(config.PermissionProfile, config.WorkspaceRoots),
+		SandboxHome:    config.SandboxHome,
+		CommandCWD:     config.CommandCWD,
+		WorkspaceRoots: cloneStrings(config.WorkspaceRoots),
+		// Taken as given. This computes the hash BOTH halves compare, and it runs
+		// in whichever process is asking — including the command runner, whose TEMP
+		// points at the sandbox runtime temp. Deriving the candidates here made the
+		// answer depend on the caller's environment, which is the one thing a
+		// shared fingerprint cannot afford. WindowsSandboxProfileWithRuntimeRoots
+		// is applied by the callers whose TEMP is still the operator's.
+		PermissionProfile: config.PermissionProfile,
 		Env:               map[string]string{windowsSandboxIdentityEnv: windowsSandboxPrincipalOptInValue(config.PrincipalOptIn)},
 		SandboxLevel:      WindowsSandboxLevelRestrictedToken,
 		// Carried through for the same reason as the opt-in above: every principal
@@ -347,10 +357,15 @@ func (config WindowsSandboxSetupConfig) commandConfig() WindowsSandboxCommandCon
 // compare it against what setup actually provisioned.
 func WindowsSandboxSetupConfigFromCommand(config WindowsSandboxCommandConfig) WindowsSandboxSetupConfig {
 	return WindowsSandboxSetupConfig{
-		SandboxHome:       config.SandboxHome,
-		CommandCWD:        config.CommandCWD,
-		WorkspaceRoots:    cloneStrings(config.WorkspaceRoots),
-		PermissionProfile: windowsSandboxProfileWithRuntime(config.PermissionProfile, config.WorkspaceRoots),
+		SandboxHome:    config.SandboxHome,
+		CommandCWD:     config.CommandCWD,
+		WorkspaceRoots: cloneStrings(config.WorkspaceRoots),
+		// NOT augmented here. This runs inside the command runner, whose TEMP and
+		// TMP are the sandbox runtime's, so deriving the temp-based candidate here
+		// yields a path no other process agrees on. The parent already folded the
+		// candidates into the profile it serialized, back when TEMP was still the
+		// operator's, so take the profile as given.
+		PermissionProfile: config.PermissionProfile,
 		PrincipalOptIn:    windowsSandboxIdentityEnabled(config.Env),
 		CallerSID:         config.CallerSID,
 	}
@@ -684,4 +699,16 @@ func shortWindowsACLPlanHash(hash string) string {
 		return hash[:12]
 	}
 	return hash
+}
+
+// WindowsSandboxProfileWithRuntimeRoots folds the sandbox runtime roots into a
+// permission profile, for callers that build a setup config outside this package.
+//
+// Call it ONLY from a process whose TEMP and TMP are the operator's. The
+// temp-derived candidate reads os.TempDir(), and the sandbox points those
+// variables at its own runtime temp for anything it launches, so a process on the
+// far side of that redirection derives a path no other process agrees on. The
+// command runner is exactly such a process: it takes the profile it is handed.
+func WindowsSandboxProfileWithRuntimeRoots(profile PermissionProfile, workspaceRoots []string) PermissionProfile {
+	return windowsSandboxProfileWithRuntime(profile, workspaceRoots)
 }
