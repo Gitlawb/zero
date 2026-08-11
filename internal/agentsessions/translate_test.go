@@ -271,8 +271,23 @@ func TestCappingKeepsTheTailAndSaysSo(t *testing.T) {
 	if events[0].Type != sessions.EventMessage {
 		t.Errorf("first event = %s, want a note announcing the trim", events[0].Type)
 	}
-	if content := str(t, events[0], "content"); !strings.Contains(content, "not imported") {
-		t.Errorf("trim note = %q, want it to say events were dropped", content)
+	note := str(t, events[0], "content")
+	if !strings.Contains(note, "not imported") {
+		t.Errorf("trim note = %q, want it to say events were dropped", note)
+	}
+	// The count must include the event sacrificed to the note's own slot: 50
+	// events, 10 kept slots, one taken by the note → 41 dropped and 9 shown, not
+	// the 40/9 the off-by-one reported.
+	if !strings.Contains(note, "41 earlier events") {
+		t.Errorf("trim note = %q, want it to report 41 dropped — the note's own slot "+
+			"displaces one more event than len-max", note)
+	}
+	if !strings.Contains(note, "most recent 9 are shown") {
+		t.Errorf("trim note = %q, want it to report 9 shown", note)
+	}
+	// turn 40 is the event whose slot the note took; the tail starts at turn 41.
+	if first := str(t, events[1], "content"); first != "turn 41" {
+		t.Errorf("first kept event = %q, want turn 41 (turn 40 gave its slot to the note)", first)
 	}
 	// And what survives must be the END of the session, not the beginning.
 	last := str(t, events[len(events)-1], "content")

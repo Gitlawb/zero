@@ -271,3 +271,41 @@ func TestSummaryEventsComeLastSoTheySitNearestTheNewRequest(t *testing.T) {
 		t.Errorf("first event is %s, want the original conversation to lead", events[0].Type)
 	}
 }
+
+// TestASuccessfulWriteSurvivesALaterFailedEditOfTheSamePath covers the
+// coarse-keying fix: the old code withdrew a failed call's claim BY VALUE, so a
+// failed Edit erased the record of an earlier successful Write to the same path
+// and the summary reported no files changed although the file was rewritten.
+func TestASuccessfulWriteSurvivesALaterFailedEditOfTheSamePath(t *testing.T) {
+	lines := []string{`{"type":"user","cwd":"/w","message":{"role":"user","content":"go"}}`}
+	lines = append(lines, claudeToolLines("t1", "Write", `{"file_path":"/w/config.yaml"}`, "wrote 40 lines", false)...)
+	lines = append(lines, claudeToolLines("t2", "Edit", `{"file_path":"/w/config.yaml"}`, "string not found", true)...)
+
+	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := joinedSummary(t, events)
+	if !strings.Contains(summary, "Files changed: config.yaml") {
+		t.Errorf("the successful Write was erased by the later failed Edit of the same path:\n%s", summary)
+	}
+}
+
+// TestAnInterruptedWriteWithNoResultDoesNotClaimTheFile covers the
+// no-result fix: a tool call whose result never arrives (the session stopped
+// mid-call) must not report its file as changed — we never learned it ran.
+func TestAnInterruptedWriteWithNoResultDoesNotClaimTheFile(t *testing.T) {
+	lines := []string{`{"type":"user","cwd":"/w","message":{"role":"user","content":"go"}}`}
+	// The tool_use with no matching tool_result — the transcript ends here.
+	lines = append(lines, claudeToolLines("t1", "Write", `{"file_path":"/w/config.yaml"}`, "", false)[0])
+
+	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range summaryTexts(t, events) {
+		if strings.HasPrefix(line, "Files changed") && strings.Contains(line, "config.yaml") {
+			t.Errorf("an interrupted write with no result is claimed as a file changed:\n%s", line)
+		}
+	}
+}

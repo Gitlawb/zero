@@ -272,3 +272,37 @@ func ids(items []ForeignSession) []string {
 	}
 	return out
 }
+
+// TestASymlinkedSlugDirectoryIsNotListedThenRefused pins the fix for the
+// list-then-refuse divergence. The slug fast path used to glob straight through
+// a symlinked project directory, while findTranscript (via globSessionDirs)
+// Lstat-skips one — so Discover listed a session Import could not resolve. Both
+// must agree; here, by both declining to follow the symlink.
+func TestASymlinkedSlugDirectoryIsNotListedThenRefused(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "projects")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The transcript lives outside the store, reachable only through a symlinked
+	// slug directory whose name matches cwd /w.
+	elsewhere := filepath.Join(t.TempDir(), "real")
+	writeFile(t, filepath.Join(elsewhere, "sneaky.jsonl"),
+		`{"type":"user","cwd":"/w","sessionId":"sneaky","message":{"role":"user","content":"hi"}}`+"\n")
+	if err := os.Symlink(elsewhere, filepath.Join(root, "-w")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	adapter := family1{name: "claude-code", root: root}
+	found, err := adapter.Discover("/w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The invariant: anything Discover lists, Read must be able to import. The
+	// old fast path listed "sneaky" by globbing through the symlink while Read
+	// refused it.
+	for _, session := range found {
+		if _, err := adapter.Read(session.ID, ReadOptions{}); err != nil {
+			t.Errorf("Discover listed %q but Read refuses it: %v — list-then-refuse", session.ID, err)
+		}
+	}
+}
