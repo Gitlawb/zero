@@ -183,12 +183,14 @@ func TestOpenAIRealtimeWriterFailureUnblocksSilentServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	chunks := make(chan []byte, 1)
 	chunks <- make([]byte, 480)
 	// Leave the channel open: the writer must fail on the append, not the commit.
 	done := make(chan error, 1)
 	go func() {
-		_, ferr := tr.StreamTranscribe(context.Background(), chunks, func(string, bool) {})
+		_, ferr := tr.StreamTranscribe(ctx, chunks, func(string, bool) {})
 		done <- ferr
 	}()
 
