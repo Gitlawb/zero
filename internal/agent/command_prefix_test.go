@@ -35,6 +35,17 @@ func TestProposedCommandPrefixHonorsValidatedRequestedPrefix(t *testing.T) {
 	}
 }
 
+func TestSafeGitCommandConsumesAttrSourceOptionValue(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "--attr-source", "HEAD", "status"},
+		{"git", "--attr-source=HEAD", "status"},
+	} {
+		if !safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = false; want true", command)
+		}
+	}
+}
+
 func TestProposedCommandPrefixSupportsSegmentedCommands(t *testing.T) {
 	got := proposedCommandPrefix("bash", map[string]any{"command": "ps aux | head -5"})
 	if runtime.GOOS == "windows" {
