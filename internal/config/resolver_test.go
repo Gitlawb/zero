@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -396,6 +397,107 @@ func TestResolveAPIKeyEnvLooksUpEnvOnlyWhenAPIKeyMissing(t *testing.T) {
 	direct := providerByName(t, resolved.Providers, "direct")
 	if direct.APIKey != "sk-direct" {
 		t.Fatalf("direct APIKey = %q, want direct apiKey to win over apiKeyEnv", direct.APIKey)
+	}
+}
+
+func TestNormalizeProvidersMatchesResolvedActiveNameCaseInsensitively(t *testing.T) {
+	providers, active, err := normalizeProviders([]ProviderProfile{{
+		Name:         "EnvProvider",
+		ProviderKind: ProviderKindOpenAI,
+		Model:        "gpt-4.1",
+	}}, "envprovider")
+	if err != nil {
+		t.Fatalf("normalizeProviders() error = %v", err)
+	}
+	if len(providers) != 1 || active.Name != "EnvProvider" {
+		t.Fatalf("resolved active = %+v from %+v, want EnvProvider", active, providers)
+	}
+}
+
+func TestNormalizeProvidersSelectsActiveSourceBeforeNormalization(t *testing.T) {
+	valid := func(name string) ProviderProfile {
+		return ProviderProfile{Name: name, ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"}
+	}
+	t.Run("exact wins over folded invalid sibling", func(t *testing.T) {
+		providers, active, err := normalizeProviders([]ProviderProfile{
+			valid("Target"),
+			{Name: "target", ProviderKind: "invalid", Model: "broken"},
+		}, " Target ")
+		if err != nil {
+			t.Fatalf("normalizeProviders() error = %v", err)
+		}
+		if active.Name != "Target" || len(providers) != 1 {
+			t.Fatalf("active = %+v, providers = %+v; want exact Target only", active, providers)
+		}
+	})
+
+	t.Run("unique folded fallback", func(t *testing.T) {
+		_, active, err := normalizeProviders([]ProviderProfile{valid("Target")}, "target")
+		if err != nil {
+			t.Fatalf("normalizeProviders() error = %v", err)
+		}
+		if active.Name != "Target" {
+			t.Fatalf("active.Name = %q, want Target", active.Name)
+		}
+	})
+
+	t.Run("multiple folded matches are ambiguous", func(t *testing.T) {
+		_, _, err := normalizeProviders([]ProviderProfile{valid("Target"), valid("TARGET")}, "target")
+		const want = `ambiguous active provider "target": multiple provider names differ only by case`
+		if err == nil || err.Error() != want {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+	})
+}
+
+func TestNormalizeProvidersActiveFallbackUsesCredentialIdentity(t *testing.T) {
+	providers, active, err := normalizeProviders([]ProviderProfile{
+		{Name: "s", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://s.example/v1", Model: "s-model"},
+		{Name: "ſ", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://long-s.example/v1", Model: "long-s-model"},
+	}, "S")
+	if err != nil {
+		t.Fatalf("normalizeProviders() error = %v", err)
+	}
+	if len(providers) != 2 || active.Name != "s" || active.Model != "s-model" {
+		t.Fatalf("providers=%#v active=%#v, want credential identity s selected", providers, active)
+	}
+}
+
+func TestResolveCrossLayerActiveProviderCaseMatching(t *testing.T) {
+	valid := func(name string) string {
+		return fmt.Sprintf(`{"providers":[{"name":%q,"providerKind":"openai","model":"gpt-4.1"}]}`, name)
+	}
+	t.Run("exact user active wins over project case variant", func(t *testing.T) {
+		userPath := writeConfig(t, `{"activeProvider":"Target","providers":[{"name":"Target","providerKind":"openai","model":"gpt-4.1"}]}`)
+		projectPath := writeConfig(t, valid("target"))
+		resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, Env: map[string]string{}})
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if resolved.ActiveProvider != "Target" {
+			t.Fatalf("active provider = %q, want exact Target", resolved.ActiveProvider)
+		}
+	})
+
+	t.Run("folded cross-layer target is ambiguous", func(t *testing.T) {
+		userPath := writeConfig(t, `{"activeProvider":"target","providers":[{"name":"Target","providerKind":"openai","model":"gpt-4.1"}]}`)
+		projectPath := writeConfig(t, valid("TARGET"))
+		_, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, Env: map[string]string{}})
+		const want = `ambiguous active provider "target": multiple provider names differ only by case`
+		if err == nil || err.Error() != want {
+			t.Fatalf("Resolve() error = %v, want %q", err, want)
+		}
+	})
+}
+
+func TestResolvePreservesSoleOpenRouterCaseVariant(t *testing.T) {
+	path := writeConfig(t, `{"activeProvider":"openrouter","providers":[{"name":"OpenRouter","catalogId":"openrouter","providerKind":"openai-compatible","baseURL":"https://openrouter.ai/api/v1","model":"openai/gpt-4.1"}]}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.ActiveProvider != "OpenRouter" {
+		t.Fatalf("active provider name = %q, want preserved OpenRouter", resolved.ActiveProvider)
 	}
 }
 

@@ -99,7 +99,44 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 	}
 	changed := false
 	for index := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) && cfg.Providers[index].APIKeyStored {
+		if strings.TrimSpace(cfg.Providers[index].Name) == provider && cfg.Providers[index].APIKeyStored {
+			cfg.Providers[index].APIKeyStored = false
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	return true, writeConfigFile(path, cfg)
+}
+
+// ClearProviderKeyStoredCaseVariants unsets the APIKeyStored marker on every
+// row whose name normalizes to the same credential-store identity as provider,
+// not just an exact-spelling match. Deleting the shared secret for one
+// case-variant row (e.g. "WORK") must also clear the marker on any sibling row
+// ("work") that pointed at the same now-gone entry — leaving it set would claim
+// a key is available when ApplyStoredAPIKey's store lookup will always miss.
+func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
+	path = strings.TrimSpace(path)
+	provider = strings.TrimSpace(provider)
+	if path == "" || provider == "" {
+		return false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	changed := false
+	providerIdentity := credstore.NormalizeProvider(provider)
+	for index := range cfg.Providers {
+		if credstore.NormalizeProvider(cfg.Providers[index].Name) == providerIdentity && cfg.Providers[index].APIKeyStored {
 			cfg.Providers[index].APIKeyStored = false
 			changed = true
 		}
@@ -268,9 +305,9 @@ func firstNonEmptyTrimmed(values ...string) string {
 // profile name is unambiguously yours), then the catalog ID as a FALLBACK (so a
 // profile renamed away from its catalog ID — e.g. {name:"codex",
 // catalogID:"chatgpt"} — still finds a `zero auth login chatgpt` token).
-// Candidates are trimmed, blank-skipped, and de-duplicated CASE-SENSITIVELY — the
-// OAuth token store is a case-sensitive map, so "ChatGPT" and "chatgpt" are
-// distinct keys and both must survive.
+// Candidates are trimmed, blank-skipped, and de-duplicated before ProviderKey
+// applies the token store's lowercase key normalization. Keeping their persisted
+// spellings here preserves deterministic profile-name-first lookup order.
 func (profile ProviderProfile) OAuthLoginCandidates() []string {
 	if profile.HasConfiguredCredential() {
 		return nil

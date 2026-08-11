@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const ProviderCommandEnv = "ZERO_PROVIDER_COMMAND"
+
 // DefaultResolveOptions builds config resolution inputs from the local process
 // environment and workspace.
 func DefaultResolveOptions(workspaceRoot string) (ResolveOptions, error) {
@@ -29,7 +31,7 @@ func DefaultResolveOptions(workspaceRoot string) (ResolveOptions, error) {
 	return ResolveOptions{
 		UserConfigPath:    userConfigPath,
 		ProjectConfigPath: projectConfigPath,
-		ProviderCommand:   strings.TrimSpace(os.Getenv("ZERO_PROVIDER_COMMAND")),
+		ProviderCommand:   strings.TrimSpace(os.Getenv(ProviderCommandEnv)),
 	}, nil
 }
 

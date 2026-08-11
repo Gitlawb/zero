@@ -74,6 +74,9 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
+		if err := ValidatePersistedProviderNames(fileConfig); err != nil {
+			return ResolvedConfig{}, err
+		}
 		mergeConfig(&cfg, fileConfig)
 	}
 	if options.ProjectConfigPath != "" {
@@ -953,26 +956,51 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 	}
 
 	if activeName == "" && len(providers) == 1 {
-		activeName = providers[0].Name
+		activeName = strings.TrimSpace(providers[0].Name)
+	}
+
+	// Select the active source row before normalizing anything. An exact name
+	// always wins; credential-store identity is only a fallback when it identifies
+	// one row. This prevents an invalid case-variant sibling from making an exact
+	// target fail while keeping distinct identities such as "s" and "ſ" separate.
+	activeIndex := -1
+	if activeName != "" {
+		for index := range providers {
+			if strings.TrimSpace(providers[index].Name) == activeName {
+				activeIndex = index
+				break
+			}
+		}
+		if activeIndex < 0 {
+			for index := range providers {
+				if !sameProviderIdentity(providers[index].Name, activeName) {
+					continue
+				}
+				if activeIndex >= 0 {
+					return nil, ProviderProfile{}, fmt.Errorf("ambiguous active provider %q: multiple provider names differ only by case", activeName)
+				}
+				activeIndex = index
+			}
+		}
 	}
 
 	normalized := make([]ProviderProfile, 0, len(providers))
 	var active ProviderProfile
 	activeFound := false
-	for _, provider := range providers {
+	for index, provider := range providers {
 		next, err := normalizeProvider(provider, env, options)
 		if err != nil {
 			// One unresolvable provider (e.g. a profile referencing a provider preset
 			// this build doesn't ship) must NOT brick the whole app — drop it and keep
 			// the rest. Only the ACTIVE provider failing is fatal, since the run can't
 			// proceed without it.
-			if strings.TrimSpace(provider.Name) == activeName {
+			if index == activeIndex {
 				return nil, ProviderProfile{}, err
 			}
 			continue
 		}
 		normalized = append(normalized, next)
-		if next.Name == activeName {
+		if index == activeIndex {
 			active = next
 			activeFound = true
 		}

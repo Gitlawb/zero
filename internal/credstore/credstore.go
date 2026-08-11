@@ -265,5 +265,16 @@ func (s *Store) write(data map[string]string) error {
 }
 
 func normalizeProvider(provider string) string {
+	return NormalizeProvider(provider)
+}
+
+// NormalizeProvider is the credential-store's provider-name equivalence rule:
+// entries are keyed by the trimmed, lowercased name. Callers that decide
+// whether two provider spellings share one stored secret (e.g. removing a
+// case-variant row while a sibling survives) must compare with THIS function
+// rather than strings.EqualFold — the two relations are not the same. Unicode
+// case folding equates "s" and "ſ", strings.ToLower does not, so an EqualFold
+// comparison can promise a survivor access to a key it cannot look up.
+func NormalizeProvider(provider string) string {
 	return strings.ToLower(strings.TrimSpace(provider))
 }

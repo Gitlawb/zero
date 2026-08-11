@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -197,6 +199,35 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 	}
 	if key, ok, _ := store.Get("ollama-cloud"); !ok || key != "sk-pasted-secret" {
 		t.Fatalf("stored key = %q,%v; want sk-pasted-secret in the credential store", key, ok)
+	}
+}
+
+func TestSaveSetupProviderRejectsExactNameWithoutCatalogOwnership(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := config.FileConfig{Providers: []config.ProviderProfile{{
+		Name: "openrouter", ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL: "https://corp.example/v1", Model: "corp-model", APIKeyStored: true,
+	}}}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, tui.SetupSelection{CatalogID: "openrouter", Model: "openai/gpt-4.1"}, setupSaveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "does not prove ownership") {
+		t.Fatalf("saveSetupProvider error = %v, want ownership rejection", err)
+	}
+	after := readFileConfig(t, configPath)
+	if len(after.Providers) != 1 || after.Providers[0].CatalogID != "" || after.Providers[0].BaseURL != "https://corp.example/v1" || after.Providers[0].Model != "corp-model" || !after.Providers[0].APIKeyStored {
+		t.Fatalf("name-only exact profile changed: %+v", after.Providers)
 	}
 }
 

@@ -1119,16 +1119,34 @@ func providerWizardModelIDs(models []providerWizardModel) []string {
 func TestWizardProviderStoredKey(t *testing.T) {
 	m := model{savedProviders: []config.ProviderProfile{
 		{Name: "acme", CatalogID: "acme-cloud", APIKeyStored: true},
-		{Name: "nokey"},
+		{Name: "nokey", CatalogID: "nokey"},
 	}}
-	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "acme"}); !ok || name != "acme" {
-		t.Fatalf("match by name = %q,%v", name, ok)
+	if name, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{ID: "acme-cloud"}); err != nil || !ok || name != "acme" {
+		t.Fatalf("match by catalog id = %q,%v,%v", name, ok, err)
 	}
-	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{ID: "acme-cloud"}); !ok || name != "acme" {
-		t.Fatalf("match by catalog id = %q,%v", name, ok)
+	if _, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{ID: "nokey"}); err != nil || ok {
+		t.Fatalf("provider without a stored key matched: ok=%v err=%v", ok, err)
 	}
-	if _, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "nokey"}); ok {
-		t.Fatal("provider without a stored key must not match")
+	if _, _, err := (model{savedProviders: []config.ProviderProfile{{Name: "OpenRouter", CatalogID: "custom-openai-compatible", APIKeyStored: true}}}).wizardProviderStoredKey(providercatalog.Descriptor{ID: "openrouter", Name: "OpenRouter"}); err == nil {
+		t.Fatal("a matching display name must report that it does not own the catalog provider")
+	}
+	if _, ok, err := (model{savedProviders: []config.ProviderProfile{{Name: "s", APIKeyStored: true}}}).wizardProviderStoredKey(providercatalog.Descriptor{ID: "ſ", Name: "ſ"}); err != nil || ok {
+		t.Fatal("Unicode long-s must not reuse the distinct s profile's key")
+	}
+
+	exact := model{savedProviders: []config.ProviderProfile{
+		{Name: "work-xai", CatalogID: "xai", APIKeyStored: true},
+		{Name: "xai", CatalogID: "xai", APIKeyStored: true},
+	}}
+	if name, ok, err := exact.wizardProviderStoredKey(providercatalog.Descriptor{ID: "xai"}); err != nil || !ok || name != "xai" {
+		t.Fatalf("exact catalog owner must win: name=%q ok=%v err=%v", name, ok, err)
+	}
+	ambiguous := model{savedProviders: []config.ProviderProfile{
+		{Name: "work-xai", CatalogID: "xai", APIKeyStored: true},
+		{Name: "personal-xai", CatalogID: "xai", APIKeyStored: true},
+	}}
+	if _, _, err := ambiguous.wizardProviderStoredKey(providercatalog.Descriptor{ID: "xai"}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("shared catalog owners error = %v, want ambiguity", err)
 	}
 }
 
@@ -1138,14 +1156,14 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","apiKeyStored":true}]}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Set("acme", "sk-secret"); err != nil {
+	if err := store.Set("acme-cloud", "sk-secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1155,8 +1173,8 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 	if next.providerWizard != nil {
 		t.Fatal("remove should close the wizard")
 	}
-	if _, ok, _ := store.Get("acme"); ok {
-		t.Fatal("remove should delete the key from the credential store")
+	if _, ok, _ := store.Get("acme-cloud"); ok {
+		t.Fatal("remove should delete the catalog-alias key from the credential store")
 	}
 }
 
@@ -1417,6 +1435,18 @@ func TestExistingAimlapiConfigurationSkipsCustomEndpointCredential(t *testing.T)
 	}
 }
 
+func TestExistingAimlapiConfigurationRequiresCatalogOwnership(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "")
+	m := model{savedProviders: []config.ProviderProfile{{
+		Name: "aimlapi", BaseURL: "https://api.aimlapi.com/v1", APIKey: "foreign-secret",
+	}}}
+
+	profile, runtimeKey, ok := m.existingAimlapiConfiguration()
+	if ok || profile.Name != "" || runtimeKey != "" {
+		t.Fatalf("name-only profile was treated as AIMLAPI-owned: (%+v, %q, %v)", profile, runtimeKey, ok)
+	}
+}
+
 func TestAdvanceAimlapiWithExistingCredentialShowsConfiguredPreflight(t *testing.T) {
 	t.Setenv("AIMLAPI_API_KEY", "aimlapi-env-secret")
 	provider, err := providercatalog.Require("aimlapi")
@@ -1594,6 +1624,42 @@ func TestApplyProviderWizardExportsActiveProviderEnv(t *testing.T) {
 	}
 	if got := os.Getenv(config.ActiveProviderEnv); got != next.providerName {
 		t.Fatalf("%s = %q after wizard apply, want %q (children would spawn on the stale provider)", config.ActiveProviderEnv, got, next.providerName)
+	}
+}
+
+func TestApplyProviderWizardRejectsExactNameWithoutCatalogOwnership(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	original := config.FileConfig{Providers: []config.ProviderProfile{{
+		Name: "openrouter", CatalogID: "custom-openai-compatible",
+		ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://corp.example/v1",
+		Model: "corp-model", APIKeyStored: true,
+	}}}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := providercatalog.Require("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{})
+	m.userConfigPath = configPath
+	m.newProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil }
+	m.providerWizard = &providerWizardState{
+		step: providerWizardStepModel, providers: []providercatalog.Descriptor{descriptor},
+		models: []providerWizardModel{{ID: descriptor.DefaultModel}},
+	}
+
+	next, _ := m.applyProviderWizard()
+	if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "does not prove ownership") {
+		t.Fatalf("wizard error = %q, want ownership rejection", next.providerWizard.err)
+	}
+	after := readProviderWizardConfigFixture(t, configPath)
+	if len(after.Providers) != 1 || after.Providers[0].CatalogID != "custom-openai-compatible" || after.Providers[0].BaseURL != "https://corp.example/v1" || after.Providers[0].Model != "corp-model" || !after.Providers[0].APIKeyStored {
+		t.Fatalf("foreign exact-name profile changed: %+v", after.Providers)
 	}
 }
 

@@ -191,6 +191,96 @@ func TestRunProvidersCurrentJSONIncludesRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestRunProvidersListMarksUserAndRuntimeProfiles(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "saved"}}})
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profiles := []config.ProviderProfile{{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}, {Name: "runtime", ProviderKind: config.ProviderKindOpenAICompatible, Model: "runtime-model"}}
+		return config.ResolvedConfig{ActiveProvider: "runtime", Provider: profiles[1], Providers: profiles}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name       string `json:"name"`
+			Selectable bool   `json:"selectable"`
+			Source     string `json:"source"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Providers) != 2 || payload.Providers[0].Name != "runtime" || payload.Providers[0].Selectable || payload.Providers[0].Source != "resolved" || !payload.Providers[1].Selectable || payload.Providers[1].Source != "user-config" {
+		t.Fatalf("unexpected providers: %#v", payload.Providers)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "list"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "not selectable via providers use") {
+		t.Fatalf("non-selectable marker missing: %s", stdout.String())
+	}
+}
+
+// Resolution merges provider names case-sensitively (internal/config/resolver.go
+// mergeProvider), so a project config or provider command can add a "WORK" entry
+// alongside a persisted "work" as two distinct resolved profiles. `providers use`
+// only ever matches config.json rows by their exact stored casing, so it can
+// select "work" but has no way to select the case-variant "WORK" entry. Folding
+// case when deriving selectable/source would mislabel "WORK" as selectable too.
+func TestRunProvidersListDoesNotFoldCaseForSelectability(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "work"}}})
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profiles := []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, Model: "other-model"},
+		}
+		return config.ResolvedConfig{ActiveProvider: "work", Provider: profiles[0], Providers: profiles}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name       string `json:"name"`
+			Selectable bool   `json:"selectable"`
+			Source     string `json:"source"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Providers) != 2 {
+		t.Fatalf("unexpected providers: %#v", payload.Providers)
+	}
+	for _, provider := range payload.Providers {
+		switch provider.Name {
+		case "work":
+			if !provider.Selectable || provider.Source != "user-config" {
+				t.Fatalf("exact-case persisted entry should be selectable: %#v", provider)
+			}
+		case "WORK":
+			if provider.Selectable || provider.Source != "resolved" {
+				t.Fatalf("case-variant resolved entry must not be marked selectable: %#v", provider)
+			}
+		default:
+			t.Fatalf("unexpected provider name: %#v", provider)
+		}
+	}
+}
+
 func TestRunProvidersCatalogListsDescriptors(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -345,6 +435,34 @@ func TestRunProvidersAddWritesCatalogProfile(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Added provider fast") || !strings.Contains(output, configPath) {
 		t.Fatalf("unexpected add output: %q", output)
+	}
+}
+
+func TestRunProvidersAddRejectsExactNameWithoutCatalogOwnership(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := config.FileConfig{Providers: []config.ProviderProfile{{
+		Name: "openrouter", CatalogID: "custom-openai-compatible",
+		ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://corp.example/v1",
+		Model: "corp-model", APIKeyStored: true,
+	}}}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "add", "openrouter"}, &stdout, &stderr, providerSetupDeps(configPath)); code == exitSuccess || !strings.Contains(stderr.String(), "does not prove ownership") {
+		t.Fatalf("exit succeeded or ownership error missing: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	after := readFileConfig(t, configPath)
+	if len(after.Providers) != 1 || after.Providers[0].CatalogID != "custom-openai-compatible" || after.Providers[0].BaseURL != "https://corp.example/v1" || after.Providers[0].Model != "corp-model" || !after.Providers[0].APIKeyStored {
+		t.Fatalf("foreign exact-name profile changed: %+v", after.Providers)
 	}
 }
 

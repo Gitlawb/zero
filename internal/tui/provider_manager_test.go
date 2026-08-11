@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,173 @@ func TestProviderManagerDeleteConfirmsAndRemoves(t *testing.T) {
 	}
 }
 
+func TestProviderManagerIdentityListsKeepLongSDistinct(t *testing.T) {
+	saved := []config.ProviderProfile{{Name: "s", Model: "ascii"}}
+	saved = upsertSavedProviderProfile(saved, config.ProviderProfile{Name: "ſ", Model: "long-s"})
+	if len(saved) != 2 {
+		t.Fatalf("upsert merged distinct credential-store identities: %+v", saved)
+	}
+	m := model{savedProviders: saved[:1]}
+	if profile, ok := m.savedProviderByName("ſ"); ok {
+		t.Fatalf("lookup returned unrelated ASCII profile: %+v", profile)
+	}
+}
+
+// TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant mirrors
+// the CLI's TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant:
+// deleting the case-variant row that owns apiKeyStored must carry the marker
+// to the surviving sibling, since the credential store's secret is keyed
+// case-folded and stays put either way.
+func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := config.FileConfig{
+		ActiveProvider: "WORK",
+		Providers: []config.ProviderProfile{
+			{Name: "work", CatalogID: "xai", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v1", APIKeyStored: true, Model: "work-model"},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v2", Model: "work-model-2"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatalf("encode seed config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write seed config: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("xai", "alias-key"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "WORK",
+		ModelName:       "work-model-2",
+		Provider:        &fakeProvider{},
+		ProviderProfile: seed.Providers[1],
+		SavedProviders:  seed.Providers,
+		UserConfigPath:  configPath,
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.width = 120
+	m.height = 40
+	m, _ = m.openProviderManager()
+
+	m = managerKey(t, m, testKeyText("d")) // select "work" (row 0)
+	next, cleanup := m.handleProviderWizardKey(testKeyText("y"))
+	if cleanup == nil {
+		t.Fatal("delete did not schedule credential cleanup")
+	}
+	next = drainProviderManagerCmds(t, next, cleanup)
+
+	persisted := readManagerConfig(t, next.userConfigPath)
+	if len(persisted.Providers) != 1 || persisted.Providers[0].Name != "WORK" || !persisted.Providers[0].APIKeyStored {
+		t.Fatalf("survivor must inherit apiKeyStored marker, got %+v", persisted.Providers)
+	}
+	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
+		t.Fatalf("shared provider key = %q, %v, %v; want retained", key, ok, err)
+	}
+	if _, ok, err := store.Get("xai"); err != nil || ok {
+		t.Fatalf("exclusive catalog-alias key survived removal: ok=%v err=%v", ok, err)
+	}
+	// The marker transfer must be mirrored into the in-memory savedProviders
+	// too — reloadProviderManagerRows rebuilds the manager list from it, and
+	// providerManagerCredState gates store lookups on APIKeyStored, so a stale
+	// false here would show "no credential" for the survivor until restart
+	// even though config.json and the credstore both already agree.
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "WORK" || !next.savedProviders[0].APIKeyStored {
+		t.Fatalf("in-memory savedProviders must inherit apiKeyStored too, got %+v", next.savedProviders)
+	}
+}
+
+// TestProviderManagerDeleteReportsFailedKeyMarkerHandoff covers jatmn's #725
+// finding that the manager committed the retain-the-key decision before it knew
+// the handoff had worked. The marker transfer can only run AFTER RemoveProvider
+// (while both case-variant rows exist the config is ambiguous and every write
+// against it is rejected), so its failure is reachable: the shared secret then
+// sits in the store with no row marked to read it, while the UI had already
+// reported a completed "Deleted <name>."
+func TestProviderManagerDeleteReportsFailedKeyMarkerHandoff(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := config.FileConfig{
+		ActiveProvider: "WORK",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v1", APIKeyStored: true, Model: "work-model"},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v2", Model: "work-model-2"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatalf("encode seed config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write seed config: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+	original := transferProviderAPIKeyStoredMarker
+	transferProviderAPIKeyStoredMarker = func(string, string) (bool, error) {
+		return false, errors.New("injected marker write failure")
+	}
+	t.Cleanup(func() { transferProviderAPIKeyStoredMarker = original })
+
+	m := newModel(context.Background(), Options{
+		ProviderName:    "WORK",
+		ModelName:       "work-model-2",
+		Provider:        &fakeProvider{},
+		ProviderProfile: seed.Providers[1],
+		SavedProviders:  seed.Providers,
+		UserConfigPath:  configPath,
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.width = 120
+	m.height = 40
+	m, _ = m.openProviderManager()
+
+	m = managerKey(t, m, testKeyText("d")) // select "work" (row 0)
+	next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+	next = drainProviderManagerCmds(t, next, cmd)
+
+	status := next.providerWizard.manageStatus
+	if strings.Contains(status, "Deleted work.") {
+		t.Fatalf("status = %q, must not report a completed delete while the shared key is unreachable", status)
+	}
+	if !strings.Contains(status, "incomplete") || !strings.Contains(status, "WORK") {
+		t.Fatalf("status = %q, want it to name the incomplete handoff and the survivor", status)
+	}
+	// The secret is kept rather than destroyed by a failed config write: it is
+	// recoverable by setting a key for the survivor again, whereas deleting it
+	// is not.
+	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
+		t.Fatalf("shared provider key = %q, %v, %v; want it preserved for recovery", key, ok, err)
+	}
+	persisted := readManagerConfig(t, next.userConfigPath)
+	if len(persisted.Providers) != 1 || persisted.Providers[0].Name != "WORK" {
+		t.Fatalf("providers = %+v, want only the survivor", persisted.Providers)
+	}
+}
+
 func TestProviderManagerEditModelPersists(t *testing.T) {
 	m := managerTestModel(t)
 	m = managerKey(t, m, testKeyText("e"))
@@ -214,6 +382,137 @@ func TestProviderManagerRenameFollowsLiveSession(t *testing.T) {
 	}
 	if len(persisted.Providers) != 2 || persisted.Providers[0].Name != "gateway-main" {
 		t.Fatalf("rename not persisted, providers: %v", names)
+	}
+}
+
+func TestProviderManagerCaseOnlyRenameFollowsNormalizedLiveSession(t *testing.T) {
+	m := managerTestModel(t)
+	t.Setenv(config.ActiveProviderEnv, "OPENGATEWAY")
+	m.providerName = "OPENGATEWAY"
+	m.providerWizard = &providerWizardState{
+		step:         providerWizardStepEditMenu,
+		editOriginal: m.savedProviders[0],
+		editDraft:    m.savedProviders[0],
+	}
+	m.providerWizard.editDraft.Name = "OpenGateway"
+
+	next, _ := m.saveManagerEdit()
+	if next.providerName != "OpenGateway" || next.providerProfile.Name != "OpenGateway" {
+		t.Fatalf("live session did not follow the case-only rename: provider=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "OpenGateway" {
+		t.Fatalf("%s = %q, want OpenGateway", config.ActiveProviderEnv, got)
+	}
+	if !strings.Contains(next.providerWizard.manageStatus, "Press Enter") {
+		t.Fatalf("active-profile edit omitted restart guidance: %q", next.providerWizard.manageStatus)
+	}
+	persisted := readManagerConfig(t, next.userConfigPath)
+	if persisted.Providers[0].Name != "OpenGateway" {
+		t.Fatalf("exact persisted row was not renamed: %+v", persisted.Providers)
+	}
+}
+
+func TestProviderManagerEditDoesNotRetargetCaseVariantProjectSession(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "WORK")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	persisted := config.ProviderProfile{
+		Name: "work", ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL: "https://user.example.com/v1", Model: "user-model",
+	}
+	project := config.ProviderProfile{
+		Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL: "https://project.example.com/v1", Model: "project-model",
+	}
+	data, err := json.Marshal(config.FileConfig{ActiveProvider: persisted.Name, Providers: []config.ProviderProfile{persisted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName: "WORK", ModelName: project.Model, Provider: &fakeProvider{},
+		ProviderProfile: project, SavedProviders: []config.ProviderProfile{persisted, project},
+		UserConfigPath: configPath,
+	})
+	m.providerWizard = &providerWizardState{
+		step: providerWizardStepEditMenu, editOriginal: persisted, editDraft: persisted,
+	}
+	m.providerWizard.editDraft.Name = "Work"
+
+	next, _ := m.saveManagerEdit()
+	if next.providerName != "WORK" || next.providerProfile.Name != "WORK" {
+		t.Fatalf("project live session was retargeted: provider=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "WORK" {
+		t.Fatalf("%s = %q, want the live project provider unchanged", config.ActiveProviderEnv, got)
+	}
+	if strings.Contains(next.providerWizard.manageStatus, "Press Enter") {
+		t.Fatalf("unrelated project session received restart guidance: %q", next.providerWizard.manageStatus)
+	}
+	if next.providerWizard.manageActiveName != "WORK" {
+		t.Fatalf("manager active identity = %q, want exact live project profile", next.providerWizard.manageActiveName)
+	}
+	cfg := readManagerConfig(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "Work" {
+		t.Fatalf("persisted user profile was not renamed exactly: %+v", cfg.Providers)
+	}
+}
+
+func TestProviderManagerEditKeepsDistinctUnicodeIdentityOutOfLiveSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	t.Setenv(config.ActiveProviderEnv, "s")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := config.FileConfig{
+		ActiveProvider: "s",
+		Providers: []config.ProviderProfile{
+			{Name: "s", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://s.example.com/v1", Model: "s-model"},
+			{Name: "ſ", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://long-s.example.com/v1", Model: "long-s-model"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(context.Background(), Options{
+		ProviderName:    "s",
+		ModelName:       "s-model",
+		Provider:        &fakeProvider{},
+		ProviderProfile: seed.Providers[0],
+		SavedProviders:  seed.Providers,
+		UserConfigPath:  configPath,
+	})
+	m.providerWizard = &providerWizardState{
+		step:         providerWizardStepEditMenu,
+		editOriginal: seed.Providers[1],
+		editDraft: config.ProviderProfile{
+			Name:         "ſ",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://long-s.example.com/v1",
+			Model:        "edited-long-s-model",
+		},
+	}
+
+	next, _ := m.saveManagerEdit()
+	persisted := readManagerConfig(t, configPath)
+	if persisted.Providers[0].Model != "s-model" || persisted.Providers[1].Model != "edited-long-s-model" {
+		t.Fatalf("persisted edit targeted wrong identity: %+v", persisted.Providers)
+	}
+	if next.savedProviders[0].Model != "s-model" || next.savedProviders[1].Model != "edited-long-s-model" {
+		t.Fatalf("in-memory edit targeted wrong identity: %+v", next.savedProviders)
+	}
+	if next.providerName != "s" || next.providerProfile.Name != "s" || os.Getenv(config.ActiveProviderEnv) != "s" {
+		t.Fatalf("unrelated live session changed: provider=%q profile=%q env=%q", next.providerName, next.providerProfile.Name, os.Getenv(config.ActiveProviderEnv))
+	}
+	if strings.Contains(next.providerWizard.manageStatus, "Press Enter") {
+		t.Fatalf("unrelated edit produced live-session restart note: %q", next.providerWizard.manageStatus)
 	}
 }
 

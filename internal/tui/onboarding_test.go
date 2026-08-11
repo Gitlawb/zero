@@ -2066,6 +2066,61 @@ func TestApplySetupOAuthSuccessAdvancesToModel(t *testing.T) {
 	}
 }
 
+func TestApplySetupOAuthTokenPersistFailureStaysOnProvider(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{Visible: true, Providers: []SetupProviderOption{
+			{ID: "xai", Name: "xAI", RequiresAuth: true},
+		}},
+	})
+	m.setup.stage = setupStageProvider
+	m.setup.oauthPending = true
+	m.setup.oauthMode = true
+	m.setup.configPath = t.TempDir() // A directory cannot be read as config.json.
+
+	updated, cmd := m.applySetupOAuth(setupOAuthMsg{tokenLogin: true, providerID: "xai"})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("failed profile persistence should not start model discovery")
+	}
+	if next.setup.stage != setupStageProvider {
+		t.Fatalf("stage = %v, want provider", next.setup.stage)
+	}
+	if next.setup.oauthErr == "" || !strings.Contains(next.setup.oauthErr, "could not be saved") {
+		t.Fatalf("oauthErr = %q, want profile-save failure", next.setup.oauthErr)
+	}
+}
+
+func TestCompleteSetupSurfacesMintedOpenRouterKeyWhenSaveFails(t *testing.T) {
+	const mintedKey = "sk-or-minted-recovery"
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "openrouter", Name: "OpenRouter", RequiresAuth: true},
+			},
+			Save: func(SetupSelection) (SetupResult, error) {
+				return SetupResult{}, errors.New("config write failed")
+			},
+		},
+	})
+	m.setup.oauthMode = true
+	m.setup.stage = setupStageReady
+	m.setup.apiKey.SetValue(mintedKey)
+
+	updated, _ := m.completeSetup()
+	next := updated.(model)
+	if !strings.Contains(next.setup.err, mintedKey) || !strings.Contains(next.setup.err, "was not saved") {
+		t.Fatalf("setup error = %q, want minted-key recovery", next.setup.err)
+	}
+}
+
+func TestSetupDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
+	msg := setupDevicePrepareCmd("xai", t.TempDir())().(setupOAuthDeviceMsg)
+	if msg.err == nil {
+		t.Fatal("device-code preparation should reject an unreadable config before requesting a code")
+	}
+}
+
 func pressSetupContinue(m model) model {
 	m = pressSetupContinueOnce(m)
 	// Transparently skip the connect-method chooser via the API-key/browse path so

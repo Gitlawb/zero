@@ -53,6 +53,16 @@ func runProvidersAdd(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	// Retarget a catalog-default name at the row that already owns that catalog
+	// identity, so re-running setup for a provider saved under different casing
+	// updates it instead of failing the collision check.
+	profile, err = config.AdoptPersistedCatalogProviderName(configPath, profile)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := config.PreflightProviderWrite(configPath, profile.Name); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	// Persist with the key moved into the encrypted credential store (capture flip);
 	// the local profile keeps the key for the verification build below.
 	cfg, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), options.setActive)

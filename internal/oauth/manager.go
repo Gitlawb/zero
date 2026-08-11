@@ -35,6 +35,7 @@ type Manager struct {
 	// openBrowser is invoked with the authorization URL for loopback logins.
 	// Tests inject a function that drives the loopback redirect.
 	openBrowser func(authURL string) error
+	beforeSave  func() error
 	// refreshLocks serializes concurrent refreshes per key so parallel callers
 	// don't each spend the single-use refresh token; the loser reuses the rotated
 	// token. refreshMu guards the map (M7).
@@ -59,6 +60,10 @@ type ManagerOptions struct {
 	RefreshBuffer time.Duration
 	Out           io.Writer
 	OpenBrowser   func(authURL string) error
+	// BeforeSave runs after interactive authorization succeeds and immediately
+	// before credential mutation. Interactive callers use it to revalidate
+	// state that may have changed while a browser or device flow was pending.
+	BeforeSave func() error
 }
 
 // NewManager builds a Manager, filling defaults.
@@ -97,6 +102,7 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 	return &Manager{
 		store: opts.Store, registry: registry, client: client,
 		env: env, now: now, buffer: buffer, out: out, openBrowser: open,
+		beforeSave: opts.BeforeSave,
 	}, nil
 }
 
@@ -143,6 +149,11 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (Status, error) 
 	}
 
 	key := ProviderKey(opts.Provider)
+	if m.beforeSave != nil {
+		if err := m.beforeSave(); err != nil {
+			return Status{}, err
+		}
+	}
 	if err := m.store.Save(key, token); err != nil {
 		return Status{}, err
 	}
@@ -199,6 +210,11 @@ func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg 
 		return Status{}, err
 	}
 	key := ProviderKey(provider)
+	if m.beforeSave != nil {
+		if err := m.beforeSave(); err != nil {
+			return Status{}, err
+		}
+	}
 	if err := m.store.Save(key, token); err != nil {
 		return Status{}, err
 	}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,7 +40,7 @@ func ensureLoginProviderProfile(deps appDeps, provider string) string {
 	if err != nil {
 		return "warning: login saved, but no provider profile was written: " + err.Error()
 	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name)
@@ -99,6 +100,16 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth openrouter takes no arguments (got %q)", args[0]))
 	}
+	// Check the config BEFORE the browser flow, as every other auth entry point
+	// does. Finding out the file is unusable only after the user has completed a
+	// PKCE round trip wastes their work and mints a key Zero then cannot store.
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := config.PreflightCatalogProviderLogin(configPath, "openrouter"); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	key, err := deps.openRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 		Out:        stdout,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
@@ -111,10 +122,14 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	key = strings.TrimSpace(key)
 	line, err := saveOpenRouterProviderKey(deps, key)
 	if err != nil {
-		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it: %s\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", err, key); writeErr != nil {
+		// The key is real and the user paid for it with a browser round trip, so
+		// print it rather than losing it. But nothing was persisted, so this is a
+		// failure: exiting 0 here reported success for a command that left the
+		// provider unusable, and a script would have carried on.
+		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it.\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", key); writeErr != nil {
 			return exitCrash
 		}
-		return exitSuccess
+		return writeAppError(stderr, "could not save the OpenRouter API key: "+err.Error(), exitCrash)
 	}
 	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key saved.\n%s\n", line); err != nil {
 		return exitCrash
@@ -129,6 +144,9 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 	}
 	configPath, err := deps.userConfigPath()
 	if err != nil {
+		return "", err
+	}
+	if err := config.PreflightUserConfig(configPath); err != nil {
 		return "", err
 	}
 	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
@@ -148,7 +166,7 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 		_, _ = store.Delete(ensured.Name)
 		return "", err
 	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name), nil
@@ -176,6 +194,14 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth chatgpt takes no arguments (got %q)", args[0]))
 	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	const provider = "chatgpt"
+	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 
 	// Build the same env map the oauth engine reads so the chatgpt preset is
 	// opted into (the preset is off by default to keep third-party OAuth
@@ -189,7 +215,7 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	}
 	env["ZERO_OAUTH_ALLOW_PRESETS"] = "1"
 
-	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
+	token, err := deps.chatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
 		Env:        env,
 		HTTPClient: &http.Client{Timeout: 60 * time.Second},
 		Out:        stdout,
@@ -212,7 +238,10 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := store.Save(oauth.ProviderKey("chatgpt"), token); err != nil {
+	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := store.Save(oauth.ProviderKey(provider), token); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	statuses, err := oauthFormatChatGPTStatus(token)
@@ -343,7 +372,7 @@ func validateAuthFlags(sub string, a authArgs) error {
 // ZERO_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it. Setting
 // ZERO_OAUTH_STORAGE=encrypted-file selects the AES-256-GCM encrypted-at-rest
 // backend (a per-user secret is created beside the token file).
-func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
+func newAuthManager(deps appDeps, out io.Writer, beforeSave func() error) (*oauth.Manager, error) {
 	// Validate ZERO_OAUTH_STORAGE up front: a mistyped value must fail fast rather
 	// than silently change the backend. Empty = default (plaintext 0600 file);
 	// "encrypted-file" = AES-256-GCM; "keyring" = the OS keyring.
@@ -372,6 +401,7 @@ func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
 		// `zero auth login <preset>` (e.g. xai) should resolve the baked-in preset
 		// without the operator exporting ZERO_OAUTH_ALLOW_PRESETS first.
 		AllowPresets: true,
+		BeforeSave:   beforeSave,
 	})
 }
 
@@ -387,7 +417,7 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if len(parsed.positional) != 1 {
 		return writeExecUsageError(stderr, "usage: zero auth login <provider> [--device] [--scope <scope>]")
 	}
-	provider := parsed.positional[0]
+	provider := strings.ToLower(strings.TrimSpace(parsed.positional[0]))
 	// ChatGPT (Codex) requires a fixed redirect_uri (http://localhost:1455/
 	// auth/callback) and mandatory authorize params (id_token_add_organizations,
 	// codex_cli_simplified_flow, originator) that the generic loopback flow
@@ -402,7 +432,16 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return runAuthChatGPT(nil, stdout, stderr, deps)
 	}
-	manager, err := newAuthManager(deps, stdout)
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	manager, err := newAuthManager(deps, stdout, func() error {
+		return config.PreflightCatalogProviderLogin(configPath, provider)
+	})
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -438,25 +477,98 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		return writeExecUsageError(stderr, "usage: zero auth logout <provider>")
 	}
 	provider := parsed.positional[0]
-	manager, err := newAuthManager(deps, stdout)
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	configErr := config.PreflightUserConfig(configPath)
+	// Resolve the target the way login does. Login accepts a catalog id or a case
+	// variant and stores its token under the catalog id, and the TUI tells users
+	// to run `zero auth logout <catalog id>` — so refusing that spelling here left
+	// the OAuth token and any stored API key in place for exactly the command the
+	// UI documents. The credential store keys stay on what the user typed (that is
+	// where login put them); only the config mutation below needs the persisted
+	// spelling, because those mutators match a row exactly.
+	//
+	// Identity resolution and candidate expansion run regardless of configErr:
+	// PersistedProviderIdentity/ProviderRow only read+parse the raw JSON, they
+	// never call ValidatePersistedProviderNames, so an unrelated ambiguous
+	// case-duplicate row elsewhere in the file must not suppress deleting every
+	// credential this logout can find for the requested provider. Only the
+	// config WRITE below (clearing the apiKeyStored marker) needs a valid config
+	// and is gated on configErr.
+	//
+	// Identity resolution prefers an exact name over a case variant, and a name
+	// over a catalog id (config.ResolvePersistedProviderIdentity). Taking the
+	// first row that matched either field let `logout xai` retarget a
+	// {name:"work-xai", catalogId:"xai"} row — a different profile, with
+	// different credentials, than the one named.
+	credentialCandidates, configProvider, identityErr := config.ProviderCredentialCandidates(configPath, provider)
+	if identityErr != nil {
+		if configErr == nil {
+			configErr = identityErr
+		}
+	}
+	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	removed, err := manager.Logout(provider)
-	if err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	// Delete every candidate the runtime bearer resolver would have tried
+	// (ProviderProfile.OAuthLoginCandidates: profile name, then catalog id) —
+	// not just the spelling the user typed. A profile saved as
+	// {name:"my-xai", catalogId:"xai"} logged in via `zero auth login xai`
+	// stores its token under "xai"; `zero auth logout my-xai` must delete that
+	// too, or the login silently survives. The same candidate set is used below
+	// for the API key store, which has the identical asymmetry.
+	//
+	// The catalog id joins that set only when the resolved profile is the ONLY
+	// row claiming it. Catalog ids are shared by design — stored-key "work-xai",
+	// stored-key "xai", and keyless "personal-xai" can all carry catalogId
+	// "xai" — so expanding unconditionally made `logout work-xai` delete the
+	// "xai" token and the "xai" profile's API key while clearing only
+	// work-xai's marker. When the id is shared, the user has to name the
+	// profile whose credential they mean.
+	removed := false
+	for _, candidate := range credentialCandidates {
+		candidateRemoved, err := manager.Logout(candidate)
+		if err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
+		removed = removed || candidateRemoved
 	}
 	// Also drop any stored API key and its marker so `auth logout` clears the whole
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
 	// failures rather than reporting success while a credential remains.
-	keyRemoved, keyErr := config.ForgetProviderKey(provider)
+	//
+	// The key store is asked for every OAuth candidate spelling too: a key
+	// captured by provider setup lives under the persisted row's name, while one
+	// captured by a catalog login lives under the catalog id. Clearing only the
+	// spelling the user typed would leave the others behind.
+	keyStore, keyErr := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
-	if configPath, perr := deps.userConfigPath(); perr == nil {
-		if _, clearErr := config.ClearProviderKeyStored(configPath, provider); clearErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
+	keyRemoved := false
+	for _, candidate := range credentialCandidates {
+		candidateRemoved, candidateErr := keyStore.Delete(candidate)
+		if candidateErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(candidateErr, redaction.Options{}), exitCrash)
 		}
+		keyRemoved = keyRemoved || candidateRemoved
+	}
+	if configErr != nil {
+		// Credentials are already gone at this point, but an invalid persisted
+		// config (e.g. ambiguous case-duplicate rows) blocks every config write,
+		// including clearing a stale apiKeyStored marker — writeConfigFile
+		// re-validates on every call, so nothing here could succeed either.
+		// Say so explicitly rather than leaving the marker silently stale.
+		return writeAppError(stderr, redaction.ErrorMessage(configErr, redaction.Options{})+"; any stale apiKeyStored marker in config.json must be corrected by hand alongside this", exitCrash)
+	}
+	// Clear the marker on every case-variant row, not just configProvider's exact
+	// spelling: the credential store keys secrets case-folded, so a sibling row
+	// could have pointed at the same now-deleted secret.
+	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, configProvider); clearErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 	}
 	removed = removed || keyRemoved
 	if parsed.json {
@@ -491,7 +603,18 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if len(parsed.positional) > 1 {
 		return writeExecUsageError(stderr, "usage: zero auth status [provider]")
 	}
-	manager, err := newAuthManager(deps, stdout)
+	var credentialCandidates []string
+	if len(parsed.positional) == 1 {
+		configPath, err := deps.userConfigPath()
+		if err != nil {
+			return writeAppError(stderr, err.Error(), exitCrash)
+		}
+		credentialCandidates, _, err = config.ProviderCredentialCandidates(configPath, parsed.positional[0])
+		if err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
+	}
+	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -500,7 +623,7 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	if len(parsed.positional) == 1 {
-		statuses = filterAuthStatuses(statuses, parsed.positional[0])
+		statuses = filterAuthStatuses(statuses, credentialCandidates)
 	}
 	if parsed.json {
 		payload := struct {
@@ -530,16 +653,33 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, "usage: zero auth refresh <provider>")
 	}
 	provider := parsed.positional[0]
-	manager, err := newAuthManager(deps, stdout)
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	credentialCandidates, _, err := config.ProviderCredentialCandidates(configPath, provider)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	key := oauth.ProviderKey(provider)
-	if parsed.watch {
-		return runAuthRefreshWatch(manager, key, provider, stdout, stderr)
-	}
-	if _, err := manager.Handle401(context.Background(), key); err != nil {
+	manager, err := newAuthManager(deps, stdout, nil)
+	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if parsed.watch {
+		return runAuthRefreshWatch(manager, credentialCandidates, provider, stdout, stderr)
+	}
+	var refreshErr error
+	for _, candidate := range credentialCandidates {
+		_, refreshErr = manager.Handle401(context.Background(), oauth.ProviderKey(candidate))
+		if refreshErr == nil {
+			break
+		}
+		if !errors.Is(refreshErr, oauth.ErrNoToken) {
+			break
+		}
+	}
+	if refreshErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(refreshErr, redaction.Options{}), exitCrash)
 	}
 	if _, err := fmt.Fprintf(stdout, "Refreshed OAuth token for %s.\n", provider); err != nil {
 		return exitCrash
@@ -551,13 +691,26 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 // interrupted. This is the opt-in proactive-refresh scheduler surface (for a
 // long-running external process that reads the token file). It validates a
 // refreshable token exists first, then schedules refreshes before each expiry.
-func runAuthRefreshWatch(manager *oauth.Manager, key, provider string, stdout io.Writer, stderr io.Writer) int {
+func runAuthRefreshWatch(manager *oauth.Manager, candidates []string, provider string, stdout io.Writer, stderr io.Writer) int {
 	ctx, stop := signalContext()
 	defer stop()
 	// Validate (and refresh-if-needed) once up front so a missing/non-refreshable
 	// token fails fast instead of silently watching nothing.
-	if _, err := manager.GetFresh(ctx, key); err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	key := ""
+	var freshErr error
+	for _, candidate := range candidates {
+		candidateKey := oauth.ProviderKey(candidate)
+		_, freshErr = manager.GetFresh(ctx, candidateKey)
+		if freshErr == nil {
+			key = candidateKey
+			break
+		}
+		if !errors.Is(freshErr, oauth.ErrNoToken) {
+			break
+		}
+	}
+	if freshErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(freshErr, redaction.Options{}), exitCrash)
 	}
 	scheduler := oauth.NewRefreshScheduler()
 	scheduler.Start(ctx, manager, key)
@@ -569,11 +722,14 @@ func runAuthRefreshWatch(manager *oauth.Manager, key, provider string, stdout io
 	return exitSuccess
 }
 
-func filterAuthStatuses(statuses []oauth.Status, provider string) []oauth.Status {
-	want := oauth.ProviderKey(provider)
-	filtered := make([]oauth.Status, 0, 1)
+func filterAuthStatuses(statuses []oauth.Status, candidates []string) []oauth.Status {
+	wanted := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		wanted[oauth.ProviderKey(candidate)] = struct{}{}
+	}
+	filtered := make([]oauth.Status, 0, len(candidates))
 	for _, st := range statuses {
-		if st.Key == want {
+		if _, ok := wanted[st.Key]; ok {
 			filtered = append(filtered, st)
 		}
 	}
