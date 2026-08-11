@@ -510,7 +510,17 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 			windowsSandboxIdentityEnv, windowsSandboxIdentityEnv)
 	}
 	if actual.ACLPlanHash != expected.ACLPlanHash || actual.ACLPlanEntries != expected.ACLPlanEntries {
-		return errors.New("windows sandbox setup is out of date: permission roots or deny lists changed")
+		// Say WHAT disagrees. The bare "permission roots or deny lists changed"
+		// left an operator with a command that refuses to run and no way to tell
+		// which side is wrong, or even whether the marker belongs to this
+		// workspace at all. The entry counts separate the two shapes this takes:
+		// equal counts mean the same roots spelled differently, unequal counts
+		// mean one side has roots the other has never heard of.
+		return fmt.Errorf("windows sandbox setup is out of date: permission roots or deny lists changed "+
+			"(marker %s has %d entries, hash %s; this command expects %d entries, hash %s) — "+
+			"re-run `zero sandbox setup` from an elevated (Administrator) terminal",
+			path, actual.ACLPlanEntries, shortWindowsACLPlanHash(actual.ACLPlanHash),
+			expected.ACLPlanEntries, shortWindowsACLPlanHash(expected.ACLPlanHash))
 	}
 	// The capability-SID plan above and the principal plan are built separately
 	// from the same profile, so the hash above does not cover principal grants.
@@ -660,4 +670,18 @@ func ensureWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
 		}
 	}
 	return nil
+}
+
+// shortWindowsACLPlanHash trims a plan hash for a human-facing error. Twelve hex
+// characters is plenty to tell two plans apart by eye, and the full 64 buries the
+// rest of the message.
+func shortWindowsACLPlanHash(hash string) string {
+	hash = strings.TrimSpace(hash)
+	if hash == "" {
+		return "(none)"
+	}
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+	return hash
 }
