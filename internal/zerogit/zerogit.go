@@ -874,6 +874,10 @@ func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
 // comparison. It returns an error when the count cannot be determined (for
 // example the remote-tracking ref was never fetched); callers treat that as a
 // hard failure rather than guessing that there is something to publish.
+// CommitsAhead reports how many commits HEAD has that are not on
+// <remote>/<branch>. It requires Git 2.24+ because it passes --end-of-options
+// so a remote or branch shaped like an option stays positional; callers that
+// must support older Git should check the version before calling.
 func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner) (int, error) {
 	runGit, _ = resolveRunners(runGit, nil)
 	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "--end-of-options", remote+"/"+branch+"..HEAD")
@@ -904,11 +908,20 @@ func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit 
 	return err
 }
 
-// RemoteHasBranch reports whether remote already has refs/heads/<branch>.
+// RemoteHasBranch reports whether remote already has refs/heads/<branch> and
+// the remote tip is the caller's current HEAD.
 // ensureFeatureBranch uses this when local upstream config is missing or
 // wrong: a prior push may have published the branch even when push -u failed
 // to write .git/config, and the nonexistence lease must not be reasserted
 // against a ref that already exists on the remote.
+// The tip-equality half is deliberate. A retry that lost a branch-name race
+// (another client created the same generated name first) must not treat the
+// surviving remote branch as its own and drop the creation lease: the remote
+// tip then differs from this caller's HEAD, so this reports false and Push
+// reasserts the zero-value force-with-lease, which fails instead of appending
+// this caller's commits to the other creator's branch. A plain
+// existence-only check would let that retry fast-forward the other branch
+// when both creators started from the same default-branch tip.
 func RemoteHasBranch(ctx context.Context, cwd, remote, branch string, runGit Runner) (bool, error) {
 	runGit, _ = resolveRunners(runGit, nil)
 	remote = strings.TrimSpace(remote)
@@ -1018,11 +1031,11 @@ func DeleteBranch(ctx context.Context, cwd, fallbackBranch, branchToDelete strin
 	return err
 }
 
-// CurrentBranch returns the short name of the currently checked-out branch, or
-// "" when HEAD is detached / unresolvable. Callers that need the branch's
-// configured upstream (for example the --yes unborn-remote preflight) use this
-// instead of IsDefaultBranch so a remote-HEAD lookup failure does not block
-// remote resolution.
+// CurrentBranchTip returns the SHA of the currently checked-out commit
+// (HEAD^{commit}), or "" when HEAD is detached or unresolvable.
+// ensureFeatureBranch uses this as the compare-and-swap old value when it
+// restores the original default branch after creating a feature branch, so a
+// concurrent advance of the default ref is refused instead of rewound.
 func CurrentBranchTip(ctx context.Context, cwd string, runGit Runner) string {
 	runGit, _ = resolveRunners(runGit, nil)
 	out, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--verify", "HEAD^{commit}")
@@ -1032,6 +1045,11 @@ func CurrentBranchTip(ctx context.Context, cwd string, runGit Runner) string {
 	return strings.TrimSpace(out)
 }
 
+// CurrentBranch returns the short name of the currently checked-out branch, or
+// "" when HEAD is detached / unresolvable. Callers that need the branch's
+// configured upstream (for example the --yes unborn-remote preflight) use this
+// instead of IsDefaultBranch so a remote-HEAD lookup failure does not block
+// remote resolution.
 func CurrentBranch(ctx context.Context, cwd string, runGit Runner) string {
 	runGit, _ = resolveRunners(runGit, nil)
 	out, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", "HEAD")

@@ -647,6 +647,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.currentGitBranch == nil {
 		deps.currentGitBranch = defaults.currentGitBranch
 	}
+	if deps.currentBranchTip == nil {
+		deps.currentBranchTip = defaults.currentBranchTip
+	}
 	// deleteBranch and resetBranchRef stay nil when unset so unit tests that
 	// mock createBranch without a real git tree do not hit real restore/delete.
 	if deps.runTUI == nil {

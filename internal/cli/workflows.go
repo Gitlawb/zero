@@ -975,6 +975,10 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	// context.Background() is deliberate: the 2-minute ctx above is the
+	// feature-branch preflight (inspection, remote probes, branch creation).
+	// The push itself must not be cancelled mid-transfer just because the
+	// preflight budget elapsed; a large push can legitimately take longer.
 	result, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
 		Remote:                 firstNonEmptyString(options.remote, remote),
@@ -1076,6 +1080,9 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return exitCrash
 		}
 	}
+	// context.Background() is deliberate here too: runChangesPR reuses the
+	// 2-minute ctx for preflight (branch creation and remote probes), but the
+	// push must not be cancelled mid-transfer if that budget elapsed.
 	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
 		Remote:                 firstNonEmptyString(options.remote, remote),

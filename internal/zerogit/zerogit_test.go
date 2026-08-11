@@ -1061,12 +1061,39 @@ func TestCreateBranch(t *testing.T) {
 
 		_, err := CreateBranch(context.Background(), BranchOptions{
 			Cwd:    root,
+			Name:   "",
 			RunGit: runner.Run,
 		})
 		if err == nil {
 			t.Fatal("expected error for empty branch name, got nil")
 		}
 	})
+
+	for _, tc := range []struct{ name, branch string }{
+		{"RejectsLeadingDash", "-feature"},
+		{"RejectsLeadingSlash", "/feature"},
+		{"RejectsDotDot", "feat..ure"},
+		{"RejectsBackslash", `feat\ure`},
+		{"RejectsSpace", "feat ure"},
+		{"RejectsTab", "feat\ture"},
+		{"RejectsNewline", "feat\nure"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			runner := &fakeRunner{results: []CommandResult{
+				{Stdout: root + "\n"},
+			}}
+			_, err := CreateBranch(context.Background(), BranchOptions{
+				Cwd:    root,
+				Name:   tc.branch,
+				RunGit: runner.Run,
+			})
+			if err == nil {
+				t.Fatalf("expected error for branch name %q, got nil", tc.branch)
+			}
+		})
+	}
 }
 
 func TestIsDefaultBranch(t *testing.T) {

@@ -2299,7 +2299,7 @@ func TestRunChangesPRYesBypassesDefaultBranchCheck(t *testing.T) {
 // squash-merge).
 func TestEnsureFeatureBranchRestoresDefaultBranchAfterCreate(t *testing.T) {
 	cwd := t.TempDir()
-	var resetBranch, resetTip string
+	var resetBranch, resetTip, resetExpectedOld string
 	var createdName string
 
 	branch, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, cwd, "", featureBranchOptions{}, appDeps{
@@ -2310,6 +2310,7 @@ func TestEnsureFeatureBranchRestoresDefaultBranchAfterCreate(t *testing.T) {
 		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error { return nil },
 		inspectChanges:     featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		currentGitUser:     func(ctx context.Context, cwd string) string { return "Someone" },
+		currentBranchTip:   func(ctx context.Context, cwd string) string { return "abc123" },
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			createdName = options.Name
 			return zerogit.BranchResult{Branch: options.Name}, nil
@@ -2317,6 +2318,7 @@ func TestEnsureFeatureBranchRestoresDefaultBranchAfterCreate(t *testing.T) {
 		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
 			resetBranch = branch
 			resetTip = newTip
+			resetExpectedOld = expectedOld
 			return nil
 		},
 	})
@@ -2328,6 +2330,12 @@ func TestEnsureFeatureBranchRestoresDefaultBranchAfterCreate(t *testing.T) {
 	}
 	if resetBranch != "main" || resetTip != "origin/main" {
 		t.Fatalf("expected reset of main to origin/main, got branch=%q tip=%q", resetBranch, resetTip)
+	}
+	// The pre-create HEAD tip must reach ResetBranchRef as the compare-and-swap
+	// old value, or a concurrent advance of the default branch is silently
+	// overwritten instead of refused.
+	if resetExpectedOld != "abc123" {
+		t.Fatalf("expected compare-and-swap old value abc123, got %q", resetExpectedOld)
 	}
 }
 
@@ -2675,6 +2683,13 @@ func TestRunChangesBareRemotePushThenPRUsable(t *testing.T) {
 	}
 	if !strings.Contains(heads, "refs/heads/"+pushedBranch) {
 		t.Fatalf("expected feature branch %q on bare remote, got %q", pushedBranch, heads)
+	}
+	// The feature branch must exclusively own the new commit: local main goes
+	// back to its upstream tip so it does not diverge after a squash-merge.
+	localMain := strings.TrimSpace(runWorkflowGit(t, repo, "rev-parse", "refs/heads/main"))
+	remoteMain := strings.TrimSpace(runWorkflowGit(t, repo, "rev-parse", "refs/remotes/origin/main"))
+	if localMain != remoteMain {
+		t.Fatalf("expected local main restored to origin/main, got %s vs %s", localMain, remoteMain)
 	}
 
 	stdout.Reset()
