@@ -197,20 +197,26 @@ const maxMCPReasonRawLen = 16 * 1024
 // Escape sequences are consumed whole rather than dropping ESC alone: removing
 // the ESC and leaving "[2J" behind would print visible junk, and an abandoned
 // OSC payload can still smuggle a title-set or a hyperlink.
-func sanitizeTerminalReason(value string) string {
-	if len(value) > maxMCPReasonRawLen {
-		value = value[:maxMCPReasonRawLen]
-		// The cut lands on an arbitrary byte. Drop a rune the bound split so the
-		// panel never shows a replacement character it produced itself.
-		for len(value) > 0 {
-			decoded, width := utf8.DecodeLastRuneInString(value)
-			if decoded != utf8.RuneError || width > 1 {
-				break
-			}
-			value = value[:len(value)-1]
-		}
-	}
+// stripTerminalRejoiners removes the bytes that DISAPPEAR WITHOUT LEAVING A GAP:
+// escape sequences, and every other control byte except the newline, carriage
+// return and tab that become spaces upstream.
+//
+// The name is the point. These bytes do not merely vanish, they close up behind
+// themselves, so text on either side of one becomes adjacent. A server that
+// echoes a credential back with an escape inserted into the middle of it sends a
+// value that matches nothing during redaction and is reassembled into the intact
+// credential here. Splitting this out of sanitizeTerminalReason lets redaction
+// run against the same text the reader will eventually see, without inheriting
+// the display truncation, which would cut a secret in half and leave the head of
+// it unmatched.
+//
+// Newline, carriage return and tab are deliberately left alone: upstream turns
+// them into spaces that survive the collapse, so they separate rather than
+// rejoin, and normalizing them here would delete the word boundaries the reason
+// is easier to read with.
+func stripTerminalRejoiners(value string) string {
 	var out strings.Builder
+	out.Grow(len(value))
 	runes := []rune(value)
 	for index := 0; index < len(runes); index++ {
 		current := runes[index]
@@ -240,14 +246,39 @@ func sanitizeTerminalReason(value string) string {
 			}
 			continue
 		}
-		// Newlines and tabs become spaces so the reason stays on the single row
-		// the panel counted for it. Every other control byte is dropped: none
-		// carries a display meaning worth preserving here.
 		if current == '\n' || current == '\r' || current == '\t' {
-			out.WriteRune(' ')
+			out.WriteRune(current)
 			continue
 		}
+		// Every other control byte is dropped: none carries a display meaning
+		// worth preserving here.
 		if current < 0x20 || current == 0x7f || (current >= 0x80 && current <= 0x9f) {
+			continue
+		}
+		out.WriteRune(current)
+	}
+	return out.String()
+}
+
+func sanitizeTerminalReason(value string) string {
+	if len(value) > maxMCPReasonRawLen {
+		value = value[:maxMCPReasonRawLen]
+		// The cut lands on an arbitrary byte. Drop a rune the bound split so the
+		// panel never shows a replacement character it produced itself.
+		for len(value) > 0 {
+			decoded, width := utf8.DecodeLastRuneInString(value)
+			if decoded != utf8.RuneError || width > 1 {
+				break
+			}
+			value = value[:len(value)-1]
+		}
+	}
+	var out strings.Builder
+	for _, current := range stripTerminalRejoiners(value) {
+		// Newlines and tabs become spaces so the reason stays on the single row
+		// the panel counted for it.
+		if current == '\n' || current == '\r' || current == '\t' {
+			out.WriteRune(' ')
 			continue
 		}
 		out.WriteRune(current)
