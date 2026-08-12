@@ -1320,23 +1320,18 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		nextProvider = built
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
-		if err := config.PreflightProviderWrite(m.userConfigPath, profile.Name); err != nil {
-			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey, runtimeProfile.APIKey}})
-			return m, nil
-		}
-		// Capture flip: move the freshly entered key into the encrypted credential
-		// store before persisting, so config.json never holds the cleartext. The
-		// provider was already built above from runtimeProfile, which has the key.
-		// Fail-soft capture with no rollback if the config write below fails —
-		// see the note in cli/provider_setup.go; atomicity is #894.
+
 		secret := profile.APIKey
-		if !preserveExistingCredentialReference {
-			profile = config.SecureProviderProfile(profile, m.userConfigPath)
-		}
-		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
+		committed, err := config.CommitProviderProfile(m.userConfigPath, config.ProviderCommit{
+			Profile:       profile,
+			SetActive:     true,
+			KeepStoredKey: preserveExistingCredentialReference,
+		})
+		if err != nil {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			return m, nil // nothing committed to live state yet
 		}
+		profile = committed.Persisted
 	}
 
 	// Both succeeded — commit the live provider, profile, model, and the child
@@ -1438,22 +1433,20 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 				wizard.err = redaction.RedactString(err.Error(), redaction.Options{})
 				return m, nil
 			}
-
-		}
-		// Marker first, secret second. The reverse order (which logout already
-		// fixed) leaves apiKeyStored:true with no secret behind it if the marker
-		// write fails — a profile that claims a credential every lookup misses.
-		// Clearing first can at worst orphan a secret no profile reads.
-		if strings.TrimSpace(m.userConfigPath) != "" {
-			if _, err := m.clearProviderKeyStored(m.userConfigPath, name); err != nil {
-				wizard.err = "Stored key marker cleanup failed: " + redaction.ErrorMessage(err, redaction.Options{})
+			credentialCandidates, exactName, err := config.ProviderCredentialCandidates(m.userConfigPath, name)
+			if err != nil {
+				wizard.err = redaction.ErrorMessage(err, redaction.Options{})
 				return m, nil
 			}
-		}
-		if _, err := m.deleteProviderKey(m.userConfigPath, name); err != nil {
-			wizard.err = "Stored key removal failed: " + redaction.ErrorMessage(err, redaction.Options{}) +
-				" — the saved-key marker was already cleared, so no profile claims it, but the secret may still be in the credential store."
-			return m, nil
+			if _, err := config.DeleteProviderCredentials(m.userConfigPath, credentialCandidates, exactName); err != nil {
+				wizard.err = "remove stored key: " + redaction.ErrorMessage(err, redaction.Options{})
+				return m, nil
+			}
+		} else {
+			if _, err := config.ForgetProviderKey(name); err != nil {
+				wizard.err = "remove stored key: " + redaction.ErrorMessage(err, redaction.Options{})
+				return m, nil
+			}
 		}
 		// Reconcile the live session with the disk write: savedProviders and
 		// providerProfile still carry APIKeyStored:true otherwise, so /providers

@@ -752,9 +752,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// the encrypted credential store (interactive runs only; headless exec keeps
 	// its existing behavior). Non-fatal — a missing keyring or write error leaves
 	// the inline key in place and this run still uses the already-resolved key.
-	if store, storeErr := config.ProviderKeyStoreAt(filepath.Dir(userConfigPath)); storeErr == nil {
-		_, _ = config.MigratePlaintextProviderKeys(userConfigPath, store)
-	}
+	_, _ = config.MigratePlaintextProviderKeysTransactional(userConfigPath)
 	doctorUserConfigPath := ""
 	projectConfigPath := ""
 	if resolveOptions, optErr := config.DefaultResolveOptions(workspaceRoot); optErr == nil {

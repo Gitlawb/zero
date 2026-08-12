@@ -133,11 +133,22 @@ func PublishProviderCredential(path string, exactName string, key string) error 
 // ForgetProviderKey removes a provider's stored API key from the credential store,
 // reporting whether one existed. Used by the lifecycle "remove key" / auth logout.
 func ForgetProviderKey(provider string) (bool, error) {
-	store, err := ProviderKeyStore()
+	path, err := DefaultUserConfigPath()
 	if err != nil {
 		return false, err
 	}
-	return store.Delete(provider)
+	return DeleteProviderCredentials(path, []string{provider}, provider)
+}
+
+// StoreProviderCredential serializes a credential-only writer with provider
+// profile transactions. It intentionally does not change config markers; STT
+// setup uses the shared provider credential store without owning a profile row.
+func StoreProviderCredential(path, provider, key string) error {
+	_, err := runProviderProfileOperation(path, true, true, func(op *providerProfileOperation) error {
+		op.publish = false
+		return op.setKey(provider, key)
+	})
+	return err
 }
 
 // ClearProviderKeyStored unsets the APIKeyStored marker for a provider in the
@@ -156,28 +167,18 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 }
 
 func clearProviderKeyStoredWhere(path string, matches func(string) bool) (bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read config %s: %w", path, err)
-	}
-	var cfg FileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
 	changed := false
-	for index := range cfg.Providers {
-		if matches(cfg.Providers[index].Name) && cfg.Providers[index].APIKeyStored {
-			cfg.Providers[index].APIKeyStored = false
-			changed = true
+	_, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		for index := range op.config.Providers {
+			if matches(op.config.Providers[index].Name) && op.config.Providers[index].APIKeyStored {
+				op.config.Providers[index].APIKeyStored = false
+				changed = true
+			}
 		}
-	}
-	if !changed {
-		return false, nil
-	}
-	return true, writeConfigFile(path, cfg)
+		op.publish = changed
+		return nil
+	})
+	return changed, err
 }
 
 // ClearProviderKeyStoredCaseVariants unsets the APIKeyStored marker on every
@@ -196,6 +197,33 @@ func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
 	return clearProviderKeyStoredWhere(path, func(name string) bool {
 		return credstore.NormalizeProvider(name) == providerIdentity
 	})
+}
+
+// DeleteProviderCredentials deletes the candidate API-key entries and clears
+// every marker sharing markerProvider's credential identity in one transaction.
+func DeleteProviderCredentials(path string, candidates []string, markerProvider string) (bool, error) {
+	removed := false
+	markerIdentity := credstore.NormalizeProvider(markerProvider)
+	_, err := runProviderProfileOperation(path, true, true, func(op *providerProfileOperation) error {
+		for _, candidate := range candidates {
+			candidateRemoved, err := op.deleteKey(candidate)
+			if err != nil {
+				return fmt.Errorf("delete stored key for %q: %w", candidate, err)
+			}
+			removed = removed || candidateRemoved
+		}
+		if op.exists && ValidatePersistedProviderNames(op.config) == nil {
+			for index := range op.config.Providers {
+				if credstore.NormalizeProvider(op.config.Providers[index].Name) == markerIdentity {
+					op.config.Providers[index].APIKeyStored = false
+				}
+			}
+		} else {
+			op.publish = false
+		}
+		return nil
+	})
+	return removed, err
 }
 
 // MigratePlaintextProviderKeys moves any inline plaintext API key in the config at
@@ -245,6 +273,30 @@ func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) 
 		return migrated, fmt.Errorf("rewrite config after migration %s: %w", path, err)
 	}
 	return migrated, nil
+}
+
+// MigratePlaintextProviderKeysTransactional is the production startup migration.
+// It serializes plaintext capture with every other provider config/key writer.
+func MigratePlaintextProviderKeysTransactional(path string) (int, error) {
+	migrated := 0
+	_, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		for index := range op.config.Providers {
+			profile := &op.config.Providers[index]
+			key := strings.TrimSpace(profile.APIKey)
+			if key == "" || strings.TrimSpace(profile.Name) == "" {
+				continue
+			}
+			if err := op.setKey(profile.Name, key); err != nil {
+				continue
+			}
+			profile.APIKey = ""
+			profile.APIKeyStored = true
+			migrated++
+		}
+		op.publish = migrated > 0
+		return nil
+	})
+	return migrated, err
 }
 
 // HasConfiguredCredential reports whether the profile is set up to authenticate
