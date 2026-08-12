@@ -36,6 +36,12 @@ const mcpDisplayRedacted = "[REDACTED]"
 
 var mcpStateUnsafeToolNameChars = regexp.MustCompile(`[^A-Za-z0-9_]+`)
 
+// shortestMCPSecret is the floor for treating a configured value as a credential
+// to strike out of an error message. A configured "1" or "true" is not a secret,
+// and redacting it by equality would punch holes through unrelated text, which is
+// its own way of making an error useless.
+const shortestMCPSecret = 8
+
 func BuildMCPViewState(options MCPStateOptions) MCPViewState {
 	toolViews := buildMCPToolViews(options.Config, options.Registry)
 	toolCounts := make(map[string]int, len(toolViews))
@@ -44,18 +50,23 @@ func BuildMCPViewState(options MCPStateOptions) MCPViewState {
 	}
 
 	return MCPViewState{
-		Servers:     buildMCPServerViews(options.Config, toolCounts, options.Skipped),
+		Servers:     buildMCPServerViews(options.Config, toolCounts, options.Skipped, options.TokenStore),
 		Tools:       toolViews,
 		Permissions: buildMCPPermissionSummary(options),
 		OAuth:       buildMCPOAuthSummary(options.Config, options.TokenStore),
 	}
 }
 
-func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skipped []mcp.SkippedServer) []MCPServerView {
+func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skipped []mcp.SkippedServer, tokenStore *mcp.TokenStore) []MCPServerView {
 	failures := make(map[string]error, len(skipped))
 	for _, entry := range skipped {
 		failures[entry.Name] = entry.Err
 	}
+	// Read the stored bearers ONCE. Every load re-reads and re-parses the whole
+	// store file, and the material is the same for every row anyway. nil is the
+	// normal case rather than a test-only one: startup soft-fails the token store
+	// to nil with a warning, and SecretValues is nil-safe for exactly that.
+	tokenSecrets := tokenStore.SecretValues()
 	names := sortedMCPServerNames(cfg)
 	servers := make([]MCPServerView, 0, len(names))
 	for _, name := range names {
@@ -70,9 +81,7 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 		default:
 			if err, ok := failures[name]; ok {
 				state = "failed"
-				message = redaction.ErrorMessage(err, redaction.Options{
-					ExtraSecretValues: mcpServerSecretValues(raw),
-				})
+				message = redactMCPFailureReason(err, raw, tokenSecrets)
 				if strings.TrimSpace(message) == "" {
 					message = "server did not start"
 				}
@@ -89,6 +98,37 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 		})
 	}
 	return servers
+}
+
+// redactMCPFailureReason turns a failed server's error into text safe to render
+// AND to persist, since the panel's output goes into the transcript.
+//
+// The second pass is the point. Redaction matches a configured value literally,
+// and the reason is written by the server, which is free to insert a byte into
+// the middle of a credential it echoes back: `wk-live-\x1b[31m4f9c2b7ae1d8` is
+// not equal to the configured `wk-live-4f9c2b7ae1d8`, so the first pass sees
+// nothing to redact. The display sanitizer downstream then removes the escape
+// WITHOUT leaving a gap, reassembling the intact credential on screen. Every
+// control byte it drops rejoins the same way, so this is not specific to ANSI.
+//
+// So the text is normalized to what the reader will actually see, and redaction
+// is run again against that. Normalizing before the first pass instead would
+// work equally well; running it after keeps redaction.ErrorMessage's handling of
+// a nil or wrapped error exactly as it was.
+//
+// The stored bearer goes in alongside the configured values because a failed
+// OAuth server can echo the token in its error body, and no pattern can
+// recognize an opaque token by shape.
+func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets []string) string {
+	secrets := mcpServerSecretValues(raw)
+	for _, value := range tokenSecrets {
+		if trimmed := strings.TrimSpace(value); len(trimmed) >= shortestMCPSecret {
+			secrets = append(secrets, trimmed)
+		}
+	}
+	options := redaction.Options{ExtraSecretValues: secrets}
+	message := redaction.ErrorMessage(err, options)
+	return redaction.RedactString(stripTerminalRejoiners(message), options)
 }
 
 func buildMCPToolViews(cfg config.MCPConfig, registry *tools.Registry) []MCPToolView {
@@ -524,10 +564,9 @@ func mcpPermissionTarget(grant mcp.PermissionGrant) string {
 // redacting it by equality would punch holes through unrelated text, which is
 // its own way of making an error message useless.
 func mcpServerSecretValues(raw config.MCPServerConfig) []string {
-	const shortestSecret = 8
-	values := make([]string, 0, len(raw.Headers)+len(raw.Env)+2)
+	values := make([]string, 0, len(raw.Headers)+len(raw.Env)+len(raw.Args)+2)
 	add := func(value string) {
-		if trimmed := strings.TrimSpace(value); len(trimmed) >= shortestSecret {
+		if trimmed := strings.TrimSpace(value); len(trimmed) >= shortestMCPSecret {
 			values = append(values, trimmed)
 		}
 	}
@@ -539,9 +578,76 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	for _, value := range raw.Env {
 		add(value)
 	}
+	// Args carry it too, and more visibly: a stdio child that rejects its own
+	// invocation usually prints that invocation back, and connectStdio appends
+	// the captured stderr to the initialization error this panel renders.
+	for _, value := range sensitiveMCPArgValues(raw.Args) {
+		add(value)
+	}
 	add(raw.Auth)
 	if raw.OAuth != nil {
 		add(raw.OAuth.ClientSecret)
+	}
+	return values
+}
+
+// sensitiveMCPArgValues returns the VALUES a stdio server is launched with
+// behind a sensitive flag, for redaction. redactedCommandArgs answers a
+// different question a few lines up: it returns display strings, so the secret
+// is already gone by the time it returns and nothing there can be reused here.
+// Only the predicates are shared, deliberately, so the two cannot drift apart
+// about which flags are sensitive.
+//
+// Values are trimmed because the child is launched with trimmed args
+// (internal/mcp/config.go), and it can only echo back what it was given. An
+// untrimmed candidate would be compared against a string the child never saw.
+//
+// The predicate matches on substrings, so a value behind a flag like
+// --auth-type is collected as well. Redacting an enum out of a message costs
+// some readability; not redacting a credential costs the credential, so the
+// collection is deliberately the wider of the two.
+func sensitiveMCPArgValues(args []string) []string {
+	values := make([]string, 0, len(args))
+	// A candidate that is itself a flag is never a value. Reading one would put
+	// something like "--verbose" into the redaction set, and every message
+	// mentioning it would lose the word.
+	isFlag := func(value string) bool { return strings.HasPrefix(value, "-") }
+	pending := false
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			// Blanks are skipped rather than consumed, matching the display pass.
+			// Consuming one would take the blank as the value and leave the real
+			// secret in the next position unredacted.
+			continue
+		}
+		if pending {
+			pending = false
+			if !isFlag(arg) {
+				values = append(values, arg)
+				continue
+			}
+			// Otherwise fall through: this argument is a flag in its own right.
+		}
+		// Cut at the FIRST "=" and keep the whole tail, so base64 padding and
+		// values that themselves contain "=" survive intact.
+		if key, rest, ok := strings.Cut(arg, "="); ok && isSensitiveMCPDisplayKey(key) {
+			values = append(values, strings.TrimSpace(rest))
+			continue
+		}
+		// A flag and its value packed into a single argument. The display pass
+		// gets this shape wrong in the other direction (it prints the whole thing
+		// verbatim, then redacts the following, unrelated argument), so this
+		// cannot be delegated to it.
+		if flag, rest, ok := strings.Cut(arg, " "); ok && isSensitiveMCPDisplayFlag(flag) {
+			values = append(values, strings.TrimSpace(rest))
+			continue
+		}
+		if isSensitiveMCPDisplayFlag(arg) {
+			// The value is the next argument, if there is one. A sensitive flag in
+			// the last position simply has nothing to redact.
+			pending = true
+		}
 	}
 	return values
 }
