@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -177,7 +176,7 @@ func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
 	if !strings.Contains(stdout.String(), "new API key saved") {
 		t.Fatalf("expected saved-key confirmation, got %q", stdout.String())
 	}
-	cfg := readCLIConfigFixture(t, configPath)
+	cfg := readFileConfig(t, configPath)
 	if cfg.ActiveProvider != "openrouter" || len(cfg.Providers) != 1 {
 		t.Fatalf("config = %#v", cfg)
 	}
@@ -267,7 +266,7 @@ func TestEnsureLoginProviderProfileAddsProviderWithoutStealingActive(t *testing.
 		t.Fatalf("expected switch hint, got %q", line)
 	}
 
-	cfg := readCLIConfigFixture(t, configPath)
+	cfg := readFileConfig(t, configPath)
 	if cfg.ActiveProvider != "opengateway" {
 		t.Fatalf("active provider changed to %q", cfg.ActiveProvider)
 	}
@@ -284,7 +283,7 @@ func TestEnsureLoginProviderProfileAddsProviderWithoutStealingActive(t *testing.
 	if !strings.Contains(line, "already configured") {
 		t.Fatalf("expected already-configured guidance, got %q", line)
 	}
-	cfg = readCLIConfigFixture(t, configPath)
+	cfg = readFileConfig(t, configPath)
 	if len(cfg.Providers) != 2 {
 		t.Fatalf("repeat login duplicated the profile: %d providers", len(cfg.Providers))
 	}
@@ -298,7 +297,7 @@ func TestEnsureLoginProviderProfileActivatesOnFreshConfig(t *testing.T) {
 	if !strings.Contains(line, "set it active") {
 		t.Fatalf("fresh config should adopt the login as active, got %q", line)
 	}
-	cfg := readCLIConfigFixture(t, configPath)
+	cfg := readFileConfig(t, configPath)
 	if cfg.ActiveProvider != "chatgpt" {
 		t.Fatalf("active provider = %q, want chatgpt", cfg.ActiveProvider)
 	}
@@ -598,7 +597,6 @@ func TestRunAuthLogoutClearsMarkerForCaseVariantSpelling(t *testing.T) {
 		t.Fatal("logout left the stored key behind")
 	}
 }
-
 func TestRunAuthStatusResolvesCatalogLoginCandidates(t *testing.T) {
 	storePath := withAuthStore(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -969,7 +967,7 @@ func TestRunAuthLogoutKeepsDistinctUnicodeCredentials(t *testing.T) {
 	if key, ok, err := keyStore.Get("s"); err != nil || !ok || key != "long-s-is-not-s" {
 		t.Fatalf("stored API key = %q, %v, %v; want the unrelated profile untouched", key, ok, err)
 	}
-	saved := readCLIConfigFixture(t, configPath).Providers
+	saved := readFileConfig(t, configPath).Providers
 	if len(saved) != 1 || saved[0].Name != "s" || !saved[0].APIKeyStored {
 		t.Fatalf("providers = %+v, want the saved profile keeping its stored-key marker", saved)
 	}
@@ -1106,18 +1104,18 @@ func TestRunAuthOpenRouterFailsWhenTheKeyCannotBeSaved(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"providers":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	calls := 0
+	loginComplete := false
 	var stdout, stderr bytes.Buffer
 	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
 		userConfigPath: func() (string, error) {
-			calls++
-			if calls > 1 {
+			if loginComplete {
 				// The preflight passed; break the path only for the save that follows.
 				return "", errors.New("config path unavailable")
 			}
 			return configPath, nil
 		},
 		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			loginComplete = true
 			return "sk-openrouter-test", nil
 		},
 	})
@@ -1129,6 +1127,20 @@ func TestRunAuthOpenRouterFailsWhenTheKeyCannotBeSaved(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "could not save") {
 		t.Fatalf("stderr = %q, want the save failure reported", stderr.String())
+	}
+}
+
+func TestRunAuthRefreshRejectsEmptyCredentialCandidates(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "refresh", "   "}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitCrash || !strings.Contains(stderr.String(), "no credential candidates") {
+		t.Fatalf("exit = %d stderr = %q, want empty-candidate error", code, stderr.String())
 	}
 }
 

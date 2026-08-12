@@ -1212,20 +1212,22 @@ func TestWizardProviderStoredKey(t *testing.T) {
 
 func TestProviderWizardManageKeyRemove(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
-	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Set("acme-cloud", "sk-secret"); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("exclusive catalog alias is removed and memory is refreshed", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		profile := config.ProviderProfile{Name: "acme", CatalogID: "acme-cloud", APIKeyStored: true}
+		if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Set("acme-cloud", "sk-secret"); err != nil {
+			t.Fatal(err)
+		}
 
 	m := newModel(context.Background(), Options{UserConfigPath: configPath})
 	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "WORK", manageKeyCursor: 2}
@@ -2010,11 +2012,23 @@ func TestWizardProviderStoredKeyDistinguishesUnicodeIdentities(t *testing.T) {
 func TestExistingAimlapiConfigurationRequiresCatalogOwnership(t *testing.T) {
 	t.Setenv("AIMLAPI_API_KEY", "")
 	m := model{savedProviders: []config.ProviderProfile{{
-		Name: "aimlapi", BaseURL: "https://api.aimlapi.com/v1", APIKey: "foreign-secret",
+		Name: "aimlapi", BaseURL: "https://api.aimlapi.com/v1", Model: "legacy-model", APIKey: "legacy-secret",
+	}}}
+
+	profile, runtimeKey, ok := m.existingAimlapiConfiguration()
+	if !ok || runtimeKey != "legacy-secret" || profile.Name != "aimlapi" || profile.Model != "legacy-model" {
+		t.Fatalf("legacy configuration = (%+v, %q, %v), want settings preserved", profile, runtimeKey, ok)
+	}
+}
+
+func TestExistingAimlapiConfigurationRejectsForeignCatalogOwnership(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "")
+	m := model{savedProviders: []config.ProviderProfile{{
+		Name: "aimlapi", CatalogID: "custom-openai-compatible", BaseURL: "https://api.aimlapi.com/v1", APIKey: "foreign-secret",
 	}}}
 
 	profile, runtimeKey, ok := m.existingAimlapiConfiguration()
 	if ok || profile.Name != "" || runtimeKey != "" {
-		t.Fatalf("name-only profile was treated as AIMLAPI-owned: (%+v, %q, %v)", profile, runtimeKey, ok)
+		t.Fatalf("foreign catalog profile was treated as AIMLAPI-owned: (%+v, %q, %v)", profile, runtimeKey, ok)
 	}
 }

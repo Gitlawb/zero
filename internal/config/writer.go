@@ -532,6 +532,8 @@ func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 // The canonical name is returned separately for marker mutations. On a config
 // read error, callers still receive the requested spelling so logout can delete
 // the credential it was explicitly asked to clear before reporting the error.
+// An ambiguous catalog id is different: it returns no candidates at all, so a
+// destructive caller cannot act on a spelling several profiles could own.
 func ProviderCredentialCandidates(path, addressedName string) (candidates []string, canonicalName string, err error) {
 	add := func(candidate string) {
 		candidate = strings.TrimSpace(candidate)

@@ -155,8 +155,11 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 }
 
 func aimlapiProfile(profile config.ProviderProfile) bool {
-	return strings.TrimSpace(profile.CatalogID) != "" &&
-		config.SameProviderIdentity(profile.CatalogID, "aimlapi")
+	catalogID := strings.TrimSpace(profile.CatalogID)
+	if catalogID != "" {
+		return config.SameProviderIdentity(catalogID, "aimlapi")
+	}
+	return config.SameProviderIdentity(profile.Name, "aimlapi")
 }
 
 func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {

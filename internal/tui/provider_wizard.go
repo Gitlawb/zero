@@ -156,9 +156,9 @@ func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
 // from the ID token and stores it on the saved token so the Codex provider can
 // inject it as a header on every request; other OAuth providers (xAI) run the
 // generic engine login which stores a refreshable token.
-func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int, configPath ...string) tea.Cmd {
+func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int, configPath string) tea.Cmd {
 	providerID := provider.ID
-	path := firstString(configPath)
+	path := configPath
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
@@ -188,8 +188,8 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 // the token's Account field) and persists the resulting token via the oauth
 // store. The runtime resolver then attaches the bearer to Codex calls and the
 // Codex provider reads the Account field for the `chatgpt-account-id` header.
-func runProviderChatGPTLogin(configPath ...string) error {
-	path := firstString(configPath)
+func runProviderChatGPTLogin(configPath string) error {
+	path := configPath
 	if err := preflightOAuthProviderConfig(path, "chatgpt"); err != nil {
 		return err
 	}
@@ -214,13 +214,6 @@ func runProviderChatGPTLogin(configPath ...string) error {
 		return err
 	}
 	return store.Save(oauth.ProviderKey("chatgpt"), token)
-}
-
-func firstString(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
 }
 
 func preflightOAuthProviderConfig(path string, providerID string) error {
@@ -289,8 +282,8 @@ func buildOAuthPresetEnv() map[string]string {
 // runProviderTokenLogin runs the generic OAuth engine login for a provider that
 // has a built-in preset (e.g. xAI), storing a refreshable token under
 // provider:<name>. The runtime resolver then attaches it to model calls.
-func runProviderTokenLogin(name string, configPath ...string) error {
-	path := firstString(configPath)
+func runProviderTokenLogin(name string, configPath string) error {
+	path := configPath
 	if err := preflightOAuthProviderConfig(path, name); err != nil {
 		return err
 	}
@@ -331,9 +324,9 @@ type providerWizardDeviceCodeMsg struct {
 
 // providerWizardDevicePrepareCmd runs phase 1 of the device-code login off the UI
 // goroutine and reports the code to display (or an error).
-func providerWizardDevicePrepareCmd(name string, attemptID int, configPath ...string) tea.Cmd {
+func providerWizardDevicePrepareCmd(name string, attemptID int, configPath string) tea.Cmd {
 	return func() tea.Msg {
-		if err := preflightOAuthProviderConfig(firstString(configPath), name); err != nil {
+		if err := preflightOAuthProviderConfig(configPath, name); err != nil {
 			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
 		}
 		auth, cfg, err := oauthDevicePrepare(name)
@@ -353,9 +346,9 @@ func providerWizardDevicePrepareCmd(name string, attemptID int, configPath ...st
 
 // providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
 // UI goroutine and reports completion as a regular OAuth result.
-func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth, configPath ...string) tea.Cmd {
+func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) tea.Cmd {
 	return func() tea.Msg {
-		path := firstString(configPath)
+		path := configPath
 		if err := preflightOAuthProviderConfig(path, name); err != nil {
 			return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: err}
 		}

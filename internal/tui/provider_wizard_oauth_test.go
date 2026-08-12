@@ -497,9 +497,13 @@ func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
 }
 
 func TestProviderWizardDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
-	msg := providerWizardDevicePrepareCmd("xai", 42, t.TempDir())().(providerWizardDeviceCodeMsg)
-	if msg.err == nil {
-		t.Fatal("device-code preparation should reject an unreadable config before requesting a code")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"demo"},{"name":"DEMO"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg := providerWizardDevicePrepareCmd("xai", 42, configPath)().(providerWizardDeviceCodeMsg)
+	if msg.err == nil || !strings.Contains(msg.err.Error(), "differ only by case") {
+		t.Fatalf("device-code preparation error = %v, want provider identity validation", msg.err)
 	}
 	if msg.attemptID != 42 {
 		t.Fatalf("attemptID = %d, want 42", msg.attemptID)

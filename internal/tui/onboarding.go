@@ -537,8 +537,8 @@ func (m *model) moveSetupMethod(delta int) {
 
 // setupOAuthCmd runs the chosen provider's browser OAuth login off the UI
 // goroutine for first-run setup. Mirrors the /provider wizard's flow.
-func setupOAuthCmd(provider providercatalog.Descriptor, configPath ...string) tea.Cmd {
-	path := firstString(configPath)
+func setupOAuthCmd(provider providercatalog.Descriptor, configPath string) tea.Cmd {
+	path := configPath
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
@@ -575,9 +575,9 @@ type setupOAuthDeviceMsg struct {
 	err        error
 }
 
-func setupDevicePrepareCmd(name string, configPath ...string) tea.Cmd {
+func setupDevicePrepareCmd(name string, configPath string) tea.Cmd {
 	return func() tea.Msg {
-		if err := preflightOAuthProviderConfig(firstString(configPath), name); err != nil {
+		if err := preflightOAuthProviderConfig(configPath, name); err != nil {
 			return setupOAuthDeviceMsg{providerID: name, err: err}
 		}
 		auth, cfg, err := oauthDevicePrepare(name)
@@ -594,9 +594,9 @@ func setupDevicePrepareCmd(name string, configPath ...string) tea.Cmd {
 	}
 }
 
-func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath ...string) tea.Cmd {
+func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) tea.Cmd {
 	return func() tea.Msg {
-		path := firstString(configPath)
+		path := configPath
 		if err := preflightOAuthProviderConfig(path, name); err != nil {
 			return setupOAuthMsg{tokenLogin: true, providerID: name, err: err}
 		}

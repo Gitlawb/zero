@@ -67,8 +67,8 @@ func oauthDevicePrepare(name string) (oauth.DeviceAuth, oauth.Config, error) {
 // oauthDeviceComplete polls for the token authorized via oauthDevicePrepare and
 // stores it under provider:<name> (phase 2). The runtime resolver then attaches
 // the refreshable token to model calls.
-func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath ...string) error {
-	path := firstString(configPath)
+func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) error {
+	path := configPath
 	if err := preflightOAuthProviderConfig(path, name); err != nil {
 		return err
 	}
