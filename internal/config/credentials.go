@@ -86,6 +86,12 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 	if path == "" || provider == "" {
 		return false, nil
 	}
+	return clearProviderKeyStoredWhere(path, func(name string) bool {
+		return strings.TrimSpace(name) == provider
+	})
+}
+
+func clearProviderKeyStoredWhere(path string, matches func(string) bool) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -99,7 +105,7 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 	}
 	changed := false
 	for index := range cfg.Providers {
-		if strings.TrimSpace(cfg.Providers[index].Name) == provider && cfg.Providers[index].APIKeyStored {
+		if matches(cfg.Providers[index].Name) && cfg.Providers[index].APIKeyStored {
 			cfg.Providers[index].APIKeyStored = false
 			changed = true
 		}
@@ -122,29 +128,10 @@ func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
 	if path == "" || provider == "" {
 		return false, nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read config %s: %w", path, err)
-	}
-	var cfg FileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-	changed := false
 	providerIdentity := credstore.NormalizeProvider(provider)
-	for index := range cfg.Providers {
-		if credstore.NormalizeProvider(cfg.Providers[index].Name) == providerIdentity && cfg.Providers[index].APIKeyStored {
-			cfg.Providers[index].APIKeyStored = false
-			changed = true
-		}
-	}
-	if !changed {
-		return false, nil
-	}
-	return true, writeConfigFile(path, cfg)
+	return clearProviderKeyStoredWhere(path, func(name string) bool {
+		return credstore.NormalizeProvider(name) == providerIdentity
+	})
 }
 
 // MigratePlaintextProviderKeys moves any inline plaintext API key in the config at

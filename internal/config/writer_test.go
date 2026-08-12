@@ -1024,6 +1024,28 @@ func TestEditProviderRejectsCollisionAndUnknown(t *testing.T) {
 	}
 }
 
+func TestUpsertProviderRejectsCaseVariantWithoutRewritingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "m1"},
+		},
+	}, 0o600)
+
+	_, err := UpsertProvider(path, ProviderProfile{Name: "WORK", Model: "m2"}, false)
+	if err == nil || !strings.Contains(err.Error(), `provider "WORK" already exists as "work"`) {
+		t.Fatalf("UpsertProvider() error = %v, want case-variant collision", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read config: %v", readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("rejected upsert rewrote config\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
 func TestSetActiveProviderRequiresExactProviderIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	before := writeConfigFixture(t, path, FileConfig{
