@@ -39,6 +39,7 @@ type Manager struct {
 	// openBrowser is invoked with the authorization URL for loopback logins.
 	// Tests inject a function that drives the loopback redirect.
 	openBrowser func(authURL string) error
+	beforeSave  func() error
 	// refreshLocks serializes concurrent refreshes per key so parallel callers
 	// don't each spend the single-use refresh token; the loser reuses the rotated
 	// token. refreshMu guards the map (M7).

@@ -67,8 +67,9 @@ func oauthDevicePrepare(name string) (oauth.DeviceAuth, oauth.Config, error) {
 // oauthDeviceComplete polls for the token authorized via oauthDevicePrepare and
 // stores it under provider:<name> (phase 2). The runtime resolver then attaches
 // the refreshable token to model calls.
-func oauthDeviceComplete(configPath string, name string, cfg oauth.Config, auth oauth.DeviceAuth) error {
-	if err := preflightOAuthLogin(configPath); err != nil {
+func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath ...string) error {
+	path := firstString(configPath)
+	if err := preflightOAuthProviderConfig(path, name); err != nil {
 		return err
 	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
@@ -79,7 +80,7 @@ func oauthDeviceComplete(configPath string, name string, cfg oauth.Config, auth 
 		Store:        store,
 		HTTPClient:   &http.Client{Timeout: 60 * time.Second},
 		AllowPresets: true, // preset config is needed to poll/exchange the device token
-		BeforeSave:   func() error { return preflightOAuthLogin(configPath) },
+		BeforeSave:   func() error { return preflightOAuthProviderConfig(path, name) },
 	})
 	if err != nil {
 		return err
