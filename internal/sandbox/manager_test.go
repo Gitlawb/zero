@@ -301,28 +301,28 @@ func TestSandboxManagerRejectsMacOSTokenInsideWritableWorkspace(t *testing.T) {
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "inside a shell-writable root") {
-		t.Fatalf("BuildCommandPlan error = %v, want macOS writable-token failure", err)
+	if err == nil || !strings.Contains(err.Error(), "hard-link aliases") {
+		t.Fatalf("BuildCommandPlan error = %v, want macOS hard-link-alias failure", err)
 	}
 }
 
-func TestProtectedCredentialInWritableMacOSRootMatchesSeatbeltWrites(t *testing.T) {
+func TestProtectedCredentialLinkableIntoWritableMacOSRoot(t *testing.T) {
 	restricted := PermissionProfile{FileSystem: FileSystemPolicy{
 		Kind:       FileSystemRestricted,
 		WriteRoots: []WritableRoot{{Root: "/Users/Test/Workspace"}},
 	}}
-	if !protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/users/test/workspace/token")}) {
+	if !protectedCredentialLinkableIntoWritableMacOSRoot(restricted, []string{normalizeProfilePath("/users/test/workspace/token")}) {
 		t.Fatal("case-variant token under a macOS write root should be rejected")
 	}
-	if protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/Users/Test/Credentials/token")}) {
+	if protectedCredentialLinkableIntoWritableMacOSRoot(restricted, []string{normalizeProfilePath("/Users/Test/Credentials/token")}) {
 		t.Fatal("token outside every macOS write root should remain allowed")
 	}
 	restricted.FileSystem.AllowTemp = true
-	if !protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/private/tmp/bridge-token")}) {
+	if !protectedCredentialLinkableIntoWritableMacOSRoot(restricted, []string{normalizeProfilePath("/private/tmp/bridge-token")}) {
 		t.Fatal("token under an allowed temporary root should be rejected")
 	}
 	unrestricted := PermissionProfile{FileSystem: FileSystemPolicy{Kind: FileSystemUnrestricted}}
-	if !protectedCredentialInWritableMacOSRoot(unrestricted, []string{"/credentials/token"}) {
+	if !protectedCredentialLinkableIntoWritableMacOSRoot(unrestricted, []string{"/credentials/token"}) {
 		t.Fatal("an unrestricted macOS filesystem makes every token path shell-writable")
 	}
 
@@ -340,7 +340,7 @@ func TestProtectedCredentialInWritableMacOSRootMatchesSeatbeltWrites(t *testing.
 		Kind:       FileSystemRestricted,
 		WriteRoots: []WritableRoot{{Root: writable}},
 	}}
-	if !protectedCredentialInWritableMacOSRoot(symlinkProfile, []string{link, target}) {
+	if !protectedCredentialLinkableIntoWritableMacOSRoot(symlinkProfile, []string{link, target}) {
 		t.Fatal("selected symlink inside a write root must be rejected even when its target is outside")
 	}
 }

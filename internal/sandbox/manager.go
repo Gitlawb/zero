@@ -235,8 +235,8 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny rules or protected credentials cannot be enforced")
 	}
 	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "darwin" &&
-		protectedCredentialInWritableMacOSRoot(profile, protectedCredentials) {
-		return SandboxExecutionRequest{}, errors.New("macOS sandbox cannot protect the remote token file inside a shell-writable root; move the token file outside the workspace and temporary directories")
+		protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentials) {
+		return SandboxExecutionRequest{}, errors.New("macOS sandbox cannot protect the remote token file from hard-link aliases in a shell-writable root; use ZERO_DAEMON_REMOTE_TOKEN, place the file on a separate filesystem, or remove shell write access")
 	}
 	// Windows: the FULL OS sandbox needs a one-time elevated `zero sandbox setup`
 	// (it applies WFP network filters + workspace ACLs and writes a marker).
@@ -297,7 +297,7 @@ func policyHasExplicitDeny(policy Policy) bool {
 	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
 }
 
-func protectedCredentialInWritableMacOSRoot(profile PermissionProfile, protected []string) bool {
+func protectedCredentialLinkableIntoWritableMacOSRoot(profile PermissionProfile, protected []string) bool {
 	if len(protected) == 0 {
 		return false
 	}
@@ -320,7 +320,7 @@ func protectedCredentialInWritableMacOSRoot(profile PermissionProfile, protected
 			continue
 		}
 		for _, root := range writeRoots {
-			if pathWithinMacOSRoot(root, credential) {
+			if pathWithinMacOSRoot(root, credential) || pathsShareFilesystem(root, credential) {
 				return true
 			}
 		}

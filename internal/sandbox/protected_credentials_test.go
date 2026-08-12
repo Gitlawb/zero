@@ -278,7 +278,7 @@ func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
 	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	assertArgsContainSequence(t, plan.Args, "--ro-bind", "/dev/null", token)
 
-	if !protectedCredentialInWritableMacOSRoot(profile, protectedCredentialPaths()) {
+	if !protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentialPaths()) {
 		t.Fatalf("spaced token %q under writable root %q must fail macOS preflight", token, workspace)
 	}
 }

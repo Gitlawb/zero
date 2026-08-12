@@ -808,10 +808,10 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 
 // denyReadRules emits seatbelt deny rules for the profile's read-denied paths.
 // The rules name paths — `(literal …)` for files, `(subpath …)` for directories
-// — because that is the whole of seatbelt's vocabulary here. A name created
-// afterwards for the same inode, most obviously a hard link made by a sandboxed
-// shell, is not covered by any of them. That applies equally to a
-// user-configured DenyRead and to the automatic remote-bridge-token deny; the
+// — because that is the whole of seatbelt's vocabulary here. A user-configured
+// DenyRead can therefore still be bypassed through a hard-link name created
+// after profile construction. Automatic remote-token protection fails closed
+// before launch whenever the token can be linked into a shell-writable root;
 // in-process tools close inode aliases separately (see protectedPathDenied).
 func denyReadRules(fs FileSystemPolicy) []string {
 	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
