@@ -210,7 +210,14 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
-	if err := applyWindowsNetworkPlanFn(networkPlan); err != nil {
+	// Install the machine's plan, not this home's. The filters are global and are
+	// replaced wholesale on every setup, so an opted-out run here would otherwise
+	// strip the offline group SID that another workspace's principals depend on
+	// and hand them egress under a NetworkDeny profile. networkPlan itself is left
+	// alone because it is what this home's marker fingerprints.
+	if err := applyWindowsNetworkPlanFn(
+		WindowsNetworkPlanForApply(networkPlan, resolveWindowsSandboxOfflineGroupSIDHook),
+	); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
 			return 1

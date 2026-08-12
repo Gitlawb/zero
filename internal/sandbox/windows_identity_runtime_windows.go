@@ -392,7 +392,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 	// local account with none of those rights, so without this every npm install,
 	// go build or pip install fails on a cache write with a bare ACCESS_DENIED and
 	// nothing pointing at the sandbox as the cause.
-	runtimeRoot, err := setupWindowsSandboxRuntimeRoot(config)
+	runtimeRoots, err := setupWindowsSandboxRuntimeRoot(config)
 	if err != nil {
 		return nil, err
 	}
@@ -447,8 +447,8 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 		// network reach, so granting the offline one less would make an approved
 		// network command see a different filesystem than an ordinary one.
 		writeRoots := filesystem.WriteRoots
-		if runtimeRoot != "" {
-			writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
+		for _, root := range runtimeRoots {
+			writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: root})
 		}
 		// Revokes this trustee's existing ACEs on the paths the plan touches AND
 		// on the paths this role's record names, before applying it, so a re-run
@@ -615,60 +615,44 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig, r
 //
 // An empty return means there is no runtime root to grant (no workspace root
 // configured), which is not an error: the caller simply grants nothing extra.
-func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, error) {
-	workspaceRoot := ""
-	for _, candidate := range config.WorkspaceRoots {
-		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
-			workspaceRoot = canonicalSandboxWorkspaceRoot(trimmed)
-			break
-		}
-	}
-	if workspaceRoot == "" {
-		return "", nil
-	}
-	cacheRoot, err := sandboxUserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache directory for sandbox runtime: %w", err)
-	}
-	// Same canonicalization as the workspace root above: the derivation compares
-	// them, so they have to be the same spelling of the same path.
-	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
-	if cacheRoot == "" || cacheRoot == "." {
-		return "", errors.New("user cache directory is unavailable for sandbox runtime")
-	}
-	// Deliberately the deterministic derivation and NOT sandboxRuntimeRootFor.
+func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) ([]string, error) {
+	// EVERY candidate, not just the cache-derived one.
 	//
-	// sandboxRuntimeRootFor falls back to os.MkdirTemp when the cache lives
-	// inside the workspace, and memoizes that only in-process. Elevated setup is
-	// its own process, so it would grant the principals an ACE on temp root A,
-	// and the next command — a new process — would derive temp root B and hit
-	// ACCESS_DENIED on ordinary cache writes with nothing pointing at the cause.
-	// Teardown, being a third process, would clean a third directory.
+	// This used to take the deterministic cache-derived root alone and return
+	// nothing when the cache sat inside the workspace, on the reasoning that the
+	// other branch minted a random per-process directory through os.MkdirTemp and
+	// so had no name both sides could agree on. That reasoning is now stale:
+	// fallbackSandboxRuntimeRoot derives its path by hashing the workspace and
+	// creates nothing, so every process reaches the same answer.
 	//
-	// When the deterministic root is unusable there is no name both sides can
-	// agree on, so this reports "no runtime root" rather than inventing one. The
-	// principal then simply gets no ACE here: it loses the runtime tree, which is
-	// a degraded sandbox rather than a broken one, and it is the same answer
-	// teardown already gives.
-	root, ok := deterministicSandboxRuntimeRoot(workspaceRoot, cacheRoot)
-	if !ok {
-		return "", nil
-	}
-	return root, nil
+	// Leaving it stale had a cost. Commands still SELECT the fallback in that
+	// layout, and prepareSandboxRuntime redirects TMP, GOCACHE and the package
+	// caches into it, while setup granted neither principal an ACE on it. A
+	// principal command in a supported layout then failed ordinary cache writes
+	// with a bare ACCESS_DENIED and nothing naming the sandbox as the cause.
+	//
+	// So this now answers with the same candidate set the capability plan already
+	// grants, and for the same reason: setup covers both so a command lands on a
+	// provisioned tree whichever one it picks.
+	return windowsSandboxRuntimeCandidates(config.WorkspaceRoots), nil
 }
 
 // setupWindowsSandboxRuntimeRoot resolves the runtime root AND creates it.
 // Teardown wants the name without the side effect, so the derivation lives in
 // windowsSandboxRuntimeRootPath above and this only adds the mkdir.
-func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string, error) {
-	root, err := windowsSandboxRuntimeRootPath(config)
-	if err != nil || root == "" {
-		return "", err
+func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) ([]string, error) {
+	roots, err := windowsSandboxRuntimeRootPath(config)
+	if err != nil {
+		return nil, err
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return "", fmt.Errorf("create sandbox runtime root: %w", err)
+	// Every candidate is created, because setup grants an ACE on every candidate
+	// and applyWindowsACLPlan fails the whole run on a target that does not exist.
+	for _, root := range roots {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return nil, fmt.Errorf("create sandbox runtime root: %w", err)
+		}
 	}
-	return root, nil
+	return roots, nil
 }
 
 // revokeWindowsPrincipalACEs drops every ACE naming principalSID on paths and
@@ -827,12 +811,14 @@ func applyWindowsPrincipalACLs(sandboxHome string, username string, principalSID
 func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principalSID string) ([]string, error) {
 	filesystem := config.PermissionProfile.FileSystem
 	writeRoots := filesystem.WriteRoots
-	runtimeRoot, err := windowsSandboxRuntimeRootPath(config)
+	runtimeRoots, err := windowsSandboxRuntimeRootPath(config)
 	if err != nil {
 		return nil, err
 	}
-	if runtimeRoot != "" {
-		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
+	// Every candidate, matching what setup granted: teardown that revoked only
+	// one would leave principal ACEs on the tree commands actually used.
+	for _, root := range runtimeRoots {
+		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: root})
 	}
 	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
 		PrincipalSID: principalSID,

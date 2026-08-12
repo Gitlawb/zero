@@ -323,11 +323,15 @@ func TestSetupGrantsTheRuntimeRootCommandsActuallyUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupWindowsSandboxRuntimeRoot: %v", err)
 	}
-	if granted == "" {
+	if len(granted) == 0 {
 		t.Fatal("no runtime root resolved for a configured workspace")
 	}
-	if info, err := os.Stat(granted); err != nil || !info.IsDir() {
-		t.Fatalf("runtime root %q was not created; applyWindowsACLPlan skips absent targets so the grant would no-op (stat err %v)", granted, err)
+	// EVERY granted candidate has to exist, not just the one this process would
+	// pick: applyWindowsACLPlan fails the whole run on a target that is absent.
+	for _, root := range granted {
+		if info, err := os.Stat(root); err != nil || !info.IsDir() {
+			t.Fatalf("runtime root %q was not created; applyWindowsACLPlan skips absent targets so the grant would no-op (stat err %v)", root, err)
+		}
 	}
 
 	// What a command would actually use.
@@ -338,9 +342,23 @@ func TestSetupGrantsTheRuntimeRootCommandsActuallyUse(t *testing.T) {
 	if release != nil {
 		defer release()
 	}
-	if filepath.Clean(runtimeState.Root) != filepath.Clean(granted) {
+	// The command's choice has to be one setup provisioned. Setup grants the whole
+	// candidate set precisely because the choice is made per process, so the
+	// contract is membership rather than equality.
+	if !grantedRuntimeRootsCover(granted, runtimeState.Root) {
 		t.Fatalf("setup granted %q but commands write to %q", granted, runtimeState.Root)
 	}
+}
+
+// grantedRuntimeRootsCover reports whether the root a command selected is one of
+// the roots setup granted an ACE on.
+func grantedRuntimeRootsCover(granted []string, selected string) bool {
+	for _, root := range granted {
+		if filepath.Clean(root) == filepath.Clean(selected) {
+			return true
+		}
+	}
+	return false
 }
 
 // No workspace root means nothing to grant, which is not an error.
@@ -349,7 +367,7 @@ func TestSetupRuntimeRootWithoutWorkspaceIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no workspace root should not error: %v", err)
 	}
-	if granted != "" {
+	if len(granted) != 0 {
 		t.Fatalf("granted %q with no workspace configured", granted)
 	}
 }

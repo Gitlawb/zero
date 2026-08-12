@@ -103,6 +103,58 @@ func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNe
 	}, nil
 }
 
+// WindowsNetworkPlanForApply returns the plan to INSTALL, which is not always
+// the plan a home fingerprints.
+//
+// The filters are machine-global and every setup installs them by deleting and
+// recreating the fixed set. So an opted-OUT setup for workspace B was replacing
+// filters that workspace A's opted-in setup had installed, dropping the offline
+// group SID as it went. A's offline principal still passed the runtime
+// membership check and A's marker still validated, but no filter matched its
+// token any more, so a NetworkDeny command in A quietly gained egress. Nothing
+// on either side reported anything: B did exactly what it was asked to.
+//
+// The gate in BuildWindowsNetworkInfraPlan stays as it is, and this is
+// deliberately a SEPARATE function rather than a change to it. That gate exists
+// because the plan is hashed into each home's setup marker: keying it on the
+// group's existence made the first workspace to opt in invalidate every other
+// home's marker on the machine, and those homes then failed every command with
+// "setup is out of date" having opted into nothing. That has to keep working.
+//
+// The two questions are simply different. What a home RECORDS is about that
+// home's own configuration; what setup INSTALLS is about the machine, where the
+// group either exists or does not. Answering both from one plan is what forced a
+// choice between stale markers and a silent hole.
+//
+// The group not existing is the ordinary opted-out machine, and it adds nothing.
+// A resolution failure is deliberately not fatal here: refusing to install any
+// filters because the group could not be read would trade a partial denial for
+// no denial at all.
+func WindowsNetworkPlanForApply(plan WindowsNetworkPlan, resolveOfflineGroupSID func() (string, error)) WindowsNetworkPlan {
+	if resolveOfflineGroupSID == nil {
+		return plan
+	}
+	groupSID, err := resolveOfflineGroupSID()
+	if err != nil {
+		return plan
+	}
+	trimmed := strings.TrimSpace(groupSID)
+	if trimmed == "" {
+		return plan
+	}
+	for _, existing := range plan.IdentitySIDs {
+		if strings.EqualFold(strings.TrimSpace(existing), trimmed) {
+			return plan
+		}
+	}
+	// Copied rather than appended in place: the caller's plan is what gets
+	// fingerprinted, and growing its backing array would risk changing the
+	// recorded plan as a side effect of installing one.
+	augmented := plan
+	augmented.IdentitySIDs = append(append([]string{}, plan.IdentitySIDs...), trimmed)
+	return augmented
+}
+
 // WindowsNetworkPlanCoversPrincipals reports whether a plan's block filters name
 // the offline group, which is the only thing that makes them apply to a sandbox
 // principal.
