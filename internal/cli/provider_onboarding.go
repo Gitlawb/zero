@@ -501,26 +501,17 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	} else {
 		name = resolvedName
 	}
-	// ProviderPersisted above answers a credential-identity question, but
-	// RemoveProvider targets a row by its exact spelling. Bridge the two, so
-	// `zero providers remove work` against a sole saved "WORK" row removes it
-	// instead of failing "not found" right after the persisted check passed.
-	name, err = config.ResolvePersistedProviderName(configPath, name)
+	// Resolve credential identity to the exact persisted row before entering the
+	// transactional row/key mutation.
+	exactName, err := config.ResolvePersistedProviderName(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	cfg, err := config.RemoveProvider(configPath, name)
+	cfg, keyRemoved, err := config.RemoveProviderAndKey(configPath, exactName)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	// Provider credentials are user-scoped, so delete from the same default user
-	// store runtime lookup uses. A surviving case variant that still claims the
-	// credential keeps it (see config.CredentialKeyRetained); a survivor that
-	// never claimed it does not.
-	keyRemoved, keyErr := false, error(nil)
-	if !config.CredentialKeyRetained(cfg.Providers, name) {
-		keyRemoved, keyErr = config.ForgetProviderKey(name)
-	}
+
 	if options.json {
 		payload := map[string]any{
 			"removed":        name,
@@ -528,10 +519,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
 		}
-		if keyErr != nil {
-			// A lingering secret must not read as a clean removal.
-			payload["keyError"] = redaction.ErrorMessage(keyErr, redaction.Options{})
-		}
+
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
 		}
@@ -543,12 +531,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if _, err := fmt.Fprintf(stdout, "Removed provider %s\n", name); err != nil {
 		return exitCrash
 	}
-	if keyErr != nil {
-		if _, err := fmt.Fprintf(stderr, "warning: its stored API key could not be deleted and remains in the credential store: %s\n", redaction.ErrorMessage(keyErr, redaction.Options{})); err != nil {
-			return exitCrash
-		}
-		return exitCrash
-	} else if keyRemoved {
+	if keyRemoved {
 		if _, err := fmt.Fprintln(stdout, "Deleted its stored API key."); err != nil {
 			return exitCrash
 		}

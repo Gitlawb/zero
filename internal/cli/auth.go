@@ -155,21 +155,8 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Validate the persisted config BEFORE EnsureCatalogProvider's lookup, which
-	// matches case-insensitively and would happily return one of a pair of legacy
-	// duplicate rows — whose shared credential the capture below then overwrites
-	// for a config that can never be published.
-	if err := config.PreflightUserConfig(configPath); err != nil {
-		return "", err
-	}
-	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
+	ensured, err := config.CommitCatalogProviderKey(configPath, "openrouter", key)
 	if err != nil {
-		return "", err
-	}
-	// One operation owns validate → capture → publish, and restores the previous
-	// stored key if publication is rejected, so a failed login never costs the
-	// user the key they were already working with.
-	if err := config.PublishProviderCredential(configPath, ensured.Name, key); err != nil {
 		return "", err
 	}
 	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
@@ -524,24 +511,11 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// Also drop any stored API key and its marker so `auth logout` clears the whole
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
 	// failures rather than reporting success while a credential remains.
-	// Clear the marker before deleting the shared credential. The reverse order
-	// can leave apiKeyStored:true with no secret behind it when config publication
-	// fails. Resolve catalog aliases first, but mutate the exact persisted row.
-	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, configProvider); clearErr != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
-	}
-	keyStore, keyErr := config.ProviderKeyStore()
+	keyRemoved, keyErr := config.DeleteProviderCredentials(configPath, credentialCandidates, configProvider)
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
-	keyRemoved := false
-	for _, candidate := range credentialCandidates {
-		candidateRemoved, candidateErr := keyStore.Delete(candidate)
-		if candidateErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(candidateErr, redaction.Options{}), exitCrash)
-		}
-		keyRemoved = keyRemoved || candidateRemoved
-	}
+	
 	removed = removed || keyRemoved
 	if parsed.json {
 		payload := struct {

@@ -623,25 +623,19 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	if profile.Name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
 	}
+	return runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		return upsertProviderConfig(&op.config, profile, setActive)
+	})
+}
 
-	cfg := FileConfig{}
-	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-	if err := ValidatePersistedProviderNames(cfg); err != nil {
-		return FileConfig{}, err
-	}
+func upsertProviderConfig(cfg *FileConfig, profile ProviderProfile, setActive bool) error {
 	for _, existing := range cfg.Providers {
 		if sameProviderIdentity(existing.Name, profile.Name) && strings.TrimSpace(existing.Name) != profile.Name {
-			return FileConfig{}, fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", profile.Name, existing.Name)
+			return fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", profile.Name, existing.Name)
 		}
 	}
 
-	mergeProvider(&cfg, profile)
+	mergeProvider(cfg, profile)
 	// mergeProfile deliberately ignores APIKeyStored — during resolve-time
 	// layering a project config must not be able to claim the user's stored
 	// keys. This user-config WRITE path re-applies the marker: capturing a key
@@ -659,11 +653,7 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	if setActive || strings.TrimSpace(cfg.ActiveProvider) == "" {
 		cfg.ActiveProvider = profile.Name
 	}
-
-	if err := writeConfigFile(path, cfg); err != nil {
-		return FileConfig{}, err
-	}
-	return cfg, nil
+	return nil
 }
 
 // EnsuredProvider reports the outcome of EnsureCatalogProvider: the profile name
@@ -692,36 +682,76 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 	if err != nil {
 		return EnsuredProvider{}, err
 	}
-
-	cfg := FileConfig{}
-	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return EnsuredProvider{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	result := EnsuredProvider{}
+	written, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		if owner, owned, err := catalogProviderOwner(op.config.Providers, descriptor.ID); err != nil {
+			return err
+		} else if owned {
+			result = EnsuredProvider{Name: owner.Name, Active: op.config.ActiveProvider}
+			op.publish = false
+			return nil
 		}
-	} else if !os.IsNotExist(err) {
-		return EnsuredProvider{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-	if err := ValidatePersistedProviderNames(cfg); err != nil {
-		return EnsuredProvider{}, err
-	}
-	if owner, owned, err := catalogProviderOwner(cfg.Providers, descriptor.ID); err != nil {
-		return EnsuredProvider{}, err
-	} else if owned {
-		return EnsuredProvider{Name: owner.Name, Active: cfg.ActiveProvider}, nil
-	}
-
-	profile := ProviderProfile{
-		Name:         descriptor.ID,
-		ProviderKind: providerKindForCatalogTransport(descriptor.Transport),
-		CatalogID:    descriptor.ID,
-		BaseURL:      descriptor.DefaultBaseURL,
-		Model:        descriptor.DefaultModel,
-	}
-	written, err := UpsertProvider(path, profile, false)
+		profile := ProviderProfile{
+			Name:         descriptor.ID,
+			ProviderKind: providerKindForCatalogTransport(descriptor.Transport),
+			CatalogID:    descriptor.ID,
+			BaseURL:      descriptor.DefaultBaseURL,
+			Model:        descriptor.DefaultModel,
+		}
+		if err := upsertProviderConfig(&op.config, profile, false); err != nil {
+			return err
+		}
+		result = EnsuredProvider{Name: profile.Name, Created: true, Active: op.config.ActiveProvider}
+		return nil
+	})
 	if err != nil {
 		return EnsuredProvider{}, err
 	}
-	return EnsuredProvider{Name: profile.Name, Created: true, Active: written.ActiveProvider}, nil
+	result.Active = written.ActiveProvider
+	return result, nil
+}
+
+// CommitCatalogProviderKey ensures the catalog profile, captures key, and marks
+// the row in one provider config/key transaction. OpenRouter uses this because
+// its OAuth exchange returns an API key rather than a bearer token.
+func CommitCatalogProviderKey(path, catalogID, key string) (EnsuredProvider, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return EnsuredProvider{}, fmt.Errorf("provider returned an empty API key")
+	}
+	descriptor, err := providercatalog.Require(catalogID)
+	if err != nil {
+		return EnsuredProvider{}, err
+	}
+	result := EnsuredProvider{}
+	_, err = runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		owner, owned, err := catalogProviderOwner(op.config.Providers, descriptor.ID)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			owner = ProviderProfile{Name: descriptor.ID, ProviderKind: providerKindForCatalogTransport(descriptor.Transport), CatalogID: descriptor.ID, BaseURL: descriptor.DefaultBaseURL, Model: descriptor.DefaultModel}
+			if err := upsertProviderConfig(&op.config, owner, false); err != nil {
+				return err
+			}
+			result.Created = true
+		}
+		if err := op.setKey(owner.Name, key); err != nil {
+			return fmt.Errorf("store API key for %q: %w", owner.Name, err)
+		}
+		for index := range op.config.Providers {
+			if strings.TrimSpace(op.config.Providers[index].Name) == strings.TrimSpace(owner.Name) {
+				op.config.Providers[index].APIKey = ""
+				op.config.Providers[index].APIKeyEnv = ""
+				op.config.Providers[index].APIKeyStored = true
+				result.Name = op.config.Providers[index].Name
+				result.Active = op.config.ActiveProvider
+				return nil
+			}
+		}
+		return fmt.Errorf("provider %q not found", owner.Name)
+	})
+	return result, err
 }
 
 // MarkProviderAPIKeyStored records that provider's API key now lives in the
@@ -738,26 +768,18 @@ func MarkProviderAPIKeyStored(path string, provider string) error {
 		return fmt.Errorf("provider name is required")
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read config %s: %w", path, err)
-	}
-	var cfg FileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-	if err := ValidatePersistedProviderNames(cfg); err != nil {
-		return err
-	}
-	for index := range cfg.Providers {
-		if strings.TrimSpace(cfg.Providers[index].Name) == provider {
-			cfg.Providers[index].APIKey = ""
-			cfg.Providers[index].APIKeyEnv = ""
-			cfg.Providers[index].APIKeyStored = true
-			return writeConfigFile(path, cfg)
+	_, err := runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		for index := range op.config.Providers {
+			if strings.TrimSpace(op.config.Providers[index].Name) == provider {
+				op.config.Providers[index].APIKey = ""
+				op.config.Providers[index].APIKeyEnv = ""
+				op.config.Providers[index].APIKeyStored = true
+				return nil
+			}
 		}
-	}
-	return fmt.Errorf("provider %q not found", provider)
+		return fmt.Errorf("provider %q not found", provider)
+	})
+	return err
 }
 
 func SetActiveProvider(path string, name string) (FileConfig, error) {
@@ -770,29 +792,15 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("provider name is required")
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-
-	cfg := FileConfig{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-
-	// Activation accepts any spelling that names this credential identity, then
-	// records the row's own spelling so every later row-targeting mutator can
-	// find it. ResolvePersistedProviderName is that bridge — see its doc for
-	// why an ambiguous identity is an error rather than an arbitrary pick.
-	resolved, err := resolvePersistedProviderName(cfg.Providers, name)
-	if err != nil {
-		return FileConfig{}, err
-	}
-	cfg.ActiveProvider = resolved
-	if err := writeConfigFile(path, cfg); err != nil {
-		return FileConfig{}, err
-	}
-	return cfg, nil
+	return runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		for _, provider := range op.config.Providers {
+			if strings.TrimSpace(provider.Name) == name {
+				op.config.ActiveProvider = provider.Name
+				return nil
+			}
+		}
+		return fmt.Errorf("provider %q not found", name)
+	})
 }
 
 // ProviderPersisted reports whether a provider profile named name actually has
@@ -829,85 +837,81 @@ func ProviderPersisted(path string, name string) (bool, error) {
 // store entry — config stays pure of secret I/O on the read path, and remove
 // keeps that symmetry by only touching config.json.
 func RemoveProvider(path string, name string) (FileConfig, error) {
+	cfg, _, err := RemoveProviderAndKey(path, name)
+	return cfg, err
+}
+
+// RemoveProviderAndKey removes the persisted row and its marked stored key in
+// one transaction, returning whether a credential entry was deleted.
+func RemoveProviderAndKey(path string, name string) (FileConfig, bool, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return FileConfig{}, fmt.Errorf("config path is required")
+		return FileConfig{}, false, fmt.Errorf("config path is required")
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return FileConfig{}, fmt.Errorf("provider name is required")
+		return FileConfig{}, false, fmt.Errorf("provider name is required")
 	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-	cfg := FileConfig{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-	before := cfg
-	before.Providers = append([]ProviderProfile(nil), cfg.Providers...)
-
-	// Persisted provider identity is exact. Resolution may fold names from
-	// runtime sources, but config mutations must target the requested row. This
-	// lookup intentionally precedes validation so an exact removal can repair a
-	// case-duplicate config; writeConfigFile validates the resulting config.
-	index := -1
-	for i, provider := range cfg.Providers {
-		if strings.TrimSpace(provider.Name) == name {
-			index = i
-			break
+	keyRemoved := false
+	cfg, err := runProviderProfileOperation(path, false, true, func(op *providerProfileOperation) error {
+		cfg := &op.config
+		index := -1
+		for i, provider := range cfg.Providers {
+			if strings.TrimSpace(provider.Name) == name {
+				index = i
+				break
+			}
 		}
-	}
-	if index < 0 {
-		return FileConfig{}, fmt.Errorf("provider %q not found", name)
-	}
-	activeIndex := -1
-	activeFoldedIndex := -1
-	activeFoldedMatches := 0
-	for i, provider := range cfg.Providers {
-		providerName := strings.TrimSpace(provider.Name)
-		if providerName == strings.TrimSpace(cfg.ActiveProvider) {
-			activeIndex = i
+		if index < 0 {
+			return fmt.Errorf("provider %q not found", name)
 		}
-		if sameProviderIdentity(providerName, cfg.ActiveProvider) {
-			activeFoldedIndex = i
-			activeFoldedMatches++
+		activeIndex, activeIdentityIndex, activeIdentityMatches := -1, -1, 0
+		for i, provider := range cfg.Providers {
+			providerName := strings.TrimSpace(provider.Name)
+			if providerName == strings.TrimSpace(cfg.ActiveProvider) {
+				activeIndex = i
+			}
+			if sameProviderIdentity(providerName, cfg.ActiveProvider) {
+				activeIdentityIndex = i
+				activeIdentityMatches++
+			}
 		}
-	}
-	removedWasActive := activeIndex == index || (activeIndex < 0 && activeFoldedMatches == 1 && activeFoldedIndex == index)
-	cfg.Providers = append(cfg.Providers[:index], cfg.Providers[index+1:]...)
-	if removedWasActive {
-		cfg.ActiveProvider = ""
-		if len(cfg.Providers) > 0 {
-			cfg.ActiveProvider = cfg.Providers[0].Name
+		removedWasActive := activeIndex == index || (activeIndex < 0 && activeIdentityMatches == 1 && activeIdentityIndex == index)
+		removed := cfg.Providers[index]
+		cfg.Providers = append(cfg.Providers[:index], cfg.Providers[index+1:]...)
+		if removedWasActive {
+			cfg.ActiveProvider = ""
+			if len(cfg.Providers) > 0 {
+				cfg.ActiveProvider = cfg.Providers[0].Name
+			}
 		}
-	} else if active := strings.TrimSpace(cfg.ActiveProvider); active != "" {
-		// Repairing a case-duplicate config can strand activeProvider on a third
-		// spelling ("WoRk" with rows "work"/"WORK"): the pointer survived the
-		// removal but now matches no remaining row exactly, so every exact
-		// mutator fails until the user hand-edits config.json. Re-point it at the
-		// survivor's own spelling when exactly one row still carries the
-		// identity; leave it alone when it is still ambiguous or already exact.
-		if resolved, resolveErr := resolvePersistedProviderName(cfg.Providers, active); resolveErr == nil {
-			cfg.ActiveProvider = resolved
+		} else if active := strings.TrimSpace(cfg.ActiveProvider); active != "" {
+			// Repairing a case-duplicate config can strand activeProvider on a
+			// third spelling. Re-point it when exactly one remaining row carries
+			// that identity; preserve exact, ambiguous, and unrelated references.
+			if resolved, resolveErr := resolvePersistedProviderName(cfg.Providers, active); resolveErr == nil {
+				cfg.ActiveProvider = resolved
+			}
 		}
-	}
-	if err := writeProviderNameRepair(path, before, cfg); err != nil {
-		return FileConfig{}, err
-	}
-	return cfg, nil
+		if removed.APIKeyStored {
+			removedKey, err := op.deleteKey(removed.Name)
+			if err != nil {
+				return fmt.Errorf("delete stored key for %q: %w", removed.Name, err)
+			}
+			keyRemoved = removedKey
+		}
+		return nil
+	})
+	return cfg, keyRemoved, err
 }
 
 // RenameProvider renames a provider profile, keeping everything keyed by the
 // profile name consistent: the activeProvider pointer follows the rename, and a
 // key in the encrypted credential store (APIKeyStored) is migrated to the new
-// name BEFORE the config is rewritten — the store write must succeed first so a
-// failed migration never strands the config pointing at a key that no longer
-// resolves. OAuth tokens are deliberately not migrated: the runtime's login
-// candidates fall back to the profile's CatalogID, which every OAuth-capable
-// catalog profile carries, so a rename keeps the login reachable.
+// name in the same transaction. OAuth tokens are deliberately not migrated:
+// the runtime's login candidates fall back to the profile's CatalogID, which
+// every OAuth-capable catalog profile carries, so a rename keeps the login
+// reachable.
 func RenameProvider(path string, oldName string, newName string) (FileConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -919,61 +923,50 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 		return FileConfig{}, fmt.Errorf("provider names are required")
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-	cfg := FileConfig{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-	if err := ValidatePersistedProviderNames(cfg); err != nil {
-		return FileConfig{}, err
-	}
-
-	// oldName is matched exactly, like ProviderPersisted/SetActiveProvider.
-	// newName collides case-insensitively because the credential store retains
-	// legacy case-insensitive keys.
-	index := -1
-	for i, provider := range cfg.Providers {
-		providerName := strings.TrimSpace(provider.Name)
-		if providerName == oldName {
-			index = i
-			continue
+	return runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		cfg := &op.config
+		index := -1
+		for i, provider := range cfg.Providers {
+			providerName := strings.TrimSpace(provider.Name)
+			if providerName == oldName {
+				index = i
+				continue
+			}
+			if sameProviderIdentity(providerName, newName) {
+				return fmt.Errorf("provider %q already exists", newName)
+			}
 		}
-		if sameProviderIdentity(providerName, newName) {
-			return FileConfig{}, fmt.Errorf("provider %q already exists", newName)
+		if index < 0 {
+			return fmt.Errorf("provider %q not found", oldName)
 		}
-	}
-	if index < 0 {
-		return FileConfig{}, fmt.Errorf("provider %q not found", oldName)
-	}
-	if sameProviderIdentity(oldName, newName) && cfg.Providers[index].Name == newName {
-		return cfg, nil
-	}
-
-	previousName := cfg.Providers[index].Name
-	keyMigrated := false
-	if cfg.Providers[index].APIKeyStored {
-		if err := migrateStoredProviderKey(path, previousName, newName); err != nil {
-			return FileConfig{}, fmt.Errorf("migrate stored key for %q: %w", oldName, err)
+		previousName := cfg.Providers[index].Name
+		if previousName == newName {
+			return nil
 		}
-		keyMigrated = true
-	}
-	if sameProviderIdentity(cfg.ActiveProvider, previousName) {
-		cfg.ActiveProvider = newName
-	}
-	cfg.Providers[index].Name = newName
-	if err := writeConfigFile(path, cfg); err != nil {
-		if keyMigrated {
-			// Compensate best-effort: config.json still names the OLD profile, so
-			// move the key back where that config can find it — otherwise a failed
-			// rewrite strands the key under a name no profile carries.
-			_ = migrateStoredProviderKey(path, newName, previousName)
+		if cfg.Providers[index].APIKeyStored && !sameProviderIdentity(previousName, newName) {
+			store, err := op.credentialStore()
+			if err != nil {
+				return err
+			}
+			key, ok, err := store.Get(previousName)
+			if err != nil {
+				return err
+			}
+			if ok && strings.TrimSpace(key) != "" {
+				if err := op.setKey(newName, key); err != nil {
+					return fmt.Errorf("migrate stored key for %q: %w", oldName, err)
+				}
+				if _, err := op.deleteKey(previousName); err != nil {
+					return fmt.Errorf("migrate stored key for %q: %w", oldName, err)
+				}
+			}
 		}
-		return FileConfig{}, err
-	}
-	return cfg, nil
+		if sameProviderIdentity(cfg.ActiveProvider, previousName) {
+			cfg.ActiveProvider = newName
+		}
+		cfg.Providers[index].Name = newName
+		return nil
+	})
 }
 
 // ProviderEdit is a field-level edit of one saved provider, applied by
@@ -991,10 +984,10 @@ type ProviderEdit struct {
 	Description  string
 }
 
-// EditProvider applies a provider edit in ONE read-modify-write: rename
-// (activeProvider follows; a stored key migrates, with a best-effort rollback
-// if the config write fails), field updates, the stored-key marker, and the
-// verbatim description. A single write keeps the operation atomic — the
+// EditProvider applies a provider edit in one config/key transaction: rename
+// (activeProvider follows and a stored key migrates), field updates, a newly
+// captured key, the stored-key marker, and the verbatim description. A single
+// write keeps the operation atomic — the
 // previous rename+upsert+describe sequence could fail halfway and leave
 // config.json renamed while every in-memory consumer still held the old name —
 // and a case-only rename (groq -> Groq) remains an in-place update instead of
@@ -1013,109 +1006,67 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 		newName = oldName
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-	cfg := FileConfig{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-
-	if err := ValidatePersistedProviderNames(cfg); err != nil {
-		return FileConfig{}, err
-	}
-
-	index := -1
-	newIdentity := credstore.NormalizeProvider(newName)
-	for i, provider := range cfg.Providers {
-		providerName := strings.TrimSpace(provider.Name)
-		if providerName == oldName {
-			index = i
-			continue
+	return runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		cfg := &op.config
+		index := -1
+		newIdentity := credstore.NormalizeProvider(newName)
+		for i, provider := range cfg.Providers {
+			providerName := strings.TrimSpace(provider.Name)
+			if providerName == oldName {
+				index = i
+				continue
+			}
+			if credstore.NormalizeProvider(providerName) == newIdentity {
+				return fmt.Errorf("provider %q already exists", newName)
+			}
 		}
-		if credstore.NormalizeProvider(providerName) == newIdentity {
-			return FileConfig{}, fmt.Errorf("provider %q already exists", newName)
+		if index < 0 {
+			return fmt.Errorf("provider %q not found", oldName)
 		}
-	}
-	if index < 0 {
-		return FileConfig{}, fmt.Errorf("provider %q not found", oldName)
-	}
-
-	previousName := cfg.Providers[index].Name
-	renamed := previousName != newName
-	keyMigrated := false
-	// A rename moves the stored key along: either the profile's existing entry,
-	// or a replacement key the caller just captured — the contract is that a
-	// captured key is stored under the CURRENT name before EditProvider runs, so
-	// one migration covers both. migrateStoredProviderKey no-ops on case-only
-	// renames (the store normalizes names), so it cannot delete the key it just
-	// moved.
-	if renamed && (cfg.Providers[index].APIKeyStored || edit.APIKeyStored) {
-		if err := migrateStoredProviderKey(path, previousName, newName); err != nil {
-			return FileConfig{}, fmt.Errorf("migrate stored key for %q: %w", oldName, err)
+		previousName := cfg.Providers[index].Name
+		if key := strings.TrimSpace(edit.APIKey); key != "" {
+			if err := op.setKey(previousName, key); err != nil {
+				return fmt.Errorf("store API key for %q: %w", previousName, err)
+			}
+			edit.APIKeyStored = true
 		}
-		keyMigrated = true
-	}
-	if renamed && sameProviderIdentity(cfg.ActiveProvider, previousName) {
-		cfg.ActiveProvider = newName
-	}
-
-	profile := &cfg.Providers[index]
-	profile.Name = newName
-	if baseURL := strings.TrimSpace(edit.BaseURL); baseURL != "" {
-		profile.BaseURL = baseURL
-	}
-	if model := strings.TrimSpace(edit.Model); model != "" {
-		profile.Model = model
-	}
-	if apiKey := strings.TrimSpace(edit.APIKey); apiKey != "" {
-		profile.APIKey = apiKey
-	}
-	if edit.APIKeyStored {
-		profile.APIKeyStored = true
-	}
-	profile.Description = strings.TrimSpace(edit.Description)
-
-	if err := writeConfigFile(path, cfg); err != nil {
-		if keyMigrated {
-			// Compensate best-effort: config.json still names the OLD profile, so
-			// move the key back where that config can find it.
-			_ = migrateStoredProviderKey(path, newName, previousName)
+		renamed := previousName != newName
+		if renamed && (cfg.Providers[index].APIKeyStored || edit.APIKeyStored) && !sameProviderIdentity(previousName, newName) {
+			store, err := op.credentialStore()
+			if err != nil {
+				return err
+			}
+			key, ok, err := store.Get(previousName)
+			if err != nil {
+				return err
+			}
+			if ok && strings.TrimSpace(key) != "" {
+				if err := op.setKey(newName, key); err != nil {
+					return fmt.Errorf("migrate stored key for %q: %w", oldName, err)
+				}
+				if _, err := op.deleteKey(previousName); err != nil {
+					return fmt.Errorf("migrate stored key for %q: %w", oldName, err)
+				}
+			}
 		}
-		return FileConfig{}, err
-	}
-	return cfg, nil
-}
-
-// migrateStoredProviderKey moves a credential-store entry to a new provider
-// name: write-new-then-delete-old, so an interruption can leave a duplicate but
-// never a missing key. A missing source entry is a no-op (the marker may be
-// stale); only a failed WRITE aborts the rename.
-func migrateStoredProviderKey(configPath string, oldName string, newName string) error {
-	// The store normalizes names case-insensitively, so a case-only rename
-	// (groq -> Groq) targets ONE entry: Set(new) rewrites it in place and
-	// Delete(old) would then remove the key that was just "moved". Nothing to
-	// migrate — the existing entry already serves the new name.
-	if sameProviderIdentity(oldName, newName) {
+		if renamed && sameProviderIdentity(cfg.ActiveProvider, previousName) {
+			cfg.ActiveProvider = newName
+		}
+		profile := &cfg.Providers[index]
+		profile.Name = newName
+		if baseURL := strings.TrimSpace(edit.BaseURL); baseURL != "" {
+			profile.BaseURL = baseURL
+		}
+		if model := strings.TrimSpace(edit.Model); model != "" {
+			profile.Model = model
+		}
+		if edit.APIKeyStored {
+			profile.APIKey = ""
+			profile.APIKeyStored = true
+		}
+		profile.Description = strings.TrimSpace(edit.Description)
 		return nil
-	}
-	store, err := ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
-		return err
-	}
-	key, ok, err := store.Get(oldName)
-	if err != nil {
-		return err
-	}
-	if !ok || strings.TrimSpace(key) == "" {
-		return nil
-	}
-	if err := store.Set(newName, key); err != nil {
-		return err
-	}
-	_, _ = store.Delete(oldName)
-	return nil
+	})
 }
 
 func SetProviderModel(path string, name string, model string) (FileConfig, error) {
@@ -1132,29 +1083,15 @@ func SetProviderModel(path string, name string, model string) (FileConfig, error
 		return FileConfig{}, fmt.Errorf("model is required")
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-
-	cfg := FileConfig{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-
-	// Persisted provider identity is exact. Resolution may fold names from
-	// runtime sources, but config mutations must target the requested row.
-	for index := range cfg.Providers {
-		if strings.TrimSpace(cfg.Providers[index].Name) == name {
-			cfg.Providers[index].Model = model
-			if err := writeConfigFile(path, cfg); err != nil {
-				return FileConfig{}, err
+	return runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		for index := range op.config.Providers {
+			if strings.TrimSpace(op.config.Providers[index].Name) == name {
+				op.config.Providers[index].Model = model
+				return nil
 			}
-			return cfg, nil
 		}
-	}
-
-	return FileConfig{}, fmt.Errorf("provider %q not found", name)
+		return fmt.Errorf("provider %q not found", name)
+	})
 }
 
 func SetFavoriteModels(path string, models []string) (FileConfig, error) {

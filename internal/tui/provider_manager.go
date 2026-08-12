@@ -364,26 +364,27 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	var activeAfter string
 	var cleanup tea.Cmd
 	if persisted {
-		// The manager row carries a RESOLVED name, which may not be the persisted
-		// row's own spelling; RemoveProvider targets rows exactly. Bridge first.
+		// The manager row may carry a resolved spelling; transact against the exact
+		// persisted row so config and credential ownership move together.
 		exactName, err := config.ResolvePersistedProviderName(m.userConfigPath, name)
 		if err != nil {
 			wizard.manageStatus = "Delete failed: " + err.Error()
 			return m, nil
 		}
-		cfg, err := config.RemoveProvider(m.userConfigPath, exactName)
+		cfg, keyRemoved, err := config.RemoveProviderAndKey(m.userConfigPath, exactName)
 		if err != nil {
 			wizard.manageStatus = "Delete failed: " + err.Error()
 			return m, nil
 		}
 		activeAfter = cfg.ActiveProvider
-		deleteStoredKey := !config.CredentialKeyRetained(cfg.Providers, exactName)
-		if deleteStoredKey {
-			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
-		} else {
-			notes = []string{"Deleted " + name + ". Kept its stored API key because another saved provider still uses that credential."}
+		notes = []string{"Deleted " + name + "."}
+		if keyRemoved {
+			notes = append(notes, "Deleted its stored API key.")
 		}
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, deleteStoredKey)
+		resolvedProfile := row.profile
+		resolvedProfile.Name = exactName
+		resolvedProfile.APIKeyStored = false
+		cleanup = providerManagerCleanupCmd(m.userConfigPath, resolvedProfile, false)
 	} else {
 		// Env-derived providers have no persisted profile or credential to
 		// delete. Keep this path session-only.
@@ -518,14 +519,12 @@ func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile
 	catalogID := profile.CatalogID
 	return func() tea.Msg {
 		notes := []string{}
-		if deleteStoredKey {
-			keyStore, storeErr := providerKeyStoreForPath(configPath)
-			if storeErr == nil {
-				_, storeErr = keyStore.Delete(name)
-			}
-			if storeErr != nil {
-				notes = append(notes, "Warning: its stored API key could not be deleted ("+redaction.ErrorMessage(storeErr, redaction.Options{})+").")
-			}
+		var storeErr error
+		if deleteStoredKey && profile.APIKeyStored {
+			_, storeErr = config.DeleteProviderCredentials(configPath, []string{name}, name)
+		}
+		if storeErr != nil {
+			notes = append(notes, "Warning: its stored API key could not be deleted ("+redaction.ErrorMessage(storeErr, redaction.Options{})+").")
 		}
 		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {
 			notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
@@ -718,18 +717,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		Description: wizard.editDraft.Description,
 	}
 	if key := strings.TrimSpace(wizard.editDraft.APIKey); key != "" {
-		if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
-			wizard.err = err.Error()
-			return m, nil
-		}
-		captured := config.SecureProviderProfile(config.ProviderProfile{Name: exactName, APIKey: key}, m.userConfigPath)
-		// On a store failure SecureProviderProfile keeps the inline key, which
-		// EditProvider then persists (the startup migration re-captures later) —
-		// the same fail-soft posture as every other capture path. A failed
-		// EditProvider below does not roll the capture back either; atomic
-		// capture+publish for this path is #894, not this PR.
-		edit.APIKey = captured.APIKey
-		edit.APIKeyStored = captured.APIKeyStored
+		edit.APIKey = key
 	}
 	if _, err := config.EditProvider(m.userConfigPath, edit); err != nil {
 		wizard.err = err.Error()
