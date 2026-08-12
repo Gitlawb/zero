@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
@@ -236,6 +237,172 @@ func TestFailedServerReasonToleratesAMissingTokenStore(t *testing.T) {
 	reason := failedServerReason(t, cfg, "linear", errors.New("connection refused"), nil)
 	if !strings.Contains(reason, "connection refused") {
 		t.Errorf("reason = %q, want the underlying failure", reason)
+	}
+}
+
+// A zero-width or otherwise invisible Unicode character rejoins exactly like a
+// control byte, and more comfortably: the reader sees an unbroken credential
+// while equality redaction saw two fragments. Adversarial review found these
+// walking straight through the first version of the fix, which only knew about
+// escapes and control bytes.
+func TestFailedServerReasonRedactsASecretSplitByInvisibleUnicode(t *testing.T) {
+	const secret = "wk-live-4f9c2b7ae1d8"
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "http", URL: "https://docs.example/mcp", Headers: map[string]string{
+			"Authorization": secret,
+		}},
+	}}
+
+	for _, testCase := range []struct {
+		name     string
+		splitter string
+	}{
+		// Written as escapes on purpose: these are invisible, and a literal one
+		// in the source would be unreadable. The byte order mark is also a build
+		// error if it lands anywhere but the first byte of a Go file.
+		{name: "zero width space", splitter: string(rune(0x200b))},
+		{name: "zero width non-joiner", splitter: string(rune(0x200c))},
+		{name: "zero width joiner", splitter: string(rune(0x200d))},
+		{name: "soft hyphen", splitter: string(rune(0x00ad))},
+		{name: "word joiner", splitter: string(rune(0x2060))},
+		{name: "left-to-right mark", splitter: string(rune(0x200e))},
+		{name: "right-to-left override", splitter: string(rune(0x202e))},
+		{name: "byte order mark", splitter: string(rune(0xfeff))},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			reason := failedServerReason(t, cfg, "docs",
+				errors.New("handshake rejected, sent wk-live-"+testCase.splitter+"4f9c2b7ae1d8"), nil)
+
+			// Assert on what the READER sees, not on the bytes. These characters
+			// render as nothing, so a reason still holding the two fragments
+			// shows an intact credential on screen while a substring check on the
+			// raw string happily reports the secret absent. Perceived text is
+			// modelled here rather than borrowed from production, so the test
+			// states the requirement instead of restating the implementation.
+			perceived := dropInvisible(reason)
+			if strings.Contains(perceived, secret) {
+				t.Errorf("the credential is intact on screen: rendered %q, perceived %q", reason, perceived)
+			}
+		})
+	}
+}
+
+// Combining marks must NOT be stripped. They are ordinary content in most of the
+// world's scripts, and deleting them to close a redaction hole would corrupt
+// every error message written in those languages.
+func TestSanitizeTerminalReasonKeepsCombiningMarks(t *testing.T) {
+	// Devanagari "hindi" and a decomposed Latin e-acute.
+	const text = "सर्वर विफल échec"
+	if got := sanitizeTerminalReason(text); got != text {
+		t.Errorf("sanitizeTerminalReason mangled legitimate text:\n got  %q\n want %q", got, text)
+	}
+}
+
+// The configured value is usually not the credential.
+//
+// Zero's own documented config spells an authenticated server as
+// `"Authorization": "Bearer <token>"`, so a server that echoes back only the
+// token, without the scheme word, matched nothing. This is the same literal-match
+// trap that disabled redaction in providerhealth once "Bearer " was inlined into
+// the configured value.
+func TestFailedServerReasonRedactsACredentialEchoedWithoutItsSchemePrefix(t *testing.T) {
+	// Deliberately OPAQUE. An "sk-"-style value would be caught by the shape
+	// patterns in the redactor and the test would pass without the fix, proving
+	// only that the pattern list works. Equality is the only thing that can catch
+	// this string, which is the whole reason configured values are collected.
+	const credential = "kf7Qm2wz9Lp4Rt8vN1cX"
+
+	for _, testCase := range []struct {
+		name      string
+		configure func(*config.MCPServerConfig)
+	}{
+		{
+			name: "scheme prefix in a configured header",
+			configure: func(server *config.MCPServerConfig) {
+				server.Headers = map[string]string{"Authorization": "Bearer " + credential}
+			},
+		},
+		{
+			name: "header name and scheme in a composite argument",
+			configure: func(server *config.MCPServerConfig) {
+				server.Args = []string{"mcp-remote", "--header", "Authorization: Bearer " + credential}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := config.MCPServerConfig{Type: "stdio", Command: "mcp-remote"}
+			testCase.configure(&server)
+			cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{"docs": server}}
+
+			// The server quotes the credential alone, which is what an upstream
+			// that validated the token and rejected it actually reports.
+			reason := failedServerReason(t, cfg, "docs",
+				errors.New(`handshake rejected: {"error":"invalid_token","presented":"`+credential+`"}`), nil)
+
+			if strings.Contains(reason, credential) {
+				t.Errorf("the credential reached the panel without its scheme prefix: %q", reason)
+			}
+			if !strings.Contains(reason, "invalid_token") {
+				t.Errorf("redaction ate the diagnostic text: %q", reason)
+			}
+		})
+	}
+}
+
+// The scheme word and the header name must NOT enter the redaction set, or every
+// message mentioning them loses them. The length floor is what prevents it.
+// dropInvisible removes the characters that render as nothing, modelling what a
+// reader actually perceives on the terminal.
+func dropInvisible(value string) string {
+	var out strings.Builder
+	for _, current := range value {
+		if unicode.Is(unicode.Cf, current) {
+			continue
+		}
+		out.WriteRune(current)
+	}
+	return out.String()
+}
+
+func TestCredentialCandidatesDoesNotCollectSchemeWords(t *testing.T) {
+	got := credentialCandidates("Authorization: Bearer kf7Qm2wz9Lp4Rt8vN1cX")
+	for _, unwanted := range []string{"Bearer", "Authorization"} {
+		for _, candidate := range got {
+			if candidate == unwanted {
+				t.Errorf("candidate %q would blank a common word out of every message: %q", unwanted, got)
+			}
+		}
+	}
+	if len(got) == 0 {
+		t.Fatal("no candidates produced")
+	}
+}
+
+// A POSITIONAL argument is not a flag and does not introduce a value.
+//
+// isSensitiveMCPDisplayFlag strips leading dashes before matching, so it says
+// yes to a bare word too. The documented GitHub server config passes the env
+// var NAME positionally, and reading it as a flag put the docker image name into
+// the redaction set: the pull failure then lost the one string explaining it.
+func TestSensitiveArgValuesIgnoresPositionalWordsThatLookSensitive(t *testing.T) {
+	args := []string{
+		"run", "-i", "--rm",
+		"-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+		"ghcr.io/github/github-mcp-server",
+	}
+	for _, got := range sensitiveMCPArgValues(args) {
+		if got == "ghcr.io/github/github-mcp-server" {
+			t.Errorf("the docker image name was collected as a secret: %q", sensitiveMCPArgValues(args))
+		}
+	}
+
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"github": {Type: "stdio", Command: "docker", Args: args},
+	}}
+	reason := failedServerReason(t, cfg, "github",
+		errors.New("initialize failed: docker: Error response from daemon: pull access denied for ghcr.io/github/github-mcp-server"), nil)
+	if !strings.Contains(reason, "ghcr.io/github/github-mcp-server") {
+		t.Errorf("the failure lost the image name that explains it: %q", reason)
 	}
 }
 
