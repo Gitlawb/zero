@@ -112,8 +112,15 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 		return nil
 	}
 	if _, err := applyWindowsACLPlan(plan); err != nil {
+		// Both remedies below are real. An earlier version offered `--sandbox
+		// forbid`, which is not: SandboxPreferenceForbid is an internal engine
+		// state with no flag behind it, so following that advice produced an
+		// unknown option and left the reader stuck on a failure they had just been
+		// told how to clear. A recovery instruction that does not work is worse
+		// than none, because it costs the reader the time to discover that.
 		return fmt.Errorf("apply unelevated workspace ACLs: %w — the workspace may be on a filesystem the current user does not own; "+
-			"run `zero sandbox setup` from an elevated (Administrator) terminal, or re-run with `--sandbox forbid` to skip OS sandboxing", err)
+			"run `zero sandbox setup` from an elevated (Administrator) terminal, "+
+			`or turn the sandbox off in your user config with "sandbox": {"enabled": false}`, err)
 	}
 	return recordWindowsUnelevatedAppliedPlan(config.SandboxHome, applied)
 }
