@@ -89,6 +89,11 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	return exitCode
 }
 
+// applyWindowsUnelevatedACLPlanFn is a seam. The failure branch below builds
+// the guidance an operator acts on, and that text is only correct by
+// inspection until something drives the branch and reads it back.
+var applyWindowsUnelevatedACLPlanFn = applyWindowsACLPlan
+
 // ensureWindowsUnelevatedSetup applies the workspace ACL plan from the current
 // (non-elevated) process so the write-restricted token has somewhere its
 // capability SIDs are granted. DACL edits on user-owned workspace and temp
@@ -111,7 +116,7 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	if marker.contains(applied) {
 		return nil
 	}
-	if _, err := applyWindowsACLPlan(plan); err != nil {
+	if _, err := applyWindowsUnelevatedACLPlanFn(plan); err != nil {
 		// Both remedies below are real. An earlier version offered `--sandbox
 		// forbid`, which is not: SandboxPreferenceForbid is an internal engine
 		// state with no flag behind it, so following that advice produced an
