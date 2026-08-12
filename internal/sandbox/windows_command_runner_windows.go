@@ -163,6 +163,16 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 			return 1
 		}
+		// Stop the child describing the CALLER. Everything identifying the account
+		// survived from the invoking user's environment, so a principal command
+		// resolved its per-user state through paths inside a profile it cannot
+		// open. Applied here, on the principal path only, because this is the first
+		// point that knows which account the command is about to run as.
+		config.Env = windowsPrincipalIdentityEnvironment(
+			config.Env,
+			windowsSandboxUserName(windowsSandboxPrincipalKey(config)),
+			config.PermissionProfile.Runtime,
+		)
 		exitCode, err := runWindowsCommandAsUser(jailedToken, config)
 		if err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
