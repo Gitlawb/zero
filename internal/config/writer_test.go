@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -31,7 +33,7 @@ func TestSetActiveProviderSwitchesConfiguredProvider(t *testing.T) {
 		},
 	}, 0o600)
 
-	cfg, err := SetActiveProvider(path, "  anthropic  ")
+	cfg, err := SetActiveProvider(path, "  Anthropic  ")
 	if err != nil {
 		t.Fatalf("SetActiveProvider() error = %v", err)
 	}
@@ -170,7 +172,7 @@ func TestSetProviderModelUpdatesConfiguredProvider(t *testing.T) {
 		},
 	}, 0o600)
 
-	cfg, err := SetProviderModel(path, " OpenAI ", " gpt-4.1-mini ")
+	cfg, err := SetProviderModel(path, " openai ", " gpt-4.1-mini ")
 	if err != nil {
 		t.Fatalf("SetProviderModel() error = %v", err)
 	}
@@ -594,7 +596,7 @@ func TestRemoveProviderDeletesAndHandsOffActive(t *testing.T) {
 		},
 	}, 0o600)
 
-	cfg, err := RemoveProvider(path, " BETA ")
+	cfg, err := RemoveProvider(path, " beta ")
 	if err != nil {
 		t.Fatalf("RemoveProvider() error = %v", err)
 	}
@@ -917,9 +919,9 @@ func TestEditProviderAppliesRenameFieldsAndDescriptionAtomically(t *testing.T) {
 
 // TestEditProviderCaseOnlyRenameUpdatesInPlace: the manager previously skipped
 // RenameProvider on case-insensitively-equal names and fell into UpsertProvider,
-// whose case-SENSITIVE merge appended a duplicate profile. EditProvider matches
-// case-insensitively, so a case-only rename is an in-place update and the store
-// entry (case-normalized) survives.
+// whose case-SENSITIVE merge appended a duplicate profile. EditProvider applies
+// NewName to the exact current profile, so a case-only rename is an in-place
+// update and the store entry (case-normalized) survives.
 func TestEditProviderCaseOnlyRenameUpdatesInPlace(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
@@ -1019,5 +1021,241 @@ func TestEditProviderRejectsCollisionAndUnknown(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("config was rewritten by a rejected edit")
+	}
+}
+
+func TestSetActiveProviderRequiresExactProviderIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	_, err := SetActiveProvider(path, "WORK")
+	if err == nil || !strings.Contains(err.Error(), `provider "WORK" not found`) {
+		t.Fatalf("SetActiveProvider() error = %v, want exact-case not-found error", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read config: %v", readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten for case-variant provider\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestMarkProviderAPIKeyStoredRequiresExactProviderIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work", APIKeyEnv: "WORK_KEY"}}}, 0o600)
+	if err := MarkProviderAPIKeyStored(path, "WORK"); err == nil || !strings.Contains(err.Error(), `provider "WORK" not found`) {
+		t.Fatalf("MarkProviderAPIKeyStored() error = %v, want exact-case not-found", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("case-variant mark rewrote config")
+	}
+}
+
+func TestProviderPersistedRequiresExactProviderIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}}}, 0o600)
+
+	persisted, err := ProviderPersisted(path, "WORK")
+	if err != nil {
+		t.Fatalf("ProviderPersisted() error = %v", err)
+	}
+	if persisted {
+		t.Fatal("ProviderPersisted() = true for case-variant identity, want false")
+	}
+}
+
+// Same scenario as RemoveProvider/RenameProvider: two rows differing only by
+// case must not let SetProviderModel update the wrong one.
+func TestSetProviderModelRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, Model: "m1"},
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, Model: "m2"},
+		},
+	}, 0o600)
+
+	_, err := SetProviderModel(path, "WORK", "m2-updated")
+	assertAmbiguousConfigUnchanged(t, path, before, err, "work", "WORK")
+}
+
+func TestProviderMutatorsHandOffCaseVariantActiveProvider(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(string) (FileConfig, error)
+		wantActive string
+		wantName   string
+	}{
+		{name: "remove", mutate: func(path string) (FileConfig, error) { return RemoveProvider(path, "work") }},
+		{name: "rename", mutate: func(path string) (FileConfig, error) { return RenameProvider(path, "work", "office") }, wantActive: "office", wantName: "office"},
+		{name: "edit", mutate: func(path string) (FileConfig, error) {
+			return EditProvider(path, ProviderEdit{Name: "work", NewName: "office", Model: "updated"})
+		}, wantActive: "office", wantName: "office"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			writeConfigFixture(t, path, FileConfig{ActiveProvider: "WORK", Providers: []ProviderProfile{{Name: "work", Model: "old"}}}, 0o600)
+			cfg, err := test.mutate(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ActiveProvider != test.wantActive {
+				t.Fatalf("activeProvider = %q, want %q", cfg.ActiveProvider, test.wantActive)
+			}
+			if test.wantName == "" && len(cfg.Providers) != 0 {
+				t.Fatalf("providers = %+v, want none", cfg.Providers)
+			}
+			if test.wantName != "" && (len(cfg.Providers) != 1 || cfg.Providers[0].Name != test.wantName) {
+				t.Fatalf("providers = %+v, want canonical name %q", cfg.Providers, test.wantName)
+			}
+		})
+	}
+}
+
+// UpsertProvider merges by exact name, so a config file can end up with two
+// rows that differ only by case (e.g. one saved as "work", another later
+// saved as "WORK"). RemoveProvider must delete the exact row the caller
+// named, not whichever case-variant sorts first.
+func TestRemoveProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	cfg, err := RemoveProvider(path, "WORK")
+	if err != nil {
+		t.Fatalf("exact removal should repair case duplicates: %v", err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" || cfg.ActiveProvider != "work" {
+		t.Fatalf("repaired config = %+v", cfg)
+	}
+}
+
+func TestRemoveProviderRejectsNonExactCaseDuplicateTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}}}, 0o600)
+	_, err := RemoveProvider(path, "WoRk")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want exact-target not-found error", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("rejected removal rewrote config: readErr=%v", readErr)
+	}
+}
+
+func TestRemoveProviderRejectsRepairThatRemainsAmbiguous(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}, {Name: "Work"}}}, 0o600)
+	_, err := RemoveProvider(path, "Work")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous persisted provider names") {
+		t.Fatalf("error = %v, want resulting-config validation error", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("invalid repair rewrote config: readErr=%v", readErr)
+	}
+}
+
+func TestRemoveProviderKeepsExactActiveCaseVariant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers:      []ProviderProfile{{Name: "alpha"}, {Name: "work"}, {Name: "WORK"}},
+	}, 0o600)
+
+	cfg, err := RemoveProvider(path, "WORK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ActiveProvider != "work" {
+		t.Fatalf("activeProvider = %q, want exact surviving row work", cfg.ActiveProvider)
+	}
+}
+
+// Same scenario as RemoveProvider: two rows differing only by case must not
+// let RenameProvider act on the wrong one.
+func TestRenameProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	_, err := RenameProvider(path, "WORK", "renamed")
+	assertAmbiguousConfigUnchanged(t, path, before, err, "work", "WORK")
+}
+
+func TestEditProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://upper.example.com/v1", Model: "upper"},
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://lower.example.com/v1", Model: "lower"},
+		},
+	}, 0o600)
+
+	_, err := EditProvider(path, ProviderEdit{Name: "WORK", NewName: "renamed", Model: "updated"})
+	assertAmbiguousConfigUnchanged(t, path, before, err, "WORK", "work")
+}
+
+func assertAmbiguousConfigUnchanged(t *testing.T, path string, before []byte, err error, first, second string) {
+	t.Helper()
+	want := fmt.Sprintf("ambiguous persisted provider names %q and %q differ only by case; rename or remove one row in config.json", first, second)
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("ambiguous mutation rewrote config\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// TestValidatePersistedProviderNamesRejectsExactDuplicates covers jatmn's #725
+// finding: the validator only rejected a repeated folded name when the
+// SPELLINGS differed, so two rows literally named "work" passed. That breaks
+// the same one-credential-per-folded-name invariant the case check protects —
+// resolver merging coalesces the rows, and plaintext-key migration writes both
+// values into one normalized credential-store entry, overwriting the first key.
+func TestValidatePersistedProviderNamesRejectsExactDuplicates(t *testing.T) {
+	for name, providers := range map[string][]ProviderProfile{
+		"identical spellings": {{Name: "work"}, {Name: "work"}},
+		"same after trimming": {{Name: "work"}, {Name: "  work  "}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidatePersistedProviderNames(FileConfig{Providers: providers})
+			if err == nil {
+				t.Fatal("a repeated folded provider identity must be rejected")
+			}
+			if want := `duplicate persisted provider name "work"`; !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want it to contain %q", err, want)
+			}
+		})
+	}
+	if err := ValidatePersistedProviderNames(FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "fast"}}}); err != nil {
+		t.Fatalf("distinct names must validate: %v", err)
 	}
 }
