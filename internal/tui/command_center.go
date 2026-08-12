@@ -711,11 +711,20 @@ func oauthLoginName(profile config.ProviderProfile) (string, bool) {
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
 	normalized := credstore.NormalizeProvider(name)
 	for _, profile := range m.savedProviders {
+		// Exact first: a project config can contribute "WORK" beside the
+		// user-config row "work", and the exact row must win over its
+		// case-variant sibling before the normalized pass below.
+		if strings.TrimSpace(profile.Name) == strings.TrimSpace(name) {
+			return profile, true
+		}
+	}
+	for _, profile := range m.savedProviders {
 		if credstore.NormalizeProvider(profile.Name) == normalized {
 			return profile, true
 		}
 	}
-	if credstore.NormalizeProvider(m.providerProfile.Name) == normalized {
+	if strings.TrimSpace(m.providerProfile.Name) == strings.TrimSpace(name) ||
+		credstore.NormalizeProvider(m.providerProfile.Name) == normalized {
 		return m.providerProfile, true
 	}
 	return config.ProviderProfile{}, false

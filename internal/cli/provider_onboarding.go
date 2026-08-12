@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -17,6 +18,8 @@ type providerUseOptions struct {
 	name string
 	json bool
 }
+
+const providerCommandEnv = "ZERO_PROVIDER_COMMAND"
 
 type providerSetupOptions struct {
 	catalogID string
@@ -82,15 +85,36 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 
 	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
+	// A case-only difference is harmless only when resolution proves that it
+	// selects the exact user-config row just written. A project profile may use
+	// the case-variant spelling and point at a different endpoint and credential.
+	if override != "" && config.SameProviderIdentity(override, cfg.ActiveProvider) &&
+		activeProviderEnvOverrideSelectsSaved(deps, configPath, cfg.ActiveProvider) {
+		override = ""
+	}
+	overrideResolution := activeProviderOverrideAbsent
+	var overrideResolutionErr error
+	if override != "" {
+		overrideResolution, overrideResolutionErr = activeProviderEnvOverrideResolution(deps, configPath, override)
+	}
 	if options.json {
 		payload := map[string]any{
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
 		}
 		if override != "" {
-			// A JSON consumer must not read this as an effective switch either.
-			payload["effectiveProvider"] = override
 			payload["overriddenByEnv"] = config.ActiveProviderEnv
+			payload["envProvider"] = override
+			payload["envProviderResolves"] = overrideResolution.resolves()
+			switch overrideResolution {
+			case activeProviderOverrideResolved:
+				payload["effectiveProvider"] = override
+			case activeProviderOverrideDeferred:
+				payload["envProviderResolution"] = "deferred"
+			case activeProviderOverrideConfigError:
+				payload["envProviderResolution"] = "config-error"
+				payload["envProviderResolutionError"] = overrideResolutionErr.Error()
+			}
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
@@ -101,16 +125,46 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return exitCrash
 	}
 	if override != "" {
-		if _, err := fmt.Fprintf(stderr, "Note: %s=%s is set and overrides config.json, so %s stays the active provider until you unset %s.\n", config.ActiveProviderEnv, override, override, config.ActiveProviderEnv); err != nil {
+		note := fmt.Sprintf("Note: %s=%s is set and overrides config.json, so %s stays the active provider until you unset %s.\n", config.ActiveProviderEnv, override, override, config.ActiveProviderEnv)
+		switch overrideResolution {
+		case activeProviderOverrideDeferred:
+			note = fmt.Sprintf("Note: %s=%s is set and overrides config.json; %s is also set, so the effective provider will be determined when Zero next resolves configuration.\n", config.ActiveProviderEnv, override, providerCommandEnv)
+		case activeProviderOverrideConfigError:
+			note = fmt.Sprintf("Note: %s=%s is set and overrides config.json, but the effective provider cannot be verified because configuration is invalid: %v\n", config.ActiveProviderEnv, override, overrideResolutionErr)
+		case activeProviderOverrideUnresolved:
+			note = fmt.Sprintf("Note: %s=%s is set and overrides config.json, but no provider named %s can be resolved, so Zero cannot start until you unset %s or point it at a saved provider.\n", config.ActiveProviderEnv, override, override, config.ActiveProviderEnv)
+		}
+		if _, err := fmt.Fprint(stderr, note); err != nil {
 			return exitCrash
 		}
 	}
 	return exitSuccess
 }
 
+type activeProviderOverrideResolution uint8
+
+const (
+	activeProviderOverrideAbsent activeProviderOverrideResolution = iota
+	activeProviderOverrideResolved
+	activeProviderOverrideUnresolved
+	activeProviderOverrideDeferred
+	activeProviderOverrideConfigError
+)
+
+func (resolution activeProviderOverrideResolution) resolves() any {
+	switch resolution {
+	case activeProviderOverrideResolved:
+		return true
+	case activeProviderOverrideUnresolved:
+		return false
+	default:
+		return nil
+	}
+}
+
 // activeProviderEnvOverride returns the ZERO_PROVIDER value when it is set and
-// names a DIFFERENT provider than the one just selected, meaning the saved
-// `providers use` selection will NOT be the effective active provider until the
+// names a different spelling than the one just selected, meaning the saved
+// `providers use` selection may not be the effective active provider until the
 // env var is unset. applyEnv (resolver.go) makes ZERO_PROVIDER win over
 // config.json unconditionally, so reporting the write as a plain success reads as
 // a switch that silently has no effect (issue #721). Empty when nothing overrides
@@ -120,10 +174,57 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 		return ""
 	}
 	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
-	if override == "" || config.SameProviderIdentity(override, selected) {
+	if override == "" || override == strings.TrimSpace(selected) {
 		return ""
 	}
 	return override
+}
+
+// activeProviderEnvOverrideSelectsSaved reports whether resolution maps a
+// case-only override back to the exact row selected in user config.
+func activeProviderEnvOverrideSelectsSaved(deps appDeps, configPath string, selected string) bool {
+	resolved, err := resolveActiveProviderWithoutProviderCommand(deps, configPath)
+	return err == nil && resolved == strings.TrimSpace(selected)
+}
+
+// resolveActiveProviderWithoutProviderCommand resolves normal user/project/env
+// inputs without executing the arbitrary external ZERO_PROVIDER_COMMAND.
+func resolveActiveProviderWithoutProviderCommand(deps appDeps, configPath string) (string, error) {
+	if deps.getenv != nil && strings.TrimSpace(deps.getenv(providerCommandEnv)) != "" {
+		return "", fmt.Errorf("provider command resolution is deferred")
+	}
+	workspaceRoot, err := resolveWorkspaceRoot("", deps)
+	if err != nil {
+		return "", err
+	}
+	options, err := config.DefaultResolveOptions(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	options.UserConfigPath = configPath
+	options.ProviderCommand = ""
+	resolved, err := config.Resolve(options)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resolved.ActiveProvider), nil
+}
+
+func activeProviderEnvOverrideResolution(deps appDeps, configPath string, override string) (activeProviderOverrideResolution, error) {
+	if deps.getenv != nil && strings.TrimSpace(deps.getenv(providerCommandEnv)) != "" {
+		return activeProviderOverrideDeferred, nil
+	}
+	resolved, err := resolveActiveProviderWithoutProviderCommand(deps, configPath)
+	if err != nil {
+		if errors.Is(err, config.ErrNoActiveProvider) || errors.Is(err, config.ErrProviderRequiresModel) {
+			return activeProviderOverrideUnresolved, nil
+		}
+		return activeProviderOverrideConfigError, err
+	}
+	if !config.SameProviderIdentity(resolved, override) {
+		return activeProviderOverrideUnresolved, nil
+	}
+	return activeProviderOverrideResolved, nil
 }
 
 func runProvidersSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
