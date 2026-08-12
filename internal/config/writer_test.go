@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1592,4 +1593,221 @@ func TestRemoveProviderNormalizesStaleActiveProviderSpelling(t *testing.T) {
 	if _, err := SetProviderModel(path, cfg.ActiveProvider, "gpt-4"); err != nil {
 		t.Fatalf("exact mutator still cannot find the active row: %v", err)
 	}
+}
+
+func TestEnsureCatalogProviderRequiresPositiveCatalogOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		catalogID string
+	}{
+		{name: "foreign catalog", catalogID: "custom-openai-compatible"},
+		{name: "missing catalog", catalogID: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "zero.json")
+			before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{
+				Name:         "OpenRouter",
+				CatalogID:    tc.catalogID,
+				ProviderKind: ProviderKindOpenAICompatible,
+				BaseURL:      "https://corp.example/v1",
+				Model:        "corp-model",
+				APIKeyStored: true,
+			}}}, 0o600)
+
+			if _, err := EnsureCatalogProvider(path, "openrouter"); err == nil || !strings.Contains(err.Error(), "does not prove ownership") {
+				t.Fatalf("EnsureCatalogProvider error = %v, want ownership rejection", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("foreign profile was rewritten:\nbefore: %s\nafter: %s", before, after)
+			}
+		})
+	}
+}
+
+func TestEnsureCatalogProviderRejectsAmbiguousCatalogOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+		{Name: "work-xai", CatalogID: "xai"},
+		{Name: "personal-xai", CatalogID: "xai"},
+	}}, 0o600)
+
+	if _, err := EnsureCatalogProvider(path, "xai"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("EnsureCatalogProvider error = %v, want shared-catalog ambiguity", err)
+	}
+	if err := PreflightCatalogProviderLogin(path, "xai"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("PreflightCatalogProviderLogin error = %v, want the same ambiguity", err)
+	}
+}
+
+// TestPersistedProviderIdentityRulesMatchTheCredentialStore pins the identity
+// contract this PR introduced across every persisted-config path at once.
+// strings.EqualFold folds "s" and Unicode long-s "ſ" together while
+// credstore.NormalizeProvider (the store's own rule, and the rule
+// ValidatePersistedProviderNames enforces) keeps them apart, so the two
+// spellings are separate profiles with separate secrets. Mixing the two
+// comparisons made one profile's mutation reach the other's row: destructive
+// logout expansion adopted the unrelated row, while ordinary writes rejected
+// the pair as a collision.
+func TestPersistedProviderIdentityRulesMatchTheCredentialStore(t *testing.T) {
+	const longS = "ſ"
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "s", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://s.example/v1", Model: "m", APIKeyStored: true},
+		},
+	}, 0o600)
+
+	t.Run("identity resolution does not adopt the distinct spelling", func(t *testing.T) {
+		if _, match, err := ResolvePersistedProviderIdentity(path, longS); err != nil || match != PersistedIdentityNone {
+			t.Fatalf("ResolvePersistedProviderIdentity(%q) = %v, %v; want no match", longS, match, err)
+		}
+	})
+
+	t.Run("a distinct spelling is writable, not a collision", func(t *testing.T) {
+		if err := PreflightProviderWrite(path, longS); err != nil {
+			t.Fatalf("PreflightProviderWrite(%q) = %v; want the distinct identity accepted", longS, err)
+		}
+		cfg, err := UpsertProvider(path, ProviderProfile{Name: longS, ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://long-s.example/v1", Model: "m"}, false)
+		if err != nil {
+			t.Fatalf("UpsertProvider(%q) = %v; want the distinct identity accepted", longS, err)
+		}
+		if len(cfg.Providers) != 2 {
+			t.Fatalf("providers = %+v, want both distinct rows saved", cfg.Providers)
+		}
+	})
+
+	t.Run("a case variant is still a collision", func(t *testing.T) {
+		if err := PreflightProviderWrite(path, "S"); err == nil {
+			t.Fatal("PreflightProviderWrite(\"S\") accepted a case variant of a saved row")
+		}
+	})
+}
+
+// TestResolvePersistedProviderIdentityPrefersNames covers jatmn's #725 finding
+// that identity resolution took the first row matching EITHER field, so a
+// catalog id on an earlier row outranked a later row with the exact name.
+func TestResolvePersistedProviderIdentityPrefersNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "work-xai", CatalogID: "xai"},
+			{Name: "xai", CatalogID: "xai"},
+		},
+	}, 0o600)
+
+	t.Run("exact name beats an earlier catalog id", func(t *testing.T) {
+		row, match, err := ResolvePersistedProviderIdentity(path, "xai")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if match != PersistedIdentityName || row.Name != "xai" {
+			t.Fatalf("row = %q match = %v, want the exactly named row", row.Name, match)
+		}
+	})
+
+	t.Run("a shared catalog id resolves to nothing", func(t *testing.T) {
+		_, match, err := ResolvePersistedProviderIdentity(path, "XAI")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		// "XAI" folds to the "xai" row's NAME, so that wins; the point of the
+		// exclusivity rule shows on a catalog id nothing is named after.
+		if match != PersistedIdentityName {
+			t.Fatalf("match = %v, want the case-variant name match", match)
+		}
+	})
+
+	t.Run("unique catalog id still resolves", func(t *testing.T) {
+		unique := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, unique, FileConfig{
+			Providers: []ProviderProfile{{Name: "my-router", CatalogID: "openrouter"}},
+		}, 0o600)
+		row, match, err := ResolvePersistedProviderIdentity(unique, "openrouter")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if match != PersistedIdentityCatalog || row.Name != "my-router" {
+			t.Fatalf("row = %q match = %v, want the sole catalog owner", row.Name, match)
+		}
+	})
+
+	t.Run("an ambiguous catalog id resolves to nothing", func(t *testing.T) {
+		shared := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, shared, FileConfig{
+			Providers: []ProviderProfile{
+				{Name: "work-xai", CatalogID: "xai"},
+				{Name: "personal-xai", CatalogID: "xai"},
+			},
+		}, 0o600)
+		if _, match, err := ResolvePersistedProviderIdentity(shared, "xai"); err != nil || match != PersistedIdentityNone {
+			t.Fatalf("match = %v err = %v, want no guess at a shared catalog id", match, err)
+		}
+	})
+}
+
+// TestCatalogIdentityExclusive guards the rule credential cleanup depends on:
+// a catalog id claimed by any other row is not the target profile's own key.
+func TestCatalogIdentityExclusive(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, shared, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "work-xai", CatalogID: "xai"},
+			{Name: "xai", CatalogID: "xai"},
+			{Name: "personal-xai", CatalogID: "xai"},
+		},
+	}, 0o600)
+	if exclusive, err := CatalogIdentityExclusive(shared, "xai", "work-xai"); err != nil || exclusive {
+		t.Fatalf("exclusive = %v err = %v, want false for a catalog id three rows claim", exclusive, err)
+	}
+
+	sole := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, sole, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "my-router", CatalogID: "openrouter"},
+			{Name: "work", CatalogID: "xai"},
+		},
+	}, 0o600)
+	if exclusive, err := CatalogIdentityExclusive(sole, "openrouter", "my-router"); err != nil || !exclusive {
+		t.Fatalf("exclusive = %v err = %v, want true when only the owner claims the id", exclusive, err)
+	}
+}
+
+func TestProviderCredentialCandidates(t *testing.T) {
+	t.Run("includes the persisted name and exclusive catalog alias", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+			{Name: "my-router", CatalogID: "openrouter"},
+		}}, 0o600)
+		candidates, canonical, err := ProviderCredentialCandidates(path, "MY-ROUTER")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"MY-ROUTER", "my-router", "openrouter"}
+		if !slices.Equal(candidates, want) || canonical != "my-router" {
+			t.Fatalf("candidates = %q canonical = %q, want %q and my-router", candidates, canonical, want)
+		}
+	})
+
+	t.Run("does not claim a shared catalog alias", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+			{Name: "work-xai", CatalogID: "xai"},
+			{Name: "personal-xai", CatalogID: "xai"},
+		}}, 0o600)
+		candidates, canonical, err := ProviderCredentialCandidates(path, "work-xai")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"work-xai"}; !slices.Equal(candidates, want) || canonical != "work-xai" {
+			t.Fatalf("candidates = %q canonical = %q, want %q and work-xai", candidates, canonical, want)
+		}
+		candidates, _, err = ProviderCredentialCandidates(path, "xai")
+		if err == nil || len(candidates) != 0 {
+			t.Fatalf("ambiguous alias candidates = %q err = %v, want no destructive candidates and an error", candidates, err)
+		}
+	})
 }

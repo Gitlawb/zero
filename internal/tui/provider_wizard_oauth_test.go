@@ -495,3 +495,23 @@ func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
 		t.Fatalf("unknown provider must not append, got %+v", got)
 	}
 }
+
+func TestProviderWizardDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
+	msg := providerWizardDevicePrepareCmd("xai", 42, t.TempDir())().(providerWizardDeviceCodeMsg)
+	if msg.err == nil {
+		t.Fatal("device-code preparation should reject an unreadable config before requesting a code")
+	}
+	if msg.attemptID != 42 {
+		t.Fatalf("attemptID = %d, want 42", msg.attemptID)
+	}
+}
+
+func TestOAuthPreflightRequiresPositiveCatalogOwnership(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"OpenRouter","catalogId":"custom-openai-compatible"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightOAuthProviderConfig(path, "openrouter"); err == nil || !strings.Contains(err.Error(), "does not prove ownership") {
+		t.Fatalf("preflight error = %v, want ownership rejection", err)
+	}
+}

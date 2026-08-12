@@ -2182,3 +2182,34 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 		t.Fatalf("%s = %q after setup save, want %q (children would spawn on the stale provider)", config.ActiveProviderEnv, got, next.providerName)
 	}
 }
+
+func TestApplySetupOAuthTokenPersistFailureStaysOnProvider(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{Visible: true, Providers: []SetupProviderOption{
+			{ID: "xai", Name: "xAI", RequiresAuth: true},
+		}},
+	})
+	m.setup.stage = setupStageProvider
+	m.setup.oauthPending = true
+	m.setup.oauthMode = true
+	m.setup.configPath = t.TempDir() // A directory cannot be read as config.json.
+
+	updated, cmd := m.applySetupOAuth(setupOAuthMsg{tokenLogin: true, providerID: "xai"})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("failed profile persistence should not start model discovery")
+	}
+	if next.setup.stage != setupStageProvider {
+		t.Fatalf("stage = %v, want provider", next.setup.stage)
+	}
+	if next.setup.oauthErr == "" || !strings.Contains(next.setup.oauthErr, "could not be saved") {
+		t.Fatalf("oauthErr = %q, want profile-save failure", next.setup.oauthErr)
+	}
+}
+
+func TestSetupDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
+	msg := setupDevicePrepareCmd("xai", t.TempDir())().(setupOAuthDeviceMsg)
+	if msg.err == nil {
+		t.Fatal("device-code preparation should reject an unreadable config before requesting a code")
+	}
+}

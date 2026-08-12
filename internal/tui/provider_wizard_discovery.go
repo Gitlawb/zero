@@ -65,7 +65,10 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 			m.providerWizard.enterAimlapi()
 			return m, nil
 		}
-		if name, ok := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); ok {
+		if name, ok, err := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); err != nil {
+			m.providerWizard.err = err.Error()
+			return m, nil
+		} else if ok {
 			// Generic/custom providers (custom-openai-compatible etc.) all share
 			// the same CatalogID — matching on CatalogID would block creating a
 			// second instance. Skip ManageKey and fall through to the shared
@@ -152,8 +155,8 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 }
 
 func aimlapiProfile(profile config.ProviderProfile) bool {
-	return strings.EqualFold(strings.TrimSpace(profile.CatalogID), "aimlapi") ||
-		strings.EqualFold(strings.TrimSpace(profile.Name), "aimlapi")
+	return strings.TrimSpace(profile.CatalogID) != "" &&
+		config.SameProviderIdentity(profile.CatalogID, "aimlapi")
 }
 
 func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {
