@@ -229,15 +229,23 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 		// is only recorded on success, so the same plan fails identically on
 		// every later command until the offending root leaves it. A reader who
 		// cannot tell which root is at fault has no way out of that.
+		// Every remedy named below is one the reader can actually carry out.
+		// Both messages used to offer `--sandbox forbid`, which is not an option
+		// at all: SandboxPreferenceForbid is an internal engine state with no flag
+		// behind it, so acting on it produced an unknown option and left the reader
+		// stuck on the failure they had just been told how to clear. Advice that
+		// does not work costs more than none, since finding that out takes time.
 		if denied := windowsACLPlanDeniedPath(err); denied != "" {
 			return fmt.Errorf("apply unelevated workspace ACLs: %w; %s cannot have its permissions changed by this user, "+
 				"so the sandbox cannot enforce a write boundary there and will not run the command. "+
 				"That path is one of this workspace's sandbox roots, usually a system directory that arrived via TEMP or TMP. "+
-				"Check those, or re-run with `--sandbox forbid` to skip OS sandboxing. "+
+				"Check those, or turn the sandbox off in your user config with "+
+				`"sandbox": {"enabled": false}. `+
 				"Running `zero sandbox setup` elevated will NOT fix this", err, denied)
 		}
 		return fmt.Errorf("apply unelevated workspace ACLs: %w — the workspace may be on a filesystem the current user does not own; "+
-			"run `zero sandbox setup` from an elevated (Administrator) terminal, or re-run with `--sandbox forbid` to skip OS sandboxing", err)
+			"run `zero sandbox setup` from an elevated (Administrator) terminal, "+
+			`or turn the sandbox off in your user config with "sandbox": {"enabled": false}`, err)
 	}
 	return recordWindowsUnelevatedAppliedPlan(config.SandboxHome, applied)
 }
