@@ -327,6 +327,90 @@ func TestLinuxBwrapRejectsMandatoryPathOutsideDenyBaseline(t *testing.T) {
 	}
 }
 
+// TestLinuxBwrapMandatoryPathRotationToUnprotectedSymlinkFailsClosed covers
+// the check/use gap between the early validate pass and plan construction: a
+// mandatory token file that was a regular file when the profile validated is
+// replaced with a symlink to an unrelated location before
+// buildLinuxBwrapFilesystemPlan runs (the shape of an external token
+// rotation, or a remote worker racing sandbox launch). The plan must fail
+// closed rather than silently omit any mask for the pathname, which would
+// leave the rotated bearer readable through the configured token-file path.
+func TestLinuxBwrapMandatoryPathRotationToUnprotectedSymlinkFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	mandatory := filepath.Join(dir, "daemon-token")
+	if err := os.WriteFile(mandatory, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                   FileSystemRestricted,
+			ReadRoots:              []string{string(filepath.Separator)},
+			DenyReadIfExists:       []string{mandatory},
+			MandatoryDenyReadPaths: []string{mandatory},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	// The early, best-effort validation pass sees a regular file and passes.
+	if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+		t.Fatalf("validateLinuxBwrapPermissionProfile on the regular file: %v", err)
+	}
+
+	// Simulate the rotation: replace the regular file with a symlink whose
+	// target is NOT itself a mandatory (or even deny-read) path.
+	outside := filepath.Join(dir, "replacement-target")
+	if err := os.WriteFile(outside, []byte("attacker bearer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(mandatory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, mandatory); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := buildLinuxBwrapFilesystemPlan(profile)
+	if err == nil {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan after rotation to an unprotected symlink = plan %#v, want an error", plan)
+	}
+	if !strings.Contains(err.Error(), "resolved target") {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan error = %v, want a resolved-target mismatch error", err)
+	}
+}
+
+// TestLinuxBwrapMandatoryPathSymlinkToAnotherMandatoryPathIsMasked is the
+// accepted-shape counterpart: a mandatory path that is a symlink to another
+// path that is itself in MandatoryDenyReadPaths is not masked directly (bwrap
+// cannot mount over a symlink destination), but the plan must still succeed
+// and mask the resolved target through its own entry.
+func TestLinuxBwrapMandatoryPathSymlinkToAnotherMandatoryPathIsMasked(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-daemon-token")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "daemon-token-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                   FileSystemRestricted,
+			ReadRoots:              []string{string(filepath.Separator)},
+			DenyReadIfExists:       []string{link, target},
+			MandatoryDenyReadPaths: []string{link, target},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
+	normalizedTarget := normalizeProfilePath(target)
+	assertArgsContainSequence(t, plan.Args, "--ro-bind", "/dev/null", normalizedTarget)
+	if stringSliceContains(plan.Args, link) {
+		t.Fatalf("bubblewrap cannot mount over the symlink itself; it must not appear as a mount target: %#v", plan.Args)
+	}
+}
+
 // TestLinuxBwrapCreatesOwnedCredentialDirsBeforeMasking covers the long-lived
 // session race: bubblewrap cannot mount over a path that does not exist, so a
 // store written after the namespace was assembled would stay readable through
