@@ -77,17 +77,22 @@ func currentTokenUserSID() (*windows.SID, error) {
 	return copied, nil
 }
 
-// lockWindowsSecretToOwner replaces a file's DACL with an explicit,
-// inheritance-protected one granting only owner and SYSTEM. PROTECTED is what
-// drops any ACE inherited from the config directory; without it a permissive
-// parent would still grant access to whoever it names.
-func lockWindowsSecretToOwner(path string, owner *windows.SID) error {
+// windowsSecretOwnerACL builds the explicit, inheritance-protected DACL granting
+// only owner and SYSTEM. PROTECTED is what drops any ACE inherited from the
+// config directory; without it a permissive parent would still grant access to
+// whoever it names.
+//
+// Returns the ACL rather than applying it, because the caller applies it to an
+// open HANDLE. Applying by pathname meant the object being locked was whatever
+// the name resolved to at that instant, which is not necessarily the object that
+// was just created.
+func windowsSecretOwnerACL(owner *windows.SID) (*windows.ACL, error) {
 	if owner == nil {
-		return errors.New("windows sandbox secret: nil owner SID")
+		return nil, errors.New("windows sandbox secret: nil owner SID")
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
-		return fmt.Errorf("resolve SYSTEM SID: %w", err)
+		return nil, fmt.Errorf("resolve SYSTEM SID: %w", err)
 	}
 	entries := []windows.EXPLICIT_ACCESS{
 		{
@@ -113,20 +118,9 @@ func lockWindowsSecretToOwner(path string, owner *windows.SID) error {
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
-		return fmt.Errorf("build secret ACL: %w", err)
+		return nil, fmt.Errorf("build secret ACL: %w", err)
 	}
-	if err := windows.SetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	); err != nil {
-		return fmt.Errorf("lock secret to owner: %w", err)
-	}
-	return nil
+	return acl, nil
 }
 
 // writeWindowsSandboxSecret stores a principal's password readable only by the
@@ -144,31 +138,38 @@ func writeWindowsSandboxSecret(path string, password string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create secret directory: %w", err)
 	}
-	// Truncate any previous secret first: the ACL below is applied to whatever
-	// inode ends up at this path, so create it before locking it.
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("create secret file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close secret file: %w", err)
-	}
-	if err := lockWindowsSecretToOwner(path, owner); err != nil {
-		// Do not leave an unprotected empty file behind.
-		_ = os.Remove(path)
-		return err
-	}
-	// Encrypt to the invoking user on top of the ACL, so a copy taken outside the
-	// filesystem's enforcement (backup, disk image) is inert. The principal name is
-	// the entropy, which keeps one principal's blob from authenticating another.
+	// Sealed BEFORE the file exists, so a failure here leaves nothing on disk at
+	// all rather than an empty file for someone else to win a race on.
+	//
+	// Encrypted to the invoking user on top of the ACL, so a copy taken outside
+	// the filesystem's enforcement (backup, disk image) is inert. The principal
+	// name is the entropy, which keeps one principal's blob from authenticating
+	// another.
 	sealed, err := protectWindowsSecret(password, windowsSandboxSecretEntropy(path))
 	if err != nil {
+		return err
+	}
+	// ONE resolution of the path, not four. The leaf is created relative to a
+	// pinned no-follow parent handle, and the DACL and the bytes are both applied
+	// to that handle. Resolving the name again between those steps is what let a
+	// junction or symlink swap point an elevated write at a file of the caller's
+	// choosing.
+	handle, err := createWindowsSecretFileNoFollow(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	if err := lockWindowsSecretHandleToOwner(handle, owner); err != nil {
+		// Do not leave an unprotected file behind. Removal is by name, which is
+		// safe in a way the write was not: worst case a swapped name means the
+		// cleanup misses and leaves a locked-down file, never that it deletes
+		// something it did not create.
 		_ = os.Remove(path)
 		return err
 	}
-	if err := os.WriteFile(path, sealed, 0o600); err != nil {
+	if err := writeWindowsSecretHandle(handle, sealed); err != nil {
 		_ = os.Remove(path)
-		return fmt.Errorf("write secret: %w", err)
+		return err
 	}
 	return nil
 }
