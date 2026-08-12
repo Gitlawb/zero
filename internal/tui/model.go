@@ -88,6 +88,8 @@ type model struct {
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
+	deleteProviderKey           func(configPath, provider string) (bool, error)
+	clearProviderKeyStored      func(configPath, provider string) (bool, error)
 	registry                    *tools.Registry
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
@@ -969,6 +971,8 @@ func newModel(ctx context.Context, options Options) model {
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
+		deleteProviderKey:           deleteProviderKey,
+		clearProviderKeyStored:      config.ClearProviderKeyStoredCaseVariants,
 		registry:                    registry,
 		sessionStore:                sessionStore,
 		peerService:                 options.PeerService,

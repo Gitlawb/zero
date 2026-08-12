@@ -1338,13 +1338,15 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if _, err := m.deleteProviderKey(m.userConfigPath, name); err != nil {
+			wizard.err = "Stored key removal failed: " + redaction.ErrorMessage(err, redaction.Options{})
+			return m, nil
+		}
 		if strings.TrimSpace(m.userConfigPath) != "" {
-			if store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath)); err == nil {
-				_, _ = store.Delete(name)
+			if _, err := m.clearProviderKeyStored(m.userConfigPath, name); err != nil {
+				wizard.err = "Stored key marker cleanup failed: " + redaction.ErrorMessage(err, redaction.Options{})
+				return m, nil
 			}
-			_, _ = config.ClearProviderKeyStoredCaseVariants(m.userConfigPath, name)
-		} else {
-			_, _ = config.ForgetProviderKey(name)
 		}
 		m.providerWizard = nil
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + name + ". Re-add it any time with /provider."})
@@ -1354,6 +1356,17 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nKept the saved key for " + name + "."})
 		return m, nil
 	}
+}
+
+func deleteProviderKey(configPath, provider string) (bool, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return config.ForgetProviderKey(provider)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		return false, err
+	}
+	return store.Delete(provider)
 }
 
 func providerWizardRuntimeProfile(profile config.ProviderProfile) config.ProviderProfile {

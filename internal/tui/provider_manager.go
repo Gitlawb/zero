@@ -363,8 +363,13 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 			return m, nil
 		}
 		activeAfter = cfg.ActiveProvider
-		notes = []string{"Deleted " + name + "."}
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, !providerIdentitySurvives(cfg.Providers, name))
+		deleteStoredKey := !providerIdentitySurvives(cfg.Providers, name)
+		if deleteStoredKey {
+			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
+		} else {
+			notes = []string{"Deleted " + name + ". Kept its stored API key because another provider uses the same credential identity."}
+		}
+		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, deleteStoredKey)
 	} else {
 		// Env-derived providers have no persisted profile or credential to
 		// delete. Keep this path session-only.
@@ -378,9 +383,9 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	// must not replace the resolved/filtered savedProviders wholesale.
 	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
-	if config.SameProviderIdentity(m.providerName, name) {
+	if samePersistedProviderName(m.providerName, name) {
 		notes = append(notes, "This session keeps running on it until you switch.")
-	} else if activeAfter != "" && !config.SameProviderIdentity(activeAfter, name) {
+	} else if activeAfter != "" && !samePersistedProviderName(activeAfter, name) {
 		notes = append(notes, "Active provider: "+activeAfter+".")
 	}
 
@@ -413,6 +418,10 @@ func providerIdentitySurvives(providers []config.ProviderProfile, removedName st
 		}
 	}
 	return false
+}
+
+func samePersistedProviderName(left, right string) bool {
+	return strings.TrimSpace(left) == strings.TrimSpace(right)
 }
 
 // providerManagerCleanupMsg reports the off-thread half of a delete: the
@@ -600,10 +609,6 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		wizard.err = "no user config path — cannot save"
 		return m, nil
 	}
-	if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
-		wizard.err = err.Error()
-		return m, nil
-	}
 	oldName := strings.TrimSpace(wizard.editOriginal.Name)
 	persisted, err := config.ProviderPersisted(m.userConfigPath, oldName)
 	if err != nil {
@@ -627,6 +632,10 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		Description: wizard.editDraft.Description,
 	}
 	if key := strings.TrimSpace(wizard.editDraft.APIKey); key != "" {
+		if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
+			wizard.err = err.Error()
+			return m, nil
+		}
 		captured := config.SecureProviderProfile(config.ProviderProfile{Name: oldName, APIKey: key}, m.userConfigPath)
 		// On a store failure SecureProviderProfile keeps the inline key, which
 		// EditProvider then persists (the startup migration re-captures later) —
@@ -646,7 +655,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	// Keep the live session's identity in sync with a rename of the provider it
 	// is running on: the exported ZERO_PROVIDER must resolve for spawned children.
-	if config.SameProviderIdentity(m.providerName, oldName) {
+	if samePersistedProviderName(m.providerName, oldName) {
 		m.providerName = newName
 		m.providerProfile.Name = newName
 		config.SetActiveProviderEnv(newName)
@@ -664,7 +673,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 // liveName is the session's provider AFTER any rename sync, so a single
 // comparison against the edited profile's final name suffices.
 func providerEditRestartNote(liveName string, editedName string) string {
-	if config.SameProviderIdentity(liveName, editedName) {
+	if samePersistedProviderName(liveName, editedName) {
 		return " Press Enter on it to apply the changes to this session."
 	}
 	return ""

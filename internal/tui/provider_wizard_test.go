@@ -1223,6 +1223,48 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 	}
 }
 
+func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
+	newRemovalModel := func(t *testing.T) model {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{UserConfigPath: path})
+		m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "work", manageKeyCursor: 2}
+		return m
+	}
+
+	t.Run("stored key deletion", func(t *testing.T) {
+		m := newRemovalModel(t)
+		m.deleteProviderKey = func(string, string) (bool, error) {
+			return false, errors.New("injected delete failure")
+		}
+		next, _ := m.applyManageKeyChoice()
+		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "Stored key removal failed") {
+			t.Fatalf("wizard did not remain open with deletion error: %+v", next.providerWizard)
+		}
+		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
+			t.Fatal("deletion failure cleared the persisted marker")
+		}
+	})
+
+	t.Run("persisted marker cleanup", func(t *testing.T) {
+		m := newRemovalModel(t)
+		m.deleteProviderKey = func(string, string) (bool, error) { return true, nil }
+		m.clearProviderKeyStored = func(string, string) (bool, error) {
+			return false, errors.New("injected marker failure")
+		}
+		next, _ := m.applyManageKeyChoice()
+		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "Stored key marker cleanup failed") {
+			t.Fatalf("wizard did not remain open with marker error: %+v", next.providerWizard)
+		}
+		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
+			t.Fatal("injected marker failure unexpectedly changed config")
+		}
+	})
+}
+
 func TestProviderWizardManageKeyReplaceAndKeep(t *testing.T) {
 	m := newModel(context.Background(), Options{UserConfigPath: filepath.Join(t.TempDir(), "config.json")})
 

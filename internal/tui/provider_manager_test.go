@@ -683,7 +683,13 @@ func TestProviderManagerRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *tes
 		t.Fatalf("in-memory survivor = %+v, want work", next.savedProviders)
 	}
 	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
-		t.Fatalf("shared key = %q,%v,%v; want sk-shared,true,nil", key, ok, getErr)
+		t.Fatalf("shared key changed: present=%v err=%v", ok, getErr)
+	}
+	if next.providerName != "work" || next.providerProfile.Name != "work" {
+		t.Fatalf("removing WORK changed live work identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if status := next.providerWizard.manageStatus; !strings.Contains(status, "Kept its stored API key") || !strings.Contains(status, "Active provider: work") {
+		t.Fatalf("delete status did not describe retained key and surviving active row: %q", status)
 	}
 }
 
@@ -741,4 +747,49 @@ func TestProviderManagerKeepsDistinctUnicodeLiveProviderOnOtherRowMutation(t *te
 			t.Fatalf("wrong in-memory removal target: %+v", next.savedProviders)
 		}
 	})
+}
+
+func TestProviderManagerCaseVariantEditDoesNotChangeLiveSibling(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	profile := config.ProviderProfile{
+		Name:         "WORK",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://other.example/v1",
+		Model:        "other-model",
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(config.FileConfig{ActiveProvider: "WORK", Providers: []config.ProviderProfile{profile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: config.ProviderProfile{Name: "work"},
+		SavedProviders:  []config.ProviderProfile{profile},
+		UserConfigPath:  path,
+	})
+	m, _ = m.openProviderManager()
+	m.providerWizard.beginProviderEdit(profile)
+	m.providerWizard.editDraft.Name = "OFFICE"
+	next, _ := m.saveManagerEdit()
+
+	if next.providerName != "work" || next.providerProfile.Name != "work" {
+		t.Fatalf("editing WORK rewrote live work identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "work" {
+		t.Fatalf("%s = %q, want live work unchanged", config.ActiveProviderEnv, got)
+	}
+	if next.providerWizard == nil || next.providerWizard.err != "" {
+		t.Fatalf("case-variant sibling edit failed: %+v", next.providerWizard)
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "OFFICE" {
+		t.Fatalf("wrong in-memory edit target: %+v", next.savedProviders)
+	}
+	cfg := readManagerConfig(t, path)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "OFFICE" {
+		t.Fatalf("wrong persisted edit target: %+v", cfg.Providers)
+	}
 }

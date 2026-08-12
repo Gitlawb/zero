@@ -138,14 +138,14 @@ func TestMigratePlaintextProviderKeysValidatesBeforeStoreWrites(t *testing.T) {
 		t.Fatalf("migrate = %d,%v; want validation error", n, err)
 	}
 	if n != 0 || len(store.keys) != 0 {
-		t.Fatalf("invalid config mutated credential store: migrated=%d keys=%v", n, store.keys)
+		t.Fatalf("invalid config mutated credential store: migrated=%d keyCount=%d", n, len(store.keys))
 	}
 	after, readErr := os.ReadFile(path)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
 	if string(after) != string(before) {
-		t.Fatalf("invalid config was rewritten\nbefore: %s\nafter: %s", before, after)
+		t.Fatalf("invalid config was rewritten: beforeBytes=%d afterBytes=%d", len(before), len(after))
 	}
 }
 

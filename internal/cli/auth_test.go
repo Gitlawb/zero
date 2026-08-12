@@ -380,6 +380,14 @@ func TestRunAuthLogoutRejectsAmbiguousConfigBeforeCredentialDeletion(t *testing.
 	if err := store.Set("work", "sk-shared"); err != nil {
 		t.Fatal(err)
 	}
+	oauthStore, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthToken := oauth.Token{AccessToken: "oauth-access", RefreshToken: "oauth-refresh", Account: "work@example.com"}
+	if err := oauthStore.Save(oauth.ProviderKey("work"), oauthToken); err != nil {
+		t.Fatal(err)
+	}
 
 	var stdout, stderr bytes.Buffer
 	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
@@ -387,7 +395,16 @@ func TestRunAuthLogoutRejectsAmbiguousConfigBeforeCredentialDeletion(t *testing.
 		t.Fatalf("logout exit = %d, want validation failure", code)
 	}
 	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
-		t.Fatalf("shared credential changed before rejection: %q,%v,%v", key, ok, getErr)
+		t.Fatalf("shared API credential changed before rejection: present=%v err=%v", ok, getErr)
+	}
+	storedOAuth, ok, loadErr := oauthStore.Load(oauth.ProviderKey("work"))
+	if loadErr != nil || !ok {
+		t.Fatalf("OAuth credential missing after rejection: ok=%v err=%v", ok, loadErr)
+	}
+	if storedOAuth.AccessToken != oauthToken.AccessToken ||
+		storedOAuth.RefreshToken != oauthToken.RefreshToken ||
+		storedOAuth.Account != oauthToken.Account {
+		t.Fatal("OAuth credential changed before ambiguous-config rejection")
 	}
 	after, readErr := os.ReadFile(configPath)
 	if readErr != nil {
