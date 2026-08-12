@@ -566,9 +566,7 @@ func mcpPermissionTarget(grant mcp.PermissionGrant) string {
 func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	values := make([]string, 0, len(raw.Headers)+len(raw.Env)+len(raw.Args)+2)
 	add := func(value string) {
-		if trimmed := strings.TrimSpace(value); len(trimmed) >= shortestMCPSecret {
-			values = append(values, trimmed)
-		}
+		values = append(values, credentialCandidates(value)...)
 	}
 	for _, value := range raw.Headers {
 		add(value)
@@ -589,6 +587,46 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 		add(raw.OAuth.ClientSecret)
 	}
 	return values
+}
+
+// credentialCandidates returns the configured value plus the shorter strings a
+// server might echo INSTEAD of it.
+//
+// Redaction is equality on the whole configured value, and the credential is
+// usually not the whole value. Zero's own documented config spells an
+// authenticated server as `"Authorization": "Bearer sk-live-..."`, so a server
+// that quotes back only the credential, without the scheme word, matches
+// nothing and prints. The same shape arrives through a composite argument such
+// as `--header "Authorization: Bearer sk-live-..."`, where the configured
+// string carries a header name as well.
+//
+// So each tail after a space or a colon is offered as its own candidate, which
+// covers "<scheme> <credential>" and "<header>: <scheme> <credential>" without
+// needing to know the scheme vocabulary. The floor discards the fragments too
+// short to be a credential, which is what stops "Bearer" or a header name from
+// entering the set and blanking those words out of unrelated text.
+//
+// A value with no separator yields itself and nothing else, so the common case
+// costs one entry, as before.
+func credentialCandidates(value string) []string {
+	candidates := make([]string, 0, 3)
+	remainder := strings.TrimSpace(value)
+	for {
+		if len(remainder) >= shortestMCPSecret {
+			candidates = append(candidates, remainder)
+		}
+		index := strings.IndexAny(remainder, " :")
+		if index < 0 {
+			return candidates
+		}
+		next := strings.TrimSpace(remainder[index+1:])
+		if next == remainder {
+			// Defensive: without this a value of only separators could not shrink
+			// and the loop would not terminate.
+			return candidates
+		}
+		remainder = next
+	}
 }
 
 // sensitiveMCPArgValues returns the VALUES a stdio server is launched with
@@ -643,7 +681,14 @@ func sensitiveMCPArgValues(args []string) []string {
 			values = append(values, strings.TrimSpace(rest))
 			continue
 		}
-		if isSensitiveMCPDisplayFlag(arg) {
+		// Only an actual FLAG claims the next argument. isSensitiveMCPDisplayFlag
+		// strips leading dashes before matching, so it says yes to a bare
+		// positional word too, and the documented GitHub server config
+		// (`-e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server`)
+		// would put the IMAGE NAME into the redaction set: the pull failure would
+		// then lose the one string that explains it. A positional argument is not
+		// a flag and does not introduce a value.
+		if isFlag(arg) && isSensitiveMCPDisplayFlag(arg) {
 			// The value is the next argument, if there is one. A sensitive flag in
 			// the last position simply has nothing to redact.
 			pending = true

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -253,6 +254,17 @@ func stripTerminalRejoiners(value string) string {
 		// Every other control byte is dropped: none carries a display meaning
 		// worth preserving here.
 		if current < 0x20 || current == 0x7f || (current >= 0x80 && current <= 0x9f) {
+			continue
+		}
+		// Unicode format characters rejoin exactly like control bytes do, and
+		// they are the more comfortable way to do it: a zero-width space or a
+		// soft hyphen inside a credential is invisible on the terminal, so the
+		// reader sees an unbroken secret while equality redaction saw two
+		// fragments. Dropping the whole Cf category covers the zero-width
+		// characters, the word joiner, the bidi controls and the byte order
+		// mark together. Combining marks are deliberately NOT dropped: they are
+		// ordinary content in most of the world's scripts.
+		if unicode.Is(unicode.Cf, current) {
 			continue
 		}
 		out.WriteRune(current)
