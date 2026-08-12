@@ -153,8 +153,8 @@ func (s *turnSession) observePrefix(ctx context.Context, request zeroruntime.Com
 // computeFingerprint digests the wire-affecting request parameters: the
 // session's model and max-tokens (fixed at construction — CompletionRequest
 // carries no model field), the normalized reasoning effort as it would appear
-// on the wire, the prompt-cache key (constant within a session, and part of
-// the request the provider serializes), and an order-preserving digest of the
+// on the wire, the normalized service tier, the prompt-cache key (constant
+// within a session, and part of the request the provider serializes), and an order-preserving digest of the
 // advertised tools (request serialization preserves tool order, so a reorder
 // changes the wire bytes and counts as drift). Messages are excluded — they
 // grow every turn; this fingerprints request parameters, not conversation
@@ -174,6 +174,8 @@ func (s *turnSession) computeFingerprint(request zeroruntime.CompletionRequest) 
 	fmt.Fprintf(&builder, "%d", s.provider.maxTokens)
 	builder.WriteByte('|')
 	builder.WriteString(openAIReasoningEffort(request.ReasoningEffort))
+	builder.WriteByte('|')
+	builder.WriteString(openAIServiceTier(request.ServiceTier))
 	builder.WriteByte('|')
 	builder.WriteString(request.PromptCacheKey)
 	builder.WriteByte('|')

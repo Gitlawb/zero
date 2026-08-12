@@ -492,6 +492,49 @@ func TestCodexProviderForwardsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestCodexProviderNormalizesServiceTier(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "priority", input: "priority", want: "priority"},
+		{name: "flex", input: "flex", want: "flex"},
+		{name: "unsupported omitted", input: "standard", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var rec codexRequest
+			srv := newCodexTestServer(t, &rec)
+			defer srv.Close()
+
+			provider, err := NewCodexProvider(CodexOptions{
+				Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5-codex"},
+				AccountID: "acc-x",
+			})
+			if err != nil {
+				t.Fatalf("NewCodexProvider: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:    []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				ServiceTier: test.input,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion: %v", err)
+			}
+			drainCodexEvents(t, stream)
+			if test.want == "" {
+				if _, ok := rec.body["service_tier"]; ok {
+					t.Fatalf("body.service_tier = %#v, want omitted", rec.body["service_tier"])
+				}
+				return
+			}
+			if got := rec.body["service_tier"]; got != test.want {
+				t.Fatalf("body.service_tier = %#v, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCodexProviderStreamsReasoningSummaryDeltas(t *testing.T) {
 	// reasoning_summary_text deltas must surface as StreamEventReasoning (live
 	// "thinking"), in order, alongside the normal text output. Without this a long

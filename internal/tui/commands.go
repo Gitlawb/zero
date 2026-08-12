@@ -33,6 +33,7 @@ const (
 	commandCompact
 	commandRewind
 	commandEffort
+	commandFast
 	commandStyle
 	commandTheme
 	commandTranscript
@@ -271,10 +272,17 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/effort",
-		usage:       "/effort [list|low|medium|high|auto]",
+		usage:       "/effort [list|level|auto]",
 		group:       commandGroupModel,
 		description: "Show or set reasoning effort for supported models.",
 		kind:        commandEffort,
+	},
+	{
+		name:        "/fast",
+		usage:       "/fast",
+		group:       commandGroupModel,
+		description: "Toggle fast mode for supported ChatGPT subscription models.",
+		kind:        commandFast,
 	},
 	{
 		name:        "/style",

@@ -80,6 +80,7 @@ type responsesRequest struct {
 	MaxOutputTokens int                 `json:"max_output_tokens,omitempty"`
 	Tools           []responsesTool     `json:"tools,omitempty"`
 	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`
+	ServiceTier     string              `json:"service_tier,omitempty"`
 }
 
 // responsesReasoning carries the reasoning controls for the Responses API. The
@@ -264,6 +265,9 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 		// Summary "auto" makes the backend stream reasoning_summary_text deltas so a
 		// long thinking phase shows live progress instead of looking hung.
 		req.Reasoning = &responsesReasoning{Effort: effort, Summary: "auto"}
+	}
+	if tier := openAIServiceTier(request.ServiceTier); tier != "" {
+		req.ServiceTier = tier
 	}
 	return req, nil
 }
