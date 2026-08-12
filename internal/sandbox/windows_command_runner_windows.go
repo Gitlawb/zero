@@ -150,6 +150,19 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 			return 1
 		}
 		defer jailedToken.Close()
+		// CreateProcessAsUser below is about to be handed a token for a DIFFERENT
+		// account, which forfeits the own-token exemption the ordinary restricted
+		// path relies on. Enable what that needs, and refuse with a specific reason
+		// when this process cannot, rather than letting an unelevated run surface a
+		// bare "Access is denied" that reads as the command being rejected.
+		//
+		// Refusing rather than falling back: an operator who set the opt-in to
+		// confine reads must not be handed the same-user restricted token while
+		// believing otherwise.
+		if err := enableWindowsPrincipalLaunchPrivileges(); err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+			return 1
+		}
 		exitCode, err := runWindowsCommandAsUser(jailedToken, config)
 		if err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
