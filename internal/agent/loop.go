@@ -2077,6 +2077,21 @@ func isRetriableToolError(result ToolResult) bool {
 // these outcomes for the retriable question; they simply were not reachable from
 // the counting one.
 func isPolicyRefusal(result ToolResult) bool {
+	// A REFUSAL IS A FAILURE. Everything below inspects metadata and then output
+	// text, and neither is meaningful on a result the tool completed.
+	//
+	// isRetriableToolError gates on this before it calls here, so the boundary
+	// held while that was the only caller. Extracting this helper and calling it
+	// straight from the counting path dropped the gate: an allowed `bash`
+	// printing "Sandbox block", or a read_file returning a document that quotes
+	// one of these phrases, was counted as a denial. Six such successes tripped
+	// the same-signature stop and ended a healthy run with a refusal answer.
+	//
+	// The gate belongs here rather than at each caller, because the next caller
+	// will forget it too.
+	if result.Status != tools.StatusError {
+		return false
+	}
 	if result.DenialReason != DenialNone {
 		return true
 	}
