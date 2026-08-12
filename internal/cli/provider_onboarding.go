@@ -58,6 +58,10 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	resolvedName, persisted, err := resolvePersistedProviderName(configPath, options.name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	// SetActiveProvider only ever matches profiles persisted in config.json
 	// (see config.ProviderPersisted), but a provider can be visible in
 	// `zero providers list`/the TUI picker purely because Resolve()
@@ -65,14 +69,12 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	// without ever writing a row to disk. Without this check, switching to
 	// that provider by name always fails with a confusing "not found" even
 	// though it is genuinely usable this session (issue #707).
-	persisted, err := config.ProviderPersisted(configPath, options.name)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
 	if !persisted {
 		if exit, handled := reportUnpersistedProviderUse(stdout, stderr, deps, options, configPath); handled {
 			return exit
 		}
+	} else {
+		options.name = resolvedName
 	}
 	cfg, err := config.SetActiveProvider(configPath, options.name)
 	if err != nil {
@@ -470,6 +472,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	name := options.names[0]
+	resolvedName, persisted, err := resolvePersistedProviderName(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	// RemoveProvider only ever matches profiles persisted in config.json (see
 	// config.ProviderPersisted), but a provider can be visible in
 	// `zero providers list`/the TUI picker purely because Resolve()
@@ -477,14 +483,12 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	// without ever writing a row to disk. Without this check, deleting that
 	// provider by name always fails with a confusing "not found" even though
 	// it is genuinely visible/usable this session (issue #707).
-	persisted, err := config.ProviderPersisted(configPath, name)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
 	if !persisted {
 		if exit, handled := reportUnpersistedProviderRemove(stdout, stderr, deps, name, options.json, configPath); handled {
 			return exit
 		}
+	} else {
+		name = resolvedName
 	}
 	// ProviderPersisted above answers a credential-identity question, but
 	// RemoveProvider targets a row by its exact spelling. Bridge the two, so
@@ -568,7 +572,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	oldName := options.names[0]
-	persisted, err := config.ProviderPersisted(configPath, oldName)
+	resolvedName, persisted, err := resolvePersistedProviderName(configPath, oldName)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -576,6 +580,8 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		if exit, handled := reportUnpersistedProviderRename(stdout, stderr, deps, oldName, options.json, configPath); handled {
 			return exit
 		}
+	} else {
+		oldName = resolvedName
 	}
 	// Same bridge as remove: the persisted check matches credential identity
 	// while RenameProvider matches the row's exact spelling.
@@ -601,6 +607,17 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func resolvePersistedProviderName(path, identity string) (string, bool, error) {
+	profile, match, err := config.ResolvePersistedProviderIdentity(path, identity)
+	if err != nil {
+		return "", false, err
+	}
+	if match == config.PersistedIdentityNone {
+		return strings.TrimSpace(identity), false, nil
+	}
+	return strings.TrimSpace(profile.Name), true, nil
 }
 
 // providerResolvedByName reports whether name matches a provider in a

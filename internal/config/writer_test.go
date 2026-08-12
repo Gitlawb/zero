@@ -1709,7 +1709,7 @@ func TestResolvePersistedProviderIdentityPrefersNames(t *testing.T) {
 		}
 	})
 
-	t.Run("a shared catalog id resolves to nothing", func(t *testing.T) {
+	t.Run("a case-variant name outranks a shared catalog id", func(t *testing.T) {
 		_, match, err := ResolvePersistedProviderIdentity(path, "XAI")
 		if err != nil {
 			t.Fatalf("resolve: %v", err)

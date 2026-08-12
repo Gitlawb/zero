@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -2184,6 +2185,10 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 }
 
 func TestApplySetupOAuthTokenPersistFailureStaysOnProvider(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"demo"},{"name":"DEMO"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	m := newModel(context.Background(), Options{
 		Setup: SetupOptions{Visible: true, Providers: []SetupProviderOption{
 			{ID: "xai", Name: "xAI", RequiresAuth: true},
@@ -2192,7 +2197,7 @@ func TestApplySetupOAuthTokenPersistFailureStaysOnProvider(t *testing.T) {
 	m.setup.stage = setupStageProvider
 	m.setup.oauthPending = true
 	m.setup.oauthMode = true
-	m.setup.configPath = t.TempDir() // A directory cannot be read as config.json.
+	m.setup.configPath = configPath
 
 	updated, cmd := m.applySetupOAuth(setupOAuthMsg{tokenLogin: true, providerID: "xai"})
 	next := updated.(model)
@@ -2205,11 +2210,18 @@ func TestApplySetupOAuthTokenPersistFailureStaysOnProvider(t *testing.T) {
 	if next.setup.oauthErr == "" || !strings.Contains(next.setup.oauthErr, "could not be saved") {
 		t.Fatalf("oauthErr = %q, want profile-save failure", next.setup.oauthErr)
 	}
+	if !strings.Contains(next.setup.oauthErr, "differ only by case") {
+		t.Fatalf("oauthErr = %q, want provider identity validation error", next.setup.oauthErr)
+	}
 }
 
 func TestSetupDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
-	msg := setupDevicePrepareCmd("xai", t.TempDir())().(setupOAuthDeviceMsg)
-	if msg.err == nil {
-		t.Fatal("device-code preparation should reject an unreadable config before requesting a code")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"demo"},{"name":"DEMO"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg := setupDevicePrepareCmd("xai", configPath)().(setupOAuthDeviceMsg)
+	if msg.err == nil || !strings.Contains(msg.err.Error(), "differ only by case") {
+		t.Fatalf("device-code preparation error = %v, want provider identity validation", msg.err)
 	}
 }

@@ -625,6 +625,9 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	if len(credentialCandidates) == 0 {
+		return writeAppError(stderr, redaction.ErrorMessage(fmt.Errorf("provider identity %q resolved to no credential candidates", provider), redaction.Options{}), exitCrash)
+	}
 	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)

@@ -31,6 +31,20 @@ func TestLoadProviderCommandSuccess(t *testing.T) {
 	}
 }
 
+func TestLoadProviderCommandSelectsNamelessOpenAIProvider(t *testing.T) {
+	command := writeCommand(t, commandScript{
+		Stdout: `{"activeProvider":"openai","providers":[{"provider":"openai","model":"gpt-command"}]}`,
+	})
+
+	cfg, err := LoadProviderCommand(command)
+	if err != nil {
+		t.Fatalf("LoadProviderCommand() error = %v", err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" {
+		t.Fatalf("providers = %+v, want normalized nameless OpenAI provider", cfg.Providers)
+	}
+}
+
 func TestLoadProviderCommandDoesNotResolveAPIKeyEnvFromProcess(t *testing.T) {
 	t.Setenv("ZERO_CMD_API_KEY", "sk-process")
 	command := writeCommand(t, commandScript{

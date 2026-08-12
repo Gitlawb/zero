@@ -141,6 +141,55 @@ func TestProviderRepairCommandsCanResolveIndependentLegacyNameProblems(t *testin
 	}
 }
 
+func TestProviderMutationsResolvePersistedIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		address string
+	}{
+		{name: "use case variant", command: "use", address: "WORK"},
+		{name: "use catalog id", command: "use", address: "acme"},
+		{name: "remove case variant", command: "remove", address: "WORK"},
+		{name: "remove catalog id", command: "remove", address: "acme"},
+		{name: "rename case variant", command: "rename", address: "WORK"},
+		{name: "rename catalog id", command: "rename", address: "acme"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+				ActiveProvider: "other",
+				Providers: []config.ProviderProfile{
+					{Name: "work", CatalogID: "acme", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "m1"},
+					{Name: "other", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://other.example/v1", Model: "m2"},
+				},
+			})
+			args := []string{"providers", test.command, test.address}
+			if test.command == "rename" {
+				args = append(args, "renamed")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+				t.Fatalf("exit = %d stderr = %q", code, stderr.String())
+			}
+			cfg := readFileConfig(t, configPath)
+			switch test.command {
+			case "use":
+				if cfg.ActiveProvider != "work" {
+					t.Fatalf("activeProvider = %q, want canonical work", cfg.ActiveProvider)
+				}
+			case "remove":
+				if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "other" {
+					t.Fatalf("providers = %+v, want work removed", cfg.Providers)
+				}
+			case "rename":
+				if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "renamed" {
+					t.Fatalf("providers = %+v, want work renamed", cfg.Providers)
+				}
+			}
+		})
+	}
+}
 func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

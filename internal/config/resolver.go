@@ -970,14 +970,22 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 	activeIndex := -1
 	if activeName != "" {
 		for index := range providers {
-			if strings.TrimSpace(providers[index].Name) == activeName {
+			providerName := strings.TrimSpace(providers[index].Name)
+			if providerName == "" {
+				providerName = string(ProviderKindOpenAI)
+			}
+			if providerName == activeName {
 				activeIndex = index
 				break
 			}
 		}
 		if activeIndex < 0 {
 			for index := range providers {
-				if !sameProviderIdentity(providers[index].Name, activeName) {
+				providerName := strings.TrimSpace(providers[index].Name)
+				if providerName == "" {
+					providerName = string(ProviderKindOpenAI)
+				}
+				if !sameProviderIdentity(providerName, activeName) {
 					continue
 				}
 				if activeIndex >= 0 {

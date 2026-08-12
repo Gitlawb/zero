@@ -166,6 +166,62 @@ func TestManagerPrepareAndCompleteDeviceLogin(t *testing.T) {
 	}
 }
 
+func TestManagerBeforeSaveFailureLeavesStoreUnchanged(t *testing.T) {
+	beforeSaveErr := errors.New("config changed before save")
+	for _, test := range []struct {
+		name string
+		run  func(context.Context, *Manager) error
+	}{
+		{
+			name: "Login",
+			run: func(ctx context.Context, manager *Manager) error {
+				_, err := manager.Login(ctx, LoginOptions{Provider: "demo", Device: true})
+				return err
+			},
+		},
+		{
+			name: "CompleteDeviceLogin",
+			run: func(ctx context.Context, manager *Manager) error {
+				auth, cfg, err := manager.PrepareDeviceLogin(ctx, LoginOptions{Provider: "demo"})
+				if err != nil {
+					return err
+				}
+				_, err = manager.CompleteDeviceLogin(ctx, "demo", cfg, auth)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fp := newFakeProvider(t, `{"access_token":"must-not-be-saved","token_type":"Bearer","expires_in":3600}`)
+			env := map[string]string{
+				"ZERO_OAUTH_DEMO_CLIENT_ID":  "client",
+				"ZERO_OAUTH_DEMO_TOKEN_URL":  fp.server.URL + "/token",
+				"ZERO_OAUTH_DEMO_DEVICE_URL": fp.server.URL + "/device",
+			}
+			store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "tok.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Save(ProviderKey("existing"), Token{AccessToken: "keep"}); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := NewManager(ManagerOptions{Store: store, Env: env, BeforeSave: func() error { return beforeSaveErr }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.run(context.Background(), manager); !errors.Is(err, beforeSaveErr) {
+				t.Fatalf("error = %v, want exact BeforeSave error", err)
+			}
+			if _, ok, err := store.Load(ProviderKey("demo")); err != nil || ok {
+				t.Fatalf("rejected token was persisted: ok=%v err=%v", ok, err)
+			}
+			if token, ok, err := store.Load(ProviderKey("existing")); err != nil || !ok || token.AccessToken != "keep" {
+				t.Fatalf("existing store entry changed: token=%+v ok=%v err=%v", token, ok, err)
+			}
+		})
+	}
+}
+
 // A provider configured with only an issuer URL (no TOKEN_URL) must still be
 // refreshable: GetFresh resolves the token endpoint via discovery before
 // refreshing. Guards resolveConfigForKey calling resolveEndpoints.
