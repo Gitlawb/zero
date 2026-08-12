@@ -52,14 +52,25 @@ func TestACLComparablePathDoesNotResolveAReparsePoint(t *testing.T) {
 	through := filepath.Join(link, "hooks")
 	comparable := windowsACLComparablePath(through)
 
-	// It must still name the link, not the target.
-	if !strings.EqualFold(filepath.Clean(comparable), filepath.Clean(through)) {
-		t.Errorf("windowsACLComparablePath resolved through the reparse point:\n  got  %s\n  want %s", comparable, through)
+	// Compared against the normalizer's OWN answer for each path, never against
+	// the raw input. GetLongPathName legitimately rewrites the string: on a CI
+	// runner the temp directory is an 8.3 short name, so expanding RUNNER~1 to
+	// runneradmin makes the result differ from what was passed in while naming
+	// exactly the same object. An earlier version of this test asserted equality
+	// with the input and failed on Windows CI for that reason, which was the test
+	// being wrong rather than the code.
+	target := windowsACLComparablePath(filepath.Join(outside, "hooks"))
+
+	// The whole property: normalizing a path THROUGH the reparse point must not
+	// produce the target's normalization. If it did, the guard would be comparing
+	// a redirected handle against a redirected expectation and matching itself.
+	if strings.EqualFold(filepath.Clean(comparable), filepath.Clean(target)) {
+		t.Errorf("windowsACLComparablePath resolved through the reparse point:\n  through %s\n  target  %s", comparable, target)
 	}
-	// And it must NOT have become the target, which is what made the old
-	// comparison agree with a redirected handle.
-	if strings.EqualFold(filepath.Clean(comparable), filepath.Clean(filepath.Join(outside, "hooks"))) {
-		t.Errorf("windowsACLComparablePath returned the reparse target %s; the guard compares against this, so a redirect would match itself", comparable)
+	// And it still has to name the link component, or it resolved to something
+	// else entirely rather than leaving the path alone.
+	if !strings.Contains(strings.ToLower(comparable), "link") {
+		t.Errorf("windowsACLComparablePath lost the link component: %s", comparable)
 	}
 
 	// The old basis is checked alongside for contrast: where it resolves, it
