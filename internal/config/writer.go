@@ -12,21 +12,24 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
-// ValidatePersistedProviderNames rejects user-config rows that share the same
-// case-insensitive identity. Credential-store keys are case-insensitive, so
-// allowing both rows would make writes and deletes affect a shared secret.
+// ValidatePersistedProviderNames rejects empty names and user-config rows that
+// share the credential store's normalized identity. Allowing either would make
+// resolver defaults or credential writes and deletes affect another row.
 // This validator intentionally applies only to raw persisted user config, not
 // to profiles merged from project, environment, or provider-command layers.
 //
-// A repeated folded identity is rejected whether or not the spellings differ.
-// Exact duplicates are just as broken as case variants: resolver merging
-// silently coalesces the rows, and plaintext-key migration writes both values
-// into the same normalized credential-store entry, so the second row's key
-// overwrites the first.
+// A repeated normalized identity is rejected whether or not the spellings
+// differ. Exact duplicates are just as broken as case variants: resolver
+// merging coalesces the rows, and plaintext-key migration writes both values
+// into the same credential-store entry, so the second row's key overwrites the
+// first.
 func ValidatePersistedProviderNames(cfg FileConfig) error {
 	seen := make(map[string]string, len(cfg.Providers))
 	for _, provider := range cfg.Providers {
 		name := strings.TrimSpace(provider.Name)
+		if name == "" {
+			return fmt.Errorf("persisted provider name cannot be empty; name the provider explicitly in config.json")
+		}
 		folded := credstore.NormalizeProvider(name)
 		previous, ok := seen[folded]
 		if ok && previous == name {
@@ -306,7 +309,7 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 	}
 
 	for _, provider := range cfg.Providers {
-		if strings.TrimSpace(provider.Name) == name {
+		if sameProviderIdentity(provider.Name, name) {
 			cfg.ActiveProvider = provider.Name
 			if err := writeConfigFile(path, cfg); err != nil {
 				return FileConfig{}, err
@@ -338,7 +341,7 @@ func ProviderPersisted(path string, name string) (bool, error) {
 		return false, err
 	}
 	for _, provider := range cfg.Providers {
-		if strings.TrimSpace(provider.Name) == name {
+		if sameProviderIdentity(provider.Name, name) {
 			return true, nil
 		}
 	}

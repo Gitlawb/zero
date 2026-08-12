@@ -2354,3 +2354,16 @@ func TestResolvePreservesSoleOpenRouterCaseVariant(t *testing.T) {
 		t.Fatalf("active provider name = %q, want preserved OpenRouter", resolved.ActiveProvider)
 	}
 }
+
+func TestResolveRejectsBlankPersistedNameBeforeImplicitOpenAIIdentity(t *testing.T) {
+	path := writeConfig(t, `{
+		"providers": [
+			{"name":"","providerKind":"openai","model":"gpt-4.1"},
+			{"name":"openai","providerKind":"openai","model":"gpt-4.1"}
+		]
+	}`)
+	_, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err == nil || !strings.Contains(err.Error(), "persisted provider name cannot be empty") {
+		t.Fatalf("Resolve() error = %v, want blank persisted-name rejection", err)
+	}
+}

@@ -364,7 +364,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		}
 		activeAfter = cfg.ActiveProvider
 		notes = []string{"Deleted " + name + "."}
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile)
+		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, !providerIdentitySurvives(cfg.Providers, name))
 	} else {
 		// Env-derived providers have no persisted profile or credential to
 		// delete. Keep this path session-only.
@@ -378,9 +378,9 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	// must not replace the resolved/filtered savedProviders wholesale.
 	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
-	if strings.EqualFold(strings.TrimSpace(m.providerName), strings.TrimSpace(name)) {
+	if config.SameProviderIdentity(m.providerName, name) {
 		notes = append(notes, "This session keeps running on it until you switch.")
-	} else if activeAfter != "" && !strings.EqualFold(activeAfter, name) {
+	} else if activeAfter != "" && !config.SameProviderIdentity(activeAfter, name) {
 		notes = append(notes, "Active provider: "+activeAfter+".")
 	}
 
@@ -398,12 +398,21 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 func removeSavedProvider(saved []config.ProviderProfile, name string) []config.ProviderProfile {
 	kept := saved[:0]
 	for _, profile := range saved {
-		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(name)) {
+		if strings.TrimSpace(profile.Name) == strings.TrimSpace(name) {
 			continue
 		}
 		kept = append(kept, profile)
 	}
 	return kept
+}
+
+func providerIdentitySurvives(providers []config.ProviderProfile, removedName string) bool {
+	for _, provider := range providers {
+		if config.SameProviderIdentity(provider.Name, removedName) {
+			return true
+		}
+	}
+	return false
 }
 
 // providerManagerCleanupMsg reports the off-thread half of a delete: the
@@ -417,17 +426,19 @@ type providerManagerCleanupMsg struct {
 // reads the token store — blocking work the confirm keypress must not wait on.
 // A failed key delete is surfaced rather than letting a lingering secret read
 // as a clean removal.
-func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile) tea.Cmd {
+func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile, deleteStoredKey bool) tea.Cmd {
 	name := profile.Name
 	catalogID := profile.CatalogID
 	return func() tea.Msg {
 		notes := []string{}
-		keyStore, storeErr := providerKeyStoreForPath(configPath)
-		if storeErr == nil {
-			_, storeErr = keyStore.Delete(name)
-		}
-		if storeErr != nil {
-			notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
+		if deleteStoredKey {
+			keyStore, storeErr := providerKeyStoreForPath(configPath)
+			if storeErr == nil {
+				_, storeErr = keyStore.Delete(name)
+			}
+			if storeErr != nil {
+				notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
+			}
 		}
 		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {
 			notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
@@ -589,6 +600,10 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		wizard.err = "no user config path — cannot save"
 		return m, nil
 	}
+	if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
+		wizard.err = err.Error()
+		return m, nil
+	}
 	oldName := strings.TrimSpace(wizard.editOriginal.Name)
 	persisted, err := config.ProviderPersisted(m.userConfigPath, oldName)
 	if err != nil {
@@ -631,7 +646,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	// Keep the live session's identity in sync with a rename of the provider it
 	// is running on: the exported ZERO_PROVIDER must resolve for spawned children.
-	if strings.EqualFold(strings.TrimSpace(m.providerName), oldName) {
+	if config.SameProviderIdentity(m.providerName, oldName) {
 		m.providerName = newName
 		m.providerProfile.Name = newName
 		config.SetActiveProviderEnv(newName)
@@ -649,7 +664,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 // liveName is the session's provider AFTER any rename sync, so a single
 // comparison against the edited profile's final name suffices.
 func providerEditRestartNote(liveName string, editedName string) string {
-	if strings.EqualFold(strings.TrimSpace(liveName), strings.TrimSpace(editedName)) {
+	if config.SameProviderIdentity(liveName, editedName) {
 		return " Press Enter on it to apply the changes to this session."
 	}
 	return ""
@@ -659,7 +674,7 @@ func providerEditRestartNote(liveName string, editedName string) string {
 // in-memory saved list without wholesale replacement (see saveManagerEdit).
 func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit config.ProviderEdit) []config.ProviderProfile {
 	for index := range saved {
-		if !strings.EqualFold(strings.TrimSpace(saved[index].Name), strings.TrimSpace(oldName)) {
+		if strings.TrimSpace(saved[index].Name) != strings.TrimSpace(oldName) {
 			continue
 		}
 		profile := &saved[index]
@@ -691,7 +706,7 @@ func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit
 // in-memory saved list (replace by name, else append).
 func upsertSavedProviderProfile(saved []config.ProviderProfile, profile config.ProviderProfile) []config.ProviderProfile {
 	for index := range saved {
-		if strings.EqualFold(strings.TrimSpace(saved[index].Name), strings.TrimSpace(profile.Name)) {
+		if strings.TrimSpace(saved[index].Name) == strings.TrimSpace(profile.Name) {
 			saved[index] = profile
 			return saved
 		}
@@ -727,7 +742,7 @@ func (wizard *providerWizardState) renderManageStep(width int) []string {
 			marker = surface(zeroTheme.accent).Render("❯ ")
 		}
 		active := ""
-		if strings.EqualFold(strings.TrimSpace(row.profile.Name), strings.TrimSpace(wizard.manageActiveName)) {
+		if strings.TrimSpace(row.profile.Name) == strings.TrimSpace(wizard.manageActiveName) {
 			active = surface(zeroTheme.accent).Render(" ● active")
 		}
 		name := padProviderManagerCell(row.profile.Name, nameWidth)

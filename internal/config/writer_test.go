@@ -1046,25 +1046,22 @@ func TestUpsertProviderRejectsCaseVariantWithoutRewritingConfig(t *testing.T) {
 	}
 }
 
-func TestSetActiveProviderRequiresExactProviderIdentity(t *testing.T) {
+func TestSetActiveProviderUsesCredentialIdentityWithoutUnicodeFolding(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
-	before := writeConfigFixture(t, path, FileConfig{
-		ActiveProvider: "work",
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "ſ",
 		Providers: []ProviderProfile{
-			{Name: "work", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "s", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "ſ", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
 		},
 	}, 0o600)
 
-	_, err := SetActiveProvider(path, "WORK")
-	if err == nil || !strings.Contains(err.Error(), `provider "WORK" not found`) {
-		t.Fatalf("SetActiveProvider() error = %v, want exact-case not-found error", err)
+	cfg, err := SetActiveProvider(path, "S")
+	if err != nil {
+		t.Fatalf("SetActiveProvider() error = %v", err)
 	}
-	after, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatalf("read config: %v", readErr)
-	}
-	if string(after) != string(before) {
-		t.Fatalf("config was rewritten for case-variant provider\nbefore: %s\nafter: %s", before, after)
+	if cfg.ActiveProvider != "s" {
+		t.Fatalf("ActiveProvider = %q, want exact persisted spelling s", cfg.ActiveProvider)
 	}
 }
 
@@ -1083,16 +1080,23 @@ func TestMarkProviderAPIKeyStoredRequiresExactProviderIdentity(t *testing.T) {
 	}
 }
 
-func TestProviderPersistedRequiresExactProviderIdentity(t *testing.T) {
+func TestProviderPersistedUsesCredentialIdentityWithoutUnicodeFolding(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
-	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}}}, 0o600)
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "s"}}}, 0o600)
 
-	persisted, err := ProviderPersisted(path, "WORK")
+	persisted, err := ProviderPersisted(path, "S")
 	if err != nil {
 		t.Fatalf("ProviderPersisted() error = %v", err)
 	}
+	if !persisted {
+		t.Fatal("ProviderPersisted() = false for case-variant credential identity")
+	}
+	persisted, err = ProviderPersisted(path, "ſ")
+	if err != nil {
+		t.Fatalf("ProviderPersisted(long-s) error = %v", err)
+	}
 	if persisted {
-		t.Fatal("ProviderPersisted() = true for case-variant identity, want false")
+		t.Fatal("ProviderPersisted() conflated s with Unicode long-s")
 	}
 }
 
@@ -1279,5 +1283,15 @@ func TestValidatePersistedProviderNamesRejectsExactDuplicates(t *testing.T) {
 	}
 	if err := ValidatePersistedProviderNames(FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "fast"}}}); err != nil {
 		t.Fatalf("distinct names must validate: %v", err)
+	}
+}
+
+func TestValidatePersistedProviderNamesRejectsImplicitOpenAICollision(t *testing.T) {
+	err := ValidatePersistedProviderNames(FileConfig{Providers: []ProviderProfile{
+		{Name: ""},
+		{Name: "openai"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "persisted provider name cannot be empty") {
+		t.Fatalf("error = %v, want empty persisted-provider name rejection", err)
 	}
 }

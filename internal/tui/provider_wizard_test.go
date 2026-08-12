@@ -719,6 +719,66 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	}
 }
 
+func TestProviderWizardRejectsCaseVariantBeforeCredentialCapture(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "OLD"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama-cloud")
+	m.providerWizard.profileName = "WORK"
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	updated, _ = next.Update(testPaste("NEW"))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	next = finishProviderWizardModelDiscoveryForTest(t, next)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+
+	if next.providerWizard == nil {
+		t.Fatal("rejected wizard unexpectedly closed")
+	}
+	if !strings.Contains(next.providerWizard.err, `provider "WORK" already exists as "work"`) {
+		t.Fatalf("wizard error = %q, want case-variant collision", next.providerWizard.err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rejected wizard rewrote config\nbefore: %s\nafter: %s", before, after)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "OLD" {
+		t.Fatalf("existing credential = %q,%v,%v; want OLD,true,nil", key, ok, getErr)
+	}
+}
+
 func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *testing.T) {
 	const secret = "ollama-env-secret"
 	t.Setenv("OLLAMA_API_KEY", secret)
@@ -1138,25 +1198,28 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","apiKeyStored":true}]}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Set("acme", "sk-secret"); err != nil {
+	if err := store.Set("work", "sk-secret"); err != nil {
 		t.Fatal(err)
 	}
 
 	m := newModel(context.Background(), Options{UserConfigPath: configPath})
-	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "acme", manageKeyCursor: 2}
+	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "WORK", manageKeyCursor: 2}
 	next, _ := m.applyManageKeyChoice()
 	if next.providerWizard != nil {
 		t.Fatal("remove should close the wizard")
 	}
-	if _, ok, _ := store.Get("acme"); ok {
-		t.Fatal("remove should delete the key from the credential store")
+	if _, ok, _ := store.Get("work"); ok {
+		t.Fatal("remove should delete the normalized key from the credential store")
+	}
+	if cfg := readProviderWizardConfigFixture(t, configPath); cfg.Providers[0].APIKeyStored {
+		t.Fatal("case-variant removal left apiKeyStored set")
 	}
 }
 

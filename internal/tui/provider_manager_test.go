@@ -645,3 +645,100 @@ func TestProviderManagerCredStateFallsThroughStaleMarker(t *testing.T) {
 		t.Fatalf("expected stored key missing with no fallback, got %q", state)
 	}
 }
+
+func TestProviderManagerRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	profiles := []config.ProviderProfile{
+		{Name: "work", APIKeyStored: true},
+		{Name: "WORK", APIKeyStored: true},
+	}
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: profiles[0],
+		SavedProviders:  profiles,
+		UserConfigPath:  configPath,
+	})
+	m, _ = m.openProviderManager()
+	m.providerWizard.manageCursor = 1
+	next, cmd := m.deleteManagerSelection()
+	next = drainProviderManagerCmds(t, next, cmd)
+
+	cfg := readManagerConfig(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" || !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("survivor = %+v, want credentialed work row", cfg.Providers)
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "work" {
+		t.Fatalf("in-memory survivor = %+v, want work", next.savedProviders)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("shared key = %q,%v,%v; want sk-shared,true,nil", key, ok, getErr)
+	}
+}
+
+func TestProviderManagerKeepsDistinctUnicodeLiveProviderOnOtherRowMutation(t *testing.T) {
+	newModelWithRows := func(t *testing.T) model {
+		t.Helper()
+		t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+		profiles := []config.ProviderProfile{
+			{Name: "s", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://s.example/v1", Model: "s-model"},
+			{Name: "ſ", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://long-s.example/v1", Model: "long-s-model"},
+		}
+		path := filepath.Join(t.TempDir(), "config.json")
+		data, err := json.Marshal(config.FileConfig{ActiveProvider: "ſ", Providers: profiles})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{
+			ProviderName:    "ſ",
+			ProviderProfile: profiles[1],
+			SavedProviders:  profiles,
+			UserConfigPath:  path,
+		})
+		m, _ = m.openProviderManager()
+		return m
+	}
+
+	t.Run("edit s", func(t *testing.T) {
+		t.Setenv(config.ActiveProviderEnv, "ſ")
+		m := newModelWithRows(t)
+		m.providerWizard.beginProviderEdit(m.savedProviders[0])
+		m.providerWizard.editDraft.Model = "s-updated"
+		next, _ := m.saveManagerEdit()
+		if next.providerName != "ſ" || next.providerProfile.Name != "ſ" {
+			t.Fatalf("editing s rewrote live long-s identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+		}
+		if got := os.Getenv(config.ActiveProviderEnv); got != "ſ" {
+			t.Fatalf("%s = %q, want long-s unchanged", config.ActiveProviderEnv, got)
+		}
+		if next.savedProviders[0].Model != "s-updated" || next.savedProviders[1].Name != "ſ" {
+			t.Fatalf("wrong in-memory edit target: %+v", next.savedProviders)
+		}
+	})
+
+	t.Run("remove s", func(t *testing.T) {
+		m := newModelWithRows(t)
+		m.providerWizard.manageCursor = 0
+		next, _ := m.deleteManagerSelection()
+		if next.providerName != "ſ" {
+			t.Fatalf("removing s changed live long-s provider to %q", next.providerName)
+		}
+		if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "ſ" {
+			t.Fatalf("wrong in-memory removal target: %+v", next.savedProviders)
+		}
+	})
+}

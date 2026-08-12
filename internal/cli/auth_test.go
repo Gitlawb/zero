@@ -321,3 +321,79 @@ func readCLIConfigFixture(t *testing.T, path string) config.FileConfig {
 	}
 	return cfg
 }
+
+func TestRunAuthLogoutClearsCaseVariantStoredMarker(t *testing.T) {
+	withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	configPath, err := config.DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-old"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"auth", "logout", "WORK"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("logout failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if _, ok, getErr := store.Get("work"); getErr != nil || ok {
+		t.Fatalf("stored key still present: ok=%v err=%v", ok, getErr)
+	}
+	cfg := readCLIConfigFixture(t, configPath)
+	if cfg.Providers[0].APIKeyStored {
+		t.Fatal("case-variant logout left apiKeyStored set")
+	}
+}
+
+func TestRunAuthLogoutRejectsAmbiguousConfigBeforeCredentialDeletion(t *testing.T) {
+	withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	configPath, err := config.DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := []byte(`{"providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"auth", "logout", "WORK"}, &stdout, &stderr, deps); code != exitCrash {
+		t.Fatalf("logout exit = %d, want validation failure", code)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("shared credential changed before rejection: %q,%v,%v", key, ok, getErr)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(seed) {
+		t.Fatal("rejected logout rewrote ambiguous config")
+	}
+}

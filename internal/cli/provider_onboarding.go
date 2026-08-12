@@ -113,7 +113,7 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 		return ""
 	}
 	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
-	if override == "" || strings.EqualFold(override, strings.TrimSpace(selected)) {
+	if override == "" || config.SameProviderIdentity(override, selected) {
 		return ""
 	}
 	return override
@@ -421,7 +421,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	// Delete the key from the store BESIDE the config being edited — the same
 	// store setup/rename write to — not the default-path store, so a
 	// non-default config path cannot leave the encrypted key behind.
-	keyRemoved, keyErr := removeStoredProviderKeyAt(configPath, name)
+	keyRemoved, keyErr := false, error(nil)
+	if !providerIdentitySurvives(cfg.Providers, name) {
+		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, name)
+	}
 	if options.json {
 		payload := map[string]any{
 			"removed":        name,
@@ -471,6 +474,15 @@ func removeStoredProviderKeyAt(configPath string, provider string) (bool, error)
 		return false, err
 	}
 	return store.Delete(provider)
+}
+
+func providerIdentitySurvives(providers []config.ProviderProfile, removedName string) bool {
+	for _, provider := range providers {
+		if config.SameProviderIdentity(provider.Name, removedName) {
+			return true
+		}
+	}
+	return false
 }
 
 // runProvidersRename renames a saved provider profile, migrating its stored
@@ -526,7 +538,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 func providerResolvedByName(providers []config.ProviderProfile, name string) bool {
 	name = strings.TrimSpace(name)
 	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+		if config.SameProviderIdentity(provider.Name, name) {
 			return true
 		}
 	}

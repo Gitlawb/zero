@@ -438,6 +438,13 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		return writeExecUsageError(stderr, "usage: zero auth logout <provider>")
 	}
 	provider := parsed.positional[0]
+	configPath := ""
+	if path, pathErr := deps.userConfigPath(); pathErr == nil {
+		configPath = path
+		if err := config.PreflightUserConfig(configPath); err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
+	}
 	manager, err := newAuthManager(deps, stdout)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -453,8 +460,8 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
-	if configPath, perr := deps.userConfigPath(); perr == nil {
-		if _, clearErr := config.ClearProviderKeyStored(configPath, provider); clearErr != nil {
+	if configPath != "" {
+		if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, provider); clearErr != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 		}
 	}

@@ -125,6 +125,30 @@ func TestMigrateLeavesKeyWhenStoreSetFails(t *testing.T) {
 	}
 }
 
+func TestMigratePlaintextProviderKeysValidatesBeforeStoreWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := []byte(`{"providers":[{"name":"","apiKey":"sk-implicit"},{"name":"openai","apiKey":"sk-openai"}]}`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeKeySetter{keys: map[string]string{}}
+
+	n, err := MigratePlaintextProviderKeys(path, store)
+	if err == nil || !strings.Contains(err.Error(), "persisted provider name cannot be empty") {
+		t.Fatalf("migrate = %d,%v; want validation error", n, err)
+	}
+	if n != 0 || len(store.keys) != 0 {
+		t.Fatalf("invalid config mutated credential store: migrated=%d keys=%v", n, store.keys)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("invalid config was rewritten\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
 func TestClearProviderKeyStored(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

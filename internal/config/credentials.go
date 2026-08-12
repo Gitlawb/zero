@@ -156,6 +156,9 @@ func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) 
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return 0, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return 0, err
+	}
 	migrated := 0
 	for index := range cfg.Providers {
 		profile := &cfg.Providers[index]

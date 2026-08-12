@@ -1261,6 +1261,10 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		nextProvider = built
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
+		if err := config.PreflightProviderWrite(m.userConfigPath, profile.Name); err != nil {
+			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey, runtimeProfile.APIKey}})
+			return m, nil
+		}
 		// Capture flip: move the freshly entered key into the encrypted credential
 		// store before persisting, so config.json never holds the cleartext. The
 		// provider was already built above from runtimeProfile, which has the key.
@@ -1329,10 +1333,16 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 		return m, nil
 	case 2: // Remove
 		if strings.TrimSpace(m.userConfigPath) != "" {
+			if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
+				wizard.err = redaction.RedactString(err.Error(), redaction.Options{})
+				return m, nil
+			}
+		}
+		if strings.TrimSpace(m.userConfigPath) != "" {
 			if store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath)); err == nil {
 				_, _ = store.Delete(name)
 			}
-			_, _ = config.ClearProviderKeyStored(m.userConfigPath, name)
+			_, _ = config.ClearProviderKeyStoredCaseVariants(m.userConfigPath, name)
 		} else {
 			_, _ = config.ForgetProviderKey(name)
 		}
