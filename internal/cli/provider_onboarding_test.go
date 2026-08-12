@@ -325,6 +325,7 @@ func providersUseOverrideConfig(t *testing.T) string {
 // different provider the saved selection is NOT effective, so the command must
 // warn instead of reporting a silent success (issue #721).
 func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
 	var stdout, stderr bytes.Buffer
 	configPath := providersUseOverrideConfig(t)
 	deps := providerSetupDeps(configPath)
@@ -353,6 +354,7 @@ func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
 }
 
 func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
 	var stdout, stderr bytes.Buffer
 	deps := providerSetupDeps(providersUseOverrideConfig(t))
 	deps.getenv = func(key string) string {
@@ -366,15 +368,139 @@ func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
 		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 	}
 	var payload struct {
-		ActiveProvider    string `json:"activeProvider"`
-		EffectiveProvider string `json:"effectiveProvider"`
-		OverriddenByEnv   string `json:"overriddenByEnv"`
+		ActiveProvider      string `json:"activeProvider"`
+		EffectiveProvider   string `json:"effectiveProvider"`
+		OverriddenByEnv     string `json:"overriddenByEnv"`
+		EnvProvider         string `json:"envProvider"`
+		EnvProviderResolves bool   `json:"envProviderResolves"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
 	}
-	if payload.ActiveProvider != "fast" || payload.EffectiveProvider != "work" || payload.OverriddenByEnv != config.ActiveProviderEnv {
+	if payload.ActiveProvider != "fast" || payload.EffectiveProvider != "work" || payload.OverriddenByEnv != config.ActiveProviderEnv || payload.EnvProvider != "work" || !payload.EnvProviderResolves {
 		t.Fatalf("JSON must flag the env override, got %#v", payload)
+	}
+}
+
+func TestRunProvidersUseExplainsUnresolvableOverride(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "removed")
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["envProvider"] != "removed" || payload["envProviderResolves"] != false {
+		t.Fatalf("payload = %#v, want an unresolved override", payload)
+	}
+	if _, ok := payload["effectiveProvider"]; ok {
+		t.Fatalf("unresolvable override reported effective: %#v", payload)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no provider named removed can be resolved") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunProvidersUseDefersOverrideWithProviderCommand(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = func(key string) string {
+		if key == providerCommandEnv {
+			return "must-not-run"
+		}
+		return os.Getenv(key)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["envProviderResolution"] != "deferred" || payload["envProviderResolves"] != nil {
+		t.Fatalf("payload = %#v, want deferred resolution", payload)
+	}
+	if _, ok := payload["effectiveProvider"]; ok {
+		t.Fatalf("deferred override reported effective: %#v", payload)
+	}
+}
+
+func TestRunProvidersUseReportsUnrelatedConfigError(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	configPath := providersUseOverrideConfig(t)
+	workspace := t.TempDir()
+	projectPath := filepath.Join(workspace, ".zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(`{"tools":{"deferThreshold":-1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := providerSetupDeps(configPath)
+	deps.getwd = func() (string, error) { return workspace, nil }
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "configuration is invalid") || !strings.Contains(stderr.String(), "deferThreshold") {
+		t.Fatalf("stderr = %q, want the actual config error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "no provider named work") {
+		t.Fatalf("unrelated config error blamed on the override: %q", stderr.String())
+	}
+}
+
+func TestRunProvidersUseCaseVariantOverrideDoesNotHideProjectProvider(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "WORK")
+	configPath := providersUseOverrideConfig(t)
+	workspace := t.TempDir()
+	projectPath := filepath.Join(workspace, ".zero", "config.json")
+	writeProviderOnboardingConfig(t, projectPath, config.FileConfig{Providers: []config.ProviderProfile{{
+		Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL: "https://project.example/v1", Model: "project-model",
+	}}})
+	deps := providerSetupDeps(configPath)
+	deps.getwd = func() (string, error) { return workspace, nil }
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "work"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "WORK stays the active provider") {
+		t.Fatalf("project provider override was hidden: %q", stderr.String())
+	}
+}
+
+func TestRunProvidersUseCaseVariantOverrideSelectsSameUserProvider(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "FAST")
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("case variant resolving to the selected user row warned: %q", stderr.String())
 	}
 }
 
