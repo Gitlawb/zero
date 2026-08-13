@@ -2305,6 +2305,122 @@ func TestStoreKeyringReloginKeepsTombstoneUntilReplacementCommits(t *testing.T) 
 	}
 }
 
+// TestStoreKeyringHonorsLogoutFromRunningLegacyBinary is the regression for
+// [P1] Do not ignore a logout performed by a running pre-migration binary:
+// after alpha is migrated into the index, a pre-PR binary sharing the same
+// keyring only ever reads and rewrites the legacy combined entry. If that
+// binary logs the user out of alpha, its write removes alpha from the legacy
+// entry — the only channel it has. The new binary's Load, Status, and Save
+// must all honor that, not keep serving the indexed copy because "indexed
+// wins over legacy" was designed for the opposite direction (protecting a
+// fresher indexed Save from a stale legacy snapshot), not for this one.
+func TestStoreKeyringHonorsLogoutFromRunningLegacyBinary(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+
+	// Step 1: alpha exists only in the legacy entry, as a pre-migration
+	// install (or an old binary's fresh login) would leave it.
+	legacy, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		key: {AccessToken: "from-old-binary"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacy)
+
+	// Step 2: this binary migrates it into the index via an ordinary Save of
+	// a DIFFERENT key, which triggers write()'s ordinary reconciliation pass
+	// (the same path Load/Status already exercise) and observes alpha in the
+	// legacy entry for the first time, marking it legacy-origin.
+	if err := s.Save(ProviderKey("bravo"), Token{AccessToken: "unrelated"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Load(key)
+	if err != nil || !ok || got.AccessToken != "from-old-binary" {
+		t.Fatalf("Load after migration = %#v, ok %v, err %v; want the legacy token indexed", got, ok, err)
+	}
+
+	// Step 3: the still-running old binary logs the user out of alpha. It has
+	// no concept of the index or tombstones, so the only thing it can do —
+	// and the only thing this test can simulate — is rewrite the legacy entry
+	// without alpha in it.
+	legacyAfterLogout, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyAfterLogout)
+
+	// Load must stop serving the indexed copy once the legacy binary's logout
+	// is visible, even though alpha still has its own indexed entry.
+	if _, ok, err := s.Load(key); err != nil || ok {
+		t.Fatalf("Load after legacy logout = ok %v, err %v; want the credential gone", ok, err)
+	}
+	statuses, err := s.Status("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range statuses {
+		if status.Key == key {
+			t.Fatalf("Status still lists %q after legacy logout: %#v", key, status)
+		}
+	}
+
+	// The logout must become durable, not merely hidden by this one read: a
+	// Save of the unrelated key (which is what actually reconciles and
+	// persists it) must not resurrect alpha from its still-present indexed
+	// entry, and the exclusion must survive even if legacyOrigin itself were
+	// ever lost.
+	if err := s.Save(ProviderKey("bravo"), Token{AccessToken: "unrelated-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.Load(key); err != nil || ok {
+		t.Fatalf("Load after reconciling write = ok %v, err %v; logout did not become durable", ok, err)
+	}
+}
+
+// TestStoreKeyringPureNewFormatKeySurvivesLegacyReconciliation guards the
+// false-positive direction of the fix above: a key created purely through
+// this binary's Save, with a legacy entry that exists (for some other key)
+// but has never once contained this one, must not be mistaken for a legacy
+// logout merely because it is absent from that entry. Only a key actually
+// observed in legacy at some point is eligible for the absence check at all.
+func TestStoreKeyringPureNewFormatKeySurvivesLegacyReconciliation(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A legacy entry exists, but only for a different key, and stays that way
+	// for the rest of the test: this binary never writes it.
+	legacy, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("legacy-only"): {AccessToken: "from-old-binary"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacy)
+
+	key := ProviderKey("pure-new-format")
+	if err := s.Save(key, Token{AccessToken: "native"}); err != nil {
+		t.Fatal(err)
+	}
+	// A second write re-runs the reconciliation pass this fix adds, which is
+	// exactly where a false positive would delete the key.
+	if err := s.Save(ProviderKey("legacy-only"), Token{AccessToken: "still-here"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := s.Load(key)
+	if err != nil || !ok || got.AccessToken != "native" {
+		t.Fatalf("Load = %#v, ok %v, err %v; a pure new-format key was wrongly treated as a legacy logout", got, ok, err)
+	}
+}
+
 func TestStoreKeyringTombstonesOutgrowLiveCredentialCap(t *testing.T) {
 	kr := newFakeKR()
 	b := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}

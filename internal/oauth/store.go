@@ -148,6 +148,12 @@ const (
 	// new binary. Old writers cannot see this entry; new readers and writers
 	// honor it so a stale legacy rewrite cannot resurrect a logout.
 	keyringTombstoneAccount = "oauth-tokens-tombstones"
+	// keyringLegacyOriginAccount holds the set of keys ever observed in the
+	// legacy combined entry. It lets write() tell "a pre-migration binary
+	// removed this key" apart from "this key was never in the legacy blob to
+	// begin with" — both look identical as a single absence, but only the
+	// first is a logout that must propagate as one.
+	keyringLegacyOriginAccount = "oauth-tokens-legacy-origin"
 )
 
 // Store persists OAuth tokens (provider + MCP namespaces) as one JSON blob,
@@ -819,6 +825,30 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 			tokens[key] = legacyToken
 		}
 	}
+	// A running pre-migration binary can only log out through the legacy
+	// entry, and that logout is invisible here as anything but the key's
+	// absence from legacyTokens — indistinguishable, on its own, from a key
+	// this process's index just happens to also hold that legacy never knew
+	// about. legacyOrigin (populated by write(), the only place with a
+	// durable record to consult) disambiguates the two: only a key ever
+	// actually observed in legacy is subject to this exclusion, so a
+	// purely-new-format credential is never hidden the moment it is absent
+	// from an entry it was never written to in the first place. Applied here
+	// transiently (not persisted): the durable version happens in write(),
+	// consistent with every other best-effort check in this function.
+	if legacyTokens != nil {
+		legacyOrigin, lerr := b.readLegacyOrigin()
+		if lerr == nil {
+			for key := range tokens {
+				if !legacyOrigin[key] {
+					continue
+				}
+				if _, stillInLegacy := legacyTokens[key]; !stillInLegacy {
+					delete(tokens, key)
+				}
+			}
+		}
+	}
 
 	data, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens})
 	if err != nil {
@@ -948,6 +978,49 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 		}
 	}
 
+	// A running pre-migration binary only ever rewrites the legacy combined
+	// entry: it has no concept of the index or tombstones, so its own logout
+	// is indistinguishable, in isolation, from a key this process simply never
+	// indexed. legacyOrigin remembers which keys were ever actually observed in
+	// that entry, so a later absence can be read as "removed" rather than
+	// "never was there" — the distinction the merge above cannot make on its
+	// own, since a key created purely through this binary's Save also never
+	// appears in legacyTokens.
+	legacyOrigin, err := b.readLegacyOrigin()
+	if err != nil {
+		return err
+	}
+	legacyOriginChanged := false
+	if legacyTokens != nil {
+		for key := range legacyTokens {
+			if ValidateKey(key) != nil {
+				continue
+			}
+			if !legacyOrigin[key] {
+				legacyOrigin[key] = true
+				legacyOriginChanged = true
+			}
+		}
+		// Only once the legacy entry has actually been read (legacyTokens != nil)
+		// can its absence mean anything. mutations[key] is this same call's own
+		// explicit Save/Delete for key: that always wins over the heuristic, so
+		// a fresh Save is never immediately undone by a stale legacy reading.
+		for key := range state.Tokens {
+			if !legacyOrigin[key] || mutations[key] {
+				continue
+			}
+			if _, stillInLegacy := legacyTokens[key]; stillInLegacy {
+				continue
+			}
+			delete(state.Tokens, key)
+			if !tombstones[key] {
+				tombstones[key] = true
+			}
+			delete(legacyOrigin, key)
+			legacyOriginChanged = true
+		}
+	}
+
 	keys := make([]string, 0, len(state.Tokens))
 	for key := range state.Tokens {
 		keys = append(keys, key)
@@ -1005,6 +1078,20 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 	}
 	if err := b.writeTombstones(tombstones, checkLease); err != nil {
 		return err
+	}
+	// Persist legacyOrigin membership changes alongside the tombstones they
+	// justify: a key observed here for the first time, or one just tombstoned
+	// for having disappeared from legacy, must survive a crash the same way
+	// the tombstone itself does, or a retried write would repeat the same
+	// detection from a colder cache and could reorder relative to a concurrent
+	// old-binary rewrite.
+	if legacyOriginChanged {
+		if err := checkLease(); err != nil {
+			return err
+		}
+		if err := b.writeLegacyOrigin(legacyOrigin, checkLease); err != nil {
+			return err
+		}
 	}
 	// 2. Publish the union of the live prior and new key sets first, so every
 	// entry that exists at any point during this update is indexed.
@@ -1156,6 +1243,77 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leas
 	sort.Strings(keys)
 	if _, err := tb.writeKeyIndex(keys, priorChunks, nil, checkLease); err != nil {
 		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
+	}
+	return nil
+}
+
+func (b keyringBlob) legacyOriginBlob() keyringBlob {
+	return keyringBlob{kr: b.kr, service: b.service, indexAccount: keyringLegacyOriginAccount, maxIndexKeys: maxKeyringTombstoneKeys}
+}
+
+// readLegacyOrigin returns the durable set of keys ever observed in the
+// legacy combined entry. Missing account => empty set (no old binary has
+// ever touched this store). Corrupt payloads fail closed, the same as
+// readTombstones: silently treating a damaged marker set as empty would
+// un-track every key it recorded and let the very absences it exists to
+// interpret look like fresh, ordinary keys again.
+func (b keyringBlob) readLegacyOrigin() (map[string]bool, error) {
+	keys, ok, _, _, err := b.legacyOriginBlob().readKeyIndex()
+	if err != nil {
+		return nil, fmt.Errorf("oauth: read keyring legacy-origin markers: %w", err)
+	}
+	if !ok {
+		return map[string]bool{}, nil
+	}
+	out := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		out[key] = true
+	}
+	return out, nil
+}
+
+// writeLegacyOrigin persists the legacy-origin set, mirroring writeTombstones:
+// an empty set removes the account/chunks entirely rather than leaving a
+// zero-key index behind.
+func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseCheck) error {
+	lb := b.legacyOriginBlob()
+	_, existed, priorChunks, _, err := lb.readKeyIndex()
+	if err != nil {
+		return fmt.Errorf("oauth: read keyring legacy-origin markers: %w", err)
+	}
+	if len(origin) == 0 {
+		if !existed {
+			return nil
+		}
+		if err := checkLease(); err != nil {
+			return err
+		}
+		if _, err := lb.kr.Delete(lb.service, lb.indexAccount); err != nil {
+			return err
+		}
+		for i := 1; i < priorChunks; i++ {
+			if err := checkLease(); err != nil {
+				return err
+			}
+			if _, err := lb.kr.Delete(lb.service, lb.chunkAccount(i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(origin) > maxKeyringTombstoneKeys {
+		return fmt.Errorf("oauth: keyring legacy-origin markers list %d keys, over the %d-key writable bound", len(origin), maxKeyringTombstoneKeys)
+	}
+	keys := make([]string, 0, len(origin))
+	for key := range origin {
+		if ValidateKey(key) != nil {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if _, err := lb.writeKeyIndex(keys, priorChunks, nil, checkLease); err != nil {
+		return fmt.Errorf("oauth: write keyring legacy-origin markers: %w", err)
 	}
 	return nil
 }
