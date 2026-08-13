@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -2039,12 +2040,9 @@ func diffCountTag(adds int, dels int) string {
 		zeroTheme.faint.Render(")")
 }
 
-func (meta diffMetadata) addOnly() bool {
-	return meta.adds > 0 && meta.dels == 0
-}
-
 func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	rawLines := strings.Split(detail, "\n")
+	displayLines := compactDiffViewerContext(rawLines)
 	meta := diffCardMetadata(detail)
 	innerWidth := width
 	lines := []string{}
@@ -2057,13 +2055,17 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 		gutterWidth = 4
 	}
 	textBudget := maxInt(8, innerWidth-3-gutterWidth)
-	highlightedAdds := highlightedAddedDiffLines(rawLines, meta, textBudget)
-	highlightAddIndex := 0
+	highlightedLines := highlightedDiffLines(rawLines, meta)
 	oldLine, newLine := 0, 0
 	inHunk := false
-	for i := 0; i < len(rawLines); i++ {
-		line := rawLines[i]
+	for i := 0; i < len(displayLines); i++ {
+		displayLine := displayLines[i]
+		line := displayLine.text
 		switch {
+		case displayLine.hiddenContext > 0:
+			lines = append(lines, zeroTheme.diffMeta.Render(fmt.Sprintf("… %d unchanged lines", displayLine.hiddenContext)))
+			oldLine += displayLine.hiddenContext
+			newLine += displayLine.hiddenContext
 		case strings.HasPrefix(line, "+++ "), strings.HasPrefix(line, "--- "):
 			// Path and counts live in the tool head row.
 		case strings.HasPrefix(line, "@@"):
@@ -2072,30 +2074,38 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 				newLine, _ = strconv.Atoi(match[2])
 				inHunk = true
 			}
-			// The raw hunk header is implementation metadata. Use it for line
-			// numbers, but keep the visible diff focused on file content.
-			continue
-		case !inHunk, strings.HasPrefix(line, `\`):
-			// Preamble ("diff --git", "index …", a stray "stdout:") and the
-			// "\ No newline at end of file" marker are not content lines: no
-			// gutter number, and the hunk counters must not advance.
+			// The line ranges drive the gutters below but do not compete with source
+			// content in a compact tool card.
+		case !inHunk:
+			// The card head already carries the target path and change counts. Hide
+			// Git transport metadata so the viewer opens on the first useful hunk.
+			// Preserve unusual pre-hunk output as muted context rather than losing
+			// diagnostics from nonstandard diff-producing commands.
+			if !isDiffViewerPreamble(line) {
+				lines = append(lines, zeroTheme.diffMeta.Render(truncateRunes(line, innerWidth)))
+			}
+		case strings.HasPrefix(line, `\`):
+			// "\ No newline at end of file" has no source-line position.
 			lines = append(lines, zeroTheme.diffMeta.Render(truncateRunes(line, innerWidth)))
 		case strings.HasPrefix(line, "+"):
-			text := truncateRunes(strings.TrimPrefix(line, "+"), textBudget)
-			if len(highlightedAdds) == meta.adds && highlightAddIndex < len(highlightedAdds) {
-				lines = append(lines, diffBodyStyledLine(newLine, "+", highlightedAdds[highlightAddIndex], true, textBudget, gutter))
-				highlightAddIndex++
+			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
+				lines = append(lines, diffBodyStyledLine(newLine, "+", styled, true, textBudget, gutter))
 			} else {
+				text := truncateRunes(strings.TrimPrefix(line, "+"), textBudget)
 				lines = append(lines, diffBodyLine(newLine, "+", text, true, textBudget, gutter))
 			}
 			newLine++
 		case strings.HasPrefix(line, "-"):
 			// Isolated 1:1 replacement (one "-" immediately followed by one "+"):
 			// highlight only the changed span on each side so a one-token edit reads
-			// instantly. Block changes and near-rewrites fall back to whole-line tint.
-			if isIsolatedReplacement(rawLines, i) {
+			// instantly. When a lexer is available the syntax-highlighter carries
+			// that same word span; unknown paths retain the established plain-text
+			// word-diff fallback.
+			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
+				lines = append(lines, diffBodyStyledLine(oldLine, "−", styled, false, textBudget, gutter))
+			} else if isIsolatedReplacement(rawLines, displayLine.rawIndex) {
 				delText := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
-				addText := truncateRunes(strings.TrimPrefix(rawLines[i+1], "+"), textBudget)
+				addText := truncateRunes(strings.TrimPrefix(rawLines[displayLine.rawIndex+1], "+"), textBudget)
 				if delRow, addRow, ok := renderWordDiffPair(oldLine, newLine, delText, addText, textBudget, gutter); ok {
 					lines = append(lines, delRow, addRow)
 					oldLine++
@@ -2103,17 +2113,22 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 					i++ // consume the paired "+"
 					continue
 				}
+			} else {
+				text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
+				lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget, gutter))
 			}
-			text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
-			lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget, gutter))
 			oldLine++
 		default:
-			text := truncateRunes(strings.TrimPrefix(line, " "), textBudget)
-			row := "   " + zeroTheme.muted.Render(text)
-			if gutter {
-				row = zeroTheme.faintest.Render(fmt.Sprintf("%4d", newLine)) + row
+			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
+				lines = append(lines, diffContextStyledLine(newLine, styled, textBudget, gutter))
+			} else {
+				text := truncateRunes(strings.TrimPrefix(line, " "), textBudget)
+				row := "   " + zeroTheme.muted.Render(text)
+				if gutter {
+					row = zeroTheme.faintest.Render(fmt.Sprintf("%4d", newLine)) + row
+				}
+				lines = append(lines, row)
 			}
-			lines = append(lines, row)
 			oldLine++
 			newLine++
 		}
@@ -2121,24 +2136,125 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), headTag: diffHeadTag(meta)}
 }
 
-func highlightedAddedDiffLines(rawLines []string, meta diffMetadata, textBudget int) []string {
-	if !meta.addOnly() || meta.path == "" {
+func isDiffViewerPreamble(line string) bool {
+	for _, prefix := range []string{
+		"diff --git ", "index ", "similarity index ", "dissimilarity index ",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	diffViewerHighlightMaxLines     = 10_000
+	diffViewerHighlightMaxBytes     = 512 * 1024
+	diffViewerHighlightMaxLineBytes = 4 * 1024
+)
+
+// highlightedDiffLines lexes each unified-diff hunk as one source unit. This
+// preserves lexer state through multiline comments, strings, and declarations,
+// while still returning independently renderable rows. Large diffs fall back to
+// the regular viewer so expanding a tool card remains responsive.
+func highlightedDiffLines(rawLines []string, meta diffMetadata) map[int]string {
+	if meta.path == "" {
 		return nil
 	}
-	content := make([]string, 0, meta.adds)
-	for _, line := range rawLines {
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++ ") {
-			content = append(content, strings.TrimPrefix(line, "+"))
+	highlighted := make(map[int]string)
+	for index := 0; index < len(rawLines); {
+		if !strings.HasPrefix(rawLines[index], "@@") {
+			index++
+			continue
+		}
+		start := index + 1
+		index = start
+		for index < len(rawLines) && !strings.HasPrefix(rawLines[index], "@@") {
+			index++
+		}
+		if !highlightDiffHunk(rawLines[start:index], start, meta.path, highlighted) {
+			return nil
+		}
+	}
+	return highlighted
+}
+
+func highlightDiffHunk(rawLines []string, rawStart int, path string, highlighted map[int]string) bool {
+	content := make([]string, 0, len(rawLines))
+	backgrounds := make([]color.Color, 0, len(rawLines))
+	rawIndexes := make([]int, 0, len(rawLines))
+	contentIndexes := make(map[int]int, len(rawLines))
+	bytes := 0
+	for offset, line := range rawLines {
+		if len(line) == 0 || line[0] == '\\' {
+			continue
+		}
+		prefix := line[0]
+		if prefix != ' ' && prefix != '+' && prefix != '-' {
+			continue
+		}
+		contentIndexes[rawStart+offset] = len(content)
+		content = append(content, line[1:])
+		rawIndexes = append(rawIndexes, rawStart+offset)
+		bytes += len(line)
+		if len(line) > diffViewerHighlightMaxLineBytes {
+			return false
+		}
+		switch prefix {
+		case '+':
+			backgrounds = append(backgrounds, zeroTheme.addLine.GetBackground())
+		case '-':
+			backgrounds = append(backgrounds, zeroTheme.delLine.GetBackground())
+		default:
+			backgrounds = append(backgrounds, nil)
 		}
 	}
 	if len(content) == 0 {
-		return nil
+		return true
 	}
-	highlighted, ok := highlightCodeForPath(content, meta.path, textBudget, zeroTheme.addLine.GetBackground())
-	if !ok || len(highlighted) != len(content) {
-		return nil
+	if len(content) > diffViewerHighlightMaxLines || bytes > diffViewerHighlightMaxBytes {
+		return false
 	}
-	return highlighted
+
+	spans := diffHunkWordSpans(rawLines, rawStart, contentIndexes)
+	styled, ok := highlightCodeForPathWithLineBackgrounds(content, path, 1<<20, backgrounds, spans)
+	if !ok || len(styled) != len(content) {
+		return false
+	}
+	for contentIndex, text := range styled {
+		highlighted[rawIndexes[contentIndex]] = text
+	}
+	return true
+}
+
+func diffHunkWordSpans(rawLines []string, rawStart int, contentIndexes map[int]int) []highlightSpan {
+	var spans []highlightSpan
+	for offset, line := range rawLines {
+		rawIndex := rawStart + offset
+		if !isDiffDelContent(line) || offset+1 >= len(rawLines) || !isDiffAddContent(rawLines[offset+1]) {
+			continue
+		}
+		if offset > 0 && isDiffDelContent(rawLines[offset-1]) {
+			continue
+		}
+		if offset+2 < len(rawLines) && isDiffAddContent(rawLines[offset+2]) {
+			continue
+		}
+		before := []rune(line[1:])
+		after := []rune(rawLines[offset+1][1:])
+		prefix, beforeEnd, afterEnd := changedSpan(before, after)
+		changed := maxInt(beforeEnd-prefix, afterEnd-prefix)
+		if changed == 0 || float64(changed)/float64(maxInt(len(before), len(after))) > 0.6 {
+			continue
+		}
+		if lineIndex, ok := contentIndexes[rawIndex]; ok {
+			spans = append(spans, highlightSpan{line: lineIndex, start: prefix, end: beforeEnd, background: zeroTheme.delLineWord.GetBackground()})
+		}
+		if lineIndex, ok := contentIndexes[rawIndex+1]; ok {
+			spans = append(spans, highlightSpan{line: lineIndex, start: prefix, end: afterEnd, background: zeroTheme.addLineWord.GetBackground()})
+		}
+	}
+	return spans
 }
 
 // diffBodyLine paints one changed row: optional gutter number, sign column,
@@ -2168,6 +2284,7 @@ func diffBodyStyledLine(number int, sign string, styledText string, added bool, 
 	if added {
 		lineStyle, signStyle, numStyle = zeroTheme.addLine, zeroTheme.addSign, zeroTheme.addLineNum
 	}
+	styledText = fitStyledLine(styledText, textBudget)
 	if pad := textBudget - lipgloss.Width(styledText); pad > 0 {
 		styledText += lineStyle.Render(strings.Repeat(" ", pad))
 	}
@@ -2176,6 +2293,18 @@ func diffBodyStyledLine(number int, sign string, styledText string, added bool, 
 		numCol = numStyle.Render(fmt.Sprintf("%4d", number))
 	}
 	return numCol + signStyle.Render(" "+sign+" ") + styledText
+}
+
+func diffContextStyledLine(number int, styledText string, textBudget int, gutter bool) string {
+	styledText = fitStyledLine(styledText, textBudget)
+	if pad := textBudget - lipgloss.Width(styledText); pad > 0 {
+		styledText += zeroTheme.muted.Render(strings.Repeat(" ", pad))
+	}
+	row := "   " + styledText
+	if gutter {
+		row = zeroTheme.faintest.Render(fmt.Sprintf("%4d", number)) + row
+	}
+	return row
 }
 
 func isDiffAddContent(s string) bool {

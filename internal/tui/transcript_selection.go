@@ -750,19 +750,19 @@ func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int,
 	}
 }
 
-// renderSelectableToolResultRow renders the tool result card and marks its head
-// (first line) as a clickable collapse/expand toggle. Body/footer text remains
-// selectable so copying a visible transcript range includes command output.
+// renderSelectableToolResultRow renders the tool result card. Only cards that
+// can actually collapse expose a clickable header; always-visible diff cards
+// retain normal text selection and never imply an unavailable action.
 func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
 	rendered := renderFn(row, width, rc)
 	if rendered == "" {
 		return "", nil
 	}
-	// The first rendered line is the clickable toggle header; carry its text so a
-	// selection dragged through it copies the label too (the toggle flag still
-	// expands/collapses on a direct click, resolved on press before selection).
+	// Carry the first line's text so a selection dragged through the card copies
+	// its label too. It receives a toggle only when this card exposes a collapse
+	// affordance in the current transcript mode.
 	allLines := viewLines(rendered)
-	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}
+	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: toolResultCanToggle(row, rendered)}
 	if len(allLines) > 0 {
 		if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY, allLines[0], false); ok {
 			header.text = meta.text
@@ -776,6 +776,13 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	// coordinate the mouse maps to. Painting it here (unshifted) made the highlight
 	// land gutter cells off from where the user clicked.
 	return rendered, selectable
+}
+
+func toolResultCanToggle(row transcriptRow, rendered string) bool {
+	if toolCardAlwaysExpands(toolRowName(row)) {
+		return false
+	}
+	return strings.Contains(ansi.Strip(rendered), "click to expand") || strings.Contains(ansi.Strip(rendered), "▾ collapse")
 }
 
 func (m model) renderSelectableRenderedRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {

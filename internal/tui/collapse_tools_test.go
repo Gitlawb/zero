@@ -121,3 +121,21 @@ func TestToolResultRowExposesClickToggle(t *testing.T) {
 		t.Fatalf("tool result visible body/footer must stay selectable, got %#v", selectable)
 	}
 }
+
+func TestAlwaysExpandedToolResultHeaderIsNotToggleable(t *testing.T) {
+	m := transcriptViewTestModel()
+	row := transcriptRow{
+		kind:   rowToolResult,
+		id:     "diff",
+		tool:   "edit_file",
+		status: tools.StatusOK,
+		detail: "--- a/example.go\n+++ b/example.go\n@@ -1 +1 @@\n-old\n+new",
+	}
+	_, selectable := m.renderSelectableToolResultRow(0, row, m.width, buildRowContext(nil), 0)
+	if len(selectable) == 0 {
+		t.Fatal("expected a visible diff result row")
+	}
+	if selectable[0].toggle {
+		t.Fatalf("always-expanded diff header must not advertise a collapse toggle: %#v", selectable[0])
+	}
+}
