@@ -30,11 +30,24 @@ import (
 // persists and renders it. This is the redaction chokepoint (invariant #6): no
 // imported byte reaches a picker row or transcript line as a secret or as a live
 // control sequence.
+// THE ORDER IS THE WHOLE GUARANTEE. Strip first, then match.
+//
+// RedactString matches secrets by SHAPE, and stripControl deletes a control byte
+// without leaving a gap, so it is also a REASSEMBLER. Running it second meant a
+// transcript could split a credential with a NUL, an ESC or any C1 byte, sail
+// past the shape patterns because neither half looks like a key, and then have
+// the halves rejoined on the way out. Every shape leaked that way: sk-ant-,
+// ghp_, AKIA. Normalizing first means the patterns see the text the reader will
+// see, which is the only text worth matching against.
+//
+// Same defect as #835, where an MCP failure reason was redacted before the
+// terminal sanitizer rejoined its halves. Any normalizer that removes bytes
+// without leaving a gap has to run BEFORE whatever matches on them.
 func redact(value string) string {
 	if value == "" {
 		return ""
 	}
-	return stripControl(redaction.RedactString(value, redaction.Options{}))
+	return redaction.RedactString(stripControl(value), redaction.Options{})
 }
 
 // stripControl removes terminal control bytes from imported text. A foreign
