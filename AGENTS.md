@@ -111,3 +111,33 @@ These classes drive multi-round reviews. Fix them before requesting review:
   shipped. Wire advertised entry points or shrink the claim. Do not bundle
   unrelated fixes. Do not widen security allowlists by name alone; check
   classification and side effects too.
+- **Host tool version floors:** Zero shells out to `git` and other host tools,
+  and the project does not declare a minimum version for any of them. A flag,
+  subcommand, or config key that is not long-established therefore raises that
+  floor silently, and the failure on an older host is an unhelpful usage error
+  rather than a clear message. Before adding one, check when it landed and say
+  so where a caller would look: `--end-of-options` is Git 2.24,
+  `--show-current` is 2.22, `branch.autoSetupMerge=inherit` is 2.35. Then
+  either keep a fallback for older versions or gate the call. A test that
+  depends on a newer feature must skip below its floor instead of failing, and
+  say which version it needs.
+- **Prove the test fails without the change:** A regression test earns its
+  place only if it fails on the unfixed code, for the reason it claims. Run it
+  both ways and quote the failure in the PR. The recurring miss is not a
+  missing test but a test that never reaches the behavior it names, because an
+  earlier guard rejects the input first, so it passes with and without the fix.
+  When a test targets a specific layer, call that layer directly rather than
+  relying on a public entry point that may refuse earlier.
+- **Hermetic tests:** Tests must not read or write the developer's real config,
+  cache, or state directories. Redirect the user config root to a temp
+  directory, and set `%AppData%` alongside `XDG_CONFIG_HOME` on Windows, where
+  `os.UserConfigDir` ignores XDG. Apply it to every test that reaches the same
+  storage, not only the one where it was first needed; a test that passes on a
+  clean machine and pollutes a real one is a blocker.
+- **Error codes are platform-specific:** The same syscall reports different
+  codes per OS, so a check written against one platform is silently inert on
+  another while still looking correct. `openat(O_DIRECTORY|O_NOFOLLOW)` on a
+  symlink reports `ENOTDIR` on Linux and Darwin but `ELOOP` elsewhere; on
+  Windows, `\\?\` and `\\.\` prefixes are not UNC paths, and an `NtCreateFile`
+  information class must match the struct actually passed. Confirm the code the
+  target platform returns instead of assuming the portable one.
