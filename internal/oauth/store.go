@@ -1574,24 +1574,27 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks
 			maxProtected = c
 		}
 	}
-	// Write each new continuation chunk into the next account that is not a
-	// protected (missing) slot, so recoverable chunk data is never overwritten.
+	// Plan the complete slot assignment before writing anything. This must be
+	// a pure computation: the loop below overwrites existing, non-protected
+	// chunk accounts the old header still references, so if it started
+	// writing and only discovered a capacity overflow afterward, the old
+	// header would be left describing a layout partially clobbered by pieces
+	// of the new one, potentially stranding every key it lists. Assigning
+	// slots first and validating the result means a rejected write leaves
+	// every existing chunk account and every existing token byte-for-byte
+	// untouched.
+	type plannedChunk struct {
+		slot  int
+		index int
+	}
+	var planned []plannedChunk
 	slot := 1
 	advertised := len(chunks)
 	for i := 1; i < len(chunks); i++ {
 		for protected[slot] {
 			slot++
 		}
-		chunkData, err := json.Marshal(chunks[i])
-		if err != nil {
-			return 0, err
-		}
-		if err := checkLease(); err != nil {
-			return 0, err
-		}
-		if err := b.kr.Set(b.service, b.chunkAccount(slot), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
-			return 0, err
-		}
+		planned = append(planned, plannedChunk{slot: slot, index: i})
 		if slot+1 > advertised {
 			advertised = slot + 1
 		}
@@ -1607,6 +1610,19 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks
 	}
 	if advertised > maxKeyringIndexChunks {
 		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", advertised, maxKeyringIndexChunks)
+	}
+	// Planning is done and the layout fits; now perform the writes it called for.
+	for _, p := range planned {
+		chunkData, err := json.Marshal(chunks[p.index])
+		if err != nil {
+			return 0, err
+		}
+		if err := checkLease(); err != nil {
+			return 0, err
+		}
+		if err := b.kr.Set(b.service, b.chunkAccount(p.slot), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
+			return 0, err
+		}
 	}
 	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: advertised, Keys: chunks[0]})
 	if err != nil {

@@ -2421,6 +2421,82 @@ func TestStoreKeyringPureNewFormatKeySurvivesLegacyReconciliation(t *testing.T) 
 	}
 }
 
+// TestWriteKeyIndexRejectsOverflowWithoutMutatingExistingChunks is the
+// regression for [P1] Preflight protected continuation-slot capacity before
+// modifying the index: the slot-assignment loop used to Set new continuation
+// chunks into existing, non-protected accounts as it went, and only computed
+// the resulting advertised chunk count (and checked it against the
+// reader-accepted cap) after every write had already landed. A rejection
+// therefore did not mean nothing happened: it meant the old header was left
+// describing a layout some of whose chunk accounts had just been overwritten
+// with pieces of the rejected new one, potentially stranding every key those
+// accounts held.
+//
+// A single protected (missing) slot at the cap is enough to force this: with
+// missingChunks=[maxKeyringIndexChunks], the "keep advertising protected
+// slots" bookkeeping alone pushes the final advertised count one past the
+// cap, regardless of how few new continuation chunks are actually needed —
+// exactly the "protected missing slots near the cap" shape the finding
+// describes, and it does not require constructing a realistic 128-chunk prior
+// index to trigger.
+func TestWriteKeyIndexRejectsOverflowWithoutMutatingExistingChunks(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+
+	// Enough keys that chunkIndexKeys needs several continuation chunks, so
+	// the old code's loop would have performed real Set calls before ever
+	// reaching the capacity check.
+	const keyLen = 130
+	keys := make([]string, 0, 80)
+	for i := 0; i < 80; i++ {
+		keys = append(keys, fmt.Sprintf("k%0*d", keyLen-1, i))
+	}
+	chunks := chunkIndexKeys(keys)
+	if len(chunks) < 3 {
+		t.Fatalf("test setup: keys only produced %d chunks, want at least 3 so the old loop would have written something before overflowing", len(chunks))
+	}
+
+	// Seed the accounts the write would target with recognizable prior
+	// content, standing in for a real existing index's chunk data.
+	priorChunks := maxKeyringIndexChunks
+	existingHeader := `{"v":1,"chunks":128,"keys":["prior-header-marker"]}`
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString([]byte(existingHeader))
+	priorChunkData := make(map[int]string, len(chunks)-1)
+	for i := 1; i < len(chunks); i++ {
+		account := b.chunkAccount(i)
+		content := fmt.Sprintf("prior-chunk-%d-marker", i)
+		kr.data[keyringService+"/"+account] = content
+		priorChunkData[i] = content
+	}
+
+	missingChunks := []int{maxKeyringIndexChunks}
+	_, err := b.writeKeyIndex(keys, priorChunks, missingChunks, noLeaseLoss)
+	if err == nil {
+		t.Fatal("expected writeKeyIndex to reject an index that overflows the chunk cap")
+	}
+	if !strings.Contains(err.Error(), "chunk") {
+		t.Fatalf("error = %v, want it to name the chunk-cap rejection", err)
+	}
+
+	// The header must be exactly what it was: not replaced with a new one
+	// (which would have advertised an unreadable Chunks: 129), and not left
+	// as some other partially-applied value.
+	got := kr.data[keyringService+"/"+keyringIndexAccount]
+	want := base64.StdEncoding.EncodeToString([]byte(existingHeader))
+	if got != want {
+		t.Fatalf("index header was mutated by a rejected write:\n got  %q\n want %q", got, want)
+	}
+	// Every existing chunk account the rejected write would have targeted
+	// must be byte-for-byte the value it held before the call.
+	for i, want := range priorChunkData {
+		account := b.chunkAccount(i)
+		got := kr.data[keyringService+"/"+account]
+		if got != want {
+			t.Fatalf("chunk account %d was mutated by a rejected write: got %q, want %q (prior content)", i, got, want)
+		}
+	}
+}
+
 func TestStoreKeyringTombstonesOutgrowLiveCredentialCap(t *testing.T) {
 	kr := newFakeKR()
 	b := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
