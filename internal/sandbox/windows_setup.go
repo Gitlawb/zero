@@ -66,6 +66,10 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	if len(workspaceRoots) == 0 {
 		workspaceRoots = []string{commandCWD}
 	}
+	// Augmented here, in the caller's shell, before the args cross into the
+	// elevated helper. The temp-derived candidate reads os.TempDir(), so it has
+	// to be resolved where the environment is still the operator's.
+	options.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(options.PermissionProfile, workspaceRoots)
 	profileJSON, err := json.Marshal(options.PermissionProfile)
 	if err != nil {
 		return nil, fmt.Errorf("marshal windows sandbox setup permission profile: %w", err)
@@ -305,4 +309,122 @@ func canonicalWindowsACLEntries(entries []WindowsACLEntry) []WindowsACLEntry {
 		return !left.Materialize && right.Materialize
 	})
 	return out
+}
+
+// windowsSandboxRuntimeCandidates returns every runtime root setup provisions.
+//
+// BOTH candidates, not the one this process would select. sandboxRuntimeRootFor
+// prefers the cache-derived root and falls back to the temp-derived one when the
+// first would land inside the workspace or its lease cannot be taken, and that
+// choice is made per process. Setup that granted only its own choice left the
+// other unprovisioned, so a command that fell back wrote to a tree with no ACE
+// on it. Both are deterministic now, so setup can cover both and command
+// selection lands on a provisioned root either way.
+func windowsSandboxRuntimeCandidates(workspaceRoots []string) []string {
+	workspaceRoot := ""
+	for _, candidate := range workspaceRoots {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			workspaceRoot = canonicalSandboxWorkspaceRoot(trimmed)
+			break
+		}
+	}
+	if workspaceRoot == "" || workspaceRoot == "." {
+		return nil
+	}
+	var roots []string
+	if cacheRoot, err := sandboxUserCacheDir(); err == nil {
+		if cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot); cacheRoot != "" && cacheRoot != "." {
+			if root, ok := deterministicSandboxRuntimeRoot(workspaceRoot, cacheRoot); ok {
+				roots = append(roots, root)
+			}
+		}
+	}
+	if root, err := fallbackSandboxRuntimeRoot(workspaceRoot); err == nil {
+		roots = append(roots, root)
+	}
+	return roots
+}
+
+// windowsSandboxProfileWithRuntime adds the runtime candidates as write roots.
+//
+// Applied on BOTH sides of the setup protocol, which is the whole point. The
+// marker fingerprints the capability ACL plan built from this profile, while
+// every command reaches the Windows runner having already had
+// permissionProfileWithRuntime append the root it selected. Setup fingerprinted
+// the bare profile and the command presented an augmented one, so a marker
+// written seconds earlier was rejected with "permission roots or deny lists
+// changed" and no command could run at all.
+//
+// Adding the full candidate set on both sides makes the two hashes agree without
+// the command having to know which root setup happened to pick, and it puts the
+// runtime roots into the CAPABILITY plan as well. That second part matters since
+// the principal command runs on a WRITE_RESTRICTED token restricted to the
+// capability SIDs: a runtime root carrying only the principal ACE satisfies the
+// normal token and fails the restricted check, so cache and temp writes were
+// denied even once the marker agreed.
+func windowsSandboxProfileWithRuntime(profile PermissionProfile, workspaceRoots []string) PermissionProfile {
+	candidates := windowsSandboxRuntimeCandidates(workspaceRoots)
+	if len(candidates) == 0 {
+		return profile
+	}
+	existing := make(map[string]struct{}, len(profile.FileSystem.WriteRoots))
+	for _, root := range profile.FileSystem.WriteRoots {
+		existing[windowsCapabilityPathKey(root.Root)] = struct{}{}
+	}
+	writeRoots := append([]WritableRoot{}, profile.FileSystem.WriteRoots...)
+	for _, candidate := range candidates {
+		if _, ok := existing[windowsCapabilityPathKey(candidate)]; ok {
+			continue
+		}
+		existing[windowsCapabilityPathKey(candidate)] = struct{}{}
+		writeRoots = append(writeRoots, WritableRoot{Root: candidate})
+	}
+	profile.FileSystem.WriteRoots = writeRoots
+	return profile
+}
+
+// ensureWindowsSandboxRuntimeCandidates creates every runtime root setup grants.
+//
+// Paired with windowsSandboxProfileWithRuntime: that function puts the candidates
+// into the ACL plan, and this one makes them exist. Splitting the two is what
+// broke elevated setup once already, because the capability plan refuses to
+// materialize a write root and fails the whole run on a path that is merely
+// absent. Whenever one of these grows a candidate, so must the other.
+//
+// Called on the setup side only. A command must never create these: setup is the
+// gate that decides which trees the sandbox may write to, and a command that
+// created its own root would be granting itself one.
+func ensureWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
+	for _, root := range windowsSandboxRuntimeCandidates(workspaceRoots) {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return fmt.Errorf("create sandbox runtime root %s: %w", root, err)
+		}
+	}
+	return nil
+}
+
+// shortWindowsACLPlanHash trims a plan hash for a human-facing error. Twelve hex
+// characters is plenty to tell two plans apart by eye, and the full 64 buries the
+// rest of the message.
+func shortWindowsACLPlanHash(hash string) string {
+	hash = strings.TrimSpace(hash)
+	if hash == "" {
+		return "(none)"
+	}
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+	return hash
+}
+
+// WindowsSandboxProfileWithRuntimeRoots folds the sandbox runtime roots into a
+// permission profile, for callers that build a setup config outside this package.
+//
+// Call it ONLY from a process whose TEMP and TMP are the operator's. The
+// temp-derived candidate reads os.TempDir(), and the sandbox points those
+// variables at its own runtime temp for anything it launches, so a process on the
+// far side of that redirection derives a path no other process agrees on. The
+// command runner is exactly such a process: it takes the profile it is handed.
+func WindowsSandboxProfileWithRuntimeRoots(profile PermissionProfile, workspaceRoots []string) PermissionProfile {
+	return windowsSandboxProfileWithRuntime(profile, workspaceRoots)
 }
