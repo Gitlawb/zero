@@ -52,7 +52,7 @@ func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
 		t.Fatalf("WriteWindowsSandboxSetupMarker: %v", err)
 	}
 
-	candidates := windowsSandboxRuntimeCandidates(config.WorkspaceRoots)
+	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots)
 	if len(candidates) == 0 {
 		t.Fatal("windowsSandboxRuntimeCandidates returned none, so this test proves nothing")
 	}
@@ -121,7 +121,7 @@ func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
 // candidates again, for the same reason as above.
 func TestWindowsSandboxRuntimeRootsAreInTheCapabilityPlan(t *testing.T) {
 	config := runtimeRootTestConfig(t)
-	candidates := windowsSandboxRuntimeCandidates(config.WorkspaceRoots)
+	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots)
 	if len(candidates) == 0 {
 		t.Fatal("windowsSandboxRuntimeCandidates returned none, so this test proves nothing")
 	}
@@ -157,7 +157,7 @@ func TestWindowsSandboxRuntimeRootsAreInTheCapabilityPlan(t *testing.T) {
 // nothing but this test stops one from growing a candidate without the other.
 func TestWindowsSandboxSetupProvisionsEveryGrantedWriteRoot(t *testing.T) {
 	config := runtimeRootTestConfig(t)
-	candidates := windowsSandboxRuntimeCandidates(config.WorkspaceRoots)
+	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots)
 	if len(candidates) == 0 {
 		t.Fatal("windowsSandboxRuntimeCandidates returned none, so this test proves nothing")
 	}
@@ -171,7 +171,7 @@ func TestWindowsSandboxSetupProvisionsEveryGrantedWriteRoot(t *testing.T) {
 		t.Cleanup(func() { _ = os.RemoveAll(candidate) })
 	}
 
-	if err := ensureWindowsSandboxRuntimeCandidates(config.WorkspaceRoots); err != nil {
+	if err := ensureWindowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots); err != nil {
 		t.Fatalf("ensureWindowsSandboxRuntimeCandidates: %v", err)
 	}
 
@@ -198,11 +198,11 @@ func TestWindowsSandboxSetupProvisionsEveryGrantedWriteRoot(t *testing.T) {
 // setup and never selected, or selected and never granted.
 func TestWindowsSandboxRuntimeCandidatesAreDeterministic(t *testing.T) {
 	config := runtimeRootTestConfig(t)
-	first := windowsSandboxRuntimeCandidates(config.WorkspaceRoots)
+	first := windowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots)
 	if len(first) == 0 {
 		t.Fatal("windowsSandboxRuntimeCandidates returned none, so this test proves nothing")
 	}
-	second := windowsSandboxRuntimeCandidates(config.WorkspaceRoots)
+	second := windowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots)
 	if len(first) != len(second) {
 		t.Fatalf("candidate count = %d then %d, want stable", len(first), len(second))
 	}
@@ -213,7 +213,7 @@ func TestWindowsSandboxRuntimeCandidatesAreDeterministic(t *testing.T) {
 	}
 
 	other := runtimeRootTestConfig(t)
-	otherCandidates := windowsSandboxRuntimeCandidates(other.WorkspaceRoots)
+	otherCandidates := windowsSandboxRuntimeRoots(PermissionProfile{}, other.WorkspaceRoots)
 	for _, candidate := range otherCandidates {
 		for _, mine := range first {
 			if candidate == mine {

@@ -51,7 +51,7 @@ func TestBuildCommandPlanCarriesTheRuntimeRootsIntoTheRunnerArgs(t *testing.T) {
 	}
 	defer plan.Cleanup()
 
-	candidates := windowsSandboxRuntimeCandidates([]string{workspace})
+	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspace})
 	if len(candidates) == 0 {
 		t.Fatal("no runtime candidates derived, so this test would pass vacuously")
 	}
@@ -88,7 +88,7 @@ func TestBuildCommandPlanProvisionsTheRuntimeRootsItGrants(t *testing.T) {
 	t.Setenv("TMP", tempRoot)
 	t.Setenv("TEMP", tempRoot)
 
-	candidates := windowsSandboxRuntimeCandidates([]string{workspace})
+	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspace})
 	if len(candidates) == 0 {
 		t.Fatal("no runtime candidates derived, so this test would pass vacuously")
 	}
