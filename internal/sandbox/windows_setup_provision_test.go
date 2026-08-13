@@ -15,13 +15,40 @@ import (
 // production call sites were missing outright. A test that reaches past the caller
 // proves the helper works and says nothing about whether anything calls it.
 
-func windowsRuntimeCandidatesForTest(t *testing.T, workspaceRoot string) []string {
+// windowsRuntimeTestRoots returns a workspace plus the runtime candidates derived
+// for it, with EVERY location the derivation reads pointed at test-owned
+// directories.
+//
+// Stubbing sandboxUserCacheDir is not tidiness. windowsSandboxRuntimeCandidates
+// reads the real user cache when it is left alone, so a test that then clears a
+// candidate to prove provisioning recreates it was deleting the developer's own
+// zero runtime tree under the real cache on every run, and failing outright on a
+// read-only home. The test has no ownership claim on that path, so it must not
+// derive one. windows_runner_marker_windows_test.go had this right already.
+func windowsRuntimeTestRoots(t *testing.T) (string, []string) {
 	t.Helper()
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	tempRoot := t.TempDir()
+
+	originalCacheDir := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
+
 	candidates := windowsSandboxRuntimeCandidates([]string{workspaceRoot})
 	if len(candidates) == 0 {
 		t.Skip("no runtime candidates derivable in this environment")
 	}
-	return candidates
+	// Belt and braces: refuse to run rather than touch anything the test does not
+	// own, so a later change to the derivation cannot quietly reintroduce this.
+	for _, candidate := range candidates {
+		if !pathWithinRoot(cacheRoot, candidate) && !pathWithinRoot(tempRoot, candidate) {
+			t.Fatalf("candidate %s is outside the test-owned cache (%s) and temp (%s) roots; refusing to modify it", candidate, cacheRoot, tempRoot)
+		}
+	}
+	return workspaceRoot, candidates
 }
 
 // TestBuildWindowsSandboxSetupACLPlanCreatesTheRootsItGrants is the regression for
@@ -30,12 +57,7 @@ func windowsRuntimeCandidatesForTest(t *testing.T, workspaceRoot string) []strin
 // targets, so an absent AllowWrite target aborts the whole elevated setup with
 // "windows ACL target does not exist".
 func TestBuildWindowsSandboxSetupACLPlanCreatesTheRootsItGrants(t *testing.T) {
-	workspaceRoot := t.TempDir()
-	tempRoot := t.TempDir()
-	t.Setenv("TMP", tempRoot)
-	t.Setenv("TEMP", tempRoot)
-
-	candidates := windowsRuntimeCandidatesForTest(t, workspaceRoot)
+	workspaceRoot, candidates := windowsRuntimeTestRoots(t)
 	for _, candidate := range candidates {
 		if err := os.RemoveAll(candidate); err != nil {
 			t.Fatalf("clear candidate %s: %v", candidate, err)
@@ -87,12 +109,7 @@ func TestBuildWindowsSandboxSetupACLPlanCreatesTheRootsItGrants(t *testing.T) {
 // left the suite green. This one hands it a BARE profile and decodes the argument
 // the elevated helper actually receives.
 func TestBuildWindowsSandboxSetupArgsCarriesEveryRuntimeCandidate(t *testing.T) {
-	workspaceRoot := t.TempDir()
-	tempRoot := t.TempDir()
-	t.Setenv("TMP", tempRoot)
-	t.Setenv("TEMP", tempRoot)
-
-	candidates := windowsRuntimeCandidatesForTest(t, workspaceRoot)
+	workspaceRoot, candidates := windowsRuntimeTestRoots(t)
 	bare := PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
 	for _, root := range bare.FileSystem.WriteRoots {
 		for _, candidate := range candidates {
@@ -192,6 +209,17 @@ func TestFallbackSandboxRuntimeRootIsSpellingStable(t *testing.T) {
 func TestWindowsSandboxRuntimeCandidatesUsesOneWorkspaceRoot(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()
+
+	// Owned cache and temp even though this test only reads: the derivation would
+	// otherwise depend on the developer's real cache directory, which makes the
+	// result environment-dependent as well as impolite.
+	cacheRoot := t.TempDir()
+	originalCacheDir := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
+	tempRoot := t.TempDir()
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 
 	combined := windowsSandboxRuntimeCandidates([]string{first, second})
 	alone := windowsSandboxRuntimeCandidates([]string{first})
