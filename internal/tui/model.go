@@ -4414,7 +4414,7 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		text := ""
 		owner := strings.TrimSpace(item.OwnerProvider)
 		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
+		if owner != "" && owner != strings.TrimSpace(m.providerName) && ownerIsSavedProvider {
 			// A model from another saved provider: switch provider + model together.
 			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
 		} else {

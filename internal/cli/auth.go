@@ -131,6 +131,9 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := config.PreflightUserConfig(configPath); err != nil {
+		return "", err
+	}
 	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
 	if err != nil {
 		return "", err
@@ -139,13 +142,22 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	previous, previousPresent, err := store.Get(ensured.Name)
+	if err != nil {
+		return "", err
+	}
 	if err := store.Set(ensured.Name, key); err != nil {
 		return "", err
 	}
 	if err := config.MarkProviderAPIKeyStored(configPath, ensured.Name); err != nil {
-		// Best-effort rollback: don't leave the key orphaned in the credential
-		// store while config.json still says it isn't there.
-		_, _ = store.Delete(ensured.Name)
+		current, present, getErr := store.Get(ensured.Name)
+		if getErr == nil && present && current == key {
+			if previousPresent {
+				_ = store.Set(ensured.Name, previous)
+			} else {
+				_, _ = store.Delete(ensured.Name)
+			}
+		}
 		return "", err
 	}
 	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))

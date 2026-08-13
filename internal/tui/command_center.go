@@ -677,11 +677,11 @@ func oauthLoginName(profile config.ProviderProfile) (string, bool) {
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
 	name = strings.TrimSpace(name)
 	for _, profile := range m.savedProviders {
-		if strings.EqualFold(strings.TrimSpace(profile.Name), name) {
+		if strings.TrimSpace(profile.Name) == name {
 			return profile, true
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(m.providerProfile.Name), name) {
+	if strings.TrimSpace(m.providerProfile.Name) == name {
 		return m.providerProfile, true
 	}
 	return config.ProviderProfile{}, false

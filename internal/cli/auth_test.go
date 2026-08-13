@@ -191,6 +191,43 @@ func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
 	}
 }
 
+func TestSaveOpenRouterProviderKeyRejectsAmbiguousConfigWithoutReplacingKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	before := []byte(`{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openrouter", "old-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = saveOpenRouterProviderKey(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, "new-key")
+	if err == nil {
+		t.Fatal("expected ambiguous persisted names to be rejected")
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("config changed: beforeBytes=%d afterBytes=%d", len(before), len(after))
+	}
+	key, ok, getErr := store.Get("openrouter")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if !ok || key != "old-key" {
+		t.Fatalf("existing credential present=%v preserved=%v", ok, key == "old-key")
+	}
+}
+
 func TestRunAuthHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runWithDeps([]string{"auth", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
