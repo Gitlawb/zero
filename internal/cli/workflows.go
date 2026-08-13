@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -1385,6 +1386,15 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// check the default branch back out so the tree is not left half-moved.
 	if deps.resetBranchRef != nil {
 		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, restoreTip, expectedRestoreTip); err != nil {
+			// A compare-and-swap conflict means the default branch moved
+			// while we were branching, so restoreTip is no longer the tip we
+			// meant to restore. The rollback below deletes the branch that
+			// now exclusively owns the user's commits, which would destroy
+			// work to recover from a race we can simply report. Keep the
+			// branch and let the user reconcile the default branch.
+			if errors.Is(err, zerogit.ErrCompareAndSwapConflict) {
+				return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w; generated branch %s was preserved because the default branch changed concurrently", currentBranch, restoreTip, err, result.Branch)
+			}
 			var rollbackErr error
 			if deps.deleteBranch != nil {
 				rollbackErr = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)

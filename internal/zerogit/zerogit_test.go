@@ -1782,8 +1782,15 @@ func TestResetBranchRefRefusesConcurrentDefaultAdvance(t *testing.T) {
 	runGitCommand(t, root, "-c", "user.name=Zero", "-c", "user.email=zero@example.invalid", "commit", "-m", "concurrent")
 	concurrentTip := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
 	runGitCommand(t, root, "update-ref", "refs/heads/main", concurrentTip)
-	if err := ResetBranchRef(context.Background(), root, "main", base, nil, base); err == nil {
+	err := ResetBranchRef(context.Background(), root, "main", base, nil, base)
+	if err == nil {
 		t.Fatal("expected concurrent default-branch update to reject restoration")
+	}
+	// The refusal must be identifiable as a compare-and-swap conflict, not a
+	// generic write failure: ensureFeatureBranch keys off this to preserve the
+	// generated branch instead of deleting it during rollback.
+	if !errors.Is(err, ErrCompareAndSwapConflict) {
+		t.Fatalf("expected ErrCompareAndSwapConflict, got %v", err)
 	}
 	got := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "refs/heads/main"))
 	if got != concurrentTip {

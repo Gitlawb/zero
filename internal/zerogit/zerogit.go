@@ -3,6 +3,7 @@ package zerogit
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1063,6 +1064,13 @@ func CurrentBranch(ctx context.Context, cwd string, runGit Runner) string {
 	return branch
 }
 
+// ErrCompareAndSwapConflict reports that a ref changed since the expected tip
+// was captured, so the compare-and-swap form of update-ref refused to move it.
+// Callers distinguish this from an ordinary update-ref failure because it means
+// someone else advanced the ref concurrently rather than that the write itself
+// is broken, and destroying work to "recover" from it would be wrong.
+var ErrCompareAndSwapConflict = errors.New("compare-and-swap conflict")
+
 // ResetBranchRef points the local branch ref at newTip without checking the
 // branch out. ensureFeatureBranch uses this after creating a feature branch
 // that owns the publishable commits: the normal flow commits on the default
@@ -1100,6 +1108,12 @@ func ResetBranchRef(ctx context.Context, cwd, branch, newTip string, runGit Runn
 		args = append(args, strings.TrimSpace(expectedOld[0]))
 	}
 	if _, err := gitOutput(ctx, runGit, cwd, args...); err != nil {
+		// With an expected-old value this is a compare-and-swap: the only way
+		// git refuses is that the ref no longer matches, so report it as a
+		// conflict the caller can recognize rather than a generic write error.
+		if len(expectedOld) > 0 && strings.TrimSpace(expectedOld[0]) != "" {
+			return fmt.Errorf("%w: update-ref refs/heads/%s: %v", ErrCompareAndSwapConflict, branch, err)
+		}
 		return fmt.Errorf("update-ref refs/heads/%s: %w", branch, err)
 	}
 	return nil

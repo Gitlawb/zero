@@ -2411,6 +2411,52 @@ func TestEnsureFeatureBranchReportsRollbackFailureWhenDeleteAlsoFails(t *testing
 	}
 }
 
+// TestEnsureFeatureBranchPreservesBranchOnCompareAndSwapConflict covers the
+// concurrent-modification case: the default branch moved while we were
+// branching, so the compare-and-swap restore refuses. The generic restore
+// failure above rolls back by deleting the feature branch, but that branch now
+// exclusively owns the user's commits, so deleting it here would destroy work
+// to "recover" from a race. The branch must survive and the error must say so.
+func TestEnsureFeatureBranchPreservesBranchOnCompareAndSwapConflict(t *testing.T) {
+	cwd := t.TempDir()
+	deleteCalled := false
+
+	branch, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, cwd, "", featureBranchOptions{}, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		currentGitUser: func(ctx context.Context, cwd string) string { return "user" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
+			return fmt.Errorf("%w: update-ref refs/heads/main: stale", zerogit.ErrCompareAndSwapConflict)
+		},
+		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
+			deleteCalled = true
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected a restore error on a compare-and-swap conflict")
+	}
+	if deleteCalled {
+		t.Fatal("compare-and-swap conflict must not delete the generated branch: it owns the user's commits")
+	}
+	if !strings.Contains(err.Error(), "preserved") {
+		t.Fatalf("expected the error to report the branch was preserved, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "user/readme-md") {
+		t.Fatalf("expected the error to name the preserved branch, got %v", err)
+	}
+	// The call still fails, so the caller must not proceed to push.
+	if created || branch != "" {
+		t.Fatalf("expected no usable branch result, got branch=%q created=%v", branch, created)
+	}
+}
+
 // TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote covers jatmn's P2:
 // --remote selects the push destination only. When local main tracks
 // origin/main and the user passes --remote upstream, restore must leave main
