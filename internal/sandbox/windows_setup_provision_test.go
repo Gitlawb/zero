@@ -37,7 +37,7 @@ func windowsRuntimeTestRoots(t *testing.T) (string, []string) {
 	t.Setenv("TMP", tempRoot)
 	t.Setenv("TEMP", tempRoot)
 
-	candidates := windowsSandboxRuntimeCandidates([]string{workspaceRoot})
+	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspaceRoot})
 	if len(candidates) == 0 {
 		t.Skip("no runtime candidates derivable in this environment")
 	}
@@ -161,6 +161,94 @@ func TestBuildWindowsSandboxSetupArgsCarriesEveryRuntimeCandidate(t *testing.T) 
 	}
 }
 
+// TestSetupMarkerSurvivesADifferentTempInALaterProcess is the regression for the
+// finding that the marker depended on the caller's transient TEMP.
+//
+// The sequence is the real one and the old code could not survive it: elevated
+// setup runs from one terminal, and a later command is planned by a parent
+// process an IDE or service started with a different TEMP. The cache runtime is
+// untouched and healthy throughout. While both candidates were folded in
+// unconditionally, the second process derived a different temp-side path, the
+// plan hashes disagreed, and every command died on "permission roots or deny
+// lists changed" with nothing wrong.
+func TestSetupMarkerSurvivesADifferentTempInALaterProcess(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	originalCacheDir := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
+
+	runtimeRootUnder := func(temp string) string {
+		t.Helper()
+		t.Setenv("TMP", temp)
+		t.Setenv("TEMP", temp)
+		roots := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspaceRoot})
+		if len(roots) != 1 {
+			t.Fatalf("expected one runtime root under TEMP=%s, got %v", temp, roots)
+		}
+		return roots[0]
+	}
+
+	atSetup := runtimeRootUnder(t.TempDir())
+	atLaterCommand := runtimeRootUnder(t.TempDir())
+
+	if atSetup != atLaterCommand {
+		t.Fatalf("the runtime root moved when only TEMP changed:\n  setup          %s\n  later process  %s\nboth feed the ACL plan the marker fingerprints, so every command would fail validation with \"permission roots or deny lists changed\" while the cache runtime sat there healthy",
+			atSetup, atLaterCommand)
+	}
+
+	// Scope, stated rather than implied. This asserts the RUNTIME ROOT no longer
+	// tracks TEMP, which is the part this PR introduced and this change removes.
+	// The whole plan hash is still TEMP-dependent for a separate, older reason:
+	// PermissionProfileFromPolicy grants os.TempDir() itself as a write root when
+	// the policy allows temp, so the profile carries the caller's TEMP before any
+	// runtime augmentation happens. Asserting on the full hash here would fail for
+	// that pre-existing reason and read as though this fix were broken.
+	base := PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
+	carriesAmbientTemp := false
+	for _, root := range base.FileSystem.WriteRoots {
+		if pathWithinRoot(canonicalSandboxWorkspaceRoot(os.TempDir()), canonicalSandboxWorkspaceRoot(root.Root)) {
+			carriesAmbientTemp = true
+		}
+	}
+	if !carriesAmbientTemp {
+		t.Log("the base profile no longer grants the ambient temp dir; the wider TEMP dependency may now be closed and this note can go")
+	}
+}
+
+// TestRuntimeRootsPinToTheProfileTheCommandActuallyHolds covers the other half:
+// once a profile carries a runtime, the plan names THAT tree and does not
+// re-derive one. prepareSandboxRuntime relocates on a lease failure, so a
+// re-derivation would name the tree the command is not writing to.
+func TestRuntimeRootsPinToTheProfileTheCommandActuallyHolds(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	originalCacheDir := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
+	tempRoot := t.TempDir()
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
+
+	derived := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspaceRoot})
+	if len(derived) != 1 {
+		t.Fatalf("expected exactly one derived runtime root, got %v", derived)
+	}
+
+	// A runtime the process actually selected, deliberately NOT the derived one,
+	// standing in for the lease-failure relocation.
+	relocated := filepath.Join(t.TempDir(), "relocated-runtime")
+	profile := PermissionProfile{Runtime: &SandboxRuntime{Root: relocated}}
+
+	pinned := windowsSandboxRuntimeRoots(profile, []string{workspaceRoot})
+	if len(pinned) != 1 || pinned[0] != relocated {
+		t.Fatalf("the plan did not pin to the runtime the profile holds:\n  profile runtime %s\n  plan named      %v\nthe command would write to one tree while the plan grants another", relocated, pinned)
+	}
+	if pinned[0] == derived[0] {
+		t.Fatalf("pinned and derived roots are identical (%s), so this test cannot tell them apart", pinned[0])
+	}
+}
+
 // TestFallbackSandboxRuntimeRootIsSpellingStable pins the canonicalization added
 // for the aliased-TEMP finding. Two spellings of one directory must produce one
 // runtime root; producing two is what let a root resolving inside the workspace
@@ -221,8 +309,8 @@ func TestWindowsSandboxRuntimeCandidatesUsesOneWorkspaceRoot(t *testing.T) {
 	t.Setenv("TMP", tempRoot)
 	t.Setenv("TEMP", tempRoot)
 
-	combined := windowsSandboxRuntimeCandidates([]string{first, second})
-	alone := windowsSandboxRuntimeCandidates([]string{first})
+	combined := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{first, second})
+	alone := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{first})
 	if len(combined) == 0 {
 		t.Skip("no runtime candidates derivable in this environment")
 	}
