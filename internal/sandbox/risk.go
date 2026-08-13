@@ -109,7 +109,8 @@ func matchesUnparseableNetworkAt(command string, depth int) bool {
 		tokens := fallbackTokenValues(tokenInfo)
 		if depth < maxUnparseableShellDepth {
 			if split := envSplitCommandFields(tokens); split.recognized {
-				if split.executableEnvironmentDependent || fallbackBodyUsesNetwork(split.command, depth+1) {
+				if split.executableEnvironmentDependent || split.commandSourceEnvironmentDependent ||
+					fallbackBodyUsesNetwork(split.command, depth+1) {
 					return true
 				}
 				continue
@@ -162,6 +163,9 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	if program == "%comspec%" {
 		program = "cmd"
 	}
+	if fallbackTokenLooksDynamic(body[0]) {
+		return true
+	}
 	if networkPrograms[program] || localServerPrograms[program] {
 		return true
 	}
@@ -201,7 +205,7 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	}
 	if program == "env" {
 		if split := envSplitCommand(args); split.recognized {
-			return split.executableEnvironmentDependent ||
+			return split.executableEnvironmentDependent || split.commandSourceEnvironmentDependent ||
 				(len(split.command) > 0 && (depth >= maxUnparseableShellDepth || fallbackBodyUsesNetwork(split.command, depth+1)))
 		}
 	}
@@ -212,7 +216,9 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	if shellPrograms[program] {
 		if payloadIndex, found := shellCommandPayloadIndex(program, args); found && payloadIndex < len(args) {
 			if payload := args[payloadIndex]; payload != "" {
-				if depth >= maxUnparseableShellDepth || matchesUnparseableNetworkAt(payload, depth+1) {
+				if fallbackTokenLooksDynamic(payload) ||
+					depth >= maxUnparseableShellDepth ||
+					matchesUnparseableNetworkAt(payload, depth+1) {
 					return true
 				}
 			}
@@ -239,18 +245,52 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	return false
 }
 
-// fallbackTokenLooksDynamic reports whether a token resolved as a wrapper's
-// delegated child program (busybox's applet, strace's traced command) still
-// carries unresolved shell syntax — a bare $VAR, ${VAR}, $(...), or a
-// backtick substitution. This fallback tokenizer runs on text the POSIX
-// parser rejected and never expands anything, so `busybox "$APPLET" …`
-// arrives with the literal token `$APPLET` rather than a blank one. Matching
-// that token against known program names silently reads "cannot resolve" as
-// "not a network program"; fail closed instead, the same direction
-// busyboxSourceDynamic/straceSourceDynamic already fail closed in on the AST
-// path for the equivalent gap.
+// fallbackTokenLooksDynamic reports whether a token selected as executable
+// source still contains an unresolved POSIX or CMD expansion. The fallback
+// never expands these values, so treating the spelling as an ordinary unknown
+// program would turn "cannot resolve" into "does not use the network."
 func fallbackTokenLooksDynamic(token string) bool {
-	return strings.ContainsAny(token, "$`")
+	if strings.ContainsAny(token, "$`") {
+		return true
+	}
+	return containsCMDVariableExpansion(token, '%') || containsCMDVariableExpansion(token, '!')
+}
+
+func containsCMDVariableExpansion(token string, delimiter byte) bool {
+	for start := 0; start < len(token); start++ {
+		if token[start] != delimiter {
+			continue
+		}
+		endOffset := strings.IndexByte(token[start+1:], delimiter)
+		if endOffset < 0 {
+			return false
+		}
+		content := token[start+1 : start+1+endOffset]
+		if delimiter == '%' {
+			if colon := strings.IndexByte(content, ':'); colon >= 0 {
+				content = content[:colon]
+			}
+		}
+		if validCMDVariableName(content) {
+			return true
+		}
+		start += endOffset + 1
+	}
+	return false
+}
+
+func validCMDVariableName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' ||
+			(index > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func fallbackPayloadUsesNetwork(payload string, depth int) bool {

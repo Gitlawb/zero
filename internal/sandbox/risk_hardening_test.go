@@ -646,6 +646,72 @@ func TestClassifyUnparseableCommandBearingWrapperValuesFailClosed(t *testing.T) 
 	}
 }
 
+func TestClassifyUnparseableDynamicCommandSourcesFailClosed(t *testing.T) {
+	for _, command := range []string{
+		`set "N=curl" & call %N% https://evil.test & rem '`,
+		`set "N=curl" & cmd /c %N% https://evil.test & rem '`,
+		`set "N=curl" & start %N% https://evil.test & rem '`,
+		`set "N=curl" & call %N:x=y% https://evil.test & rem '`,
+		`set "N=git" & call !N! push origin main & rem '`,
+		`sh -c "$PAYLOAD" & rem '`,
+		`sh -c "${PAYLOAD}" & rem '`,
+		"sh -c \"$(printf curl)\" & rem '",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) parsed; this case must exercise the fallback", command)
+			}
+			risk := classifyCommand(command)
+			if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+				t.Fatalf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
+			}
+		})
+	}
+}
+
+func TestClassifyUnparseableLiteralPercentBangAndShellSourceStayLocal(t *testing.T) {
+	for _, command := range []string{
+		`call 100%local printf ok & rem '`,
+		`call wow!local printf ok & rem '`,
+		`sh -c 'printf ok' & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if risk := classifyCommand(command); HasRiskCategory(risk, "network") {
+				t.Fatalf("Classify(%q) = categories %v; want no network category", command, risk.Categories)
+			}
+		})
+	}
+}
+
+func TestEnvSplitAssignmentDependenciesMatchASTAndFallback(t *testing.T) {
+	for _, testCase := range []struct {
+		command string
+		network bool
+	}{
+		{`CMD=curl env -S '${CMD} https://evil.test'`, true},
+		{`PAYLOAD='curl https://evil.test' env -S 'sh -c "${PAYLOAD}"'`, true},
+		{`VALUE=x env -S 'printf ${VALUE}'`, false},
+		{`env -S 'sh -c "printf ok"'`, false},
+	} {
+		t.Run(testCase.command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(testCase.command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) reported TooComplex; this case must exercise the AST path", testCase.command)
+			}
+			if got := HasRiskCategory(classifyCommand(testCase.command), "network"); got != testCase.network {
+				t.Errorf("AST Classify(%q) network = %v, want %v", testCase.command, got, testCase.network)
+			}
+
+			unparseable := testCase.command + " & rem '"
+			if analysis := AnalyzeCommand(unparseable); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) parsed; this case must exercise the fallback", unparseable)
+			}
+			if got := HasRiskCategory(classifyCommand(unparseable), "network"); got != testCase.network {
+				t.Errorf("fallback Classify(%q) network = %v, want %v", unparseable, got, testCase.network)
+			}
+		})
+	}
+}
+
 // These malformed forms contain network-looking text in non-executing variable,
 // arithmetic, array, escaped-backtick, or ordinary argument contexts. They must
 // stay non-network so fallback tokenization does not over-flag inert text.

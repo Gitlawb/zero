@@ -167,7 +167,8 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		// ordinary effective program, so resolve its argv before that scan.
 		if fields, ok := literalCallFields(call.Args); ok {
 			if split := envSplitCommandFields(fields); split.recognized {
-				if split.executableEnvironmentDependent || fallbackBodyUsesNetwork(split.command, depth+1) {
+				if split.executableEnvironmentDependent || split.commandSourceEnvironmentDependent ||
+					fallbackBodyUsesNetwork(split.command, depth+1) {
 					result.Network = true
 				}
 				return true
@@ -217,6 +218,9 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 					result.Network = true
 				}
 			}
+		}
+		if cmdLauncherUsesNetwork(prog, rest, depth) {
+			result.Network = true
 		}
 		if _, interactive := interactivePrograms[prog]; interactive && !replSuppressed(prog, rest) {
 			result.Interactive = true
@@ -664,6 +668,43 @@ func literalCallFields(args []*syntax.Word) ([]string, bool) {
 		fields = append(fields, wordText(arg))
 	}
 	return fields, true
+}
+
+func cmdLauncherUsesNetwork(program string, args []*syntax.Word, depth int) bool {
+	switch program {
+	case "cmd", "call", "start", "%comspec%":
+	default:
+		return false
+	}
+	tokens := make([]fallbackCommandToken, 0, len(args)+1)
+	tokens = append(tokens, fallbackCommandToken{value: program})
+	for _, arg := range args {
+		if !isLiteralWord(arg) {
+			return true
+		}
+		tokens = append(tokens, fallbackCommandToken{
+			value:  wordText(arg),
+			quoted: literalWordIsQuoted(arg),
+		})
+	}
+	for _, body := range cmdCommandBodyTokenInfoCandidates(tokens) {
+		if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+			return true
+		}
+	}
+	return false
+}
+
+func literalWordIsQuoted(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	switch word.Parts[0].(type) {
+	case *syntax.SglQuoted, *syntax.DblQuoted:
+		return true
+	default:
+		return false
+	}
 }
 
 // textualPayloadUsesNetwork classifies source carried by another interpreter
