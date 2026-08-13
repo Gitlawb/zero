@@ -212,6 +212,9 @@ func highlightCodeWithLexerAndLineBackgrounds(lexer chroma.Lexer, code []string,
 		var chunkStyle lipgloss.Style
 		var chunkBackground color.Color
 		var haveChunkStyle bool
+		var styledBackground color.Color
+		var styleWithBackground lipgloss.Style
+		var haveStyledBackground bool
 		flushChunk := func() {
 			if chunk.Len() > 0 {
 				cur.WriteString(chunkStyle.Render(chunk.String()))
@@ -231,10 +234,15 @@ func highlightCodeWithLexerAndLineBackgrounds(lexer chroma.Lexer, code []string,
 					break
 				}
 			}
-			runeStyle := style
-			if background != nil {
-				runeStyle = runeStyle.Background(background)
+			if !haveStyledBackground || !sameHighlightColor(background, styledBackground) {
+				styleWithBackground = style
+				if background != nil {
+					styleWithBackground = styleWithBackground.Background(background)
+				}
+				styledBackground = background
+				haveStyledBackground = true
 			}
+			runeStyle := styleWithBackground
 			if !haveChunkStyle {
 				chunkStyle = runeStyle
 				chunkBackground = background

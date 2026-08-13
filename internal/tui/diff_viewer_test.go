@@ -3,7 +3,19 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 )
+
+func requireDiffViewerTrueColor(t *testing.T) {
+	t.Helper()
+	oldProfile := lipgloss.Writer.Profile
+	lipgloss.Writer.Profile = colorprofile.TrueColor
+	t.Cleanup(func() {
+		lipgloss.Writer.Profile = oldProfile
+	})
+}
 
 func TestDiffViewerUsesHunkHeaderForLineNumbers(t *testing.T) {
 	diff := strings.Join([]string{
@@ -45,6 +57,28 @@ func TestDiffViewerCollapsesLongUnchangedContext(t *testing.T) {
 	}
 }
 
+func TestDiffViewerKeepsSevenUnchangedContextLines(t *testing.T) {
+	lines := []string{
+		"--- a/x.go",
+		"+++ b/x.go",
+		"@@ -1,7 +1,7 @@",
+	}
+	for i := 1; i <= diffViewerContextLines*2+1; i++ {
+		lines = append(lines, " context "+string(rune('a'+i-1)))
+	}
+
+	body := diffCardBody(strings.Join(lines, "\n"), 80, cardRenderOptions{bodyCap: 0})
+	got := plainRender(t, strings.Join(body.lines, "\n"))
+	if strings.Contains(got, "unchanged lines") {
+		t.Fatalf("seven unchanged context lines should remain visible:\n%s", got)
+	}
+	for _, want := range []string{"context a", "context d", "context g"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("diff viewer omitted %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestDiffViewerKeepsLineNumbersAfterCollapsedContext(t *testing.T) {
 	lines := []string{
 		"--- a/x.go",
@@ -64,6 +98,7 @@ func TestDiffViewerKeepsLineNumbersAfterCollapsedContext(t *testing.T) {
 }
 
 func TestDiffViewerSyntaxHighlightsBothChangedSides(t *testing.T) {
+	requireDiffViewerTrueColor(t)
 	diff := strings.Join([]string{
 		"--- a/example.go",
 		"+++ b/example.go",
@@ -85,6 +120,7 @@ func TestDiffViewerSyntaxHighlightsBothChangedSides(t *testing.T) {
 }
 
 func TestDiffViewerSyntaxHighlightsUnchangedHunkContext(t *testing.T) {
+	requireDiffViewerTrueColor(t)
 	diff := strings.Join([]string{
 		"--- a/example.go",
 		"+++ b/example.go",
@@ -108,6 +144,7 @@ func TestDiffViewerSyntaxHighlightsUnchangedHunkContext(t *testing.T) {
 }
 
 func TestDiffViewerPreservesSyntaxStateAcrossHunkLines(t *testing.T) {
+	requireDiffViewerTrueColor(t)
 	diff := strings.Join([]string{
 		"--- a/example.py",
 		"+++ b/example.py",
@@ -174,6 +211,7 @@ func TestDiffViewerKeepsModeMetadataWithoutHunks(t *testing.T) {
 }
 
 func TestDiffViewerFallsBackForOversizedSourceLine(t *testing.T) {
+	requireDiffViewerTrueColor(t)
 	longLine := strings.Repeat("x", diffViewerHighlightMaxLineBytes)
 	diff := strings.Join([]string{
 		"--- a/example.go",
@@ -193,6 +231,7 @@ func TestDiffViewerFallsBackForOversizedSourceLine(t *testing.T) {
 }
 
 func TestDiffViewerSyntaxHighlighterKeepsSpans(t *testing.T) {
+	requireDiffViewerTrueColor(t)
 	styled, ok := highlightCodeForPathWithSpans(
 		[]string{"func greet(name string) string { return \"new\" }"},
 		"example.go",
@@ -205,5 +244,57 @@ func TestDiffViewerSyntaxHighlighterKeepsSpans(t *testing.T) {
 	}
 	if !strings.Contains(styled[0], "46;101;77") {
 		t.Fatalf("highlighted span lost its word-diff background: %q", styled[0])
+	}
+}
+
+func TestDiffViewerHighlightsEachFileWithItsOwnPath(t *testing.T) {
+	requireDiffViewerTrueColor(t)
+	rawLines := []string{
+		"diff --git a/example.go b/example.go",
+		"--- a/example.go",
+		"+++ b/example.go",
+		"@@ -1 +1 @@",
+		"-func old() {}",
+		"+func new() {}",
+		"diff --git a/example.py b/example.py",
+		"--- a/example.py",
+		"+++ b/example.py",
+		"@@ -1 +1 @@",
+		"-def old(): pass",
+		"+def new(): pass",
+	}
+
+	highlighted := highlightedDiffLines(rawLines, diffCardMetadata(strings.Join(rawLines, "\n")))
+	if len(highlighted) != 4 {
+		t.Fatalf("highlighted line count = %d, want 4: %#v", len(highlighted), highlighted)
+	}
+	for _, index := range []int{4, 5, 10, 11} {
+		if !strings.Contains(highlighted[index], "202;255;63") {
+			t.Fatalf("source row %d lost syntax highlighting: %q", index, highlighted[index])
+		}
+	}
+	for _, header := range []int{2, 3, 8, 9} {
+		if _, ok := highlighted[header]; ok {
+			t.Fatalf("file header at row %d entered syntax highlighter: %q", header, highlighted[header])
+		}
+	}
+}
+
+func TestDiffViewerHighlightBudgetSpansHunks(t *testing.T) {
+	hunkLines := diffViewerHighlightMaxLines/2 + 1
+	rawLines := []string{
+		"--- a/example.go",
+		"+++ b/example.go",
+		"@@ -1 +1 @@",
+	}
+	for i := 0; i < hunkLines; i++ {
+		rawLines = append(rawLines, " context")
+	}
+	rawLines = append(rawLines, "@@ -6000 +6000 @@")
+	for i := 0; i < hunkLines; i++ {
+		rawLines = append(rawLines, " context")
+	}
+	if highlighted := highlightedDiffLines(rawLines, diffCardMetadata(strings.Join(rawLines, "\n"))); highlighted != nil {
+		t.Fatalf("diff exceeding the aggregate highlight budget should use the plain fallback: %d highlighted rows", len(highlighted))
 	}
 }

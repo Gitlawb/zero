@@ -762,7 +762,7 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	// its label too. It receives a toggle only when this card exposes a collapse
 	// affordance in the current transcript mode.
 	allLines := viewLines(rendered)
-	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: toolResultCanToggle(row, rendered)}
+	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: toolResultCanToggle(row, allLines)}
 	if len(allLines) > 0 {
 		if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY, allLines[0], false); ok {
 			header.text = meta.text
@@ -778,11 +778,24 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	return rendered, selectable
 }
 
-func toolResultCanToggle(row transcriptRow, rendered string) bool {
+func toolResultCanToggle(row transcriptRow, lines []string) bool {
 	if toolCardAlwaysExpands(toolRowName(row)) {
 		return false
 	}
-	return strings.Contains(ansi.Strip(rendered), "click to expand") || strings.Contains(ansi.Strip(rendered), "▾ collapse")
+	if len(lines) == 0 {
+		return false
+	}
+	// A collapsed tool card puts its visual affordance in a fixed footer, while
+	// its header remains the clickable target. Inspect that structural footer
+	// instead of arbitrary body output, which may contain the same prose.
+	for _, line := range []string{lines[0], lines[len(lines)-1]} {
+		plain := strings.TrimSpace(ansi.Strip(line))
+		if (strings.HasPrefix(plain, "▸ ") && strings.HasSuffix(plain, " — click to expand")) ||
+			strings.Contains(plain, "▾ collapse") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m model) renderSelectableRenderedRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {

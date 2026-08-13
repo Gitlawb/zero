@@ -2068,6 +2068,10 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 			newLine += displayLine.hiddenContext
 		case strings.HasPrefix(line, "+++ "), strings.HasPrefix(line, "--- "):
 			// Path and counts live in the tool head row.
+		case strings.HasPrefix(line, "diff --git "):
+			// A subsequent file section is metadata, not context from the preceding
+			// hunk. Reset so its headers remain hidden until its next hunk starts.
+			inHunk = false
 		case strings.HasPrefix(line, "@@"):
 			if match := hunkHeaderPattern.FindStringSubmatch(line); match != nil {
 				oldLine, _ = strconv.Atoi(match[1])
@@ -2153,33 +2157,81 @@ const (
 	diffViewerHighlightMaxLineBytes = 4 * 1024
 )
 
+type diffHighlightBudget struct {
+	lines int
+	bytes int
+}
+
+func (budget *diffHighlightBudget) reserve(lines int, bytes int) bool {
+	if lines > diffViewerHighlightMaxLines || bytes > diffViewerHighlightMaxBytes ||
+		budget.lines+lines > diffViewerHighlightMaxLines || budget.bytes+bytes > diffViewerHighlightMaxBytes {
+		return false
+	}
+	budget.lines += lines
+	budget.bytes += bytes
+	return true
+}
+
 // highlightedDiffLines lexes each unified-diff hunk as one source unit. This
 // preserves lexer state through multiline comments, strings, and declarations,
 // while still returning independently renderable rows. Large diffs fall back to
 // the regular viewer so expanding a tool card remains responsive.
 func highlightedDiffLines(rawLines []string, meta diffMetadata) map[int]string {
-	if meta.path == "" {
-		return nil
-	}
 	highlighted := make(map[int]string)
+	budget := diffHighlightBudget{}
+	path := ""
 	for index := 0; index < len(rawLines); {
-		if !strings.HasPrefix(rawLines[index], "@@") {
+		line := rawLines[index]
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			if candidate := diffViewerSourcePath(line); candidate != "" {
+				path = candidate
+			}
+			index++
+			continue
+		case strings.HasPrefix(line, "+++ "):
+			if candidate := diffViewerSourcePath(line); candidate != "" {
+				path = candidate
+			}
+			index++
+			continue
+		case !strings.HasPrefix(line, "@@"):
 			index++
 			continue
 		}
 		start := index + 1
 		index = start
-		for index < len(rawLines) && !strings.HasPrefix(rawLines[index], "@@") {
+		for index < len(rawLines) && isDiffHunkBodyLine(rawLines[index]) {
 			index++
 		}
-		if !highlightDiffHunk(rawLines[start:index], start, meta.path, highlighted) {
+		hunkPath := path
+		if hunkPath == "" {
+			hunkPath = meta.path
+		}
+		if hunkPath == "" || !highlightDiffHunk(rawLines[start:index], start, hunkPath, highlighted, &budget) {
 			return nil
 		}
 	}
 	return highlighted
 }
 
-func highlightDiffHunk(rawLines []string, rawStart int, path string, highlighted map[int]string) bool {
+func diffViewerSourcePath(line string) string {
+	parts := strings.Fields(line)
+	if len(parts) < 2 || parts[1] == "/dev/null" {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(parts[1], "a/"), "b/")
+}
+
+func isDiffHunkBodyLine(line string) bool {
+	if strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "diff --git ") ||
+		strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
+		return false
+	}
+	return line == "" || line[0] == ' ' || line[0] == '+' || line[0] == '-' || line[0] == '\\'
+}
+
+func highlightDiffHunk(rawLines []string, rawStart int, path string, highlighted map[int]string, budget *diffHighlightBudget) bool {
 	content := make([]string, 0, len(rawLines))
 	backgrounds := make([]color.Color, 0, len(rawLines))
 	rawIndexes := make([]int, 0, len(rawLines))
@@ -2212,7 +2264,7 @@ func highlightDiffHunk(rawLines []string, rawStart int, path string, highlighted
 	if len(content) == 0 {
 		return true
 	}
-	if len(content) > diffViewerHighlightMaxLines || bytes > diffViewerHighlightMaxBytes {
+	if !budget.reserve(len(content), bytes) {
 		return false
 	}
 

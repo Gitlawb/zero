@@ -32,7 +32,9 @@ func compactDiffViewerContext(raw []string) []diffViewerLine {
 			index++
 		}
 		count := index - start
-		if count <= diffViewerContextLines*2 {
+		// Collapsing seven lines would replace one readable line with one marker,
+		// leaving the display equally tall. Only collapse when it removes space.
+		if count <= diffViewerContextLines*2+1 {
 			for i := start; i < index; i++ {
 				lines = append(lines, diffViewerLine{text: raw[i], rawIndex: i})
 			}
