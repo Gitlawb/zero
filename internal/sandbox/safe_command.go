@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"os"
 	"runtime"
 	"strings"
 )
@@ -409,9 +408,10 @@ func commandBodyFields(fields []string) []string {
 // split string is argv syntax, not shell source, so metacharacters remain inert
 // unless the resulting executable is itself a shell with -c.
 type envSplitCommandResult struct {
-	command                        []string
-	recognized                     bool
-	executableEnvironmentDependent bool
+	command                           []string
+	recognized                        bool
+	executableEnvironmentDependent    bool
+	commandSourceEnvironmentDependent bool
 }
 
 func envSplitCommandFields(fields []string) envSplitCommandResult {
@@ -508,15 +508,43 @@ func envSplitCommand(args []string) envSplitCommandResult {
 			command = commandBodyFields(command)
 			commandIndex = len(current) - len(command)
 		}
+		commandDependencies := dependent[commandIndex:]
 		return envSplitCommandResult{
-			command:                        command,
-			recognized:                     true,
-			executableEnvironmentDependent: len(command) > 0 && dependent[commandIndex],
+			command:                           command,
+			recognized:                        true,
+			executableEnvironmentDependent:    len(commandDependencies) > 0 && commandDependencies[0],
+			commandSourceEnvironmentDependent: envSplitCommandSourceDependent(command, commandDependencies),
 		}
 	}
 	// Excessive rewrites are attacker-controlled ambiguity. Keep the network
 	// gate rather than recursing without a bound.
 	return envSplitCommandResult{recognized: true, executableEnvironmentDependent: true}
+}
+
+func envSplitCommandSourceDependent(command []string, dependent []bool) bool {
+	if len(command) == 0 || len(command) != len(dependent) {
+		return false
+	}
+	program := normalizeProgramToken(command[0])
+	if dependent[0] {
+		return true
+	}
+	args, argDependent := command[1:], dependent[1:]
+	if shellPrograms[program] {
+		if index, ok := shellCommandPayloadIndex(program, args); ok && index < len(argDependent) {
+			return argDependent[index]
+		}
+		return false
+	}
+	if program == "powershell" || program == "pwsh" || program == "cmd" ||
+		program == "call" || program == "start" || program == "env" {
+		for _, value := range argDependent {
+			if value {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // envSplitLongOptionName is GNU env's only long option beginning with "s", so
@@ -683,7 +711,7 @@ func splitEnvString(value string) ([]string, []bool, bool) {
 			if end >= len(runes) || !validEnvSplitVariableName(string(runes[index+2:end])) {
 				return nil, nil, false
 			}
-			word.WriteString(os.Getenv(string(runes[index+2 : end])))
+			word.WriteString(string(runes[index : end+1]))
 			started = true
 			wordDependent = true
 			index = end
