@@ -335,6 +335,18 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	if execRequest.EnforcementLevel == EnforcementUnelevated {
 		level = WindowsSandboxLevelUnelevated
 	}
+	// Derived AND created here, in the caller's shell. The unelevated tier applies
+	// this plan itself, and applyWindowsACLPlan fails the whole run on an AllowWrite
+	// target that does not exist; prepareSandboxRuntime creates only the candidate
+	// this process selects, so the other one has to be created explicitly. The
+	// runner cannot do it, for the same reason it cannot derive them (below).
+	runtimeProfile, err := windowsSandboxProfileWithProvisionedRuntime(
+		execRequest.PermissionProfile,
+		[]string{execRequest.WorkspaceRoot},
+	)
+	if err != nil {
+		return CommandPlan{}, err
+	}
 	args, err := BuildWindowsSandboxCommandArgs(WindowsSandboxCommandArgsOptions{
 		SandboxHome:    sandboxHome,
 		CommandCWD:     spec.Dir,
@@ -349,13 +361,10 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 		// Setup, whose TEMP is untouched, derived the other spelling, and every
 		// command then died on "permission roots or deny lists changed" with two
 		// plans that had the same number of entries and different paths.
-		PermissionProfile: windowsSandboxProfileWithRuntime(
-			execRequest.PermissionProfile,
-			[]string{execRequest.WorkspaceRoot},
-		),
-		Env:          childEnv,
-		SandboxLevel: level,
-		Command:      append([]string{spec.Name}, spec.Args...),
+		PermissionProfile: runtimeProfile,
+		Env:               childEnv,
+		SandboxLevel:      level,
+		Command:           append([]string{spec.Name}, spec.Args...),
 	})
 	if err != nil {
 		return CommandPlan{}, err

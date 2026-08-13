@@ -221,8 +221,24 @@ func combineSandboxCleanups(cleanups ...func()) func() {
 // It creates nothing, so deterministicSandboxRuntimeRoot's promise about naming
 // a tree without materializing it now holds for the fallback as well.
 func fallbackSandboxRuntimeRoot(workspaceRoot string) (string, error) {
+	// Canonicalized for the same reason prepareSandboxRuntime canonicalizes the
+	// workspace and cache roots: pathWithinRoot compares SPELLINGS, so a raw
+	// os.TempDir() measured against a canonical workspace root compares two
+	// different names for one directory and the containment check misses. Both
+	// callers resolve this in the operator's environment, so the derived path is
+	// identical on the setup and command sides and the plan hashes still agree.
+	//
+	// This closes the 8.3 short-name and symlink spellings, not every alias. A
+	// Windows directory JUNCTION comes back from EvalSymlinks unchanged, so a TEMP
+	// that is a junction into the workspace still reads as outside it. Closing that
+	// needs a physical identity check (os.SameFile against existing ancestors, or
+	// GetFinalPathNameByHandle) rather than a string comparison.
+	tempRoot := canonicalSandboxWorkspaceRoot(os.TempDir())
+	if tempRoot == "" || tempRoot == "." {
+		return "", errors.New("temp directory is unavailable")
+	}
 	digest := sha256.Sum256([]byte(workspaceRoot))
-	root := filepath.Join(os.TempDir(), "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
+	root := filepath.Join(tempRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
 	if pathWithinRoot(workspaceRoot, root) {
 		// Both candidates land inside the workspace, so there is nowhere left to
 		// put a runtime tree the workspace's own policy does not govern. Refused

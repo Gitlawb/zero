@@ -100,10 +100,16 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 	}
 	profile := sandbox.PermissionProfileFromPolicy(workspaceRoot, doctorSandboxPolicy(sandboxConfig), scope)
 	setupConfig := sandbox.WindowsSandboxSetupConfig{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        workspaceRoot,
-		WorkspaceRoots:    []string{workspaceRoot},
-		PermissionProfile: profile,
+		SandboxHome:    sandboxHome,
+		CommandCWD:     workspaceRoot,
+		WorkspaceRoots: []string{workspaceRoot},
+		// The same augmentation setup and the command plan apply, so doctor
+		// fingerprints what a real command fingerprints. Checking the bare profile
+		// made doctor call a correctly prepared machine "out of date", which is the
+		// mismatch this pairing exists to close. Safe to resolve in this process:
+		// doctor runs in the operator's shell, not behind the sandbox TEMP
+		// redirection that stops the runner deriving these for itself.
+		PermissionProfile: sandbox.WindowsSandboxProfileWithRuntimeRoots(profile, []string{workspaceRoot}),
 	}
 	if err := sandbox.ValidateWindowsSandboxSetupMarker(setupConfig); err != nil {
 		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but Windows sandbox setup is missing or out of date: %v.", backend.Name, err), map[string]any{
