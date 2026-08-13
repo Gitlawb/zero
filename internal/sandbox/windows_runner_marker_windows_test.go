@@ -1,0 +1,68 @@
+//go:build windows
+
+package sandbox
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// THE AUGMENTATION HAS TO HAPPEN ON THE COMMAND PATH, NOT ONLY IN A HELPER.
+//
+// windows_setup_runtime_root_test.go proves the pieces compose: given a profile
+// put through WindowsSandboxProfileWithRuntimeRoots on both sides, the marker
+// validates. It calls that function directly, so it stays green even when the
+// production call site in BuildCommandPlan is deleted, which is exactly the
+// shape of the bug being fixed here. Reverting the runner call and watching that
+// test still pass is how this gap was found.
+//
+// So this drives the real path and asserts on what the runner is actually handed.
+// The config is serialized into the runner's argv, so the argv is where to look:
+// recomputing the profile in the test would just be the helper test again.
+func TestBuildCommandPlanCarriesTheRuntimeRootsIntoTheRunnerArgs(t *testing.T) {
+	workspace := t.TempDir()
+	cacheRoot := t.TempDir()
+	original := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = original })
+
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Backend: Backend{
+			Name:            BackendWindowsRestrictedToken,
+			Available:       true,
+			Platform:        "windows",
+			Executable:      filepath.Join(t.TempDir(), WindowsSandboxCommandRunnerName),
+			CommandWrapping: true,
+			NativeIsolation: true,
+		},
+	})
+
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "cmd.exe",
+		Args: WindowsShellArgs("echo hi"),
+		Dir:  workspace,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	defer plan.Cleanup()
+
+	candidates := windowsSandboxRuntimeCandidates([]string{workspace})
+	if len(candidates) == 0 {
+		t.Fatal("no runtime candidates derived, so this test would pass vacuously")
+	}
+
+	// The profile reaches the runner as JSON inside one of these arguments.
+	argv := strings.Join(plan.Args, "\x00")
+	for _, candidate := range candidates {
+		// JSON escapes the backslashes in a Windows path, so compare in the same
+		// spelling the encoder produced rather than the raw path.
+		encoded := strings.ReplaceAll(candidate, `\`, `\\`)
+		if !strings.Contains(argv, encoded) && !strings.Contains(argv, candidate) {
+			t.Errorf("the runner argv does not carry runtime root %s; setup grants it, so the plans disagree and every command dies on \"permission roots or deny lists changed\"", candidate)
+		}
+	}
+}
