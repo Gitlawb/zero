@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -370,7 +371,7 @@ func (e errKR) Error() string { return string(e) }
 func indexedKeysOf(t *testing.T, kr *fakeKR) map[string]bool {
 	t.Helper()
 	blob := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
-	keys, _, _, _, err := blob.readKeyIndex()
+	keys, _, _, _, _, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatalf("readKeyIndex: %v", err)
 	}
@@ -414,8 +415,15 @@ func TestStoreKeyringIndexStaysUnderEntryLimit(t *testing.T) {
 		}
 	}
 	// The index actually chunked (otherwise the ceiling check proves nothing).
-	if _, ok := kr.data[keyringService+"/"+keyringIndexAccount+"-1"]; !ok {
-		t.Fatal("expected the index to split into continuation chunks")
+	// Checked via readKeyIndex's reported chunk count, not a specific account
+	// name: a healthy write (no missing/protected chunks, true throughout this
+	// test) stages continuation chunks under a fresh generation's own account
+	// names rather than the single flat namespace older code always used.
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+	if _, _, chunks, _, _, err := blob.readKeyIndex(); err != nil {
+		t.Fatalf("readKeyIndex: %v", err)
+	} else if chunks < 2 {
+		t.Fatalf("expected the index to split into continuation chunks, got %d chunk(s)", chunks)
 	}
 	for _, name := range names {
 		if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
@@ -429,8 +437,18 @@ func TestStoreKeyringIndexStaysUnderEntryLimit(t *testing.T) {
 			t.Fatalf("Delete(%s): %v", name, err)
 		}
 	}
-	if _, ok := kr.data[keyringService+"/"+keyringIndexAccount+"-1"]; ok {
-		t.Fatal("stale index continuation chunk left behind after shrink")
+	if _, _, chunks, _, missing, err := blob.readKeyIndex(); err != nil {
+		t.Fatalf("readKeyIndex: %v", err)
+	} else if chunks != 1 || len(missing) != 0 {
+		t.Fatalf("expected the index to shrink to a single chunk with nothing missing, got chunks=%d missing=%v", chunks, missing)
+	}
+	// No chunk account under any generation the store could have used may
+	// still hold data: a real stale-chunk leak would otherwise hide behind
+	// whichever generation name this assertion did not think to check.
+	for key := range kr.data {
+		if strings.Contains(key, keyringIndexAccount+"-") {
+			t.Fatalf("stale index continuation chunk left behind after shrink: %q", key)
+		}
 	}
 }
 
@@ -439,6 +457,193 @@ func TestStoreKeyringIndexStaysUnderEntryLimit(t *testing.T) {
 // the recoverable-store invariant at each boundary: every token entry present
 // in the keyring is listed in the published index (so no credential is ever
 // stranded invisibly), and a subsequent unimpeded write fully reconciles.
+// TestStoreKeyringIndexGrowthInterruptionsPreserveOldLayout is the regression
+// for [P1] Preserve the old index layout until its replacement header is
+// committed: a normal insert that grows a chunked index used to repack every
+// continuation chunk in place, overwriting accounts the OLD header still
+// referenced, before ever publishing the new header. A process killed after
+// one of those overwrites but before the header Set left the old header
+// pointing at a layout partially clobbered by pieces of the new one, and any
+// key that had been shifted into a chunk the old header's Chunks count did
+// not yet cover became unreachable from both the index and the (unrelated)
+// legacy blob, permanently.
+//
+// Unlike TestStoreKeyringWriteInterruptionsLeaveNoInvisibleTokens, this seeds
+// enough keys that growth needs multiple new continuation chunks (a single
+// key would never reach the vulnerable code at all), and asserts a stronger
+// invariant at every interruption boundary: not just that no credential is
+// invisible, but that the pre-growth index is still decodable with zero
+// missing chunks and every original key intact, since a fresh-generation
+// write must never touch an account the current header can reach.
+func TestStoreKeyringIndexGrowthInterruptionsPreserveOldLayout(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// Long enough, and enough of them, that the original index alone already
+	// needs multiple continuation chunks. That is what makes this scenario
+	// reachable at all: if the pre-growth index fit in the header alone (one
+	// chunk), an in-place rewrite of new continuation slots would trivially
+	// avoid every account the old header could reach, regardless of whether
+	// generations are used, and this test would pass without exercising
+	// anything. Kept under maxKeyringKeyBytes once ProviderKey's "provider:"
+	// prefix is added, or ValidateKey would drop these as malformed.
+	const rawNameLen = 120
+	original := make([]string, 25)
+	for i := range original {
+		original[i] = ProviderKey(fmt.Sprintf("orig%0*d", rawNameLen-4, i))
+	}
+	added := make([]string, 60)
+	for i := range added {
+		added[i] = ProviderKey(fmt.Sprintf("k%0*d", rawNameLen-1, i))
+	}
+
+	growthState := func() []byte {
+		state := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{}}
+		for _, key := range original {
+			state.Tokens[key] = Token{AccessToken: "orig-" + key}
+		}
+		for _, key := range added {
+			state.Tokens[key] = Token{AccessToken: "new-" + key}
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	mutations := func() map[string]bool {
+		m := make(map[string]bool, len(added))
+		for _, key := range added {
+			m[key] = false
+		}
+		return m
+	}
+
+	originalSorted := append([]string{}, original...)
+	sort.Strings(originalSorted)
+	originalChunks := chunkIndexKeys(originalSorted)
+	if len(originalChunks) < 2 {
+		t.Fatalf("test setup: original keys only produced %d chunk(s), want at least 2 so the old header already references a continuation slot", len(originalChunks))
+	}
+	seed := func(kr *failingKR) {
+		// The pre-growth index directly, already spanning multiple chunks:
+		// exactly what write() would have left after an earlier, unrelated,
+		// uninterrupted write of the same key set.
+		for _, key := range original {
+			raw, err := json.Marshal(Token{AccessToken: "orig-" + key})
+			if err != nil {
+				t.Fatal(err)
+			}
+			kr.data[keyringService+"/"+key] = base64.StdEncoding.EncodeToString(raw)
+		}
+		for i := 1; i < len(originalChunks); i++ {
+			chunkData, err := json.Marshal(originalChunks[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+			account := keyringBlob{indexAccount: keyringIndexAccount}.chunkAccount(0, i)
+			kr.data[keyringService+"/"+account] = base64.StdEncoding.EncodeToString(chunkData)
+		}
+		header, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: len(originalChunks), Keys: originalChunks[0]})
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	}
+
+	// An uninterrupted run establishes how many mutating ops the growth write
+	// can ever perform, including best-effort old-generation cleanup Deletes
+	// whose own errors are deliberately swallowed (nothing reads that
+	// generation again once the new header is durable, so a failed cleanup
+	// Delete there does not need to fail the write). Iterating failAt only up
+	// to this ceiling, and checking the layout invariant unconditionally
+	// rather than requiring every failAt to surface a visible error, still
+	// covers every mutating boundary without the loop mistaking a swallowed
+	// cleanup failure for a bug.
+	ceilingKR := &failingKR{fakeKR: newFakeKR()}
+	seed(ceilingKR)
+	ceilingBlob := keyringBlob{kr: ceilingKR, service: keyringService, indexAccount: keyringIndexAccount}
+	if err := ceilingBlob.write(growthState(), mutations(), noLeaseLoss); err != nil {
+		t.Fatalf("uninterrupted baseline growth write failed: %v", err)
+	}
+	ceiling := ceilingKR.ops
+
+	for failAt := 1; failAt <= ceiling; failAt++ {
+		kr := &failingKR{fakeKR: newFakeKR()}
+		blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+		seed(kr)
+
+		kr.failAt = failAt
+		_ = blob.write(growthState(), mutations(), noLeaseLoss)
+		kr.failAt = 0
+
+		// The invariant this finding is about: at every interruption
+		// boundary, the OLD layout the header still (or again) advertises
+		// must decode cleanly, with no missing chunks and every original key
+		// present and correct. A fresh-generation write must never leave
+		// this false, because it must never have touched an old-generation
+		// account in the first place.
+		listedKeys, ok, _, _, missing, err := blob.readKeyIndex()
+		if err != nil {
+			t.Fatalf("failAt=%d: readKeyIndex after interruption: %v", failAt, err)
+		}
+		if !ok {
+			t.Fatalf("failAt=%d: index vanished after interruption", failAt)
+		}
+		if len(missing) != 0 {
+			t.Fatalf("failAt=%d: index reports missing chunks after interruption: %v; the old layout must stay fully intact until the new one is durable", failAt, missing)
+		}
+		// The critical check: readKeyIndex not erroring is not enough on its
+		// own, since an overwritten chunk can still decode as valid JSON — it
+		// is just the wrong content. Every original key must still actually be
+		// LISTED, not merely that the read did not fail.
+		listed := make(map[string]bool, len(listedKeys))
+		for _, k := range listedKeys {
+			listed[k] = true
+		}
+		for _, key := range original {
+			if !listed[key] {
+				t.Fatalf("failAt=%d: original key %q no longer listed in the index after interruption (readKeyIndex returned %d keys); a chunk it depended on was overwritten before the new header committed", failAt, key, len(listedKeys))
+			}
+		}
+		for _, key := range original {
+			enc, exists, err := kr.Get(keyringService, key)
+			if err != nil || !exists {
+				t.Fatalf("failAt=%d: original entry %q missing after interruption: exists=%v err=%v", failAt, key, exists, err)
+			}
+			raw, err := base64.StdEncoding.DecodeString(enc)
+			if err != nil {
+				t.Fatalf("failAt=%d: original entry %q undecodable: %v", failAt, key, err)
+			}
+			var token Token
+			if err := json.Unmarshal(raw, &token); err != nil {
+				t.Fatalf("failAt=%d: original entry %q corrupt: %v", failAt, key, err)
+			}
+			if token.AccessToken != "orig-"+key {
+				t.Fatalf("failAt=%d: original entry %q = %q, want %q", failAt, key, token.AccessToken, "orig-"+key)
+			}
+		}
+
+		// A retried, unimpeded write must still fully reconcile: old and new
+		// keys all present.
+		if err := blob.write(growthState(), mutations(), noLeaseLoss); err != nil {
+			t.Fatalf("failAt=%d: reconciling write: %v", failAt, err)
+		}
+		full, _, err := blob.read()
+		if err != nil {
+			t.Fatalf("failAt=%d: read after reconcile: %v", failAt, err)
+		}
+		var state storeFile
+		if err := json.Unmarshal(full, &state); err != nil {
+			t.Fatalf("failAt=%d: decode after reconcile: %v", failAt, err)
+		}
+		for _, key := range append(append([]string{}, original...), added...) {
+			if _, ok := state.Tokens[key]; !ok {
+				t.Fatalf("failAt=%d: key %q missing after reconcile", failAt, key)
+			}
+		}
+	}
+}
+
 func TestStoreKeyringWriteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for failAt := 1; ; failAt++ {
@@ -965,7 +1170,7 @@ func TestStoreKeyringReadIndexRejectsCorruptHeader(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(oversized)
 	ckr.gets = 0
-	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized chunk count to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -978,7 +1183,7 @@ func TestStoreKeyringReadIndexRejectsCorruptHeader(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(unsupported)
 	ckr.gets = 0
-	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an unsupported index version to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -1007,7 +1212,7 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
 	ckr.gets = 0
-	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized key list in a chunk-0 header to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -1021,7 +1226,7 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(legacyArray)
 	ckr.gets = 0
-	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized legacy-format key array to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -1042,7 +1247,7 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(headerOK)
 	ckr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
 	ckr.gets = 0
-	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized key list accumulated across chunks to be rejected")
 	}
 	if ckr.gets != 2 {
@@ -1287,7 +1492,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapChunks(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("%s-%d", long, i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0, nil, noLeaseLoss); err == nil {
+	if _, _, err := b.writeKeyIndex(keys, 0, 0, nil, noLeaseLoss); err == nil {
 		t.Fatal("writeKeyIndex published an index readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -1307,7 +1512,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapKeys(t *testing.T) {
 		// would not catch this over-cap set.
 		keys[i] = fmt.Sprintf("p%d", i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0, nil, noLeaseLoss); err == nil {
+	if _, _, err := b.writeKeyIndex(keys, 0, 0, nil, noLeaseLoss); err == nil {
 		t.Fatal("writeKeyIndex published a key count readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -1340,7 +1545,7 @@ func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = encoded
 
-	keys, ok, _, _, err := blob.readKeyIndex()
+	keys, ok, _, _, _, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatalf("readKeyIndex: %v", err)
 	}
@@ -1358,7 +1563,7 @@ func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(mixed)
-	keys, _, _, _, err = blob.readKeyIndex()
+	keys, _, _, _, _, err = blob.readKeyIndex()
 	if err != nil {
 		t.Fatalf("readKeyIndex: %v", err)
 	}
@@ -1947,7 +2152,7 @@ func TestStoreKeyringReadIndexRejectsOversizedEncodedPayload(t *testing.T) {
 	huge := strings.Repeat("A", maxKeyringIndexEncodedBytes+1)
 	ckr.data[keyringService+"/"+keyringIndexAccount] = huge
 	ckr.gets = 0
-	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected oversized encoded index payload to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -1962,7 +2167,7 @@ func TestStoreKeyringReadIndexRejectsOversizedEncodedPayload(t *testing.T) {
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
 	ckr.data[keyringService+"/"+keyringIndexAccount+"-1"] = huge
 	ckr.gets = 0
-	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected oversized encoded chunk payload to be rejected")
 	}
 }
@@ -2463,14 +2668,14 @@ func TestWriteKeyIndexRejectsOverflowWithoutMutatingExistingChunks(t *testing.T)
 	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString([]byte(existingHeader))
 	priorChunkData := make(map[int]string, len(chunks)-1)
 	for i := 1; i < len(chunks); i++ {
-		account := b.chunkAccount(i)
+		account := b.chunkAccount(0, i)
 		content := fmt.Sprintf("prior-chunk-%d-marker", i)
 		kr.data[keyringService+"/"+account] = content
 		priorChunkData[i] = content
 	}
 
 	missingChunks := []int{maxKeyringIndexChunks}
-	_, err := b.writeKeyIndex(keys, priorChunks, missingChunks, noLeaseLoss)
+	_, _, err := b.writeKeyIndex(keys, priorChunks, 0, missingChunks, noLeaseLoss)
 	if err == nil {
 		t.Fatal("expected writeKeyIndex to reject an index that overflows the chunk cap")
 	}
@@ -2489,7 +2694,7 @@ func TestWriteKeyIndexRejectsOverflowWithoutMutatingExistingChunks(t *testing.T)
 	// Every existing chunk account the rejected write would have targeted
 	// must be byte-for-byte the value it held before the call.
 	for i, want := range priorChunkData {
-		account := b.chunkAccount(i)
+		account := b.chunkAccount(0, i)
 		got := kr.data[keyringService+"/"+account]
 		if got != want {
 			t.Fatalf("chunk account %d was mutated by a rejected write: got %q, want %q (prior content)", i, got, want)
@@ -3069,7 +3274,7 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	// Damage: drop chunk-1.
 	delete(kr.data, keyringService+"/"+keyringIndexAccount+"-1")
 
-	gotKeys, ok, chunks, missing, err := blob.readKeyIndex()
+	gotKeys, ok, chunks, _, missing, err := blob.readKeyIndex()
 	if err != nil || !ok {
 		t.Fatalf("readKeyIndex: ok=%v err=%v", ok, err)
 	}
@@ -3099,7 +3304,7 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; !ok {
 		t.Fatal("beta entry was deleted despite missing index chunk; orphan risk path")
 	}
-	afterKeys, _, afterChunks, afterMissing, err := blob.readKeyIndex()
+	afterKeys, _, afterChunks, _, afterMissing, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3119,7 +3324,7 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	// Restoring the missing chunk must surface beta again (the point of preserving
 	// the advertisement instead of shrinking to a complete 1-chunk index).
 	kr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
-	restored, _, _, restoredMissing, err := blob.readKeyIndex()
+	restored, _, _, _, restoredMissing, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3171,7 +3376,7 @@ func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
 	// Damage: drop the MIDDLE continuation chunk (chunk-1).
 	delete(kr.data, keyringService+"/"+keyringIndexAccount+"-1")
 
-	gotKeys, ok, chunks, missing, err := blob.readKeyIndex()
+	gotKeys, ok, chunks, _, missing, err := blob.readKeyIndex()
 	if err != nil || !ok {
 		t.Fatalf("readKeyIndex: ok=%v err=%v", ok, err)
 	}
@@ -3208,7 +3413,7 @@ func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
 	if _, exists := kr.data[keyringService+"/"+keyringIndexAccount+"-1"]; exists {
 		t.Fatal("write overwrote the protected missing chunk-1 slot")
 	}
-	afterKeys, ok, afterChunks, afterMissing, err := blob.readKeyIndex()
+	afterKeys, ok, afterChunks, _, afterMissing, err := blob.readKeyIndex()
 	if err != nil || !ok {
 		t.Fatalf("post-write readKeyIndex: ok=%v err=%v", ok, err)
 	}
@@ -3236,7 +3441,7 @@ func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
 	// Restore the original missing chunk: beta must become discoverable and
 	// deletable again.
 	kr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
-	restored, ok, _, restoredMissing, err := blob.readKeyIndex()
+	restored, ok, _, _, restoredMissing, err := blob.readKeyIndex()
 	if err != nil || !ok {
 		t.Fatalf("restored readKeyIndex: ok=%v err=%v", ok, err)
 	}

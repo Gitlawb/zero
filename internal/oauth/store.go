@@ -726,7 +726,7 @@ type keyringBlob struct {
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
-	keys, ok, _, _, err := b.readKeyIndex()
+	keys, ok, _, _, _, err := b.readKeyIndex()
 	if err != nil {
 		return nil, false, err
 	}
@@ -921,7 +921,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
 	}
-	priorKeys, indexExisted, priorChunks, missingChunks, err := b.readKeyIndex()
+	priorKeys, indexExisted, priorChunks, priorGeneration, missingChunks, err := b.readKeyIndex()
 	if err != nil {
 		return err
 	}
@@ -1116,7 +1116,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 	if err := checkLease(); err != nil {
 		return err
 	}
-	unionChunks, err := b.writeKeyIndex(union, priorChunks, missingChunks, checkLease)
+	unionChunks, unionGeneration, err := b.writeKeyIndex(union, priorChunks, priorGeneration, missingChunks, checkLease)
 	if err != nil {
 		return err
 	}
@@ -1150,7 +1150,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 		if err := checkLease(); err != nil {
 			return err
 		}
-		if _, err := b.writeKeyIndex(keys, unionChunks, nil, checkLease); err != nil {
+		if _, _, err := b.writeKeyIndex(keys, unionChunks, unionGeneration, nil, checkLease); err != nil {
 			return err
 		}
 	}
@@ -1186,7 +1186,7 @@ func (b keyringBlob) tombstoneBlob() keyringBlob {
 // readTombstones returns the durable set of keys deleted by a new binary.
 // Missing account => empty set. Corrupt payloads fail closed.
 func (b keyringBlob) readTombstones() (map[string]bool, error) {
-	keys, ok, _, _, err := b.tombstoneBlob().readKeyIndex()
+	keys, ok, _, _, _, err := b.tombstoneBlob().readKeyIndex()
 	if err != nil {
 		return nil, fmt.Errorf("oauth: read keyring token tombstones: %w", err)
 	}
@@ -1206,7 +1206,7 @@ func (b keyringBlob) readTombstones() (map[string]bool, error) {
 // real keyring failures cannot be swallowed.
 func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leaseCheck) error {
 	tb := b.tombstoneBlob()
-	_, existed, priorChunks, _, err := tb.readKeyIndex()
+	_, existed, priorChunks, priorGeneration, _, err := tb.readKeyIndex()
 	if err != nil {
 		return fmt.Errorf("oauth: read keyring token tombstones: %w", err)
 	}
@@ -1224,7 +1224,7 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leas
 			if err := checkLease(); err != nil {
 				return err
 			}
-			if _, err := tb.kr.Delete(tb.service, tb.chunkAccount(i)); err != nil {
+			if _, err := tb.kr.Delete(tb.service, tb.chunkAccount(priorGeneration, i)); err != nil {
 				return err
 			}
 		}
@@ -1241,7 +1241,7 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leas
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, err := tb.writeKeyIndex(keys, priorChunks, nil, checkLease); err != nil {
+	if _, _, err := tb.writeKeyIndex(keys, priorChunks, priorGeneration, nil, checkLease); err != nil {
 		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
 	}
 	return nil
@@ -1258,7 +1258,7 @@ func (b keyringBlob) legacyOriginBlob() keyringBlob {
 // un-track every key it recorded and let the very absences it exists to
 // interpret look like fresh, ordinary keys again.
 func (b keyringBlob) readLegacyOrigin() (map[string]bool, error) {
-	keys, ok, _, _, err := b.legacyOriginBlob().readKeyIndex()
+	keys, ok, _, _, _, err := b.legacyOriginBlob().readKeyIndex()
 	if err != nil {
 		return nil, fmt.Errorf("oauth: read keyring legacy-origin markers: %w", err)
 	}
@@ -1277,7 +1277,7 @@ func (b keyringBlob) readLegacyOrigin() (map[string]bool, error) {
 // zero-key index behind.
 func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseCheck) error {
 	lb := b.legacyOriginBlob()
-	_, existed, priorChunks, _, err := lb.readKeyIndex()
+	_, existed, priorChunks, priorGeneration, _, err := lb.readKeyIndex()
 	if err != nil {
 		return fmt.Errorf("oauth: read keyring legacy-origin markers: %w", err)
 	}
@@ -1295,7 +1295,7 @@ func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseC
 			if err := checkLease(); err != nil {
 				return err
 			}
-			if _, err := lb.kr.Delete(lb.service, lb.chunkAccount(i)); err != nil {
+			if _, err := lb.kr.Delete(lb.service, lb.chunkAccount(priorGeneration, i)); err != nil {
 				return err
 			}
 		}
@@ -1312,7 +1312,7 @@ func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseC
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, err := lb.writeKeyIndex(keys, priorChunks, nil, checkLease); err != nil {
+	if _, _, err := lb.writeKeyIndex(keys, priorChunks, priorGeneration, nil, checkLease); err != nil {
 		return fmt.Errorf("oauth: write keyring legacy-origin markers: %w", err)
 	}
 	return nil
@@ -1395,6 +1395,12 @@ type keyIndexHeader struct {
 	Version int      `json:"v"`
 	Chunks  int      `json:"chunks"`
 	Keys    []string `json:"keys"`
+	// Generation selects which physical chunk-account namespace Chunks refers
+	// to; see chunkAccount. Omitted (0) both for an index that predates this
+	// field and for generation 0 itself, which are the same namespace by
+	// construction: chunkAccount(0, i) reproduces the original, ungenerationed
+	// naming, so an old header decodes exactly as it always did.
+	Generation int `json:"gen,omitempty"`
 }
 
 func (b keyringBlob) indexKeyLimit() int {
@@ -1404,8 +1410,19 @@ func (b keyringBlob) indexKeyLimit() int {
 	return maxKeyringIndexKeys
 }
 
-func (b keyringBlob) chunkAccount(index int) string {
-	return fmt.Sprintf("%s-%d", b.indexAccount, index)
+// chunkAccount names the continuation-chunk account for index within
+// generation. generation 0 reproduces the original naming an ungenerationed
+// index already used, so every index written before generations existed
+// keeps working with no migration step. A later generation gets its own
+// disjoint namespace, so a writer publishing generation N+1 can stage every
+// chunk it needs under names generation N's reader (or a concurrent one still
+// using the old header) will never look at, and only touch generation N's
+// accounts afterward, as cleanup.
+func (b keyringBlob) chunkAccount(generation, index int) string {
+	if generation <= 0 {
+		return fmt.Sprintf("%s-%d", b.indexAccount, index)
+	}
+	return fmt.Sprintf("%s-g%d-%d", b.indexAccount, generation, index)
 }
 
 // decodeKeyringIndexPayload bounds and decodes one index header/chunk value
@@ -1435,55 +1452,58 @@ func decodeKeyringIndexPayload(enc string, what string) ([]byte, error) {
 // so reads stay available, but its index is remembered so write() can refuse
 // to shrink the index (stranding the unlisted entries as undeletable orphans)
 // and can refuse to overwrite that account with unrelated new chunk data.
-func (b keyringBlob) readKeyIndex() (keys []string, ok bool, chunks int, missing []int, err error) {
+func (b keyringBlob) readKeyIndex() (keys []string, ok bool, chunks int, generation int, missing []int, err error) {
 	enc, ok, err := b.kr.Get(b.service, b.indexAccount)
 	if err != nil {
-		return nil, false, 0, nil, err
+		return nil, false, 0, 0, nil, err
 	}
 	if !ok {
-		return nil, false, 0, nil, nil
+		return nil, false, 0, 0, nil, nil
 	}
 	raw, err := decodeKeyringIndexPayload(enc, "keyring token index")
 	if err != nil {
-		return nil, false, 0, nil, err
+		return nil, false, 0, 0, nil, err
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if strings.HasPrefix(trimmed, "[") {
 		var rawKeys []string
 		if err := json.Unmarshal(raw, &rawKeys); err != nil {
-			return nil, false, 0, nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
+			return nil, false, 0, 0, nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
 		}
 		if len(rawKeys) > maxRawKeyringIndexKeys {
-			return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
+			return nil, false, 0, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 		}
 		keys := dedupeValidKeys(rawKeys)
 		if len(keys) > b.indexKeyLimit() {
-			return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
+			return nil, false, 0, 0, nil, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 		}
-		return keys, true, 1, nil, nil
+		return keys, true, 1, 0, nil, nil
 	}
 	var header keyIndexHeader
 	if err := json.Unmarshal(raw, &header); err != nil {
-		return nil, false, 0, nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
+		return nil, false, 0, 0, nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
 	}
 	// Reject an unsupported or corrupt header before looping: an out-of-range
 	// Chunks would otherwise drive up to that many blocking keyring lookups
 	// (each up to the 10s command timeout) while the store lock is held, wedging
 	// every Load/Status/Save/Delete instead of failing promptly.
 	if header.Version != 1 {
-		return nil, false, 0, nil, fmt.Errorf("oauth: unsupported keyring token index version %d", header.Version)
+		return nil, false, 0, 0, nil, fmt.Errorf("oauth: unsupported keyring token index version %d", header.Version)
 	}
 	if header.Chunks < 1 || header.Chunks > maxKeyringIndexChunks {
-		return nil, false, 0, nil, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
+		return nil, false, 0, 0, nil, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
+	}
+	if header.Generation < 0 {
+		return nil, false, 0, 0, nil, fmt.Errorf("oauth: keyring token index advertises a negative generation %d", header.Generation)
 	}
 	rawKeys := header.Keys
 	if len(rawKeys) > maxRawKeyringIndexKeys {
-		return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
+		return nil, false, 0, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 	}
 	for i := 1; i < header.Chunks; i++ {
-		chunkEnc, chunkOK, err := b.kr.Get(b.service, b.chunkAccount(i))
+		chunkEnc, chunkOK, err := b.kr.Get(b.service, b.chunkAccount(header.Generation, i))
 		if err != nil {
-			return nil, false, 0, nil, err
+			return nil, false, 0, 0, nil, err
 		}
 		if !chunkOK {
 			// Skip so Load/Status stay available, but remember which account is
@@ -1494,22 +1514,22 @@ func (b keyringBlob) readKeyIndex() (keys []string, ok bool, chunks int, missing
 		}
 		chunkRaw, err := decodeKeyringIndexPayload(chunkEnc, fmt.Sprintf("keyring token index chunk %d", i))
 		if err != nil {
-			return nil, false, 0, nil, err
+			return nil, false, 0, 0, nil, err
 		}
 		var more []string
 		if err := json.Unmarshal(chunkRaw, &more); err != nil {
-			return nil, false, 0, nil, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
+			return nil, false, 0, 0, nil, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
 		}
 		if len(rawKeys)+len(more) > maxRawKeyringIndexKeys {
-			return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys)+len(more), maxRawKeyringIndexKeys)
+			return nil, false, 0, 0, nil, errKeyringIndexTooManyKeys(len(rawKeys)+len(more), maxRawKeyringIndexKeys)
 		}
 		rawKeys = append(rawKeys, more...)
 	}
 	keys = dedupeValidKeys(rawKeys)
 	if len(keys) > b.indexKeyLimit() {
-		return nil, false, 0, nil, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
+		return nil, false, 0, 0, nil, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 	}
-	return keys, true, header.Chunks, missing, nil
+	return keys, true, header.Chunks, header.Generation, missing, nil
 }
 
 // dedupeValidKeys drops duplicates and malformed entries from a decoded
@@ -1540,32 +1560,106 @@ func dedupeValidKeys(keys []string) []string {
 }
 
 // writeKeyIndex persists keys as a chunked index and reports how many chunk
-// entries the published header advertises. Continuation chunks are written
-// before the header that references them, so the authoritative chunk 0 never
-// advertises a content chunk that does not exist yet; stale chunks from a
-// previously larger index are removed only after the header stops referencing
-// them (best-effort: an unreferenced chunk is never read).
+// entries the published header advertises, and under which generation (see
+// chunkAccount) it wrote them.
 //
-// missingChunks lists the continuation-chunk accounts readKeyIndex reported as
-// missing. Those slots are protected: the credentials they listed may still
-// exist in the keyring, so overwriting the account with unrelated new chunk
-// data would permanently orphan them even if the original chunk is later
-// restored. New continuation chunks are therefore remapped around protected
-// slots, the header keeps advertising at least priorChunks so a later-restored
-// chunk remains reachable, and protected accounts are never deleted.
-func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks []int, checkLease leaseCheck) (int, error) {
+// missingChunks lists continuation-chunk accounts readKeyIndex could not read
+// from priorGeneration: their keys are unknown, so advancing past them would
+// silently orphan whatever credentials they listed, with no record of what
+// they were left to recover from. When missingChunks is empty, every key this
+// index has ever listed is accounted for in keys, so it is safe to stage the
+// complete new layout under a fresh generation, publish a header that adopts
+// it atomically, and only then clean up priorGeneration's now-unreferenced
+// chunk accounts: nothing this function does before the header Set can ever
+// leave a half-written layout reachable, because nothing reads a generation
+// the header does not name. When missingChunks is non-empty, this instead
+// falls back to the narrower in-place update the fresh-generation path exists
+// to avoid elsewhere: new continuation chunks are remapped around the
+// protected (missing) slots within priorGeneration itself, the header keeps
+// advertising at least priorChunks so a later-restored chunk stays reachable,
+// and protected accounts are never deleted. That path accepts the same
+// in-place-overwrite exposure this function's own doc used to describe
+// unconditionally; it is now scoped to only the case where advancing the
+// generation is not safe to begin with.
+func (b keyringBlob) writeKeyIndex(keys []string, priorChunks, priorGeneration int, missingChunks []int, checkLease leaseCheck) (chunks int, generation int, err error) {
 	// Refuse to publish an index the reader would reject: readKeyIndex caps both
 	// total keys and chunk count, and a header beyond either would make every
 	// later Load/Status/Save/Delete fail before it could recover. Check the key
 	// count before chunking so a large set of short keys that still fit under
 	// maxKeyringIndexChunks cannot strand the store unreadable.
 	if len(keys) > b.indexKeyLimit() {
-		return 0, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
+		return 0, 0, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 	}
-	chunks := chunkIndexKeys(keys)
-	if len(chunks) > maxKeyringIndexChunks {
-		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", len(chunks), maxKeyringIndexChunks)
+	chunkList := chunkIndexKeys(keys)
+	if len(chunkList) > maxKeyringIndexChunks {
+		return 0, 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", len(chunkList), maxKeyringIndexChunks)
 	}
+	if len(missingChunks) == 0 {
+		return b.writeKeyIndexNewGeneration(chunkList, priorChunks, priorGeneration, checkLease)
+	}
+	return b.writeKeyIndexInPlace(chunkList, priorChunks, priorGeneration, missingChunks, checkLease)
+}
+
+// writeKeyIndexNewGeneration is writeKeyIndex's normal-case path: prior state
+// is fully known (missingChunks is empty), so it is safe to stage the entire
+// new layout under a never-before-used generation and adopt it with a single
+// header write. Every chunk write below therefore targets an account nothing
+// currently reads; the header Set is the only step any concurrent or crashed
+// reader can observe as a change at all.
+func (b keyringBlob) writeKeyIndexNewGeneration(chunkList [][]string, priorChunks, priorGeneration int, checkLease leaseCheck) (chunks int, generation int, err error) {
+	newGeneration := priorGeneration + 1
+	advertised := len(chunkList)
+	if advertised > maxKeyringIndexChunks {
+		return 0, 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", advertised, maxKeyringIndexChunks)
+	}
+	for i := 1; i < len(chunkList); i++ {
+		chunkData, err := json.Marshal(chunkList[i])
+		if err != nil {
+			return 0, 0, err
+		}
+		if err := checkLease(); err != nil {
+			return 0, 0, err
+		}
+		if err := b.kr.Set(b.service, b.chunkAccount(newGeneration, i), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
+			return 0, 0, err
+		}
+	}
+	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: advertised, Generation: newGeneration, Keys: chunkList[0]})
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := checkLease(); err != nil {
+		return 0, 0, err
+	}
+	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
+		return 0, 0, err
+	}
+	// The new generation is durable and exclusively authoritative from this
+	// point on. Reclaiming the old one is pure cleanup: best-effort, and safe
+	// to abandon partway, since nothing will ever read priorGeneration again
+	// regardless of how much of it gets deleted here.
+	if priorGeneration != newGeneration {
+		for i := 1; i < priorChunks; i++ {
+			if checkLease() != nil {
+				break
+			}
+			_, _ = b.kr.Delete(b.service, b.chunkAccount(priorGeneration, i))
+		}
+	}
+	return advertised, newGeneration, nil
+}
+
+// writeKeyIndexInPlace is writeKeyIndex's degraded-case fallback, used only
+// when missingChunks is non-empty: some prior chunk's keys are unknown, so
+// staging a fresh generation would publish a layout that silently drops them
+// with no remaining record of what they were. It stays within priorGeneration
+// and mirrors the original single-namespace protocol exactly: new
+// continuation chunks are remapped around protected (missing) slots, and
+// capacity is still planned before any chunk is written (a rejected write
+// here still leaves every existing chunk account untouched), but a slot that
+// is not protected is still overwritten in place, since there is no
+// generation boundary available to defer that behind here.
+func (b keyringBlob) writeKeyIndexInPlace(chunkList [][]string, priorChunks, priorGeneration int, missingChunks []int, checkLease leaseCheck) (chunks int, generation int, err error) {
 	protected := make(map[int]bool, len(missingChunks))
 	maxProtected := 0
 	for _, c := range missingChunks {
@@ -1574,23 +1668,14 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks
 			maxProtected = c
 		}
 	}
-	// Plan the complete slot assignment before writing anything. This must be
-	// a pure computation: the loop below overwrites existing, non-protected
-	// chunk accounts the old header still references, so if it started
-	// writing and only discovered a capacity overflow afterward, the old
-	// header would be left describing a layout partially clobbered by pieces
-	// of the new one, potentially stranding every key it lists. Assigning
-	// slots first and validating the result means a rejected write leaves
-	// every existing chunk account and every existing token byte-for-byte
-	// untouched.
 	type plannedChunk struct {
 		slot  int
 		index int
 	}
 	var planned []plannedChunk
 	slot := 1
-	advertised := len(chunks)
-	for i := 1; i < len(chunks); i++ {
+	advertised := len(chunkList)
+	for i := 1; i < len(chunkList); i++ {
 		for protected[slot] {
 			slot++
 		}
@@ -1602,54 +1687,41 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks
 	}
 	// Keep advertising protected slots (a restored chunk is read by walking
 	// every account below the advertised count) and the prior chunk count.
-	if len(missingChunks) > 0 && maxProtected+1 > advertised {
+	if maxProtected+1 > advertised {
 		advertised = maxProtected + 1
 	}
-	if len(missingChunks) > 0 && priorChunks > advertised {
+	if priorChunks > advertised {
 		advertised = priorChunks
 	}
 	if advertised > maxKeyringIndexChunks {
-		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", advertised, maxKeyringIndexChunks)
+		return 0, 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", advertised, maxKeyringIndexChunks)
 	}
-	// Planning is done and the layout fits; now perform the writes it called for.
 	for _, p := range planned {
-		chunkData, err := json.Marshal(chunks[p.index])
+		chunkData, err := json.Marshal(chunkList[p.index])
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if err := checkLease(); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
-		if err := b.kr.Set(b.service, b.chunkAccount(p.slot), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
-			return 0, err
+		if err := b.kr.Set(b.service, b.chunkAccount(priorGeneration, p.slot), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
+			return 0, 0, err
 		}
 	}
-	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: advertised, Keys: chunks[0]})
+	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: advertised, Generation: priorGeneration, Keys: chunkList[0]})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := checkLease(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	// Remove stale chunks only when nothing is protected: deleting a protected
-	// account would destroy the last chance to recover the keys it listed.
-	if len(missingChunks) == 0 {
-		for i := len(chunks); i < priorChunks; i++ {
-			if checkLease() != nil {
-				// Best-effort cleanup: a lost lease here must not turn into an
-				// error return, since the index header above is already
-				// durable and correct. Leaving an orphaned chunk account is
-				// the same shape of harmless leftover a failed Delete already
-				// tolerates below.
-				break
-			}
-			_, _ = b.kr.Delete(b.service, b.chunkAccount(i))
-		}
-	}
-	return advertised, nil
+	// No shrink-cleanup here: protected slots are always present in this path
+	// (that is why it was taken), and deleting a protected account would
+	// destroy the last chance to recover the keys it listed.
+	return advertised, priorGeneration, nil
 }
 
 // chunkIndexKeys packs keys into chunks whose marshaled JSON stays under
