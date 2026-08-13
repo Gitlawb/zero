@@ -22,3 +22,10 @@ func checkOAuthLockDirOwner(info os.FileInfo) error {
 	}
 	return nil
 }
+
+// identityLockRoot is never called on non-Windows: keyringFallbackLockDir
+// resolves the uid-anchored home and the fixed /tmp root directly. It exists so
+// the shared fallback can name one helper without a build-tagged call site.
+func identityLockRoot() (string, error) {
+	return "", fmt.Errorf("oauth: identityLockRoot is windows-only")
+}

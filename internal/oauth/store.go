@@ -326,7 +326,9 @@ func keyringLockPath(env map[string]string, service, account string) (string, er
 // pre-create it and deny OAuth. Windows temp is already per-user.
 func keyringFallbackLockDir() (string, error) {
 	if runtime.GOOS == "windows" {
-		return os.TempDir(), nil
+		// Not os.TempDir(): see identityLockRoot for why %TMP%/%TEMP% cannot
+		// anchor a lock two processes of the same user must agree on.
+		return identityLockRoot()
 	}
 	if uid := os.Getuid(); uid >= 0 {
 		if u, err := lookupUserID(strconv.Itoa(uid)); err == nil && strings.TrimSpace(u.HomeDir) != "" {

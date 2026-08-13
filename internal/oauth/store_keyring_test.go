@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2435,6 +2436,48 @@ func TestKeyringLockPathUserLookupFallbackIgnoresAmbientHome(t *testing.T) {
 // fixed keyring index, so they could race it. Every branch of lock-path
 // resolution must be identity-stable, and the fallback must fail closed rather
 // than fall back to a process-specific temp root.
+// TestKeyringLockPathFallbackStableAcrossWindowsTempOverrides is the Windows
+// half of the test below. The fallback returned os.TempDir() there, justified
+// as "Windows temp is already per-user", but per-user is not the property that
+// matters: os.TempDir resolves %TMP%, then %TEMP%, then %USERPROFILE%, and the
+// first two are launcher-controlled. Two processes of one user could therefore
+// compute different lock paths while writing the same fixed keyring index,
+// which is exactly the race the Unix branch refuses os.TempDir() to avoid.
+func TestKeyringLockPathFallbackStableAcrossWindowsTempOverrides(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("exercises the Windows-only identity lock root")
+	}
+	previousUser := currentOSUser
+	currentOSUser = func() (*user.User, error) { return nil, fmt.Errorf("lookup unavailable") }
+	defer func() { currentOSUser = previousUser }()
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	t.Setenv("TMP", dirA)
+	t.Setenv("TEMP", dirA)
+	storeA, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMP", dirB)
+	t.Setenv("TEMP", dirB)
+	storeB, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobA := storeA.blob.(keyringBlob)
+	blobB := storeB.blob.(keyringBlob)
+	if blobA.lockPath == "" || blobB.lockPath == "" {
+		t.Fatal("keyring store has no lock path in the fallback branch")
+	}
+	if blobA.lockPath != blobB.lockPath {
+		t.Fatalf("fallback lock path changed with TMP/TEMP: %q vs %q (they can race the shared keyring index)", blobA.lockPath, blobB.lockPath)
+	}
+	if strings.Contains(blobA.lockPath, dirA) || strings.Contains(blobA.lockPath, dirB) {
+		t.Fatalf("fallback lock path %q is still derived from TMP/TEMP", blobA.lockPath)
+	}
+}
+
 func TestKeyringLockPathFallbackStableAcrossTMPDIROverrides(t *testing.T) {
 	previousUser := currentOSUser
 	currentOSUser = func() (*user.User, error) { return nil, fmt.Errorf("lookup unavailable") }
