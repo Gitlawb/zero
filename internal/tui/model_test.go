@@ -198,6 +198,7 @@ func TestParseCommand(t *testing.T) {
 		{input: "/plan off", kind: commandPlan, text: "off"},
 		{input: "/compact", kind: commandCompact},
 		{input: "/effort high", kind: commandEffort, text: "high"},
+		{input: "/fast", kind: commandFast},
 		{input: "/style concise", kind: commandStyle, text: "concise"},
 		{input: "/debug-mode", kind: commandDebug},
 		{input: "hello zero", kind: commandPrompt, text: "hello zero"},

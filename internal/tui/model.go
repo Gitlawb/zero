@@ -141,6 +141,7 @@ type model struct {
 	permissionModeBeforePlan agent.PermissionMode
 	selfCorrectTests         bool
 	reasoningEffort          modelregistry.ReasoningEffort
+	serviceTier              string
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -4840,6 +4841,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m, text = m.handleEffortCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
+	case commandFast:
+		text := ""
+		m, text = m.handleFastCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
 	case commandStyle:
 		text := ""
 		m, text = m.handleStyleCommand(command.text)
@@ -5408,6 +5414,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ProviderName = m.providerName
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
+		options.ServiceTier = m.activeServiceTier()
 		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd
 		options.Images = images

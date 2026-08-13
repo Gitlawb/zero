@@ -456,6 +456,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(nextProfile.Name)
 	m.modelName = target.modelID
+	m.serviceTier = ""
 	// Record the outgoing pair too, not just the destination: otherwise the
 	// model a session started on (never itself the target of a recordRecentModel
 	// call) would silently drop out of "Recent" the moment you switch away from
@@ -559,6 +560,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	m.providerProfile = target
 	m.providerName = target.Name
 	m.modelName = target.Model
+	m.serviceTier = ""
 	// An active profile's effort fill is per-model: re-derive it for the
 	// destination, exactly like handleModelCommand does. No generic
 	// unsupported-drop here: cross-provider targets are often custom models

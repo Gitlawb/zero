@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -49,6 +50,40 @@ func TestModelPickerDetectsOllamaCloudFromBaseURL(t *testing.T) {
 	}
 	if contains(got, "custom-model") {
 		t.Fatalf("picker should not show custom-openai-compatible fallback when URL is Ollama Cloud: %#v", got)
+	}
+}
+
+func TestModelPickerChatGPTDiscoveryUsesMatchingOAuthAccount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("oauth store: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{
+		AccessToken: "live-token",
+		Account:     "workspace-77",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save OAuth token: %v", err)
+	}
+
+	m := model{userAgent: "zero/test"}
+	options := m.modelPickerDiscoveryOptions(config.ProviderProfile{Name: "codex", CatalogID: "chatgpt"})
+	if options.OAuthResolver == nil || options.CodexAccountResolver == nil {
+		t.Fatal("ChatGPT model discovery must carry both bearer and account resolvers")
+	}
+	header, bearer, ok, err := options.OAuthResolver(context.Background(), false)
+	if err != nil || !ok || header != "Authorization" || bearer != "Bearer live-token" {
+		t.Fatalf("discovery bearer = (%q, %q, %v, %v)", header, bearer, ok, err)
+	}
+	account, ok, err := options.CodexAccountResolver(context.Background())
+	if err != nil || !ok || account != "workspace-77" {
+		t.Fatalf("discovery account = (%q, %v, %v)", account, ok, err)
+	}
+	if options.UserAgent != "zero/test" {
+		t.Fatalf("discovery user agent = %q", options.UserAgent)
 	}
 }
 
@@ -1106,6 +1141,42 @@ func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
 	}
 	if m.picker.title != "select reasoning effort" {
 		t.Fatalf("picker title = %q, want %q", m.picker.title, "select reasoning effort")
+	}
+}
+
+func TestEffortPickerPrefersLiveProviderReasoningLevels(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "future-reasoner"})
+	m.providerProfile = config.ProviderProfile{CatalogID: "test-provider"}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"test-provider": {{
+			ID:               "future-reasoner",
+			Reasoning:        true,
+			ReasoningEfforts: []string{"low", "high", "xhigh", "max", "ultra", "unknown", "high"},
+		}},
+	}
+
+	got := m.availableReasoningEfforts()
+	want := []modelregistry.ReasoningEffort{
+		modelregistry.ReasoningEffortLow,
+		modelregistry.ReasoningEffortHigh,
+		modelregistry.ReasoningEffortXHigh,
+		modelregistry.ReasoningEffortMax,
+		modelregistry.ReasoningEffortUltra,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reasoning efforts = %#v, want %#v", got, want)
+	}
+}
+
+func TestEffortPickerDoesNotFallbackWhenLiveModelAdvertisesNoSelectableEfforts(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-5.5"})
+	m.providerProfile = config.ProviderProfile{CatalogID: "test-provider"}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"test-provider": {{ID: "gpt-5.5", ReasoningEfforts: []string{"none"}}},
+	}
+
+	if got := m.availableReasoningEfforts(); len(got) != 0 {
+		t.Fatalf("live model with only none exposed efforts %#v, want none", got)
 	}
 }
 
