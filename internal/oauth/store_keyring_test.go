@@ -655,7 +655,7 @@ func TestStoreKeyringWithLockRefreshesLease(t *testing.T) {
 	defer func() { fileLockRefreshInterval = previous }()
 
 	var first, second time.Time
-	err := blob.withLock(time.Now, func() error {
+	err := blob.withLock(time.Now, func(leaseCheck) error {
 		info, err := os.Stat(lockPath)
 		if err != nil {
 			return err
@@ -922,7 +922,7 @@ func TestStoreKeyringLeaseUsesWallClockNotStoreClock(t *testing.T) {
 	// would land decades in the past and look stale immediately.
 	fixed := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	var mtime time.Time
-	err := blob.withLock(func() time.Time { return fixed }, func() error {
+	err := blob.withLock(func() time.Time { return fixed }, func(leaseCheck) error {
 		time.Sleep(150 * time.Millisecond)
 		info, statErr := os.Stat(lockPath)
 		if statErr != nil {
@@ -1287,7 +1287,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapChunks(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("%s-%d", long, i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0, nil); err == nil {
+	if _, err := b.writeKeyIndex(keys, 0, nil, noLeaseLoss); err == nil {
 		t.Fatal("writeKeyIndex published an index readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -1307,7 +1307,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapKeys(t *testing.T) {
 		// would not catch this over-cap set.
 		keys[i] = fmt.Sprintf("p%d", i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0, nil); err == nil {
+	if _, err := b.writeKeyIndex(keys, 0, nil, noLeaseLoss); err == nil {
 		t.Fatal("writeKeyIndex published a key count readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -2173,7 +2173,7 @@ func TestStoreKeyringLeaseRefreshesWhileWaitingOnSecondLock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- withLeasedLocks([]string{indexLock, legacyLock}, time.Now, func() error {
+		done <- withLeasedLocks([]string{indexLock, legacyLock}, time.Now, func(leaseCheck) error {
 			return nil
 		})
 	}()
@@ -2280,7 +2280,7 @@ func TestStoreKeyringReloginKeepsTombstoneUntilReplacementCommits(t *testing.T) 
 	}
 	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacy)
 	b := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
-	if err := b.writeTombstones(map[string]bool{ProviderKey("alpha"): true}); err != nil {
+	if err := b.writeTombstones(map[string]bool{ProviderKey("alpha"): true}, noLeaseLoss); err != nil {
 		t.Fatal(err)
 	}
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
@@ -2312,7 +2312,7 @@ func TestStoreKeyringTombstonesOutgrowLiveCredentialCap(t *testing.T) {
 	for i := 0; i <= maxKeyringIndexKeys; i++ {
 		tombstones[ProviderKey(fmt.Sprintf("retired-%03d", i))] = true
 	}
-	if err := b.writeTombstones(tombstones); err != nil {
+	if err := b.writeTombstones(tombstones, noLeaseLoss); err != nil {
 		t.Fatalf("write %d tombstones: %v", len(tombstones), err)
 	}
 	got, err := b.readTombstones()
@@ -2355,7 +2355,7 @@ func TestStoreKeyringTombstoneBoundaryDoesNotBrickSaves(t *testing.T) {
 	for i := 0; i < maxKeyringTombstoneKeys; i++ {
 		tombstones[maxKey(i)] = true
 	}
-	if err := blob.writeTombstones(tombstones); err != nil {
+	if err := blob.writeTombstones(tombstones, noLeaseLoss); err != nil {
 		t.Fatalf("write %d max-length tombstones: %v", len(tombstones), err)
 	}
 	got, err := blob.readTombstones()
@@ -2542,7 +2542,7 @@ func TestWithLeasedLocksReleasesOnPanic(t *testing.T) {
 				t.Fatal("expected panic from fn")
 			}
 		}()
-		_ = withLeasedLocks([]string{lockPath}, time.Now, func() error {
+		_ = withLeasedLocks([]string{lockPath}, time.Now, func(leaseCheck) error {
 			panic("simulated critical-section panic")
 		})
 	}()
@@ -2550,7 +2550,7 @@ func TestWithLeasedLocksReleasesOnPanic(t *testing.T) {
 		t.Fatalf("lock file still present after panic recovery: %v", err)
 	}
 	start := time.Now()
-	if err := withLeasedLocks([]string{lockPath}, time.Now, func() error { return nil }); err != nil {
+	if err := withLeasedLocks([]string{lockPath}, time.Now, func(leaseCheck) error { return nil }); err != nil {
 		t.Fatalf("second withLeasedLocks after panic: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -2569,7 +2569,7 @@ func TestLeaseRefreshStopsWhenLockReplaced(t *testing.T) {
 	defer func() { fileLockRefreshInterval = prevRefresh }()
 
 	var lostErr error
-	err := withLeasedLocks([]string{lockPath}, time.Now, func() error {
+	err := withLeasedLocks([]string{lockPath}, time.Now, func(leaseCheck) error {
 		// Replace the lock as a reclaiming peer would after a long pause.
 		if err := os.WriteFile(lockPath, []byte("replacement-holder"), 0o600); err != nil {
 			return err
@@ -2609,6 +2609,92 @@ func TestLeaseRefreshStopsWhenLockReplaced(t *testing.T) {
 	}
 }
 
+// TestKeyringWriteAbortsBeforeAnyMutationOnLeaseLoss is the regression for
+// fencing the whole write, not just the entry to and exit from it: a checkLease
+// that already reports loss on its very first call (as if the lease had been
+// reclaimed before write() was ever entered) must prevent every keyring
+// mutation write() would otherwise perform, not merely the first one it
+// happens to reach.
+func TestKeyringWriteAbortsBeforeAnyMutationOnLeaseLoss(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: "zero-test", indexAccount: "idx"}
+	state := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "a"},
+	}}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alreadyLost := func() error { return fmt.Errorf("simulated lease loss") }
+
+	err = b.write(data, map[string]bool{ProviderKey("alpha"): false}, alreadyLost)
+	if err == nil || !strings.Contains(err.Error(), "simulated lease loss") {
+		t.Fatalf("write err = %v, want the simulated lease-loss error surfaced", err)
+	}
+	if len(kr.data) != 0 {
+		t.Fatalf("write mutated the keyring despite an already-lost lease: %#v", kr.data)
+	}
+}
+
+// TestKeyringWriteAbortsMidSequenceOnLeaseLoss is the regression for
+// [P1] Fence a lease loss that occurs during the critical callback: the lease
+// was checked only immediately before and after fn as a whole, so a process
+// that stalled partway through a multi-step keyring write (index publish, then
+// one Set per token) could have every step after the stall land anyway, racing
+// the peer that reclaimed the lock's own read-modify-write. checkLease must be
+// consulted before each step, so a loss discovered partway through the entry
+// writes stops before every entry is written, not only before or after the
+// whole operation.
+func TestKeyringWriteAbortsMidSequenceOnLeaseLoss(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: "zero-test", indexAccount: "idx"}
+
+	names := []string{"alpha", "bravo", "charlie", "delta", "echo"}
+	tokens := make(map[string]Token, len(names))
+	mutations := make(map[string]bool, len(names))
+	for _, name := range names {
+		key := ProviderKey(name)
+		tokens[key] = Token{AccessToken: name}
+		mutations[key] = false
+	}
+	state := storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Let enough checks pass to publish the index and write at least one entry,
+	// then simulate the lease being reclaimed underneath the still-running write.
+	const allowedChecks = 4
+	var calls int
+	check := func() error {
+		calls++
+		if calls > allowedChecks {
+			return fmt.Errorf("simulated lease loss")
+		}
+		return nil
+	}
+
+	err = b.write(data, mutations, check)
+	if err == nil || !strings.Contains(err.Error(), "simulated lease loss") {
+		t.Fatalf("write err = %v, want the simulated lease-loss error surfaced", err)
+	}
+
+	written := 0
+	for _, name := range names {
+		if _, ok := kr.data["zero-test/"+ProviderKey(name)]; ok {
+			written++
+		}
+	}
+	if written == 0 {
+		t.Fatalf("checkLease call count %d never reached the per-key Set loop; adjust allowedChecks so this test actually exercises mid-sequence abort (calls observed: %d)", allowedChecks, calls)
+	}
+	if written == len(names) {
+		t.Fatalf("every token entry was written (%d/%d) despite the lease being lost partway through: the fencing check did not stop mid-sequence", written, len(names))
+	}
+	t.Logf("checkLease was called %d times before aborting; %d of %d entries were written", calls, written, len(names))
+}
+
 // TestWithLeasedLocksSkipsFnWhenLeaseLostWhileWaiting is the regression for
 // [P1] Abort before the keyring mutation when a leased lock is lost
 // (2026-08-09): withLeasedLocks used to invoke fn after acquisition and report
@@ -2634,7 +2720,7 @@ func TestWithLeasedLocksSkipsFnWhenLeaseLostWhileWaiting(t *testing.T) {
 	var fnCalled atomic.Bool
 	done := make(chan error, 1)
 	go func() {
-		done <- withLeasedLocks([]string{lock1, lock2}, time.Now, func() error {
+		done <- withLeasedLocks([]string{lock1, lock2}, time.Now, func(leaseCheck) error {
 			fnCalled.Store(true)
 			return nil
 		})
@@ -2698,7 +2784,7 @@ func TestWithLeasedLocksSkipsFnWhenChtimesFails(t *testing.T) {
 	var fnCalled atomic.Bool
 	done := make(chan error, 1)
 	go func() {
-		done <- withLeasedLocks([]string{lock1, lock2}, time.Now, func() error {
+		done <- withLeasedLocks([]string{lock1, lock2}, time.Now, func(leaseCheck) error {
 			fnCalled.Store(true)
 			return nil
 		})
@@ -2814,7 +2900,7 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := blob.write(state, map[string]bool{ProviderKey("gamma"): false}); err != nil {
+	if err := blob.write(state, map[string]bool{ProviderKey("gamma"): false}, noLeaseLoss); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	// beta entry must still exist (not deleted: it was absent from truncated livePrior).
@@ -2921,7 +3007,7 @@ func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := blob.write(data, map[string]bool{ProviderKey("fill-000"): false}); err != nil {
+	if err := blob.write(data, map[string]bool{ProviderKey("fill-000"): false}, noLeaseLoss); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 

@@ -409,13 +409,13 @@ func (s *Store) Save(key string, token Token) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.blob.withLock(s.now, func() error {
+	return s.blob.withLock(s.now, func(check leaseCheck) error {
 		state, err := s.readState()
 		if err != nil {
 			return err
 		}
 		state.Tokens[key] = token
-		return s.writeState(state, map[string]bool{key: false})
+		return s.writeState(state, map[string]bool{key: false}, check)
 	})
 }
 
@@ -434,7 +434,7 @@ func (s *Store) Load(key string) (Token, bool, error) {
 	// reads keep their crash tolerance (a crashed writer's fresh lock file
 	// must not block reads of the last complete file).
 	var state storeFile
-	err := s.blob.withReadLock(s.now, func() error {
+	err := s.blob.withReadLock(s.now, func(check leaseCheck) error {
 		var readErr error
 		state, readErr = s.readState()
 		return readErr
@@ -454,7 +454,7 @@ func (s *Store) Delete(key string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var removed bool
-	err := s.blob.withLock(s.now, func() error {
+	err := s.blob.withLock(s.now, func(check leaseCheck) error {
 		state, err := s.readState()
 		if err != nil {
 			return err
@@ -467,7 +467,7 @@ func (s *Store) Delete(key string) (bool, error) {
 		// Exclude the deleted key from legacy reconciliation so a credential
 		// that was only present in the legacy blob (never indexed) is not
 		// reclassified as a fresh old-binary login and written back.
-		return s.writeState(state, map[string]bool{key: true})
+		return s.writeState(state, map[string]bool{key: true}, check)
 	})
 	return removed, err
 }
@@ -481,7 +481,7 @@ func (s *Store) Status(prefix string) ([]Status, error) {
 	// keyring's multi-entry read can't observe another process's Save/Delete
 	// mid write, while file-backend reads stay lock-free.
 	var state storeFile
-	err := s.blob.withReadLock(s.now, func() error {
+	err := s.blob.withReadLock(s.now, func(check leaseCheck) error {
 		var readErr error
 		state, readErr = s.readState()
 		return readErr
@@ -550,7 +550,7 @@ func (s *Store) readState() (storeFile, error) {
 // writeState persists state. mutations identifies explicitly saved (false) and
 // deleted (true) keys. The keyring backend uses it to order durable tombstone
 // transitions; file and encrypted-file backends ignore it.
-func (s *Store) writeState(state storeFile, mutations map[string]bool) error {
+func (s *Store) writeState(state storeFile, mutations map[string]bool, checkLease leaseCheck) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -564,7 +564,7 @@ func (s *Store) writeState(state storeFile, mutations map[string]bool) error {
 			return err
 		}
 	}
-	return s.blob.write(payload, mutations)
+	return s.blob.write(payload, mutations, checkLease)
 }
 
 func emptyStoreFile() storeFile {
@@ -578,19 +578,21 @@ type blobStore interface {
 	read() (data []byte, ok bool, err error)
 	// write replaces the stored blob. mutations is keyring-only and identifies
 	// explicit saves (false) and deletes (true) for durable tombstone ordering.
-	// File backends ignore it.
-	write(data []byte, mutations map[string]bool) error
+	// File backends ignore it. checkLease must be consulted immediately before
+	// each externally visible mutation write() performs; see leaseCheck.
+	write(data []byte, mutations map[string]bool, checkLease leaseCheck) error
 	// withLock runs fn under whatever cross-process exclusion the backend offers
 	// (a lock file for the file backend; none for the keyring, which is the
 	// authoritative store and is serialized within the process by Store.mu).
-	withLock(now func() time.Time, fn func() error) error
+	// fn receives a leaseCheck to consult before mutating; see its doc comment.
+	withLock(now func() time.Time, fn func(check leaseCheck) error) error
 	// withReadLock guards a read-only pass. The file backend's writes are
 	// atomic renames, so its reads stay lock-free: a crashed writer's fresh
 	// lock file must not turn into ~30s of read failures when the last
 	// complete file is perfectly readable. The keyring backend's read is
 	// several separate Get calls (index, then each entry), not one atomic
 	// snapshot, so it takes the same cross-process lock as its writes.
-	withReadLock(now func() time.Time, fn func() error) error
+	withReadLock(now func() time.Time, fn func(check leaseCheck) error) error
 	// location is a human-readable identifier for diagnostics/errors.
 	location() string
 }
@@ -610,7 +612,7 @@ func (b fileBlob) read() ([]byte, bool, error) {
 	return data, true, nil
 }
 
-func (b fileBlob) write(data []byte, _ map[string]bool) error {
+func (b fileBlob) write(data []byte, _ map[string]bool, _ leaseCheck) error {
 	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
 		return err
 	}
@@ -663,21 +665,26 @@ func createPublicationFile(path string) (*os.File, string, error) {
 	return temp, temp.Name(), nil
 }
 
-func (b fileBlob) withLock(now func() time.Time, fn func() error) error {
+// noLeaseLoss is the fileBlob checkLease: acquireFileLock's O_EXCL lock has no
+// reclaim path (unlike the keyring's mtime-based staleness reclaim), so there
+// is no ownership loss for fn to observe mid-critical-section.
+func noLeaseLoss() error { return nil }
+
+func (b fileBlob) withLock(now func() time.Time, fn func(check leaseCheck) error) error {
 	unlock, _, err := acquireFileLock(b.path+".lockfile", now)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return fn()
+	return fn(noLeaseLoss)
 }
 
 // withReadLock is deliberately lock-free: write() replaces the file with an
 // atomic rename, so a reader always sees a complete file, and a crashed
 // writer's leftover lock file must not turn readable state into ~30 seconds
 // of Load/Status failures while the stale threshold runs out.
-func (b fileBlob) withReadLock(now func() time.Time, fn func() error) error {
-	return fn()
+func (b fileBlob) withReadLock(now func() time.Time, fn func(check leaseCheck) error) error {
+	return fn(noLeaseLoss)
 }
 
 func (b fileBlob) location() string { return b.path }
@@ -879,7 +886,7 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // durable tombstones and must not be re-merged from the legacy blob even
 // when they were never indexed (a legacy-only old-binary login that the
 // user logged out of).
-func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
+func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease leaseCheck) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
@@ -982,10 +989,21 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 		}
 	}
 
+	// Each numbered step below is gated on checkLease immediately before it
+	// mutates the keyring: this write can span several round-trips (a chunked
+	// index plus one Set per token), and a process that stalls partway through
+	// after another process reclaimed its lock as stale must not let the rest
+	// of the sequence land. Checking only once at entry would let every step
+	// after the stall complete, racing the reclaiming process's own
+	// read-modify-write instead of aborting before touching shared state.
+
 	// 1. Persist tombstones before removing entries so logout survives a crash
 	// between entry delete and a later reconcile (and survives an old binary
 	// rewriting the legacy blob with the deleted key still present).
-	if err := b.writeTombstones(tombstones); err != nil {
+	if err := checkLease(); err != nil {
+		return err
+	}
+	if err := b.writeTombstones(tombstones, checkLease); err != nil {
 		return err
 	}
 	// 2. Publish the union of the live prior and new key sets first, so every
@@ -1008,12 +1026,18 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 		}
 		sort.Strings(union)
 	}
-	unionChunks, err := b.writeKeyIndex(union, priorChunks, missingChunks)
+	if err := checkLease(); err != nil {
+		return err
+	}
+	unionChunks, err := b.writeKeyIndex(union, priorChunks, missingChunks, checkLease)
 	if err != nil {
 		return err
 	}
 	// 3. Write each token entry (encodings preflighted above).
 	for _, key := range keys {
+		if err := checkLease(); err != nil {
+			return err
+		}
 		if err := b.kr.Set(b.service, key, encoded[key]); err != nil {
 			return err
 		}
@@ -1024,6 +1048,9 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	// chunk stay put so a restored chunk can still find them.
 	for _, key := range livePrior {
 		if _, ok := state.Tokens[key]; !ok {
+			if err := checkLease(); err != nil {
+				return err
+			}
 			if _, err := b.kr.Delete(b.service, key); err != nil {
 				return err
 			}
@@ -1033,7 +1060,10 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	// Skip shrink when the prior index was incomplete: a shrink to `keys` would
 	// drop the preserved chunk advertisements and strand unlisted entries.
 	if !indexIncomplete {
-		if _, err := b.writeKeyIndex(keys, unionChunks, nil); err != nil {
+		if err := checkLease(); err != nil {
+			return err
+		}
+		if _, err := b.writeKeyIndex(keys, unionChunks, nil, checkLease); err != nil {
 			return err
 		}
 	}
@@ -1048,7 +1078,10 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 		}
 	}
 	if tombstonesChanged {
-		if err := b.writeTombstones(tombstones); err != nil {
+		if err := checkLease(); err != nil {
+			return err
+		}
+		if err := b.writeTombstones(tombstones, checkLease); err != nil {
 			return err
 		}
 	}
@@ -1084,7 +1117,7 @@ func (b keyringBlob) readTombstones() (map[string]bool, error) {
 // tombstone account/chunk so a fully clean store does not leave leftover
 // markers. Errors from that cleanup are surfaced so interruption tests and
 // real keyring failures cannot be swallowed.
-func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
+func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leaseCheck) error {
 	tb := b.tombstoneBlob()
 	_, existed, priorChunks, _, err := tb.readKeyIndex()
 	if err != nil {
@@ -1094,10 +1127,16 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
 		if !existed {
 			return nil
 		}
+		if err := checkLease(); err != nil {
+			return err
+		}
 		if _, err := tb.kr.Delete(tb.service, tb.indexAccount); err != nil {
 			return err
 		}
 		for i := 1; i < priorChunks; i++ {
+			if err := checkLease(); err != nil {
+				return err
+			}
 			if _, err := tb.kr.Delete(tb.service, tb.chunkAccount(i)); err != nil {
 				return err
 			}
@@ -1115,7 +1154,7 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, err := tb.writeKeyIndex(keys, priorChunks, nil); err != nil {
+	if _, err := tb.writeKeyIndex(keys, priorChunks, nil, checkLease); err != nil {
 		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
 	}
 	return nil
@@ -1356,7 +1395,7 @@ func dedupeValidKeys(keys []string) []string {
 // restored. New continuation chunks are therefore remapped around protected
 // slots, the header keeps advertising at least priorChunks so a later-restored
 // chunk remains reachable, and protected accounts are never deleted.
-func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks []int) (int, error) {
+func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks []int, checkLease leaseCheck) (int, error) {
 	// Refuse to publish an index the reader would reject: readKeyIndex caps both
 	// total keys and chunk count, and a header beyond either would make every
 	// later Load/Status/Save/Delete fail before it could recover. Check the key
@@ -1389,6 +1428,9 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks
 		if err != nil {
 			return 0, err
 		}
+		if err := checkLease(); err != nil {
+			return 0, err
+		}
 		if err := b.kr.Set(b.service, b.chunkAccount(slot), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
 			return 0, err
 		}
@@ -1412,6 +1454,9 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks
 	if err != nil {
 		return 0, err
 	}
+	if err := checkLease(); err != nil {
+		return 0, err
+	}
 	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
 		return 0, err
 	}
@@ -1419,6 +1464,14 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, missingChunks
 	// account would destroy the last chance to recover the keys it listed.
 	if len(missingChunks) == 0 {
 		for i := len(chunks); i < priorChunks; i++ {
+			if checkLease() != nil {
+				// Best-effort cleanup: a lost lease here must not turn into an
+				// error return, since the index header above is already
+				// durable and correct. Leaving an orphaned chunk account is
+				// the same shape of harmless leftover a failed Delete already
+				// tolerates below.
+				break
+			}
 			_, _ = b.kr.Delete(b.service, b.chunkAccount(i))
 		}
 	}
@@ -1541,7 +1594,19 @@ func (l *leasedPath) release() {
 // If a lease is replaced under us mid-critical-section, the operation fails
 // closed after fn returns (or with fn's error) rather than treating a dual-
 // entry window as success.
-func withLeasedLocks(paths []string, now func() time.Time, fn func() error) error {
+// leaseCheck reports whether every lock backing the current critical section
+// is still owned, at the instant it is called. fn must call it immediately
+// before each externally visible mutation (a keyring Set/Delete, not a read),
+// not only rely on the pre/post checks around fn as a whole: a process can
+// pass the pre-check, stall past the stale interval, and have another process
+// reclaim the lock while it is paused. Checking only before and after fn lets
+// every mutation fn performs while stalled complete before the loss is
+// reported, so it races the reclaiming process's read-modify-write rather
+// than aborting before touching shared state. A mid-fn check closes that
+// window to whatever fn's own step granularity is.
+type leaseCheck func() error
+
+func withLeasedLocks(paths []string, now func() time.Time, fn func(check leaseCheck) error) error {
 	var leases []*leasedPath
 	released := false
 	releaseAll := func() {
@@ -1565,29 +1630,31 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func() error) erro
 		// Start refreshing this lock before blocking on the next path.
 		leases = append(leases, startLease(p, token, unlock))
 	}
+	check := func() error {
+		for _, l := range leases {
+			if l.lost.Load() {
+				return fmt.Errorf("oauth: lost token lock lease on %s", filepath.Base(l.path))
+			}
+		}
+		return nil
+	}
 	if len(leases) == 0 {
-		return fn()
+		return fn(check)
 	}
 	defer releaseAll()
 	// Fencing: if any lease was already lost while later locks were still
 	// being acquired (e.g. the first, global index lock reclaimed as stale
 	// while the caller blocks on legacyLockPath), do not enter the critical
-	// section at all. A mutation under a lost lock would run concurrently with
-	// the peer that reclaimed it, reviving the token-loss race the locks exist
-	// to prevent.
-	for _, l := range leases {
-		if l.lost.Load() {
-			return fmt.Errorf("oauth: lost token lock lease on %s", filepath.Base(l.path))
-		}
+	// section at all.
+	if err := check(); err != nil {
+		return err
 	}
-	err := fn()
-	for _, l := range leases {
-		if l.lost.Load() {
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("oauth: lost token lock lease on %s", filepath.Base(l.path))
+	err := fn(check)
+	if lostErr := check(); lostErr != nil {
+		if err != nil {
+			return err
 		}
+		return lostErr
 	}
 	return err
 }
@@ -1600,14 +1667,14 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func() error) erro
 // legacyKeyringLockPath) serializes with our reconcile-and-index pass.
 // Cross-root old writers cannot share that lock; never overwriting the
 // legacy blob and durable tombstones are the remaining safety net for them.
-func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
+func (b keyringBlob) withLock(now func() time.Time, fn func(check leaseCheck) error) error {
 	return withLeasedLocks([]string{b.lockPath, b.legacyLockPath}, now, fn)
 }
 
 // withReadLock only takes lockPath: a pre-PR binary never locks for a read
 // (see legacyKeyringLockPath), so a read here has nothing to coordinate with
 // on the legacy side.
-func (b keyringBlob) withReadLock(now func() time.Time, fn func() error) error {
+func (b keyringBlob) withReadLock(now func() time.Time, fn func(check leaseCheck) error) error {
 	return withLeasedLocks([]string{b.lockPath}, now, fn)
 }
 
