@@ -1616,6 +1616,53 @@ func TestCurrentBranchReturnsCheckedOutName(t *testing.T) {
 	}
 }
 
+// TestRemoteHasBranchReportsTrueForDivergedTip is the ordinary retry case: a
+// branch already published once, then a second local commit, then push
+// again. RemoteHasBranch must report existence only, not tip equality, or
+// ensureFeatureBranch reasserts the nonexistence lease (--force-with-lease=
+// <branch>:) against a branch that plainly exists, and the follow-up push
+// fails with a stale-info error instead of a normal fast-forward.
+func TestRemoteHasBranchReportsTrueForDivergedTip(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	tmp := t.TempDir()
+	bare := filepath.Join(tmp, "remote.git")
+	repo := filepath.Join(tmp, "repo")
+	runGitCommand(t, tmp, "init", "--bare", bare)
+	runGitCommand(t, tmp, "init", repo)
+	runGitCommand(t, repo, "config", "user.name", "Zero")
+	runGitCommand(t, repo, "config", "user.email", "zero@example.invalid")
+	runGitCommand(t, repo, "checkout", "-b", "main")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "initial\n")
+	runGitCommand(t, repo, "add", "README.md")
+	runGitCommand(t, repo, "commit", "-m", "Initial commit")
+	runGitCommand(t, repo, "remote", "add", "origin", bare)
+	runGitCommand(t, repo, "push", "-u", "origin", "main")
+	runGitCommand(t, repo, "checkout", "-b", "user/slug")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "feature work\n")
+	runGitCommand(t, repo, "add", "README.md")
+	runGitCommand(t, repo, "commit", "-m", "feature")
+	runGitCommand(t, repo, "push", "-u", "origin", "user/slug")
+
+	// A second local commit puts HEAD ahead of what was just published; the
+	// remote tip and local HEAD now differ.
+	writeTestFile(t, filepath.Join(repo, "README.md"), "feature work v2\n")
+	runGitCommand(t, repo, "add", "README.md")
+	runGitCommand(t, repo, "commit", "-m", "feature v2")
+
+	exists, err := RemoteHasBranch(context.Background(), repo, "origin", "user/slug", nil)
+	if err != nil {
+		t.Fatalf("RemoteHasBranch: %v", err)
+	}
+	if !exists {
+		t.Fatal("RemoteHasBranch must report true for a published branch whose tip has since diverged locally")
+	}
+}
+
 // TestRemoteHasBranchSeesPushWithoutLocalUpstream is the publication side of
 // the push -u config-write race: a plain `git push` (no -u) leaves local
 // upstream empty while the remote branch exists. ensureFeatureBranch must

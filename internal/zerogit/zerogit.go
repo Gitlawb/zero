@@ -908,20 +908,25 @@ func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit 
 	return err
 }
 
-// RemoteHasBranch reports whether remote already has refs/heads/<branch> and
-// the remote tip is the caller's current HEAD.
-// ensureFeatureBranch uses this when local upstream config is missing or
-// wrong: a prior push may have published the branch even when push -u failed
-// to write .git/config, and the nonexistence lease must not be reasserted
-// against a ref that already exists on the remote.
-// The tip-equality half is deliberate. A retry that lost a branch-name race
-// (another client created the same generated name first) must not treat the
-// surviving remote branch as its own and drop the creation lease: the remote
-// tip then differs from this caller's HEAD, so this reports false and Push
-// reasserts the zero-value force-with-lease, which fails instead of appending
-// this caller's commits to the other creator's branch. A plain
-// existence-only check would let that retry fast-forward the other branch
-// when both creators started from the same default-branch tip.
+// RemoteHasBranch reports whether remote already has refs/heads/<branch>.
+// ensureFeatureBranch uses this on every non-default-branch push (not just
+// when local upstream config is missing or wrong): a prior push may have
+// published the branch even when push -u failed to write .git/config, and
+// the nonexistence lease must not be reasserted against a ref that already
+// exists on the remote.
+//
+// This is existence-only, not tip equality. ensureFeatureBranch already
+// covers the concurrent-creator race this could be mistaken for protecting:
+// when the branch exists, it drops to a plain push and relies on Git's own
+// fast-forward check as the safety net (see
+// TestRunChangesPushDropsLeaseWhenBranchExistsOnRemote), so a survivor of a
+// branch-name race with unrelated history is rejected there, not here. A
+// tip-equality check here instead breaks the ordinary case: after publishing
+// once, a second local commit makes HEAD outrun the remote tip, so this
+// would report false, Push would reassert the empty-value
+// force-with-lease=<branch>: (branch must not exist), and Git would reject
+// the plain follow-up push with a stale-info error against a ref that
+// plainly exists.
 func RemoteHasBranch(ctx context.Context, cwd, remote, branch string, runGit Runner) (bool, error) {
 	runGit, _ = resolveRunners(runGit, nil)
 	remote = strings.TrimSpace(remote)
@@ -943,11 +948,6 @@ func RemoteHasBranch(ctx context.Context, cwd, remote, branch string, runGit Run
 			continue
 		}
 		if _, got, ok := strings.Cut(line, "\t"); ok && strings.TrimSpace(got) == ref {
-			remoteTip := strings.TrimSpace(strings.TrimSuffix(line, "\t"+got))
-			localTip, localErr := gitOutput(ctx, runGit, cwd, "rev-parse", "--verify", "HEAD^{commit}")
-			if localErr != nil || strings.TrimSpace(localTip) != remoteTip {
-				return false, nil
-			}
 			return true, nil
 		}
 	}
