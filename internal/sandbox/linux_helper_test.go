@@ -373,17 +373,15 @@ func TestLinuxBwrapMandatoryPathRotationToUnprotectedSymlinkFailsClosed(t *testi
 	if err == nil {
 		t.Fatalf("buildLinuxBwrapFilesystemPlan after rotation to an unprotected symlink = plan %#v, want an error", plan)
 	}
-	if !strings.Contains(err.Error(), "resolved target") {
-		t.Fatalf("buildLinuxBwrapFilesystemPlan error = %v, want a resolved-target mismatch error", err)
+	if !strings.Contains(err.Error(), "mandatory credential symlink") {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan error = %v, want a mandatory-symlink error", err)
 	}
 }
 
-// TestLinuxBwrapMandatoryPathSymlinkToAnotherMandatoryPathIsMasked is the
-// accepted-shape counterpart: a mandatory path that is a symlink to another
-// path that is itself in MandatoryDenyReadPaths is not masked directly (bwrap
-// cannot mount over a symlink destination), but the plan must still succeed
-// and mask the resolved target through its own entry.
-func TestLinuxBwrapMandatoryPathSymlinkToAnotherMandatoryPathIsMasked(t *testing.T) {
+// A mandatory symlink is rejected even when its current target is another
+// mandatory path. Bubblewrap cannot mount over the lexical symlink, and
+// accepting it would leave a repoint interval before namespace construction.
+func TestLinuxBwrapMandatoryPathSymlinkFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "real-daemon-token")
 	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
@@ -391,7 +389,7 @@ func TestLinuxBwrapMandatoryPathSymlinkToAnotherMandatoryPathIsMasked(t *testing
 	}
 	link := filepath.Join(dir, "daemon-token-link")
 	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
@@ -403,11 +401,28 @@ func TestLinuxBwrapMandatoryPathSymlinkToAnotherMandatoryPathIsMasked(t *testing
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
-	normalizedTarget := normalizeProfilePath(target)
-	assertArgsContainSequence(t, plan.Args, "--ro-bind", "/dev/null", normalizedTarget)
-	if stringSliceContains(plan.Args, link) {
-		t.Fatalf("bubblewrap cannot mount over the symlink itself; it must not appear as a mount target: %#v", plan.Args)
+	if _, err := buildLinuxBwrapFilesystemPlan(profile); err == nil ||
+		!strings.Contains(err.Error(), "mandatory credential symlink") {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan() error = %v, want mandatory-symlink rejection", err)
+	}
+}
+
+func TestLinuxMandatoryPathMembershipUsesCanonicalIdentity(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, "daemon-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{FileSystem: FileSystemPolicy{
+		DenyReadIfExists:       []string{resolved},
+		MandatoryDenyReadPaths: []string{token},
+	}}
+	if err := validateLinuxMandatoryDenyReadPaths(profile.FileSystem); err != nil {
+		t.Fatalf("canonical-equivalent mandatory/baseline paths rejected: %v", err)
 	}
 }
 

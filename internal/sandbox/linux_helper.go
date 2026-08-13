@@ -253,25 +253,18 @@ func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
 func validateLinuxMandatoryDenyReadPaths(fs FileSystemPolicy) error {
 	baseline := make(map[string]struct{}, len(fs.DenyReadIfExists))
 	for _, path := range fs.DenyReadIfExists {
-		baseline[path] = struct{}{}
+		if identity := canonicalLinuxMandatoryPath(path); identity != "" {
+			baseline[identity] = struct{}{}
+		}
 	}
-	mandatory := mandatoryDenyReadPathSet(fs)
 	for _, path := range fs.MandatoryDenyReadPaths {
 		if path == "" || !filepath.IsAbs(path) {
 			return fmt.Errorf("invalid mandatory deny-read path %q: path must be absolute", path)
 		}
-		if _, ok := baseline[path]; !ok {
+		identity := canonicalLinuxMandatoryPath(path)
+		if _, ok := baseline[identity]; !ok {
 			return fmt.Errorf("invalid mandatory deny-read path %q: path is not in denyReadIfExists", path)
 		}
-	}
-	// This pass is a best-effort, early fail-fast diagnostic only: a rotation
-	// between this Lstat and the one buildLinuxBwrapFilesystemPlan performs
-	// immediately before emitting each path's mount args could change what it
-	// finds. appendUnreadableLinuxPathArgsForPath repeats the symlink-target
-	// check below against its own fresh Lstat and is the authoritative one;
-	// this loop exists to surface an obviously missing or misconfigured token
-	// with a clear message before the (potentially expensive) plan is built.
-	for path := range mandatory {
 		info, err := os.Lstat(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -279,43 +272,37 @@ func validateLinuxMandatoryDenyReadPaths(fs FileSystemPolicy) error {
 			}
 			return fmt.Errorf("inspect mandatory credential path %q: %w", path, err)
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			continue
-		}
-		if _, err := mandatoryDenyReadSymlinkTarget(path, mandatory); err != nil {
-			return err
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("bubblewrap cannot enforce mandatory credential symlink %q; configure the resolved token path", path)
 		}
 	}
 	return nil
 }
 
-// mandatoryDenyReadPathSet returns fs.MandatoryDenyReadPaths as a set, for
-// resolved-symlink-target membership checks.
+// canonicalLinuxMandatoryPath gives mandatory/baseline membership one physical
+// identity across macOS /var aliases and Windows short/long path spellings.
+func canonicalLinuxMandatoryPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(absolute)
+}
+
 func mandatoryDenyReadPathSet(fs FileSystemPolicy) map[string]struct{} {
 	mandatory := make(map[string]struct{}, len(fs.MandatoryDenyReadPaths))
 	for _, path := range fs.MandatoryDenyReadPaths {
-		mandatory[path] = struct{}{}
+		if identity := canonicalLinuxMandatoryPath(path); identity != "" {
+			mandatory[identity] = struct{}{}
+		}
 	}
 	return mandatory
-}
-
-// mandatoryDenyReadSymlinkTarget resolves path — already known by the caller's
-// own Lstat to currently be a symlink — and reports an error unless its
-// target is itself one of the plan's mandatory deny-read paths (and so gets
-// its own mount-masking entry). Every caller must pass a path it just Lstat'd
-// itself: resolving against a decision cached from an earlier syscall is
-// exactly the gap that let an external token rotation swap a validated
-// regular file for a symlink pointing outside the protected set before the
-// plan was built.
-func mandatoryDenyReadSymlinkTarget(path string, mandatory map[string]struct{}) (string, error) {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve mandatory credential symlink %q: %w", path, err)
-	}
-	if _, ok := mandatory[resolved]; !ok {
-		return "", fmt.Errorf("bubblewrap cannot enforce mandatory credential symlink %q without its resolved target %q", path, resolved)
-	}
-	return resolved, nil
 }
 
 func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) (linuxBwrapFilesystemPlan, error) {
@@ -385,7 +372,7 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) (linuxBwrapFilesys
 	ensureLinuxDenyReadDirs(fs.EnsureDenyReadDirs)
 	mandatory := mandatoryDenyReadPathSet(fs)
 	for _, path := range fs.DenyReadIfExists {
-		_, required := mandatory[path]
+		_, required := mandatory[canonicalLinuxMandatoryPath(path)]
 		if !required && !pathExists(path) {
 			// A baseline credential path is emitted for every run, so an absent
 			// entry is the common case on a fresh machine — a third-party store
@@ -398,7 +385,7 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) (linuxBwrapFilesys
 		}
 		if required {
 			var err error
-			args, err = appendMandatoryUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts, mandatory)
+			args, err = appendMandatoryUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
 			if err != nil {
 				return linuxBwrapFilesystemPlan{}, err
 			}
@@ -481,35 +468,26 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	args, _ = appendUnreadableLinuxPathArgsForPath(args, normalizeProfilePath(path), carveouts, true, nil)
+	args, _ = appendUnreadableLinuxPathArgsForPath(args, normalizeProfilePath(path), carveouts, true, false)
 	return args
 }
 
-func appendMandatoryUnreadableLinuxPathArgs(args []string, path string, carveouts []string, mandatory map[string]struct{}) ([]string, error) {
-	return appendUnreadableLinuxPathArgsForPath(args, path, carveouts, false, mandatory)
+func appendMandatoryUnreadableLinuxPathArgs(args []string, path string, carveouts []string) ([]string, error) {
+	return appendUnreadableLinuxPathArgsForPath(args, path, carveouts, false, true)
 }
 
-// appendUnreadableLinuxPathArgsForPath's own Lstat is the single source of
-// truth for path's current state; it must never trust a symlink/regular-file
-// decision made by any earlier syscall, because the only realistic attacker
-// here (a rotation racing sandbox launch, or a remote worker with write
-// access to the token's directory) acts exactly in the gap between an
-// earlier check and this one. mandatory is nil for ordinary (non-mandatory)
-// credential paths, whose symlinks are skipped without further verification
-// exactly as before; it is non-nil only for MandatoryDenyReadPaths entries,
-// where a symlink must additionally resolve to another path in the same set.
-func appendUnreadableLinuxPathArgsForPath(args []string, path string, carveouts []string, allowMissing bool, mandatory map[string]struct{}) ([]string, error) {
+// appendUnreadableLinuxPathArgsForPath's Lstat is authoritative for planning.
+// Mandatory paths are never skipped when they are symlinks: the planner rejects
+// a symlink it already observes. For a regular path, the emitted lexical bind
+// is also the launch-time guard: if the pathname is swapped to a symlink after
+// planning, Bubblewrap refuses that symlink mount destination and fails closed.
+func appendUnreadableLinuxPathArgsForPath(args []string, path string, carveouts []string, allowMissing bool, mandatory bool) ([]string, error) {
 	if path == "" {
 		return args, nil
 	}
-	// Bubblewrap cannot mount over a symlink destination. Protected daemon-token
-	// paths include both the lexical link and its resolved target; the target is
-	// materialized by its own entry, while Seatbelt can still deny both names.
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		if mandatory != nil {
-			if _, err := mandatoryDenyReadSymlinkTarget(path, mandatory); err != nil {
-				return nil, err
-			}
+		if mandatory {
+			return nil, fmt.Errorf("bubblewrap cannot enforce mandatory credential symlink %q; configure the resolved token path", path)
 		}
 		return args, nil
 	}
