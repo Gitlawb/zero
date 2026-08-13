@@ -116,11 +116,14 @@ These classes drive multi-round reviews. Fix them before requesting review:
   subcommand, or config key that is not long-established therefore raises that
   floor silently, and the failure on an older host is an unhelpful usage error
   rather than a clear message. Before adding one, check when it landed and say
-  so where a caller would look: `--end-of-options` is Git 2.24,
-  `--show-current` is 2.22, `branch.autoSetupMerge=inherit` is 2.35. Then
-  either keep a fallback for older versions or gate the call. A test that
-  depends on a newer feature must skip below its floor instead of failing, and
-  say which version it needs.
+  so where a caller would look. Record the floor for the exact subcommand you
+  call, not for the flag in general: `--end-of-options` reached Git's shared
+  parser in 2.24, but `git rev-parse` only accepted it from 2.30, and
+  `git checkout` and `git reset` later still. Likewise `--show-current` is
+  `git branch` 2.22, and `branch.autoSetupMerge=inherit` is 2.35. Then either
+  keep a fallback for older versions or gate the call. A test that depends on a
+  newer feature must skip below its floor instead of failing, and say which
+  version it needs.
 - **Prove the test fails without the change:** A regression test earns its
   place only if it fails on the unfixed code, for the reason it claims. Run it
   both ways and quote the failure in the PR. The recurring miss is not a
@@ -129,15 +132,18 @@ These classes drive multi-round reviews. Fix them before requesting review:
   When a test targets a specific layer, call that layer directly rather than
   relying on a public entry point that may refuse earlier.
 - **Hermetic tests:** Tests must not read or write the developer's real config,
-  cache, or state directories. Redirect the user config root to a temp
-  directory, and set `%AppData%` alongside `XDG_CONFIG_HOME` on Windows, where
-  `os.UserConfigDir` ignores XDG. Apply it to every test that reaches the same
-  storage, not only the one where it was first needed; a test that passes on a
-  clean machine and pollutes a real one is a blocker.
-- **Error codes are platform-specific:** The same syscall reports different
-  codes per OS, so a check written against one platform is silently inert on
-  another while still looking correct. `openat(O_DIRECTORY|O_NOFOLLOW)` on a
-  symlink reports `ENOTDIR` on Linux and Darwin but `ELOOP` elsewhere; on
-  Windows, `\\?\` and `\\.\` prefixes are not UNC paths, and an `NtCreateFile`
-  information class must match the struct actually passed. Confirm the code the
-  target platform returns instead of assuming the portable one.
+  cache, or state directories. Redirect every root the code under test resolves,
+  not just config: on Unix that means the relevant `XDG_*` variable for each,
+  and on Windows `%AppData%` and `%LocalAppData%`, since `os.UserConfigDir` and
+  `os.UserCacheDir` ignore the XDG variables there. Apply it to every test that
+  reaches the same storage, not only the one where it was first needed; a test
+  that passes on a clean machine and pollutes a real one is a blocker.
+- **Error codes vary by platform and by flag combination:** A check written
+  against the code one target returns can be silently inert on another while
+  still looking correct. `openat(O_DIRECTORY|O_NOFOLLOW)` on a symlink may
+  report `ENOTDIR` or `ELOOP` depending on the platform, because the kernel can
+  reject the directory mismatch before it ever resolves the link; accept both
+  rather than assuming the one POSIX names. On Windows, `\\?\` and `\\.\`
+  prefixes are not UNC paths, and an `NtCreateFile` information class must match
+  the struct actually passed. Confirm the code each supported target returns
+  instead of reasoning from the man page.
