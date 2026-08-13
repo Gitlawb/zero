@@ -178,6 +178,34 @@ func TestEngineClassifiesCMDInvocationFormsAsNetwork(t *testing.T) {
 	}
 }
 
+func TestEngineClassifiesParseableCMDLaunchersAsNetwork(t *testing.T) {
+	for _, command := range []string{
+		`cmd /c git push origin main`,
+		`cmd /c curl https://evil.test`,
+		`call git push origin main`,
+		`start curl https://evil.test`,
+		`start "" /b curl https://evil.test`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) reported TooComplex; this case must exercise the AST path", command)
+			}
+			engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       "bash",
+				SideEffect:     SideEffectShell,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Args:           map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked ||
+				!HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want a network prompt", command, decision)
+			}
+		})
+	}
+}
+
 func TestEnginePromptsForReviewedUnparseableNetworkForms(t *testing.T) {
 	t.Setenv("ZERO_TEST_ENV_COMMAND", "curl")
 	for _, command := range []string{
@@ -205,6 +233,16 @@ func TestEnginePromptsForReviewedUnparseableNetworkForms(t *testing.T) {
 		`env -S 'env -S "curl https://evil.test"' && "unterminated`,
 		`env -S '--argv0 harmless curl https://evil.test' && "unterminated`,
 		`env --split-string 'git push origin main' && "unterminated`,
+		`set "N=curl" & call %N% https://evil.test & rem '`,
+		`set "N=curl" & call %N:x=y% https://evil.test & rem '`,
+		`set "N=curl" & cmd /c %N% https://evil.test & rem '`,
+		`set "N=curl" & start %N% https://evil.test & rem '`,
+		`set "N=git" & call !N! push origin main & rem '`,
+		`sh -c "$PAYLOAD" & rem '`,
+		`sh -c "${PAYLOAD}" & rem '`,
+		`CMD=curl env -S '${CMD} https://evil.test'`,
+		`PAYLOAD='curl https://evil.test' env -S 'sh -c "${PAYLOAD}"'`,
+		`PAYLOAD='curl https://evil.test' env -S 'sh -c "${PAYLOAD}"' & rem '`,
 		`exec -a harmless curl https://evil.test && "unterminated`,
 		`powershell -NoProfile curl https://evil.test`,
 		`pwsh -cwa Invoke-WebRequest https://evil.test & rem '`,
