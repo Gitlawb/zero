@@ -17,7 +17,9 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": Administrator rights are required. Re-run `zero sandbox setup` from an elevated (Run as administrator) terminal.")
 		return 1
 	}
-	plan, err := BuildWindowsACLPlan(config.commandConfig())
+	// Provisions the runtime candidate roots, then builds the plan that grants
+	// them. One call because a granted-but-absent write root fails the whole apply.
+	plan, err := buildWindowsSandboxSetupACLPlan(config)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1

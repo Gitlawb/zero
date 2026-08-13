@@ -320,6 +320,17 @@ func canonicalWindowsACLEntries(entries []WindowsACLEntry) []WindowsACLEntry {
 // other unprovisioned, so a command that fell back wrote to a tree with no ACE
 // on it. Both are deterministic now, so setup can cover both and command
 // selection lands on a provisioned root either way.
+//
+// The FIRST root only, and that is deliberate rather than an oversight. The
+// marker compares plan hashes for EQUALITY, and a command presents exactly one
+// workspace root, so setup has to derive its candidates from the same single root
+// the command will. Deriving them for every root instead would put candidates in
+// the marker that no single command reproduces, and every command would fail with
+// the same "permission roots or deny lists changed" this pairing exists to fix.
+// Nothing passes more than one root today: every construction site is a
+// one-element slice. Whoever adds multi-root support has to change the marker to a
+// per-root or subset comparison FIRST; widening this function on its own would
+// reintroduce the outage.
 func windowsSandboxRuntimeCandidates(workspaceRoots []string) []string {
 	workspaceRoot := ""
 	for _, candidate := range workspaceRoots {
@@ -391,9 +402,13 @@ func windowsSandboxProfileWithRuntime(profile PermissionProfile, workspaceRoots 
 // materialize a write root and fails the whole run on a path that is merely
 // absent. Whenever one of these grows a candidate, so must the other.
 //
-// Called on the setup side only. A command must never create these: setup is the
-// gate that decides which trees the sandbox may write to, and a command that
-// created its own root would be granting itself one.
+// Called by WHOEVER APPLIES THE PLAN, which is both tiers rather than only the
+// elevated one. Setup applies it under Administrator; the unelevated tier applies
+// its own workspace ACLs per command by design, since capability grants on trees
+// the user already owns need no privilege. A command creating a runtime root under
+// its own cache or temp grants itself nothing it could not create anyway, and the
+// tier that skips this is the tier that dies on "windows ACL target does not
+// exist".
 func ensureWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
 	for _, root := range windowsSandboxRuntimeCandidates(workspaceRoots) {
 		if err := os.MkdirAll(root, 0o700); err != nil {
@@ -401,6 +416,39 @@ func ensureWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
 		}
 	}
 	return nil
+}
+
+// buildWindowsSandboxSetupACLPlan provisions the runtime roots and then builds the
+// plan that grants them, in that order.
+//
+// One function rather than two statements at the call site because the ordering is
+// the contract: BuildWindowsACLPlan emits AllowWrite entries for the runtime
+// candidates, applyWindowsACLPlan materializes only DenyRead targets, and an
+// AllowWrite target that does not exist fails the entire run. The elevated setup
+// path had the provisioning omitted once already, which turned a clean `zero
+// sandbox setup` into "windows ACL target does not exist". Keeping the two joined
+// here means a caller cannot get the plan without the trees it names.
+func buildWindowsSandboxSetupACLPlan(config WindowsSandboxSetupConfig) (WindowsACLPlan, error) {
+	if err := ensureWindowsSandboxRuntimeCandidates(config.WorkspaceRoots); err != nil {
+		return WindowsACLPlan{}, err
+	}
+	return BuildWindowsACLPlan(config.commandConfig())
+}
+
+// windowsSandboxProfileWithProvisionedRuntime is the command-side counterpart:
+// it creates the runtime candidates and returns the profile that grants them.
+//
+// Joined for the same reason as the setup helper, and called from the PARENT for
+// one more. The unelevated tier applies its own ACL plan inside the re-exec'd
+// runner, where TEMP points into the runtime tree; deriving the candidates there
+// yields a temp-side root under the redirected temp rather than the one the plan
+// names, so the runner can neither derive nor provision them. The parent still has
+// the operator's environment, so it does both and the runner only applies.
+func windowsSandboxProfileWithProvisionedRuntime(profile PermissionProfile, workspaceRoots []string) (PermissionProfile, error) {
+	if err := ensureWindowsSandboxRuntimeCandidates(workspaceRoots); err != nil {
+		return PermissionProfile{}, err
+	}
+	return windowsSandboxProfileWithRuntime(profile, workspaceRoots), nil
 }
 
 // shortWindowsACLPlanHash trims a plan hash for a human-facing error. Twelve hex
