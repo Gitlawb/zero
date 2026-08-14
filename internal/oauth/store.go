@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"os/user"
@@ -338,7 +339,17 @@ func keyringFallbackLockDir() (string, error) {
 	}
 	if uid := os.Getuid(); uid >= 0 {
 		if u, err := lookupUserID(strconv.Itoa(uid)); err == nil && strings.TrimSpace(u.HomeDir) != "" {
-			return filepath.Join(u.HomeDir, ".cache", "zero"), nil
+			dir := filepath.Join(u.HomeDir, ".cache", "zero")
+			if err := os.MkdirAll(dir, 0o700); err == nil {
+				if info, lerr := os.Lstat(dir); lerr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+					if info.Mode().Perm() != 0o700 {
+						_ = os.Chmod(dir, 0o700)
+					}
+					if checkOAuthLockDirOwner(info) == nil {
+						return dir, nil
+					}
+				}
+			}
 		}
 	}
 	name := "zero-oauth-locks"
@@ -991,7 +1002,16 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 		return err
 	}
 	legacyOriginChanged := false
+	legacyTokensChanged := false
 	if legacyTokens != nil {
+		for key, deleted := range mutations {
+			if deleted {
+				if _, ok := legacyTokens[key]; ok {
+					delete(legacyTokens, key)
+					legacyTokensChanged = true
+				}
+			}
+		}
 		for key := range legacyTokens {
 			if ValidateKey(key) != nil {
 				continue
@@ -1172,6 +1192,19 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 			return err
 		}
 	}
+	if legacyTokensChanged {
+		if err := checkLease(); err != nil {
+			return err
+		}
+		if len(legacyTokens) == 0 {
+			_, _ = b.kr.Delete(b.service, b.legacyAccount)
+		} else {
+			legacyData, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokens})
+			if err == nil {
+				_ = b.kr.Set(b.service, b.legacyAccount, base64.StdEncoding.EncodeToString(legacyData))
+			}
+		}
+	}
 	return nil
 }
 
@@ -1206,7 +1239,7 @@ func (b keyringBlob) readTombstones() (map[string]bool, error) {
 // real keyring failures cannot be swallowed.
 func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leaseCheck) error {
 	tb := b.tombstoneBlob()
-	_, existed, priorChunks, priorGeneration, _, err := tb.readKeyIndex()
+	_, existed, priorChunks, priorGeneration, missingChunks, err := tb.readKeyIndex()
 	if err != nil {
 		return fmt.Errorf("oauth: read keyring token tombstones: %w", err)
 	}
@@ -1241,7 +1274,7 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leas
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, _, err := tb.writeKeyIndex(keys, priorChunks, priorGeneration, nil, checkLease); err != nil {
+	if _, _, err := tb.writeKeyIndex(keys, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
 		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
 	}
 	return nil
@@ -1277,7 +1310,7 @@ func (b keyringBlob) readLegacyOrigin() (map[string]bool, error) {
 // zero-key index behind.
 func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseCheck) error {
 	lb := b.legacyOriginBlob()
-	_, existed, priorChunks, priorGeneration, _, err := lb.readKeyIndex()
+	_, existed, priorChunks, priorGeneration, missingChunks, err := lb.readKeyIndex()
 	if err != nil {
 		return fmt.Errorf("oauth: read keyring legacy-origin markers: %w", err)
 	}
@@ -1312,7 +1345,7 @@ func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseC
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, _, err := lb.writeKeyIndex(keys, priorChunks, priorGeneration, nil, checkLease); err != nil {
+	if _, _, err := lb.writeKeyIndex(keys, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
 		return fmt.Errorf("oauth: write keyring legacy-origin markers: %w", err)
 	}
 	return nil
@@ -1607,6 +1640,9 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks, priorGeneration i
 // currently reads; the header Set is the only step any concurrent or crashed
 // reader can observe as a change at all.
 func (b keyringBlob) writeKeyIndexNewGeneration(chunkList [][]string, priorChunks, priorGeneration int, checkLease leaseCheck) (chunks int, generation int, err error) {
+	if priorGeneration >= math.MaxInt {
+		return 0, 0, fmt.Errorf("oauth: keyring key index generation overflow: %d", priorGeneration)
+	}
 	newGeneration := priorGeneration + 1
 	advertised := len(chunkList)
 	if advertised > maxKeyringIndexChunks {
@@ -1879,6 +1915,10 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func(check leaseCh
 	check := func() error {
 		for _, l := range leases {
 			if l.lost.Load() {
+				return fmt.Errorf("oauth: lost token lock lease on %s", filepath.Base(l.path))
+			}
+			if !ownLockFile(l.path, l.token) {
+				l.lost.Store(true)
 				return fmt.Errorf("oauth: lost token lock lease on %s", filepath.Base(l.path))
 			}
 		}

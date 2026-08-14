@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -3473,5 +3474,88 @@ func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
 	}
 	if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; ok {
 		t.Fatal("beta entry still resident after Delete; not deletable")
+	}
+}
+
+func TestKeyringDeleteRemovesCredentialFromLegacyBlob(t *testing.T) {
+	kr := newFakeKR()
+	legacyTokens := map[string]Token{
+		ProviderKey("p1"): {AccessToken: "at1", RefreshToken: "rt1"},
+		ProviderKey("p2"): {AccessToken: "at2", RefreshToken: "rt2"},
+	}
+	legacyRaw, _ := json.Marshal(storeFile{SchemaVersion: 1, Tokens: legacyTokens})
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyRaw)
+
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Loading p1 works via legacy migration.
+	tok1, ok, err := s.Load(ProviderKey("p1"))
+	if err != nil || !ok || tok1.AccessToken != "at1" {
+		t.Fatalf("Load(p1) = %+v, ok=%v, err=%v", tok1, ok, err)
+	}
+
+	// Delete p1 (logout).
+	removed, err := s.Delete(ProviderKey("p1"))
+	if err != nil || !removed {
+		t.Fatalf("Delete(p1) = %v, err=%v", removed, err)
+	}
+
+	// Inspect legacy entry directly: p1 must be deleted from legacy entry.
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount, legacyAccount: keyringLegacyAccount}
+	remainingLegacy, err := blob.readLegacyTokens()
+	if err != nil {
+		t.Fatalf("readLegacyTokens: %v", err)
+	}
+	if remainingLegacy != nil {
+		if _, exists := remainingLegacy[ProviderKey("p1")]; exists {
+			t.Fatal("p1 must not exist in legacy tokens blob after logout")
+		}
+		if _, exists := remainingLegacy[ProviderKey("p2")]; !exists {
+			t.Fatal("p2 must still be present in legacy tokens blob")
+		}
+	}
+
+	// Delete p2 (all tokens removed): legacy account should be deleted entirely.
+	removed2, err := s.Delete(ProviderKey("p2"))
+	if err != nil || !removed2 {
+		t.Fatalf("Delete(p2) = %v, err=%v", removed2, err)
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
+		t.Fatal("legacy account should be deleted when all legacy tokens are removed")
+	}
+}
+
+func TestKeyringWriteKeyIndexNewGenerationOverflowRejection(t *testing.T) {
+	blob := keyringBlob{kr: newFakeKR(), service: keyringService, indexAccount: keyringIndexAccount}
+	chunkList := [][]string{{"provider:one"}}
+	_, _, err := blob.writeKeyIndexNewGeneration(chunkList, 1, math.MaxInt, noLeaseLoss)
+	if err == nil || !strings.Contains(err.Error(), "generation overflow") {
+		t.Fatalf("expected generation overflow error, got %v", err)
+	}
+}
+
+func TestKeyringLeaseCheckFailsOnDiskLockTheft(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "test.lock")
+	var checked error
+	err := withLeasedLocks([]string{lockPath}, time.Now, func(check leaseCheck) error {
+		// Verify check succeeds initially.
+		if err := check(); err != nil {
+			t.Fatalf("initial check failed: %v", err)
+		}
+		// Steal lock on disk.
+		if err := os.WriteFile(lockPath, []byte("stolen-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		checked = check()
+		return checked
+	})
+	if err == nil || !strings.Contains(err.Error(), "lost token lock lease") {
+		t.Fatalf("expected lost lease error after lock theft, got %v", err)
+	}
+	if checked == nil || !strings.Contains(checked.Error(), "lost token lock lease") {
+		t.Fatalf("expected leaseCheck to return error immediately, got %v", checked)
 	}
 }

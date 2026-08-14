@@ -341,3 +341,24 @@ func TestRefreshUsesConfigScopesWhenTokenHasNone(t *testing.T) {
 		t.Fatalf("refresh should use cfg scopes when token has none, got %v", tok.Scopes)
 	}
 }
+
+func TestRefreshFailsOnHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"token expired"}`))
+	}))
+	defer server.Close()
+	cfg := Config{ClientID: "c", TokenEndpoint: server.URL}
+	_, err := Refresh(context.Background(), server.Client(), cfg, Token{RefreshToken: "expired-rt"}, nil)
+	if err == nil {
+		t.Fatal("expected refresh failure on HTTP 400")
+	}
+}
+
+func TestRefreshRequiresRefreshToken(t *testing.T) {
+	cfg := Config{ClientID: "c", TokenEndpoint: "https://example.com/token"}
+	_, err := Refresh(context.Background(), nil, cfg, Token{AccessToken: "only-access-token"}, nil)
+	if err == nil {
+		t.Fatal("expected error when token has no refresh token")
+	}
+}
