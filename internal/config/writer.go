@@ -981,7 +981,12 @@ type ProviderEdit struct {
 	Model        string
 	APIKey       string
 	APIKeyStored bool
-	Description  string
+	// Description is applied verbatim, unlike BaseURL/Model/APIKey, which are
+	// treated as "leave unchanged" when empty. An empty value therefore CLEARS a
+	// saved description rather than preserving it, because clearing is otherwise
+	// unexpressible. Callers doing a partial edit must re-send the current
+	// description; see TestEditProviderAppliesRenameFieldsAndDescriptionAtomically.
+	Description string
 }
 
 // EditProvider applies a provider edit in one config/key transaction: rename

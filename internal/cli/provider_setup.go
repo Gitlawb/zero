@@ -61,7 +61,12 @@ func runProvidersAdd(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	cfg := committed.Config
+	// Take the persisted name and stored-key state so the snapshot below reports
+	// what was committed. The plaintext key deliberately stays on the local
+	// profile: it is this run's only copy for the verification probe, and the
+	// snapshot redacts it rather than printing it.
 	profile.Name = committed.Persisted.Name
+	profile.APIKeyStored = committed.Persisted.APIKeyStored
 
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{

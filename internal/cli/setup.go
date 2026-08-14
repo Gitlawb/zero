@@ -271,7 +271,11 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
+	// As in `providers add`: adopt the committed name and stored-key state, but
+	// keep the plaintext key on the returned profile because verifySetupProvider
+	// probes with it before this process exits.
 	profile.Name = committed.Persisted.Name
+	profile.APIKeyStored = committed.Persisted.APIKeyStored
 	return tui.SetupResult{ConfigPath: configPath, Provider: profile}, nil
 }
 
