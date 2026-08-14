@@ -261,7 +261,12 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 		return fmt.Errorf("windows sandbox setup is out of date: schema %d, want %d", actual.SchemaVersion, expected.SchemaVersion)
 	}
 	if actual.ACLPlanHash != expected.ACLPlanHash || actual.ACLPlanEntries != expected.ACLPlanEntries {
-		return errors.New("windows sandbox setup is out of date: permission roots or deny lists changed")
+		// Name both sides. This message fires when setup and the command derived
+		// different runtime roots, and without the hashes the operator cannot tell
+		// that case apart from a genuine policy edit.
+		return fmt.Errorf("windows sandbox setup is out of date: permission roots or deny lists changed (marker plan %s, %d entries; this command wants %s, %d entries)",
+			shortWindowsACLPlanHash(actual.ACLPlanHash), actual.ACLPlanEntries,
+			shortWindowsACLPlanHash(expected.ACLPlanHash), expected.ACLPlanEntries)
 	}
 	// Mode-agnostic: validate the provisioned infrastructure, never the
 	// per-command network mode — so an approved (allow) network command and an
