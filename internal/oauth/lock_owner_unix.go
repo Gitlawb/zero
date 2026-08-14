@@ -3,10 +3,20 @@
 package oauth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
 )
+
+// isLockCreateContention reports whether a failed O_EXCL lock create should be
+// treated as contention (another holder's lock exists) rather than a hard
+// error. On non-Windows platforms the only contention errno is EEXIST
+// (os.ErrExist); EACCES (os.ErrPermission) is a genuine permission failure and
+// must surface immediately rather than spin to the lock timeout.
+func isLockCreateContention(err error) bool {
+	return errors.Is(err, os.ErrExist)
+}
 
 // checkOAuthLockDirOwner rejects a fallback lock directory not owned by the
 // current user: on a shared temp root another user could have pre-created the

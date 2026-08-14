@@ -3,12 +3,23 @@
 package oauth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
+
+// isLockCreateContention reports whether a failed O_EXCL lock create should be
+// treated as contention (another holder's lock exists) rather than a hard
+// error. On Windows, a concurrent holder's os.Remove leaves the lock file in a
+// "delete pending" state, so the O_EXCL create races it with
+// ERROR_ACCESS_DENIED (os.ErrPermission) rather than os.ErrExist; both are
+// contention here.
+func isLockCreateContention(err error) bool {
+	return errors.Is(err, os.ErrExist) || errors.Is(err, os.ErrPermission)
+}
 
 // checkOAuthLockDirOwner is a no-op on Windows: identityLockRoot resolves a
 // per-user location from the process token rather than a shared root, so there

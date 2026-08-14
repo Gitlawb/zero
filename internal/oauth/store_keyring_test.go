@@ -1266,7 +1266,7 @@ func TestKeyringLockPathIsPerUser(t *testing.T) {
 	currentOSUser = user.Current
 	t.Cleanup(func() { currentOSUser = previous })
 
-	got, err := keyringLockPath(nil, keyringService, keyringIndexAccount)
+	got, err := keyringLockPath(keyringService, keyringIndexAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2804,11 +2804,11 @@ func TestKeyringLockPathUserLookupFallbackIgnoresAmbientHome(t *testing.T) {
 	currentOSUser = func() (*user.User, error) { return nil, fmt.Errorf("lookup unavailable") }
 	defer func() { currentOSUser = previous }()
 
-	gotA, err := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
+	gotA, err := keyringLockPath(keyringService, keyringIndexAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotB, err := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
+	gotB, err := keyringLockPath(keyringService, keyringIndexAccount)
 	if err != nil {
 		t.Fatal(err)
 	}

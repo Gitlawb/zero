@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"net/url"
 	"os"
@@ -266,7 +265,7 @@ func NewStore(options StoreOptions) (*Store, error) {
 		// process's token write. legacyLockPath additionally coordinates with a
 		// still-running pre-PR binary during the supported mixed-version window
 		// (see legacyKeyringLockPath).
-		lockPath, err := keyringLockPath(options.Env, keyringService, keyringIndexAccount)
+		lockPath, err := keyringLockPath(keyringService, keyringIndexAccount)
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +305,7 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 // When the OS user lookup fails, the fallback is a private UID-scoped directory
 // under the process temp root (validated 0700, owned by us); a co-tenant DoS
 // of the shared /tmp name is rejected rather than accepted as the lock path.
-func keyringLockPath(env map[string]string, service, account string) (string, error) {
+func keyringLockPath(service, account string) (string, error) {
 	name := keyringLockFileName(service, account)
 	if u, err := currentOSUser(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
 		return filepath.Join(u.HomeDir, ".cache", "zero", name), nil
@@ -1417,7 +1416,6 @@ const maxRawKeyringIndexKeys = 16384
 // errKeyringIndexTooManyKeys is returned when a decoded index (or one of its
 // chunks) claims more keys than maxKeyringIndexKeys.
 func errKeyringIndexTooManyKeys(count, limit int) error {
-	log.Printf("warning: oauth: keyring token index lists %d keys, over the %d-key cap", count, limit)
 	return fmt.Errorf("oauth: keyring token index lists %d keys, over the %d-key cap", count, limit)
 }
 

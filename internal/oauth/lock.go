@@ -1,7 +1,6 @@
 package oauth
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,10 +79,11 @@ func acquireFileLock(lockPath string, now func() time.Time) (unlock func(), toke
 		}
 		// On Windows a concurrent holder's os.Remove leaves the lock file in a
 		// "delete pending" state, so an O_EXCL create races it with
-		// ERROR_ACCESS_DENIED (os.ErrPermission) rather than ErrExist. Treat that
-		// as contention and retry, exactly like ErrExist — otherwise the lock
-		// spuriously fails under concurrency on Windows.
-		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
+		// ERROR_ACCESS_DENIED (os.ErrPermission) rather than ErrExist. The
+		// platform predicate recognizes that as contention (and returns
+		// unrelated permission errors immediately) instead of failing the lock
+		// spuriously under concurrency.
+		if !isLockCreateContention(err) {
 			return nil, "", fmt.Errorf("oauth: acquire token lock: %w", err)
 		}
 		// Reclaim a stale lock left by a crashed holder — atomically (H3). A blind
