@@ -1,0 +1,26 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "local-7a41bc1c-43aa-4d25-92da-cdb6d00893ad",
+    "model": "claude",
+    "agent": "claude-code",
+    "promptCount": 1,
+    "promptSummary": "fix req changes",
+    "fullPrompt": "fix req changes",
+    "prompts": [
+      {
+        "index": 0,
+        "text": "fix req changes",
+        "agent": "claude-code",
+        "model": "claude"
+      }
+    ],
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 885,
+    "linesRemoved": 0,
+    "originUrl": "https://getorigin.io/sessions/local-7a41bc1c-43aa-4d25-92da-cdb6d00893ad",
+    "timestamp": "2026-08-14T15:49:58.925Z"
+  }
+}
