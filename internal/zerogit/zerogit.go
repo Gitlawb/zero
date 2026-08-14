@@ -628,7 +628,7 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	// skip verification/repair: set-upstream-to would mutate the repo and fail
 	// for unpublished branches with a misleading "push published" error.
 	expectedUpstream := remote + "/" + branch
-	if !options.DryRun && UpstreamRef(ctx, root, branch, runGit) != expectedUpstream {
+	if !options.DryRun && IsNamedRemote(ctx, root, remote, runGit) && UpstreamRef(ctx, root, branch, runGit) != expectedUpstream {
 		if _, setErr := gitOutput(ctx, runGit, root, "branch", "--set-upstream-to="+expectedUpstream, branch); setErr != nil {
 			return PushResult{Remote: remote, Branch: branch, Output: output}, fmt.Errorf(
 				"push published %s but failed to configure local upstream %s: %w; run `git branch --set-upstream-to=%s %s` then retry",
@@ -875,13 +875,13 @@ func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
 // comparison. It returns an error when the count cannot be determined (for
 // example the remote-tracking ref was never fetched); callers treat that as a
 // hard failure rather than guessing that there is something to publish.
-// CommitsAhead reports how many commits HEAD has that are not on
-// <remote>/<branch>. It requires Git 2.24+ because it passes --end-of-options
-// so a remote or branch shaped like an option stays positional; callers that
-// must support older Git should check the version before calling.
 func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner) (int, error) {
 	runGit, _ = resolveRunners(runGit, nil)
-	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "--end-of-options", remote+"/"+branch+"..HEAD")
+	ref := remote + "/" + branch
+	if !IsNamedRemote(ctx, cwd, remote, runGit) {
+		ref = branch
+	}
+	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", ref+"..HEAD")
 	if err != nil {
 		return 0, err
 	}
@@ -898,15 +898,46 @@ func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner
 // symref check, but a merely-cached origin/main (last written at clone or a
 // previous fetch) can sit behind the remote's live tip, making a local-only
 // rev-list comparison report nothing to publish when the remote has actually
-// advanced. The explicit refspec updates the tracking ref regardless of the
-// remote's configured fetch refspec.
+// advanced. When remote is a raw URL or path, no remote-tracking ref is
+// maintained and this call is a no-op.
 func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit Runner) error {
 	runGit, _ = resolveRunners(runGit, nil)
+	if !IsNamedRemote(ctx, cwd, remote, runGit) {
+		return nil
+	}
 	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branch, remote, branch)
 	// "--" terminates option parsing so a remote value shaped like an option
 	// (--upload-pack=/bin/echo) reaches Git as a positional argument.
 	_, err := gitOutput(ctx, runGit, cwd, "fetch", "--", remote, refspec)
 	return err
+}
+
+// isRemoteURLOrPath reports whether remote is formatted as a direct URL
+// (https://..., git@..., ssh://...) or filesystem path (/path/to/repo,
+// C:\path\to\repo), as opposed to a configured named remote (origin, upstream).
+func isRemoteURLOrPath(remote string) bool {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return false
+	}
+	return strings.Contains(remote, "://") ||
+		strings.Contains(remote, "@") ||
+		strings.Contains(remote, ":") ||
+		strings.Contains(remote, "/") ||
+		strings.Contains(remote, "\\") ||
+		strings.HasPrefix(remote, ".") ||
+		strings.HasPrefix(remote, "~")
+}
+
+// IsNamedRemote reports whether remote is a configured named remote (such as
+// "origin" or "upstream"), as opposed to a direct URL (https://..., git@...)
+// or a file path (/path/to/repo, C:\path\to\repo).
+func IsNamedRemote(ctx context.Context, cwd, remote string, runGit Runner) bool {
+	remote = strings.TrimSpace(remote)
+	if remote == "" || isRemoteURLOrPath(remote) {
+		return false
+	}
+	return true
 }
 
 // RemoteHasBranch reports whether remote already has refs/heads/<branch>.

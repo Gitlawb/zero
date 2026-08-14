@@ -863,15 +863,68 @@ func TestPushBranchesToRemote(t *testing.T) {
 			t.Fatalf("unexpected push command: %q", got)
 		}
 		for i := range runner.calls {
-			line := runner.commandLine(i)
-			if strings.Contains(line, "--set-upstream-to=") {
-				t.Fatalf("dry-run must not repair upstream, call %d: %q", i, line)
+			if strings.Contains(runner.commandLine(i), "branch --set-upstream-to") {
+				t.Fatalf("dry run must not attempt upstream repair: %q", runner.commandLine(i))
 			}
 		}
 		if len(runner.calls) != 5 {
 			t.Fatalf("expected only pre-push setup + dry-run push (5 calls), got %d", len(runner.calls))
 		}
 	})
+
+	t.Run("DirectURLRemoteSucceedsWithoutUpstreamVerification", func(t *testing.T) {
+		root := t.TempDir()
+		directURL := "https://github.com/org/repo.git"
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "feat/some-feature\n"},
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
+			{Stdout: "Everything up-to-date\n"},
+		}}
+
+		result, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			Remote: directURL,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("Push returned error: %v", err)
+		}
+		if result.Remote != directURL || result.Branch != "feat/some-feature" {
+			t.Fatalf("unexpected push result: %#v", result)
+		}
+	})
+}
+
+func TestIsNamedRemote(t *testing.T) {
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: "origin\nupstream\n"},
+	}}
+	if !IsNamedRemote(context.Background(), "/repo", "origin", runner.Run) {
+		t.Fatal("origin should be a named remote")
+	}
+	if IsNamedRemote(context.Background(), "/repo", "https://github.com/org/repo.git", runner.Run) {
+		t.Fatal("https URL must not be a named remote")
+	}
+	if IsNamedRemote(context.Background(), "/repo", "git@github.com:org/repo.git", runner.Run) {
+		t.Fatal("git@ URL must not be a named remote")
+	}
+	if IsNamedRemote(context.Background(), "/repo", "/path/to/repo", runner.Run) {
+		t.Fatal("path must not be a named remote")
+	}
+	if IsNamedRemote(context.Background(), "/repo", `C:\path\to\repo`, runner.Run) {
+		t.Fatal("Windows path must not be a named remote")
+	}
+}
+
+func TestRefreshTrackingRefSkipsDirectURLOrPath(t *testing.T) {
+	runner := &fakeRunner{}
+	if err := RefreshTrackingRef(context.Background(), "/repo", "https://github.com/org/repo.git", "main", runner.Run); err != nil {
+		t.Fatalf("unexpected error for URL remote: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("expected no git calls for URL remote, got %d", len(runner.calls))
+	}
 }
 
 func TestCreatePRCommandConstruction(t *testing.T) {

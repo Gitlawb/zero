@@ -2464,6 +2464,7 @@ func TestEnsureFeatureBranchPreservesBranchOnCompareAndSwapConflict(t *testing.T
 func TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote(t *testing.T) {
 	cwd := t.TempDir()
 	var resetBranch, resetTip string
+	var refreshedRemote, refreshedBranch string
 
 	_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, cwd, "upstream", featureBranchOptions{}, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
@@ -2472,10 +2473,19 @@ func TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote(t *testing.T) {
 			}
 			return true, "main", "upstream", nil
 		},
-		commitsAhead:       func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error { return nil },
-		inspectChanges:     featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
-		currentGitUser:     func(ctx context.Context, cwd string) string { return "Someone" },
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			if remote != "origin" || branch != "main" {
+				t.Fatalf("expected commitsAhead check against origin/main, got %s/%s", remote, branch)
+			}
+			return 1, nil
+		},
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+			refreshedRemote = remote
+			refreshedBranch = branch
+			return nil
+		},
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
 		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
 			if branch != "main" {
 				t.Fatalf("expected upstream query for main, got %q", branch)
@@ -2500,6 +2510,9 @@ func TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote(t *testing.T) {
 	}
 	if !created {
 		t.Fatal("expected a feature branch to be created")
+	}
+	if refreshedRemote != "origin" || refreshedBranch != "main" {
+		t.Fatalf("expected refreshTrackingRef for origin/main, got %s/%s", refreshedRemote, refreshedBranch)
 	}
 	if resetBranch != "main" || resetTip != "origin/main" {
 		t.Fatalf("expected restore main -> origin/main (source upstream), got %q -> %q", resetBranch, resetTip)

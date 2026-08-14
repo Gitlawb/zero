@@ -1269,6 +1269,27 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 		return "", "", false, fmt.Errorf("working tree has uncommitted changes; commit or stash them before pushing from the default branch")
 	}
 
+	// Capture the source default branch's own upstream before refreshing or
+	// leaving it. --remote selects the push destination; restore must not
+	// rewrite local main to upstream/main when main still tracks origin/main
+	// (fork setups), and refreshing must update the exact tracking ref that
+	// will supply both the ahead count and the restore target.
+	trackingRemote := remote
+	trackingBranch := currentBranch
+	restoreTip := ""
+	if deps.branchUpstreamRef != nil {
+		if uref := deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch); uref != "" {
+			restoreTip = uref
+			if parts := strings.SplitN(uref, "/", 2); len(parts) == 2 {
+				trackingRemote = parts[0]
+				trackingBranch = parts[1]
+			}
+		}
+	}
+	if restoreTip == "" {
+		restoreTip = remote + "/" + currentBranch
+	}
+
 	// Refresh the local remote-tracking ref before trusting it: IsDefaultBranch
 	// already contacted the remote for its symref check, but the tracking ref
 	// commitsAhead reads from is only a local cache (written at clone or the
@@ -1280,7 +1301,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// unresolvable ahead count below.
 	var fetchErr error
 	if deps.refreshTrackingRef != nil {
-		fetchErr = deps.refreshTrackingRef(ctx, workspaceRoot, remote, currentBranch)
+		fetchErr = deps.refreshTrackingRef(ctx, workspaceRoot, trackingRemote, trackingBranch)
 	}
 
 	// Branching off the default branch only makes sense when HEAD carries a
@@ -1291,31 +1312,31 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// the remote is confirmed unborn, refuse auto-branching entirely: the
 	// initial default branch must be established first (changes push --yes)
 	// so the remote has a real HEAD before any feature branch is published.
-	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch)
+	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, trackingRemote, trackingBranch)
 	if fetchErr != nil || aheadErr != nil {
 		var unbornRemote bool
 		var unbornErr error
 		if deps.isUnbornRemote != nil {
-			unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, remote)
+			unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, trackingRemote)
 		}
 		if unbornErr == nil && unbornRemote {
-			return "", "", false, fmt.Errorf("remote %s has no branches yet; push the initial default branch first with --yes (`zero changes push --yes`), then use auto-branching for subsequent work", remote)
+			return "", "", false, fmt.Errorf("remote %s has no branches yet; push the initial default branch first with --yes (`zero changes push --yes`), then use auto-branching for subsequent work", trackingRemote)
 		}
 		cause := aheadErr
 		if cause == nil {
 			cause = fetchErr
 		}
-		return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, cause)
+		return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", trackingRemote, trackingBranch, cause)
 	}
 	if ahead == 0 {
-		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
+		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", trackingRemote, trackingBranch)
 	}
 
 	// Name the branch (and, with --auto, send the provider) from what HEAD is
 	// actually ahead of the resolved remote branch by, using the same ref
 	// commitsAhead just checked. A working-tree snapshot can describe edits a
 	// commit-only push will never include.
-	baseRef := remote + "/" + currentBranch
+	baseRef := restoreTip
 	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: baseRef, MaxDiffBytes: opts.MaxDiffBytes})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)
@@ -1355,18 +1376,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 		}
 	}
 
-	// Capture the source default branch's own upstream before leaving it.
-	// --remote selects the push destination; restore must not rewrite local
-	// main to upstream/main when main still tracks origin/main (fork setups).
-	restoreTip := ""
 	expectedRestoreTip := ""
-	if deps.branchUpstreamRef != nil {
-		restoreTip = deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch)
-	}
-	if restoreTip == "" {
-		restoreTip = remote + "/" + currentBranch
-	}
-
 	if deps.currentBranchTip != nil {
 		expectedRestoreTip = deps.currentBranchTip(ctx, workspaceRoot)
 	}
