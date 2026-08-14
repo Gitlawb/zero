@@ -54,7 +54,64 @@ func sandboxRuntimeRootFor(workspaceRoot string, cacheRoot string) (string, erro
 func deterministicSandboxRuntimeRoot(workspaceRoot string, cacheRoot string) (string, bool) {
 	digest := sha256.Sum256([]byte(workspaceRoot))
 	root := filepath.Join(cacheRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
-	return root, !pathWithinRoot(workspaceRoot, root)
+	return root, !runtimeRootWithinWorkspace(workspaceRoot, root)
+}
+
+// runtimeRootWithinWorkspace reports whether root lands inside workspaceRoot.
+//
+// pathWithinRoot compares SPELLINGS, and canonicalSandboxWorkspaceRoot folds only
+// the aliases filepath.EvalSymlinks folds. Two get through it. Case: filepath.Rel
+// folds case on Windows via sameWord but not elsewhere, so on a case-insensitive
+// macOS volume /var/folders/x and /VAR/FOLDERS/X are one directory that every
+// string comparison here keeps apart. Junctions: EvalSymlinks returns a Windows
+// directory junction unchanged, so a TEMP that reaches the workspace through one
+// measures as outside it.
+//
+// Three checks, each of which can only ADD a containment answer. That asymmetry
+// is the safety argument: the failure that matters is the runtime tree living
+// inside the workspace, so a missed alias is the expensive direction and an extra
+// relocation is the cheap one.
+//
+//  1. the spellings as given;
+//  2. the spellings resolved to physical paths, which on Windows follows
+//     junctions at any depth via GetFinalPathNameByHandle;
+//  3. filesystem identity across root's existing ancestors, which catches a case
+//     alias on a case-insensitive volume where step 2 has no API to call.
+//
+// Step 3 only sees an alias whose target IS the workspace root, because it walks
+// a SPELLING upward and a junction has no spelling chain back into its target's
+// parent. That shape is covered by step 2 on Windows. It remains open off Windows
+// for a bind mount, which the kernel presents as a real path with no way to ask
+// where it came from; closing that needs mountinfo parsing, not a path API.
+func runtimeRootWithinWorkspace(workspaceRoot string, root string) bool {
+	if pathWithinRoot(workspaceRoot, root) {
+		return true
+	}
+	if physicalWorkspace := physicalSandboxPath(workspaceRoot); physicalWorkspace != "" {
+		if pathWithinRoot(physicalWorkspace, physicalSandboxPath(root)) {
+			return true
+		}
+	}
+	workspaceInfo, err := os.Stat(workspaceRoot)
+	if err != nil {
+		// An unresolvable workspace leaves nothing to compare against. The
+		// spelling checks above already returned their answer.
+		return false
+	}
+	// root itself usually does not exist yet, which is the point: start at the
+	// deepest component and walk up, so the first directory that does exist gets
+	// compared and every ancestor above it after that.
+	current := filepath.Clean(root)
+	for {
+		if info, err := os.Stat(current); err == nil && os.SameFile(workspaceInfo, info) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
@@ -228,18 +285,18 @@ func fallbackSandboxRuntimeRoot(workspaceRoot string) (string, error) {
 	// callers resolve this in the operator's environment, so the derived path is
 	// identical on the setup and command sides and the plan hashes still agree.
 	//
-	// This closes the 8.3 short-name and symlink spellings, not every alias. A
-	// Windows directory JUNCTION comes back from EvalSymlinks unchanged, so a TEMP
-	// that is a junction into the workspace still reads as outside it. Closing that
-	// needs a physical identity check (os.SameFile against existing ancestors, or
-	// GetFinalPathNameByHandle) rather than a string comparison.
+	// This closes the 8.3 short-name and symlink spellings, not every alias: a
+	// Windows directory JUNCTION comes back from EvalSymlinks unchanged, and case
+	// survives it on a case-insensitive macOS volume. The containment check below
+	// therefore does not rely on canonicalization alone; runtimeRootWithinWorkspace
+	// falls through to filesystem identity for exactly those aliases.
 	tempRoot := canonicalSandboxWorkspaceRoot(os.TempDir())
 	if tempRoot == "" || tempRoot == "." {
 		return "", errors.New("temp directory is unavailable")
 	}
 	digest := sha256.Sum256([]byte(workspaceRoot))
 	root := filepath.Join(tempRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
-	if pathWithinRoot(workspaceRoot, root) {
+	if runtimeRootWithinWorkspace(workspaceRoot, root) {
 		// Both candidates land inside the workspace, so there is nowhere left to
 		// put a runtime tree the workspace's own policy does not govern. Refused
 		// rather than pointed somewhere arbitrary: a runtime root inside the
