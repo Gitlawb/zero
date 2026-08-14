@@ -97,6 +97,39 @@ func TestDiffViewerKeepsLineNumbersAfterCollapsedContext(t *testing.T) {
 	}
 }
 
+func TestDiffViewerSyntheticContextHasNoSourceIndex(t *testing.T) {
+	raw := make([]string, 0, diffViewerContextLines*2+2)
+	for index := 0; index < diffViewerContextLines*2+2; index++ {
+		raw = append(raw, " context")
+	}
+	for _, line := range compactDiffViewerContext(raw) {
+		if line.hiddenContext > 0 && line.rawIndex != -1 {
+			t.Fatalf("synthetic collapsed context rawIndex = %d, want -1", line.rawIndex)
+		}
+	}
+}
+
+func TestDiffViewerNearRewriteDeletionSurvives(t *testing.T) {
+	diff := strings.Join([]string{
+		"--- a/notes.log",
+		"+++ b/notes.log",
+		"@@ -1 +1 @@",
+		"-alpha bravo charlie delta",
+		"+zulu yankee xray whiskey",
+	}, "\n")
+	body := diffCardBody(diff, 100, cardRenderOptions{bodyCap: 0})
+	got := plainRender(t, strings.Join(body.lines, "\n"))
+	if !strings.Contains(got, "alpha bravo charlie delta") {
+		t.Fatalf("near-rewrite deletion disappeared:\n%s", got)
+	}
+}
+
+func TestDiffViewerSourcePathStripsOnlyOneDiffPrefix(t *testing.T) {
+	if got, want := diffViewerSourcePath("--- a/b/c.go"), "b/c.go"; got != want {
+		t.Fatalf("diffViewerSourcePath = %q, want %q", got, want)
+	}
+}
+
 func TestDiffViewerSyntaxHighlightsBothChangedSides(t *testing.T) {
 	requireDiffViewerTrueColor(t)
 	diff := strings.Join([]string{

@@ -44,7 +44,7 @@ func compactDiffViewerContext(raw []string) []diffViewerLine {
 		for i := start; i < start+diffViewerContextLines; i++ {
 			lines = append(lines, diffViewerLine{text: raw[i], rawIndex: i})
 		}
-		lines = append(lines, diffViewerLine{hiddenContext: count - diffViewerContextLines*2})
+		lines = append(lines, diffViewerLine{rawIndex: -1, hiddenContext: count - diffViewerContextLines*2})
 		for i := index - diffViewerContextLines; i < index; i++ {
 			lines = append(lines, diffViewerLine{text: raw[i], rawIndex: i})
 		}

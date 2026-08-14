@@ -716,17 +716,19 @@ func (m model) transcriptRowBodyHeightCacheKeyOpts(row transcriptRow, width int,
 }
 
 func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow, opts)
 }
 
 // renderTranscriptDetailedRow routes through renderTranscriptRowFn with
 // renderRowDetailed (bodyCap: 0) so tool output appears uncapped.
 func (m model) renderTranscriptDetailedRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRowDetailed)
+	opts := cardRenderOptions{bodyCap: 0, cwd: m.cwd}
+	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRowDetailed, opts)
 }
 
 // renderTranscriptRowFn dispatches row-kind rendering using the provided renderFn.
-func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
+func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn, toolOpts cardRenderOptions) (string, []transcriptSelectableLine) {
 	switch row.kind {
 	case rowUser:
 		return m.renderSelectableUserRow(rowIndex, row, width, startBodyY)
@@ -737,7 +739,7 @@ func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int,
 	case rowSystem, rowError, rowToolCall, rowPermission, rowAskUser:
 		return m.renderSelectableRenderedRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
 	case rowToolResult:
-		return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
+		return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, renderFn, toolOpts)
 	case rowSpecialist:
 		return m.renderSelectableSpecialistRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
 	default:
@@ -753,7 +755,7 @@ func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int,
 // renderSelectableToolResultRow renders the tool result card. Only cards that
 // can actually collapse expose a clickable header; always-visible diff cards
 // retain normal text selection and never imply an unavailable action.
-func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
+func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn, opts cardRenderOptions) (string, []transcriptSelectableLine) {
 	rendered := renderFn(row, width, rc)
 	if rendered == "" {
 		return "", nil
@@ -762,7 +764,7 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	// its label too. It receives a toggle only when this card exposes a collapse
 	// affordance in the current transcript mode.
 	allLines := viewLines(rendered)
-	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: toolResultCanToggle(row, allLines)}
+	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: toolResultCanToggle(row, width, rc, opts)}
 	if len(allLines) > 0 {
 		if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY, allLines[0], false); ok {
 			header.text = meta.text
@@ -778,24 +780,36 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	return rendered, selectable
 }
 
-func toolResultCanToggle(row transcriptRow, lines []string) bool {
-	if toolCardAlwaysExpands(toolRowName(row)) {
+func toolResultCanToggle(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) bool {
+	name := toolRowName(row)
+	if opts.bodyCap <= 0 || toolCardAlwaysExpands(name) {
 		return false
 	}
-	if len(lines) == 0 {
+	failed := row.status == tools.StatusError
+	if !failed && looksLikeRedundantConfirmation(row.detail) {
 		return false
 	}
-	// A collapsed tool card puts its visual affordance in a fixed footer, while
-	// its header remains the clickable target. Inspect that structural footer
-	// instead of arbitrary body output, which may contain the same prose.
-	for _, line := range []string{lines[0], lines[len(lines)-1]} {
-		plain := strings.TrimSpace(ansi.Strip(line))
-		if (strings.HasPrefix(plain, "▸ ") && strings.HasSuffix(plain, " — click to expand")) ||
-			strings.Contains(plain, "▾ collapse") {
-			return true
-		}
+	collapsedFooter := ""
+	if failed || (!isExploreTool(name) && !isLocalControlTool(name)) {
+		collapsedFooter = collapsedToolFooter(row.detail)
 	}
-	return false
+	if collapsedFooter != "" && !row.expanded {
+		return true
+	}
+	// Explore cards deliberately use their own compact "details" affordance
+	// instead of the generic long-output footer. Ask the body renderer whether
+	// it exposed that affordance so selection behavior stays coupled to the
+	// rendered card rather than matching display text.
+	if collapsedFooter == "" && !isExploreTool(name) {
+		return false
+	}
+	bodyOpts := opts
+	bodyOpts.expanded = row.expanded
+	body := toolCardBody(name, rc.hints[rcKey(row.runID, row.id)], rc.args[rcKey(row.runID, row.id)], row.detail, width, bodyOpts, failed)
+	if collapsedFooter != "" && row.expanded && body.footer == "" {
+		return true
+	}
+	return body.canToggle
 }
 
 func (m model) renderSelectableRenderedRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {

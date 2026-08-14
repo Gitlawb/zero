@@ -146,8 +146,8 @@ func TestToolResultOutputCannotCreateToggle(t *testing.T) {
 	m := transcriptViewTestModel()
 	row := transcriptRow{
 		kind:   rowToolResult,
-		id:     "read",
-		tool:   "read_file",
+		id:     "custom",
+		tool:   "custom_tool",
 		status: tools.StatusOK,
 		detail: "the file literally says: click to expand",
 	}
@@ -157,5 +157,23 @@ func TestToolResultOutputCannotCreateToggle(t *testing.T) {
 	}
 	if selectable[0].toggle {
 		t.Fatalf("tool-output text must not create a header toggle: %#v", selectable[0])
+	}
+}
+
+func TestCollapsedExploreToolResultHeaderIsToggleable(t *testing.T) {
+	m := transcriptViewTestModel()
+	row := transcriptRow{
+		kind:   rowToolResult,
+		id:     "read",
+		tool:   "read_file",
+		status: tools.StatusOK,
+		detail: numberedLines(cardBodyMaxLines + 5),
+	}
+	_, selectable := m.renderSelectableToolResultRow(0, row, m.width, buildRowContext(nil), 0)
+	if len(selectable) == 0 {
+		t.Fatal("expected a visible explore result row")
+	}
+	if !selectable[0].toggle {
+		t.Fatalf("collapsed explore card header must remain toggleable: %#v", selectable[0])
 	}
 }

@@ -1440,12 +1440,14 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 const cardBodyMaxLines = 16
 
 // cardBody is what a result-shape renderer hands back: body lines, an
-// optional footer embedded in the bottom border, and optional extra head
-// metadata (e.g. a read's line range).
+// optional footer embedded in the bottom border, optional extra head metadata
+// (e.g. a read's line range), and whether the rendered body exposes an
+// expand/collapse interaction.
 type cardBody struct {
-	lines   []string
-	footer  string
-	headTag string
+	lines     []string
+	footer    string
+	headTag   string
+	canToggle bool
 }
 
 // renderRunningToolCard draws the head-only card for a tool call that has no
@@ -2117,10 +2119,9 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 					i++ // consume the paired "+"
 					continue
 				}
-			} else {
-				text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
-				lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget, gutter))
 			}
+			text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
+			lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget, gutter))
 			oldLine++
 		default:
 			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
@@ -2216,11 +2217,17 @@ func highlightedDiffLines(rawLines []string, meta diffMetadata) map[int]string {
 }
 
 func diffViewerSourcePath(line string) string {
-	parts := strings.Fields(line)
-	if len(parts) < 2 || parts[1] == "/dev/null" {
+	path := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "--- "), "+++ "))
+	if tab := strings.IndexByte(path, '\t'); tab >= 0 {
+		path = path[:tab]
+	}
+	if path == "" || path == "/dev/null" {
 		return ""
 	}
-	return strings.TrimPrefix(strings.TrimPrefix(parts[1], "a/"), "b/")
+	if strings.HasPrefix(path, "a/") {
+		return strings.TrimPrefix(path, "a/")
+	}
+	return strings.TrimPrefix(path, "b/")
 }
 
 func isDiffHunkBodyLine(line string) bool {
@@ -2456,15 +2463,17 @@ func exploreCardBody(name string, hint string, arg string, detail string, width 
 		if strings.TrimSpace(detail) != "" {
 			footer = zeroTheme.faint.Render("▸ details")
 		}
-		return cardBody{lines: []string{summary}, footer: footer}
+		return cardBody{lines: []string{summary}, footer: footer, canToggle: footer != ""}
 	}
 	body := exploreDetailCardBody(name, detail, width, opts)
 	lines := append([]string{summary}, body.lines...)
 	footer := body.footer
+	canToggle := body.canToggle
 	if opts.expanded && opts.bodyCap > 0 && footer == "" {
 		footer = zeroTheme.faint.Render("▾ collapse")
+		canToggle = true
 	}
-	return cardBody{lines: lines, footer: footer}
+	return cardBody{lines: lines, footer: footer, canToggle: canToggle}
 }
 
 func exploreDetailCardBody(name string, detail string, width int, opts cardRenderOptions) cardBody {
