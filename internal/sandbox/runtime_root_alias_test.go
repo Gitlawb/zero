@@ -129,19 +129,26 @@ func TestDeterministicRuntimeRootRejectsAnAliasedCache(t *testing.T) {
 	if err := os.MkdirAll(cacheRoot, 0o700); err != nil {
 		t.Fatalf("create cache: %v", err)
 	}
-	alias := aliasTo(t, inner)
-	if alias == "" {
-		t.Skip("no alias spelling is constructible here")
-	}
+	// A junction on Windows, a symlink elsewhere. Both point at inner by its REAL
+	// spelling on purpose. Stacking a case alias on top would build the one shape
+	// the doc on runtimeRootWithinWorkspace says stays open off Windows, an alias
+	// into a workspace SUBDIRECTORY that no spelling chain reaches, and the test
+	// would then be asserting a guarantee macOS does not make.
+	link := filepath.Join(cacheRoot, "zero")
 	if runtime.GOOS == "windows" {
-		// aliasTo built the junction somewhere else; put one at <cache>/zero.
-		if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(cacheRoot, "zero"), inner).CombinedOutput(); err != nil {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, inner).CombinedOutput(); err != nil {
 			t.Skipf("mklink /J unavailable: %v %s", err, out)
 		}
-	} else {
-		if err := os.Symlink(alias, filepath.Join(cacheRoot, "zero")); err != nil {
-			t.Skipf("symlink unavailable: %v", err)
-		}
+	} else if err := os.Symlink(inner, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	innerInfo, err := os.Stat(inner)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	linkInfo, err := os.Stat(link)
+	if err != nil || !os.SameFile(innerInfo, linkInfo) {
+		t.Fatalf("%s is not an alias of %s", link, inner)
 	}
 
 	root, usableOutside := deterministicSandboxRuntimeRoot(workspaceRoot, cacheRoot)
