@@ -1721,6 +1721,25 @@ func TestResolvePersistedProviderIdentityPrefersNames(t *testing.T) {
 		}
 	})
 
+	t.Run("a name folding onto multiple rows is ambiguous", func(t *testing.T) {
+		variants := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, variants, FileConfig{
+			Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}},
+		}, 0o600)
+		if _, _, err := ResolvePersistedProviderIdentity(variants, "wOrK"); err == nil {
+			t.Fatal("resolve succeeded for a name matching two case-variant rows, want an ambiguity error")
+		}
+		// An exact spelling still addresses one row, so a legacy config with such
+		// a pair stays repairable.
+		row, match, err := ResolvePersistedProviderIdentity(variants, "WORK")
+		if err != nil {
+			t.Fatalf("resolve exact: %v", err)
+		}
+		if match != PersistedIdentityName || row.Name != "WORK" {
+			t.Fatalf("row = %q match = %v, want the exactly named row", row.Name, match)
+		}
+	})
+
 	t.Run("unique catalog id still resolves", func(t *testing.T) {
 		unique := filepath.Join(t.TempDir(), "config.json")
 		writeConfigFixture(t, unique, FileConfig{

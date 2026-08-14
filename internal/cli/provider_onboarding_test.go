@@ -190,6 +190,55 @@ func TestProviderMutationsResolvePersistedIdentity(t *testing.T) {
 		})
 	}
 }
+
+// A legacy config can hold rows that differ only by case. Addressing such a pair
+// by a third spelling identifies no single row, so a mutation must fail instead
+// of picking the one that happens to come first and deleting its credential.
+func TestProviderRemoveRejectsAmbiguousFoldedName(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "m1", APIKeyStored: true},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://upper.example/v1", Model: "m2", APIKeyStored: true},
+		},
+	})
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-lower"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "remove", "wOrK"}, &stdout, &stderr, providerSetupDeps(configPath)); code == exitSuccess {
+		t.Fatalf("providers remove wOrK succeeded, want an ambiguity failure; stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "ambiguous provider name") {
+		t.Fatalf("stderr = %q, want an ambiguous-provider-name error", stderr.String())
+	}
+
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "work" || cfg.Providers[1].Name != "WORK" {
+		t.Fatalf("providers = %+v, want both rows untouched", cfg.Providers)
+	}
+	key, ok, err := store.Get("work")
+	if err != nil || !ok || key != "sk-lower" {
+		t.Fatalf("stored key = %q ok=%v err=%v, want the credential preserved", key, ok, err)
+	}
+
+	// The exact spelling still works, so a legacy config remains repairable.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		t.Fatalf("exact-name removal exit = %d stderr = %q", code, stderr.String())
+	}
+	cfg = readFileConfig(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" {
+		t.Fatalf("providers = %+v, want only the exact row removed", cfg.Providers)
+	}
+}
 func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
