@@ -292,7 +292,10 @@ func lockProviderWrite(configPath string) (func() error, error) {
 		}
 		_ = file.Close()
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("provider config/key transaction is busy; retry the operation (lock %s)", lockPath)
+			// Name the lock file: this lock is never reclaimed by age, so retrying
+			// alone never clears a stranded one and the user otherwise has no way to
+			// find the file to remove.
+			return nil, fmt.Errorf("provider config/key transaction is busy; retry the operation, or remove %s if no other Zero process is running", lockPath)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
