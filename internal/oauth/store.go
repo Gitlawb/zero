@@ -308,7 +308,10 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 func keyringLockPath(service, account string) (string, error) {
 	name := keyringLockFileName(service, account)
 	if u, err := currentOSUser(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
-		return filepath.Join(u.HomeDir, ".cache", "zero", name), nil
+		dir := filepath.Join(u.HomeDir, ".cache", "zero")
+		if err := validateOAuthLockDir(dir); err == nil {
+			return filepath.Join(dir, name), nil
+		}
 	}
 	// Do not fall back to os.UserHomeDir: it reads ambient HOME/USERPROFILE, so
 	// two same-user processes can choose different locks for one keyring.
@@ -317,6 +320,31 @@ func keyringLockPath(service, account string) (string, error) {
 		return "", fmt.Errorf("oauth: keyring lock fallback dir: %w", err)
 	}
 	return filepath.Join(dir, keyringLockFileName(service, account)), nil
+}
+
+// validateOAuthLockDir creates dir with 0700 permissions if needed, rejects
+// symlinks and non-directories, tightens permissions to 0700, and validates
+// ownership by the current user.
+func validateOAuthLockDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("oauth lock fallback %s is not a plain directory", dir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("tighten oauth lock fallback permissions: %w", err)
+		}
+	}
+	if err := checkOAuthLockDirOwner(info); err != nil {
+		return err
+	}
+	return nil
 }
 
 // keyringFallbackLockDir returns a private directory for last-resort keyring
@@ -339,15 +367,8 @@ func keyringFallbackLockDir() (string, error) {
 	if uid := os.Getuid(); uid >= 0 {
 		if u, err := lookupUserID(strconv.Itoa(uid)); err == nil && strings.TrimSpace(u.HomeDir) != "" {
 			dir := filepath.Join(u.HomeDir, ".cache", "zero")
-			if err := os.MkdirAll(dir, 0o700); err == nil {
-				if info, lerr := os.Lstat(dir); lerr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
-					if info.Mode().Perm() != 0o700 {
-						_ = os.Chmod(dir, 0o700)
-					}
-					if checkOAuthLockDirOwner(info) == nil {
-						return dir, nil
-					}
-				}
+			if err := validateOAuthLockDir(dir); err == nil {
+				return dir, nil
 			}
 		}
 	}
@@ -356,22 +377,7 @@ func keyringFallbackLockDir() (string, error) {
 		name = fmt.Sprintf("zero-oauth-locks-%d", uid)
 	}
 	dir := filepath.Join("/tmp", name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", fmt.Errorf("oauth lock fallback %s is not a plain directory", dir)
-	}
-	if info.Mode().Perm() != 0o700 {
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return "", fmt.Errorf("tighten oauth lock fallback permissions: %w", err)
-		}
-	}
-	if err := checkOAuthLockDirOwner(info); err != nil {
+	if err := validateOAuthLockDir(dir); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -917,15 +923,10 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // permanently consume capacity) or entries that a later read/write can still
 // see and reconcile, never an invisible credential stranded in the OS keychain.
 //
-// The legacy combined entry is never written or deleted by this path. New
-// code cannot share a lock with old writers on other config roots, so any
-// snapshot-then-Set of that account can clobber an unobserved login or
-// truncate a valid oversized Linux keyring map. Legacy stays a read-only
-// discovery source; indexed entries are the sole writable representation.
-// omitFromLegacy lists keys the caller just deleted; they are recorded as
-// durable tombstones and must not be re-merged from the legacy blob even
-// when they were never indexed (a legacy-only old-binary login that the
-// user logged out of).
+// The legacy combined entry is preserved as a discovery source for unindexed
+// old-binary logins. When Delete explicitly logs out of a provider, that key
+// is removed from the legacy blob (or the legacy account deleted if empty)
+// so a downgraded binary cannot continue to use the revoked credential.
 func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease leaseCheck) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -1196,11 +1197,16 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 			return err
 		}
 		if len(legacyTokens) == 0 {
-			_, _ = b.kr.Delete(b.service, b.legacyAccount)
+			if _, err := b.kr.Delete(b.service, b.legacyAccount); err != nil {
+				return fmt.Errorf("oauth: delete empty legacy keyring blob: %w", err)
+			}
 		} else {
 			legacyData, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokens})
-			if err == nil {
-				_ = b.kr.Set(b.service, b.legacyAccount, base64.StdEncoding.EncodeToString(legacyData))
+			if err != nil {
+				return fmt.Errorf("oauth: encode updated legacy keyring blob: %w", err)
+			}
+			if err := b.kr.Set(b.service, b.legacyAccount, base64.StdEncoding.EncodeToString(legacyData)); err != nil {
+				return fmt.Errorf("oauth: update legacy keyring blob: %w", err)
 			}
 		}
 	}
@@ -1244,6 +1250,12 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leas
 	}
 	if len(tombstones) == 0 {
 		if !existed {
+			return nil
+		}
+		if len(missingChunks) > 0 {
+			if _, _, err := tb.writeKeyIndex(nil, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
+				return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
+			}
 			return nil
 		}
 		if err := checkLease(); err != nil {
@@ -1315,6 +1327,12 @@ func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseC
 	}
 	if len(origin) == 0 {
 		if !existed {
+			return nil
+		}
+		if len(missingChunks) > 0 {
+			if _, _, err := lb.writeKeyIndex(nil, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
+				return fmt.Errorf("oauth: write keyring legacy-origin markers: %w", err)
+			}
 			return nil
 		}
 		if err := checkLease(); err != nil {
@@ -1524,8 +1542,8 @@ func (b keyringBlob) readKeyIndex() (keys []string, ok bool, chunks int, generat
 	if header.Chunks < 1 || header.Chunks > maxKeyringIndexChunks {
 		return nil, false, 0, 0, nil, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
 	}
-	if header.Generation < 0 {
-		return nil, false, 0, 0, nil, fmt.Errorf("oauth: keyring token index advertises a negative generation %d", header.Generation)
+	if header.Generation < 0 || header.Generation >= math.MaxInt {
+		return nil, false, 0, 0, nil, fmt.Errorf("oauth: keyring token index advertises invalid generation %d", header.Generation)
 	}
 	rawKeys := header.Keys
 	if len(rawKeys) > maxRawKeyringIndexKeys {
@@ -1613,6 +1631,9 @@ func dedupeValidKeys(keys []string) []string {
 // unconditionally; it is now scoped to only the case where advancing the
 // generation is not safe to begin with.
 func (b keyringBlob) writeKeyIndex(keys []string, priorChunks, priorGeneration int, missingChunks []int, checkLease leaseCheck) (chunks int, generation int, err error) {
+	if priorGeneration < 0 || priorGeneration >= math.MaxInt {
+		return 0, 0, fmt.Errorf("oauth: keyring key index generation overflow: %d", priorGeneration)
+	}
 	// Refuse to publish an index the reader would reject: readKeyIndex caps both
 	// total keys and chunk count, and a header beyond either would make every
 	// later Load/Status/Save/Delete fail before it could recover. Check the key
@@ -1638,7 +1659,7 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks, priorGeneration i
 // currently reads; the header Set is the only step any concurrent or crashed
 // reader can observe as a change at all.
 func (b keyringBlob) writeKeyIndexNewGeneration(chunkList [][]string, priorChunks, priorGeneration int, checkLease leaseCheck) (chunks int, generation int, err error) {
-	if priorGeneration >= math.MaxInt {
+	if priorGeneration < 0 || priorGeneration >= math.MaxInt {
 		return 0, 0, fmt.Errorf("oauth: keyring key index generation overflow: %d", priorGeneration)
 	}
 	newGeneration := priorGeneration + 1
@@ -1694,6 +1715,9 @@ func (b keyringBlob) writeKeyIndexNewGeneration(chunkList [][]string, priorChunk
 // is not protected is still overwritten in place, since there is no
 // generation boundary available to defer that behind here.
 func (b keyringBlob) writeKeyIndexInPlace(chunkList [][]string, priorChunks, priorGeneration int, missingChunks []int, checkLease leaseCheck) (chunks int, generation int, err error) {
+	if priorGeneration < 0 || priorGeneration >= math.MaxInt {
+		return 0, 0, fmt.Errorf("oauth: keyring key index generation overflow: %d", priorGeneration)
+	}
 	protected := make(map[int]bool, len(missingChunks))
 	maxProtected := 0
 	for _, c := range missingChunks {

@@ -3528,6 +3528,96 @@ func TestKeyringDeleteRemovesCredentialFromLegacyBlob(t *testing.T) {
 	}
 }
 
+// TestStoreKeyringDowngradedLegacyReaderCannotAuthenticateAfterLogout is the
+// regression for [P1] Logout doesn't revoke legacy representation: after migration
+// to per-key entries, Delete removes the per-key entry and records a tombstone,
+// but must also remove that provider from the legacy oauth-tokens blob so a
+// downgraded / pre-PR binary reading the legacy account directly cannot
+// authenticate using the logged-out credentials.
+func TestStoreKeyringDowngradedLegacyReaderCannotAuthenticateAfterLogout(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+
+	// 1. Older binary logged into github and anthropic via the legacy single-blob entry.
+	legacyTokens := map[string]Token{
+		ProviderKey("github"):    {AccessToken: "gh-secret-token", RefreshToken: "gh-refresh"},
+		ProviderKey("anthropic"): {AccessToken: "ant-secret-token", RefreshToken: "ant-refresh"},
+	}
+	legacyRaw, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyRaw)
+
+	// A legacy reader helper simulating a pre-PR binary that only reads the legacy account.
+	legacyReaderAuthenticate := func(provider string) (Token, bool) {
+		enc, ok := kr.data[keyringService+"/"+keyringLegacyAccount]
+		if !ok {
+			return Token{}, false
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+		if err != nil {
+			return Token{}, false
+		}
+		var sf storeFile
+		if err := json.Unmarshal(raw, &sf); err != nil {
+			return Token{}, false
+		}
+		tok, has := sf.Tokens[ProviderKey(provider)]
+		return tok, has
+	}
+
+	// Legacy reader sees both credentials initially.
+	if tok, ok := legacyReaderAuthenticate("github"); !ok || tok.AccessToken != "gh-secret-token" {
+		t.Fatalf("legacy reader before logout: github token = %v, ok = %v", tok, ok)
+	}
+	if tok, ok := legacyReaderAuthenticate("anthropic"); !ok || tok.AccessToken != "ant-secret-token" {
+		t.Fatalf("legacy reader before logout: anthropic token = %v, ok = %v", tok, ok)
+	}
+
+	// 2. Upgraded binary initializes the store, migrating credentials to per-key entries.
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// User logs out of github in the upgraded binary.
+	removed, err := s.Delete(ProviderKey("github"))
+	if err != nil || !removed {
+		t.Fatalf("Delete(github): removed=%v err=%v", removed, err)
+	}
+
+	// Upgraded binary confirms github is gone.
+	if _, ok, err := s.Load(ProviderKey("github")); err != nil || ok {
+		t.Fatalf("upgraded Load(github): ok=%v err=%v, want false", ok, err)
+	}
+
+	// 3. Mixed-version / downgraded reader check:
+	// A downgraded binary reading the legacy account must NOT find github tokens after logout.
+	if tok, ok := legacyReaderAuthenticate("github"); ok {
+		t.Fatalf("downgraded binary was able to authenticate with github token %v after logout!", tok)
+	}
+
+	// The downgraded binary can still read the non-logged-out anthropic token.
+	if tok, ok := legacyReaderAuthenticate("anthropic"); !ok || tok.AccessToken != "ant-secret-token" {
+		t.Fatalf("downgraded binary anthropic token = %v, ok = %v, want anthropic preserved", tok, ok)
+	}
+
+	// Now logout of anthropic as well.
+	removed, err = s.Delete(ProviderKey("anthropic"))
+	if err != nil || !removed {
+		t.Fatalf("Delete(anthropic): removed=%v err=%v", removed, err)
+	}
+
+	// Downgraded binary sees no tokens at all now.
+	if tok, ok := legacyReaderAuthenticate("anthropic"); ok {
+		t.Fatalf("downgraded binary was able to authenticate with anthropic token %v after all providers logged out!", tok)
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
+		t.Fatal("legacy account still exists in keyring after all providers logged out")
+	}
+}
+
 func TestKeyringWriteKeyIndexNewGenerationOverflowRejection(t *testing.T) {
 	blob := keyringBlob{kr: newFakeKR(), service: keyringService, indexAccount: keyringIndexAccount}
 	chunkList := [][]string{{"provider:one"}}
@@ -3537,25 +3627,184 @@ func TestKeyringWriteKeyIndexNewGenerationOverflowRejection(t *testing.T) {
 	}
 }
 
-func TestKeyringLeaseCheckFailsOnDiskLockTheft(t *testing.T) {
-	lockPath := filepath.Join(t.TempDir(), "test.lock")
-	var checked error
-	err := withLeasedLocks([]string{lockPath}, time.Now, func(check leaseCheck) error {
-		// Verify check succeeds initially.
-		if err := check(); err != nil {
-			t.Fatalf("initial check failed: %v", err)
-		}
-		// Steal lock on disk.
-		if err := os.WriteFile(lockPath, []byte("stolen-token"), 0o600); err != nil {
+// TestKeyringWriteSynchronousCheckLeaseAbortsOnReplacedLock is the regression for
+// [P1] Lock ownership fence is async only: checkLease must synchronously verify
+// ownLockFile(path, token) before every externally visible keyring mutation,
+// so that a lock stolen/reclaimed while the holder was paused is detected immediately
+// on the write side without relying on the asynchronous refresher goroutine.
+func TestKeyringWriteSynchronousCheckLeaseAbortsOnReplacedLock(t *testing.T) {
+	prevRefresh := fileLockRefreshInterval
+	fileLockRefreshInterval = 24 * time.Hour // Ensure async refresher NEVER runs during this test
+	defer func() { fileLockRefreshInterval = prevRefresh }()
+
+	lockPath := filepath.Join(t.TempDir(), "fencing.lock")
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: "zero-test", indexAccount: "idx", lockPath: lockPath}
+
+	names := []string{"p1", "p2", "p3"}
+	tokens := make(map[string]Token, len(names))
+	mutations := make(map[string]bool, len(names))
+	for _, n := range names {
+		k := ProviderKey(n)
+		tokens[k] = Token{AccessToken: n}
+		mutations[k] = false
+	}
+	state := storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run write under withLeasedLocks
+	writeErr := withLeasedLocks([]string{lockPath}, time.Now, func(check leaseCheck) error {
+		// Steal lock on disk immediately before write
+		if err := os.WriteFile(lockPath, []byte("stolen-by-peer"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		checked = check()
-		return checked
+		// write() calls checkLease() before any keyring mutation
+		return b.write(data, mutations, check)
 	})
-	if err == nil || !strings.Contains(err.Error(), "lost token lock lease") {
-		t.Fatalf("expected lost lease error after lock theft, got %v", err)
+
+	if writeErr == nil || !strings.Contains(writeErr.Error(), "lost token lock lease") {
+		t.Fatalf("writeErr = %v, want lost token lock lease error", writeErr)
 	}
-	if checked == nil || !strings.Contains(checked.Error(), "lost token lock lease") {
-		t.Fatalf("expected leaseCheck to return error immediately, got %v", checked)
+	if len(kr.data) != 0 {
+		t.Fatalf("keyring was mutated after lock was replaced: %#v", kr.data)
+	}
+}
+
+// TestStoreKeyringTombstonesPreserveMissingChunksOnWrite is the regression for
+// [P1] Tombstone index missing chunks lost on write: when multi-chunk tombstones
+// have a missing continuation chunk, writeTombstones must carry missing chunk slots
+// through to writeKeyIndexInPlace so the missing chunk's markers are not destroyed.
+func TestStoreKeyringTombstonesPreserveMissingChunksOnWrite(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+	tb := b.tombstoneBlob()
+
+	// 1. Create multi-chunk tombstones (needs > 2700 bytes to split into >= 2 chunks)
+	tombstones := make(map[string]bool, 80)
+	for i := 0; i < 80; i++ {
+		tombstones[fmt.Sprintf("provider:retired-provider-with-a-longer-name-%03d", i)] = true
+	}
+	if err := b.writeTombstones(tombstones, noLeaseLoss); err != nil {
+		t.Fatalf("initial writeTombstones: %v", err)
+	}
+
+	// Verify we wrote at least 2 chunks
+	_, ok, chunks, gen, missing, err := tb.readKeyIndex()
+	if err != nil || !ok || chunks < 2 || len(missing) != 0 {
+		t.Fatalf("setup check: ok=%v, chunks=%d, gen=%d, missing=%v, err=%v", ok, chunks, gen, missing, err)
+	}
+
+	// 2. Simulate chunk 1 becoming unavailable (e.g. transient failure / corrupted account)
+	chunk1Account := tb.chunkAccount(gen, 1)
+	savedChunk1Data, chunk1Existed := kr.data[tb.service+"/"+chunk1Account]
+	if !chunk1Existed {
+		t.Fatalf("expected chunk account %s in fake keyring", chunk1Account)
+	}
+	delete(kr.data, tb.service+"/"+chunk1Account)
+
+	// Verify readKeyIndex now reports chunk 1 as missing
+	_, ok, chunksAfter, genAfter, missingAfter, err := tb.readKeyIndex()
+	if err != nil || !ok || len(missingAfter) != 1 || missingAfter[0] != 1 {
+		t.Fatalf("after deleting chunk 1: ok=%v, missing=%v, chunks=%d, err=%v", ok, missingAfter, chunksAfter, err)
+	}
+
+	// 3. Write a new tombstone while chunk 1 is missing
+	tombstones[ProviderKey("new-retired-provider")] = true
+	if err := b.writeTombstones(tombstones, noLeaseLoss); err != nil {
+		t.Fatalf("writeTombstones with missing chunk: %v", err)
+	}
+
+	// Verify the index still advertises chunks covering the missing slot
+	_, ok, chunksAfterWrite, genAfterWrite, missingAfterWrite, err := tb.readKeyIndex()
+	if err != nil || !ok || len(missingAfterWrite) != 1 || missingAfterWrite[0] != 1 {
+		t.Fatalf("after write with missing chunk: ok=%v, missing=%v, chunks=%d, err=%v", ok, missingAfterWrite, chunksAfterWrite, err)
+	}
+	if genAfterWrite != genAfter {
+		t.Fatalf("generation changed during in-place update with missing chunks: got %d, want %d", genAfterWrite, genAfter)
+	}
+
+	// 4. Restore chunk 1
+	kr.data[tb.service+"/"+chunk1Account] = savedChunk1Data
+
+	// Verify readTombstones now reads ALL tombstones from all chunks intact
+	allTombstones, err := b.readTombstones()
+	if err != nil {
+		t.Fatalf("readTombstones after restore: %v", err)
+	}
+	if !allTombstones[ProviderKey("new-retired-provider")] {
+		t.Fatal("new tombstone missing after restoring chunk 1")
+	}
+	for k := range tombstones {
+		if !allTombstones[k] {
+			t.Fatalf("tombstone %s was lost during write with missing chunk!", k)
+		}
+	}
+}
+
+// TestValidateOAuthLockDir verifies validateOAuthLockDir enforces 0700 permissions
+// and rejects symlinks and regular files.
+func TestValidateOAuthLockDir(t *testing.T) {
+	temp := t.TempDir()
+
+	// 1. Valid directory creation
+	validDir := filepath.Join(temp, "valid-lock-dir")
+	if err := validateOAuthLockDir(validDir); err != nil {
+		t.Fatalf("validateOAuthLockDir(valid): %v", err)
+	}
+
+	// 2. Symlink rejection
+	symlinkTarget := filepath.Join(temp, "target-dir")
+	if err := os.MkdirAll(symlinkTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(temp, "symlink-dir")
+	if err := os.Symlink(symlinkTarget, symlinkPath); err == nil {
+		if err := validateOAuthLockDir(symlinkPath); err == nil {
+			t.Fatal("validateOAuthLockDir should reject symlinks")
+		}
+	}
+
+	// 3. Regular file rejection
+	filePath := filepath.Join(temp, "file-not-dir")
+	if err := os.WriteFile(filePath, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOAuthLockDir(filePath); err == nil {
+		t.Fatal("validateOAuthLockDir should reject regular files")
+	}
+}
+
+// TestStoreKeyringGenerationBoundaryRejection is the regression for
+// [P2] Max generation overflow not rejected: readKeyIndex and writeKeyIndex
+// must reject generations that cannot safely advance (negative or >= math.MaxInt).
+func TestStoreKeyringGenerationBoundaryRejection(t *testing.T) {
+	kr := newFakeKR()
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+
+	// 1. readKeyIndex rejects negative generation
+	headerNeg, _ := json.Marshal(keyIndexHeader{Version: 1, Chunks: 1, Generation: -1, Keys: []string{"provider:p1"}})
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(headerNeg)
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("readKeyIndex should reject negative generation")
+	}
+
+	// 2. readKeyIndex rejects math.MaxInt generation
+	headerMax, _ := json.Marshal(keyIndexHeader{Version: 1, Chunks: 1, Generation: math.MaxInt, Keys: []string{"provider:p1"}})
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(headerMax)
+	if _, _, _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("readKeyIndex should reject math.MaxInt generation")
+	}
+
+	// 3. writeKeyIndex rejects math.MaxInt generation
+	if _, _, err := blob.writeKeyIndex([]string{ProviderKey("p1")}, 1, math.MaxInt, nil, noLeaseLoss); err == nil {
+		t.Fatal("writeKeyIndex should reject math.MaxInt generation")
+	}
+
+	// 4. writeKeyIndexInPlace rejects math.MaxInt generation
+	if _, _, err := blob.writeKeyIndexInPlace([][]string{{ProviderKey("p1")}}, 1, math.MaxInt, []int{1}, noLeaseLoss); err == nil {
+		t.Fatal("writeKeyIndexInPlace should reject math.MaxInt generation")
 	}
 }
