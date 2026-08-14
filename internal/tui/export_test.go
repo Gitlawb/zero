@@ -2,9 +2,7 @@
 package tui
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -102,20 +100,6 @@ func (s planPanelState) height(width int, now time.Time) int {
 		return 2 + len(s.steps)
 	}
 	return 2
-}
-
-func GetLocalDiffStats(baseBranch string) (additions int, deletions int, err error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return 0, 0, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), prCommandTimeout)
-	defer cancel()
-	return getLocalDiffStats(ctx, cwd, baseBranch, defaultPRCommandRunner)
-}
-
-func WatchPRState(service *PrService, onChange func(PrState)) func() {
-	return WatchPRStateContext(context.Background(), service, onChange)
 }
 
 func (c *staticRenderCache) retainedCharacters() int {
