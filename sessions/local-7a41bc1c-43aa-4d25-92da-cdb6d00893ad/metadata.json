@@ -3,8 +3,8 @@
   "sessionId": "local-7a41bc1c-43aa-4d25-92da-cdb6d00893ad",
   "model": "claude-opus-5",
   "startedAt": "2026-08-14T15:48:46.047Z",
-  "endedAt": "2026-08-14T15:50:07.086Z",
-  "durationMs": 81027,
+  "endedAt": "2026-08-14T15:50:10.709Z",
+  "durationMs": 84651,
   "status": "running",
   "tokens": {
     "total": 3422,
@@ -16,21 +16,28 @@
   },
   "toolCalls": 5,
   "lines": {
-    "added": 885,
-    "removed": 0
+    "added": 1242,
+    "removed": 7
   },
   "filesChanged": [
-    "internal/memory/escape_test.go",
-    "internal/memory/memory.go",
-    "internal/memory/memory_test.go",
-    "internal/tools/memory.go"
+    "internal/credstore/concurrency_test.go",
+    "internal/credstore/credstore.go",
+    "internal/credstore/filelock_unix.go",
+    "internal/credstore/filelock_windows.go",
+    "internal/pathjail/pathjail.go",
+    "internal/pathjail/pathjail_test.go",
+    "internal/worktrees/run_git_test.go",
+    "internal/worktrees/run_git_unix.go",
+    "internal/worktrees/run_git_unix_test.go",
+    "internal/worktrees/run_git_windows.go",
+    "internal/worktrees/worktrees.go"
   ],
   "git": {
     "branch": "fixround",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "b6b27bae0f7b15cfa1c46fb19dee3d7affcad5bb",
+    "headAfter": "f952915060dd04448f9bd4f0d3b9c57418473fcb",
     "commitShas": [
-      "b6b27bae0f7b15cfa1c46fb19dee3d7affcad5bb"
+      "f952915060dd04448f9bd4f0d3b9c57418473fcb"
     ]
   },
   "summary": "The comment claims \"Reads are confined too\" with no `RefuseReparse` call — exactly the overstatement Vasanth flagged. Let me see the rest:",
