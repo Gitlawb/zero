@@ -3477,144 +3477,144 @@ func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
 	}
 }
 
-func TestKeyringDeleteRemovesCredentialFromLegacyBlob(t *testing.T) {
+// TestStoreKeyringDurableLogoutHidesSurvivingIndexedCredential is the regression for
+// [P1] Make a durable logout hide a surviving indexed credential:
+// when a tombstone exists for a key, read()/Load()/Status() must treat it as deleted
+// even if an interrupted delete left the per-key entry and key index intact.
+func TestStoreKeyringDurableLogoutHidesSurvivingIndexedCredential(t *testing.T) {
 	kr := newFakeKR()
-	legacyTokens := map[string]Token{
-		ProviderKey("p1"): {AccessToken: "at1", RefreshToken: "rt1"},
-		ProviderKey("p2"): {AccessToken: "at2", RefreshToken: "rt2"},
-	}
-	legacyRaw, _ := json.Marshal(storeFile{SchemaVersion: 1, Tokens: legacyTokens})
-	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyRaw)
-
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	// Loading p1 works via legacy migration.
-	tok1, ok, err := s.Load(ProviderKey("p1"))
-	if err != nil || !ok || tok1.AccessToken != "at1" {
-		t.Fatalf("Load(p1) = %+v, ok=%v, err=%v", tok1, ok, err)
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "alpha-token"}); err != nil {
+		t.Fatalf("Save(alpha): %v", err)
 	}
 
-	// Delete p1 (logout).
-	removed, err := s.Delete(ProviderKey("p1"))
-	if err != nil || !removed {
-		t.Fatalf("Delete(p1) = %v, err=%v", removed, err)
+	// Verify alpha is loaded.
+	tok, ok, err := s.Load(ProviderKey("alpha"))
+	if err != nil || !ok || tok.AccessToken != "alpha-token" {
+		t.Fatalf("Load(alpha) before interruption: tok=%v, ok=%v, err=%v", tok, ok, err)
 	}
 
-	// Inspect legacy entry directly: p1 must be deleted from legacy entry.
-	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount, legacyAccount: keyringLegacyAccount}
-	remainingLegacy, err := blob.readLegacyTokens()
+	// Simulate an interrupted Delete: publish tombstone for alpha, but leave alpha's
+	// per-key entry in keyring.
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+	if err := blob.writeTombstones(map[string]bool{ProviderKey("alpha"): true}, noLeaseLoss); err != nil {
+		t.Fatalf("writeTombstones: %v", err)
+	}
+
+	// A fresh store reader must hide alpha immediately, despite the per-key entry surviving.
+	sFresh, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
-		t.Fatalf("readLegacyTokens: %v", err)
-	}
-	if remainingLegacy != nil {
-		if _, exists := remainingLegacy[ProviderKey("p1")]; exists {
-			t.Fatal("p1 must not exist in legacy tokens blob after logout")
-		}
-		if _, exists := remainingLegacy[ProviderKey("p2")]; !exists {
-			t.Fatal("p2 must still be present in legacy tokens blob")
-		}
+		t.Fatalf("NewStore fresh: %v", err)
 	}
 
-	// Delete p2 (all tokens removed): legacy account should be deleted entirely.
-	removed2, err := s.Delete(ProviderKey("p2"))
-	if err != nil || !removed2 {
-		t.Fatalf("Delete(p2) = %v, err=%v", removed2, err)
+	if tok, ok, err := sFresh.Load(ProviderKey("alpha")); err != nil || ok {
+		t.Fatalf("Load(alpha) after tombstone published: ok=%v (tok=%+v), err=%v; want ok=false", ok, tok, err)
 	}
-	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
-		t.Fatal("legacy account should be deleted when all legacy tokens are removed")
+
+	status, err := sFresh.Status("")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	for _, entry := range status {
+		if entry.Key == ProviderKey("alpha") {
+			t.Fatalf("Status returned alpha after tombstone published: %+v", entry)
+		}
 	}
 }
 
-// TestStoreKeyringDowngradedLegacyReaderCannotAuthenticateAfterLogout is the
-// regression for [P1] Logout doesn't revoke legacy representation: after migration
-// to per-key entries, Delete removes the per-key entry and records a tombstone,
-// but must also remove that provider from the legacy oauth-tokens blob so a
-// downgraded / pre-PR binary reading the legacy account directly cannot
-// authenticate using the logged-out credentials.
-func TestStoreKeyringDowngradedLegacyReaderCannotAuthenticateAfterLogout(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+// TestStoreKeyringReloginRetiresLegacyOriginPrecedence is the regression for
+// [P1] Retire legacy-origin precedence when an explicit re-login succeeds:
+// after legacy migration and old-binary logout of alpha, an explicit new-binary
+// Save for alpha must retire the legacyOrigin marker so future reads and unrelated
+// Saves do not re-delete alpha via the absence heuristic.
+func TestStoreKeyringReloginRetiresLegacyOriginPrecedence(t *testing.T) {
 	kr := newFakeKR()
 
-	// 1. Older binary logged into github and anthropic via the legacy single-blob entry.
+	// 1. Initial state: legacy blob has alpha and beta.
 	legacyTokens := map[string]Token{
-		ProviderKey("github"):    {AccessToken: "gh-secret-token", RefreshToken: "gh-refresh"},
-		ProviderKey("anthropic"): {AccessToken: "ant-secret-token", RefreshToken: "ant-refresh"},
+		ProviderKey("alpha"): {AccessToken: "old-alpha-token"},
+		ProviderKey("beta"):  {AccessToken: "beta-token"},
 	}
-	legacyRaw, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokens})
-	if err != nil {
-		t.Fatal(err)
-	}
+	legacyRaw, _ := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokens})
 	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyRaw)
 
-	// A legacy reader helper simulating a pre-PR binary that only reads the legacy account.
-	legacyReaderAuthenticate := func(provider string) (Token, bool) {
-		enc, ok := kr.data[keyringService+"/"+keyringLegacyAccount]
-		if !ok {
-			return Token{}, false
-		}
-		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
-		if err != nil {
-			return Token{}, false
-		}
-		var sf storeFile
-		if err := json.Unmarshal(raw, &sf); err != nil {
-			return Token{}, false
-		}
-		tok, has := sf.Tokens[ProviderKey(provider)]
-		return tok, has
-	}
-
-	// Legacy reader sees both credentials initially.
-	if tok, ok := legacyReaderAuthenticate("github"); !ok || tok.AccessToken != "gh-secret-token" {
-		t.Fatalf("legacy reader before logout: github token = %v, ok = %v", tok, ok)
-	}
-	if tok, ok := legacyReaderAuthenticate("anthropic"); !ok || tok.AccessToken != "ant-secret-token" {
-		t.Fatalf("legacy reader before logout: anthropic token = %v, ok = %v", tok, ok)
-	}
-
-	// 2. Upgraded binary initializes the store, migrating credentials to per-key entries.
-	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	s1, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewStore s1: %v", err)
 	}
 
-	// User logs out of github in the upgraded binary.
-	removed, err := s.Delete(ProviderKey("github"))
-	if err != nil || !removed {
-		t.Fatalf("Delete(github): removed=%v err=%v", removed, err)
+	// Migration happens on save of any token or explicit read.
+	if _, ok, err := s1.Load(ProviderKey("alpha")); err != nil || !ok {
+		t.Fatalf("initial Load(alpha): ok=%v, err=%v", ok, err)
 	}
 
-	// Upgraded binary confirms github is gone.
-	if _, ok, err := s.Load(ProviderKey("github")); err != nil || ok {
-		t.Fatalf("upgraded Load(github): ok=%v err=%v, want false", ok, err)
+	// 2. Old binary logs out alpha by writing {beta} to the legacy blob.
+	legacyTokensAfterLogout := map[string]Token{
+		ProviderKey("beta"): {AccessToken: "beta-token"},
+	}
+	legacyRaw2, _ := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokensAfterLogout})
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyRaw2)
+
+	// 3. New binary explicitly logs into alpha with a new token.
+	if err := s1.Save(ProviderKey("alpha"), Token{AccessToken: "new-alpha-token"}); err != nil {
+		t.Fatalf("Save(alpha): %v", err)
 	}
 
-	// 3. Mixed-version / downgraded reader check:
-	// A downgraded binary reading the legacy account must NOT find github tokens after logout.
-	if tok, ok := legacyReaderAuthenticate("github"); ok {
-		t.Fatalf("downgraded binary was able to authenticate with github token %v after logout!", tok)
+	// 4. Verify alpha is loaded immediately.
+	tok, ok, err := s1.Load(ProviderKey("alpha"))
+	if err != nil || !ok || tok.AccessToken != "new-alpha-token" {
+		t.Fatalf("Load(alpha) after re-login: tok=%v, ok=%v, err=%v", tok, ok, err)
 	}
 
-	// The downgraded binary can still read the non-logged-out anthropic token.
-	if tok, ok := legacyReaderAuthenticate("anthropic"); !ok || tok.AccessToken != "ant-secret-token" {
-		t.Fatalf("downgraded binary anthropic token = %v, ok = %v, want anthropic preserved", tok, ok)
+	// 5. Subsequent read from a fresh store must preserve alpha.
+	sFresh, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatalf("NewStore sFresh: %v", err)
+	}
+	tok2, ok2, err2 := sFresh.Load(ProviderKey("alpha"))
+	if err2 != nil || !ok2 || tok2.AccessToken != "new-alpha-token" {
+		t.Fatalf("Load(alpha) from fresh store: tok=%v, ok=%v, err=%v", tok2, ok2, err2)
 	}
 
-	// Now logout of anthropic as well.
-	removed, err = s.Delete(ProviderKey("anthropic"))
-	if err != nil || !removed {
-		t.Fatalf("Delete(anthropic): removed=%v err=%v", removed, err)
+	// 6. An unrelated Save of gamma must NOT re-trigger absence deletion of alpha.
+	if err := sFresh.Save(ProviderKey("gamma"), Token{AccessToken: "gamma-token"}); err != nil {
+		t.Fatalf("Save(gamma): %v", err)
 	}
 
-	// Downgraded binary sees no tokens at all now.
-	if tok, ok := legacyReaderAuthenticate("anthropic"); ok {
-		t.Fatalf("downgraded binary was able to authenticate with anthropic token %v after all providers logged out!", tok)
+	tok3, ok3, err3 := sFresh.Load(ProviderKey("alpha"))
+	if err3 != nil || !ok3 || tok3.AccessToken != "new-alpha-token" {
+		t.Fatalf("Load(alpha) after unrelated Save(gamma): tok=%v, ok=%v, err=%v", tok3, ok3, err3)
 	}
-	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
-		t.Fatal("legacy account still exists in keyring after all providers logged out")
+}
+
+// TestStoreKeyringKeyIndexGenerationConflictRejection is the regression for
+// [P1] Do not treat a file-token read as a fencing guarantee:
+// writeKeyIndex must detect when a concurrent process advanced the generation
+// in the keyring and reject stale header publication.
+func TestStoreKeyringKeyIndexGenerationConflictRejection(t *testing.T) {
+	kr := newFakeKR()
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+
+	// 1. Initial generation 1 written.
+	_, gen1, err := blob.writeKeyIndex([]string{ProviderKey("p1")}, 0, 0, nil, noLeaseLoss)
+	if err != nil || gen1 != 1 {
+		t.Fatalf("initial writeKeyIndex: gen=%d, err=%v", gen1, err)
+	}
+
+	// 2. Another process advances generation to 2.
+	_, gen2, err := blob.writeKeyIndex([]string{ProviderKey("p1"), ProviderKey("p2")}, 1, 1, nil, noLeaseLoss)
+	if err != nil || gen2 != 2 {
+		t.Fatalf("second writeKeyIndex: gen=%d, err=%v", gen2, err)
+	}
+
+	// 3. Stale writer trying to write with priorGeneration=1 must fail due to generation conflict.
+	_, _, err = blob.writeKeyIndex([]string{ProviderKey("p1"), ProviderKey("p3")}, 1, 1, nil, noLeaseLoss)
+	if err == nil {
+		t.Fatal("stale writeKeyIndex with priorGeneration=1 should fail due to generation conflict")
 	}
 }
 

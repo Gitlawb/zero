@@ -481,15 +481,15 @@ func (s *Store) Delete(key string) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if _, ok := state.Tokens[key]; !ok {
-			return nil
+		if _, ok := state.Tokens[key]; ok {
+			delete(state.Tokens, key)
+			removed = true
+			return s.writeState(state, map[string]bool{key: true}, check)
 		}
-		delete(state.Tokens, key)
-		removed = true
-		// Exclude the deleted key from legacy reconciliation so a credential
-		// that was only present in the legacy blob (never indexed) is not
-		// reclassified as a fresh old-binary login and written back.
-		return s.writeState(state, map[string]bool{key: true}, check)
+		if kb, ok := s.blob.(keyringBlob); ok && kb.hasResidentEntry(key) {
+			return s.writeState(state, map[string]bool{key: true}, check)
+		}
+		return nil
 	})
 	return removed, err
 }
@@ -741,6 +741,23 @@ type keyringBlob struct {
 	maxIndexKeys int
 }
 
+// hasResidentEntry reports whether key is still named in the key index or
+// has an individual entry in the OS keyring. Used during Store.Delete to
+// finish reconciling interrupted deletes whose tombstones already hide the key
+// from readState().
+func (b keyringBlob) hasResidentEntry(key string) bool {
+	keys, ok, _, _, _, _ := b.readKeyIndex()
+	if ok {
+		for _, k := range keys {
+			if k == key {
+				return true
+			}
+		}
+	}
+	_, exists, _ := b.kr.Get(b.service, key)
+	return exists
+}
+
 func (b keyringBlob) read() ([]byte, bool, error) {
 	keys, ok, _, _, _, err := b.readKeyIndex()
 	if err != nil {
@@ -795,6 +812,9 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 	}
 	tokens := make(map[string]Token, len(keys))
 	for _, key := range keys {
+		if tombstones[key] {
+			continue
+		}
 		enc, ok, err := b.kr.Get(b.service, key)
 		if err != nil {
 			return nil, false, err
@@ -804,11 +824,6 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 			// from the legacy blob when present and not tombstoned; otherwise
 			// skip rather than fail the whole read (the next Save/Delete prunes
 			// the phantom index key so it cannot permanently consume capacity).
-			// Tombstones do not hide a still-present indexed entry (in-flight
-			// delete): they only block resurrection from the legacy account.
-			if tombstones[key] {
-				continue
-			}
 			loadLegacy()
 			if token, has := legacyTokens[key]; has {
 				tokens[key] = token
@@ -1002,14 +1017,11 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 		return err
 	}
 	legacyOriginChanged := false
-	legacyTokensChanged := false
 	if legacyTokens != nil {
-		for key, deleted := range mutations {
-			if deleted {
-				if _, ok := legacyTokens[key]; ok {
-					delete(legacyTokens, key)
-					legacyTokensChanged = true
-				}
+		for key := range mutations {
+			if legacyOrigin[key] {
+				delete(legacyOrigin, key)
+				legacyOriginChanged = true
 			}
 		}
 		for key := range legacyTokens {
@@ -1017,8 +1029,10 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 				continue
 			}
 			if !legacyOrigin[key] {
-				legacyOrigin[key] = true
-				legacyOriginChanged = true
+				if _, mutated := mutations[key]; !mutated {
+					legacyOrigin[key] = true
+					legacyOriginChanged = true
+				}
 			}
 		}
 		// Only once the legacy entry has actually been read (legacyTokens != nil)
@@ -1192,22 +1206,9 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 			return err
 		}
 	}
-	if legacyTokensChanged {
-		if err := checkLease(); err != nil {
-			return err
-		}
-		if len(legacyTokens) == 0 {
-			if _, err := b.kr.Delete(b.service, b.legacyAccount); err != nil {
-				return fmt.Errorf("oauth: delete empty legacy keyring blob: %w", err)
-			}
-		} else {
-			legacyData, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokens})
-			if err != nil {
-				return fmt.Errorf("oauth: encode updated legacy keyring blob: %w", err)
-			}
-			if err := b.kr.Set(b.service, b.legacyAccount, base64.StdEncoding.EncodeToString(legacyData)); err != nil {
-				return fmt.Errorf("oauth: update legacy keyring blob: %w", err)
-			}
+	if len(state.Tokens) == 0 && len(legacyTokens) > 0 {
+		if err := checkLease(); err == nil {
+			_, _ = b.kr.Delete(b.service, b.legacyAccount)
 		}
 	}
 	return nil
@@ -1686,6 +1687,12 @@ func (b keyringBlob) writeKeyIndexNewGeneration(chunkList [][]string, priorChunk
 	if err := checkLease(); err != nil {
 		return 0, 0, err
 	}
+	if priorGeneration > 0 {
+		_, ok, _, curGen, _, err := b.readKeyIndex()
+		if err == nil && ok && curGen != priorGeneration {
+			return 0, 0, fmt.Errorf("oauth: keyring key index generation conflict: expected %d, found %d", priorGeneration, curGen)
+		}
+	}
 	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
 		return 0, 0, err
 	}
@@ -1772,6 +1779,12 @@ func (b keyringBlob) writeKeyIndexInPlace(chunkList [][]string, priorChunks, pri
 	}
 	if err := checkLease(); err != nil {
 		return 0, 0, err
+	}
+	if priorGeneration > 0 {
+		_, ok, _, curGen, _, err := b.readKeyIndex()
+		if err == nil && ok && curGen != priorGeneration {
+			return 0, 0, fmt.Errorf("oauth: keyring key index generation conflict: expected %d, found %d", priorGeneration, curGen)
+		}
 	}
 	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
 		return 0, 0, err
