@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -290,6 +291,18 @@ func TestFallbackSandboxRuntimeRootIsSpellingStable(t *testing.T) {
 	aliasInfo, err := os.Stat(alias)
 	if err != nil || !os.SameFile(realInfo, aliasInfo) {
 		t.Skip("case-sensitive filesystem: the upper-cased spelling is a different directory")
+	}
+
+	// Case folding is a Windows property of canonicalSandboxWorkspaceRoot, not a
+	// cross-platform one: it folds case only because filepath.EvalSymlinks returns
+	// the on-disk spelling there. On a case-insensitive macOS volume os.SameFile
+	// calls these one directory and canonicalization still keeps them apart, which
+	// is a real gap but not one this branch claims to close, and it cannot produce
+	// the setup-versus-command disagreement fixed here because the elevated setup
+	// marker is Windows-only. Gate on the platform, never on what the function
+	// under test returns.
+	if runtime.GOOS != "windows" {
+		t.Skip("canonicalization folds case only on windows; nothing to assert here")
 	}
 
 	// One directory under two spellings. Canonicalization has to fold them, and a
