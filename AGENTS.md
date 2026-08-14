@@ -132,12 +132,15 @@ These classes drive multi-round reviews. Fix them before requesting review:
   When a test targets a specific layer, call that layer directly rather than
   relying on a public entry point that may refuse earlier.
 - **Hermetic tests:** Tests must not read or write the developer's real config,
-  cache, or state directories. Redirect every root the code under test resolves,
-  not just config: on Unix that means the relevant `XDG_*` variable for each,
-  and on Windows `%AppData%` and `%LocalAppData%`, since `os.UserConfigDir` and
-  `os.UserCacheDir` ignore the XDG variables there. Apply it to every test that
-  reaches the same storage, not only the one where it was first needed; a test
-  that passes on a clean machine and pollutes a real one is a blocker.
+  cache, or state directories. Redirect every root the code under test
+  resolves, not just config. `os.UserConfigDir` and `os.UserCacheDir` read
+  `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` only on Linux and the BSDs. On macOS
+  they derive from `HOME`, and on Windows from `%AppData%` and `%LocalAppData%`.
+  Setting the XDG variables alone still leaves a macOS run writing to the real
+  home, so set `HOME` as well, or take the directory as a parameter. Apply it to
+  every test that reaches the same storage, not only the one where it was first
+  needed; a test that passes on a clean machine and pollutes a real one is a
+  blocker.
 - **Error codes vary by platform and by flag combination:** A check written
   against the code one target returns can be silently inert on another while
   still looking correct. `openat(O_DIRECTORY|O_NOFOLLOW)` on a symlink may
