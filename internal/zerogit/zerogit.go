@@ -898,7 +898,7 @@ func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner
 		}
 		if remoteSHA == "" {
 			// Remote has no such branch yet; count all commits on HEAD.
-			out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "--", "HEAD")
+			out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "HEAD")
 			if err != nil {
 				return 0, err
 			}
@@ -910,7 +910,10 @@ func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner
 		}
 		baseRef = remoteSHA
 	}
-	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "--", baseRef+"..HEAD")
+	if strings.HasPrefix(baseRef, "-") {
+		return 0, fmt.Errorf("invalid base ref %q", baseRef)
+	}
+	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", baseRef+"..HEAD")
 	if err != nil {
 		return 0, err
 	}

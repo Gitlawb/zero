@@ -1341,7 +1341,7 @@ func TestCommitsAhead(t *testing.T) {
 		if count != 3 {
 			t.Fatalf("count = %d, want 3", count)
 		}
-		if got := runner.commandLine(0); got != "git rev-list --count -- origin/main..HEAD" {
+		if got := runner.commandLine(0); got != "git rev-list --count origin/main..HEAD" {
 			t.Fatalf("unexpected rev-list command: %q", got)
 		}
 	})
@@ -1362,7 +1362,7 @@ func TestCommitsAhead(t *testing.T) {
 		if got := runner.commandLine(0); got != "git ls-remote --heads -- https://github.com/example/repo.git refs/heads/main" {
 			t.Fatalf("unexpected ls-remote command: %q", got)
 		}
-		if got := runner.commandLine(1); got != "git rev-list --count -- abc1234..HEAD" {
+		if got := runner.commandLine(1); got != "git rev-list --count abc1234..HEAD" {
 			t.Fatalf("unexpected rev-list command: %q", got)
 		}
 	})
@@ -1383,7 +1383,7 @@ func TestCommitsAhead(t *testing.T) {
 		if got := runner.commandLine(0); got != "git ls-remote --heads -- /path/to/bare.git refs/heads/main" {
 			t.Fatalf("unexpected ls-remote command: %q", got)
 		}
-		if got := runner.commandLine(1); got != "git rev-list --count -- HEAD" {
+		if got := runner.commandLine(1); got != "git rev-list --count HEAD" {
 			t.Fatalf("unexpected rev-list command: %q", got)
 		}
 	})
