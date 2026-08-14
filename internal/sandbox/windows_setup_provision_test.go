@@ -273,13 +273,31 @@ func TestFallbackSandboxRuntimeRootIsSpellingStable(t *testing.T) {
 	// volume setting: 8.3 generation is disabled on many volumes and creating a
 	// symlink needs a privilege the test process may not hold, while a
 	// case-insensitive filesystem resolves this to the same directory and
-	// GetLongPathName returns the on-disk casing. Skipped rather than passed
-	// vacuously where the filesystem is case-sensitive, since there the two names
-	// really are different directories.
+	// GetLongPathName returns the on-disk casing.
 	alias := strings.ToUpper(tempRoot)
+	if alias == tempRoot {
+		t.Skip("the temp path has no distinct upper-cased spelling here")
+	}
+
+	// Decide whether the alias is usable by asking the filesystem, never by asking
+	// canonicalSandboxWorkspaceRoot. Skipping on what the function under test says
+	// would turn a canonicalization regression into a silent skip on the one
+	// platform this test exists to protect.
+	realInfo, err := os.Stat(tempRoot)
+	if err != nil {
+		t.Fatalf("stat temp dir: %v", err)
+	}
+	aliasInfo, err := os.Stat(alias)
+	if err != nil || !os.SameFile(realInfo, aliasInfo) {
+		t.Skip("case-sensitive filesystem: the upper-cased spelling is a different directory")
+	}
+
+	// One directory under two spellings. Canonicalization has to fold them, and a
+	// failure here is the regression, not a reason to stop testing.
 	canonical := canonicalSandboxWorkspaceRoot(tempRoot)
-	if alias == tempRoot || canonicalSandboxWorkspaceRoot(alias) != canonical {
-		t.Skip("no distinct alias spelling of the temp dir is constructible here")
+	if got := canonicalSandboxWorkspaceRoot(alias); got != canonical {
+		t.Fatalf("canonicalization did not fold two spellings of one directory:\n  %s\n    -> %s\n  %s\n    -> %s\nos.SameFile says these are the same directory, so the runtime roots derived from them will disagree",
+			tempRoot, canonical, alias, got)
 	}
 
 	t.Setenv("TMP", tempRoot)
