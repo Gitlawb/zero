@@ -363,7 +363,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 			return m, nil
 		}
 		activeAfter = cfg.ActiveProvider
-		deleteStoredKey := !config.ProviderCredentialSurvives(cfg.Providers, name)
+		deleteStoredKey := !providerIdentitySurvives(cfg.Providers, name)
 		if deleteStoredKey {
 			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
 		} else {
@@ -409,6 +409,15 @@ func removeSavedProvider(saved []config.ProviderProfile, name string) []config.P
 		kept = append(kept, profile)
 	}
 	return kept
+}
+
+func providerIdentitySurvives(providers []config.ProviderProfile, removedName string) bool {
+	for _, provider := range providers {
+		if config.SameProviderIdentity(provider.Name, removedName) {
+			return true
+		}
+	}
+	return false
 }
 
 func samePersistedProviderName(left, right string) bool {

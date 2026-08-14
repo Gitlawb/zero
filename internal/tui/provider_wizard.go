@@ -1261,17 +1261,21 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		nextProvider = built
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
+		if err := config.PreflightProviderWrite(m.userConfigPath, profile.Name); err != nil {
+			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey, runtimeProfile.APIKey}})
+			return m, nil
+		}
+		// Capture flip: move the freshly entered key into the encrypted credential
+		// store before persisting, so config.json never holds the cleartext. The
+		// provider was already built above from runtimeProfile, which has the key.
 		secret := profile.APIKey
-		result, err := config.CommitProviderProfile(m.userConfigPath, config.ProviderCommit{
-			Profile:       profile,
-			SetActive:     true,
-			KeepStoredKey: preserveExistingCredentialReference,
-		})
-		if err != nil {
+		if !preserveExistingCredentialReference {
+			profile = config.SecureProviderProfile(profile, m.userConfigPath)
+		}
+		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			return m, nil // nothing committed to live state yet
 		}
-		profile = result.Persisted
 	}
 
 	// Both succeeded — commit the live provider, profile, model, and the child

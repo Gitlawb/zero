@@ -43,17 +43,6 @@ type APIKeySetter interface {
 	Set(provider, key string) error
 }
 
-// ProviderCredentialSurvives reports whether a remaining persisted row still
-// references the removed provider's normalized credential.
-func ProviderCredentialSurvives(providers []ProviderProfile, removedName string) bool {
-	for _, provider := range providers {
-		if provider.APIKeyStored && SameProviderIdentity(provider.Name, removedName) {
-			return true
-		}
-	}
-	return false
-}
-
 // SecureProviderProfile moves an inline APIKey on the profile into the credential
 // store co-located with configPath, returning a profile with APIKeyStored set and
 // APIKey cleared so the secret is never written to config.json. On any store error

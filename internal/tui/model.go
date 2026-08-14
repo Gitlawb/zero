@@ -21,6 +21,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/errhint"
 	"github.com/Gitlawb/zero/internal/lsp"
@@ -4414,7 +4415,7 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		text := ""
 		owner := strings.TrimSpace(item.OwnerProvider)
 		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && owner != strings.TrimSpace(m.providerName) && ownerIsSavedProvider {
+		if owner != "" && credstore.NormalizeProvider(owner) != credstore.NormalizeProvider(m.providerName) && ownerIsSavedProvider {
 			// A model from another saved provider: switch provider + model together.
 			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
 		} else {

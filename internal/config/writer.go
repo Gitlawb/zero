@@ -149,6 +149,11 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	profile.Name = strings.TrimSpace(profile.Name)
+	if profile.Name == "" {
+		return FileConfig{}, fmt.Errorf("provider name is required")
+	}
+
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -160,26 +165,19 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	if err := ValidatePersistedProviderNames(cfg); err != nil {
 		return FileConfig{}, err
 	}
-	if err := upsertProviderConfig(&cfg, profile, setActive); err != nil {
-		return FileConfig{}, err
-	}
-	if err := writeConfigFile(path, cfg); err != nil {
-		return FileConfig{}, err
-	}
-	return cfg, nil
-}
-
-func upsertProviderConfig(cfg *FileConfig, profile ProviderProfile, setActive bool) error {
-	profile.Name = strings.TrimSpace(profile.Name)
-	if profile.Name == "" {
-		return fmt.Errorf("provider name is required")
-	}
 	for _, existing := range cfg.Providers {
 		if sameProviderIdentity(existing.Name, profile.Name) && strings.TrimSpace(existing.Name) != profile.Name {
-			return fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", profile.Name, existing.Name)
+			return FileConfig{}, fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", profile.Name, existing.Name)
 		}
 	}
-	mergeProvider(cfg, profile)
+
+	mergeProvider(&cfg, profile)
+	// mergeProfile deliberately ignores APIKeyStored — during resolve-time
+	// layering a project config must not be able to claim the user's stored
+	// keys. This user-config WRITE path re-applies the marker: capturing a key
+	// via SecureProviderProfile onto a previously env/no-key profile must
+	// persist apiKeyStored, or the secret sits in the credential store while
+	// every ApplyStoredAPIKey gate skips it (PR #560 review).
 	if profile.APIKeyStored {
 		for index := range cfg.Providers {
 			if cfg.Providers[index].Name == profile.Name {
@@ -191,7 +189,11 @@ func upsertProviderConfig(cfg *FileConfig, profile ProviderProfile, setActive bo
 	if setActive || strings.TrimSpace(cfg.ActiveProvider) == "" {
 		cfg.ActiveProvider = profile.Name
 	}
-	return nil
+
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
 }
 
 // EnsuredProvider reports the outcome of EnsureCatalogProvider: the profile name

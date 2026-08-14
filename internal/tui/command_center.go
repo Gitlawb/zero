@@ -674,14 +674,19 @@ func oauthLoginName(profile config.ProviderProfile) (string, bool) {
 	return strings.TrimPrefix(key, oauth.KeyPrefixProvider), true
 }
 
+// savedProviderByName resolves a provider spelling to its saved profile using
+// the credential store's own normalization rather than strings.EqualFold. The
+// two disagree: EqualFold folds "s" and Unicode long-s "ſ" together, while the
+// store keeps separate entries for them, so EqualFold could hand back a
+// different provider's profile and reach its secret.
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
-	name = strings.TrimSpace(name)
+	normalized := credstore.NormalizeProvider(name)
 	for _, profile := range m.savedProviders {
-		if strings.TrimSpace(profile.Name) == name {
+		if credstore.NormalizeProvider(profile.Name) == normalized {
 			return profile, true
 		}
 	}
-	if strings.TrimSpace(m.providerProfile.Name) == name {
+	if credstore.NormalizeProvider(m.providerProfile.Name) == normalized {
 		return m.providerProfile, true
 	}
 	return config.ProviderProfile{}, false
