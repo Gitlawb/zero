@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -238,6 +239,11 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentials) {
 		return SandboxExecutionRequest{}, errors.New("macOS sandbox cannot protect the remote token file from hard-link aliases in a shell-writable root; use ZERO_DAEMON_REMOTE_TOKEN, place the file on a separate filesystem, or remove shell write access")
 	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "linux" {
+		if credential, ok := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentials); ok {
+			return SandboxExecutionRequest{}, fmt.Errorf("bubblewrap cannot protect the remote token file %q from hard-link aliases in a shell-accessible root: a /dev/null bind covers one pathname, not the inode; use ZERO_DAEMON_REMOTE_TOKEN, place the file on a separate filesystem, or remove that root from the sandbox", credential)
+		}
+	}
 	// Windows: the FULL OS sandbox needs a one-time elevated `zero sandbox setup`
 	// (it applies WFP network filters + workspace ACLs and writes a marker).
 	// Without it, a restricted-filesystem profile can still run in the UNELEVATED
@@ -326,6 +332,57 @@ func protectedCredentialLinkableIntoWritableMacOSRoot(profile PermissionProfile,
 		}
 	}
 	return false
+}
+
+// protectedCredentialLinkableIntoLinuxShellRoot reports a mandatory token that a
+// shell command could reach through a second directory entry for the same inode,
+// and the offending pathname.
+//
+// The bubblewrap plan binds /dev/null over each configured pathname, which hides
+// that name and nothing else. A hard link is another name for the same inode, so
+// an alias in any root the shell can read defeats the mask, and one that already
+// exists needs neither the token-file variable nor a new link operation. Linking
+// requires the alias and the target to sit on one filesystem, so sharing a device
+// with a shell-visible root is what makes the class reachable; an existing link
+// count above one proves an alias the planner cannot enumerate.
+func protectedCredentialLinkableIntoLinuxShellRoot(profile PermissionProfile, protected []string) (string, bool) {
+	if len(protected) == 0 {
+		return "", false
+	}
+	if profile.FileSystem.Kind == FileSystemUnrestricted {
+		return protected[0], true
+	}
+	if profile.FileSystem.Kind != FileSystemRestricted {
+		return "", false
+	}
+	// Read roots count as well as write roots: reading an existing alias is
+	// enough to recover the token, no write access required.
+	roots := make([]string, 0, len(profile.FileSystem.ReadRoots)+len(profile.FileSystem.WriteRoots)+len(sandboxWritableSubpaths))
+	roots = append(roots, normalizeProfilePaths(profile.FileSystem.ReadRoots)...)
+	for _, root := range profile.FileSystem.WriteRoots {
+		roots = append(roots, normalizeProfilePath(root.Root))
+	}
+	if profile.FileSystem.AllowTemp {
+		roots = append(roots, normalizeProfilePaths(sandboxWritableSubpaths)...)
+	}
+	for _, credential := range protected {
+		credential = filepath.Clean(credential)
+		if credential == "." || credential == "" {
+			continue
+		}
+		if count, ok := pathHardLinkCount(credential); ok && count > 1 {
+			return credential, true
+		}
+		for _, root := range roots {
+			if root == "" {
+				continue
+			}
+			if pathWithinRoot(root, credential) || pathsShareFilesystem(root, credential) {
+				return credential, true
+			}
+		}
+	}
+	return "", false
 }
 
 func pathWithinMacOSRoot(root, candidate string) bool {

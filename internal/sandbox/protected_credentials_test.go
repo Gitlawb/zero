@@ -283,7 +283,10 @@ func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
 	}
 }
 
-func TestUnreadableLinuxPathSkipsProtectedSymlinkDestination(t *testing.T) {
+// A mandatory token named by a symlink fails the plan outright: bubblewrap
+// cannot bind-mask a mutable symlink destination, so masking the link's current
+// target would be detached by a retarget mid-session.
+func TestMandatoryLinuxTokenSymlinkFailsPlan(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
 	}
@@ -299,13 +302,140 @@ func TestUnreadableLinuxPathSkipsProtectedSymlinkDestination(t *testing.T) {
 	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, link)
 	profile := PermissionProfileFromPolicy(dir, DefaultPolicy(), nil)
-	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
-	if stringSliceContains(plan.Args, link) {
-		t.Fatalf("bubblewrap plan attempted to mount over symlink destination %q: %#v", link, plan.Args)
+
+	_, err := buildLinuxBwrapFilesystemPlan(profile)
+	if err == nil {
+		t.Fatal("buildLinuxBwrapFilesystemPlan succeeded for a symlinked mandatory token, want a fail-closed error")
+	}
+	if !strings.Contains(err.Error(), "mandatory credential symlink") {
+		t.Fatalf("buildLinuxBwrapFilesystemPlan error = %v, want a mandatory credential symlink refusal", err)
+	}
+}
+
+// The helper-level refusal above must also hold at the command-plan level, so a
+// future change cannot restore the unsafe accepted-symlink behavior while only a
+// helper test stays green.
+func TestSandboxManagerRefusesLinuxShellForSymlinkedToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on Windows")
+	}
+	workspace := t.TempDir()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "token")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "token-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, link)
+
+	policy := DefaultPolicy()
+	backend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox", Platform: "linux"}
+	_, err := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err == nil {
+		t.Fatal("BuildCommandPlan succeeded with a symlinked mandatory token, want the shell refused")
+	}
+	if !strings.Contains(err.Error(), "mandatory credential symlink") && !strings.Contains(err.Error(), "hard-link aliases") {
+		t.Fatalf("BuildCommandPlan error = %v, want a fail-closed credential refusal", err)
+	}
+}
+
+// A hard-link alias is a second directory entry for the token's inode, so the
+// /dev/null bind over the configured pathname does not hide it. Plan
+// construction must fail closed instead of running behind that mask.
+func TestSandboxManagerRejectsLinuxTokenHardLinkAlias(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("hard-link inode probing is exercised on Linux")
+	}
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := filepath.Join(tokenDir, "bridge-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(tokenDir, "token-alias")
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("fixture paths are not hard-linkable: %v", err)
+	}
+
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+
+	if _, ok := pathHardLinkCount(token); !ok {
+		t.Fatal("pathHardLinkCount could not inspect the token fixture")
+	}
+	if credential, linkable := protectedCredentialLinkableIntoLinuxShellRoot(
+		PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil),
+		protectedCredentialPaths(),
+	); !linkable || credential != token {
+		t.Fatalf("linkable = %t credential = %q, want the aliased token %q reported", linkable, credential, token)
+	}
+
+	policy := DefaultPolicy()
+	backend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox", Platform: "linux"}
+	_, err = NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "cat " + alias}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err == nil {
+		t.Fatal("BuildCommandPlan succeeded with a hard-linked token alias, want plan construction to fail closed")
+	}
+	if !strings.Contains(err.Error(), "hard-link aliases") {
+		t.Fatalf("BuildCommandPlan error = %v, want a hard-link alias refusal", err)
+	}
+}
+
+// The optional (non-mandatory) credential candidates keep the older behavior:
+// never bind over the link itself, and mask the resolved destination when it is
+// the path that actually exists.
+func TestOptionalLinuxCredentialSymlinkMasksResolvedDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "token")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "token-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
 	}
 	resolvedTarget, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		t.Fatalf("EvalSymlinks target: %v", err)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{dir},
+			DenyReadIfExists: []string{link, resolvedTarget},
+		},
+	}
+	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
+	if stringSliceContains(plan.Args, link) {
+		t.Fatalf("bubblewrap plan attempted to mount over symlink destination %q: %#v", link, plan.Args)
 	}
 	assertArgsContainSequence(t, plan.Args, "--ro-bind", "/dev/null", resolvedTarget)
 }
