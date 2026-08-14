@@ -228,6 +228,10 @@ func TestCommitProviderProfileConcurrentCaseVariantsKeepOneKey(t *testing.T) {
 }
 
 func TestCommitProviderProfileCrossProcessCaseVariantsKeepOneKey(t *testing.T) {
+	// The children below pin the encrypted-file backend, so this process must
+	// pin it too: auto resolution picks the macOS keychain, and the parent would
+	// then verify a different backend than the one the children wrote to.
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	commands := []*exec.Cmd{

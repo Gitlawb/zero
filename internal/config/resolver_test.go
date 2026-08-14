@@ -2268,6 +2268,25 @@ func TestNormalizeProvidersMatchesResolvedActiveNameCaseInsensitively(t *testing
 	}
 }
 
+// A config with one unnamed provider row and no activeProvider is still fully
+// determined: normalization names that row "openai", so it must resolve as the
+// active provider instead of failing with ErrNoActiveProvider.
+func TestNormalizeProvidersSelectsSoleNamelessProvider(t *testing.T) {
+	providers, active, err := normalizeProviders([]ProviderProfile{{
+		Model:  "gpt-4.1",
+		APIKey: "sk-test",
+	}}, "")
+	if err != nil {
+		t.Fatalf("normalizeProviders() error = %v, want the sole nameless row selected", err)
+	}
+	if len(providers) != 1 || providers[0].Name != string(ProviderKindOpenAI) {
+		t.Fatalf("normalized providers = %+v, want one row named %q", providers, ProviderKindOpenAI)
+	}
+	if active.Name != string(ProviderKindOpenAI) || active.Model != "gpt-4.1" {
+		t.Fatalf("resolved active = %+v, want the openai-defaulted row", active)
+	}
+}
+
 func TestNormalizeProvidersSelectsActiveSourceBeforeNormalization(t *testing.T) {
 	valid := func(name string) ProviderProfile {
 		return ProviderProfile{Name: name, ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"}

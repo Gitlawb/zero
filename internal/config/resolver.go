@@ -961,6 +961,10 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 
 	if activeName == "" && len(providers) == 1 {
 		activeName = strings.TrimSpace(providers[0].Name)
+		// A sole nameless row normalizes to the openai identity below, so the
+		// selection loops must look for that same default name. Leaving activeName
+		// empty skipped selection entirely and failed with ErrNoActiveProvider for
+		// a config that names exactly one usable provider.
 		if activeName == "" {
 			activeName = string(ProviderKindOpenAI)
 		}
