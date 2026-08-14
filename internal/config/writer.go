@@ -453,6 +453,13 @@ const (
 // an arbitrary winner: the caller asked for something the config does not
 // uniquely identify, and guessing there is what let one profile's logout delete
 // a sibling's shared token.
+//
+// A non-exact name is held to the same rule. A legacy config can still hold
+// case-variant rows such as "work" and "WORK" (persistedProviders reads the file
+// without validating it), and resolving "wOrK" to whichever appeared first let
+// `providers remove` delete that row and its stored credential. Only an exact
+// spelling can address such a pair, which keeps repairing a legacy config
+// possible.
 func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, PersistedIdentityMatch, error) {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
@@ -463,6 +470,7 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 		return ProviderProfile{}, PersistedIdentityNone, err
 	}
 	var foldedName *ProviderProfile
+	foldedMatches := 0
 	var catalogRow *ProviderProfile
 	catalogMatches := 0
 	for index := range providers {
@@ -471,9 +479,12 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 		if name == identity {
 			return row, PersistedIdentityName, nil
 		}
-		if foldedName == nil && sameProviderIdentity(name, identity) {
-			match := row
-			foldedName = &match
+		if sameProviderIdentity(name, identity) {
+			foldedMatches++
+			if foldedName == nil {
+				match := row
+				foldedName = &match
+			}
 		}
 		if sameProviderIdentity(row.CatalogID, identity) {
 			catalogMatches++
@@ -483,8 +494,11 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 			}
 		}
 	}
-	if foldedName != nil {
+	if foldedMatches == 1 {
 		return *foldedName, PersistedIdentityName, nil
+	}
+	if foldedMatches > 1 {
+		return ProviderProfile{}, PersistedIdentityNone, fmt.Errorf("ambiguous provider name %q matches multiple persisted rows that differ only by case; use the exact spelling from config.json", identity)
 	}
 	if catalogMatches == 1 {
 		return *catalogRow, PersistedIdentityCatalog, nil
