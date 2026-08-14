@@ -64,52 +64,54 @@ type appDeps struct {
 	// getenv reads a process environment variable (production: os.Getenv, set in
 	// defaultAppDeps — deliberately NOT filled by fillAppDeps, so tests are hermetic
 	// against ambient vars like ZERO_PROVIDER unless they inject it). nil ⇒ empty.
-	getenv                 func(string) string
-	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
-	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
-	detectLocalRuntimes    func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
-	openRouterLogin        func(context.Context, provideroauth.OpenRouterOptions) (string, error)
-	newSessionStore        func() *sessions.Store
-	loadPlugins            func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks              func(hooks.LoadOptions) (hooks.LoadResult, error)
-	skillsDir              func() string
-	pluginsDir             func() string
-	toolsDir               func() string
-	newMCPStore            func() (*mcp.PermissionStore, error)
-	newMCPTokenStore       func() (*mcp.TokenStore, error)
-	newSandboxStore        func() (*sandbox.GrantStore, error)
-	selectSandboxBackend   func(sandbox.BackendOptions) sandbox.Backend
-	runSandboxSetupHelper  func(path string, args []string, stdout io.Writer, stderr io.Writer) error
-	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
-	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
-	releaseWorktree        func(context.Context, worktrees.Options, string) error
-	detectVerifyPlan       func(string) (verify.Plan, error)
-	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runSelfVerify          func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
-	runAgentEval           func(context.Context, agentEvalOptions) (agentEvalReport, error)
-	inspectChanges         func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
-	commitChanges          func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
-	pushChanges            func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
-	createPR               func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
-	createBranch           func(context.Context, zerogit.BranchOptions) (zerogit.BranchResult, error)
-	isDefaultBranch        func(context.Context, zerogit.DefaultBranchOptions) (bool, string, string, error)
-	currentGitUser         func(context.Context, string) string
-	headCommitSubject      func(context.Context, string) string
-	commitsAhead           func(context.Context, string, string, string) (int, error)
-	isUnbornRemote         func(context.Context, string, string) (bool, error)
-	refreshTrackingRef     func(context.Context, string, string, string) error
-	branchUpstreamRemote   func(context.Context, string, string) string
-	branchUpstreamRef      func(context.Context, string, string) string
-	remoteHasBranch        func(context.Context, string, string, string) (bool, error)
-	currentGitBranch       func(context.Context, string) string
-	currentBranchTip       func(context.Context, string) string
-	deleteBranch           func(context.Context, string, string, string) error
-	resetBranchRef         func(context.Context, string, string, string, string) error
-	runTUI                 func(context.Context, tui.Options) int
-	runEditor              func(string) error
-	checkUpdate            func(context.Context, update.Options) (update.Result, error)
-	applyUpdate            func(context.Context, update.Options) (update.ApplyResult, error)
-	now                    func() time.Time
+	getenv                       func(string) string
+	probeProviderHealth          func(context.Context, providerhealth.Options) providerhealth.Result
+	discoverProviderModels       func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	detectLocalRuntimes          func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
+	openRouterLogin              func(context.Context, provideroauth.OpenRouterOptions) (string, error)
+	newSessionStore              func() *sessions.Store
+	loadPlugins                  func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks                    func(hooks.LoadOptions) (hooks.LoadResult, error)
+	skillsDir                    func() string
+	pluginsDir                   func() string
+	toolsDir                     func() string
+	newMCPStore                  func() (*mcp.PermissionStore, error)
+	newMCPTokenStore             func() (*mcp.TokenStore, error)
+	newSandboxStore              func() (*sandbox.GrantStore, error)
+	selectSandboxBackend         func(sandbox.BackendOptions) sandbox.Backend
+	runSandboxSetupHelper        func(path string, args []string, stdout io.Writer, stderr io.Writer) error
+	registerMCPTools             func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree              func(context.Context, worktrees.Options) (worktrees.Result, error)
+	releaseWorktree              func(context.Context, worktrees.Options, string) error
+	detectVerifyPlan             func(string) (verify.Plan, error)
+	runVerify                    func(context.Context, verify.Plan, verify.RunOptions) verify.Report
+	runSelfVerify                func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	runAgentEval                 func(context.Context, agentEvalOptions) (agentEvalReport, error)
+	inspectChanges               func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
+	commitChanges                func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	pushChanges                  func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
+	createPR                     func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
+	createBranch                 func(context.Context, zerogit.BranchOptions) (zerogit.BranchResult, error)
+	isDefaultBranch              func(context.Context, zerogit.DefaultBranchOptions) (bool, string, string, error)
+	currentGitUser               func(context.Context, string) string
+	headCommitSubject            func(context.Context, string) string
+	commitsAhead                 func(context.Context, string, string, string) (int, error)
+	isUnbornRemote               func(context.Context, string, string) (bool, error)
+	refreshTrackingRef           func(context.Context, string, string, string) error
+	branchUpstreamRemote         func(context.Context, string, string) string
+	branchUpstreamRef            func(context.Context, string, string) string
+	branchUpstreamRemoteAndMerge func(context.Context, string, string) (string, string)
+	isNamedRemote                func(context.Context, string, string) bool
+	remoteHasBranch              func(context.Context, string, string, string) (bool, error)
+	currentGitBranch             func(context.Context, string) string
+	currentBranchTip             func(context.Context, string) string
+	deleteBranch                 func(context.Context, string, string, string) error
+	resetBranchRef               func(context.Context, string, string, string, string) error
+	runTUI                       func(context.Context, tui.Options) int
+	runEditor                    func(string) error
+	checkUpdate                  func(context.Context, update.Options) (update.Result, error)
+	applyUpdate                  func(context.Context, update.Options) (update.ApplyResult, error)
+	now                          func() time.Time
 }
 
 type mcpToolRuntime interface {
@@ -234,6 +236,12 @@ func defaultAppDeps() appDeps {
 		},
 		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
 			return zerogit.UpstreamRef(ctx, cwd, branch, nil)
+		},
+		branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
+			return zerogit.UpstreamRemoteAndMergeBranch(ctx, cwd, branch, nil)
+		},
+		isNamedRemote: func(ctx context.Context, cwd, remote string) bool {
+			return zerogit.IsNamedRemote(ctx, cwd, remote, nil)
 		},
 		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
 			return zerogit.RemoteHasBranch(ctx, cwd, remote, branch, nil)

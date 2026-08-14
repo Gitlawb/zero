@@ -1341,15 +1341,54 @@ func TestCommitsAhead(t *testing.T) {
 		if count != 3 {
 			t.Fatalf("count = %d, want 3", count)
 		}
-		if got := runner.commandLine(0); got != "git rev-list --count --end-of-options origin/main..HEAD" {
-			t.Fatalf("unexpected command: %q", got)
+		if got := runner.commandLine(0); got != "git rev-list --count -- origin/main..HEAD" {
+			t.Fatalf("unexpected rev-list command: %q", got)
+		}
+	})
+
+	t.Run("CountsCommitsAheadOfDirectRemoteViaLsRemote", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: "abc1234\trefs/heads/main\n"}, // ls-remote succeeds
+			{Stdout: "2\n"},
+		}}
+		count, err := CommitsAhead(context.Background(), root, "https://github.com/example/repo.git", "main", runner.Run)
+		if err != nil {
+			t.Fatalf("CommitsAhead returned error: %v", err)
+		}
+		if count != 2 {
+			t.Fatalf("count = %d, want 2", count)
+		}
+		if got := runner.commandLine(0); got != "git ls-remote --heads -- https://github.com/example/repo.git refs/heads/main" {
+			t.Fatalf("unexpected ls-remote command: %q", got)
+		}
+		if got := runner.commandLine(1); got != "git rev-list --count -- abc1234..HEAD" {
+			t.Fatalf("unexpected rev-list command: %q", got)
+		}
+	})
+
+	t.Run("CountsCommitsAheadOfUnbornDirectRemote", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: ""}, // ls-remote returns empty (no heads)
+			{Stdout: "5\n"},
+		}}
+		count, err := CommitsAhead(context.Background(), root, "/path/to/bare.git", "main", runner.Run)
+		if err != nil {
+			t.Fatalf("CommitsAhead returned error: %v", err)
+		}
+		if count != 5 {
+			t.Fatalf("count = %d, want 5", count)
+		}
+		if got := runner.commandLine(0); got != "git ls-remote --heads -- /path/to/bare.git refs/heads/main" {
+			t.Fatalf("unexpected ls-remote command: %q", got)
+		}
+		if got := runner.commandLine(1); got != "git rev-list --count -- HEAD" {
+			t.Fatalf("unexpected rev-list command: %q", got)
 		}
 	})
 
 	t.Run("ReturnsErrorWhenRemoteTrackingRefMissing", func(t *testing.T) {
-		// A never-fetched remote-tracking ref makes rev-list fail. The caller
-		// treats that as a hard failure and refuses to auto-branch, rather
-		// than guessing that there is something to publish.
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{ExitCode: 128, Stderr: "fatal: ambiguous argument 'origin/main..HEAD'"},
@@ -1851,5 +1890,43 @@ func TestResetBranchRefRefusesConcurrentDefaultAdvance(t *testing.T) {
 	}
 	if featureTip == concurrentTip {
 		t.Fatal("test setup failed to create distinct tips")
+	}
+}
+
+func TestResetBranchRefRefusesCheckedOutInLinkedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	root := initGitRepo(t, true)
+	runGitCommand(t, root, "branch", "-M", "main")
+	base := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
+	runGitCommand(t, root, "checkout", "-b", "feature/new-branch")
+
+	// Create a second linked worktree checking out main.
+	wtDir := filepath.Join(t.TempDir(), "wt-main")
+	runGitCommand(t, root, "worktree", "add", wtDir, "main")
+
+	err := ResetBranchRef(context.Background(), root, "main", base, nil)
+	if err == nil || !strings.Contains(err.Error(), "checked out in worktree") {
+		t.Fatalf("expected refusal due to checked out in linked worktree, got %v", err)
+	}
+}
+
+func TestIsNamedRemoteHandlesSlashes(t *testing.T) {
+	root := t.TempDir()
+	if !IsNamedRemote(context.Background(), root, "team/upstream", nil) {
+		t.Fatal("IsNamedRemote should report true for configured remote containing slash")
+	}
+}
+
+func TestUpstreamRemoteAndMergeBranch(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: "team/upstream\n"},
+		{Stdout: "refs/heads/main\n"},
+	}}
+	remote, merge := UpstreamRemoteAndMergeBranch(context.Background(), root, "feature", runner.Run)
+	if remote != "team/upstream" || merge != "main" {
+		t.Fatalf("UpstreamRemoteAndMergeBranch = (%q, %q), want (%q, %q)", remote, merge, "team/upstream", "main")
 	}
 }

@@ -1277,7 +1277,17 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	trackingRemote := remote
 	trackingBranch := currentBranch
 	restoreTip := ""
-	if deps.branchUpstreamRef != nil {
+	if deps.branchUpstreamRemoteAndMerge != nil {
+		if r, m := deps.branchUpstreamRemoteAndMerge(ctx, workspaceRoot, currentBranch); r != "" && m != "" {
+			trackingRemote = r
+			trackingBranch = m
+			if deps.isNamedRemote != nil && deps.isNamedRemote(ctx, workspaceRoot, trackingRemote) {
+				restoreTip = trackingRemote + "/" + trackingBranch
+			} else {
+				restoreTip = trackingBranch
+			}
+		}
+	} else if deps.branchUpstreamRef != nil {
 		if uref := deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch); uref != "" {
 			restoreTip = uref
 			if parts := strings.SplitN(uref, "/", 2); len(parts) == 2 {

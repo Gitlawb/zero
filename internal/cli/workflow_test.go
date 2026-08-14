@@ -2519,6 +2519,60 @@ func TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote(t *testing.T) {
 	}
 }
 
+// TestEnsureFeatureBranchHandlesSlashContainingRemoteName covers configured
+// remote names with slashes (e.g. "team/upstream"). It must not split the
+// remote name on '/' or fail tracking ref refresh.
+func TestEnsureFeatureBranchHandlesSlashContainingRemoteName(t *testing.T) {
+	cwd := t.TempDir()
+	var resetBranch, resetTip string
+	var refreshedRemote, refreshedBranch string
+
+	_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, cwd, "", featureBranchOptions{}, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "team/upstream", nil
+		},
+		branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
+			return "team/upstream", "main"
+		},
+		isNamedRemote: func(ctx context.Context, cwd, remote string) bool {
+			return remote == "team/upstream"
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			if remote != "team/upstream" || branch != "main" {
+				t.Fatalf("expected commitsAhead check against team/upstream/main, got %s/%s", remote, branch)
+			}
+			return 1, nil
+		},
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+			refreshedRemote = remote
+			refreshedBranch = branch
+			return nil
+		},
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
+			resetBranch = branch
+			resetTip = newTip
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch returned error: %v", err)
+	}
+	if !created {
+		t.Fatal("expected a feature branch to be created")
+	}
+	if refreshedRemote != "team/upstream" || refreshedBranch != "main" {
+		t.Fatalf("expected refreshTrackingRef for team/upstream/main, got %s/%s", refreshedRemote, refreshedBranch)
+	}
+	if resetBranch != "main" || resetTip != "team/upstream/main" {
+		t.Fatalf("expected restore main -> team/upstream/main, got %q -> %q", resetBranch, resetTip)
+	}
+}
+
 // TestRunChangesPushRestoresDefaultBranchOnAutoBranchPath exercises the
 // commit-then-push auto-branch path end-to-end through runChangesPush and
 // asserts the default branch is restored to its remote tip after the feature

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -869,19 +870,47 @@ func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
 }
 
 // CommitsAhead reports how many commits HEAD is ahead of the remote-tracking
-// ref <remote>/<branch>. Auto-branching runs this before creating and pushing
-// a feature branch off the default branch: a clean, up-to-date default branch
-// has nothing to publish, so the caller can refuse rather than push an empty
-// comparison. It returns an error when the count cannot be determined (for
-// example the remote-tracking ref was never fetched); callers treat that as a
-// hard failure rather than guessing that there is something to publish.
+// ref <remote>/<branch> or the advertised branch on a direct remote. Auto-branching
+// runs this before creating and pushing a feature branch off the default branch: a
+// clean, up-to-date default branch has nothing to publish, so the caller can refuse
+// rather than push an empty comparison. It returns an error when the count cannot be
+// determined (for example the remote-tracking ref was never fetched); callers treat
+// that as a hard failure rather than guessing that there is something to publish.
 func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner) (int, error) {
 	runGit, _ = resolveRunners(runGit, nil)
-	ref := remote + "/" + branch
-	if !IsNamedRemote(ctx, cwd, remote, runGit) {
-		ref = branch
+	var baseRef string
+	if IsNamedRemote(ctx, cwd, remote, runGit) {
+		baseRef = remote + "/" + branch
+	} else {
+		// Non-named remote (direct path or URL). Resolve the advertised remote branch tip via ls-remote.
+		out, err := gitOutput(ctx, runGit, cwd, "ls-remote", "--heads", "--", remote, "refs/heads/"+branch)
+		if err != nil {
+			return 0, fmt.Errorf("cannot check remote branch %s on %s: %w", branch, remote, err)
+		}
+		var remoteSHA string
+		for _, line := range strings.Split(out, "\n") {
+			if sha, ref, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok {
+				if strings.TrimSpace(ref) == "refs/heads/"+branch {
+					remoteSHA = strings.TrimSpace(sha)
+					break
+				}
+			}
+		}
+		if remoteSHA == "" {
+			// Remote has no such branch yet; count all commits on HEAD.
+			out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "--", "HEAD")
+			if err != nil {
+				return 0, err
+			}
+			count, err := strconv.Atoi(strings.TrimSpace(out))
+			if err != nil {
+				return 0, fmt.Errorf("parse commit count %q: %w", out, err)
+			}
+			return count, nil
+		}
+		baseRef = remoteSHA
 	}
-	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", ref+"..HEAD")
+	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", "--", baseRef+"..HEAD")
 	if err != nil {
 		return 0, err
 	}
@@ -914,30 +943,52 @@ func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit 
 
 // isRemoteURLOrPath reports whether remote is formatted as a direct URL
 // (https://..., git@..., ssh://...) or filesystem path (/path/to/repo,
-// C:\path\to\repo), as opposed to a configured named remote (origin, upstream).
+// C:\path\to\repo, .\repo), as opposed to a configured named remote (origin, upstream, team/upstream).
 func isRemoteURLOrPath(remote string) bool {
 	remote = strings.TrimSpace(remote)
 	if remote == "" {
 		return false
 	}
-	return strings.Contains(remote, "://") ||
-		strings.Contains(remote, "@") ||
-		strings.Contains(remote, ":") ||
-		strings.Contains(remote, "/") ||
-		strings.Contains(remote, "\\") ||
+	if strings.Contains(remote, "://") ||
+		strings.HasPrefix(remote, "/") ||
+		strings.HasPrefix(remote, "\\") ||
 		strings.HasPrefix(remote, ".") ||
-		strings.HasPrefix(remote, "~")
+		strings.HasPrefix(remote, "~") {
+		return true
+	}
+	if len(remote) >= 3 && unicode.IsLetter(rune(remote[0])) && remote[1] == ':' && (remote[2] == '/' || remote[2] == '\\') {
+		return true
+	}
+	if strings.Contains(remote, "@") && strings.Contains(remote, ":") {
+		return true
+	}
+	return false
 }
 
 // IsNamedRemote reports whether remote is a configured named remote (such as
-// "origin" or "upstream"), as opposed to a direct URL (https://..., git@...)
-// or a file path (/path/to/repo, C:\path\to\repo).
+// "origin", "upstream", or "team/upstream"), as opposed to a direct URL
+// (https://..., git@...) or a file path (/path/to/repo, C:\path\to\repo).
 func IsNamedRemote(ctx context.Context, cwd, remote string, runGit Runner) bool {
 	remote = strings.TrimSpace(remote)
 	if remote == "" || isRemoteURLOrPath(remote) {
 		return false
 	}
 	return true
+}
+
+// UpstreamRemoteAndMergeBranch returns the configured upstream remote and merge branch
+// for branch from git config branch.<name>.remote and branch.<name>.merge.
+func UpstreamRemoteAndMergeBranch(ctx context.Context, cwd, branch string, runGit Runner) (remote string, mergeBranch string) {
+	runGit, _ = resolveRunners(runGit, nil)
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", ""
+	}
+	r, _ := gitOutput(ctx, runGit, cwd, "config", "branch."+branch+".remote")
+	m, _ := gitOutput(ctx, runGit, cwd, "config", "branch."+branch+".merge")
+	remote = strings.TrimSpace(r)
+	mergeBranch = strings.TrimPrefix(strings.TrimSpace(m), "refs/heads/")
+	return remote, mergeBranch
 }
 
 // RemoteHasBranch reports whether remote already has refs/heads/<branch>.
@@ -1102,6 +1153,29 @@ func CurrentBranch(ctx context.Context, cwd string, runGit Runner) string {
 // is broken, and destroying work to "recover" from it would be wrong.
 var ErrCompareAndSwapConflict = errors.New("compare-and-swap conflict")
 
+// checkedOutInWorktrees reports whether branch is currently checked out in any
+// worktree across the repository, returning the path of the worktree if found.
+func checkedOutInWorktrees(ctx context.Context, cwd, branch string, runGit Runner) (bool, string, error) {
+	out, err := gitOutput(ctx, runGit, cwd, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, "", err
+	}
+	var currentWorktree string
+	targetRef := "refs/heads/" + branch
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "worktree ") {
+			currentWorktree = strings.TrimPrefix(line, "worktree ")
+		} else if strings.HasPrefix(line, "branch ") {
+			b := strings.TrimPrefix(line, "branch ")
+			if b == targetRef || b == branch {
+				return true, currentWorktree, nil
+			}
+		}
+	}
+	return false, "", nil
+}
+
 // ResetBranchRef points the local branch ref at newTip without checking the
 // branch out. ensureFeatureBranch uses this after creating a feature branch
 // that owns the publishable commits: the normal flow commits on the default
@@ -1126,9 +1200,13 @@ func ResetBranchRef(ctx context.Context, cwd, branch, newTip string, runGit Runn
 	if strings.Contains(branch, "..") || strings.HasPrefix(branch, "/") || strings.ContainsAny(branch, "\\ \t\n") {
 		return fmt.Errorf("invalid branch name %q", branch)
 	}
-	headBranch, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", "HEAD")
-	if err == nil && strings.TrimSpace(headBranch) == branch {
-		return fmt.Errorf("refusing to move currently checked-out branch %q", branch)
+	if inUse, wtPath, wtErr := checkedOutInWorktrees(ctx, cwd, branch, runGit); wtErr == nil && inUse {
+		return fmt.Errorf("refusing to move currently checked-out branch %q (checked out in worktree %s)", branch, wtPath)
+	} else if wtErr != nil {
+		headBranch, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", "HEAD")
+		if err == nil && strings.TrimSpace(headBranch) == branch {
+			return fmt.Errorf("refusing to move currently checked-out branch %q", branch)
+		}
 	}
 	tipSHA, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--verify", newTip+"^{commit}")
 	if err != nil {
