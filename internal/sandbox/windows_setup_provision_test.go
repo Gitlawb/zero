@@ -43,9 +43,21 @@ func windowsRuntimeTestRoots(t *testing.T) (string, []string) {
 	}
 	// Belt and braces: refuse to run rather than touch anything the test does not
 	// own, so a later change to the derivation cannot quietly reintroduce this.
+	//
+	// BOTH SIDES CANONICALIZED, because pathWithinRoot compares spellings and the
+	// candidate arrives canonical: the derivation runs the cache root through
+	// canonicalSandboxWorkspaceRoot before joining. Measuring that against a raw
+	// t.TempDir() is the same one-sided comparison this PR fixes in
+	// fallbackSandboxRuntimeRoot, and it fired on exactly the machines that carry a
+	// second spelling: macOS /var vs /private/var, and a CI Windows runner whose
+	// profile has an 8.3 name (RUNNER~1 against runneradmin). It passed locally
+	// because this box has neither.
+	ownedCache := canonicalSandboxWorkspaceRoot(cacheRoot)
+	ownedTemp := canonicalSandboxWorkspaceRoot(tempRoot)
 	for _, candidate := range candidates {
-		if !pathWithinRoot(cacheRoot, candidate) && !pathWithinRoot(tempRoot, candidate) {
-			t.Fatalf("candidate %s is outside the test-owned cache (%s) and temp (%s) roots; refusing to modify it", candidate, cacheRoot, tempRoot)
+		canonical := canonicalSandboxWorkspaceRoot(candidate)
+		if !pathWithinRoot(ownedCache, canonical) && !pathWithinRoot(ownedTemp, canonical) {
+			t.Fatalf("candidate %s (canonically %s) is outside the test-owned cache (%s) and temp (%s) roots; refusing to modify it", candidate, canonical, ownedCache, ownedTemp)
 		}
 	}
 	return workspaceRoot, candidates
