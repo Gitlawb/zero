@@ -3,33 +3,34 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:58:25.801Z",
-  "durationMs": 6386301,
+  "endedAt": "2026-08-15T09:58:33.396Z",
+  "durationMs": 6393900,
   "status": "running",
   "tokens": {
-    "total": 19225,
-    "input": 70,
-    "output": 19155
+    "total": 19343,
+    "input": 72,
+    "output": 19271
   },
   "cost": {
-    "usd": 16.4807
+    "usd": 16.839
   },
-  "toolCalls": 33,
+  "toolCalls": 34,
   "lines": {
-    "added": 320,
-    "removed": 2
+    "added": 162,
+    "removed": 11
   },
   "filesChanged": [
-    "internal/specialist/plan_exec.go",
-    "internal/specialist/plan_wall_budget_test.go",
-    "internal/specialist/zzhol829_probe_test.go"
+    "internal/specialist/plan_runner.go",
+    "internal/specialist/plan_write_grant_test.go",
+    "internal/tui/orchestrate_saved.go",
+    "internal/tui/orchestrate_saved_write_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "cb51684582e3b09b49176948caa70c58af4fb6b9",
+    "headAfter": "5b2c80959ea094422fe4c75c3b7755bc1a9c1392",
     "commitShas": [
-      "cb51684582e3b09b49176948caa70c58af4fb6b9"
+      "5b2c80959ea094422fe4c75c3b7755bc1a9c1392"
     ]
   },
   "summary": "77/131 and climbing — rerere is handling the repeats. Let me wait for it to finish:",
