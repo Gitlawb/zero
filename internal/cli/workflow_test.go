@@ -1017,26 +1017,28 @@ func TestRunExecRejectsWorktreeDirWithoutWorktree(t *testing.T) {
 }
 
 func TestParseChangesArgsAuto(t *testing.T) {
-	// 1. Correct parsing of auto
-	for _, args := range [][]string{
-		{"--auto"},
-		{"-a"},
-	} {
-		options, help, err := parseChangesArgs(args, "commit")
-		if err != nil {
-			t.Fatalf("parseChangesArgs(%v) error: %v", args, err)
-		}
-		if help {
-			t.Fatalf("parseChangesArgs(%v) returned help", args)
-		}
-		if !options.auto {
-			t.Fatalf("auto = false, want true (args %v)", args)
+	// 1. Correct parsing of auto on commit, push, and pr
+	for _, cmd := range []string{"commit", "push", "pr"} {
+		for _, args := range [][]string{
+			{"--auto"},
+			{"-a"},
+		} {
+			options, help, err := parseChangesArgs(args, cmd)
+			if err != nil {
+				t.Fatalf("parseChangesArgs(%v, %q) error: %v", args, cmd, err)
+			}
+			if help {
+				t.Fatalf("parseChangesArgs(%v, %q) returned help", args, cmd)
+			}
+			if !options.auto {
+				t.Fatalf("auto = false, want true (args %v, cmd %q)", args, cmd)
+			}
 		}
 	}
 
 	// 2. Reject --auto on inspect
 	_, _, err := parseChangesArgs([]string{"--auto"}, "inspect")
-	if err == nil || !strings.Contains(err.Error(), "--auto") {
+	if err == nil || !strings.Contains(err.Error(), "--auto is only valid with commit, push, or pr") {
 		t.Fatalf("expected --auto rejection on inspect, got %v", err)
 	}
 
@@ -1050,6 +1052,20 @@ func TestParseChangesArgsAuto(t *testing.T) {
 	_, _, err = parseChangesArgs([]string{"--message=", "--auto"}, "commit")
 	if err == nil || !strings.Contains(err.Error(), "cannot specify both --message and --auto") {
 		t.Fatalf("expected empty --message and --auto conflict error, got %v", err)
+	}
+
+	// 5. Dry-run allowed on commit and push, rejected on pr and inspect
+	for _, cmd := range []string{"commit", "push"} {
+		opts, _, err := parseChangesArgs([]string{"--dry-run"}, cmd)
+		if err != nil || !opts.dryRun {
+			t.Fatalf("expected --dry-run accepted on %q, got opts=%+v err=%v", cmd, opts, err)
+		}
+	}
+	for _, cmd := range []string{"pr", "inspect"} {
+		_, _, err := parseChangesArgs([]string{"--dry-run"}, cmd)
+		if err == nil || !strings.Contains(err.Error(), "--dry-run is only valid with commit or push") {
+			t.Fatalf("expected --dry-run rejected on %q, got %v", cmd, err)
+		}
 	}
 }
 
@@ -2733,6 +2749,8 @@ func TestEnsureFeatureBranchUnbornDestinationMatrix(t *testing.T) {
 			cwd := t.TempDir()
 			branchCreated := false
 
+			var createdRemote string
+
 			_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, cwd, tc.requestedRemote, featureBranchOptions{
 				AllowDefaultBranch: tc.allowDefaultBranch,
 			}, appDeps{
@@ -2761,6 +2779,7 @@ func TestEnsureFeatureBranchUnbornDestinationMatrix(t *testing.T) {
 				currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
 				createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 					branchCreated = true
+					createdRemote = options.Remote
 					return zerogit.BranchResult{Branch: options.Name}, nil
 				},
 			})
@@ -2783,6 +2802,15 @@ func TestEnsureFeatureBranchUnbornDestinationMatrix(t *testing.T) {
 			}
 			if created != tc.wantBranch {
 				t.Fatalf("created = %v, want %v", created, tc.wantBranch)
+			}
+			if tc.wantBranch {
+				wantRemote := tc.defaultRemote
+				if tc.requestedRemote != "" {
+					wantRemote = tc.requestedRemote
+				}
+				if createdRemote != wantRemote {
+					t.Fatalf("createdRemote = %q, want %q", createdRemote, wantRemote)
+				}
 			}
 		})
 	}

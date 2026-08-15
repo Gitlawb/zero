@@ -1197,24 +1197,6 @@ type featureBranchOptions struct {
 // requires Push's push itself to assert the destination is still new. That
 // requirement also carries across a retry: if the current branch is already
 // non-default (this call didn't create it) but has not been successfully
-// published to the exact target remote under the same branch name, keep the
-// nonexistence lease. branch.<name>.remote alone is not enough: with
-// branch.autoSetupMerge=inherit, checkout -b copies remote=origin from the
-// source branch before any push. After a successful create, the original
-// default branch ref is moved back to its own upstream tip (not necessarily
-// the push destination) so the feature branch exclusively owns the
-// publishable commits; a failed restore rolls the feature branch back.
-// allowDefaultBranch (the --yes flag) and dryRun both opt out via the ""
-// branch / false return, leaving Push's own guard/preview behavior on the
-// default branch unaffected.
-//
-// autoNaming gates the LLM naming path (--auto): these commands were
-// git-only, and sending the change diff to a configured provider on every
-// default-branch push would silently export source code nobody asked to
-// share. Without the opt-in the name comes from deterministic local
-// information only. maxDiffBytes caps the committed-range diff Inspect
-// returns, so a user who passed --diff-bytes to bound the proprietary source
-// sent for LLM naming has that cap honored here just as the commit path does.
 // branchPushPlan holds the resolved parameters for a push or PR workflow
 // before any branches are created or refs mutated. Separating plan resolution
 // from mutation allows tests to assert the resolution matrix directly without
@@ -1433,7 +1415,7 @@ func resolveBranchPushPlan(ctx context.Context, stdout io.Writer, workspaceRoot 
 	return branchPushPlan{
 		ShouldBranch:           true,
 		CurrentBranch:          currentBranch,
-		PushRemote:             remote,
+		PushRemote:             pushRemote,
 		RequireNewRemoteBranch: true,
 		TrackingRemote:         trackingRemote,
 		TrackingBranch:         trackingBranch,

@@ -1003,9 +1003,13 @@ func isRemoteURLOrPath(remote string) bool {
 	return false
 }
 
-// IsNamedRemote reports whether remote is a configured named remote (such as
-// "origin", "upstream", or "team/upstream"), as opposed to a direct URL
+// IsNamedRemote reports whether remote is shaped like a remote NAME (such as
+// "origin", "upstream", or "team/upstream") rather than a direct URL
 // (https://..., git@...) or a file path (/path/to/repo, C:\path\to\repo).
+// It does not consult git config, so a name that is not configured (a typo)
+// still reports true; the subsequent git command surfaces that failure.
+// ctx, cwd, and runGit are accepted for signature stability with the other
+// remote helpers and are unused.
 func IsNamedRemote(ctx context.Context, cwd, remote string, runGit Runner) bool {
 	remote = strings.TrimSpace(remote)
 	if remote == "" || isRemoteURLOrPath(remote) {
@@ -1075,8 +1079,8 @@ func RemoteHasBranch(ctx context.Context, cwd, remote, branch string, runGit Run
 	return false, nil
 }
 
-// UpstreamRef returns the short remote-tracking name for branch's configured
-// upstream (for example "origin/user/slug"), or "" when none is configured or
+// UpstreamRef returns the full upstream reference name for branch (e.g.
+// "origin/feature-1" or "upstream/main"), or the empty string if no upstream or
 // the ref cannot be resolved. Callers that need to know whether Zero's own
 // `push -u` published exactly <remote>/<branch> compare this string rather than
 // reading branch.<name>.remote alone: with branch.autoSetupMerge=inherit,
@@ -1118,14 +1122,15 @@ func HasUpstream(ctx context.Context, cwd, branch string, runGit Runner) (bool, 
 	if ref == "" {
 		return false, nil
 	}
-	// rev-parse --abbrev-ref prints "<remote>/<branch>"; branch names may
-	// themselves contain slashes (user/slug), so take everything after the
-	// first slash as the tracked branch name.
-	_, tracked, ok := strings.Cut(ref, "/")
-	if !ok || tracked == "" {
-		return false, nil
+	// rev-parse --abbrev-ref prints "<remote>/<branch>". Both remote names
+	// (e.g. team/upstream) and branch names (e.g. user/slug) may contain
+	// slashes, so verify that the upstream ref ends with "/" + branch and
+	// has a non-empty remote prefix.
+	suffix := "/" + branch
+	if strings.HasSuffix(ref, suffix) && len(ref) > len(suffix) {
+		return true, nil
 	}
-	return tracked == branch, nil
+	return false, nil
 }
 
 // UpstreamRemote returns the configured upstream remote name for branch (e.g. "origin"),

@@ -1943,6 +1943,20 @@ func TestHasUpstreamRejectsInheritedMainUpstream(t *testing.T) {
 	}
 }
 
+func TestHasUpstreamMultiSegmentRemote(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: "team/upstream/user/slug\n"},
+	}}
+	has, err := HasUpstream(context.Background(), root, "user/slug", runner.Run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !has {
+		t.Fatal("expected HasUpstream to return true for multi-segment remote tracking branch")
+	}
+}
+
 func TestResetBranchRefRefusesConcurrentDefaultAdvance(t *testing.T) {
 	root := initGitRepo(t, true)
 	runGitCommand(t, root, "branch", "-M", "main")
