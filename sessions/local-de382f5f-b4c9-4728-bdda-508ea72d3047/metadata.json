@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:24:08.235Z",
-  "durationMs": 7928565,
+  "endedAt": "2026-08-15T10:24:11.314Z",
+  "durationMs": 7931717,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,26 +16,20 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 310,
-    "removed": 22
+    "added": 112,
+    "removed": 31
   },
   "filesChanged": [
-    "internal/specialist/plan.go",
-    "internal/specialist/plan_exec.go",
-    "internal/specialist/plan_test.go",
-    "internal/specialist/plan_tool.go",
-    "internal/tui/keybinding_help.go",
-    "internal/tui/model.go",
-    "internal/tui/mouse.go",
-    "internal/tui/orchestrate_panel.go",
-    "internal/tui/orchestrate_panel_test.go"
+    "internal/tui/effort_options_test.go",
+    "internal/tui/picker.go",
+    "internal/tui/picker_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "77d9e5a66f27aa66ef36845a7c75f60bbd6d94a3",
+    "headAfter": "4ceb23b4d33c1ea544aeafc93fd7ed2059249b83",
     "commitShas": [
-      "77d9e5a66f27aa66ef36845a7c75f60bbd6d94a3"
+      "4ceb23b4d33c1ea544aeafc93fd7ed2059249b83"
     ]
   },
   "summary": "Now #829:",
