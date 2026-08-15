@@ -315,6 +315,36 @@ var objectiveFailureMarkers = []string{
 	"do this task", "perform this task", "carry out this task",
 }
 
+// blockedWorkMarkers are what turns an absence-establishing sentence back into
+// an admission of failure.
+//
+// MEASURED, NOT ARGUED. The successNegationTails list above exists so a finder
+// reporting "I could not find where X is set" is not marked incomplete for doing
+// its job. But the stems it added — "find the", "reproduce ", "confirm any",
+// "observe any" — also head the most ordinary way of admitting defeat, and the
+// allowance fired on the whole sentence regardless of how it ended. Measured
+// against eleven genuine admissions, TEN passed the detector undetected:
+//
+//	"I could not reproduce the crash, so the fix is unverified."
+//	"I could not find the root cause; someone else will need to pick this up."
+//	"I could not locate the source of the regression and have run out of ideas."
+//
+// That is the guard's entire purpose defeated — it is the last thing between a
+// stalled run and a report that reads like success.
+//
+// So the allowance now yields when the sentence ALSO says the work is blocked.
+// "I could not find where X is set in production code" still passes, because
+// nothing in it claims the objective was left undone; the three above do not.
+var blockedWorkMarkers = []string{
+	"unverified", "not verified", "cannot verify", "could not verify",
+	"someone else", "will need to", "needs someone", "handed off", "hand off",
+	"ran out of", "run out of", "out of time", "in the time available",
+	"stopped there", "stopping here", "gave up", "giving up",
+	"nothing was modified", "no changes were made", "left unchanged", "left undone",
+	"may be inert", "is unresolved", "remains unresolved", "still broken",
+	"so i cannot", "so i could not",
+}
+
 func selfReportedIncompletion(text string) string {
 	for _, sentence := range admissionSentences(strings.ToLower(stripQuoted(text))) {
 		if containsAny(sentence, narrativeMarkers) {
@@ -348,7 +378,11 @@ func selfReportedIncompletion(text string) string {
 				}
 				abs := start + rel
 				tail := strings.TrimSpace(sentence[abs+len(stem):])
-				if !hasAnyPrefix(tail, successNegationTails) {
+				// The allowance yields to a sentence that also says the work is
+				// blocked: "could not reproduce the crash" is a finding, "could not
+				// reproduce the crash, so the fix is unverified" is an admission,
+				// and the tail prefix alone cannot tell them apart.
+				if !hasAnyPrefix(tail, successNegationTails) || containsAny(sentence, blockedWorkMarkers) {
 					return selfReportReason(strings.TrimSpace(stem) + " …")
 				}
 				start = abs + len(stem)
