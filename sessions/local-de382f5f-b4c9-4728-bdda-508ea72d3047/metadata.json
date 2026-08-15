@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:04:20.674Z",
-  "durationMs": 6741122,
+  "endedAt": "2026-08-15T10:04:29.356Z",
+  "durationMs": 6749826,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,19 +16,19 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 24,
-    "removed": 5
+    "added": 32,
+    "removed": 6
   },
   "filesChanged": [
-    "internal/tui/orchestrate_saved.go",
-    "internal/tui/orchestrate_saved_test.go"
+    "internal/execution/completed_session_test.go",
+    "internal/specialist/plan_workspace_reach.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "3e69d2358746296aa68442709d1f24567e178470",
+    "headAfter": "ba122d748dfcb70844848730d95095abee5e9926",
     "commitShas": [
-      "3e69d2358746296aa68442709d1f24567e178470"
+      "ba122d748dfcb70844848730d95095abee5e9926"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
