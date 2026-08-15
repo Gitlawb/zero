@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:03:25.994Z",
-  "durationMs": 6686483,
+  "endedAt": "2026-08-15T10:03:37.871Z",
+  "durationMs": 6698374,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,22 +16,30 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 642,
-    "removed": 6
+    "added": 1451,
+    "removed": 32
   },
   "filesChanged": [
-    "internal/cli/app.go",
-    "internal/specialist/exec.go",
-    "internal/specialist/plan_runner.go",
-    "internal/specialist/task_model_autoassign_test.go",
-    "internal/specialist/task_model_test.go"
+    "internal/tui/cancel_settles_agents_test.go",
+    "internal/tui/files_panel.go",
+    "internal/tui/model.go",
+    "internal/tui/models_panel.go",
+    "internal/tui/models_panel_test.go",
+    "internal/tui/orchestrate_panel.go",
+    "internal/tui/plan_step_detail.go",
+    "internal/tui/sidebar.go",
+    "internal/tui/sidebar_plan_detail.go",
+    "internal/tui/specialist_card.go",
+    "internal/tui/view.go",
+    "internal/tui/zeromaxing_skin.go",
+    "internal/tui/zeromaxing_skin_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "e90e47d18030b691e06f0759641e27aee7034917",
+    "headAfter": "27b2f1fd98a4b1af5c3b593260abfd63b9b001ce",
     "commitShas": [
-      "e90e47d18030b691e06f0759641e27aee7034917"
+      "27b2f1fd98a4b1af5c3b593260abfd63b9b001ce"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
