@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:05:58.510Z",
-  "durationMs": 6839016,
+  "endedAt": "2026-08-15T10:06:10.230Z",
+  "durationMs": 6850719,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,19 +16,21 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 119,
-    "removed": 91
+    "added": 106,
+    "removed": 5
   },
   "filesChanged": [
-    "internal/specialist/plan_model_size.go",
-    "internal/specialist/plan_model_size_test.go"
+    "internal/tui/cancel_settles_agents_test.go",
+    "internal/tui/render_cache.go",
+    "internal/tui/render_cache_fingerprint_test.go",
+    "internal/tui/specialist_card.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "dc67571a36c24a346362aa00bf2d369118a1591d",
+    "headAfter": "900dce1fe56c90e4fb33ca9f66e3344d86ee0b25",
     "commitShas": [
-      "dc67571a36c24a346362aa00bf2d369118a1591d"
+      "900dce1fe56c90e4fb33ca9f66e3344d86ee0b25"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
