@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:06:25.372Z",
-  "durationMs": 6865871,
+  "endedAt": "2026-08-15T10:06:35.990Z",
+  "durationMs": 6876488,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,18 +16,20 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 5,
-    "removed": 4
+    "added": 95,
+    "removed": 1
   },
   "filesChanged": [
-    "internal/agent/posture_off_identity_test.go"
+    "internal/tools/bash.go",
+    "internal/tools/shell_runtime.go",
+    "internal/tools/shell_runtime_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "a1582f72a70e0d0d7cb2b91f545bc3212bfeb4e3",
+    "headAfter": "a91f1925c4976f911d0b45867bbf5e4d7a823c1f",
     "commitShas": [
-      "a1582f72a70e0d0d7cb2b91f545bc3212bfeb4e3"
+      "a91f1925c4976f911d0b45867bbf5e4d7a823c1f"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
