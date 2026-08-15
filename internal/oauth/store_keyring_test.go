@@ -2143,6 +2143,91 @@ func TestStoreKeyringCrossRootLegacyLoginSurvivesWithoutDualWrite(t *testing.T) 
 	}
 }
 
+// TestStoreKeyringLogoutAllLeavesLegacyAccountIntact extends the cross-root
+// invariant above to logout-all, which was the one write path that still
+// deleted the whole legacy account when the indexed store emptied. That delete
+// used the snapshot taken at write entry rather than a post-reconcile re-read,
+// so an old binary on another config root could land a login in the gap and
+// have it deleted along with the account. Its error was discarded too, letting
+// Delete report success while plaintext credentials survived. Legacy is frozen
+// on every path now: bounded migration, not downgrade revocation.
+func TestStoreKeyringLogoutAllLeavesLegacyAccountIntact(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"XDG_CONFIG_HOME": t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An old binary on a config root this process cannot lock writes its own
+	// combined entry after the index already exists.
+	legacy, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("carol"): {AccessToken: "c"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEnc := base64.StdEncoding.EncodeToString(legacy)
+	kr.data[keyringService+"/"+keyringLegacyAccount] = legacyEnc
+
+	// Log out of every key this binary can see. carol reconciles into the
+	// indexed store on the way, so both deletes drain state.Tokens to empty.
+	for _, name := range []string{"alpha", "carol"} {
+		if removed, err := s.Delete(ProviderKey(name)); err != nil || !removed {
+			t.Fatalf("Delete(%s) = removed %v, err %v", name, removed, err)
+		}
+	}
+	if raw, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+		t.Fatal("logout-all deleted the legacy account; a concurrent old-binary login on another config root is lost with it")
+	} else if raw != legacyEnc {
+		t.Fatal("logout-all rewrote the legacy account, which new code must never do")
+	}
+}
+
+// TestStoreKeyringDeleteReportsRemovedWhenReconcilingResidentEntry: when a
+// tombstone already hides a key from readState but its keyring entry survives
+// (an interrupted logout), Delete still runs per-key deletes and an index
+// shrink. It used to return removed=false through Manager.Logout, so
+// `zero auth logout` told the user nothing was removed while it was removing.
+func TestStoreKeyringDeleteReportsRemovedWhenReconcilingResidentEntry(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"XDG_CONFIG_HOME": t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+	if err := s.Save(key, Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tombstone the key without removing its entry: the state an interrupted
+	// delete leaves behind, where the logical logout committed but the entry
+	// cleanup did not.
+	blob := s.blob.(keyringBlob)
+	if err := blob.writeTombstones(map[string]bool{key: true}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.Load(key); err != nil || ok {
+		t.Fatalf("Load = ok %v, err %v; tombstone must hide the entry", ok, err)
+	}
+	if !blob.hasResidentEntry(key) {
+		t.Fatal("test setup: the keyring entry should still be resident")
+	}
+
+	removed, err := s.Delete(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Fatal("Delete reported removed=false while reconciling a resident entry; `zero auth logout` prints \"nothing removed\" for a logout that did remove a keyring entry")
+	}
+	if _, ok := kr.data[keyringService+"/"+key]; ok {
+		t.Fatal("resident entry survived the reconciling delete")
+	}
+}
+
 // TestStoreKeyringReadIndexRejectsOversizedEncodedPayload: bound the base64
 // payload before DecodeString/Unmarshal so a damaged index cannot force
 // unbounded memory/CPU under the store lock.

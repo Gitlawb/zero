@@ -486,7 +486,14 @@ func (s *Store) Delete(key string) (bool, error) {
 			removed = true
 			return s.writeState(state, map[string]bool{key: true}, check)
 		}
+		// readState no longer exposes the key (a tombstone hides it, or an
+		// interrupted delete already finished the logical logout) but a keyring
+		// entry for it survives. Reconciling that residue still deletes a
+		// credential-bearing entry, so report it as removed: `zero auth logout`
+		// surfaces this boolean directly and "nothing removed" would be wrong
+		// while per-key deletes and an index shrink are running.
 		if kb, ok := s.blob.(keyringBlob); ok && kb.hasResidentEntry(key) {
+			removed = true
 			return s.writeState(state, map[string]bool{key: true}, check)
 		}
 		return nil
@@ -938,10 +945,14 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // permanently consume capacity) or entries that a later read/write can still
 // see and reconcile, never an invisible credential stranded in the OS keychain.
 //
-// The legacy combined entry is preserved as a discovery source for unindexed
-// old-binary logins. When Delete explicitly logs out of a provider, that key
-// is removed from the legacy blob (or the legacy account deleted if empty)
-// so a downgraded binary cannot continue to use the revoked credential.
+// The legacy combined entry is never written or deleted here; it stays frozen
+// as a discovery source for unindexed old-binary logins. Logout is authoritative
+// for new binaries only: a tombstone durably suppresses the legacy copy on every
+// new-binary read, but a pre-per-key binary reading `oauth-tokens` directly can
+// still use the credential until it is upgraded. Scrubbing the key out of the
+// legacy blob would require a snapshot-then-Set that cannot be locked against
+// old writers on other config roots, so it would trade a bounded downgrade
+// window for unbounded loss of concurrent old-binary logins.
 func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease leaseCheck) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -1204,11 +1215,6 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 		}
 		if err := b.writeTombstones(tombstones, checkLease); err != nil {
 			return err
-		}
-	}
-	if len(state.Tokens) == 0 && len(legacyTokens) > 0 {
-		if err := checkLease(); err == nil {
-			_, _ = b.kr.Delete(b.service, b.legacyAccount)
 		}
 	}
 	return nil
