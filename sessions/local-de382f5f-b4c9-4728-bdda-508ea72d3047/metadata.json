@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:59:10.164Z",
-  "durationMs": 6430644,
+  "endedAt": "2026-08-15T09:59:19.676Z",
+  "durationMs": 6440176,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,33 +16,24 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 403,
-    "removed": 56
+    "added": 347,
+    "removed": 7
   },
   "filesChanged": [
-    "internal/tui/model.go",
-    "internal/tui/orchestrate_panel.go",
-    "internal/tui/orchestrate_panel_test.go",
-    "internal/tui/orchestrate_saved.go",
-    "internal/tui/orchestrate_window_test.go",
-    "internal/tui/plan_card_regression_test.go",
-    "internal/tui/plan_fallback_display_test.go",
-    "internal/tui/plan_messages.go",
-    "internal/tui/plan_progress.go",
-    "internal/tui/plan_progress_test.go",
-    "internal/tui/sidebar.go",
-    "internal/tui/sidebar_plan_detail.go",
-    "internal/tui/sidebar_plan_detail_test.go",
-    "internal/tui/sidebar_plan_test.go",
-    "internal/tui/sidebar_test.go",
-    "internal/tui/specialist_card.go"
+    "internal/cli/app.go",
+    "internal/cli/shutdown_order_test.go",
+    "internal/specialist/plan.go",
+    "internal/specialist/plan_store.go",
+    "internal/specialist/plan_store_test.go",
+    "internal/specialist/plan_strict_lists_test.go",
+    "internal/specialist/plan_tool.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "c658b09524832e7335a466c5f7b634bffa61a1c6",
+    "headAfter": "2954c2b38ce9c471e79c67fc17e7fcd6c1821c67",
     "commitShas": [
-      "c658b09524832e7335a466c5f7b634bffa61a1c6"
+      "2954c2b38ce9c471e79c67fc17e7fcd6c1821c67"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
