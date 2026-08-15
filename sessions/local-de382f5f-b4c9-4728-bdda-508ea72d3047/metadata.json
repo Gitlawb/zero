@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:25:06.119Z",
-  "durationMs": 7986480,
+  "endedAt": "2026-08-15T10:25:09.051Z",
+  "durationMs": 7989390,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,34 +16,22 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 559,
-    "removed": 42
+    "added": 305,
+    "removed": 36
   },
   "filesChanged": [
-    "internal/specialist/plan.go",
-    "internal/specialist/plan_events.go",
-    "internal/specialist/plan_exec.go",
-    "internal/specialist/plan_retry_test.go",
-    "internal/specialist/plan_runner.go",
-    "internal/specialist/plan_tool.go",
-    "internal/specialist/plan_watchdog.go",
-    "internal/specialist/plan_watchdog_test.go",
-    "internal/tui/model.go",
     "internal/tui/orchestrate_panel.go",
     "internal/tui/orchestrate_panel_test.go",
-    "internal/tui/plan_messages.go",
-    "internal/tui/plan_progress.go",
-    "internal/tui/plan_progress_test.go",
-    "internal/tui/sidebar_plan_detail.go",
-    "internal/tui/sidebar_plan_detail_test.go",
-    "internal/tui/sidebar_plan_test.go"
+    "internal/tui/orchestrate_window.go",
+    "internal/tui/orchestrate_window_test.go",
+    "internal/tui/sidebar_plan_detail.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "aabab5d96bfe4fe7c879b27b7e209632e12f3e1b",
+    "headAfter": "a65986e7e8d25284df797e4b9e9f9dbf7f98ae50",
     "commitShas": [
-      "aabab5d96bfe4fe7c879b27b7e209632e12f3e1b"
+      "a65986e7e8d25284df797e4b9e9f9dbf7f98ae50"
     ]
   },
   "summary": "Now #829:",
