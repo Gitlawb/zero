@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:26:06.619Z",
-  "durationMs": 8047018,
+  "endedAt": "2026-08-15T10:26:01.219Z",
+  "durationMs": 8041138,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,19 +16,19 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 320,
-    "removed": 4
+    "added": 49,
+    "removed": 1
   },
   "filesChanged": [
-    "internal/sandbox/scope.go",
-    "internal/sandbox/scope_temporary_test.go"
+    "internal/specialist/plan_runner.go",
+    "internal/specialist/plan_worktree_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "a2939397c442dcf65d7b5e173cec224d58c35770",
+    "headAfter": "da2169a91f3596b4f4be3d792baaf80ce4ee2bc3",
     "commitShas": [
-      "a2939397c442dcf65d7b5e173cec224d58c35770"
+      "da2169a91f3596b4f4be3d792baaf80ce4ee2bc3"
     ]
   },
   "summary": "Now #829:",
