@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:05:42.078Z",
-  "durationMs": 6822581,
+  "endedAt": "2026-08-15T10:05:49.426Z",
+  "durationMs": 6829929,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,25 +16,19 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 219,
-    "removed": 37
+    "added": 75,
+    "removed": 1
   },
   "filesChanged": [
-    "internal/specialist/exec.go",
-    "internal/specialist/plan_exec.go",
-    "internal/specialist/plan_provider_retry_test.go",
-    "internal/tui/cancel_settles_agents_test.go",
-    "internal/tui/models_panel_test.go",
-    "internal/tui/sidebar.go",
-    "internal/tui/theme_palettes.go",
-    "internal/tui/zeromaxing_skin_test.go"
+    "internal/specialist/plan_model_size.go",
+    "internal/specialist/plan_model_size_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "7b4adc6c67d4540f8bb2db06eb04329f486a3301",
+    "headAfter": "d966828587977b7f32fad5c817d8d528fa09a574",
     "commitShas": [
-      "7b4adc6c67d4540f8bb2db06eb04329f486a3301"
+      "d966828587977b7f32fad5c817d8d528fa09a574"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
