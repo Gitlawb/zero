@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:56:36.164Z",
-  "durationMs": 6276662,
+  "endedAt": "2026-08-15T09:56:47.335Z",
+  "durationMs": 6287830,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,22 +16,19 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 319,
-    "removed": 19
+    "added": 45,
+    "removed": 1
   },
   "filesChanged": [
-    "internal/tui/hover_test.go",
-    "internal/tui/model.go",
     "internal/tui/sidebar.go",
-    "internal/tui/sidebar_test.go",
-    "internal/tui/transcript_selection.go"
+    "internal/tui/sidebar_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "3cf5d0c4d7cbaf83a1e3d69400355b4285b4643b",
+    "headAfter": "383b804415e263f18f66e7532604a815983073c0",
     "commitShas": [
-      "3cf5d0c4d7cbaf83a1e3d69400355b4285b4643b"
+      "383b804415e263f18f66e7532604a815983073c0"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
