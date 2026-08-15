@@ -69,8 +69,16 @@ func TestAnAncestorLinkCannotTakeTheStoreOutOfTheWorkspace(t *testing.T) {
 	if _, err := os.Stat(secret); err != nil {
 		t.Errorf("Forget deleted a file outside the workspace: %v", err)
 	}
-	if notes := List(paths); len(notes) != 0 {
+	notes, listErr := List(paths)
+	if len(notes) != 0 {
 		t.Errorf("List surfaced %d note(s) from outside the workspace", len(notes))
+	}
+	// The refusal is REPORTED, not swallowed. A store that cannot be opened
+	// because a link redirects it out of the workspace is an operational failure;
+	// returning an empty list for it would tell the caller there are no notes,
+	// which is how a redirected store looks exactly like an empty one.
+	if listErr == nil {
+		t.Error("List reported no problem for a store redirected outside the workspace")
 	}
 }
 
@@ -89,7 +97,11 @@ func TestAnOrdinaryWorkspaceStoreStillRoundTrips(t *testing.T) {
 	if note.Description != "a summary" || strings.TrimSpace(note.Body) != "the body" {
 		t.Errorf("round trip lost content: %+v", note)
 	}
-	if notes := List(paths); len(notes) != 1 {
+	notes, listErr := List(paths)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(notes) != 1 {
 		t.Errorf("List returned %d notes, want 1", len(notes))
 	}
 	if err := Forget(paths, ScopeProject, "note"); err != nil {

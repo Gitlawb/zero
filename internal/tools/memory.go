@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -25,8 +26,9 @@ import (
 // change in that list.
 
 const (
-	MemoryToolName      = "memory"
-	MemoryWriteToolName = "memory_write"
+	MemoryToolName       = "memory"
+	MemoryWriteToolName  = "memory_write"
+	MemoryForgetToolName = "memory_forget"
 )
 
 type memoryTool struct {
@@ -68,17 +70,46 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 	if err != nil {
 		return errorResult("Error: Invalid arguments for memory: " + err.Error())
 	}
-	if tool.paths.ProjectDir == "" && tool.paths.LocalDir == "" {
+	// Asked of the store rather than tested here, because the fields alone are
+	// not the answer: a blank Root makes every scope refuse with ErrNoStore,
+	// which List treats as "not configured" — so a Paths with both directories
+	// and no Root rendered as "No saved notes yet" and told the user the memory
+	// was empty when it was switched off.
+	if !tool.paths.Available() {
 		return errorResult("Error: memory is not available in this run.")
 	}
 
-	if strings.TrimSpace(name) == "" {
-		return okResult(renderMemoryList(memory.List(tool.paths)))
+	// Resolved ONCE, and refused when the caller names a scope this package does
+	// not know. The two paths used to disagree: an unrecognised spelling widened
+	// the named read to BOTH stores, while the listing ignored a perfectly valid
+	// scope and always read both.
+	scopes, err := memory.ResolveScopes(scope)
+	if err != nil {
+		return errorResult(fmt.Sprintf("Error: %v. Use \"project\" or \"local\", or omit it to search both.", err))
 	}
-	for _, candidate := range memoryScopes(scope) {
-		note, err := memory.Read(tool.paths, candidate, name)
-		if err != nil {
-			continue
+
+	if strings.TrimSpace(name) == "" {
+		notes, listErr := memory.List(tool.paths, scopes...)
+		if listErr != nil {
+			// A store that could not be read is reported rather than rendered as
+			// an empty memory: "you have no notes" and "your notes could not be
+			// read" are different answers, and only one of them should lead the
+			// model to write the note again.
+			return errorResult("Error: reading saved notes: " + listErr.Error())
+		}
+		return okResult(renderMemoryList(notes))
+	}
+	for _, candidate := range scopes {
+		note, readErr := memory.Read(tool.paths, candidate, name)
+		if readErr != nil {
+			// Absence is the only reason to try the next scope. A refused link,
+			// an oversized note or a permission error is an operational failure,
+			// and reporting it as "no memory named" is how the model concludes
+			// the note is gone and writes over whatever is actually there.
+			if errors.Is(readErr, memory.ErrNotFound) {
+				continue
+			}
+			return errorResult(fmt.Sprintf("Error: reading memory %q (%s): %v", name, candidate, readErr))
 		}
 		return okResult(fmt.Sprintf("memory %q (%s)\n\n%s", note.Name, note.Scope, note.Body))
 	}
@@ -95,19 +126,26 @@ func NewMemoryWriteTool(paths memory.Paths) Tool {
 	return memoryWriteTool{
 		baseTool: baseTool{
 			name: MemoryWriteToolName,
-			description: "Save a durable note for future sessions, or delete one. " +
+			description: "Save a durable note for future sessions. " +
 				"Write what a later session could not work out for itself — a convention, a decision and its reason, a finding already confirmed. " +
 				"Do NOT write what the code, the tests or git history already say; a note that repeats them is one more thing to keep true. " +
-				`Use scope "local" by default; "project" is checked in and shared with everyone who clones the repo, so save there only what the whole team should read.`,
+				`Use scope "local" by default; "project" is checked in and shared with everyone who clones the repo, so save there only what the whole team should read. ` +
+				"To delete a note, use " + MemoryForgetToolName + ".",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"name":        {Type: "string", Description: "Short identifier: letters, digits, hyphen and underscore."},
-					"content":     {Type: "string", Description: "The note itself. Omit to DELETE the note of this name."},
+					"name":        {Type: "string", Description: `Short identifier: lowercase letters, digits and hyphen, starting with a letter (for example "error-handling").`},
+					"content":     {Type: "string", Description: "The note itself."},
 					"description": {Type: "string", Description: "One line saying what this note is for. Shown when listing, so a reader can choose without opening it."},
 					"scope":       {Type: "string", Description: `"local" (this machine, the default) or "project" (checked in, shared).`},
 				},
-				Required:             []string{"name"},
+				// content is REQUIRED, and that is the fix rather than a tidy-up.
+				// It used to be optional with allowEmpty, so a call that merely
+				// left it out — or sent "  \n\t" — fell through to Forget and
+				// destroyed the note, behind an approval whose text says only
+				// that this tool saves. Deletion now lives in its own tool with
+				// its own disclosure.
+				Required:             []string{"name", "content"},
 				AdditionalProperties: false,
 			},
 			safety:       promptSafety(SideEffectWrite, "Saves a note that future sessions will read and believe."),
@@ -122,9 +160,17 @@ func (tool memoryWriteTool) Run(_ context.Context, args map[string]any) Result {
 	if err != nil {
 		return errorResult("Error: Invalid arguments for memory_write: " + err.Error())
 	}
-	content, err := aliasedStringArg(args, []string{"content", "body", "text"}, "", false, true)
+	// Required and non-empty: an omitted or whitespace-only payload is a
+	// malformed save, not a request to delete.
+	content, err := aliasedStringArg(args, []string{"content", "body", "text"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for memory_write: " + err.Error())
+	}
+	// Checked after trimming as well, because the argument helper only rejects a
+	// genuinely empty string. "  \n\t" used to reach the delete branch and destroy
+	// the note; it must now be refused rather than saved as a blank one.
+	if strings.TrimSpace(content) == "" {
+		return errorResult("Error: memory_write needs the note's content. To delete a note, use " + MemoryForgetToolName + ".")
 	}
 	description, err := aliasedStringArg(args, []string{"description", "summary"}, "", false, true)
 	if err != nil {
@@ -142,27 +188,72 @@ func (tool memoryWriteTool) Run(_ context.Context, args map[string]any) Result {
 		scope = memory.Scope(trimmed)
 	}
 
-	if strings.TrimSpace(content) == "" {
-		if err := memory.Forget(tool.paths, scope, name); err != nil {
-			return errorResult("Error: " + err.Error())
-		}
-		return okResult(fmt.Sprintf("Forgot %q (%s).", name, scope))
-	}
 	if _, err := memory.Write(tool.paths, scope, name, description, content); err != nil {
 		return errorResult("Error: " + err.Error())
 	}
 	return okResult(fmt.Sprintf("Saved %q (%s).", name, scope))
 }
 
-func memoryScopes(requested string) []memory.Scope {
-	switch memory.Scope(strings.TrimSpace(strings.ToLower(requested))) {
-	case memory.ScopeProject:
-		return []memory.Scope{memory.ScopeProject}
-	case memory.ScopeLocal:
-		return []memory.Scope{memory.ScopeLocal}
-	default:
-		return []memory.Scope{memory.ScopeProject, memory.ScopeLocal}
+type memoryForgetTool struct {
+	baseTool
+	paths memory.Paths
+}
+
+// NewMemoryForgetTool deletes a durable note.
+//
+// A SEPARATE TOOL, not a mode of memory_write, because the approval text is
+// fixed per tool. memory_write's says it "saves a note that future sessions will
+// read and believe", and deleting under that sentence is what made an omitted
+// content field destructive: the human approved a save and got a permanent
+// removal, and an "always allow" on that prompt made every later deletion
+// unattended. Splitting them lets each prompt say what its tool actually does,
+// and keeps a save grant from authorising a delete.
+func NewMemoryForgetTool(paths memory.Paths) Tool {
+	return memoryForgetTool{
+		baseTool: baseTool{
+			name: MemoryForgetToolName,
+			description: "Permanently delete a saved note. " +
+				"There is no undo and no copy is returned, so read the note first if you are not certain it should go.",
+			parameters: Schema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"name":  {Type: "string", Description: "The note to delete."},
+					"scope": {Type: "string", Description: `"local" (this machine, the default) or "project" (checked in, shared).`},
+				},
+				Required:             []string{"name"},
+				AdditionalProperties: false,
+			},
+			safety:       promptSafety(SideEffectWrite, "PERMANENTLY DELETES a saved note. There is no undo."),
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false},
+		},
+		paths: paths,
 	}
+}
+
+func (tool memoryForgetTool) Run(_ context.Context, args map[string]any) Result {
+	name, err := aliasedStringArg(args, []string{"name", "note", "key"}, "", true, false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for memory_forget: " + err.Error())
+	}
+	rawScope, err := aliasedStringArg(args, []string{"scope"}, "", false, true)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for memory_forget: " + err.Error())
+	}
+	scope := memory.ScopeLocal
+	if trimmed := strings.TrimSpace(strings.ToLower(rawScope)); trimmed != "" {
+		scope = memory.Scope(trimmed)
+	}
+	// Absence is reported as absence. memory.Forget is idempotent by design — a
+	// missing note is not an error at the store layer — but saying "Forgot" for a
+	// note that never existed tells a model which misspelled the name that the
+	// deletion happened, and it stops looking for the real one.
+	if _, err := memory.Read(tool.paths, scope, name); errors.Is(err, memory.ErrNotFound) {
+		return okResult(fmt.Sprintf("No note named %q in %s, so there was nothing to forget.", name, scope))
+	}
+	if err := memory.Forget(tool.paths, scope, name); err != nil {
+		return errorResult("Error: " + err.Error())
+	}
+	return okResult(fmt.Sprintf("Forgot %q (%s).", name, scope))
 }
 
 func renderMemoryList(notes []memory.Note) string {

@@ -703,6 +703,11 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if resolved.Profiles.Memory {
 		registry.Register(tools.NewMemoryTool(memory.DefaultPaths(workspaceRoot)))
 		registry.Register(tools.NewMemoryWriteTool(memory.DefaultPaths(workspaceRoot)))
+		// Deletion is its own tool so the approval can disclose it. memory_write's
+		// prompt says only that it saves, and deleting under that sentence is what
+		// made an omitted content field destructive (#897) — registering the save
+		// tool without this one would leave notes undeletable instead.
+		registry.Register(tools.NewMemoryForgetTool(memory.DefaultPaths(workspaceRoot)))
 	}
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	executionRunner := execution.NewRunner(nil)

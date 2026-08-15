@@ -82,18 +82,37 @@ func TestANoteDefaultsToTheLocalScope(t *testing.T) {
 }
 
 // Deleting is asking for it to be gone, so a missing note is not an error.
-func TestOmittingContentForgetsTheNote(t *testing.T) {
+// Deleting a note goes through memory_forget, NOT through an omitted content on
+// the save tool. The earlier version of this test asserted the opposite, which
+// encoded the defect #897 fixed: memory_write's approval says it saves a note,
+// so an omitted or blank payload falling through to Forget destroyed a note
+// under a prompt that never mentioned deletion.
+func TestDeletingANoteGoesThroughTheForgetTool(t *testing.T) {
 	paths := memoryPaths(t)
-	write, read := NewMemoryWriteTool(paths), NewMemoryTool(paths)
+	write, read, forget := NewMemoryWriteTool(paths), NewMemoryTool(paths), NewMemoryForgetTool(paths)
 	write.Run(context.Background(), map[string]any{"name": "temp", "content": "x"})
-	if res := write.Run(context.Background(), map[string]any{"name": "temp"}); res.Status != StatusOK {
+
+	// A save-shaped call with no content is a malformed save, not a deletion.
+	if res := write.Run(context.Background(), map[string]any{"name": "temp"}); res.Status != StatusError {
+		t.Errorf("an omitted content was accepted as a deletion: %s", res.Output)
+	}
+	if res := read.Run(context.Background(), map[string]any{"name": "temp"}); res.Status != StatusOK {
+		t.Errorf("the note was destroyed by a save-shaped call: %s", res.Output)
+	}
+
+	if res := forget.Run(context.Background(), map[string]any{"name": "temp"}); res.Status != StatusOK {
 		t.Fatalf("forget: %s", res.Output)
 	}
 	if res := read.Run(context.Background(), map[string]any{"name": "temp"}); res.Status != StatusError {
 		t.Errorf("a forgotten note is still readable: %s", res.Output)
 	}
-	if res := write.Run(context.Background(), map[string]any{"name": "never-existed"}); res.Status != StatusOK {
+	// Forgetting something absent is not an error, but must not claim success.
+	res := forget.Run(context.Background(), map[string]any{"name": "never-existed"})
+	if res.Status != StatusOK {
 		t.Errorf("forgetting a missing note errored: %s", res.Output)
+	}
+	if strings.Contains(res.Output, "Forgot") {
+		t.Errorf("forget claimed it deleted a note that never existed: %s", res.Output)
 	}
 }
 
