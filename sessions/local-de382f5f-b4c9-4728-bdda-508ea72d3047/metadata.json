@@ -3,33 +3,45 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:06:56.974Z",
-  "durationMs": 6897483,
+  "endedAt": "2026-08-15T10:10:27.602Z",
+  "durationMs": 7108114,
   "status": "running",
   "tokens": {
-    "total": 20061,
-    "input": 76,
-    "output": 19985
+    "total": 23409,
+    "input": 92,
+    "output": 23317
   },
   "cost": {
-    "usd": 17.565
+    "usd": 20.5212
   },
-  "toolCalls": 36,
+  "toolCalls": 44,
   "lines": {
-    "added": 28,
-    "removed": 0
+    "added": 1144,
+    "removed": 96
   },
   "filesChanged": [
-    "internal/cli/provider_models.go"
+    "internal/cli/app.go",
+    "internal/credstore/concurrency_test.go",
+    "internal/credstore/credstore.go",
+    "internal/credstore/filelock_unix.go",
+    "internal/credstore/filelock_windows.go",
+    "internal/memory/escape_test.go",
+    "internal/memory/memory.go",
+    "internal/memory/memory_test.go",
+    "internal/pathjail/pathjail.go",
+    "internal/pathjail/pathjail_test.go",
+    "internal/tools/memory.go",
+    "internal/tools/memory_test.go",
+    "internal/tools/memory_tool_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "834ad53b73c317fd9c5d31131f6e38a922bdb554",
+    "headAfter": "117890f3b0d50314cb5039d51837e3b3c0f5185d",
     "commitShas": [
-      "834ad53b73c317fd9c5d31131f6e38a922bdb554"
+      "117890f3b0d50314cb5039d51837e3b3c0f5185d"
     ]
   },
-  "summary": "80/131. Let me wait for it to complete:",
+  "summary": "**132 commits, zero merge commits** — fully linear. Let me run the test gauntlet before pushing:",
   "originUrl": "https://getorigin.io/sessions/local-de382f5f-b4c9-4728-bdda-508ea72d3047"
 }
