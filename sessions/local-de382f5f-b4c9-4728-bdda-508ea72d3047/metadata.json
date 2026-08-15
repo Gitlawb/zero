@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:26:00.599Z",
-  "durationMs": 8040821,
+  "endedAt": "2026-08-15T10:26:06.619Z",
+  "durationMs": 8047018,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,22 +16,19 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 292,
-    "removed": 2
+    "added": 320,
+    "removed": 4
   },
   "filesChanged": [
-    "internal/worktrees/run_git_test.go",
-    "internal/worktrees/run_git_unix.go",
-    "internal/worktrees/run_git_unix_test.go",
-    "internal/worktrees/run_git_windows.go",
-    "internal/worktrees/worktrees.go"
+    "internal/sandbox/scope.go",
+    "internal/sandbox/scope_temporary_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "19e1694591e278c340f5dd97bd4b3a332b031a87",
+    "headAfter": "a2939397c442dcf65d7b5e173cec224d58c35770",
     "commitShas": [
-      "19e1694591e278c340f5dd97bd4b3a332b031a87"
+      "a2939397c442dcf65d7b5e173cec224d58c35770"
     ]
   },
   "summary": "Now #829:",
