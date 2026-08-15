@@ -3,35 +3,34 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:28:44.814Z",
-  "durationMs": 8205299,
+  "endedAt": "2026-08-15T10:28:48.315Z",
+  "durationMs": 8208813,
   "status": "running",
   "tokens": {
-    "total": 29359,
-    "input": 116,
-    "output": 29243
+    "total": 30014,
+    "input": 118,
+    "output": 29896
   },
   "cost": {
-    "usd": 25.0197
+    "usd": 25.4008
   },
-  "toolCalls": 55,
+  "toolCalls": 56,
   "lines": {
-    "added": 95,
-    "removed": 1
+    "added": 109,
+    "removed": 2
   },
   "filesChanged": [
-    "internal/tools/bash.go",
-    "internal/tools/shell_runtime.go",
-    "internal/tools/shell_runtime_test.go"
+    "internal/config/keep_finished_agents_resolve_test.go",
+    "internal/tui/keep_finished_agents_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "a0222666b3b9e24b6f69c210e5152753ed20f04f",
+    "headAfter": "059ea07b5d1c2a17ed177db00e8677c0a27e5341",
     "commitShas": [
-      "a0222666b3b9e24b6f69c210e5152753ed20f04f"
+      "059ea07b5d1c2a17ed177db00e8677c0a27e5341"
     ]
   },
-  "summary": "Now #829:",
+  "summary": "Clean rebase. But #902 and #829 both touch `internal/tui/rendering.go`, so let me verify carefully:",
   "originUrl": "https://getorigin.io/sessions/local-de382f5f-b4c9-4728-bdda-508ea72d3047"
 }
