@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:28:23.516Z",
-  "durationMs": 8183970,
+  "endedAt": "2026-08-15T10:28:26.052Z",
+  "durationMs": 8186434,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,18 +16,19 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 21,
-    "removed": 11
+    "added": 46,
+    "removed": 0
   },
   "filesChanged": [
-    "internal/tui/theme_palettes.go"
+    "internal/tui/session_controls.go",
+    "internal/tui/zeromaxing_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "291731a8066876b735fb9564c5cdeeb45cdd0e70",
+    "headAfter": "b8767adaa75627950d7c13bd75de2a9cd209d29a",
     "commitShas": [
-      "291731a8066876b735fb9564c5cdeeb45cdd0e70"
+      "b8767adaa75627950d7c13bd75de2a9cd209d29a"
     ]
   },
   "summary": "Now #829:",
