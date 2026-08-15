@@ -76,10 +76,15 @@ func acquireFileLock(lockPath string, now func() time.Time) (unlock func() error
 					return nil
 				}
 				released = true
-				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					if err := lockutil.RemoveLockFile(lockPath); err != nil {
-						return fmt.Errorf("oauth: release token lock %s: %w", filepath.Base(lockPath), err)
-					}
+				data, rerr := os.ReadFile(lockPath)
+				if rerr != nil {
+					return fmt.Errorf("oauth: verify token lock on release %s: %w", filepath.Base(lockPath), rerr)
+				}
+				if string(data) != token {
+					return fmt.Errorf("oauth: lost token lock ownership on release %s", filepath.Base(lockPath))
+				}
+				if err := lockutil.RemoveLockFile(lockPath); err != nil {
+					return fmt.Errorf("oauth: release token lock %s: %w", filepath.Base(lockPath), err)
 				}
 				return nil
 			}, token, nil

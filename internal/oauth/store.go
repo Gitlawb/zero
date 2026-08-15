@@ -898,17 +898,18 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 	// from an entry it was never written to in the first place. Applied here
 	// transiently (not persisted): the durable version happens in write(),
 	// consistent with every other best-effort check in this function.
-	if legacyTokens != nil {
-		legacyOrigin, lerr := b.readLegacyOrigin()
-		if lerr == nil {
-			for key := range tokens {
-				if !legacyOrigin[key] {
+	legacyOrigin, lerr := b.readLegacyOrigin()
+	if lerr == nil && len(legacyOrigin) > 0 {
+		for key := range tokens {
+			if !legacyOrigin[key] {
+				continue
+			}
+			if legacyTokens != nil {
+				if _, stillInLegacy := legacyTokens[key]; stillInLegacy {
 					continue
 				}
-				if _, stillInLegacy := legacyTokens[key]; !stillInLegacy {
-					delete(tokens, key)
-				}
 			}
+			delete(tokens, key)
 		}
 	}
 
@@ -1053,12 +1054,6 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 	}
 	legacyOriginChanged := false
 	if legacyTokens != nil {
-		for key := range mutations {
-			if legacyOrigin[key] {
-				delete(legacyOrigin, key)
-				legacyOriginChanged = true
-			}
-		}
 		for key := range legacyTokens {
 			if ValidateKey(key) != nil {
 				continue
@@ -1070,16 +1065,22 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 				}
 			}
 		}
-		// Only once the legacy entry has actually been read (legacyTokens != nil)
-		// can its absence mean anything. mutations[key] is this same call's own
-		// explicit Save/Delete for key: that always wins over the heuristic, so
-		// a fresh Save is never immediately undone by a stale legacy reading.
+	}
+	for key := range mutations {
+		if legacyOrigin[key] {
+			delete(legacyOrigin, key)
+			legacyOriginChanged = true
+		}
+	}
+	if len(legacyOrigin) > 0 {
 		for key := range state.Tokens {
 			if _, mutated := mutations[key]; mutated || !legacyOrigin[key] {
 				continue
 			}
-			if _, stillInLegacy := legacyTokens[key]; stillInLegacy {
-				continue
+			if legacyTokens != nil {
+				if _, stillInLegacy := legacyTokens[key]; stillInLegacy {
+					continue
+				}
 			}
 			delete(state.Tokens, key)
 			if !tombstones[key] {

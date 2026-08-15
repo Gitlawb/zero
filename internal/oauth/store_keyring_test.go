@@ -1626,11 +1626,11 @@ func TestStoreKeyringDuplicateIndexDoesNotFanOutPerEntry(t *testing.T) {
 		t.Fatalf("Status returned %d entries for an 80-duplicate index of one key, want 1", len(statuses))
 	}
 	// One Get for the index header, one Get for the single deduplicated key's
-	// own entry, one Get for durable tombstones, and at most one extra Get for
-	// the legacy fallback lookup. The key regression is: not one Get per
+	// own entry, one Get for durable tombstones, one Get for legacy fallback,
+	// and one Get for legacy origin. The key regression is: not one Get per
 	// duplicate entry.
-	if ckr.gets > 4 {
-		t.Fatalf("Status issued %d keyring gets for an 80-entry duplicate index, want <= 4 (fan-out DoS regression)", ckr.gets)
+	if ckr.gets > 5 {
+		t.Fatalf("Status issued %d keyring gets for an 80-entry duplicate index, want <= 5 (fan-out DoS regression)", ckr.gets)
 	}
 }
 
@@ -4001,5 +4001,60 @@ func TestCheckOAuthLockDirOwnerFailsOnUnavailableMetadata(t *testing.T) {
 	err = checkOAuthLockDirOwner(mock)
 	if err == nil || !strings.Contains(err.Error(), "ownership metadata unavailable") {
 		t.Fatalf("expected ownership metadata unavailable error, got %v", err)
+	}
+}
+
+func TestLockOwnershipLossOnReleaseFails(t *testing.T) {
+	temp := t.TempDir()
+	lockPath := filepath.Join(temp, "test.lock")
+	unlock, _, err := acquireFileLock(lockPath, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, []byte("foreign-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(); err == nil || !strings.Contains(err.Error(), "lost token lock ownership") {
+		t.Fatalf("expected lost token lock ownership error, got %v", err)
+	}
+}
+
+func TestStoreKeyringDeletedLegacyAccountReconciliation(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"XDG_CONFIG_HOME": t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+	blob := s.blob.(keyringBlob)
+	if err := blob.writeLegacyOrigin(map[string]bool{key: true}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	tokData, _ := json.Marshal(Token{AccessToken: "tok"})
+	kr.data[keyringService+"/"+key] = base64.StdEncoding.EncodeToString(tokData)
+	if _, _, err := blob.writeKeyIndex([]string{key}, 0, 0, nil, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	delete(kr.data, keyringService+"/"+keyringLegacyAccount)
+
+	tok, ok, err := s.Load(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("Load = (%+v, true), want key hidden after legacy deletion", tok)
+	}
+
+	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "tok-beta"}); err != nil {
+		t.Fatal(err)
+	}
+	keys, ok, _, _, _, err := blob.readKeyIndex()
+	if err != nil || !ok {
+		t.Fatalf("readKeyIndex failed: %v", err)
+	}
+	for _, k := range keys {
+		if k == key {
+			t.Fatalf("key %s survived in index after reconciliation of deleted legacy account", key)
+		}
 	}
 }
