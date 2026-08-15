@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:21:10.608Z",
-  "durationMs": 7751121,
+  "endedAt": "2026-08-15T10:21:14.901Z",
+  "durationMs": 7755413,
   "status": "running",
   "tokens": {
     "total": 27962,
@@ -16,28 +16,22 @@
   },
   "toolCalls": 51,
   "lines": {
-    "added": 1242,
-    "removed": 7
+    "added": 1470,
+    "removed": 0
   },
   "filesChanged": [
-    "internal/credstore/concurrency_test.go",
-    "internal/credstore/credstore.go",
-    "internal/credstore/filelock_unix.go",
-    "internal/credstore/filelock_windows.go",
-    "internal/pathjail/pathjail.go",
-    "internal/pathjail/pathjail_test.go",
-    "internal/worktrees/run_git_test.go",
-    "internal/worktrees/run_git_unix.go",
-    "internal/worktrees/run_git_unix_test.go",
-    "internal/worktrees/run_git_windows.go",
-    "internal/worktrees/worktrees.go"
+    "internal/memory/escape_test.go",
+    "internal/memory/memory.go",
+    "internal/memory/memory_test.go",
+    "internal/tools/memory.go",
+    "internal/tools/memory_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "3808addefd996b69a99d82386858d666cc311136",
+    "headAfter": "d9a62a126ddf5f6bee4bb8be34a89e1b5e1a0d83",
     "commitShas": [
-      "3808addefd996b69a99d82386858d666cc311136"
+      "d9a62a126ddf5f6bee4bb8be34a89e1b5e1a0d83"
     ]
   },
   "summary": "**vulncheck clean now.** Let me push #891 and do the other two:",
