@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:05:49.426Z",
-  "durationMs": 6829929,
+  "endedAt": "2026-08-15T10:05:58.510Z",
+  "durationMs": 6839016,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,8 +16,8 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 75,
-    "removed": 1
+    "added": 119,
+    "removed": 91
   },
   "filesChanged": [
     "internal/specialist/plan_model_size.go",
@@ -26,9 +26,9 @@
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "d966828587977b7f32fad5c817d8d528fa09a574",
+    "headAfter": "dc67571a36c24a346362aa00bf2d369118a1591d",
     "commitShas": [
-      "d966828587977b7f32fad5c817d8d528fa09a574"
+      "dc67571a36c24a346362aa00bf2d369118a1591d"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
