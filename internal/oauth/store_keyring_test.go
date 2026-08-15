@@ -4058,3 +4058,34 @@ func TestStoreKeyringDeletedLegacyAccountReconciliation(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreKeyringInPlaceShrinkClearsStaleUnprotectedSlots(t *testing.T) {
+	kr := newFakeKR()
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+
+	chunk1, _ := json.Marshal([]string{"provider:key1", "provider:key2"})
+	chunk2, _ := json.Marshal([]string{"provider:key3", "provider:key4"})
+	kr.data[keyringService+"/"+blob.chunkAccount(1, 1)] = base64.StdEncoding.EncodeToString(chunk1)
+	kr.data[keyringService+"/"+blob.chunkAccount(1, 2)] = base64.StdEncoding.EncodeToString(chunk2)
+	header, _ := json.Marshal(keyIndexHeader{Version: 1, Chunks: 3, Generation: 1, Keys: []string{"provider:key0"}})
+	kr.data[keyringService+"/"+blob.indexAccount] = base64.StdEncoding.EncodeToString(header)
+
+	chunkList := [][]string{{"provider:key0"}}
+	_, _, err := blob.writeKeyIndexInPlace(chunkList, 3, 1, []int{1}, noLeaseLoss)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readKeys, ok, _, _, missing, err := blob.readKeyIndex()
+	if err != nil || !ok {
+		t.Fatalf("readKeyIndex failed: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing chunks: %v", missing)
+	}
+	for _, k := range readKeys {
+		if k == "provider:key3" || k == "provider:key4" {
+			t.Fatalf("stale key %s survived in shrunk index", k)
+		}
+	}
+}

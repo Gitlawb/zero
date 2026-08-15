@@ -199,12 +199,11 @@ func ResolveStorePath(env map[string]string) (string, error) {
 }
 
 // resolveHomeDir returns the user's home directory, honoring HOME/USERPROFILE
-// hermetically (via env) before falling back to os.UserHomeDir(). Shared by
-// ResolveStorePath's config-root fallback and by keyringLockPath, which
-// anchors on this same identity so the keyring lock never varies with a
-// per-process override like XDG_CACHE_HOME/XDG_CONFIG_HOME/TMPDIR that two
-// processes of the same real user commonly set differently (sandboxes, CI,
-// per-shell env).
+// hermetically (via env) before falling back to os.UserHomeDir(). Used by
+// ResolveStorePath's config-root fallback. Unlike ResolveStorePath,
+// keyringLockPath anchors directly on OS identity (currentOSUser /
+// keyringFallbackLockDir) so the keyring lock never varies with per-process
+// environment overrides.
 func resolveHomeDir(env map[string]string) (string, error) {
 	if home := strings.TrimSpace(firstNonEmpty(envValue(env, "HOME"), envValue(env, "USERPROFILE"))); home != "" {
 		return home, nil
@@ -1053,16 +1052,14 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 		return err
 	}
 	legacyOriginChanged := false
-	if legacyTokens != nil {
-		for key := range legacyTokens {
-			if ValidateKey(key) != nil {
-				continue
-			}
-			if !legacyOrigin[key] {
-				if _, mutated := mutations[key]; !mutated {
-					legacyOrigin[key] = true
-					legacyOriginChanged = true
-				}
+	for key := range legacyTokens {
+		if ValidateKey(key) != nil {
+			continue
+		}
+		if !legacyOrigin[key] {
+			if _, mutated := mutations[key]; !mutated {
+				legacyOrigin[key] = true
+				legacyOriginChanged = true
 			}
 		}
 	}
@@ -1253,12 +1250,10 @@ func (b keyringBlob) tombstoneBlob() keyringBlob {
 	return keyringBlob{kr: b.kr, service: b.service, indexAccount: keyringTombstoneAccount, maxIndexKeys: maxKeyringTombstoneKeys}
 }
 
-// readTombstones returns the durable set of keys deleted by a new binary.
-// Missing account => empty set. Corrupt payloads fail closed.
-func (b keyringBlob) readTombstones() (map[string]bool, error) {
-	keys, ok, _, _, _, err := b.tombstoneBlob().readKeyIndex()
+func (b keyringBlob) readMarkerSet(mb keyringBlob, label string) (map[string]bool, error) {
+	keys, ok, _, _, _, err := mb.readKeyIndex()
 	if err != nil {
-		return nil, fmt.Errorf("oauth: read keyring token tombstones: %w", err)
+		return nil, fmt.Errorf("oauth: read keyring %s: %w", label, err)
 	}
 	if !ok {
 		return map[string]bool{}, nil
@@ -1270,57 +1265,70 @@ func (b keyringBlob) readTombstones() (map[string]bool, error) {
 	return out, nil
 }
 
-// writeTombstones persists the durable deletion set. An empty set removes every
-// tombstone account/chunk so a fully clean store does not leave leftover
-// markers. Errors from that cleanup are surfaced so interruption tests and
-// real keyring failures cannot be swallowed.
-func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leaseCheck) error {
-	tb := b.tombstoneBlob()
-	_, existed, priorChunks, priorGeneration, missingChunks, err := tb.readKeyIndex()
+func (b keyringBlob) writeMarkerSet(mb keyringBlob, set map[string]bool, label string, limit int, overflowMsg string, checkLease leaseCheck) error {
+	_, existed, priorChunks, priorGeneration, missingChunks, err := mb.readKeyIndex()
 	if err != nil {
-		return fmt.Errorf("oauth: read keyring token tombstones: %w", err)
+		return fmt.Errorf("oauth: read keyring %s: %w", label, err)
 	}
-	if len(tombstones) == 0 {
+	if len(set) == 0 {
 		if !existed {
 			return nil
 		}
 		if len(missingChunks) > 0 {
-			if _, _, err := tb.writeKeyIndex(nil, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
-				return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
+			if _, _, err := mb.writeKeyIndex(nil, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
+				return fmt.Errorf("oauth: write keyring %s: %w", label, err)
 			}
 			return nil
 		}
 		if err := checkLease(); err != nil {
 			return err
 		}
-		if _, err := tb.kr.Delete(tb.service, tb.indexAccount); err != nil {
+		if _, err := mb.kr.Delete(mb.service, mb.indexAccount); err != nil {
 			return err
 		}
 		for i := 1; i < priorChunks; i++ {
 			if err := checkLease(); err != nil {
 				return err
 			}
-			if _, err := tb.kr.Delete(tb.service, tb.chunkAccount(priorGeneration, i)); err != nil {
+			if _, err := mb.kr.Delete(mb.service, mb.chunkAccount(priorGeneration, i)); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if len(tombstones) > maxKeyringTombstoneKeys {
-		return fmt.Errorf("oauth: keyring token tombstones list %d logged-out keys, over the %d-key writable bound; re-login to a retired provider to free a marker slot", len(tombstones), maxKeyringTombstoneKeys)
+	if len(set) > limit {
+		if overflowMsg != "" {
+			return fmt.Errorf("oauth: keyring %s list %d %s", label, len(set), overflowMsg)
+		}
+		return fmt.Errorf("oauth: keyring %s list %d keys, over the %d-key writable bound", label, len(set), limit)
 	}
-	keys := make([]string, 0, len(tombstones))
-	for key := range tombstones {
+	keys := make([]string, 0, len(set))
+	for key := range set {
 		if ValidateKey(key) != nil {
 			continue
 		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, _, err := tb.writeKeyIndex(keys, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
-		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
+	if _, _, err := mb.writeKeyIndex(keys, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
+		return fmt.Errorf("oauth: write keyring %s: %w", label, err)
 	}
 	return nil
+}
+
+// readTombstones returns the durable set of keys deleted by a new binary.
+// Missing account => empty set. Corrupt payloads fail closed.
+func (b keyringBlob) readTombstones() (map[string]bool, error) {
+	return b.readMarkerSet(b.tombstoneBlob(), "token tombstones")
+}
+
+// writeTombstones persists the durable deletion set. An empty set removes every
+// tombstone account/chunk so a fully clean store does not leave leftover
+// markers. Errors from that cleanup are surfaced so interruption tests and
+// real keyring failures cannot be swallowed.
+func (b keyringBlob) writeTombstones(tombstones map[string]bool, checkLease leaseCheck) error {
+	overflow := fmt.Sprintf("logged-out keys, over the %d-key writable bound; re-login to a retired provider to free a marker slot", maxKeyringTombstoneKeys)
+	return b.writeMarkerSet(b.tombstoneBlob(), tombstones, "token tombstones", maxKeyringTombstoneKeys, overflow, checkLease)
 }
 
 func (b keyringBlob) legacyOriginBlob() keyringBlob {
@@ -1334,70 +1342,14 @@ func (b keyringBlob) legacyOriginBlob() keyringBlob {
 // un-track every key it recorded and let the very absences it exists to
 // interpret look like fresh, ordinary keys again.
 func (b keyringBlob) readLegacyOrigin() (map[string]bool, error) {
-	keys, ok, _, _, _, err := b.legacyOriginBlob().readKeyIndex()
-	if err != nil {
-		return nil, fmt.Errorf("oauth: read keyring legacy-origin markers: %w", err)
-	}
-	if !ok {
-		return map[string]bool{}, nil
-	}
-	out := make(map[string]bool, len(keys))
-	for _, key := range keys {
-		out[key] = true
-	}
-	return out, nil
+	return b.readMarkerSet(b.legacyOriginBlob(), "legacy-origin markers")
 }
 
 // writeLegacyOrigin persists the legacy-origin set, mirroring writeTombstones:
 // an empty set removes the account/chunks entirely rather than leaving a
 // zero-key index behind.
 func (b keyringBlob) writeLegacyOrigin(origin map[string]bool, checkLease leaseCheck) error {
-	lb := b.legacyOriginBlob()
-	_, existed, priorChunks, priorGeneration, missingChunks, err := lb.readKeyIndex()
-	if err != nil {
-		return fmt.Errorf("oauth: read keyring legacy-origin markers: %w", err)
-	}
-	if len(origin) == 0 {
-		if !existed {
-			return nil
-		}
-		if len(missingChunks) > 0 {
-			if _, _, err := lb.writeKeyIndex(nil, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
-				return fmt.Errorf("oauth: write keyring legacy-origin markers: %w", err)
-			}
-			return nil
-		}
-		if err := checkLease(); err != nil {
-			return err
-		}
-		if _, err := lb.kr.Delete(lb.service, lb.indexAccount); err != nil {
-			return err
-		}
-		for i := 1; i < priorChunks; i++ {
-			if err := checkLease(); err != nil {
-				return err
-			}
-			if _, err := lb.kr.Delete(lb.service, lb.chunkAccount(priorGeneration, i)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if len(origin) > maxKeyringTombstoneKeys {
-		return fmt.Errorf("oauth: keyring legacy-origin markers list %d keys, over the %d-key writable bound", len(origin), maxKeyringTombstoneKeys)
-	}
-	keys := make([]string, 0, len(origin))
-	for key := range origin {
-		if ValidateKey(key) != nil {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	if _, _, err := lb.writeKeyIndex(keys, priorChunks, priorGeneration, missingChunks, checkLease); err != nil {
-		return fmt.Errorf("oauth: write keyring legacy-origin markers: %w", err)
-	}
-	return nil
+	return b.writeMarkerSet(b.legacyOriginBlob(), origin, "legacy-origin markers", maxKeyringTombstoneKeys, "", checkLease)
 }
 
 // maxKeyringSingleEntryBytes bounds a single base64-encoded token secret so
@@ -1816,6 +1768,25 @@ func (b keyringBlob) writeKeyIndexInPlace(chunkList [][]string, priorChunks, pri
 			return 0, 0, err
 		}
 		if err := b.kr.Set(b.service, b.chunkAccount(priorGeneration, p.slot), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
+			return 0, 0, err
+		}
+	}
+	plannedSlots := make(map[int]bool, len(planned))
+	for _, p := range planned {
+		plannedSlots[p.slot] = true
+	}
+	for s := 1; s < advertised; s++ {
+		if protected[s] || plannedSlots[s] {
+			continue
+		}
+		emptyData, err := json.Marshal([]string{})
+		if err != nil {
+			return 0, 0, err
+		}
+		if err := checkLease(); err != nil {
+			return 0, 0, err
+		}
+		if err := b.kr.Set(b.service, b.chunkAccount(priorGeneration, s), base64.StdEncoding.EncodeToString(emptyData)); err != nil {
 			return 0, 0, err
 		}
 	}
