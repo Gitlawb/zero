@@ -642,6 +642,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.branchUpstreamRemote == nil {
 		deps.branchUpstreamRemote = defaults.branchUpstreamRemote
 	}
+	if deps.branchUpstreamRemoteAndMerge == nil {
+		deps.branchUpstreamRemoteAndMerge = defaults.branchUpstreamRemoteAndMerge
+	}
 	if deps.remoteHasBranch == nil {
 		deps.remoteHasBranch = defaults.remoteHasBranch
 	}

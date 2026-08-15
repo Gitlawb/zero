@@ -1180,23 +1180,6 @@ type featureBranchOptions struct {
 	MaxDiffBytes       int
 }
 
-// ensureFeatureBranch is the branch-naming step `zero changes push`/`pr` run
-// before pushing: pushing straight to the default branch is refused deeper in
-// zerogit.Push, so rather than surface that as a dead end, create and switch
-// to a conventionally named "<user>/<slug>" branch first. It returns the
-// branch push/pr should target, or "" to mean "current HEAD branch, unchanged"
-// (zerogit.Push already treats an empty Branch that way), plus the remote the
-// preflight resolved (requestedRemote, then the original branch's configured
-// upstream, then "origin"), plus whether Push should require that branch not
-// already exist on that remote. Callers must pass the remote to Push: a
-// freshly created branch has no tracking configuration, so Push's own
-// fallback would silently retarget "origin" even when the work came from a
-// branch tracking a different remote. Callers must also pass that third value
-// through as Push's RequireNewRemoteBranch: CreateBranch's own
-// remote-collision probe runs before this returns, and closing that race
-// requires Push's push itself to assert the destination is still new. That
-// requirement also carries across a retry: if the current branch is already
-// non-default (this call didn't create it) but has not been successfully
 // branchPushPlan holds the resolved parameters for a push or PR workflow
 // before any branches are created or refs mutated. Separating plan resolution
 // from mutation allows tests to assert the resolution matrix directly without
@@ -1426,8 +1409,33 @@ func resolveBranchPushPlan(ctx context.Context, stdout io.Writer, workspaceRoot 
 	}, nil
 }
 
-// ensureFeatureBranch coordinates branch creation, commit range naming, and
-// default-branch restoration for push and PR workflows.
+// ensureFeatureBranch is the branch-naming step `zero changes push`/`pr` run
+// before pushing: pushing straight to the default branch is refused deeper in
+// zerogit.Push, so rather than surface that as a dead end, create and switch
+// to a conventionally named "<user>/<slug>" branch first. It returns the
+// branch push/pr should target, or "" to mean "current HEAD branch, unchanged"
+// (zerogit.Push already treats an empty Branch that way), plus the remote the
+// preflight resolved (requestedRemote, then the original branch's configured
+// upstream, then "origin"), plus whether Push should require that branch not
+// already exist on that remote. Callers must pass the remote to Push: a
+// freshly created branch has no tracking configuration, so Push's own
+// fallback would silently retarget "origin" even when the work came from a
+// branch tracking a different remote. Callers must also pass that third value
+// through as Push's RequireNewRemoteBranch: CreateBranch's own
+// remote-collision probe runs before this returns, and closing that race
+// requires Push's push itself to assert the destination is still new. That
+// requirement also carries across a retry: if the current branch is already
+// non-default (this call didn't create it) but has not been successfully
+// published to the exact target remote under the same branch name, keep the
+// nonexistence lease. branch.<name>.remote alone is not enough: with
+// branch.autoSetupMerge=inherit, checkout -b copies remote=origin from the
+// source branch before any push. After a successful create, the original
+// default branch ref is moved back to its own upstream tip (not necessarily
+// the push destination) so the feature branch exclusively owns the
+// publishable commits; a failed restore rolls the feature branch back.
+// allowDefaultBranch (the --yes flag) and dryRun both opt out via the ""
+// branch / false return, leaving Push's own guard/preview behavior on the
+// default branch unaffected.
 //
 // autoNaming gates the LLM naming path (--auto): these commands were
 // git-only, and sending the change diff to a configured provider on every
