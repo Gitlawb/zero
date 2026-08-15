@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:27:53.484Z",
-  "durationMs": 8153907,
+  "endedAt": "2026-08-15T10:27:54.276Z",
+  "durationMs": 8154707,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,22 +16,32 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 393,
-    "removed": 8
+    "added": 1417,
+    "removed": 9
   },
   "filesChanged": [
-    "internal/specialist/plan_builtin_params_test.go",
-    "internal/specialist/plan_params.go",
-    "internal/specialist/plans/research.json",
-    "internal/tui/orchestrate_saved.go",
-    "internal/tui/orchestrate_saved_params_test.go"
+    "internal/agent/loop.go",
+    "internal/config/profile_flags_test.go",
+    "internal/memory/memory.go",
+    "internal/memory/memory_test.go",
+    "internal/sandbox/scope.go",
+    "internal/specialist/exec.go",
+    "internal/specialist/plan_isolation_test.go",
+    "internal/specialist/plan_keyword.go",
+    "internal/specialist/plan_keyword_test.go",
+    "internal/specialist/plan_tool.go",
+    "internal/specialist/session_budget.go",
+    "internal/specialist/session_budget_test.go",
+    "internal/tools/memory.go",
+    "internal/tools/memory_tool_test.go",
+    "internal/tools/registry.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "9bd7d69c0ff9db21e1b2d544612e95b1c848d536",
+    "headAfter": "c12798c5cedda15f54bc772d32a9aaf90dc9b839",
     "commitShas": [
-      "9bd7d69c0ff9db21e1b2d544612e95b1c848d536"
+      "c12798c5cedda15f54bc772d32a9aaf90dc9b839"
     ]
   },
   "summary": "Now #829:",
