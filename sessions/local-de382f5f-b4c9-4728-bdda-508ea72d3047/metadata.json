@@ -3,37 +3,38 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:21:34.458Z",
-  "durationMs": 7774967,
+  "endedAt": "2026-08-15T10:22:46.671Z",
+  "durationMs": 7847095,
   "status": "running",
   "tokens": {
-    "total": 28792,
-    "input": 112,
-    "output": 28680
+    "total": 29359,
+    "input": 116,
+    "output": 29243
   },
   "cost": {
-    "usd": 24.2798
+    "usd": 25.0197
   },
-  "toolCalls": 53,
+  "toolCalls": 55,
   "lines": {
-    "added": 1470,
-    "removed": 0
+    "added": 551,
+    "removed": 5
   },
   "filesChanged": [
-    "internal/memory/escape_test.go",
-    "internal/memory/memory.go",
-    "internal/memory/memory_test.go",
-    "internal/tools/memory.go",
-    "internal/tools/memory_test.go"
+    "internal/config/profiles_zeromaxing_test.go",
+    "internal/config/resolver.go",
+    "internal/config/types.go",
+    "internal/execprofile/profile.go",
+    "internal/execprofile/profile_test.go",
+    "internal/execprofile/zeromaxing_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "f65a26c10de3d620577fdfe5fda9a385479d5e15",
+    "headAfter": "1673713e1dd8aa17b798f72af892373a5cd785cf",
     "commitShas": [
-      "f65a26c10de3d620577fdfe5fda9a385479d5e15"
+      "1673713e1dd8aa17b798f72af892373a5cd785cf"
     ]
   },
-  "summary": "Now properly stacked on `2c1b82d4`. Let me verify and push:",
+  "summary": "Now #829:",
   "originUrl": "https://getorigin.io/sessions/local-de382f5f-b4c9-4728-bdda-508ea72d3047"
 }
