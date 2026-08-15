@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:58:56.915Z",
-  "durationMs": 6417425,
+  "endedAt": "2026-08-15T09:59:10.164Z",
+  "durationMs": 6430644,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,28 +16,33 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 732,
-    "removed": 20
+    "added": 403,
+    "removed": 56
   },
   "filesChanged": [
-    "internal/cli/app.go",
-    "internal/cli/child_exit_code_agreement_test.go",
-    "internal/cli/exec.go",
-    "internal/cli/exec_usage_cache_test.go",
-    "internal/cli/exec_writer.go",
-    "internal/cli/exec_zeromaxing_test.go",
-    "internal/cli/plan_grant_test.go",
-    "internal/cli/plan_live_provider_test.go",
-    "internal/cli/plan_model_prefs_carry_test.go",
-    "internal/cli/plan_model_probe.go",
-    "internal/cli/provider_models.go"
+    "internal/tui/model.go",
+    "internal/tui/orchestrate_panel.go",
+    "internal/tui/orchestrate_panel_test.go",
+    "internal/tui/orchestrate_saved.go",
+    "internal/tui/orchestrate_window_test.go",
+    "internal/tui/plan_card_regression_test.go",
+    "internal/tui/plan_fallback_display_test.go",
+    "internal/tui/plan_messages.go",
+    "internal/tui/plan_progress.go",
+    "internal/tui/plan_progress_test.go",
+    "internal/tui/sidebar.go",
+    "internal/tui/sidebar_plan_detail.go",
+    "internal/tui/sidebar_plan_detail_test.go",
+    "internal/tui/sidebar_plan_test.go",
+    "internal/tui/sidebar_test.go",
+    "internal/tui/specialist_card.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "e54036d843dfc6fa8c6ce5ebc137cdc9936edb7f",
+    "headAfter": "c658b09524832e7335a466c5f7b634bffa61a1c6",
     "commitShas": [
-      "e54036d843dfc6fa8c6ce5ebc137cdc9936edb7f"
+      "c658b09524832e7335a466c5f7b634bffa61a1c6"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
