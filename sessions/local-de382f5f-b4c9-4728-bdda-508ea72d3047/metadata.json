@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:52:32.034Z",
-  "durationMs": 6032544,
+  "endedAt": "2026-08-15T09:52:40.027Z",
+  "durationMs": 6040531,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,21 +16,18 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 244,
-    "removed": 12
+    "added": 9,
+    "removed": 6
   },
   "filesChanged": [
-    "internal/cli/app.go",
-    "internal/cli/exec.go",
-    "internal/cli/orchestrate_notice_test.go",
     "internal/specialist/plan_tool.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "547fb767d08f708472549eb1e8b1de23a7799c85",
+    "headAfter": "01aba323d613247690ded1251445686ea40ba2e9",
     "commitShas": [
-      "547fb767d08f708472549eb1e8b1de23a7799c85"
+      "01aba323d613247690ded1251445686ea40ba2e9"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
