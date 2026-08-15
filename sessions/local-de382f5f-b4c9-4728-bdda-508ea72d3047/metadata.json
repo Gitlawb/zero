@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:05:07.417Z",
-  "durationMs": 6787923,
+  "endedAt": "2026-08-15T10:05:14.114Z",
+  "durationMs": 6794588,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,21 +16,21 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 127,
-    "removed": 1
+    "added": 260,
+    "removed": 0
   },
   "filesChanged": [
-    "internal/cli/provider_models.go",
-    "internal/specialist/plan_model_assign.go",
-    "internal/specialist/plan_model_size.go",
-    "internal/specialist/plan_model_size_test.go"
+    "internal/cli/child_exit_code_agreement_test.go",
+    "internal/specialist/plan_exec.go",
+    "internal/specialist/plan_provider_retry_test.go",
+    "internal/specialist/plan_runner.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "796d27d79ac235c5cebc01720eeffa1893698a4b",
+    "headAfter": "7c21dbfea0939076e86c665db5f87bfb0c73aef9",
     "commitShas": [
-      "796d27d79ac235c5cebc01720eeffa1893698a4b"
+      "7c21dbfea0939076e86c665db5f87bfb0c73aef9"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
