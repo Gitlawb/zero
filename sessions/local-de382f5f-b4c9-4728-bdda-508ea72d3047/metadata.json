@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:23:20.800Z",
-  "durationMs": 7881178,
+  "endedAt": "2026-08-15T10:23:23.749Z",
+  "durationMs": 7884088,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,18 +16,38 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 91,
-    "removed": 0
+    "added": 1200,
+    "removed": 52
   },
   "filesChanged": [
-    "internal/specialist/plan_grant_test.go"
+    "internal/agent/child_progress_test.go",
+    "internal/agent/loop.go",
+    "internal/cli/app.go",
+    "internal/cli/exec.go",
+    "internal/cli/plan_grant_test.go",
+    "internal/specialist/plan_exec.go",
+    "internal/specialist/plan_exec_test.go",
+    "internal/specialist/plan_grant_test.go",
+    "internal/specialist/plan_progress_test.go",
+    "internal/specialist/plan_runner.go",
+    "internal/specialist/plan_test.go",
+    "internal/specialist/plan_tool.go",
+    "internal/specialist/task_tool.go",
+    "internal/tools/registry.go",
+    "internal/tui/model.go",
+    "internal/tui/plan_messages.go",
+    "internal/tui/plan_progress.go",
+    "internal/tui/plan_progress_test.go",
+    "internal/tui/render_cache.go",
+    "internal/tui/sidebar.go",
+    "internal/tui/specialist_card.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "2dc56cc96b314ca1f6335d8612f5e627ee556c82",
+    "headAfter": "0059d3f9ef952ff8bbcee3f0c359eae6c48134ba",
     "commitShas": [
-      "2dc56cc96b314ca1f6335d8612f5e627ee556c82"
+      "0059d3f9ef952ff8bbcee3f0c359eae6c48134ba"
     ]
   },
   "summary": "Now #829:",
