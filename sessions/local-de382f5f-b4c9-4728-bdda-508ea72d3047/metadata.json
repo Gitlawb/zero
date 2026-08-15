@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:24:20.401Z",
-  "durationMs": 7940594,
+  "endedAt": "2026-08-15T10:24:23.710Z",
+  "durationMs": 7944109,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,24 +16,20 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 213,
-    "removed": 6
+    "added": 74,
+    "removed": 11
   },
   "filesChanged": [
     "internal/tui/model.go",
     "internal/tui/orchestrate_panel.go",
-    "internal/tui/plan_card_regression_test.go",
-    "internal/tui/plan_messages.go",
-    "internal/tui/plan_progress.go",
-    "internal/tui/sidebar.go",
-    "internal/tui/specialist_card.go"
+    "internal/tui/orchestrate_panel_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "6642ff7f3631eb31d020c80bc8eb2a6ecf0a9857",
+    "headAfter": "b30ad41fd592ad427fb3ad1b6619f4d2a6e77a43",
     "commitShas": [
-      "6642ff7f3631eb31d020c80bc8eb2a6ecf0a9857"
+      "b30ad41fd592ad427fb3ad1b6619f4d2a6e77a43"
     ]
   },
   "summary": "Now #829:",
