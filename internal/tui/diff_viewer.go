@@ -20,15 +20,26 @@ type diffViewerLine struct {
 // rows always remain intact.
 func compactDiffViewerContext(raw []string) []diffViewerLine {
 	lines := make([]diffViewerLine, 0, len(raw))
+	hunk := diffHunkState{}
 	for index := 0; index < len(raw); {
-		if !strings.HasPrefix(raw[index], " ") {
+		if parsed, ok := parseDiffHunkHeader(raw[index]); ok {
 			lines = append(lines, diffViewerLine{text: raw[index], rawIndex: index})
+			hunk = parsed
+			index++
+			continue
+		}
+		if !hunk.active() || !strings.HasPrefix(raw[index], " ") {
+			lines = append(lines, diffViewerLine{text: raw[index], rawIndex: index})
+			if hunk.active() && isDiffHunkBodyLine(raw[index]) {
+				hunk.consume(raw[index])
+			}
 			index++
 			continue
 		}
 
 		start := index
-		for index < len(raw) && strings.HasPrefix(raw[index], " ") {
+		for index < len(raw) && hunk.active() && strings.HasPrefix(raw[index], " ") {
+			hunk.consume(raw[index])
 			index++
 		}
 		count := index - start

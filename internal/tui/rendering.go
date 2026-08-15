@@ -2185,6 +2185,9 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 			// word-diff fallback.
 			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
 				lines = append(lines, diffBodyStyledLine(hunk.oldLine, "−", styled, false, textBudget, gutter))
+				hunk.oldLine++
+				hunk.consume(line)
+				continue
 			} else if isIsolatedReplacement(rawLines, displayLine.rawIndex) {
 				delText := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
 				addText := truncateRunes(strings.TrimPrefix(rawLines[displayLine.rawIndex+1], "+"), textBudget)

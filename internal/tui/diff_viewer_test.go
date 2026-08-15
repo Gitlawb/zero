@@ -125,6 +125,50 @@ func TestDiffViewerNearRewriteDeletionSurvives(t *testing.T) {
 	}
 }
 
+func TestDiffViewerRendersStyledDeletionOnce(t *testing.T) {
+	requireDiffViewerTrueColor(t)
+	diff := strings.Join([]string{
+		"--- a/example.go",
+		"+++ b/example.go",
+		"@@ -1 +1 @@",
+		"-func value() string { return \"old\" }",
+		"+func value() string { return \"new\" }",
+	}, "\n")
+	body := diffCardBody(diff, 100, cardRenderOptions{bodyCap: 0})
+	got := plainRender(t, strings.Join(body.lines, "\n"))
+	if count := strings.Count(got, "func value() string { return \"old\" }"); count != 1 {
+		t.Fatalf("styled deleted row count = %d, want 1:\n%s", count, got)
+	}
+}
+
+func TestDiffViewerDoesNotFoldPreambleContext(t *testing.T) {
+	raw := []string{
+		"commit deadbeef",
+		"Author: Example",
+		"",
+	}
+	for index := 1; index <= 10; index++ {
+		raw = append(raw, fmt.Sprintf("    commit message line %d", index))
+	}
+	raw = append(raw,
+		"--- a/example.go",
+		"+++ b/example.go",
+		"@@ -1,1 +1,1 @@",
+		"-old value",
+		"+new value",
+	)
+
+	compacted := compactDiffViewerContext(raw)
+	for _, line := range compacted {
+		if line.hiddenContext > 0 {
+			t.Fatalf("preamble context was folded: %#v", compacted)
+		}
+	}
+	if len(compacted) != len(raw) {
+		t.Fatalf("compacted preamble length = %d, want %d", len(compacted), len(raw))
+	}
+}
+
 func TestDiffViewerKeepsHeaderLikeHunkContent(t *testing.T) {
 	diff := strings.Join([]string{
 		"--- a/example.go",
