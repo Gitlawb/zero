@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:01:58.159Z",
-  "durationMs": 6598661,
+  "endedAt": "2026-08-15T10:02:11.345Z",
+  "durationMs": 6611837,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,19 +16,19 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 131,
-    "removed": 6
+    "added": 124,
+    "removed": 7
   },
   "filesChanged": [
-    "internal/specialist/plan_budget_schema_test.go",
-    "internal/specialist/plan_tool.go"
+    "internal/tui/zeromaxing_chip_row_test.go",
+    "internal/tui/zeromaxing_glow.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "45a4d24a12cc5709648c4fb38fe7096ff0e5e464",
+    "headAfter": "6e258e20069e763fe858a395e3fed4b47460ef1c",
     "commitShas": [
-      "45a4d24a12cc5709648c4fb38fe7096ff0e5e464"
+      "6e258e20069e763fe858a395e3fed4b47460ef1c"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
