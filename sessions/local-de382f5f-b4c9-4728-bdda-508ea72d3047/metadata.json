@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:25:44.677Z",
-  "durationMs": 8025072,
+  "endedAt": "2026-08-15T10:25:46.632Z",
+  "durationMs": 8027077,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,21 +16,27 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 172,
-    "removed": 2
+    "added": 569,
+    "removed": 15
   },
   "filesChanged": [
-    "internal/tui/commands.go",
-    "internal/tui/orchestrate_control.go",
-    "internal/tui/orchestrate_saved.go",
-    "internal/tui/orchestrate_saved_test.go"
+    "internal/agent/zeromaxing.go",
+    "internal/cli/app.go",
+    "internal/cli/exec.go",
+    "internal/cli/plan_grant_test.go",
+    "internal/cli/plan_isolate.go",
+    "internal/specialist/plan_exec.go",
+    "internal/specialist/plan_runner.go",
+    "internal/specialist/plan_tool.go",
+    "internal/specialist/plan_worktree.go",
+    "internal/specialist/plan_worktree_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "218272a6e0239dca68690c0b74260b848a8f513f",
+    "headAfter": "2af7e949e8fbf6b54f5da398e34b13a9c443fc2c",
     "commitShas": [
-      "218272a6e0239dca68690c0b74260b848a8f513f"
+      "2af7e949e8fbf6b54f5da398e34b13a9c443fc2c"
     ]
   },
   "summary": "Now #829:",
