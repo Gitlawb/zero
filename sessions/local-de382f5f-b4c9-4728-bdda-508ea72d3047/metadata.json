@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:49:46.279Z",
-  "durationMs": 5866792,
+  "endedAt": "2026-08-15T09:49:53.812Z",
+  "durationMs": 5874323,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,38 +16,24 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 1200,
-    "removed": 52
+    "added": 930,
+    "removed": 8
   },
   "filesChanged": [
-    "internal/agent/child_progress_test.go",
-    "internal/agent/loop.go",
-    "internal/cli/app.go",
-    "internal/cli/exec.go",
-    "internal/cli/plan_grant_test.go",
-    "internal/specialist/plan_exec.go",
-    "internal/specialist/plan_exec_test.go",
-    "internal/specialist/plan_grant_test.go",
-    "internal/specialist/plan_progress_test.go",
-    "internal/specialist/plan_runner.go",
-    "internal/specialist/plan_test.go",
-    "internal/specialist/plan_tool.go",
-    "internal/specialist/task_tool.go",
-    "internal/tools/registry.go",
+    "internal/tui/autocomplete_test.go",
+    "internal/tui/commands.go",
     "internal/tui/model.go",
+    "internal/tui/orchestrate_panel.go",
+    "internal/tui/orchestrate_panel_test.go",
     "internal/tui/plan_messages.go",
-    "internal/tui/plan_progress.go",
-    "internal/tui/plan_progress_test.go",
-    "internal/tui/render_cache.go",
-    "internal/tui/sidebar.go",
-    "internal/tui/specialist_card.go"
+    "internal/tui/plan_progress.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "7299291d11ad8e3a1fdc7f37de9c3d4f2f17ae4f",
+    "headAfter": "38475d12bdf5bd6cbc126e43738d3d6eda32f4ee",
     "commitShas": [
-      "7299291d11ad8e3a1fdc7f37de9c3d4f2f17ae4f"
+      "38475d12bdf5bd6cbc126e43738d3d6eda32f4ee"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
