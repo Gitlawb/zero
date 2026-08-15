@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:51:00.559Z",
-  "durationMs": 5941071,
+  "endedAt": "2026-08-15T09:51:06.873Z",
+  "durationMs": 5947375,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,21 +16,26 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 228,
-    "removed": 37
+    "added": 637,
+    "removed": 623
   },
   "filesChanged": [
+    "internal/tui/files_panel.go",
+    "internal/tui/model.go",
+    "internal/tui/mouse.go",
+    "internal/tui/orchestrate_detail.go",
+    "internal/tui/orchestrate_detail_test.go",
     "internal/tui/orchestrate_panel.go",
-    "internal/tui/plan_card_regression_test.go",
     "internal/tui/sidebar.go",
-    "internal/tui/sidebar_plan_test.go"
+    "internal/tui/sidebar_plan_detail.go",
+    "internal/tui/sidebar_plan_detail_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "aea5c8476d9bed608d91ab8de8883a863644b269",
+    "headAfter": "77fb32d953d7829645aebcadb69a890696e71a93",
     "commitShas": [
-      "aea5c8476d9bed608d91ab8de8883a863644b269"
+      "77fb32d953d7829645aebcadb69a890696e71a93"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
