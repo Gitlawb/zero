@@ -1,19 +1,19 @@
 package tui
 
 import (
+	"fmt"
 	"image/color"
+	"strconv"
 
 	"charm.land/lipgloss/v2"
 )
 
-// tuiTheme is the resolved terminal palette Zero renders with. It is produced by
-// buildTheme from a palette, so the same renderers serve both the dark default
-// and the light variant; the active theme lives in the package var zeroTheme and
-// may be swapped at startup (background detection / ZERO_THEME / --theme) or live
-// via /theme. Colors are truecolor hex; lipgloss downsamples on limited displays
-// and renders plain text when there is no TTY (tests). Every renderer consumes
-// these named styles — no hex literal may appear outside theme_palettes.go (the
-// palette tables + theme registry).
+// tuiTheme is the resolved terminal palette Zero renders with. The default system
+// theme keeps the terminal's foreground and background intact; named palettes only
+// style local UI surfaces. The active theme lives in zeroTheme and changes only
+// after an explicit /theme selection. Every renderer consumes these named styles —
+// no hex literal may appear outside theme_palettes.go (the palette tables + theme
+// registry).
 type tuiTheme struct {
 	// Base tokens.
 	ink        lipgloss.Style // primary text
@@ -128,7 +128,9 @@ type palette struct {
 	cardPerm  string // permission card border (amber mixed into line)
 }
 
-// buildTheme resolves a palette into the styles every renderer uses.
+// buildTheme resolves a named palette into the styles every renderer uses. Palette
+// backgrounds are intentionally limited to local cards and diff rows; View never
+// paints the full terminal canvas.
 func buildTheme(p palette) tuiTheme {
 	col := func(s string) color.Color { return lipgloss.Color(s) }
 	fg := func(s string) lipgloss.Style { return lipgloss.NewStyle().Foreground(col(s)) }
@@ -204,10 +206,143 @@ func buildTheme(p palette) tuiTheme {
 	}
 }
 
-// zeroTheme is the active palette every renderer reads. It defaults to dark and is
-// reassigned by theme selection at startup and by /theme. All references are
-// .field accesses evaluated at render time, so reassigning this var repaints every
-// subsequent render.
+// paletteForTerminal keeps a palette readable without changing the terminal's
+// canvas. A light palette on a dark terminal (or the reverse) mirrors its colors,
+// preserving the palette's relationships while switching it to the terminal's
+// contrast direction. This lets every listed theme remain usable with transparent
+// terminals and wallpapers.
+func paletteForTerminal(p palette, paletteDark, terminalDark bool) palette {
+	if paletteDark == terminalDark {
+		return p
+	}
+	return invertedPalette(p)
+}
+
+func invertedPalette(p palette) palette {
+	p.ink = invertPaletteColor(p.ink)
+	p.muted = invertPaletteColor(p.muted)
+	p.faint = invertPaletteColor(p.faint)
+	p.faintest = invertPaletteColor(p.faintest)
+	p.accent = invertPaletteColor(p.accent)
+	p.green = invertPaletteColor(p.green)
+	p.red = invertPaletteColor(p.red)
+	p.amber = invertPaletteColor(p.amber)
+	p.blue = invertPaletteColor(p.blue)
+	p.gitAdd = invertPaletteColor(p.gitAdd)
+	p.gitDel = invertPaletteColor(p.gitDel)
+	p.line = invertPaletteColor(p.line)
+	p.line2 = invertPaletteColor(p.line2)
+	p.panel = invertPaletteColor(p.panel)
+	p.promptBg = invertPaletteColor(p.promptBg)
+	p.permBg = invertPaletteColor(p.permBg)
+	p.addBg = invertPaletteColor(p.addBg)
+	p.delBg = invertPaletteColor(p.delBg)
+	p.addBgWord = invertPaletteColor(p.addBgWord)
+	p.delBgWord = invertPaletteColor(p.delBgWord)
+	p.selBg = invertPaletteColor(p.selBg)
+	p.addInk = invertPaletteColor(p.addInk)
+	p.delInk = invertPaletteColor(p.delInk)
+	p.onAccent = invertPaletteColor(p.onAccent)
+	p.cardRun = invertPaletteColor(p.cardRun)
+	p.cardErr = invertPaletteColor(p.cardErr)
+	p.cardPerm = invertPaletteColor(p.cardPerm)
+	return p
+}
+
+func invertPaletteColor(value string) string {
+	if len(value) != 7 || value[0] != '#' {
+		return value
+	}
+	rgb, err := strconv.ParseUint(value[1:], 16, 32)
+	if err != nil {
+		return value
+	}
+	return fmt.Sprintf("#%06x", 0xffffff^rgb)
+}
+
+// buildSystemTheme preserves the terminal canvas and its foreground color. It uses
+// a small ANSI role set for semantic cues, which follows the user's terminal
+// palette rather than imposing a second opaque color scheme on top of it.
+func buildSystemTheme() tuiTheme {
+	base := lipgloss.NewStyle()
+	accentColor := lipgloss.Color("6")
+	greenColor := lipgloss.Color("2")
+	redColor := lipgloss.Color("1")
+	amberColor := lipgloss.Color("3")
+	blueColor := lipgloss.Color("4")
+	noColor := lipgloss.NoColor{}
+	accent := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+	green := lipgloss.NewStyle().Foreground(greenColor)
+	red := lipgloss.NewStyle().Foreground(redColor)
+	amber := lipgloss.NewStyle().Foreground(amberColor)
+	blue := lipgloss.NewStyle().Foreground(blueColor)
+	return tuiTheme{
+		ink:        base,
+		muted:      base.Faint(true),
+		faint:      base.Faint(true),
+		faintest:   base.Faint(true),
+		accent:     accent,
+		green:      green,
+		red:        red,
+		amber:      amber,
+		blue:       blue,
+		gitAdd:     green,
+		gitDel:     red,
+		line:       base.Faint(true),
+		lineStrong: base.Faint(true),
+		selection:  base.Reverse(true),
+		hover:      base.Underline(true),
+
+		badge: base.Foreground(accentColor).Bold(true),
+
+		userPrompt: base.Foreground(accentColor).Bold(true),
+		sayText:    base.Faint(true),
+		toolName:   base.Bold(true),
+		toolTarget: base,
+		toolArg:    base.Faint(true),
+		cardRun:    accent,
+		cardErr:    red,
+		bashPrompt: accent,
+		grepLoc:    blue,
+
+		diffAdd:     green,
+		diffDel:     red,
+		diffMeta:    base.Faint(true),
+		addLineWord: green.Bold(true).Underline(true),
+		delLineWord: red.Bold(true).Underline(true),
+		addLine:     green,
+		delLine:     red,
+		addLineNum:  base.Faint(true),
+		delLineNum:  base.Faint(true),
+		addSign:     green,
+		delSign:     red,
+		delText:     red,
+
+		permBadge:  amber.Bold(true),
+		permBg:     base,
+		permBorder: amber,
+
+		panel:           base,
+		userPromptPanel: base,
+
+		modeAuto:   green.Bold(true),
+		modeAsk:    amber,
+		modeUnsafe: red.Bold(true),
+		modePlan:   blue.Bold(true),
+
+		accentColor: accentColor,
+		inkColor:    noColor,
+		bgPanel:     noColor,
+		bgPrompt:    noColor,
+		bgSel:       noColor,
+		bgPerm:      noColor,
+	}
+}
+
+// zeroTheme is the active palette every renderer reads. Run applies the terminal-
+// native system default before it creates the interactive program; the dark palette
+// here keeps package-level render helpers deterministic before a model has started
+// (including in unit tests that construct more than one model).
 var zeroTheme = buildTheme(darkPalette)
 
 // onPanel returns a copy of style that paints on the panel surface. lipgloss

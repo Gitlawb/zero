@@ -373,7 +373,7 @@ func (m model) applyInstalledModel(v dictation.ModelVariant) (model, tea.Cmd) {
 	if aerr != nil {
 		return m.appendSystemNotice("Couldn't save the config: " + aerr.Error()), nil
 	}
-	return m.appendSystemNotice(v.Label + " is already downloaded — dictation ready. Run /voice, then hold Space to dictate."), nil
+	return m.showTransientNoticeInline(v.Label+" is ready. Run /voice to start dictating.", transientNoticeSuccess), nil
 }
 
 // sttDownloadVariants returns the variants currently offered — the full fetched

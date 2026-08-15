@@ -808,11 +808,12 @@ const maxSidebarActivityLines = 5
 // feed inspects per render, so a sparse-work transcript stays O(window).
 const maxSidebarActivityScan = 200
 
-// sidebarActivityLines builds the ACTIVITY feed: a live "generating…" pulse (when
-// the run has gone quiet) atop the most recent completed work (files written,
-// commands run). It scans the transcript BACKWARD and stops after the cap, so the
-// cost is bounded by the cap — never a full-transcript walk per frame. budget is
-// the rows available before the token floor; the feed clips itself to it.
+// sidebarActivityLines builds the ACTIVITY feed: a live, phase-aware pulse atop
+// the most recent completed work (files written, commands run). The quiet-run
+// warning still replaces the phase label when needed. It scans the transcript
+// BACKWARD and stops after the cap, so the cost is bounded by the cap — never a
+// full-transcript walk per frame. budget is the rows available before the token
+// floor; the feed clips itself to it.
 func (m model) sidebarActivityLines(width, budget int) []string {
 	if budget <= 0 {
 		return nil
@@ -838,9 +839,11 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 	}
 	live := ""
 	if m.activeRunID != 0 {
+		label := m.workingActivity()
 		if hint := m.quietGenerationHint(); hint != "" {
-			live = " " + zeroTheme.accent.Render("•") + " " + zeroTheme.faint.Render(truncateStep(hint, room))
+			label = hint
 		}
+		live = " " + runningRailStyle(m.spinnerPhase, m.reducedMotion).Render(m.spinnerGlyph()) + " " + zeroTheme.faint.Render(truncateStep(label, room))
 	}
 	lines := make([]string, 0, len(work)+1)
 	if live != "" {

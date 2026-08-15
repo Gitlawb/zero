@@ -467,7 +467,7 @@ var dunePalette = palette{
 
 // themeEntry is one registered theme: Name is the /theme value + ZERO_THEME/--theme
 // token (lowercase, kebab), Label is the picker display text, and IsDark groups the
-// picker (Dark/Light sections) and drives which built-in `auto` resolves to.
+// picker into Dark/Light sections.
 type themeEntry struct {
 	Name    string
 	Label   string
@@ -478,7 +478,7 @@ type themeEntry struct {
 // themeRegistry is the ordered source of truth for every selectable theme. Order is
 // the picker order: all Dark themes first, then all Light, with the brand
 // dark/light built-ins leading their groups. themeModes (theme_select.go) prepends
-// `auto` to this. Append here to add a theme — nothing else needs editing.
+// `system` to this. Append here to add a theme — nothing else needs editing.
 var themeRegistry = []themeEntry{
 	{Name: "dark", Label: "dark", Palette: darkPalette, IsDark: true},
 	{Name: "dracula", Label: "Dracula", Palette: draculaPalette, IsDark: true},
@@ -496,9 +496,7 @@ var themeRegistry = []themeEntry{
 	{Name: "dune", Label: "Dune", Palette: dunePalette, IsDark: false},
 }
 
-// themeByName indexes the registry by lowercased name for O(1) lookup. Built as a
-// var initializer (not init()) so it is ready before themeModes' package-var
-// initializer calls themeNames().
+// themeByName indexes the registry by lowercased name for O(1) lookup.
 var themeByName = func() map[string]themeEntry {
 	byName := make(map[string]themeEntry, len(themeRegistry))
 	for _, entry := range themeRegistry {
@@ -511,13 +509,4 @@ var themeByName = func() map[string]themeEntry {
 func lookupTheme(name string) (themeEntry, bool) {
 	entry, ok := themeByName[strings.ToLower(strings.TrimSpace(name))]
 	return entry, ok
-}
-
-// themeNames returns every registered theme name in registry (picker) order.
-func themeNames() []string {
-	names := make([]string, len(themeRegistry))
-	for index, entry := range themeRegistry {
-		names[index] = entry.Name
-	}
-	return names
 }

@@ -61,6 +61,10 @@ func Run(ctx context.Context, options Options) int {
 		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	initialModel := newModel(ctx, options)
+	// Apply the terminal-native system default at the real interactive entry point.
+	// Constructing a model alone is also useful to tests and non-TUI helpers, and
+	// should not mutate the package-level render palette for those callers.
+	applyTheme(initialModel.themeMode, initialModel.hasDarkBg)
 	initialModel.petRenderer = petRenderer
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true

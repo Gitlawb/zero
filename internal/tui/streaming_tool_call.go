@@ -126,5 +126,5 @@ func (m model) streamingToolCallView(width int) string {
 	}
 	head := toolCardHead(m.streamCallName, d.path, "", headTag, "", "", true, zeroTheme.ink, false, width, cardRenderOptions{cwd: m.cwd})
 	lines := []string{zeroTheme.accent.Render(m.spinnerGlyph()) + " " + head}
-	return strings.Join(lines, "\n")
+	return renderLeftRuleCard(width, lines, runningRailStyle(m.spinnerPhase, m.reducedMotion))
 }

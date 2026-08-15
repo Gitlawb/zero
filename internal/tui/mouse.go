@@ -531,6 +531,20 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	if !ok {
 		return mouseSelectionTarget{}, false
 	}
+	// The theme picker has a right-hand visual preview on wider terminals. It is
+	// deliberately non-interactive: clicking a color sample must not select a
+	// list item merely because it shares that row's y-coordinate.
+	if m.picker.kind == pickerTheme {
+		overlayWidth := minInt(width, pickerOverlayMaxWidth)
+		if overlayWidth < pickerOverlayMinWidth {
+			overlayWidth = width
+		}
+		listWidth, _, showPreview := themePickerColumnWidths(maxInt(1, overlayWidth-4))
+		// styledBlockFillTitle contributes a left border and one-cell inset.
+		if showPreview && hit.x >= listWidth+2 {
+			return mouseSelectionTarget{}, false
+		}
+	}
 	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
 	selected := clampInt(m.picker.selected, 0, len(m.picker.items)-1)
 	start := selectableListStart(len(m.picker.items), maxVisible, selected)
@@ -549,9 +563,6 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 		if hit.y == line {
 			index := start + offset
 			m.picker.selected = index
-			// Clicking (or hovering onto) a row live-previews it, like arrow keys,
-			// so the theme picker repaints before the confirming second click.
-			m.previewSelectedTheme()
 			return mouseSelectionTarget{Scope: "picker", Kind: int(m.picker.kind), Value: item.Value, Index: index}, true
 		}
 		line++

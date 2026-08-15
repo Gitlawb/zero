@@ -1333,9 +1333,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	multi := len(questions) > 1
 
 	var lines []string
-	if header := strings.TrimSpace(prompt.request.Header); header != "" {
-		lines = append(lines, fill(zeroTheme.ink).Render(header))
-	}
+	lines = append(lines, renderAskUserWaitingState(strings.TrimSpace(prompt.request.Header), width, fill))
 
 	// Tab row (only for multi-question prompts): each question's short title + a
 	// trailing Confirm tab; the active tab is a lime badge, answered ones get a ✓.
@@ -1433,6 +1431,23 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 }
 
+// renderAskUserWaitingState makes the paused handoff explicit inside the prompt
+// that owns the keyboard. It is intentionally steady: this is user-blocked work,
+// not background progress, so a spinner would imply Zero can advance without an
+// answer. The state label wins over the optional title on narrow terminals.
+func renderAskUserWaitingState(title string, width int, fill func(lipgloss.Style) lipgloss.Style) string {
+	state := zeroTheme.accent.Render("●") + " " + fill(zeroTheme.faint).Render("waiting for your answer")
+	if title == "" {
+		return state
+	}
+	heading := fill(zeroTheme.ink).Render(title)
+	available := maxInt(1, width-4)
+	if gap := available - lipgloss.Width(heading) - lipgloss.Width(state); gap >= 2 {
+		return heading + strings.Repeat(" ", gap) + state
+	}
+	return fitStyledLine(state, available)
+}
+
 // --- Tool cards -------------------------------------------------------------
 
 // cardBodyMaxLines caps every card body; hidden lines collapse into a
@@ -1456,7 +1471,8 @@ type cardBody struct {
 // global pending flag alone would re-animate dead cards on every later run.
 func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
 	glyph := zeroTheme.faintest.Render("…")
-	if m.pending && row.runID != 0 && row.runID == m.activeRunID {
+	active := m.pending && row.runID != 0 && row.runID == m.activeRunID
+	if active {
 		glyph = zeroTheme.accent.Render(m.spinnerGlyph())
 	}
 	// The call row carries its own argHints; rc.hints/args only matter for
@@ -1472,6 +1488,11 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	// Running cards keep the normal name color; the accent spinner glyph at the
 	// front already marks them live (and orphaned dead cards must not look active).
 	head := toolCardHead(toolRowName(row), hint, arg, "", "", "", true, zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
+	if active {
+		// A quiet breathing rail distinguishes the one operation that is live now
+		// without giving completed or rehydrated cards a false sense of activity.
+		return renderLeftRuleCard(width, []string{glyph + " " + head}, runningRailStyle(m.spinnerPhase, m.reducedMotion))
+	}
 	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
 }
 
@@ -1759,6 +1780,12 @@ func toolCardActionLabel(name string, detail string, running bool) string {
 			return "Listing"
 		case "terminal_session":
 			return "Running"
+		case "update_plan":
+			return "Planning"
+		case "tool_search":
+			return "Preparing tools"
+		case "Task":
+			return "Delegating"
 		default:
 			return toolDisplayName(name)
 		}
@@ -1921,10 +1948,10 @@ func singleLineToolHeadText(text string) string {
 	return strings.Join(parts, " ")
 }
 
-// toolCard draws a compact tool block: the status glyph leads the head row,
-// body lines follow directly below, and an optional footer closes the block. No
-// rail or box border is drawn, so the transcript does not carry a distracting
-// vertical activity line.
+// toolCard draws a compact completed-or-static tool block: the status glyph
+// leads the head row, body lines follow directly below, and an optional footer
+// closes the block. The one live card is rendered separately with a breathing
+// rail, so history remains visually quiet.
 func toolCard(head string, glyph string, body []string, footer string, _ lipgloss.Style, width int) string {
 	if width < 24 {
 		width = 24

@@ -3,6 +3,9 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 )
 
 // TestRippleLevelAtTrough verifies the cosine trough: with q = waveLen/2,
@@ -121,5 +124,23 @@ func TestWorkingStatusLineRipplesWorkingWord(t *testing.T) {
 	b := m.workingStatusLine()
 	if a == b {
 		t.Fatalf("working status line did not change as spinnerPhase advanced; got %q", a)
+	}
+}
+
+func TestRunningRailUsesSharedClockAndRespectsReducedMotion(t *testing.T) {
+	old := lipgloss.Writer.Profile
+	lipgloss.Writer.Profile = colorprofile.TrueColor
+	defer func() { lipgloss.Writer.Profile = old }()
+
+	first := runningRailStyle(0, false).Render("│")
+	second := runningRailStyle(4, false).Render("│")
+	if first == second {
+		t.Fatalf("running rail did not animate across spinner phases: %q", first)
+	}
+
+	stillFirst := runningRailStyle(0, true).Render("│")
+	stillSecond := runningRailStyle(4, true).Render("│")
+	if stillFirst != stillSecond {
+		t.Fatalf("reduced-motion rail changed across phases: %q != %q", stillFirst, stillSecond)
 	}
 }

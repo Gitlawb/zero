@@ -532,8 +532,8 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	if next.modelName != "openai/gpt-4.1" {
 		t.Fatalf("active model = %q, want raw OpenRouter model ID", next.modelName)
 	}
-	if !transcriptContains(next.transcript, "openai/gpt-4.1 ·") {
-		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "openai/gpt-4.1") {
+		t.Fatalf("model switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -930,8 +930,8 @@ func TestModelPickerNavigatesAndChoosesAppliesHandler(t *testing.T) {
 	if m.modelName != "claude-haiku-4.5" {
 		t.Fatalf("expected model switched to claude-haiku-4.5 via handler, got %q", m.modelName)
 	}
-	if !transcriptContains(m.transcript, "Model") {
-		t.Fatal("choosing should append the model handler's status text")
+	if !strings.Contains(m.transientNotice.text, "Model:") {
+		t.Fatalf("model picker notice = %q", m.transientNotice.text)
 	}
 }
 
@@ -963,7 +963,7 @@ func TestEffortPickerOpensForSupportedModel(t *testing.T) {
 }
 
 func TestThemeCommandOpensPicker(t *testing.T) {
-	// Bare /theme opens the theme popup (live preview on move, apply on Enter),
+	// Bare /theme opens the theme popup (contained preview on move, apply on Enter),
 	// like /model and /effort. Full preview/commit/cancel behavior is covered in
 	// theme_picker_test.go; here we just pin that the no-arg command opens it.
 	defer applyTheme(themeDark, true)

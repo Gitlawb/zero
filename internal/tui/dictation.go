@@ -201,13 +201,13 @@ func (m model) toggleVoiceMode() (model, tea.Cmd) {
 	}
 	m.dictation.voiceModeEnabled = !m.dictation.voiceModeEnabled
 	if m.dictation.voiceModeEnabled {
-		return m.appendSystemNotice("Voice mode on (" + m.dictation.currentModelLabel() + ") — hold Space to dictate, release to transcribe. Run /voice again to turn it off (so Space types normally)."), nil
+		return m.showTransientNoticeInline("Voice mode on — hold Space to dictate; run /voice again to turn it off.", transientNoticeSuccess), nil
 	}
 	// Turning voice off is the "done dictating" signal, so release the warm sherpa
 	// streaming server — otherwise a loaded model keeps idling in RAM (and holding
 	// its port) until the app exits. It respawns lazily on the next streaming
 	// recording. Skip while a recording is still in flight so we don't kill it.
-	next := m.appendSystemNotice("Voice mode off.")
+	next := m.showTransientNoticeInline("Voice mode off.", transientNoticeInfo)
 	if next.dictation.active() {
 		return next, nil
 	}
@@ -299,7 +299,7 @@ func (m model) cancelDictation() (model, tea.Cmd) {
 	}
 	m = m.discardDictationRegion()
 	m.dictation.reset()
-	return m.appendSystemNotice("Dictation cancelled."), nil
+	return m.showTransientNoticeInline("Dictation cancelled.", transientNoticeInfo), nil
 }
 
 // wantStreaming decides whether this recording uses the streaming pipeline:
@@ -438,7 +438,7 @@ func (m model) handleDictationTranscribed(msg dictationTranscribedMsg) (tea.Mode
 		if streaming {
 			return m, nil // streaming already rendered live; nothing to add
 		}
-		return m.appendSystemNotice("No speech detected."), nil
+		return m.showTransientNoticeInline("No speech detected.", transientNoticeInfo), nil
 	}
 	if !streaming {
 		m = m.insertDictatedText(msg.text)

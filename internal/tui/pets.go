@@ -86,7 +86,7 @@ func (m model) handlePetsCommand(argument string) (tea.Model, tea.Cmd) {
 		m.petPreview = nil
 		m.picker = nil
 		m.petTickSeq++
-		return m.appendSystemNotice("Terminal companion hidden. Run /pets to choose another."), nil
+		return m.showTransientNoticeInline("Terminal companion hidden. Run /pets to choose another.", transientNoticeInfo), nil
 	}
 	m.petRequestedSlug = argument
 	localEntries, _ := m.petClient.InstalledEntries()
@@ -242,13 +242,13 @@ func (m model) installPet(slug string) (tea.Model, tea.Cmd) {
 		m.petName = ""
 		m.petAnimation = nil
 		m.petTickSeq++
-		return m.appendSystemNotice("Terminal companion hidden. Run /pets to choose another."), nil
+		return m.showTransientNoticeInline("Terminal companion hidden. Run /pets to choose another.", transientNoticeInfo), nil
 	}
 	entry, ok := m.petEntries[slug]
 	if !ok {
 		return m.appendSystemNotice(fmt.Sprintf("Pet %q is no longer in the catalog.", slug)), nil
 	}
-	m = m.appendSystemNotice("Installing " + entry.Label() + "…")
+	m = m.showTransientNoticeInline("Installing "+entry.Label()+"…", transientNoticeInfo)
 	return m, func() tea.Msg {
 		animation, err := m.petClient.Install(m.ctx, entry)
 		return petInstalledMsg{entry: entry, animation: animation, err: err}
@@ -270,7 +270,7 @@ func (m model) applyPetInstall(msg petInstalledMsg) (tea.Model, tea.Cmd) {
 	m.petPlaybackState = terminalpet.Idle
 	m.petClickAnimationIndex = 0
 	m.petOutcome = terminalpet.Idle
-	m = m.appendSystemNotice(msg.entry.Label() + " is now your terminal companion. Use /pets off to hide it.")
+	m = m.showTransientNoticeInline(msg.entry.Label()+" is now your terminal companion. Use /pets off to hide it.", transientNoticeSuccess)
 	if m.reducedMotion {
 		return m, nil
 	}

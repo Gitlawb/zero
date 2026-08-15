@@ -202,8 +202,8 @@ type model struct {
 	petDragState                  terminalpet.State
 	petLastClickAt                time.Time
 	keyBindings                   keyBindings
-	themeMode                     themeMode // palette preference: auto (default), dark, light
-	hasDarkBg                     bool      // last terminal background-detection result (auto mode)
+	themeMode                     themeMode // palette preference: system (default) or named palette
+	hasDarkBg                     bool      // last terminal background-detection result, if one is delivered
 	userAgent                     string
 	compactRequests               int
 	compactInFlight               bool
@@ -485,11 +485,16 @@ type model struct {
 	// mouse cursor with no button pressed, so it renders in a distinct style —
 	// the visual cue that it's clickable. Requires AllMotion mouse reporting
 	// (see wantsMouseCapture) since idle cursor movement carries no button.
-	hover             hoverTarget
-	copyStatus        string
-	copyStatusSeq     int
-	exitConfirmActive bool
-	exitConfirmSeq    int
+	hover         hoverTarget
+	copyStatus    string
+	copyStatusSeq int
+	// transientNotice is a single, replaceable confirmation shown above the
+	// composer. Unlike copyStatus it is shared by lightweight slash commands
+	// and is never persisted into the transcript.
+	transientNotice    transientNotice
+	transientNoticeSeq int
+	exitConfirmActive  bool
+	exitConfirmSeq     int
 	// cancelConfirmActive/cancelConfirmSeq mirror exitConfirmActive/exitConfirmSeq
 	// (same seq-gated tea.Tick pattern) but guard a DIFFERENT action: Esc
 	// cancelling a running turn. The two are deliberately separate state (not a
@@ -1015,9 +1020,10 @@ func newModel(ctx context.Context, options Options) model {
 			}
 		}
 	}
-	// Apply an explicit theme immediately; auto stays on the dark default until
-	// Init's terminal background probe resolves it (see Init / BackgroundColorMsg).
-	if m.themeMode != themeAuto {
+	// Apply an explicit palette immediately. System is applied by Run immediately
+	// before Bubble Tea starts, which keeps package-level helper rendering
+	// deterministic while models are being constructed in tests.
+	if m.themeMode != themeSystem {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
@@ -1117,19 +1123,17 @@ func (m model) Init() tea.Cmd {
 	// unpadded, non-fullscreen render path for the rest of the session, and
 	// the alt-screen viewport never gets filled below the actual content.
 	// Explicitly requesting it here means Zero doesn't depend solely on the
-	// terminal's unprompted push — mirrors the RequestBackgroundColor request
-	// below for the same reason.
+	// terminal's unprompted push.
 	cmds = append(cmds, tea.RequestWindowSize)
+	// Read the terminal background only to keep a selected palette legible. This
+	// query never changes the terminal canvas; View deliberately leaves both
+	// terminal-wide color fields unset.
+	cmds = append(cmds, tea.RequestBackgroundColor)
 	// Baseline git snapshot for the FILES sidebar sweep: whatever is already
 	// dirty when the TUI opens is pre-existing state, not this session's work
 	// (files_git_sweep.go). Async; a non-git workspace just disables the sweep.
 	if strings.TrimSpace(m.cwd) != "" {
 		cmds = append(cmds, gitSweepCmd(m.ctx, m.cwd, true))
-	}
-	// In auto mode, ask the terminal for its background color; the reply arrives
-	// as tea.BackgroundColorMsg and selects light vs dark (see updateModel).
-	if m.themeMode == themeAuto {
-		cmds = append(cmds, tea.RequestBackgroundColor)
 	}
 	// Warm model discovery for the active provider in the background so the
 	// context-usage gauge (used / total tokens + % fill) knows the active model's
@@ -1344,6 +1348,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case composerBlinkMsg:
+		m = m.expireTransientNotice()
 		switch {
 		case !m.terminalFocused:
 			m.composerCursorVisible = false // hidden while unfocused
@@ -1354,12 +1359,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, composerBlinkCmd()
 	case tea.BackgroundColorMsg:
-		// Terminal background-color reply (from Init's RequestBackgroundColor). In
-		// auto mode it selects light vs dark; applyTheme repaints (clears the render
-		// cache). An explicit dark/light theme ignores it but still records the bg.
+		// A background reading changes only the contrast direction used for named
+		// palettes. It never repaints the terminal canvas.
 		m.hasDarkBg = msg.IsDark()
-		if m.themeMode == themeAuto {
-			applyTheme(themeAuto, m.hasDarkBg)
+		if m.themeMode != themeSystem {
+			applyTheme(m.themeMode, m.hasDarkBg)
 		}
 		return m, nil
 	case tea.MouseMsg:
@@ -1383,6 +1387,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transcriptCopyStatusExpiredMsg:
 		if msg.seq == m.copyStatusSeq {
 			m.copyStatus = ""
+		}
+		return m, nil
+	case transientNoticeExpiredMsg:
+		if msg.seq == m.transientNoticeSeq {
+			m.transientNotice = transientNotice{}
 		}
 		return m, nil
 	case exitConfirmExpiredMsg:
@@ -1601,7 +1610,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
 				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
-			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
+			return m.showTransientNoticeInline("Mouse interaction re-enabled.", transientNoticeSuccess), nil
 		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && keyIs(msg, tea.KeySpace) && !keyHasMod(msg, tea.ModCtrl) && !keyAlt(msg) && m.noBlockingModal():
 			// Voice mode (/voice) repurposes Space into the record gesture — the only
 			// dictation trigger — so it must not also type a space. Turn voice mode
@@ -1695,11 +1704,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.picker != nil {
 				if m.picker.kind == pickerModel {
 					m.clearModelPickerLoadState()
-				}
-				if m.picker.kind == pickerTheme {
-					// A live theme preview was applied while navigating; restore the
-					// committed palette since Esc dismisses without choosing.
-					m.restoreCommittedTheme()
 				}
 				if m.picker.kind == pickerPet {
 					m.cancelPetPreview()
@@ -1929,9 +1933,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.picker.deleteQueryRune()
-				// Editing the filter changes which row is highlighted; keep the
-				// theme preview in sync with it (no-op for other pickers).
-				m.previewSelectedTheme()
 				if m.picker.kind == pickerPet {
 					return m.schedulePetPreview()
 				}
@@ -2154,9 +2155,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if keyPrintable(msg) {
 				m.picker.appendQuery(keyRunes(msg))
-				// Filtering changes the highlighted row; keep the theme preview in
-				// sync with it (no-op for other pickers).
-				m.previewSelectedTheme()
 				if m.picker.kind == pickerPet {
 					return m.schedulePetPreview()
 				}
@@ -2990,29 +2988,8 @@ func (m model) View() tea.View {
 
 	view := tea.NewView(content)
 	view.AltScreen = m.altScreen
-	// Paint the whole frame with the active theme's surface. Zero never paints the
-	// terminal's own canvas, so without this a theme's text falls on the terminal
-	// background — fine when they share polarity, but a light theme's dark text on a
-	// dark terminal (or vice versa) is invisible, and a color theme never shows its
-	// real surface. Painting the panel makes every theme self-contained and legible
-	// on any terminal, and fills the transparent popup interiors (e.g. the /theme
-	// picker) too. Alt-screen only, so inline output never leaves a painted
-	// background behind in the user's scrollback after exit.
-	if m.altScreen {
-		view.BackgroundColor = zeroTheme.bgPanel
-		// Also fill the frame content with the panel surface, not just the
-		// terminal's default background. Relying on view.BackgroundColor alone
-		// leaves blank/padding cells (and anything ClearScreen erases) on the
-		// terminal's own default, which is white on a light terminal — so light
-		// themes flash a blinding white instead of their cream surface. Wrapping
-		// the content paints every cell (including blank lines) with the theme
-		// panel, so the surface is uniform regardless of the terminal default and
-		// ClearScreen repaints to the theme color instead of white.
-		if m.width > 0 && m.height > 0 {
-			content = zeroTheme.panel.Width(m.width).Height(m.height).Render(content)
-			view.SetContent(content)
-		}
-	}
+	// Keep the terminal's canvas intact. Named themes may color local cards, but
+	// Zero never replaces the user's background, opacity, wallpaper, or profile.
 	// Always requested, independent of the notifier: the composer cursor's
 	// focus/blink behavior (composerBlinkMsg above) needs tea.FocusMsg/BlurMsg
 	// regardless of notification config. A standard, widely supported DEC
@@ -3234,6 +3211,8 @@ func (m model) footerView(width int) string {
 	// so the footer height is unchanged.
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+	} else if notice := m.transientNoticeLine(width); notice != "" {
+		footer.WriteString(notice)
 	} else if recap := strings.TrimSpace(m.idleRecap); recap != "" {
 		footer.WriteString(fitStyledLine("  "+zeroTheme.faint.Render("※ "+recap), width))
 	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
@@ -3248,10 +3227,6 @@ func (m model) footerView(width int) string {
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))
-	if hint := m.composerDescriptionHint(width); hint != "" {
-		footer.WriteString("\n")
-		footer.WriteString(hint)
-	}
 	footer.WriteString("\n")
 	footer.WriteString(m.footerStatusLine(width))
 	return footer.String()
@@ -3730,15 +3705,63 @@ func (m model) spinnerGlyph() string {
 	return m.spinner.View()
 }
 
-// workingActivity labels what the agent is doing right now for the working
-// status line: "writing" while the final answer streams, otherwise "thinking"
-// (reasoning, waiting on the model, or a tool in flight). Cheap and robust — no
-// transcript scan — so it can't misreport on a long, output-less step.
+// workingActivity labels the current live phase for the working status line.
+// User-blocked states take precedence, then a streamed or outstanding tool call,
+// then assistant text/reasoning. This makes a quiet but healthy run legible
+// without guessing from elapsed time alone.
 func (m model) workingActivity() string {
+	if m.pendingPermission != nil {
+		return "waiting for approval"
+	}
+	if m.pendingAskUser != nil {
+		return "waiting for your answer"
+	}
+	if m.streamCallName != "" {
+		return strings.ToLower(toolCardActionLabel(m.streamCallName, "", true))
+	}
+	if row, ok := m.activeToolCall(); ok {
+		return strings.ToLower(toolCardActionLabel(toolRowName(row), row.detail, true))
+	}
 	if strings.TrimSpace(m.streamingTextString()) != "" {
 		return "writing"
 	}
 	return "thinking"
+}
+
+// activeToolCallScanLimit bounds per-frame work while the spinner is active.
+// A current tool call belongs near the transcript tail; if it falls outside this
+// window we use the conservative "thinking" label rather than scan history on
+// every animation frame.
+const activeToolCallScanLimit = 200
+
+// activeToolCall returns the newest unresolved tool call from the active run.
+// Results are encountered before their calls while scanning backwards, so a
+// small resolved set prevents an earlier completed call from being reported as
+// live. Tool IDs are required: unkeyed historical rows cannot be paired safely.
+func (m model) activeToolCall() (transcriptRow, bool) {
+	if !m.pending || m.activeRunID == 0 {
+		return transcriptRow{}, false
+	}
+	var resolved map[string]struct{}
+	for i, scanned := len(m.transcript)-1, 0; i >= 0 && scanned < activeToolCallScanLimit; i, scanned = i-1, scanned+1 {
+		row := m.transcript[i]
+		if row.runID != m.activeRunID || row.id == "" {
+			continue
+		}
+		key := rcKey(row.runID, row.id)
+		switch row.kind {
+		case rowToolResult:
+			if resolved == nil {
+				resolved = make(map[string]struct{})
+			}
+			resolved[key] = struct{}{}
+		case rowToolCall:
+			if _, complete := resolved[key]; !complete {
+				return row, true
+			}
+		}
+	}
+	return transcriptRow{}, false
 }
 
 // toolCardSuppressedInTranscript reports tools whose transcript card is redundant
@@ -4302,37 +4325,6 @@ func (m model) composerBox(width int) string {
 	return strings.Join(rendered, "\n")
 }
 
-// composerDescriptionHint returns the description line that sits below the
-// composer box, claude-code style, when the input is a single unambiguous
-// slash command. Returns "" when the user is mid-prompt, the palette is closed,
-// or more than one command matches. Slash commands only; the @file palette
-// already shows its rows. The inline argument hint ([low|medium|...]) is
-// unchanged and continues to render inside the composer box.
-func (m model) composerDescriptionHint(width int) string {
-	if width < 8 {
-		return ""
-	}
-	if m.suggestionsAreFiles {
-		return ""
-	}
-	if !m.commandPaletteOpen || len(m.suggestions) != 1 {
-		return ""
-	}
-	if m.suggestionIdx != 0 {
-		return ""
-	}
-	value := strings.TrimSpace(m.input.Value())
-	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, " \t\n") {
-		return ""
-	}
-	suggestion := m.suggestions[0]
-	desc := strings.TrimSpace(suggestion.Desc)
-	if desc == "" {
-		return ""
-	}
-	return fitStyledLine(zeroTheme.muted.Render(desc), width)
-}
-
 // startsTurn reports whether a row begins a new conversational turn and therefore
 // gets a blank line of separation above it (tool rows stay grouped together).
 func startsTurn(kind rowKind) bool {
@@ -4450,16 +4442,12 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	}
 	item, ok := picker.current()
 	if !ok {
-		if picker.kind == pickerTheme {
-			// No selectable row (e.g. the filter matched nothing): undo any live
-			// preview so the palette matches the committed m.themeMode.
-			m.restoreCommittedTheme()
-		}
 		return m, nil
 	}
 	var cmd tea.Cmd
 	switch picker.kind {
 	case pickerModel:
+		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
 		owner := strings.TrimSpace(item.OwnerProvider)
 		_, ownerIsSavedProvider := m.savedProviderByName(owner)
@@ -4472,10 +4460,17 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			// the active provider instead of attempting an unresolvable provider switch.
 			m, text = m.handleModelCommand(item.Value)
 		}
+		if m.providerName != previousProvider || m.modelName != previousModel {
+			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), cmd
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerEffort:
+		previous := m.reasoningEffort
 		text := ""
 		m, text = m.handleEffortCommand(item.Value)
+		if m.reasoningEffort != previous {
+			return m.showTransientNoticeInline(m.effortAppliedNotice(), transientNoticeSuccess), cmd
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerSession:
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
@@ -4506,17 +4501,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerPet:
 		return m.installPet(item.Value)
 	case pickerTheme:
-		// The hovered palette is already live from the preview; handleThemeCommand
-		// records the choice (m.themeMode) and re-applies it, and reports the switch.
+		// Selection is applied only after Enter. Moving through the picker renders a
+		// local preview and never changes the active palette.
 		text := ""
 		m, text = m.handleThemeCommand(item.Value)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		if m.themeMode == themeAuto {
-			// Re-probe the terminal background so a committed `auto` re-detects
-			// light/dark instead of reusing the preview's reading — mirrors the
-			// text /theme dispatch (M17).
-			return m, tea.RequestBackgroundColor
+		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
+			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, cmd
 }
@@ -4702,6 +4694,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
 	case commandPS:
+		if len(m.backgroundTerminalSessions()) == 0 {
+			return m.showTransientNoticeInline("No background terminals running.", transientNoticeInfo), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.backgroundTerminalsText()})
 		return m, nil
 	case commandStop:
@@ -4738,8 +4733,12 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 		}
+		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
 		m, text = m.handleModelCommand(command.text)
+		if m.providerName != previousProvider || m.modelName != previousModel {
+			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandSTTModel:
@@ -4837,23 +4836,39 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		previous := m.reasoningEffort
 		text := ""
 		m, text = m.handleEffortCommand(command.text)
+		if m.reasoningEffort != previous {
+			return m.showTransientNoticeInline(m.effortAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandFast:
+		previous := m.activeServiceTier()
 		text := ""
 		m, text = m.handleFastCommand(command.text)
+		if m.activeServiceTier() != previous {
+			return m.showTransientNoticeInline(m.fastAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandStyle:
+		previous := m.responseStyle
 		text := ""
 		m, text = m.handleStyleCommand(command.text)
+		if m.responseStyle != previous {
+			return m.showTransientNoticeInline("Style: "+m.responseStyle, transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandSelfCorrect:
+		previous := m.selfCorrectTests
 		text := ""
 		m, text = m.handleSelfCorrectCommand(command.text)
+		if m.selfCorrectTests != previous {
+			return m.showTransientNoticeInline(m.selfCorrectAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTurns:
@@ -4864,8 +4879,12 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Turns\nFinish or stop the current run before changing the tool-turn budget."})
 			return m, nil
 		}
+		previous := m.agentOptions.MaxTurns
 		text := ""
 		m, text = m.handleTurnsCommand(command.text)
+		if m.agentOptions.MaxTurns != previous {
+			return m.showTransientNoticeInline(m.turnsAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandProfile:
@@ -4876,27 +4895,27 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Profile\nFinish or stop the current run before switching the execution profile."})
 			return m, nil
 		}
+		previous := m.execProfileName
 		text := ""
 		m, text = m.handleProfileCommand(command.text)
+		if m.execProfileName != previous {
+			return m.showTransientNoticeInline(m.profileAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme:
-		// Bare `/theme` opens the popup picker (live preview on move, apply on
-		// Enter), matching /model and /effort. An explicit `/theme auto|dark|light`
-		// (or `/theme list`) still runs the text handler directly.
+		// Bare `/theme` opens a picker with a contained candidate preview. An
+		// explicit `/theme <name>` (or `/theme list`) still runs the text handler.
 		if strings.TrimSpace(command.text) == "" {
 			m.picker = m.newThemePicker()
 			return m, nil
 		}
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		if m.themeMode == themeAuto {
-			// Re-probe the terminal background so /theme auto re-detects light/dark
-			// instead of reusing a stale reading from startup; the BackgroundColorMsg
-			// handler re-applies the auto palette with the fresh result (M17).
-			return m, tea.RequestBackgroundColor
+		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
+			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)

@@ -76,6 +76,48 @@ func TestUserRowRendersPromptGutter(t *testing.T) {
 	}
 }
 
+func TestRunningToolCardUsesLiveRailOnlyForActiveRun(t *testing.T) {
+	m := limeTestModel()
+	m.pending = true
+	m.activeRunID = 4
+	row := transcriptRow{kind: rowToolCall, id: "call-1", runID: 4, tool: "read_file", detail: "main.go"}
+	active := plainRender(t, m.renderRunningToolCard(row, 80, buildRowContext([]transcriptRow{row}), cardRenderOptions{}))
+	if !strings.HasPrefix(active, "│ ") {
+		t.Fatalf("active card should begin with a live rail, got %q", active)
+	}
+	if !strings.Contains(active, "Reading") {
+		t.Fatalf("active card should retain its action label, got %q", active)
+	}
+
+	m.pending = false
+	inactive := plainRender(t, m.renderRunningToolCard(row, 80, buildRowContext([]transcriptRow{row}), cardRenderOptions{}))
+	if strings.HasPrefix(inactive, "│ ") {
+		t.Fatalf("inactive card should not retain a live rail, got %q", inactive)
+	}
+}
+
+func TestAskUserQuestionnaireNamesWaitingForAnswer(t *testing.T) {
+	prompt := pendingAskUserPrompt{
+		request: agent.AskUserRequest{
+			Header: "Quick question",
+			Questions: []agent.AskUserQuestion{{
+				Question: "Which task should Zero handle first?",
+				Options:  []string{"Work helper"},
+			}},
+		},
+		states: newAskUserStates([]agent.AskUserQuestion{{
+			Question: "Which task should Zero handle first?",
+			Options:  []string{"Work helper"},
+		}}),
+	}
+	got := plainRender(t, renderAskUserQuestionnaire(prompt, "", 80))
+	for _, want := range []string{"Quick question", "waiting for your answer"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("questionnaire missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestTranscriptSeparatesUserPromptFromContinuation(t *testing.T) {
 	m := limeTestModel()
 	m.headerPrinted = true
@@ -1892,54 +1934,19 @@ func TestSessionsCardFieldsAreSanitized(t *testing.T) {
 	}
 }
 
-func TestComposerDescriptionHintRendersForSingleSlashMatch(t *testing.T) {
-	// When the user has typed a slash command that matches exactly one entry in
-	// the command palette, the composer hint line should surface that command's
-	// description below the box, claude-code style.
+func TestCommandPaletteKeepsDescriptionInsideOverlay(t *testing.T) {
 	m := limeTestModel()
 	m.input.SetValue("/effort")
 	m.recomputeSuggestions()
 	if !m.commandPaletteOpen || len(m.suggestions) != 1 || m.suggestions[0].Name != "/effort" {
 		t.Fatalf("setup: expected a single /effort suggestion, got palette=%v matches=%#v", m.commandPaletteOpen, m.suggestions)
 	}
-	got := plainRender(t, m.composerDescriptionHint(96))
-	if !strings.Contains(got, "reasoning effort") {
-		t.Fatalf("description hint = %q, want it to mention reasoning effort", got)
+	overlay := plainRender(t, m.suggestionOverlay(96))
+	if !strings.Contains(overlay, "reasoning effort") {
+		t.Fatalf("palette description = %q", overlay)
 	}
-}
-
-func TestComposerDescriptionHintStaysEmptyForAmbiguousPrefix(t *testing.T) {
-	// A prefix that still matches multiple commands should not surface a hint --
-	// the dropdown is the right affordance for an ambiguous match.
-	m := limeTestModel()
-	m.input.SetValue("/")
-	m.recomputeSuggestions()
-	if !m.commandPaletteOpen || len(m.suggestions) < 2 {
-		t.Fatalf("setup: expected multiple suggestions for bare '/', got palette=%v matches=%d", m.commandPaletteOpen, len(m.suggestions))
-	}
-	if got := m.composerDescriptionHint(96); got != "" {
-		t.Fatalf("description hint should be empty for ambiguous matches, got %q", got)
-	}
-}
-
-func TestComposerDescriptionHintStaysEmptyAfterArgs(t *testing.T) {
-	// Once the user starts typing arguments, the palette narrows off and we
-	// shouldn't keep advertising the command's description.
-	m := limeTestModel()
-	m.input.SetValue("/effort high")
-	m.recomputeSuggestions()
-	if got := m.composerDescriptionHint(96); got != "" {
-		t.Fatalf("description hint should be empty after args, got %q", got)
-	}
-}
-
-func TestComposerDescriptionHintStaysEmptyForFilePalette(t *testing.T) {
-	// The @file palette already renders its rows; the description hint is
-	// scoped to slash commands.
-	m := limeTestModel()
-	m.input.SetValue("@")
-	m.recomputeSuggestions()
-	if got := m.composerDescriptionHint(96); got != "" {
-		t.Fatalf("description hint should be empty for file palette, got %q", got)
+	footer := plainRender(t, m.footerView(96))
+	if strings.Contains(footer, "reasoning effort") {
+		t.Fatalf("composer footer duplicated palette description: %q", footer)
 	}
 }

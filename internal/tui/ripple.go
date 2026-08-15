@@ -105,3 +105,24 @@ func ripplePalette() []lipgloss.Style {
 	}
 	return out
 }
+
+// runningRailStyle renders the single-cell activity rail used by a live tool
+// call. It shares the spinner clock with the working label: the rail breathes
+// while work is progressing and becomes a stable, low-contrast marker when
+// reduced motion is requested. No extra timer is introduced for this effect.
+func runningRailStyle(phase int, reducedMotion bool) lipgloss.Style {
+	if reducedMotion {
+		return zeroTheme.cardRun
+	}
+	bright := zeroTheme.accent.GetForeground()
+	dim := zeroTheme.cardRun.GetForeground()
+	if bright == nil || dim == nil {
+		return zeroTheme.cardRun
+	}
+	palette := lipgloss.Blend1D(5, dim, bright)
+	if len(palette) == 0 {
+		return zeroTheme.cardRun
+	}
+	level := rippleLevel(phase, len(palette)-1, 8)
+	return lipgloss.NewStyle().Foreground(palette[level])
+}

@@ -55,8 +55,8 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
 		t.Fatalf("expected effort high, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "active effort: high") {
-		t.Fatalf("expected effort switch transcript, got %#v", next.transcript)
+	if next.transientNotice.text != "Reasoning effort: high" {
+		t.Fatalf("effort switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -162,8 +162,8 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	if next.responseStyle != "explanatory" {
 		t.Fatalf("expected explanatory style, got %q", next.responseStyle)
 	}
-	if !transcriptContains(next.transcript, "active style: explanatory") {
-		t.Fatalf("expected style switch transcript, got %#v", next.transcript)
+	if next.transientNotice.text != "Style: explanatory" {
+		t.Fatalf("style switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -938,8 +938,8 @@ func TestModelSwitchClearsUnsupportedEffortPreference(t *testing.T) {
 	if next.reasoningEffort != "" {
 		t.Fatalf("expected unsupported effort preference to reset, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "effort auto (reset)") {
-		t.Fatalf("expected model switch transcript to mention effort reset, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "effort auto") {
+		t.Fatalf("expected model switch notice to mention effort reset, got %q", next.transientNotice.text)
 	}
 }
 

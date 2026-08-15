@@ -36,8 +36,11 @@ func TestToggleVoiceModeFlips(t *testing.T) {
 	if !next.dictation.voiceModeEnabled {
 		t.Fatal("first /voice should enable voice mode")
 	}
-	if !transcriptHasText(next, "Voice mode on") {
-		t.Error("expected voice-mode-on notice")
+	if next.transientNotice.text != "Voice mode on — hold Space to dictate; run /voice again to turn it off." {
+		t.Errorf("voice-mode-on notice = %q", next.transientNotice.text)
+	}
+	if transcriptHasText(next, "Voice mode on") {
+		t.Error("voice-mode-on confirmation should not be persisted in the transcript")
 	}
 	off, _ := next.toggleVoiceMode()
 	if off.dictation.voiceModeEnabled {

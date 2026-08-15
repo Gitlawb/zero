@@ -558,9 +558,9 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	if rebuilt.Model != "gpt-4.1-mini" {
 		t.Fatalf("expected provider rebuild with selected model, got %#v", rebuilt)
 	}
-	for _, want := range []string{"Model", "gpt-4.1-mini · openai"} {
-		if !transcriptContains(next.transcript, want) {
-			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
+	for _, want := range []string{"Model:", "gpt-4.1-mini · openai"} {
+		if !strings.Contains(next.transientNotice.text, want) {
+			t.Fatalf("expected model notice to contain %q, got %q", want, next.transientNotice.text)
 		}
 	}
 }
@@ -611,8 +611,8 @@ func TestModelCommandPersistsSelectedModelToUserConfig(t *testing.T) {
 	if got := persisted.Provider.Model; got != "gpt-4.1-mini" {
 		t.Fatalf("persisted provider model = %q, want gpt-4.1-mini", got)
 	}
-	if !transcriptContains(next.transcript, "· saved") {
-		t.Fatalf("expected model transcript to mention saved user config, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "gpt-4.1-mini") {
+		t.Fatalf("expected model notice to name selected model, got %q", next.transientNotice.text)
 	}
 }
 

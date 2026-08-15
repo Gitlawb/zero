@@ -38,6 +38,48 @@ func TestWorkingPlanLine(t *testing.T) {
 	}
 }
 
+func TestWorkingActivityNamesCurrentPhase(t *testing.T) {
+	tests := []struct {
+		name  string
+		model model
+		want  string
+	}{
+		{name: "default", want: "thinking"},
+		{name: "assistant text", model: model{streamingText: []byte("drafting")}, want: "writing"},
+		{name: "permission", model: model{pendingPermission: &pendingPermissionPrompt{}}, want: "waiting for approval"},
+		{name: "question", model: model{pendingAskUser: &pendingAskUserPrompt{}}, want: "waiting for your answer"},
+		{name: "streamed tool", model: model{streamCallName: "grep"}, want: "searching"},
+		{
+			name: "outstanding tool",
+			model: model{
+				pending:     true,
+				activeRunID: 7,
+				transcript:  []transcriptRow{{kind: rowToolCall, id: "call-1", runID: 7, tool: "read_file"}},
+			},
+			want: "reading",
+		},
+		{
+			name: "completed tool",
+			model: model{
+				pending:     true,
+				activeRunID: 7,
+				transcript: []transcriptRow{
+					{kind: rowToolCall, id: "call-1", runID: 7, tool: "read_file"},
+					{kind: rowToolResult, id: "call-1", runID: 7, tool: "read_file", status: tools.StatusOK},
+				},
+			},
+			want: "thinking",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.model.workingActivity(); got != test.want {
+				t.Fatalf("workingActivity() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 // TestHiddenPlumbingToolsSkippedFromTranscript: the plumbing tools (update_plan,
 // tool_search) render nothing — their call AND result rows are dropped; real
 // work tools still render.

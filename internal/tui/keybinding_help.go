@@ -11,7 +11,11 @@
 // who remaps them in config.json sees the actual chords, not the defaults.
 package tui
 
-import "strings"
+import (
+	"strings"
+
+	"charm.land/lipgloss/v2"
+)
 
 // keybinding is one row in the help overlay: the key chord and what it does.
 type keybinding struct {
@@ -144,7 +148,7 @@ func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) str
 func (m model) renderKeybindingHelpOverlay(width int) string {
 	overlayWidth := keybindingHelpOverlayWidth(width)
 	lines := m.renderKeybindingHelpLines(overlayWidth - 4)
-	block := styledBlockFillTitle(overlayWidth, "Keyboard Shortcuts", lines, zeroTheme.line, zeroTheme.panel)
+	block := styledBlockFillTitle(overlayWidth, "Keyboard Shortcuts", lines, zeroTheme.line, lipgloss.NewStyle())
 	return centerRenderedBlock(block, width)
 }
 

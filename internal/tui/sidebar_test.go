@@ -52,6 +52,18 @@ func TestSidebarActivityLines(t *testing.T) {
 	}
 }
 
+func TestSidebarActivityNamesCurrentTool(t *testing.T) {
+	m := sidebarTestModel()
+	m.pending = true
+	m.activeRunID = 7
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, id: "call-1", runID: 7, tool: "grep", detail: "internal/tui"})
+
+	got := plainRender(t, strings.Join(m.sidebarActivityLines(40, 10), "\n"))
+	if !strings.Contains(got, "searching") {
+		t.Fatalf("sidebar activity should name the active tool, got:\n%s", got)
+	}
+}
+
 func swarmSidebarTestModel(t *testing.T, sessionIDs map[string]string) model {
 	t.Helper()
 	m := sidebarTestModel()
