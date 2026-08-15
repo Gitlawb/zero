@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:28:48.315Z",
-  "durationMs": 8208813,
+  "endedAt": "2026-08-15T10:28:49.041Z",
+  "durationMs": 8209542,
   "status": "running",
   "tokens": {
     "total": 30014,
@@ -16,19 +16,18 @@
   },
   "toolCalls": 56,
   "lines": {
-    "added": 109,
-    "removed": 2
+    "added": 28,
+    "removed": 0
   },
   "filesChanged": [
-    "internal/config/keep_finished_agents_resolve_test.go",
-    "internal/tui/keep_finished_agents_test.go"
+    "internal/cli/provider_models.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "059ea07b5d1c2a17ed177db00e8677c0a27e5341",
+    "headAfter": "c667c613d7da230f32558e8e88cfb6ba7edda544",
     "commitShas": [
-      "059ea07b5d1c2a17ed177db00e8677c0a27e5341"
+      "c667c613d7da230f32558e8e88cfb6ba7edda544"
     ]
   },
   "summary": "Clean rebase. But #902 and #829 both touch `internal/tui/rendering.go`, so let me verify carefully:",
