@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:49:14.860Z",
-  "durationMs": 5835370,
+  "endedAt": "2026-08-15T09:49:21.320Z",
+  "durationMs": 5841830,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,26 +16,22 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 449,
-    "removed": 40
+    "added": 171,
+    "removed": 25
   },
   "filesChanged": [
-    "internal/cli/app.go",
-    "internal/cli/exec.go",
-    "internal/cli/plan_grant_test.go",
-    "internal/specialist/exec.go",
-    "internal/specialist/manifest.go",
-    "internal/specialist/plan.go",
-    "internal/specialist/plan_exec.go",
-    "internal/specialist/plan_grant_test.go",
-    "internal/specialist/plan_runner.go"
+    "internal/tui/command_center.go",
+    "internal/tui/profile_command_test.go",
+    "internal/tui/profile_effort_doors_test.go",
+    "internal/tui/session_controls.go",
+    "internal/tui/zeromaxing_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "b3d5f2b91f2dd190eefb1174091cde711f91500a",
+    "headAfter": "75dd9c68c7db3a9649c1a942415885f5ca6aa604",
     "commitShas": [
-      "b3d5f2b91f2dd190eefb1174091cde711f91500a"
+      "75dd9c68c7db3a9649c1a942415885f5ca6aa604"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
