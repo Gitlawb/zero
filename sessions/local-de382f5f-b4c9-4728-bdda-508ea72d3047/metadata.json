@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:28:28.795Z",
-  "durationMs": 8189229,
+  "endedAt": "2026-08-15T10:28:28.744Z",
+  "durationMs": 8189102,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,19 +16,19 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 24,
-    "removed": 5
+    "added": 72,
+    "removed": 6
   },
   "filesChanged": [
-    "internal/tui/orchestrate_saved.go",
-    "internal/tui/orchestrate_saved_test.go"
+    "internal/cli/exec.go",
+    "internal/cli/exec_child_roots_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "e3a057bec5256db8e04e008c58d45c186580eb2a",
+    "headAfter": "c53fc0de1e3d442c36c19d2c126b134a102a5eb8",
     "commitShas": [
-      "e3a057bec5256db8e04e008c58d45c186580eb2a"
+      "c53fc0de1e3d442c36c19d2c126b134a102a5eb8"
     ]
   },
   "summary": "Now #829:",
