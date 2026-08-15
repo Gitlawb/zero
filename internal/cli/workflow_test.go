@@ -2486,12 +2486,12 @@ func TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote(t *testing.T) {
 		},
 		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
-		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+		branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
 			if branch != "main" {
 				t.Fatalf("expected upstream query for main, got %q", branch)
 			}
 			// Fork: main tracks origin, not the push destination.
-			return "origin/main"
+			return "origin", "main"
 		},
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			if options.Remote != "upstream" {
@@ -2534,9 +2534,6 @@ func TestEnsureFeatureBranchHandlesSlashContainingRemoteName(t *testing.T) {
 		branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
 			return "team/upstream", "main"
 		},
-		isNamedRemote: func(ctx context.Context, cwd, remote string) bool {
-			return remote == "team/upstream"
-		},
 		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
 			if remote != "team/upstream" || branch != "main" {
 				t.Fatalf("expected commitsAhead check against team/upstream/main, got %s/%s", remote, branch)
@@ -2571,6 +2568,306 @@ func TestEnsureFeatureBranchHandlesSlashContainingRemoteName(t *testing.T) {
 	if resetBranch != "main" || resetTip != "team/upstream/main" {
 		t.Fatalf("expected restore main -> team/upstream/main, got %q -> %q", resetBranch, resetTip)
 	}
+}
+
+// TestEnsureFeatureBranchResolvesRestoreTipToCommit covers jatmn's P2: when the
+// source upstream is a direct URL or path (branch.main.remote is a transport
+// locator, not a named remote), restore must resolve a concrete commit, never
+// fall back to the bare branch name. Resolving "main" yields the very commit
+// the feature branch was just created from, making the restore a silent no-op
+// and leaving the publishable commits on the default branch.
+func TestEnsureFeatureBranchResolvesRestoreTipToCommit(t *testing.T) {
+	tests := []struct {
+		name           string
+		upstreamRemote string
+		upstreamBranch string
+		tipSHA         string
+		tipErr         error
+		wantRestoreTip string
+		wantErr        bool
+		errContains    string
+	}{
+		{
+			name:           "NamedRemoteOrigin",
+			upstreamRemote: "origin",
+			upstreamBranch: "main",
+			tipSHA:         "1111111111111111111111111111111111111111",
+			wantRestoreTip: "1111111111111111111111111111111111111111",
+		},
+		{
+			name:           "DirectHTTPSURL",
+			upstreamRemote: "https://github.com/example/repo.git",
+			upstreamBranch: "main",
+			tipSHA:         "2222222222222222222222222222222222222222",
+			wantRestoreTip: "2222222222222222222222222222222222222222",
+		},
+		{
+			name:           "DirectFilesystemPath",
+			upstreamRemote: "/path/to/bare.git",
+			upstreamBranch: "main",
+			tipSHA:         "3333333333333333333333333333333333333333",
+			wantRestoreTip: "3333333333333333333333333333333333333333",
+		},
+		{
+			name:           "ResolutionErrorFailsClosedBeforeBranchCreation",
+			upstreamRemote: "https://github.com/example/missing.git",
+			upstreamBranch: "main",
+			tipErr:         errors.New("remote has no branch main to restore to"),
+			wantErr:        true,
+			errContains:    "cannot resolve restore tip",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			var resetBranch, resetTip string
+			branchCreated := false
+
+			_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, cwd, "", featureBranchOptions{}, appDeps{
+				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+					return true, "main", "origin", nil
+				},
+				branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
+					return tc.upstreamRemote, tc.upstreamBranch
+				},
+				resolveRemoteBranchTip: func(ctx context.Context, cwd, remote, branch string) (string, error) {
+					if remote != tc.upstreamRemote || branch != tc.upstreamBranch {
+						t.Fatalf("expected restore-tip resolution for %s/%s, got %s/%s", tc.upstreamRemote, tc.upstreamBranch, remote, branch)
+					}
+					return tc.tipSHA, tc.tipErr
+				},
+				commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+					return 1, nil
+				},
+				refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+					return nil
+				},
+				inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+				currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+				createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+					branchCreated = true
+					return zerogit.BranchResult{Branch: options.Name}, nil
+				},
+				resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
+					resetBranch = branch
+					resetTip = newTip
+					return nil
+				},
+			})
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("expected error containing %q, got %v", tc.errContains, err)
+				}
+				if branchCreated || created {
+					t.Fatal("expected no branch creation when restore tip resolution fails")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !created {
+				t.Fatal("expected a feature branch to be created")
+			}
+			if resetBranch != "main" || resetTip != tc.wantRestoreTip {
+				t.Fatalf("expected restore main -> %s, got %q -> %q", tc.wantRestoreTip, resetBranch, resetTip)
+			}
+		})
+	}
+}
+
+// TestEnsureFeatureBranchUnbornDestinationMatrix covers jatmn's P2: unborn
+// remote policy must gate the push destination as well as the source upstream.
+func TestEnsureFeatureBranchUnbornDestinationMatrix(t *testing.T) {
+	matrix := []struct {
+		name               string
+		requestedRemote    string
+		defaultRemote      string
+		unbornRemotes      map[string]bool
+		allowDefaultBranch bool
+		wantBranch         bool
+		wantErr            bool
+		errContains        string
+	}{
+		{
+			name:            "PushDestinationUnbornViaFlagRefuses",
+			requestedRemote: "backup",
+			defaultRemote:   "origin",
+			unbornRemotes:   map[string]bool{"backup": true, "origin": false},
+			wantErr:         true,
+			errContains:     "remote backup has no branches yet",
+		},
+		{
+			name:            "SourceUpstreamUnbornRefuses",
+			requestedRemote: "",
+			defaultRemote:   "origin",
+			unbornRemotes:   map[string]bool{"origin": true},
+			wantErr:         true,
+			errContains:     "remote origin has no branches yet",
+		},
+		{
+			name:            "PopulatedDestinationAndSourceAllows",
+			requestedRemote: "upstream",
+			defaultRemote:   "origin",
+			unbornRemotes:   map[string]bool{"upstream": false, "origin": false},
+			wantBranch:      true,
+		},
+		{
+			name:               "AllowDefaultBranchBypassesAutoBranching",
+			requestedRemote:    "backup",
+			defaultRemote:      "origin",
+			unbornRemotes:      map[string]bool{"backup": true},
+			allowDefaultBranch: true,
+			wantBranch:         false,
+		},
+	}
+
+	for _, tc := range matrix {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			branchCreated := false
+
+			_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, cwd, tc.requestedRemote, featureBranchOptions{
+				AllowDefaultBranch: tc.allowDefaultBranch,
+			}, appDeps{
+				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+					return true, "main", tc.defaultRemote, nil
+				},
+				branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
+					return tc.defaultRemote, "main"
+				},
+				resolveRemoteBranchTip: func(ctx context.Context, cwd, remote, branch string) (string, error) {
+					return "abc123sha", nil
+				},
+				commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+					if tc.unbornRemotes[remote] {
+						return 0, errors.New("cannot determine ahead")
+					}
+					return 1, nil
+				},
+				refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+					return nil
+				},
+				isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+					return tc.unbornRemotes[remote], nil
+				},
+				inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+				currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+				createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+					branchCreated = true
+					return zerogit.BranchResult{Branch: options.Name}, nil
+				},
+			})
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("expected error containing %q, got %v", tc.errContains, err)
+				}
+				if branchCreated || created {
+					t.Fatal("expected no branch creation on error")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if created != tc.wantBranch {
+				t.Fatalf("created = %v, want %v", created, tc.wantBranch)
+			}
+		})
+	}
+}
+
+// TestResolveBranchPushPlan covers the pure plan resolution function directly
+// without mutating repository state.
+func TestResolveBranchPushPlan(t *testing.T) {
+	cwd := t.TempDir()
+
+	t.Run("NonDefaultBranchPlan", func(t *testing.T) {
+		plan, err := resolveBranchPushPlan(context.Background(), &bytes.Buffer{}, cwd, "", featureBranchOptions{}, appDeps{
+			isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+				return false, "feat/my-feature", "origin", nil
+			},
+			remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+				return false, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if plan.ShouldBranch {
+			t.Fatal("expected ShouldBranch to be false for non-default branch")
+		}
+		if plan.CurrentBranch != "feat/my-feature" || plan.PushRemote != "origin" || !plan.RequireNewRemoteBranch {
+			t.Fatalf("unexpected plan values: %+v", plan)
+		}
+	})
+
+	t.Run("DefaultBranchPlanWithResolvedCommit", func(t *testing.T) {
+		plan, err := resolveBranchPushPlan(context.Background(), &bytes.Buffer{}, cwd, "upstream", featureBranchOptions{}, appDeps{
+			isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+				return true, "main", "upstream", nil
+			},
+			branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
+				return "origin", "main"
+			},
+			resolveRemoteBranchTip: func(ctx context.Context, cwd, remote, branch string) (string, error) {
+				return "fedcba9876", nil
+			},
+			commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+				return 2, nil
+			},
+			refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+				return nil
+			},
+			isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+				return false, nil
+			},
+			inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "main.go", Status: "modified"}}, ""),
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !plan.ShouldBranch {
+			t.Fatal("expected ShouldBranch to be true for ahead default branch")
+		}
+		if plan.CurrentBranch != "main" || plan.PushRemote != "upstream" {
+			t.Fatalf("unexpected branch/remote: %s/%s", plan.CurrentBranch, plan.PushRemote)
+		}
+		if plan.TrackingRemote != "origin" || plan.TrackingBranch != "main" {
+			t.Fatalf("unexpected tracking: %s/%s", plan.TrackingRemote, plan.TrackingBranch)
+		}
+		if plan.RestoreTip != "fedcba9876" || plan.PublishabilityBase != "fedcba9876" {
+			t.Fatalf("unexpected restore tip / base: %s / %s", plan.RestoreTip, plan.PublishabilityBase)
+		}
+		if plan.Slug != "main-go" {
+			t.Fatalf("unexpected slug: %s", plan.Slug)
+		}
+	})
+
+	t.Run("RefusesDirtyWorkingTree", func(t *testing.T) {
+		_, err := resolveBranchPushPlan(context.Background(), &bytes.Buffer{}, cwd, "", featureBranchOptions{}, appDeps{
+			isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+				return true, "main", "origin", nil
+			},
+			inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+				return zerogit.ChangeSummary{Clean: false}, nil
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+			t.Fatalf("expected dirty working tree error, got %v", err)
+		}
+	})
 }
 
 // TestRunChangesPushRestoresDefaultBranchOnAutoBranchPath exercises the

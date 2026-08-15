@@ -944,6 +944,41 @@ func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit 
 	return err
 }
 
+// ResolveRemoteBranchTip returns the commit SHA that branch points to on
+// remote. ensureFeatureBranch uses this as the restore target after
+// auto-branching, and that target must never be a bare local branch name:
+// resolving "main" yields the very commit the just-created feature branch
+// owns, which makes the restore a silent no-op and leaves the publishable
+// commits on the default branch. For a named remote the SHA comes from the
+// local remote-tracking ref (which RefreshTrackingRef has just updated); for a
+// direct URL or path it is resolved from the remote's advertised heads. It
+// fails closed when no such commit exists rather than letting the caller
+// substitute a local branch name.
+func ResolveRemoteBranchTip(ctx context.Context, cwd, remote, branch string, runGit Runner) (string, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	if IsNamedRemote(ctx, cwd, remote, runGit) {
+		out, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--verify", "refs/remotes/"+remote+"/"+branch+"^{commit}")
+		if err != nil {
+			return "", fmt.Errorf("resolve restore tip refs/remotes/%s/%s: %w", remote, branch, err)
+		}
+		return strings.TrimSpace(out), nil
+	}
+	// Direct URL or path: resolve the advertised branch tip without creating
+	// or updating a remote-tracking ref.
+	out, err := gitOutput(ctx, runGit, cwd, "ls-remote", "--heads", "--", remote, "refs/heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve branch %s on %s: %w", branch, remote, err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if sha, ref, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok {
+			if strings.TrimSpace(ref) == "refs/heads/"+branch && strings.TrimSpace(sha) != "" {
+				return strings.TrimSpace(sha), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("remote %s has no branch %s to restore to", remote, branch)
+}
+
 // isRemoteURLOrPath reports whether remote is formatted as a direct URL
 // (https://..., git@..., ssh://...) or filesystem path (/path/to/repo,
 // C:\path\to\repo, .\repo), as opposed to a configured named remote (origin, upstream, team/upstream).

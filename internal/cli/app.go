@@ -99,9 +99,8 @@ type appDeps struct {
 	isUnbornRemote               func(context.Context, string, string) (bool, error)
 	refreshTrackingRef           func(context.Context, string, string, string) error
 	branchUpstreamRemote         func(context.Context, string, string) string
-	branchUpstreamRef            func(context.Context, string, string) string
 	branchUpstreamRemoteAndMerge func(context.Context, string, string) (string, string)
-	isNamedRemote                func(context.Context, string, string) bool
+	resolveRemoteBranchTip       func(context.Context, string, string, string) (string, error)
 	remoteHasBranch              func(context.Context, string, string, string) (bool, error)
 	currentGitBranch             func(context.Context, string) string
 	currentBranchTip             func(context.Context, string) string
@@ -234,14 +233,11 @@ func defaultAppDeps() appDeps {
 		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
 			return zerogit.UpstreamRemote(ctx, cwd, branch, nil)
 		},
-		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
-			return zerogit.UpstreamRef(ctx, cwd, branch, nil)
-		},
 		branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
 			return zerogit.UpstreamRemoteAndMergeBranch(ctx, cwd, branch, nil)
 		},
-		isNamedRemote: func(ctx context.Context, cwd, remote string) bool {
-			return zerogit.IsNamedRemote(ctx, cwd, remote, nil)
+		resolveRemoteBranchTip: func(ctx context.Context, cwd, remote, branch string) (string, error) {
+			return zerogit.ResolveRemoteBranchTip(ctx, cwd, remote, branch, nil)
 		},
 		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
 			return zerogit.RemoteHasBranch(ctx, cwd, remote, branch, nil)
@@ -646,9 +642,6 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.branchUpstreamRemote == nil {
 		deps.branchUpstreamRemote = defaults.branchUpstreamRemote
 	}
-	if deps.branchUpstreamRef == nil {
-		deps.branchUpstreamRef = defaults.branchUpstreamRef
-	}
 	if deps.remoteHasBranch == nil {
 		deps.remoteHasBranch = defaults.remoteHasBranch
 	}
@@ -658,8 +651,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.currentBranchTip == nil {
 		deps.currentBranchTip = defaults.currentBranchTip
 	}
-	// deleteBranch and resetBranchRef stay nil when unset so unit tests that
-	// mock createBranch without a real git tree do not hit real restore/delete.
+	// resolveRemoteBranchTip, deleteBranch, and resetBranchRef stay nil when
+	// unset so unit tests that mock createBranch without a real git tree do not
+	// hit real git restore/delete commands.
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
 	}

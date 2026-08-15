@@ -1215,24 +1215,42 @@ type featureBranchOptions struct {
 // information only. maxDiffBytes caps the committed-range diff Inspect
 // returns, so a user who passed --diff-bytes to bound the proprietary source
 // sent for LLM naming has that cap honored here just as the commit path does.
-// The working tree must be clean and HEAD must be ahead of the resolved
-// remote branch; both are verified before any branch is created. The
-// inspectChanges, commitsAhead, headCommitSubject, currentGitUser, and
-// createBranch dependencies are required on the default-branch path and are
-// called without nil guards; fillAppDeps populates all of them. The
-// refreshTrackingRef, isUnbornRemote, branchUpstreamRef, resetBranchRef, and
-// deleteBranch dependencies are optional and are skipped when nil.
-func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot string, requestedRemote string, opts featureBranchOptions, deps appDeps) (string, string, bool, error) {
+// branchPushPlan holds the resolved parameters for a push or PR workflow
+// before any branches are created or refs mutated. Separating plan resolution
+// from mutation allows tests to assert the resolution matrix directly without
+// touching a git repository.
+type branchPushPlan struct {
+	ShouldBranch           bool
+	CurrentBranch          string
+	PushRemote             string
+	RequireNewRemoteBranch bool
+	TrackingRemote         string
+	TrackingBranch         string
+	RestoreTip             string
+	PublishabilityBase     string
+	Summary                zerogit.ChangeSummary
+	Slug                   string
+}
+
+// resolveBranchPushPlan resolves the branch, remotes, restore tip, and naming
+// slug for changes push / pr workflows. It performs all checks (clean working
+// tree, unborn remote detection, ahead count, restore tip resolution) but
+// executes no mutation (no branch creation, ref resets, or deletions).
+func resolveBranchPushPlan(ctx context.Context, stdout io.Writer, workspaceRoot string, requestedRemote string, opts featureBranchOptions, deps appDeps) (branchPushPlan, error) {
 	if opts.AllowDefaultBranch || opts.DryRun {
-		return "", strings.TrimSpace(requestedRemote), false, nil
+		return branchPushPlan{
+			ShouldBranch:           false,
+			PushRemote:             strings.TrimSpace(requestedRemote),
+			RequireNewRemoteBranch: false,
+		}, nil
 	}
 
 	if deps.isDefaultBranch == nil {
-		return "", "", false, fmt.Errorf("isDefaultBranch dependency missing")
+		return branchPushPlan{}, fmt.Errorf("isDefaultBranch dependency missing")
 	}
 	isDefault, currentBranch, remote, err := deps.isDefaultBranch(ctx, zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: requestedRemote})
 	if err != nil {
-		return "", "", false, err
+		return branchPushPlan{}, err
 	}
 	if !isDefault {
 		// Whether this push needs the nonexistence lease is decided by one
@@ -1248,14 +1266,24 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 		// if the remote history isn't ours, the push fails with a clear
 		// non-fast-forward error instead of an attempted silent recovery.
 		if deps.remoteHasBranch == nil {
-			return currentBranch, remote, true, nil
+			return branchPushPlan{
+				ShouldBranch:           false,
+				CurrentBranch:          currentBranch,
+				PushRemote:             remote,
+				RequireNewRemoteBranch: true,
+			}, nil
 		}
 		targetRemote := firstNonEmptyString(requestedRemote, remote)
 		exists, existsErr := deps.remoteHasBranch(ctx, workspaceRoot, targetRemote, currentBranch)
 		if existsErr != nil {
-			return "", "", false, fmt.Errorf("cannot check whether %s already exists on remote %s: %w", currentBranch, targetRemote, existsErr)
+			return branchPushPlan{}, fmt.Errorf("cannot check whether %s already exists on remote %s: %w", currentBranch, targetRemote, existsErr)
 		}
-		return currentBranch, remote, !exists, nil
+		return branchPushPlan{
+			ShouldBranch:           false,
+			CurrentBranch:          currentBranch,
+			PushRemote:             remote,
+			RequireNewRemoteBranch: !exists,
+		}, nil
 	}
 
 	// CreateBranch and Push publish commits only. A dirty working tree would
@@ -1263,10 +1291,10 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// them, so refuse until the tree is clean (commit or stash first).
 	workingTree, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot})
 	if err != nil {
-		return "", "", false, fmt.Errorf("failed to inspect working tree: %w", err)
+		return branchPushPlan{}, fmt.Errorf("failed to inspect working tree: %w", err)
 	}
 	if !workingTree.Clean {
-		return "", "", false, fmt.Errorf("working tree has uncommitted changes; commit or stash them before pushing from the default branch")
+		return branchPushPlan{}, fmt.Errorf("working tree has uncommitted changes; commit or stash them before pushing from the default branch")
 	}
 
 	// Capture the source default branch's own upstream before refreshing or
@@ -1276,28 +1304,11 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// will supply both the ahead count and the restore target.
 	trackingRemote := remote
 	trackingBranch := currentBranch
-	restoreTip := ""
 	if deps.branchUpstreamRemoteAndMerge != nil {
 		if r, m := deps.branchUpstreamRemoteAndMerge(ctx, workspaceRoot, currentBranch); r != "" && m != "" {
 			trackingRemote = r
 			trackingBranch = m
-			if deps.isNamedRemote != nil && deps.isNamedRemote(ctx, workspaceRoot, trackingRemote) {
-				restoreTip = trackingRemote + "/" + trackingBranch
-			} else {
-				restoreTip = trackingBranch
-			}
 		}
-	} else if deps.branchUpstreamRef != nil {
-		if uref := deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch); uref != "" {
-			restoreTip = uref
-			if parts := strings.SplitN(uref, "/", 2); len(parts) == 2 {
-				trackingRemote = parts[0]
-				trackingBranch = parts[1]
-			}
-		}
-	}
-	if restoreTip == "" {
-		restoreTip = remote + "/" + currentBranch
 	}
 
 	// Refresh the local remote-tracking ref before trusting it: IsDefaultBranch
@@ -1312,6 +1323,20 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	var fetchErr error
 	if deps.refreshTrackingRef != nil {
 		fetchErr = deps.refreshTrackingRef(ctx, workspaceRoot, trackingRemote, trackingBranch)
+	}
+
+	// The ahead check gates on the source upstream (trackingRemote), but the
+	// feature branch is pushed to `pushRemote`, which can be a different
+	// destination (--remote on a fork). Refuse to auto-branch onto an unborn
+	// destination: without an initial default branch the new feature branch
+	// becomes the destination's first ref and its HEAD is left pointing at it.
+	// This is checked once, here, against the push destination, before resolving
+	// commit tips or creating any branches.
+	pushRemote := firstNonEmptyString(requestedRemote, remote)
+	if deps.isUnbornRemote != nil {
+		if unbornDest, unbornDestErr := deps.isUnbornRemote(ctx, workspaceRoot, pushRemote); unbornDestErr == nil && unbornDest {
+			return branchPushPlan{}, fmt.Errorf("remote %s has no branches yet; push the initial default branch first with --yes (`zero changes push --yes`), then use auto-branching for subsequent work", pushRemote)
+		}
 	}
 
 	// Branching off the default branch only makes sense when HEAD carries a
@@ -1330,16 +1355,35 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 			unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, trackingRemote)
 		}
 		if unbornErr == nil && unbornRemote {
-			return "", "", false, fmt.Errorf("remote %s has no branches yet; push the initial default branch first with --yes (`zero changes push --yes`), then use auto-branching for subsequent work", trackingRemote)
+			return branchPushPlan{}, fmt.Errorf("remote %s has no branches yet; push the initial default branch first with --yes (`zero changes push --yes`), then use auto-branching for subsequent work", trackingRemote)
 		}
 		cause := aheadErr
 		if cause == nil {
 			cause = fetchErr
 		}
-		return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", trackingRemote, trackingBranch, cause)
+		return branchPushPlan{}, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", trackingRemote, trackingBranch, cause)
 	}
 	if ahead == 0 {
-		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", trackingRemote, trackingBranch)
+		return branchPushPlan{}, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", trackingRemote, trackingBranch)
+	}
+
+	// Resolve the restore tip to a concrete commit before creating any branch.
+	// It must never be a bare local branch name: resolving "main" yields the
+	// very commit the feature branch is about to own, so restore becomes a
+	// silent no-op and the publishable commits stay on the default branch. A
+	// named remote resolves through its just-refreshed remote-tracking ref; a
+	// direct URL or path asks the remote itself. Fail closed rather than
+	// substitute a local branch name.
+	restoreTip := ""
+	if deps.resolveRemoteBranchTip != nil {
+		tip, tipErr := deps.resolveRemoteBranchTip(ctx, workspaceRoot, trackingRemote, trackingBranch)
+		if tipErr != nil {
+			return branchPushPlan{}, fmt.Errorf("cannot resolve restore tip for %s/%s: %w", trackingRemote, trackingBranch, tipErr)
+		}
+		restoreTip = tip
+	}
+	if restoreTip == "" {
+		restoreTip = trackingRemote + "/" + trackingBranch
 	}
 
 	// Name the branch (and, with --auto, send the provider) from what HEAD is
@@ -1349,7 +1393,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	baseRef := restoreTip
 	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: baseRef, MaxDiffBytes: opts.MaxDiffBytes})
 	if err != nil {
-		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)
+		return branchPushPlan{}, fmt.Errorf("failed to inspect changes: %w", err)
 	}
 
 	slug := fallbackBranchSlug(summary)
@@ -1386,13 +1430,53 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 		}
 	}
 
+	return branchPushPlan{
+		ShouldBranch:           true,
+		CurrentBranch:          currentBranch,
+		PushRemote:             remote,
+		RequireNewRemoteBranch: true,
+		TrackingRemote:         trackingRemote,
+		TrackingBranch:         trackingBranch,
+		RestoreTip:             restoreTip,
+		PublishabilityBase:     baseRef,
+		Summary:                summary,
+		Slug:                   slug,
+	}, nil
+}
+
+// ensureFeatureBranch coordinates branch creation, commit range naming, and
+// default-branch restoration for push and PR workflows.
+//
+// autoNaming gates the LLM naming path (--auto): these commands were
+// git-only, and sending the change diff to a configured provider on every
+// default-branch push would silently export source code nobody asked to
+// share. Without the opt-in the name comes from deterministic local
+// information only. maxDiffBytes caps the committed-range diff Inspect
+// returns, so a user who passed --diff-bytes to bound the proprietary source
+// sent for LLM naming has that cap honored here just as the commit path does.
+// The working tree must be clean and HEAD must be ahead of the resolved
+// remote branch; both are verified before any branch is created. The
+// inspectChanges, commitsAhead, headCommitSubject, currentGitUser, and
+// createBranch dependencies are required on the default-branch path and are
+// called without nil guards; fillAppDeps populates all of them. The
+// refreshTrackingRef, resolveRemoteBranchTip, isUnbornRemote, resetBranchRef,
+// and deleteBranch dependencies are optional and are skipped when nil.
+func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot string, requestedRemote string, opts featureBranchOptions, deps appDeps) (string, string, bool, error) {
+	plan, err := resolveBranchPushPlan(ctx, stdout, workspaceRoot, requestedRemote, opts, deps)
+	if err != nil {
+		return "", "", false, err
+	}
+	if !plan.ShouldBranch {
+		return plan.CurrentBranch, plan.PushRemote, plan.RequireNewRemoteBranch, nil
+	}
+
 	expectedRestoreTip := ""
 	if deps.currentBranchTip != nil {
 		expectedRestoreTip = deps.currentBranchTip(ctx, workspaceRoot)
 	}
 
-	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
-	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: remote})
+	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), plan.Slug)
+	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: plan.PushRemote})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to create branch: %w", err)
 	}
@@ -1405,7 +1489,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 	// Failure-safe: if the restore fails, delete the feature branch and
 	// check the default branch back out so the tree is not left half-moved.
 	if deps.resetBranchRef != nil {
-		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, restoreTip, expectedRestoreTip); err != nil {
+		if err := deps.resetBranchRef(ctx, workspaceRoot, plan.CurrentBranch, plan.RestoreTip, expectedRestoreTip); err != nil {
 			// A compare-and-swap conflict means the default branch moved
 			// while we were branching, so restoreTip is no longer the tip we
 			// meant to restore. The rollback below deletes the branch that
@@ -1413,22 +1497,22 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, workspaceRoot st
 			// work to recover from a race we can simply report. Keep the
 			// branch and let the user reconcile the default branch.
 			if errors.Is(err, zerogit.ErrCompareAndSwapConflict) {
-				return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w; generated branch %s was preserved because the default branch changed concurrently", currentBranch, restoreTip, err, result.Branch)
+				return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w; generated branch %s was preserved because the default branch changed concurrently", plan.CurrentBranch, plan.RestoreTip, err, result.Branch)
 			}
 			var rollbackErr error
 			if deps.deleteBranch != nil {
-				rollbackErr = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
+				rollbackErr = deps.deleteBranch(ctx, workspaceRoot, plan.CurrentBranch, result.Branch)
 			}
 			if rollbackErr != nil {
-				return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w; rollback of %s also failed: %v", currentBranch, restoreTip, err, result.Branch, rollbackErr)
+				return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w; rollback of %s also failed: %v", plan.CurrentBranch, plan.RestoreTip, err, result.Branch, rollbackErr)
 			}
-			return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w", currentBranch, restoreTip, err)
+			return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w", plan.CurrentBranch, plan.RestoreTip, err)
 		}
 	}
 	if !opts.JSONMode {
-		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)
+		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, plan.CurrentBranch)
 	}
-	return result.Branch, remote, true, nil
+	return result.Branch, plan.PushRemote, true, nil
 }
 
 // fallbackBranchSlug derives a deterministic branch-name slug from a change

@@ -1399,6 +1399,89 @@ func TestCommitsAhead(t *testing.T) {
 	})
 }
 
+func TestResolveRemoteBranchTip(t *testing.T) {
+	t.Run("ResolvesNamedRemoteFromTrackingRef", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: "abc123commit\n"},
+		}}
+		sha, err := ResolveRemoteBranchTip(context.Background(), root, "origin", "main", runner.Run)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sha != "abc123commit" {
+			t.Fatalf("got sha %q, want %q", sha, "abc123commit")
+		}
+		if got := runner.commandLine(0); got != "git rev-parse --verify refs/remotes/origin/main^{commit}" {
+			t.Fatalf("unexpected command: %q", got)
+		}
+	})
+
+	t.Run("ResolvesDirectURLViaLsRemote", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: "def456commit\trefs/heads/main\n"},
+		}}
+		sha, err := ResolveRemoteBranchTip(context.Background(), root, "https://github.com/example/repo.git", "main", runner.Run)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sha != "def456commit" {
+			t.Fatalf("got sha %q, want %q", sha, "def456commit")
+		}
+		if got := runner.commandLine(0); got != "git ls-remote --heads -- https://github.com/example/repo.git refs/heads/main" {
+			t.Fatalf("unexpected command: %q", got)
+		}
+	})
+
+	t.Run("ResolvesDirectPathViaLsRemote", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: "7890abccommit\trefs/heads/main\n"},
+		}}
+		sha, err := ResolveRemoteBranchTip(context.Background(), root, "/path/to/bare.git", "main", runner.Run)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sha != "7890abccommit" {
+			t.Fatalf("got sha %q, want %q", sha, "7890abccommit")
+		}
+		if got := runner.commandLine(0); got != "git ls-remote --heads -- /path/to/bare.git refs/heads/main" {
+			t.Fatalf("unexpected command: %q", got)
+		}
+	})
+
+	t.Run("FailsWhenDirectRemoteHasNoMatchingBranch", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: ""},
+		}}
+		if _, err := ResolveRemoteBranchTip(context.Background(), root, "/path/to/bare.git", "main", runner.Run); err == nil {
+			t.Fatal("expected error when direct remote has no branch")
+		}
+	})
+
+	t.Run("FailsWhenLsRemoteErrors", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{ExitCode: 128, Stderr: "fatal: repository not found"},
+		}}
+		if _, err := ResolveRemoteBranchTip(context.Background(), root, "https://github.com/example/missing.git", "main", runner.Run); err == nil {
+			t.Fatal("expected error when ls-remote fails")
+		}
+	})
+
+	t.Run("FailsWhenRevParseErrorsOnNamedRemote", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{ExitCode: 128, Stderr: "fatal: Needed a single revision"},
+		}}
+		if _, err := ResolveRemoteBranchTip(context.Background(), root, "origin", "main", runner.Run); err == nil {
+			t.Fatal("expected error when rev-parse fails")
+		}
+	})
+}
+
 func TestCurrentGitUser(t *testing.T) {
 	root := t.TempDir()
 	runner := &fakeRunner{results: []CommandResult{
