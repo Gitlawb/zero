@@ -311,6 +311,11 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallM
 		}
 		return guidance + " `zero upgrade` installs onto this machine (" + local + ") instead."
 	}
+	if installMethod == InstallMethodHomebrew {
+		// Said before the source-flag branch below: whatever source the check read,
+		// the answer for a keg is the same and `zero upgrade` is never it.
+		return "This Homebrew-managed installation is updated with `brew upgrade zero`. `zero upgrade` refuses here, because replacing the keg binary would leave Homebrew's records describing a version that is no longer installed."
+	}
 	if sourceFlag != "" {
 		if installMethod == InstallMethodNpm {
 			return "This npm-managed installation can be updated with `npm install -g " + npmPackageName + "@latest`, which installs the official npm package. The custom `" + sourceFlag + "` source only affects the release check and update gating, not the npm install source."

@@ -1,14 +1,25 @@
 # Installing Zero
 
-Zero is distributed as:
+Pick whichever fits how you already install things. None of these is the
+blessed one.
 
-- an npm package, `@gitlawb/zero`
-- release archives on GitHub Releases
-- source builds with Go 1.26.5+
+| Method | Command | Self-update |
+| --- | --- | --- |
+| Install script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh \| bash` | `zero upgrade` |
+| Install script (Windows) | `irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 \| iex` | `zero upgrade` |
+| npm | `npm install -g @gitlawb/zero` | `zero upgrade` (runs npm) |
+| Release archive | download from [Releases](https://github.com/Gitlawb/zero/releases) | `zero upgrade` |
+| mise | `mise use -g ubi:Gitlawb/zero` | `mise upgrade` |
+| `go install` | `go install github.com/Gitlawb/zero/cmd/zero@latest` | rerun the command |
+| Source | `go build -o zero ./cmd/zero` | rebuild |
 
-The install scripts download a platform-specific release archive and require a
-published GitHub Release for the requested version. The npm package is
-self-contained: the platform binary installs from the npm registry.
+`zero upgrade` knows which of these you used and does the right thing, or
+refuses and tells you the command that works. It never fights a package manager
+for control of its own binary.
+
+Release archives are the substrate for most of the above: the install scripts
+and the npm fallback both download a platform archive from a published GitHub
+Release and verify its checksum.
 
 ## npm
 
@@ -110,6 +121,45 @@ Defaults:
 - Repository: `Gitlawb/zero`
 - Version: latest GitHub release
 - Install path: `%LOCALAPPDATA%\zero\bin\zero.exe`
+
+## mise
+
+[mise](https://mise.jdx.dev/) installs Zero straight from the GitHub Release
+archives through its `ubi` backend, so there is nothing extra to publish and no
+registry in the middle:
+
+```bash
+mise use -g ubi:Gitlawb/zero
+```
+
+Pin a version the same way you would any other tool:
+
+```bash
+mise use -g ubi:Gitlawb/zero@0.7.1
+```
+
+Updates come from `mise upgrade`. `zero upgrade` also works, because a
+mise-managed binary is an ordinary standalone install, but then mise's records
+describe a version that is no longer on disk. Prefer `mise upgrade`.
+
+## go install
+
+```bash
+go install github.com/Gitlawb/zero/cmd/zero@latest
+```
+
+This builds from source, so it needs Go 1.26.6+ and it does not go through the
+release archives. Two consequences worth knowing before you pick it:
+
+- On Linux you also need the sandbox helper, which is a separate binary and is
+  not installed by this command. See
+  [Sandbox Helpers For Source Builds](#sandbox-helpers-for-source-builds).
+  Without it, native sandboxing is unavailable.
+- `zero upgrade` treats the result as a standalone install and will replace the
+  binary with a release build rather than rebuilding from source. If you chose
+  `go install` deliberately, rerun it instead.
+
+macOS and Windows need no extra helper.
 
 ## From Source
 
@@ -242,3 +292,18 @@ zero upgrade
 ```
 
 See the [update guide](UPDATE.md) for update modes, flags, and platform details.
+
+`zero upgrade` behaves differently depending on how Zero was installed, because
+overwriting a binary a package manager owns leaves that manager describing a
+version that is no longer there:
+
+- **npm**: runs `npm install -g @gitlawb/zero@latest` for you.
+- **Homebrew**: refuses, and tells you to run `brew upgrade zero`. Replacing the
+  keg binary directly would be reverted by the next `brew upgrade` or
+  `brew reinstall`.
+- **everything else**: downloads the verified release archive and replaces the
+  binary in place.
+
+Homebrew is detected by the binary living inside a Cellar keg, so an ordinary
+install under `/usr/local/bin` is left alone even on an Intel Mac where that is
+also the Homebrew prefix.
