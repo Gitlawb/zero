@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:27:45.259Z",
-  "durationMs": 8145581,
+  "endedAt": "2026-08-15T10:27:48.156Z",
+  "durationMs": 8148609,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,19 +16,21 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 70,
-    "removed": 1
+    "added": 350,
+    "removed": 0
   },
   "filesChanged": [
-    "internal/specialist/plan_runner.go",
-    "internal/specialist/plan_runner_test.go"
+    "internal/specialist/plan_exec.go",
+    "internal/specialist/plan_handoff_test.go",
+    "internal/specialist/plan_measurement_test.go",
+    "internal/specialist/plan_runner.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "1cb5f91849d9bb5f8c5eb3ea4a65cb4a2cbcdec8",
+    "headAfter": "4e6e7d36e028e8124fd0fdee538b3aba86250776",
     "commitShas": [
-      "1cb5f91849d9bb5f8c5eb3ea4a65cb4a2cbcdec8"
+      "4e6e7d36e028e8124fd0fdee538b3aba86250776"
     ]
   },
   "summary": "Now #829:",
