@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:24:45.416Z",
-  "durationMs": 7965803,
+  "endedAt": "2026-08-15T10:24:44.659Z",
+  "durationMs": 7964778,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,23 +16,21 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 253,
-    "removed": 1
+    "added": 238,
+    "removed": 3
   },
   "filesChanged": [
-    "internal/tui/hover.go",
-    "internal/tui/mouse.go",
-    "internal/tui/sidebar.go",
-    "internal/tui/sidebar_plan_detail_test.go",
+    "internal/tui/picker.go",
+    "internal/tui/view.go",
     "internal/tui/zeromaxing_glow.go",
     "internal/tui/zeromaxing_glow_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "3fa1e6d0e81e03f6f4d6e0f508e3913337f971ae",
+    "headAfter": "220791c6681cde0b6427606bb6fd1212e4c8cf09",
     "commitShas": [
-      "3fa1e6d0e81e03f6f4d6e0f508e3913337f971ae"
+      "220791c6681cde0b6427606bb6fd1212e4c8cf09"
     ]
   },
   "summary": "Now #829:",
