@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:28:03.871Z",
-  "durationMs": 8164307,
+  "endedAt": "2026-08-15T10:28:03.865Z",
+  "durationMs": 8164297,
   "status": "running",
   "tokens": {
     "total": 29359,
