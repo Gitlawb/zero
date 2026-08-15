@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -121,6 +122,30 @@ func TestDiffViewerNearRewriteDeletionSurvives(t *testing.T) {
 	got := plainRender(t, strings.Join(body.lines, "\n"))
 	if !strings.Contains(got, "alpha bravo charlie delta") {
 		t.Fatalf("near-rewrite deletion disappeared:\n%s", got)
+	}
+}
+
+func TestDiffViewerKeepsHeaderLikeHunkContent(t *testing.T) {
+	diff := strings.Join([]string{
+		"--- a/example.go",
+		"+++ b/example.go",
+		"@@ -1 +1 @@",
+		"--- removed",
+		"+++ added",
+	}, "\n")
+	body := diffCardBody(diff, 100, cardRenderOptions{bodyCap: 0})
+	got := plainRender(t, strings.Join(body.lines, "\n"))
+	for _, want := range []string{"-- removed", "++ added"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("diff viewer lost header-like hunk content %q:\n%s", want, got)
+		}
+	}
+	meta := diffCardMetadata(diff)
+	if meta.adds != 1 || meta.dels != 1 {
+		t.Fatalf("diff metadata counts = +%d -%d, want +1 -1", meta.adds, meta.dels)
+	}
+	if _, ok := highlightedDiffLines(strings.Split(diff, "\n"), meta)[3]; !ok {
+		t.Fatal("deleted header-like hunk content was not syntax highlighted")
 	}
 }
 
@@ -318,12 +343,12 @@ func TestDiffViewerHighlightBudgetSpansHunks(t *testing.T) {
 	rawLines := []string{
 		"--- a/example.go",
 		"+++ b/example.go",
-		"@@ -1 +1 @@",
+		fmt.Sprintf("@@ -1,%d +1,%d @@", hunkLines, hunkLines),
 	}
 	for i := 0; i < hunkLines; i++ {
 		rawLines = append(rawLines, " context")
 	}
-	rawLines = append(rawLines, "@@ -6000 +6000 @@")
+	rawLines = append(rawLines, fmt.Sprintf("@@ -6000,%d +6000,%d @@", hunkLines, hunkLines))
 	for i := 0; i < hunkLines; i++ {
 		rawLines = append(rawLines, " context")
 	}

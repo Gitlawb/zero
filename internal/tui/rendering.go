@@ -1997,9 +1997,70 @@ func genericCardBody(detail string, opts cardRenderOptions) cardBody {
 	return cardBody{lines: capCardLines(lines, opts.bodyCap)}
 }
 
-// hunkHeaderPattern extracts the old/new start lines from a unified-diff hunk
-// header so the gutter can show real line numbers.
-var hunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+// hunkHeaderPattern extracts the old/new ranges from a unified-diff hunk
+// header so the gutter can show real line numbers and distinguish hunk content
+// that happens to resemble a file header.
+var hunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+
+type diffHunkState struct {
+	oldLine      int
+	newLine      int
+	oldRemaining int
+	newRemaining int
+}
+
+func parseDiffHunkHeader(line string) (diffHunkState, bool) {
+	match := hunkHeaderPattern.FindStringSubmatch(line)
+	if match == nil {
+		return diffHunkState{}, false
+	}
+	oldLine, oldErr := strconv.Atoi(match[1])
+	newLine, newErr := strconv.Atoi(match[3])
+	if oldErr != nil || newErr != nil {
+		return diffHunkState{}, false
+	}
+	oldRemaining, newRemaining := 1, 1
+	if match[2] != "" {
+		oldRemaining, oldErr = strconv.Atoi(match[2])
+	}
+	if match[4] != "" {
+		newRemaining, newErr = strconv.Atoi(match[4])
+	}
+	if oldErr != nil || newErr != nil || oldRemaining < 0 || newRemaining < 0 {
+		return diffHunkState{}, false
+	}
+	return diffHunkState{oldLine: oldLine, newLine: newLine, oldRemaining: oldRemaining, newRemaining: newRemaining}, true
+}
+
+func (state diffHunkState) active() bool {
+	return state.oldRemaining > 0 || state.newRemaining > 0
+}
+
+func (state *diffHunkState) consume(line string) {
+	if len(line) == 0 {
+		return
+	}
+	switch line[0] {
+	case ' ':
+		state.oldRemaining--
+		state.newRemaining--
+	case '-':
+		state.oldRemaining--
+	case '+':
+		state.newRemaining--
+	}
+}
+
+func (state *diffHunkState) consumeContext(count int) {
+	state.oldRemaining -= count
+	state.newRemaining -= count
+	state.oldLine += count
+	state.newLine += count
+}
+
+func isDiffFileHeader(line string) bool {
+	return strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ")
+}
 
 type diffMetadata struct {
 	path    string
@@ -2010,18 +2071,29 @@ type diffMetadata struct {
 
 func diffCardMetadata(detail string) diffMetadata {
 	meta := diffMetadata{}
+	hunk := diffHunkState{}
 	for _, line := range strings.Split(detail, "\n") {
+		if parsed, ok := parseDiffHunkHeader(line); ok {
+			hunk = parsed
+			continue
+		}
+		if hunk.active() && isDiffHunkBodyLine(line) {
+			switch line[0] {
+			case '+':
+				meta.adds++
+			case '-':
+				meta.dels++
+			}
+			hunk.consume(line)
+			continue
+		}
 		switch {
 		case strings.HasPrefix(line, "+++ "):
-			meta.path = strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "+++ ")), "b/")
+			meta.path = diffViewerSourcePath(line)
 		case strings.HasPrefix(line, "--- "):
 			if strings.TrimSpace(strings.TrimPrefix(line, "--- ")) == "/dev/null" {
 				meta.newFile = true
 			}
-		case strings.HasPrefix(line, "+"):
-			meta.adds++
-		case strings.HasPrefix(line, "-"):
-			meta.dels++
 		}
 	}
 	return meta
@@ -2058,31 +2130,27 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	}
 	textBudget := maxInt(8, innerWidth-3-gutterWidth)
 	highlightedLines := highlightedDiffLines(rawLines, meta)
-	oldLine, newLine := 0, 0
-	inHunk := false
+	hunk := diffHunkState{}
 	for i := 0; i < len(displayLines); i++ {
 		displayLine := displayLines[i]
 		line := displayLine.text
 		switch {
 		case displayLine.hiddenContext > 0:
 			lines = append(lines, zeroTheme.diffMeta.Render(fmt.Sprintf("… %d unchanged lines", displayLine.hiddenContext)))
-			oldLine += displayLine.hiddenContext
-			newLine += displayLine.hiddenContext
-		case strings.HasPrefix(line, "+++ "), strings.HasPrefix(line, "--- "):
+			hunk.consumeContext(displayLine.hiddenContext)
+		case isDiffFileHeader(line) && !hunk.active():
 			// Path and counts live in the tool head row.
-		case strings.HasPrefix(line, "diff --git "):
+		case strings.HasPrefix(line, "diff --git ") && !hunk.active():
 			// A subsequent file section is metadata, not context from the preceding
 			// hunk. Reset so its headers remain hidden until its next hunk starts.
-			inHunk = false
+			hunk = diffHunkState{}
 		case strings.HasPrefix(line, "@@"):
-			if match := hunkHeaderPattern.FindStringSubmatch(line); match != nil {
-				oldLine, _ = strconv.Atoi(match[1])
-				newLine, _ = strconv.Atoi(match[2])
-				inHunk = true
+			if parsed, ok := parseDiffHunkHeader(line); ok {
+				hunk = parsed
 			}
 			// The line ranges drive the gutters below but do not compete with source
 			// content in a compact tool card.
-		case !inHunk:
+		case !hunk.active():
 			// The card head already carries the target path and change counts. Hide
 			// Git transport metadata so the viewer opens on the first useful hunk.
 			// Preserve unusual pre-hunk output as muted context rather than losing
@@ -2095,12 +2163,13 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 			lines = append(lines, zeroTheme.diffMeta.Render(truncateRunes(line, innerWidth)))
 		case strings.HasPrefix(line, "+"):
 			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
-				lines = append(lines, diffBodyStyledLine(newLine, "+", styled, true, textBudget, gutter))
+				lines = append(lines, diffBodyStyledLine(hunk.newLine, "+", styled, true, textBudget, gutter))
 			} else {
 				text := truncateRunes(strings.TrimPrefix(line, "+"), textBudget)
-				lines = append(lines, diffBodyLine(newLine, "+", text, true, textBudget, gutter))
+				lines = append(lines, diffBodyLine(hunk.newLine, "+", text, true, textBudget, gutter))
 			}
-			newLine++
+			hunk.newLine++
+			hunk.consume(line)
 		case strings.HasPrefix(line, "-"):
 			// Isolated 1:1 replacement (one "-" immediately followed by one "+"):
 			// highlight only the changed span on each side so a one-token edit reads
@@ -2108,34 +2177,38 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 			// that same word span; unknown paths retain the established plain-text
 			// word-diff fallback.
 			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
-				lines = append(lines, diffBodyStyledLine(oldLine, "−", styled, false, textBudget, gutter))
+				lines = append(lines, diffBodyStyledLine(hunk.oldLine, "−", styled, false, textBudget, gutter))
 			} else if isIsolatedReplacement(rawLines, displayLine.rawIndex) {
 				delText := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
 				addText := truncateRunes(strings.TrimPrefix(rawLines[displayLine.rawIndex+1], "+"), textBudget)
-				if delRow, addRow, ok := renderWordDiffPair(oldLine, newLine, delText, addText, textBudget, gutter); ok {
+				if delRow, addRow, ok := renderWordDiffPair(hunk.oldLine, hunk.newLine, delText, addText, textBudget, gutter); ok {
 					lines = append(lines, delRow, addRow)
-					oldLine++
-					newLine++
+					hunk.oldLine++
+					hunk.newLine++
+					hunk.consume(line)
+					hunk.consume(rawLines[displayLine.rawIndex+1])
 					i++ // consume the paired "+"
 					continue
 				}
 			}
 			text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
-			lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget, gutter))
-			oldLine++
+			lines = append(lines, diffBodyLine(hunk.oldLine, "−", text, false, textBudget, gutter))
+			hunk.oldLine++
+			hunk.consume(line)
 		default:
 			if styled, ok := highlightedLines[displayLine.rawIndex]; ok {
-				lines = append(lines, diffContextStyledLine(newLine, styled, textBudget, gutter))
+				lines = append(lines, diffContextStyledLine(hunk.newLine, styled, textBudget, gutter))
 			} else {
 				text := truncateRunes(strings.TrimPrefix(line, " "), textBudget)
 				row := "   " + zeroTheme.muted.Render(text)
 				if gutter {
-					row = zeroTheme.faintest.Render(fmt.Sprintf("%4d", newLine)) + row
+					row = zeroTheme.faintest.Render(fmt.Sprintf("%4d", hunk.newLine)) + row
 				}
 				lines = append(lines, row)
 			}
-			oldLine++
-			newLine++
+			hunk.oldLine++
+			hunk.newLine++
+			hunk.consume(line)
 		}
 	}
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), headTag: diffHeadTag(meta)}
@@ -2184,13 +2257,7 @@ func highlightedDiffLines(rawLines []string, meta diffMetadata) map[int]string {
 	for index := 0; index < len(rawLines); {
 		line := rawLines[index]
 		switch {
-		case strings.HasPrefix(line, "--- "):
-			if candidate := diffViewerSourcePath(line); candidate != "" {
-				path = candidate
-			}
-			index++
-			continue
-		case strings.HasPrefix(line, "+++ "):
+		case isDiffFileHeader(line):
 			if candidate := diffViewerSourcePath(line); candidate != "" {
 				path = candidate
 			}
@@ -2200,9 +2267,15 @@ func highlightedDiffLines(rawLines []string, meta diffMetadata) map[int]string {
 			index++
 			continue
 		}
+		hunk, ok := parseDiffHunkHeader(line)
+		if !ok {
+			index++
+			continue
+		}
 		start := index + 1
 		index = start
-		for index < len(rawLines) && isDiffHunkBodyLine(rawLines[index]) {
+		for index < len(rawLines) && hunk.active() && isDiffHunkBodyLine(rawLines[index]) {
+			hunk.consume(rawLines[index])
 			index++
 		}
 		hunkPath := path
@@ -2231,10 +2304,6 @@ func diffViewerSourcePath(line string) string {
 }
 
 func isDiffHunkBodyLine(line string) bool {
-	if strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "diff --git ") ||
-		strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
-		return false
-	}
 	return line == "" || line[0] == ' ' || line[0] == '+' || line[0] == '-' || line[0] == '\\'
 }
 
