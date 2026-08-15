@@ -42,7 +42,7 @@ var lockSeq atomic.Uint64
 // StoreOptions.Now, which callers may legitimately fix (e.g. a test or an
 // embedded clock). Measuring the deadline with that clock would either never
 // fire (fixed clock) or diverge from the mtime lease stamps (wall-clock).
-func acquireFileLock(lockPath string, now func() time.Time) (unlock func(), token string, err error) {
+func acquireFileLock(lockPath string, now func() time.Time) (unlock func() error, token string, err error) {
 	if now == nil {
 		now = time.Now
 	}
@@ -59,22 +59,29 @@ func acquireFileLock(lockPath string, now func() time.Time) (unlock func(), toke
 			// other processes. Fail closed: remove the file and surface the error.
 			if _, werr := f.WriteString(token); werr != nil {
 				_ = f.Close()
-				_ = lockutil.RemoveLockFile(lockPath)
+				if rerr := lockutil.RemoveLockFile(lockPath); rerr != nil {
+					return nil, "", fmt.Errorf("oauth: write token lock: %w; cleanup: %v", werr, rerr)
+				}
 				return nil, "", fmt.Errorf("oauth: write token lock: %w", werr)
 			}
 			if cerr := f.Close(); cerr != nil {
-				_ = lockutil.RemoveLockFile(lockPath)
+				if rerr := lockutil.RemoveLockFile(lockPath); rerr != nil {
+					return nil, "", fmt.Errorf("oauth: close token lock: %w; cleanup: %v", cerr, rerr)
+				}
 				return nil, "", fmt.Errorf("oauth: close token lock: %w", cerr)
 			}
 			var released bool
-			return func() {
+			return func() error {
 				if released {
-					return
+					return nil
 				}
 				released = true
 				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					_ = lockutil.RemoveLockFile(lockPath)
+					if err := lockutil.RemoveLockFile(lockPath); err != nil {
+						return fmt.Errorf("oauth: release token lock %s: %w", filepath.Base(lockPath), err)
+					}
 				}
+				return nil
 			}, token, nil
 		}
 		// On Windows a concurrent holder's os.Remove leaves the lock file in a

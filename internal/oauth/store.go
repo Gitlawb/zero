@@ -319,7 +319,7 @@ func keyringLockPath(service, account string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("oauth: keyring lock fallback dir: %w", err)
 	}
-	return filepath.Join(dir, keyringLockFileName(service, account)), nil
+	return filepath.Join(dir, name), nil
 }
 
 // validateOAuthLockDir creates dir with 0700 permissions if needed, rejects
@@ -364,12 +364,17 @@ func keyringFallbackLockDir() (string, error) {
 		// anchor a lock two processes of the same user must agree on.
 		return identityLockRoot()
 	}
+	var homeErr error
 	if uid := os.Getuid(); uid >= 0 {
 		if u, err := lookupUserID(strconv.Itoa(uid)); err == nil && strings.TrimSpace(u.HomeDir) != "" {
 			dir := filepath.Join(u.HomeDir, ".cache", "zero")
 			if err := validateOAuthLockDir(dir); err == nil {
 				return dir, nil
+			} else {
+				homeErr = err
 			}
+		} else if err != nil {
+			homeErr = err
 		}
 	}
 	name := "zero-oauth-locks"
@@ -378,6 +383,9 @@ func keyringFallbackLockDir() (string, error) {
 	}
 	dir := filepath.Join("/tmp", name)
 	if err := validateOAuthLockDir(dir); err != nil {
+		if homeErr != nil {
+			return "", fmt.Errorf("oauth lock fallback /tmp: %w; prior home lookup error: %v", err, homeErr)
+		}
 		return "", err
 	}
 	return dir, nil
@@ -492,9 +500,15 @@ func (s *Store) Delete(key string) (bool, error) {
 		// credential-bearing entry, so report it as removed: `zero auth logout`
 		// surfaces this boolean directly and "nothing removed" would be wrong
 		// while per-key deletes and an index shrink are running.
-		if kb, ok := s.blob.(keyringBlob); ok && kb.hasResidentEntry(key) {
-			removed = true
-			return s.writeState(state, map[string]bool{key: true}, check)
+		if kb, ok := s.blob.(keyringBlob); ok {
+			resident, rerr := kb.hasResidentEntry(key)
+			if rerr != nil {
+				return rerr
+			}
+			if resident {
+				removed = true
+				return s.writeState(state, map[string]bool{key: true}, check)
+			}
 		}
 		return nil
 	})
@@ -611,8 +625,8 @@ type blobStore interface {
 	// each externally visible mutation write() performs; see leaseCheck.
 	write(data []byte, mutations map[string]bool, checkLease leaseCheck) error
 	// withLock runs fn under whatever cross-process exclusion the backend offers
-	// (a lock file for the file backend; none for the keyring, which is the
-	// authoritative store and is serialized within the process by Store.mu).
+	// (a lock file for the file backend; leased lock files for the keyring backend;
+	// Store.mu provides in-process serialization).
 	// fn receives a leaseCheck to consult before mutating; see its doc comment.
 	withLock(now func() time.Time, fn func(check leaseCheck) error) error
 	// withReadLock guards a read-only pass. The file backend's writes are
@@ -704,8 +718,12 @@ func (b fileBlob) withLock(now func() time.Time, fn func(check leaseCheck) error
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	return fn(noLeaseLoss)
+	defer func() { _ = unlock() }()
+	fnErr := fn(noLeaseLoss)
+	if uerr := unlock(); uerr != nil && fnErr == nil {
+		return uerr
+	}
+	return fnErr
 }
 
 // withReadLock is deliberately lock-free: write() replaces the file with an
@@ -752,17 +770,23 @@ type keyringBlob struct {
 // has an individual entry in the OS keyring. Used during Store.Delete to
 // finish reconciling interrupted deletes whose tombstones already hide the key
 // from readState().
-func (b keyringBlob) hasResidentEntry(key string) bool {
-	keys, ok, _, _, _, _ := b.readKeyIndex()
+func (b keyringBlob) hasResidentEntry(key string) (bool, error) {
+	keys, ok, _, _, _, err := b.readKeyIndex()
+	if err != nil {
+		return false, err
+	}
 	if ok {
 		for _, k := range keys {
 			if k == key {
-				return true
+				return true, nil
 			}
 		}
 	}
-	_, exists, _ := b.kr.Get(b.service, key)
-	return exists
+	_, exists, gerr := b.kr.Get(b.service, key)
+	if gerr != nil {
+		return false, gerr
+	}
+	return exists, nil
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
@@ -1051,7 +1075,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 		// explicit Save/Delete for key: that always wins over the heuristic, so
 		// a fresh Save is never immediately undone by a stale legacy reading.
 		for key := range state.Tokens {
-			if !legacyOrigin[key] || mutations[key] {
+			if _, mutated := mutations[key]; mutated || !legacyOrigin[key] {
 				continue
 			}
 			if _, stillInLegacy := legacyTokens[key]; stillInLegacy {
@@ -1659,6 +1683,12 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks, priorGeneration i
 	return b.writeKeyIndexInPlace(chunkList, priorChunks, priorGeneration, missingChunks, checkLease)
 }
 
+func (b keyringBlob) discardStagedChunks(generation, count int) {
+	for i := 1; i < count; i++ {
+		_, _ = b.kr.Delete(b.service, b.chunkAccount(generation, i))
+	}
+}
+
 // writeKeyIndexNewGeneration is writeKeyIndex's normal-case path: prior state
 // is fully known (missingChunks is empty), so it is safe to stage the entire
 // new layout under a never-before-used generation and adopt it with a single
@@ -1674,32 +1704,41 @@ func (b keyringBlob) writeKeyIndexNewGeneration(chunkList [][]string, priorChunk
 	if advertised > maxKeyringIndexChunks {
 		return 0, 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", advertised, maxKeyringIndexChunks)
 	}
+	staged := 0
 	for i := 1; i < len(chunkList); i++ {
 		chunkData, err := json.Marshal(chunkList[i])
 		if err != nil {
+			b.discardStagedChunks(newGeneration, staged+1)
 			return 0, 0, err
 		}
 		if err := checkLease(); err != nil {
+			b.discardStagedChunks(newGeneration, staged+1)
 			return 0, 0, err
 		}
 		if err := b.kr.Set(b.service, b.chunkAccount(newGeneration, i), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
+			b.discardStagedChunks(newGeneration, staged+1)
 			return 0, 0, err
 		}
+		staged = i
 	}
 	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: advertised, Generation: newGeneration, Keys: chunkList[0]})
 	if err != nil {
+		b.discardStagedChunks(newGeneration, len(chunkList))
 		return 0, 0, err
 	}
 	if err := checkLease(); err != nil {
+		b.discardStagedChunks(newGeneration, len(chunkList))
 		return 0, 0, err
 	}
 	if priorGeneration > 0 {
 		_, ok, _, curGen, _, err := b.readKeyIndex()
 		if err == nil && ok && curGen != priorGeneration {
+			b.discardStagedChunks(newGeneration, len(chunkList))
 			return 0, 0, fmt.Errorf("oauth: keyring key index generation conflict: expected %d, found %d", priorGeneration, curGen)
 		}
 	}
 	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
+		b.discardStagedChunks(newGeneration, len(chunkList))
 		return 0, 0, err
 	}
 	// The new generation is durable and exclusively authoritative from this
@@ -1845,13 +1884,13 @@ var chtimesLockFile = os.Chtimes
 type leasedPath struct {
 	path   string
 	token  string
-	unlock func()
+	unlock func() error
 	stop   chan struct{}
 	done   chan struct{}
 	lost   atomic.Bool
 }
 
-func startLease(path, token string, unlock func()) *leasedPath {
+func startLease(path, token string, unlock func() error) *leasedPath {
 	l := &leasedPath{
 		path:   path,
 		token:  token,
@@ -1902,10 +1941,13 @@ func startLease(path, token string, unlock func()) *leasedPath {
 	return l
 }
 
-func (l *leasedPath) release() {
+func (l *leasedPath) release() error {
 	close(l.stop)
 	<-l.done
-	l.unlock()
+	if l.unlock != nil {
+		return l.unlock()
+	}
+	return nil
 }
 
 // withLeasedLocks acquires every non-empty path in order. Each lock's mtime
@@ -1932,14 +1974,18 @@ type leaseCheck func() error
 func withLeasedLocks(paths []string, now func() time.Time, fn func(check leaseCheck) error) error {
 	var leases []*leasedPath
 	released := false
-	releaseAll := func() {
+	releaseAll := func() error {
 		if released {
-			return
+			return nil
 		}
 		released = true
+		var firstErr error
 		for i := len(leases) - 1; i >= 0; i-- {
-			leases[i].release()
+			if err := leases[i].release(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
+		return firstErr
 	}
 	for _, p := range paths {
 		if p == "" {
@@ -1947,7 +1993,7 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func(check leaseCh
 		}
 		unlock, token, err := acquireFileLock(p, now)
 		if err != nil {
-			releaseAll()
+			_ = releaseAll()
 			return err
 		}
 		// Start refreshing this lock before blocking on the next path.
@@ -1968,7 +2014,7 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func(check leaseCh
 	if len(leases) == 0 {
 		return fn(check)
 	}
-	defer releaseAll()
+	defer func() { _ = releaseAll() }()
 	// Fencing: if any lease was already lost while later locks were still
 	// being acquired (e.g. the first, global index lock reclaimed as stale
 	// while the caller blocks on legacyLockPath), do not enter the critical
@@ -1978,10 +2024,17 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func(check leaseCh
 	}
 	err := fn(check)
 	if lostErr := check(); lostErr != nil {
+		_ = releaseAll()
 		if err != nil {
 			return err
 		}
 		return lostErr
+	}
+	if relErr := releaseAll(); relErr != nil {
+		if err != nil {
+			return err
+		}
+		return relErr
 	}
 	return err
 }

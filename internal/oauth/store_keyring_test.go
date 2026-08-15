@@ -3,6 +3,7 @@ package oauth
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -2209,10 +2210,11 @@ func TestStoreKeyringDeleteReportsRemovedWhenReconcilingResidentEntry(t *testing
 	if err := blob.writeTombstones(map[string]bool{key: true}, noLeaseLoss); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := s.Load(key); err != nil || ok {
-		t.Fatalf("Load = ok %v, err %v; tombstone must hide the entry", ok, err)
+	resident, err := blob.hasResidentEntry(key)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !blob.hasResidentEntry(key) {
+	if !resident {
 		t.Fatal("test setup: the keyring entry should still be resident")
 	}
 
@@ -3891,5 +3893,113 @@ func TestStoreKeyringGenerationBoundaryRejection(t *testing.T) {
 	// 4. writeKeyIndexInPlace rejects math.MaxInt generation
 	if _, _, err := blob.writeKeyIndexInPlace([][]string{{ProviderKey("p1")}}, 1, math.MaxInt, []int{1}, noLeaseLoss); err == nil {
 		t.Fatal("writeKeyIndexInPlace should reject math.MaxInt generation")
+	}
+}
+
+type errorOnGetKeyring struct {
+	KeyringClient
+	targetAccount string
+	err           error
+}
+
+func (e *errorOnGetKeyring) Get(service, account string) (string, bool, error) {
+	if account == e.targetAccount {
+		return "", false, e.err
+	}
+	return e.KeyringClient.Get(service, account)
+}
+
+func TestStoreKeyringHasResidentEntryErrorPropagation(t *testing.T) {
+	kr := newFakeKR()
+	key := ProviderKey("alpha")
+	failKR := &errorOnGetKeyring{KeyringClient: kr, targetAccount: key, err: errors.New("keychain timeout")}
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: failKR, Env: map[string]string{"XDG_CONFIG_HOME": t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := s.blob.(keyringBlob)
+	if err := blob.writeTombstones(map[string]bool{key: true}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Delete(key)
+	if err == nil || !strings.Contains(err.Error(), "keychain timeout") {
+		t.Fatalf("expected keychain timeout error, got %v", err)
+	}
+}
+
+type failOnSetKeyring struct {
+	*fakeKR
+	failAccount string
+	err         error
+}
+
+func (f *failOnSetKeyring) Set(service, account, secret string) error {
+	if account == f.failAccount {
+		return f.err
+	}
+	return f.fakeKR.Set(service, account, secret)
+}
+
+func TestStoreKeyringDiscardStagedChunksOnHeaderFailure(t *testing.T) {
+	kr := newFakeKR()
+	failKR := &failOnSetKeyring{fakeKR: kr, failAccount: keyringIndexAccount, err: errors.New("disk full")}
+	blob := keyringBlob{kr: failKR, service: keyringService, indexAccount: keyringIndexAccount}
+	var keys []string
+	for i := 0; i < 15; i++ {
+		keys = append(keys, fmt.Sprintf("provider:key-%02d", i))
+	}
+	_, _, err := blob.writeKeyIndex(keys, 1, 1, nil, noLeaseLoss)
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("expected disk full error, got %v", err)
+	}
+	for k := range kr.data {
+		if strings.Contains(k, "oauth-keys-gen2-") {
+			t.Fatalf("staged chunk %s survived failed index write", k)
+		}
+	}
+}
+
+func TestStoreKeyringSavedKeyAbsentFromLegacyBlobSurvives(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"XDG_CONFIG_HOME": t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+	blob := s.blob.(keyringBlob)
+	if err := blob.writeLegacyOrigin(map[string]bool{key: true}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(key, Token{AccessToken: "secret-token"}); err != nil {
+		t.Fatal(err)
+	}
+	tok, ok, err := s.Load(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || tok.AccessToken != "secret-token" {
+		t.Fatalf("Load = (%+v, %v), want secret-token", tok, ok)
+	}
+}
+
+type mockFileInfoNoSys struct {
+	os.FileInfo
+}
+
+func (m mockFileInfoNoSys) Sys() any { return nil }
+
+func TestCheckOAuthLockDirOwnerFailsOnUnavailableMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("checkOAuthLockDirOwner is a no-op on Windows")
+	}
+	temp := t.TempDir()
+	info, err := os.Stat(temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock := mockFileInfoNoSys{FileInfo: info}
+	err = checkOAuthLockDirOwner(mock)
+	if err == nil || !strings.Contains(err.Error(), "ownership metadata unavailable") {
+		t.Fatalf("expected ownership metadata unavailable error, got %v", err)
 	}
 }

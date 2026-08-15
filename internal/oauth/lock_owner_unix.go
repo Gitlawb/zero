@@ -25,7 +25,7 @@ func isLockCreateContention(err error) bool {
 func checkOAuthLockDirOwner(info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return nil
+		return errors.New("oauth lock fallback directory ownership metadata unavailable")
 	}
 	if int(stat.Uid) != os.Geteuid() {
 		return fmt.Errorf("oauth lock fallback directory is owned by uid %d, not the current user", stat.Uid)
