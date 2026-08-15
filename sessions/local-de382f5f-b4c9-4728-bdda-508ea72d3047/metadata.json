@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:03:14.249Z",
-  "durationMs": 6674748,
+  "endedAt": "2026-08-15T10:03:25.994Z",
+  "durationMs": 6686483,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,19 +16,22 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 14,
-    "removed": 83
+    "added": 642,
+    "removed": 6
   },
   "filesChanged": [
-    "internal/specialist/plan_resume.go",
-    "internal/specialist/plan_resume_test.go"
+    "internal/cli/app.go",
+    "internal/specialist/exec.go",
+    "internal/specialist/plan_runner.go",
+    "internal/specialist/task_model_autoassign_test.go",
+    "internal/specialist/task_model_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "fa6b0ffae3767f2c59d8e26cdb3a4bbebb06e74a",
+    "headAfter": "e90e47d18030b691e06f0759641e27aee7034917",
     "commitShas": [
-      "fa6b0ffae3767f2c59d8e26cdb3a4bbebb06e74a"
+      "e90e47d18030b691e06f0759641e27aee7034917"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
