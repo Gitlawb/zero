@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:06:44.291Z",
-  "durationMs": 6884800,
+  "endedAt": "2026-08-15T10:06:48.030Z",
+  "durationMs": 6888539,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,19 +16,29 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 109,
-    "removed": 2
+    "added": 620,
+    "removed": 101
   },
   "filesChanged": [
-    "internal/config/keep_finished_agents_resolve_test.go",
-    "internal/tui/keep_finished_agents_test.go"
+    "internal/memory/escape_test.go",
+    "internal/memory/memory.go",
+    "internal/pathjail/pathjail.go",
+    "internal/pathjail/pathjail_test.go",
+    "internal/specialist/plan_params_test.go",
+    "internal/specialist/plan_store.go",
+    "internal/specialist/plan_store_escape_test.go",
+    "internal/specialist/plan_store_test.go",
+    "internal/specialist/plan_strict_lists_test.go",
+    "internal/tui/orchestrate_saved.go",
+    "internal/tui/orchestrate_saved_test.go",
+    "internal/tui/resume_from_stop_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "05e855188fb6ec1868ebbda9f2e8275c10ad948c",
+    "headAfter": "f8dd72f23dbbfd327a539024b788541ae258b121",
     "commitShas": [
-      "05e855188fb6ec1868ebbda9f2e8275c10ad948c"
+      "f8dd72f23dbbfd327a539024b788541ae258b121"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
