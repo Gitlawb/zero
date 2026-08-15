@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:53:01.208Z",
-  "durationMs": 6061719,
+  "endedAt": "2026-08-15T09:53:07.420Z",
+  "durationMs": 6067931,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,20 +16,20 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 82,
-    "removed": 5
+    "added": 426,
+    "removed": 0
   },
   "filesChanged": [
-    "internal/agent/prompt_capability_test.go",
-    "internal/cli/plan_grant_test.go",
-    "internal/specialist/plan.go"
+    "internal/tui/permission_detail.go",
+    "internal/tui/permission_detail_test.go",
+    "internal/tui/rendering.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "cee2c644c2becc1b0923b71bed8c2ce2d6e05b1c",
+    "headAfter": "b032281a88aaa727fadc86a083be011dd49f7c13",
     "commitShas": [
-      "cee2c644c2becc1b0923b71bed8c2ce2d6e05b1c"
+      "b032281a88aaa727fadc86a083be011dd49f7c13"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
