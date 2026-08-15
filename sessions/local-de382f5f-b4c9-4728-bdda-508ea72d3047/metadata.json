@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:48:25.483Z",
-  "durationMs": 5785985,
+  "endedAt": "2026-08-15T09:48:33.174Z",
+  "durationMs": 5793678,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,26 +16,24 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 1078,
-    "removed": 80
+    "added": 285,
+    "removed": 12
   },
   "filesChanged": [
-    "internal/cli/app.go",
     "internal/cli/exec.go",
     "internal/cli/exec_parse.go",
     "internal/cli/exec_zeromaxing_test.go",
-    "internal/tui/model.go",
-    "internal/tui/options.go",
+    "internal/execprofile/profile.go",
+    "internal/execprofile/zeromaxing_test.go",
     "internal/tui/session_controls.go",
-    "internal/tui/view.go",
     "internal/tui/zeromaxing_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "3b0e12afad1ff306a7daef4cd8795de05eb74381",
+    "headAfter": "3396037773d4eb390abc1a7018ff296d40322964",
     "commitShas": [
-      "3b0e12afad1ff306a7daef4cd8795de05eb74381"
+      "3396037773d4eb390abc1a7018ff296d40322964"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
