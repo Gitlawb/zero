@@ -158,6 +158,45 @@ func TestUpgradeGuidanceKeepsCrossTargetAnswerForHomebrew(t *testing.T) {
 	}
 }
 
+// localReleaseEndpoint builds a data: release whose assets match THIS platform.
+//
+// Apply runs Check first, and Check fails outright when the release carries no
+// archive for the running target. An empty asset list therefore made the
+// Homebrew test pass on the error it was looking for and fail on the message,
+// which is a fixture that proves nothing about the branch it was written for.
+func localReleaseEndpoint(t *testing.T, version string) string {
+	t.Helper()
+	target := localReleaseTarget()
+	if target == "" {
+		t.Skip("no published release target for this platform")
+	}
+	extension := ".tar.gz"
+	if strings.HasPrefix(target, "windows") {
+		extension = ".zip"
+	}
+	archive := "zero-v" + version + "-" + target + extension
+	payload := url.QueryEscape(`{"tag_name":"v` + version + `","html_url":"https://example.test/release","assets":[` +
+		`{"name":"` + archive + `","browser_download_url":"https://example.test/` + archive + `"},` +
+		`{"name":"` + archive + `.sha256","browser_download_url":"https://example.test/` + archive + `.sha256"}]}`)
+	return "data:application/json," + payload
+}
+
+// Guards the helper above on EVERY platform, including the ones where the
+// Homebrew test that uses it has to skip. The fixture broke on macOS while
+// passing everywhere it was not exercised, so the fixture gets its own check.
+func TestLocalReleaseEndpointIsAcceptedByCheck(t *testing.T) {
+	result, err := Check(context.Background(), Options{
+		CurrentVersion: "0.1.0",
+		Endpoint:       localReleaseEndpoint(t, "0.7.0"),
+	})
+	if err != nil {
+		t.Fatalf("Check rejected the fixture release for this platform: %v", err)
+	}
+	if !result.UpdateAvailable {
+		t.Errorf("fixture release 0.7.0 should be newer than 0.1.0")
+	}
+}
+
 // Apply must refuse a Homebrew keg outright: no download, no write, and an error
 // that names the command which does work.
 func TestApplyRefusesToUpdateAHomebrewKeg(t *testing.T) {
@@ -179,10 +218,9 @@ func TestApplyRefusesToUpdateAHomebrewKeg(t *testing.T) {
 	currentExecutable = func() (string, error) { return binary, nil }
 	t.Cleanup(func() { currentExecutable = restore })
 
-	payload := url.QueryEscape(`{"tag_name":"v0.7.0","html_url":"https://example.test/release","assets":[]}`)
 	_, err := Apply(context.Background(), Options{
 		CurrentVersion: "0.1.0",
-		Endpoint:       "data:application/json," + payload,
+		Endpoint:       localReleaseEndpoint(t, "0.7.0"),
 	})
 	if err == nil {
 		t.Fatal("Apply updated a Homebrew keg instead of refusing")
