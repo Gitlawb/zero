@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:05:14.114Z",
-  "durationMs": 6794588,
+  "endedAt": "2026-08-15T10:05:21.633Z",
+  "durationMs": 6802145,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,21 +16,19 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 260,
-    "removed": 0
+    "added": 93,
+    "removed": 9
   },
   "filesChanged": [
-    "internal/cli/child_exit_code_agreement_test.go",
-    "internal/specialist/plan_exec.go",
-    "internal/specialist/plan_provider_retry_test.go",
-    "internal/specialist/plan_runner.go"
+    "internal/specialist/plan_model_size.go",
+    "internal/specialist/plan_model_size_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "7c21dbfea0939076e86c665db5f87bfb0c73aef9",
+    "headAfter": "9add79dda6741fbefbcf24f0fe2511868325ec07",
     "commitShas": [
-      "7c21dbfea0939076e86c665db5f87bfb0c73aef9"
+      "9add79dda6741fbefbcf24f0fe2511868325ec07"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
