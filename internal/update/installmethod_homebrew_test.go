@@ -1,6 +1,8 @@
 package update
 
 import (
+	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,6 +27,10 @@ func TestIsHomebrewPathPerTarget(t *testing.T) {
 		{"linux", "/opt/cellar/bin/zero", false},          // lowercase is not a keg
 		{"linux", "/opt/CellarX/bin/zero", false},         // segment must match exactly
 		{"windows", `C:\Cellar\zero\bin\zero.exe`, false}, // Homebrew does not run here
+		// A user directory that happens to be called Cellar. Too shallow to be a
+		// keg, and refusing to update this install would be the expensive mistake.
+		{"linux", "/home/someone/Cellar/zero", false},
+		{"darwin", "/Users/someone/Cellar/bin/zero", false},
 	}
 	for _, testCase := range cases {
 		if got := isHomebrewPath(testCase.goos, testCase.path); got != testCase.want {
@@ -122,5 +128,73 @@ func TestUpgradeGuidanceIgnoresSourceFlagForHomebrew(t *testing.T) {
 	guidance := upgradeGuidance(AssetCheck{}, "--source", InstallMethodHomebrew)
 	if !strings.Contains(guidance, "brew upgrade zero") {
 		t.Errorf("source flag changed the Homebrew answer: %q", guidance)
+	}
+}
+
+// A CROSS-TARGET check outranks the install method, on purpose.
+//
+// Homebrew is a property of the binary on THIS machine. When the check was asked
+// about a different target, the answer is about that other machine, and
+// `brew upgrade zero` would change this one instead. Pinned as a test because it
+// reads like an ordering bug until you see which question is being answered.
+func TestUpgradeGuidanceKeepsCrossTargetAnswerForHomebrew(t *testing.T) {
+	local := localReleaseTarget()
+	other := "linux-arm64"
+	if local == other {
+		other = "macos-x64"
+	}
+	target, err := ResolveTarget(other)
+	if err != nil {
+		t.Fatalf("resolve target: %v", err)
+	}
+	asset := AssetCheck{Platform: target.Platform, Arch: target.Arch}
+
+	guidance := upgradeGuidance(asset, "", InstallMethodHomebrew)
+	if strings.Contains(guidance, "brew upgrade zero") {
+		t.Errorf("a question about %s was answered with a command that changes this machine: %q", other, guidance)
+	}
+	if !strings.Contains(guidance, other) {
+		t.Errorf("cross-target guidance does not name the target asked about: %q", guidance)
+	}
+}
+
+// Apply must refuse a Homebrew keg outright: no download, no write, and an error
+// that names the command which does work.
+func TestApplyRefusesToUpdateAHomebrewKeg(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("DetectInstallMethod is GOOS-gated; see TestIsHomebrewPathPerTarget")
+	}
+	prefix := t.TempDir()
+	keg := filepath.Join(prefix, "Cellar", "zero", "0.7.0", "bin")
+	if err := os.MkdirAll(keg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(keg, "zero")
+	original := []byte("original binary")
+	if err := os.WriteFile(binary, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := currentExecutable
+	currentExecutable = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { currentExecutable = restore })
+
+	payload := url.QueryEscape(`{"tag_name":"v0.7.0","html_url":"https://example.test/release","assets":[]}`)
+	_, err := Apply(context.Background(), Options{
+		CurrentVersion: "0.1.0",
+		Endpoint:       "data:application/json," + payload,
+	})
+	if err == nil {
+		t.Fatal("Apply updated a Homebrew keg instead of refusing")
+	}
+	if !strings.Contains(err.Error(), "brew upgrade zero") {
+		t.Errorf("refusal does not name the command that works: %v", err)
+	}
+	after, readErr := os.ReadFile(binary)
+	if readErr != nil {
+		t.Fatalf("read binary: %v", readErr)
+	}
+	if string(after) != string(original) {
+		t.Error("Apply rewrote the keg binary it claimed to refuse")
 	}
 }

@@ -13,9 +13,13 @@ blessed one.
 | `go install` | `go install github.com/Gitlawb/zero/cmd/zero@latest` | rerun the command |
 | Source | `go build -o zero ./cmd/zero` | rebuild |
 
-`zero upgrade` knows which of these you used and does the right thing, or
-refuses and tells you the command that works. It never fights a package manager
-for control of its own binary.
+`zero upgrade` follows whatever owns the binary. It delegates to npm for an npm
+install, refuses outright for a Homebrew keg and names `brew upgrade zero`, and
+replaces the binary in place for everything else.
+
+mise is the one case it cannot detect: a mise-managed binary is an ordinary
+standalone install on disk, so `zero upgrade` will replace it and leave mise
+describing a version that is no longer there. Use `mise upgrade` instead.
 
 Release archives are the substrate for most of the above: the install scripts
 and the npm fallback both download a platform archive from a published GitHub
@@ -175,7 +179,7 @@ Build a local binary:
 go build -o zero ./cmd/zero
 ```
 
-Source builds require Go 1.26.5+.
+Source builds require Go 1.26.6+.
 
 ### Sandbox Helpers For Source Builds
 

@@ -91,8 +91,23 @@ func isHomebrewPath(goos string, executablePath string) bool {
 		// an unrelated directory called Cellar than a keg.
 		return false
 	}
-	for _, segment := range strings.Split(filepath.ToSlash(executablePath), "/") {
-		if segment == homebrewCellar {
+	// The keg SHAPE, not merely the segment: <prefix>/Cellar/<formula>/<version>/
+	// and then at least the binary. A bare Cellar segment would also match a
+	// user's own directory that happens to be called that, and the cost of a
+	// false positive here is refusing to update an install Homebrew has never
+	// touched. Requiring the two segments Homebrew always inserts costs nothing
+	// and no filesystem access.
+	//
+	// Deliberately not matched: the formula name, because a tap may name it
+	// something other than zero; and Homebrew's receipt metadata, because reading
+	// it would put filesystem I/O on a path that runs on every version check, to
+	// tighten a case a path-shape check already covers.
+	segments := strings.Split(filepath.ToSlash(executablePath), "/")
+	for index, segment := range segments {
+		if segment != homebrewCellar {
+			continue
+		}
+		if len(segments)-index >= 4 {
 			return true
 		}
 	}
