@@ -975,6 +975,26 @@ func TestEditedDiffCardHidesHunkHeader(t *testing.T) {
 	}
 }
 
+func TestEditedDiffCardHandlesBareBlankHunkContext(t *testing.T) {
+	m := limeTestModel()
+	diff := strings.Join([]string{
+		"--- a/time_test.py",
+		"+++ b/time_test.py",
+		"@@ -1,3 +1,3 @@",
+		" from datetime import datetime",
+		"",
+		"-print(datetime.now())",
+		"+print(f\"Current time: {datetime.now()}\")",
+	}, "\n")
+	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "edit_file", status: tools.StatusOK, detail: diff}
+	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
+	for _, want := range []string{"Edited", "time_test.py", "(+1 -1)", "from datetime import datetime", "   3 −", "   3 +"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("edited diff card = %q, missing %q", got, want)
+		}
+	}
+}
+
 func TestReadCardBodyShowsExploredSummary(t *testing.T) {
 	m := limeTestModel()
 	// Mirrors the real read_file output shape: "<right-aligned N> | <text>".

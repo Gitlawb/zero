@@ -2038,6 +2038,11 @@ func (state diffHunkState) active() bool {
 
 func (state *diffHunkState) consume(line string) {
 	if len(line) == 0 {
+		// Some producers omit the leading space on a blank context line. Treat
+		// that non-standard but harmless form exactly like normal context so the
+		// parser stays aligned with the hunk ranges.
+		state.oldRemaining--
+		state.newRemaining--
 		return
 	}
 	switch line[0] {
@@ -2078,11 +2083,13 @@ func diffCardMetadata(detail string) diffMetadata {
 			continue
 		}
 		if hunk.active() && isDiffHunkBodyLine(line) {
-			switch line[0] {
-			case '+':
-				meta.adds++
-			case '-':
-				meta.dels++
+			if len(line) > 0 {
+				switch line[0] {
+				case '+':
+					meta.adds++
+				case '-':
+					meta.dels++
+				}
 			}
 			hunk.consume(line)
 			continue
