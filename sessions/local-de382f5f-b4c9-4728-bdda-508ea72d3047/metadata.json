@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:23:09.789Z",
-  "durationMs": 7870200,
+  "endedAt": "2026-08-15T10:23:12.133Z",
+  "durationMs": 7872569,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,19 +16,26 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 189,
-    "removed": 6
+    "added": 449,
+    "removed": 40
   },
   "filesChanged": [
-    "internal/tui/session_controls.go",
-    "internal/tui/zeromaxing_test.go"
+    "internal/cli/app.go",
+    "internal/cli/exec.go",
+    "internal/cli/plan_grant_test.go",
+    "internal/specialist/exec.go",
+    "internal/specialist/manifest.go",
+    "internal/specialist/plan.go",
+    "internal/specialist/plan_exec.go",
+    "internal/specialist/plan_grant_test.go",
+    "internal/specialist/plan_runner.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "ea24b0715f0cc2ddf463ae0655b5a41789049973",
+    "headAfter": "97a1aed52b82017c2dc8302f60d38890409e80b3",
     "commitShas": [
-      "ea24b0715f0cc2ddf463ae0655b5a41789049973"
+      "97a1aed52b82017c2dc8302f60d38890409e80b3"
     ]
   },
   "summary": "Now #829:",
