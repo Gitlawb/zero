@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:02:23.105Z",
-  "durationMs": 6623604,
+  "endedAt": "2026-08-15T10:02:44.716Z",
+  "durationMs": 6645199,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,19 +16,20 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 110,
-    "removed": 1
+    "added": 200,
+    "removed": 2
   },
   "filesChanged": [
-    "internal/tui/sidebar.go",
-    "internal/tui/sidebar_done_agents_test.go"
+    "internal/specialist/plan_runner.go",
+    "internal/specialist/plan_session_id_test.go",
+    "internal/specialist/streamer.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "6446d6e7dea3291bbe5183d05ef640af433186df",
+    "headAfter": "f62d83dbc8784896635d74878c4f3d83f5bc7d87",
     "commitShas": [
-      "6446d6e7dea3291bbe5183d05ef640af433186df"
+      "f62d83dbc8784896635d74878c4f3d83f5bc7d87"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
