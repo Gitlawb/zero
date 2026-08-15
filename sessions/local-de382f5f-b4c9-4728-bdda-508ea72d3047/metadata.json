@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:26:34.059Z",
-  "durationMs": 8074337,
+  "endedAt": "2026-08-15T10:26:33.946Z",
+  "durationMs": 8074358,
   "status": "running",
   "tokens": {
     "total": 29359,
@@ -16,19 +16,26 @@
   },
   "toolCalls": 55,
   "lines": {
-    "added": 63,
+    "added": 354,
     "removed": 5
   },
   "filesChanged": [
-    "internal/tui/orchestrate_panel.go",
-    "internal/tui/orchestrate_panel_test.go"
+    "internal/tui/model.go",
+    "internal/tui/mouse.go",
+    "internal/tui/plan_messages.go",
+    "internal/tui/plan_progress.go",
+    "internal/tui/plan_progress_test.go",
+    "internal/tui/sidebar.go",
+    "internal/tui/sidebar_test.go",
+    "internal/tui/specialist_card.go",
+    "internal/tui/transcript_selection.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "c7d5a7dad034e47887abe0ee41555a24408f6423",
+    "headAfter": "65d726e76322bfaaa74efba2253170120368e6b6",
     "commitShas": [
-      "c7d5a7dad034e47887abe0ee41555a24408f6423"
+      "65d726e76322bfaaa74efba2253170120368e6b6"
     ]
   },
   "summary": "Now #829:",
