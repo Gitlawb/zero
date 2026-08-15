@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:06:35.990Z",
-  "durationMs": 6876488,
+  "endedAt": "2026-08-15T10:06:44.291Z",
+  "durationMs": 6884800,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,20 +16,19 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 95,
-    "removed": 1
+    "added": 109,
+    "removed": 2
   },
   "filesChanged": [
-    "internal/tools/bash.go",
-    "internal/tools/shell_runtime.go",
-    "internal/tools/shell_runtime_test.go"
+    "internal/config/keep_finished_agents_resolve_test.go",
+    "internal/tui/keep_finished_agents_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "a91f1925c4976f911d0b45867bbf5e4d7a823c1f",
+    "headAfter": "05e855188fb6ec1868ebbda9f2e8275c10ad948c",
     "commitShas": [
-      "a91f1925c4976f911d0b45867bbf5e4d7a823c1f"
+      "05e855188fb6ec1868ebbda9f2e8275c10ad948c"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
