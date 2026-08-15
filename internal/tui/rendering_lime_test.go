@@ -993,6 +993,12 @@ func TestEditedDiffCardHandlesBareBlankHunkContext(t *testing.T) {
 			t.Fatalf("edited diff card = %q, missing %q", got, want)
 		}
 	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.TrimSpace(line) == "2" {
+			return
+		}
+	}
+	t.Fatalf("edited diff card = %q, missing blank context line 2", got)
 }
 
 func TestReadCardBodyShowsExploredSummary(t *testing.T) {
