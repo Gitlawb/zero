@@ -3,33 +3,37 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T14:32:37.126Z",
-  "durationMs": 27265186,
+  "endedAt": "2026-08-16T14:34:55.880Z",
+  "durationMs": 27403942,
   "status": "running",
   "tokens": {
-    "total": 222510,
-    "input": 542,
-    "output": 221968
+    "total": 224084,
+    "input": 546,
+    "output": 223538
   },
   "cost": {
-    "usd": 53.0619
+    "usd": 53.4767
   },
-  "toolCalls": 265,
+  "toolCalls": 267,
   "lines": {
-    "added": 6,
-    "removed": 3
+    "added": 243,
+    "removed": 16
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
+    "internal/agent/guardrails.go",
+    "internal/agent/guardrails_false_admission_test.go",
+    "internal/measurements/measurements.go",
+    "internal/measurements/measurements_test.go",
     "internal/memory/escape_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "70280a7f546d67e599e881bcf2c570edb2187c2a",
+    "headAfter": "cfb8d06d4cd7534e66da41b06523be6185acfbfc",
     "commitShas": [
-      "70280a7f546d67e599e881bcf2c570edb2187c2a"
+      "cfb8d06d4cd7534e66da41b06523be6185acfbfc"
     ]
   },
   "summary": "Now committing #897's Windows-junction fix, then re-syncing #829:",
