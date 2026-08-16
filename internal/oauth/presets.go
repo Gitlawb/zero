@@ -152,16 +152,24 @@ func scopesOrPreset(envScopes string, preset []string) []string {
 	return append([]string(nil), preset...)
 }
 
+// attachProviderHeaders derives ExtraHeaders from the endpoints this config
+// will actually call. Identity headers are minted only when those destinations
+// are canonical Kimi hosts.
+func attachProviderHeaders(name string, cfg Config) Config {
+	cfg.ExtraHeaders = providerExtraHeaders(name, cfg.AuthorizationEndpoint, cfg.TokenEndpoint, cfg.DeviceAuthorizationEndpoint, cfg.IssuerURL)
+	return cfg
+}
+
 // providerExtraHeaders returns the Config.ExtraHeaders a provider's OAuth
 // requests need beyond the generic RFC 8628/OAuth2 form bodies this package
 // builds. This is a protocol requirement of the provider's OWN backend
 // (not tied to whether its preset client_id or an operator-supplied one is in
 // use), so unlike the presets above it applies regardless of
-// ZERO_OAUTH_ALLOW_PRESETS. Overridden endpoints are checked so device identity
-// headers are not sent to arbitrary third-party hosts.
-func providerExtraHeaders(name string, overriddenEndpoints ...string) map[string]string {
+// ZERO_OAUTH_ALLOW_PRESETS. endpoints are the resolved destinations, not the
+// raw env overlay, so header policy cannot diverge from where requests go.
+func providerExtraHeaders(name string, endpoints ...string) map[string]string {
 	if strings.ToLower(strings.TrimSpace(name)) == "kimi-code" {
-		for _, ep := range overriddenEndpoints {
+		for _, ep := range endpoints {
 			if ep = strings.TrimSpace(ep); ep != "" && !isCanonicalKimiHost(ep) {
 				return nil
 			}

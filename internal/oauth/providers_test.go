@@ -205,3 +205,39 @@ func TestResolveConfigKimiCodeStripsExtraHeadersOnKimiSubdomain(t *testing.T) {
 		t.Fatalf("expected empty ExtraHeaders on unapproved kimi subdomain, got: %v", cfg.ExtraHeaders)
 	}
 }
+
+func TestResolveConfigKimiIssuerOnlyClearsPresetEndpoints(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	r := NewRegistry()
+
+	canonical, _, err := r.ResolveConfig("kimi-code", map[string]string{
+		"ZERO_OAUTH_ALLOW_PRESETS":        "1",
+		"ZERO_OAUTH_KIMI_CODE_ISSUER_URL": "https://auth.kimi.com",
+	})
+	if err != nil {
+		t.Fatalf("ResolveConfig canonical issuer: %v", err)
+	}
+	if canonical.IssuerURL != "https://auth.kimi.com" {
+		t.Fatalf("IssuerURL = %q", canonical.IssuerURL)
+	}
+	if canonical.TokenEndpoint != "" || canonical.DeviceAuthorizationEndpoint != "" {
+		t.Fatalf("issuer-only override must not keep preset endpoints: token=%q device=%q", canonical.TokenEndpoint, canonical.DeviceAuthorizationEndpoint)
+	}
+	if canonical.ExtraHeaders["X-Msh-Device-Id"] == "" {
+		t.Fatalf("canonical issuer should keep identity headers, got %#v", canonical.ExtraHeaders)
+	}
+
+	foreign, _, err := r.ResolveConfig("kimi-code", map[string]string{
+		"ZERO_OAUTH_ALLOW_PRESETS":        "1",
+		"ZERO_OAUTH_KIMI_CODE_ISSUER_URL": "https://idp.example/oauth",
+	})
+	if err != nil {
+		t.Fatalf("ResolveConfig foreign issuer: %v", err)
+	}
+	if foreign.TokenEndpoint != "" || foreign.DeviceAuthorizationEndpoint != "" {
+		t.Fatalf("foreign issuer must not keep preset Kimi endpoints: token=%q device=%q", foreign.TokenEndpoint, foreign.DeviceAuthorizationEndpoint)
+	}
+	if len(foreign.ExtraHeaders) != 0 {
+		t.Fatalf("foreign issuer must not send X-Msh-* headers, got %#v", foreign.ExtraHeaders)
+	}
+}

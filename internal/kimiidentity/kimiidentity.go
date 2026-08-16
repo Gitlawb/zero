@@ -14,6 +14,7 @@
 package kimiidentity
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -64,8 +65,11 @@ var (
 // Kimi Code's own CLI persists this to ~/.kimi/device_id so the same value
 // follows a device across logins, refreshes, and model calls; mirroring
 // that, the ID is stored under the user config dir (zero/kimi-device-id) and
-// minted once on first use. When the config dir is unavailable the ID is
-// still stable for the life of the process.
+// minted once on first use. Acquisition is bounded: an existing valid ID is
+// returned, a live publisher is waited on only up to deviceIDMaxWait, a
+// proven-dead or expired lease is reclaimed, and unreadable/unwritable
+// storage, cancellation, or a live holder that outlasts the wait all return
+// a process-local ID without overwriting a file this process does not own.
 //
 // The cache is keyed by the resolved storage path so tests that redirect
 // os.UserConfigDir (via XDG_CONFIG_HOME / APPDATA / HOME) pick up a fresh
@@ -105,7 +109,25 @@ func loadOrCreateDeviceIDAt(path string) string {
 	if id := readValidDeviceID(root, name); id != "" {
 		return id
 	}
-	return publishOrAdoptDeviceID(root, name, generateDeviceID())
+	return publishOrAdoptDeviceID(context.Background(), root, name, generateDeviceID())
+}
+
+// loadOrCreateDeviceIDAtContext is loadOrCreateDeviceIDAt with a caller
+// context. Cancellation returns a process-local id without touching a live
+// holder's persisted file.
+func loadOrCreateDeviceIDAtContext(ctx context.Context, path string) string {
+	if path == "" {
+		return generateDeviceID()
+	}
+	root, name, err := openDeviceIDDir(path)
+	if err != nil {
+		return generateDeviceID()
+	}
+	defer root.Close()
+	if id := readValidDeviceID(root, name); id != "" {
+		return id
+	}
+	return publishOrAdoptDeviceID(ctx, root, name, generateDeviceID())
 }
 
 // openDeviceIDDir opens the zero/ directory under the configuration root for
@@ -138,33 +160,49 @@ func openDeviceIDDir(path string) (*os.Root, string, error) {
 	return zeroRoot, name, nil
 }
 
-var beforeRenameHook func()
+var (
+	beforeRenameHook func()
+	deviceIDNow      = time.Now
+	deviceIDMaxWait  = 5 * time.Second
+	deviceIDLeaseTTL = 10 * time.Second
+)
 
-func publishDeviceIDAsHolder(root *os.Root, name, lockName, id, ownerToken string) (string, bool) {
+type publishOutcome int
+
+const (
+	publishOK publishOutcome = iota
+	publishContended
+	publishPersistFailed
+)
+
+func publishDeviceIDAsHolder(root *os.Root, name, lockName, id, ownerToken string) (string, publishOutcome) {
 	tmpLockName := fmt.Sprintf("%s.tmp.%s", lockName, ownerToken)
 	if err := root.WriteFile(tmpLockName, []byte(ownerToken+"\n"), 0o600); err != nil {
-		return "", false
+		return "", publishPersistFailed
 	}
 	defer func() { _ = root.Remove(tmpLockName) }()
 
 	if err := root.Link(tmpLockName, lockName); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return "", false
+			return "", publishContended
 		}
 		// Fallback for filesystems where Link is unsupported:
 		lock, oerr := root.OpenFile(lockName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if oerr != nil {
-			return "", false
+			if errors.Is(oerr, os.ErrExist) {
+				return "", publishContended
+			}
+			return "", publishPersistFailed
 		}
 		if _, werr := lock.WriteString(ownerToken + "\n"); werr != nil {
 			_ = lock.Close()
 			_ = root.Remove(lockName)
-			return "", false
+			return "", publishPersistFailed
 		}
 		if serr := lock.Sync(); serr != nil {
 			_ = lock.Close()
 			_ = root.Remove(lockName)
-			return "", false
+			return "", publishPersistFailed
 		}
 		_ = lock.Close()
 	}
@@ -176,15 +214,15 @@ func publishDeviceIDAsHolder(root *os.Root, name, lockName, id, ownerToken strin
 	}()
 
 	if existingID := readValidDeviceID(root, name); existingID != "" {
-		return existingID, true
+		return existingID, publishOK
 	}
 
 	tmpName := tmpDeviceIDName(name)
 	if err := writeDeviceIDFile(root, tmpName, id); err != nil {
 		if existingID := readValidDeviceIDWithRetry(root, name); existingID != "" {
-			return existingID, true
+			return existingID, publishOK
 		}
-		return "", false
+		return "", publishPersistFailed
 	}
 	defer func() { _ = root.Remove(tmpName) }()
 
@@ -194,22 +232,26 @@ func publishDeviceIDAsHolder(root *os.Root, name, lockName, id, ownerToken strin
 
 	if err := root.Rename(tmpName, name); err != nil {
 		if existingID := readValidDeviceIDWithRetry(root, name); existingID != "" {
-			return existingID, true
+			return existingID, publishOK
 		}
-		return "", false
+		return "", publishPersistFailed
 	}
 	if existingID := readValidDeviceID(root, name); existingID != "" {
-		return existingID, true
+		return existingID, publishOK
 	}
-	return id, true
+	return id, publishOK
 }
 
-func publishOrAdoptDeviceID(root *os.Root, name, id string) string {
+func publishOrAdoptDeviceID(ctx context.Context, root *os.Root, name, id string) string {
 	if existingID := readValidDeviceID(root, name); existingID != "" {
 		return existingID
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	lockName := name + ".lock"
-	ownerToken := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
+	ownerToken := fmt.Sprintf("%d.%d", os.Getpid(), deviceIDNow().UnixNano())
+	deadline := deviceIDNow().Add(deviceIDMaxWait)
 
 	const pollInterval = 10 * time.Millisecond
 
@@ -217,29 +259,47 @@ func publishOrAdoptDeviceID(root *os.Root, name, id string) string {
 		if existingID := readValidDeviceID(root, name); existingID != "" {
 			return existingID
 		}
+		if ctx.Err() != nil {
+			return id
+		}
 
-		if publishedID, ok := publishDeviceIDAsHolder(root, name, lockName, id, ownerToken); ok {
+		publishedID, outcome := publishDeviceIDAsHolder(root, name, lockName, id, ownerToken)
+		switch outcome {
+		case publishOK:
 			return publishedID
+		case publishPersistFailed:
+			if existingID := readValidDeviceID(root, name); existingID != "" {
+				return existingID
+			}
+			return id
 		}
 
 		if existingID := readValidDeviceID(root, name); existingID != "" {
 			return existingID
 		}
 
-		// Lock exists: check if holder is live before attempting reclaim.
-		if raw, rerr := root.ReadFile(lockName); rerr == nil {
-			if lockHolderAlive(raw) {
-				time.Sleep(pollInterval)
-				continue
+		raw, rerr := root.ReadFile(lockName)
+		switch {
+		case rerr != nil && !errors.Is(rerr, os.ErrNotExist):
+			return id
+		case rerr == nil && lockHolderAlive(raw):
+			if !deviceIDNow().Before(deadline) || ctx.Err() != nil {
+				return id
 			}
-		}
-
-		// Holder crashed or left a corrupt lock: reclaim only when ownership
-		// is proven dead, then retry exclusive create.
-		if reclaimed, rerr := reclaimDeadRepairLock(root, lockName); rerr == nil && reclaimed {
+			time.Sleep(pollInterval)
 			continue
 		}
 
+		reclaimed, rerr := reclaimDeadRepairLock(root, lockName)
+		if rerr != nil {
+			return id
+		}
+		if reclaimed {
+			continue
+		}
+		if !deviceIDNow().Before(deadline) || ctx.Err() != nil {
+			return id
+		}
 		time.Sleep(pollInterval)
 	}
 }
@@ -259,29 +319,36 @@ func reclaimDeadRepairLock(root *os.Root, lockName string) (bool, error) {
 // lockHolderAlive reports whether the repair-lock contents still represent a
 // live holder. Token format is "<pid>.<nano>". Empty or unparseable contents
 // are treated as dead (abandoned claim) so a crashed mid-write holder can be
-// recovered. A parseable live PID fails closed (not reclaimed).
+// recovered. A parseable live PID is not enough: the lease also expires after
+// deviceIDLeaseTTL so a reused PID cannot pin the lock forever.
 func lockHolderAlive(raw []byte) bool {
-	pid, ok := parseLockPID(strings.TrimSpace(string(raw)))
+	pid, issued, ok := parseLockToken(strings.TrimSpace(string(raw)))
 	if !ok || pid <= 0 {
+		return false
+	}
+	if deviceIDNow().Sub(issued) > deviceIDLeaseTTL {
 		return false
 	}
 	return processAlive(pid)
 }
 
-func parseLockPID(token string) (int, bool) {
+func parseLockToken(token string) (pid int, issued time.Time, ok bool) {
 	if token == "" {
-		return 0, false
+		return 0, time.Time{}, false
 	}
-	// ownerToken is "<pid>.<nano>"; take the pid prefix only.
 	dot := strings.IndexByte(token, '.')
-	if dot <= 0 {
-		return 0, false
+	if dot <= 0 || dot == len(token)-1 {
+		return 0, time.Time{}, false
 	}
 	pid, err := strconv.Atoi(token[:dot])
 	if err != nil {
-		return 0, false
+		return 0, time.Time{}, false
 	}
-	return pid, true
+	nano, err := strconv.ParseInt(token[dot+1:], 10, 64)
+	if err != nil || nano <= 0 {
+		return 0, time.Time{}, false
+	}
+	return pid, time.Unix(0, nano), true
 }
 
 // writeDeviceIDFile writes a complete id+"\n" to root/name, checking write,

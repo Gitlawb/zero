@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -488,6 +489,49 @@ func TestResolveRejectsProjectBaseURLOverrideWithInheritedCompatibleCredentials(
 		t.Fatalf("error leaked apiKeyEnv secret: %q", err.Error())
 	}
 	if !strings.Contains(err.Error(), "project provider shared cannot override baseURL") {
+		t.Fatalf("error = %q, want project baseURL override rejection", err.Error())
+	}
+}
+
+func TestResolveRejectsProjectBaseURLOverrideWithStoredKimiOAuth(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	tokenPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: tokenPath})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("kimi-code"), oauth.Token{AccessToken: "kimi-secret-token"}); err != nil {
+		t.Fatalf("seed Kimi login: %v", err)
+	}
+
+	userPath := writeConfig(t, `{
+		"activeProvider": "kimi-code",
+		"providers": [{
+			"name": "kimi-code",
+			"catalogID": "kimi-code"
+		}]
+	}`)
+	projectPath := writeConfig(t, `{
+		"providers": [{
+			"name": "kimi-code",
+			"baseURL": "https://attacker.example/v1"
+		}]
+	}`)
+
+	_, err = Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want project baseURL override rejection for stored OAuth")
+	}
+	if strings.Contains(err.Error(), "kimi-secret-token") {
+		t.Fatalf("error leaked OAuth token: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "cannot override baseURL") {
 		t.Fatalf("error = %q, want project baseURL override rejection", err.Error())
 	}
 }

@@ -111,19 +111,27 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
    `auth login` engine, which enables presets unconditionally — no
    `ZERO_OAUTH_ALLOW_PRESETS=1` is needed (same rule as xAI on those paths).
    Any field is still overridable with
-   `ZERO_OAUTH_KIMI_CODE_*`. Kimi's backend also requires a handful of
+   `ZERO_OAUTH_KIMI_CODE_*`. Setting only `ZERO_OAUTH_KIMI_CODE_ISSUER_URL`
+   replaces the preset device/token endpoints and uses discovery; leftover
+   preset destinations are not kept, so header policy and request URLs stay
+   one coherent configuration. Kimi's backend also requires a handful of
    vendor-identity `X-Msh-*` headers across all applicable OAuth and API calls
    (device authorization, polling, code exchange, refresh, and managed
-   runtime/completions requests). One of these, `X-Msh-Device-Name`, is your
-   machine's hostname: it is sent to the provider on every OAuth request and
-   completion, so the provider sees the device name that is authorizing and
-   calling. These headers are reverse-engineered from kimi-cli,
-   not from public documentation — verify against a real login before relying
+   runtime/completions requests). Those headers are minted lazily on the first
+   request that actually talks to Kimi, not when listing providers. They send
+   `X-Msh-Platform` (`kimi_code_cli`), `X-Msh-Version` (`unknown`),
+   `X-Msh-Device-Name` (this machine's hostname), `X-Msh-Device-Model`
+   (GOOS/GOARCH), `X-Msh-Os-Version` (GOOS), and a persistent
+   `X-Msh-Device-Id`. These headers are reverse-engineered from kimi-cli,
+   not from public documentation; verify against a real login before relying
    on this.
    This is distinct from the `moonshot` catalog entry, which is the API-key path at
-   `https://api.moonshot.ai/v1` (set `MOONSHOT_API_KEY`). To override the managed
-   endpoint, set `baseURL` on the provider profile; to override the OAuth host,
-   set `ZERO_OAUTH_KIMI_CODE_ISSUER_URL`/`ZERO_OAUTH_KIMI_CODE_DEVICE_URL`/`ZERO_OAUTH_KIMI_CODE_TOKEN_URL`
+   `https://api.moonshot.ai/v1` (set `MOONSHOT_API_KEY`). A profile `baseURL`
+   override strips `X-Msh-*` headers. OAuth endpoint overrides keep them only
+   for HTTPS `auth.kimi.com` or `api.kimi.com`; any other host also strips
+   them. To override the managed endpoint, set `baseURL` on the provider
+   profile; to override the OAuth host, set
+   `ZERO_OAUTH_KIMI_CODE_ISSUER_URL`/`ZERO_OAUTH_KIMI_CODE_DEVICE_URL`/`ZERO_OAUTH_KIMI_CODE_TOKEN_URL`
    (the provider resolves as `kimi-code`, so the env prefix is `KIMI_CODE`).
 - **ChatGPT (Codex) — built-in preset** — `zero auth chatgpt` opens a browser, you
   approve with your ChatGPT Plus/Pro/Business/Enterprise account, and the bearer is

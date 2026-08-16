@@ -1,9 +1,12 @@
 package kimiidentity
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -368,6 +371,11 @@ func TestLockHolderAlive(t *testing.T) {
 	if !lockHolderAlive([]byte(self)) {
 		t.Fatalf("self pid token %q should be live", self)
 	}
+	// A live PID with an expired timestamp is dead: PID reuse must not pin the lock.
+	stale := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().Add(-time.Hour).UnixNano())
+	if lockHolderAlive([]byte(stale)) {
+		t.Fatalf("expired lease %q should not be live", stale)
+	}
 }
 
 func TestAsciiHeaderValueStripsNonPrintable(t *testing.T) {
@@ -535,5 +543,143 @@ func TestLiveLockHolderLeaseNeverOverwrittenByCompetitor(t *testing.T) {
 	}
 	if persisted := strings.TrimSpace(string(raw)); persisted != holderPublishedID {
 		t.Fatalf("persisted file = %q, want holder's %q", persisted, holderPublishedID)
+	}
+}
+
+func TestLoadOrCreateDeviceIDUnwritableDirReturnsLocalWithoutHang(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory write-bit is not enforced the same way on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can write a 0555 directory")
+	}
+	dir := t.TempDir()
+	zeroDir := filepath.Join(dir, "zero")
+	if err := os.MkdirAll(zeroDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(zeroDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(zeroDir, 0o700) })
+	path := filepath.Join(zeroDir, "kimi-device-id")
+
+	done := make(chan string, 1)
+	go func() { done <- loadOrCreateDeviceIDAt(path) }()
+	var got string
+	select {
+	case got = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("identity acquisition hung on unwritable storage")
+	}
+	if !isUUID(got) {
+		t.Fatalf("process-local id %q is not a UUID", got)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unwritable storage must not persist a device id: stat err=%v", err)
+	}
+}
+
+func TestLoadOrCreateDeviceIDReclaimsExpiredLivePIDLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := path + ".lock"
+	// Our PID is live, but the timestamp is older than the lease TTL: this is
+	// the PID-reuse case, not a current holder.
+	stale := fmt.Sprintf("%d.%d\n", os.Getpid(), time.Now().Add(-time.Hour).UnixNano())
+	if err := os.WriteFile(lockPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := loadOrCreateDeviceIDAt(path)
+	if !isUUID(got) {
+		t.Fatalf("reclaimed id %q is not a UUID", got)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted id: %v", err)
+	}
+	if persisted := strings.TrimSpace(string(raw)); persisted != got {
+		t.Fatalf("persisted %q, want reclaimed %q", persisted, got)
+	}
+}
+
+func TestLoadOrCreateDeviceIDLiveHolderPastDeadlineDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const holderID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	if err := os.WriteFile(path, []byte(holderID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := path + ".lock"
+	ownerToken := fmt.Sprintf("%d.%d\n", os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(lockPath, []byte(ownerToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restore := SetDeviceIDMaxWait(0)
+	defer restore()
+
+	got := loadOrCreateDeviceIDAt(path)
+	if got != holderID {
+		t.Fatalf("got %q, want existing holder id %q", got, holderID)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted id: %v", err)
+	}
+	if persisted := strings.TrimSpace(string(raw)); persisted != holderID {
+		t.Fatalf("persisted %q, want unchanged holder id %q", persisted, holderID)
+	}
+}
+
+func TestLoadOrCreateDeviceIDLiveHolderPastDeadlineLeavesMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := path + ".lock"
+	ownerToken := fmt.Sprintf("%d.%d\n", os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(lockPath, []byte(ownerToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restore := SetDeviceIDMaxWait(0)
+	defer restore()
+
+	got := loadOrCreateDeviceIDAt(path)
+	if !isUUID(got) {
+		t.Fatalf("process-local id %q is not a UUID", got)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("live-holder deadline fallback must not publish: stat err=%v", err)
+	}
+}
+
+func TestLoadOrCreateDeviceIDCancelReturnsLocalWithoutWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := path + ".lock"
+	ownerToken := fmt.Sprintf("%d.%d\n", os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(lockPath, []byte(ownerToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got := LoadOrCreateDeviceIDAtContext(ctx, path)
+	if !isUUID(got) {
+		t.Fatalf("canceled id %q is not a UUID", got)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancellation must not persist a device id: stat err=%v", err)
 	}
 }

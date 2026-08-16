@@ -82,11 +82,11 @@ type Config struct {
 	ExtraAuthParams map[string]string
 
 	// ExtraHeaders are set on every device-authorization, token-poll, code
-	// exchange, and refresh HTTP request this Config makes. Most providers
-	// need none; Kimi Code's backend rejects all of those requests with 401
-	// unless its vendor-identity X-Msh-* headers are present (see
-	// kimiExtraHeaders in presets.go), which the generic RFC 8628/OAuth2 form
-	// bodies built elsewhere in this package have no other way to carry.
+	// exchange, and refresh HTTP request this Config makes. They are derived
+	// from the resolved destinations (after env overlays and issuer discovery),
+	// not from the raw override env vars. Most providers need none; Kimi
+	// Code's backend rejects those requests with 401 unless its vendor-identity
+	// X-Msh-* headers are present (see kimiExtraHeaders in presets.go).
 	ExtraHeaders map[string]string
 }
 

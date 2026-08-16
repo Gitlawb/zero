@@ -130,7 +130,7 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (Status, error) 
 	loginCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cfg, err = m.resolveEndpoints(loginCtx, cfg)
+	cfg, err = m.resolveEndpoints(loginCtx, opts.Provider, cfg)
 	if err != nil {
 		return Status{}, err
 	}
@@ -175,7 +175,7 @@ func (m *Manager) PrepareDeviceLogin(ctx context.Context, opts LoginOptions) (De
 	}
 	prepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cfg, err = m.resolveEndpoints(prepCtx, cfg)
+	cfg, err = m.resolveEndpoints(prepCtx, opts.Provider, cfg)
 	if err != nil {
 		return DeviceAuth{}, Config{}, err
 	}
@@ -211,12 +211,14 @@ func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg 
 
 // resolveEndpoints fills missing authorize/token/device endpoints from issuer
 // discovery (RFC 8414 then OIDC), leaving any explicitly-pinned endpoint intact.
-func (m *Manager) resolveEndpoints(ctx context.Context, cfg Config) (Config, error) {
+// ExtraHeaders are derived from the final destinations so header policy cannot
+// come from a raw issuer override while requests still use preset URLs.
+func (m *Manager) resolveEndpoints(ctx context.Context, name string, cfg Config) (Config, error) {
 	if trimmed(cfg.IssuerURL) == "" {
-		return cfg, nil
+		return attachProviderHeaders(name, cfg), nil
 	}
 	if cfg.AuthorizationEndpoint != "" && cfg.TokenEndpoint != "" && cfg.DeviceAuthorizationEndpoint != "" {
-		return cfg, nil
+		return attachProviderHeaders(name, cfg), nil
 	}
 	// Discovery is best-effort: a failure is non-fatal because pinned endpoints
 	// may already be sufficient for the chosen flow. Only merge on success (and
@@ -245,7 +247,7 @@ func (m *Manager) resolveEndpoints(ctx context.Context, cfg Config) (Config, err
 			cfg.DeviceAuthorizationEndpoint = meta.DeviceAuthorizationEndpoint
 		}
 	}
-	return cfg, nil
+	return attachProviderHeaders(name, cfg), nil
 }
 
 // discover tries the OAuth (RFC 8414) well-known path, then the OIDC
@@ -408,7 +410,7 @@ func (m *Manager) resolveConfigForKey(ctx context.Context, key string) (Config, 
 	// Fill any missing token/authorize/device endpoints from issuer discovery so a
 	// provider configured with only ZERO_OAUTH_<NAME>_ISSUER_URL can still refresh
 	// (refreshAndSave requires the token endpoint).
-	cfg, err = m.resolveEndpoints(ctx, cfg)
+	cfg, err = m.resolveEndpoints(ctx, name, cfg)
 	if err != nil {
 		return Config{}, err
 	}

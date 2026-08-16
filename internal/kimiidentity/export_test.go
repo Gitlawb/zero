@@ -1,6 +1,10 @@
 package kimiidentity
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
 // IsolateDeviceIDStorage redirects the env vars os.UserConfigDir consults so
 // subsequent DeviceID/Headers calls store under root for the duration of t
@@ -31,4 +35,14 @@ func SetBeforeRenameHook(hook func()) func() {
 	return func() {
 		beforeRenameHook = prev
 	}
+}
+
+func SetDeviceIDMaxWait(d time.Duration) func() {
+	prev := deviceIDMaxWait
+	deviceIDMaxWait = d
+	return func() { deviceIDMaxWait = prev }
+}
+
+func LoadOrCreateDeviceIDAtContext(ctx context.Context, path string) string {
+	return loadOrCreateDeviceIDAtContext(ctx, path)
 }

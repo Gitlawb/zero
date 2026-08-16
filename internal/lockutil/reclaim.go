@@ -163,11 +163,18 @@ func restoreRootedLock(root *os.Root, reclaimed, lockName string) error {
 		return err
 	}
 	// Hard-link incapable filesystem (FAT, some FUSE/network mounts): probe
-	// lockName with O_EXCL so we never overwrite a racer, then atomically
-	// rename the sidelined file back without depending on reading its contents.
+	// lockName with O_EXCL so we never overwrite a racer. Prefer writing the
+	// sidelined contents into the probe first so lockName is never observable
+	// as empty; if the read fails, fall back to the empty probe + rename.
+	raw, readErr := readSidelinedLock(root, reclaimed)
 	probe, err := root.OpenFile(lockName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
+	}
+	if readErr == nil && len(raw) > 0 {
+		if _, werr := probe.Write(raw); werr == nil {
+			_ = probe.Sync()
+		}
 	}
 	_ = probe.Close()
 	return root.Rename(reclaimed, lockName)

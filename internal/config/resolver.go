@@ -12,6 +12,7 @@ import (
 	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
@@ -447,7 +448,23 @@ func hasInheritedProviderCredentialMaterial(project ProviderProfile, candidate P
 	if project.CustomHeaders == nil && hasCustomHeaderMaterial(candidate.CustomHeaders) {
 		return true
 	}
+	if hasInheritedOAuthLogin(candidate) {
+		return true
+	}
 	return false
+}
+
+func hasInheritedOAuthLogin(candidate ProviderProfile) bool {
+	names := candidate.OAuthLoginCandidates()
+	if len(names) == 0 {
+		return false
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return false
+	}
+	_, _, ok := oauth.FirstStored(store, names)
+	return ok
 }
 
 func hasCustomHeaderMaterial(headers map[string]string) bool {

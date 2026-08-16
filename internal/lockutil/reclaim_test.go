@@ -207,7 +207,11 @@ func TestReclaimStaleLockRootedFallbackWhenLinkFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("root.Close: %v", err)
+		}
+	})
 
 	lockName := "lock"
 	lockPath := filepath.Join(dir, lockName)
@@ -225,6 +229,9 @@ func TestReclaimStaleLockRootedFallbackWhenLinkFails(t *testing.T) {
 	data, err := os.ReadFile(lockPath)
 	if err != nil || string(data) != "live-holder" {
 		t.Fatalf("restored lock contents = %q (err=%v), want %q", data, err, "live-holder")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+		t.Fatalf("expected only the restored lock, got %d entries (err=%v)", len(entries), err)
 	}
 }
 
@@ -246,7 +253,11 @@ func TestReclaimStaleLockRootedFallbackWhenLinkAndReadFail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("root.Close: %v", err)
+		}
+	})
 
 	lockName := "lock"
 	lockPath := filepath.Join(dir, lockName)
@@ -264,6 +275,9 @@ func TestReclaimStaleLockRootedFallbackWhenLinkAndReadFail(t *testing.T) {
 	data, err := os.ReadFile(lockPath)
 	if err != nil || string(data) != "live-holder" {
 		t.Fatalf("restored lock contents = %q (err=%v), want %q", data, err, "live-holder")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+		t.Fatalf("expected only the restored lock, got %d entries (err=%v)", len(entries), err)
 	}
 }
 

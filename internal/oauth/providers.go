@@ -69,16 +69,27 @@ func (r *Registry) ResolveConfig(name string, env map[string]string) (Config, Fl
 	if presetsAllowed(env) {
 		preset, _ = lookupOAuthPreset(name)
 	}
+	authEnv := strings.TrimSpace(envValue(env, envKey(name, "AUTHORIZE_URL")))
+	tokenEnv := strings.TrimSpace(envValue(env, envKey(name, "TOKEN_URL")))
+	deviceEnv := strings.TrimSpace(envValue(env, envKey(name, "DEVICE_URL")))
+	issuerEnv := strings.TrimSpace(envValue(env, envKey(name, "ISSUER_URL")))
+	presetAuth, presetToken, presetDevice := preset.AuthorizationEndpoint, preset.TokenEndpoint, preset.DeviceAuthorizationEndpoint
+	if issuerEnv != "" {
+		// An issuer override is a destination change. Keep only endpoints the
+		// operator also overrode; leftover preset URLs would mix header policy
+		// from the new issuer with requests that still go to the old host.
+		presetAuth, presetToken, presetDevice = "", "", ""
+	}
 	cfg := Config{
 		ClientID:                    firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "CLIENT_ID"))), preset.ClientID),
 		ClientSecret:                firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "CLIENT_SECRET"))), preset.ClientSecret),
-		AuthorizationEndpoint:       firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "AUTHORIZE_URL"))), preset.AuthorizationEndpoint),
-		TokenEndpoint:               firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "TOKEN_URL"))), preset.TokenEndpoint),
-		DeviceAuthorizationEndpoint: firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "DEVICE_URL"))), preset.DeviceAuthorizationEndpoint),
-		IssuerURL:                   firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "ISSUER_URL"))), preset.IssuerURL),
+		AuthorizationEndpoint:       firstNonEmpty(authEnv, presetAuth),
+		TokenEndpoint:               firstNonEmpty(tokenEnv, presetToken),
+		DeviceAuthorizationEndpoint: firstNonEmpty(deviceEnv, presetDevice),
+		IssuerURL:                   firstNonEmpty(issuerEnv, preset.IssuerURL),
 		Scopes:                      scopesOrPreset(envValue(env, envKey(name, "SCOPES")), preset.Scopes),
-		ExtraHeaders:                providerExtraHeaders(name, envValue(env, envKey(name, "AUTHORIZE_URL")), envValue(env, envKey(name, "TOKEN_URL")), envValue(env, envKey(name, "DEVICE_URL")), envValue(env, envKey(name, "ISSUER_URL"))),
 	}
+	cfg = attachProviderHeaders(name, cfg)
 	if cfg.ClientID == "" {
 		hint := ""
 		if _, ok := lookupOAuthPreset(name); ok {

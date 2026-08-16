@@ -214,7 +214,7 @@ func TestResolveEndpointsRejectsInsecureDiscoveredEndpoint(t *testing.T) {
 		_, _ = io.WriteString(w, `{"issuer":"`+server.URL+`","token_endpoint":"`+server.URL+`/token","authorization_endpoint":"http://evil.example/authorize"}`)
 	})
 	m := managerFor(t, map[string]string{}, nil)
-	_, err := m.resolveEndpoints(context.Background(), Config{IssuerURL: server.URL})
+	_, err := m.resolveEndpoints(context.Background(), "", Config{IssuerURL: server.URL})
 	if !errors.Is(err, ErrInsecureTokenEndpoint) {
 		t.Fatalf("resolveEndpoints err = %v, want ErrInsecureTokenEndpoint", err)
 	}
@@ -338,7 +338,9 @@ func TestCompleteDeviceLoginCancelAtCommitRestoresPreviousToken(t *testing.T) {
 	m := managerFor(t, env, nil)
 
 	prevToken := Token{AccessToken: "previous-valid-token", RefreshToken: "prev-rt"}
-	_ = m.store.Save(ProviderKey("demo"), prevToken)
+	if err := m.store.Save(ProviderKey("demo"), prevToken); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -456,5 +458,119 @@ func TestCompleteDeviceLoginTwoManagersSharingStoreConcurrent(t *testing.T) {
 	}
 	if err2 != nil || !ok2 || tok2.AccessToken != "token-2" {
 		t.Fatalf("prov2: tok=%+v ok=%v err=%v", tok2, ok2, err2)
+	}
+}
+
+func TestCompleteDeviceLoginTwoManagersSameKeyConcurrent(t *testing.T) {
+	fp1 := newFakeProvider(t, `{"access_token":"token-a"}`)
+	fp2 := newFakeProvider(t, `{"access_token":"token-b"}`)
+	storePath := filepath.Join(t.TempDir(), "tokens.json")
+	store1, err := NewStore(StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store2, err := NewStore(StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1, err := NewManager(ManagerOptions{Store: store1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := NewManager(ManagerOptions{Store: store2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg1 := Config{ClientID: "client", TokenEndpoint: fp1.server.URL + "/token"}
+	cfg2 := Config{ClientID: "client", TokenEndpoint: fp2.server.URL + "/token"}
+	auth1 := DeviceAuth{DeviceCode: "dc1", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+	auth2 := DeviceAuth{DeviceCode: "dc2", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := m1.CompleteDeviceLogin(context.Background(), "demo", cfg1, auth1)
+		errs <- err
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := m2.CompleteDeviceLogin(context.Background(), "demo", cfg2, auth2)
+		errs <- err
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("CompleteDeviceLogin: %v", err)
+		}
+	}
+
+	tok, ok, err := store2.Load(ProviderKey("demo"))
+	if err != nil || !ok {
+		t.Fatalf("load through second store: tok=%+v ok=%v err=%v", tok, ok, err)
+	}
+	if tok.AccessToken != "token-a" && tok.AccessToken != "token-b" {
+		t.Fatalf("surviving token = %q, want token-a or token-b", tok.AccessToken)
+	}
+}
+
+func TestPrepareDeviceLoginKimiIssuerOverrideUsesDiscoveredEndpoints(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	var discoveryHits, deviceHits atomic.Int32
+	var sawIdentity atomic.Bool
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		discoveryHits.Add(1)
+		_, _ = io.WriteString(w, `{"issuer":"`+server.URL+`","token_endpoint":"`+server.URL+`/token","device_authorization_endpoint":"`+server.URL+`/device","authorization_endpoint":"`+server.URL+`/authorize"}`)
+	})
+	mux.HandleFunc("/device", func(w http.ResponseWriter, r *http.Request) {
+		deviceHits.Add(1)
+		if r.Header.Get("X-Msh-Device-Id") != "" {
+			sawIdentity.Store(true)
+		}
+		_, _ = io.WriteString(w, `{"device_code":"dc","user_code":"U-1","verification_uri":"https://example/dev","expires_in":600,"interval":1}`)
+	})
+
+	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "tok.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(ManagerOptions{
+		Store:        store,
+		AllowPresets: true,
+		Env: map[string]string{
+			"ZERO_OAUTH_KIMI_CODE_ISSUER_URL": server.URL,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	auth, cfg, err := m.PrepareDeviceLogin(context.Background(), LoginOptions{Provider: "kimi-code"})
+	if err != nil {
+		t.Fatalf("PrepareDeviceLogin: %v", err)
+	}
+	if auth.UserCode != "U-1" {
+		t.Fatalf("auth = %+v", auth)
+	}
+	if cfg.TokenEndpoint != server.URL+"/token" || cfg.DeviceAuthorizationEndpoint != server.URL+"/device" {
+		t.Fatalf("discovered endpoints = token %q device %q", cfg.TokenEndpoint, cfg.DeviceAuthorizationEndpoint)
+	}
+	if cfg.TokenEndpoint == "https://auth.kimi.com/api/oauth/token" || cfg.DeviceAuthorizationEndpoint == "https://auth.kimi.com/api/oauth/device_authorization" {
+		t.Fatal("issuer override still used preset Kimi destinations")
+	}
+	if len(cfg.ExtraHeaders) != 0 {
+		t.Fatalf("non-canonical discovered host must not send X-Msh-*: %#v", cfg.ExtraHeaders)
+	}
+	if discoveryHits.Load() == 0 || deviceHits.Load() == 0 {
+		t.Fatalf("discoveryHits=%d deviceHits=%d", discoveryHits.Load(), deviceHits.Load())
+	}
+	if sawIdentity.Load() {
+		t.Fatal("device request sent X-Msh-* to a non-canonical issuer override")
 	}
 }
