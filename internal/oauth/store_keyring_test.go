@@ -4089,3 +4089,39 @@ func TestStoreKeyringInPlaceShrinkClearsStaleUnprotectedSlots(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreKeyringFailedLegacyGetPreservesIndexedTokens(t *testing.T) {
+	kr := &legacyGetFailKR{fakeKR: newFakeKR(), fail: false}
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"XDG_CONFIG_HOME": t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+	blob := s.blob.(keyringBlob)
+	if err := blob.writeLegacyOrigin(map[string]bool{key: true}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	tokData, _ := json.Marshal(Token{AccessToken: "tok-alpha"})
+	kr.data[keyringService+"/"+key] = base64.StdEncoding.EncodeToString(tokData)
+	if _, _, err := blob.writeKeyIndex([]string{key}, 0, 0, nil, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+
+	kr.fail = true
+
+	tok, ok, err := s.Load(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || tok.AccessToken != "tok-alpha" {
+		t.Fatalf("Load = (%+v, %v), want (tok-alpha, true) despite transient legacy read error", tok, ok)
+	}
+
+	st, err := s.Status("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st) != 1 || st[0].Key != key {
+		t.Fatalf("Status = %+v, want 1 token with key %s", st, key)
+	}
+}

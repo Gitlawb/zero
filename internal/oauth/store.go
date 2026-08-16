@@ -827,6 +827,7 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 	// can overwrite an explicit new-binary Save with an older account's token.
 	var legacyTokens map[string]Token
 	legacyLoaded := false
+	legacyReadOK := false
 	loadLegacy := func() {
 		if legacyLoaded {
 			return
@@ -837,6 +838,7 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 		// transient error for an empty blob.
 		if lt, lerr := b.readLegacyTokens(); lerr == nil {
 			legacyTokens = lt
+			legacyReadOK = true
 		}
 		legacyLoaded = true
 	}
@@ -898,7 +900,7 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 	// transiently (not persisted): the durable version happens in write(),
 	// consistent with every other best-effort check in this function.
 	legacyOrigin, lerr := b.readLegacyOrigin()
-	if lerr == nil && len(legacyOrigin) > 0 {
+	if lerr == nil && len(legacyOrigin) > 0 && legacyReadOK {
 		for key := range tokens {
 			if !legacyOrigin[key] {
 				continue
