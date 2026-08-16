@@ -3,37 +3,36 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T10:30:02.220Z",
-  "durationMs": 12710278,
+  "endedAt": "2026-08-16T10:48:21.949Z",
+  "durationMs": 13810008,
   "status": "running",
   "tokens": {
-    "total": 101517,
-    "input": 290,
-    "output": 101227
+    "total": 127201,
+    "input": 356,
+    "output": 126845
   },
   "cost": {
-    "usd": 29.717
+    "usd": 34.2034
   },
-  "toolCalls": 142,
+  "toolCalls": 174,
   "lines": {
-    "added": 157,
-    "removed": 13
+    "added": 238,
+    "removed": 21
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
-    "internal/agent/guardrails.go",
-    "internal/agent/guardrails_false_admission_test.go",
-    "internal/sandbox/scope_temporary_test.go"
+    "internal/memory/escape_test.go",
+    "internal/memory/memory.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "da56b1369344671f13f1d52cd02ca3464856b135",
+    "headAfter": "61a8cbe748e6d37149d35ddf9b138050911af2dc",
     "commitShas": [
-      "da56b1369344671f13f1d52cd02ca3464856b135"
+      "61a8cbe748e6d37149d35ddf9b138050911af2dc"
     ]
   },
-  "summary": "Full suite clean on #829 (it carries `internal/cli` changes that the two network-dependent doctor tests pass under). Committing:",
+  "summary": "The message is actionable — it names the promise broken and the exact file. Committing:",
   "originUrl": "https://getorigin.io/sessions/local-abff1ceb-89a0-4779-bf13-17d2552ca680"
 }
