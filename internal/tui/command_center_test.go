@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -70,6 +71,74 @@ func TestModelPersistenceUsesResolvedPersistedSpelling(t *testing.T) {
 		}
 		if cfg.Providers[0].Model != "gpt-5.5" {
 			t.Fatalf("model = %q, want gpt-5.5 persisted onto the OpenAI row", cfg.Providers[0].Model)
+		}
+	})
+}
+
+// The switch deliberately continues in-session when config.json cannot be
+// updated, so the note is the only thing telling the user the two now disagree.
+// Silence here would read as a saved switch that was never persisted.
+func TestSwitchProviderModelReportsPersistenceFailures(t *testing.T) {
+	saved := []config.ProviderProfile{
+		{Name: "OpenAI", CatalogID: "openai", Model: "gpt-5.1", APIKey: "sk-test"},
+		{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "m1"},
+	}
+	newSwitchModel := func(t *testing.T, configJSON string) model {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(configJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return newModel(context.Background(), Options{
+			UserConfigPath:  path,
+			ProviderName:    "ollama",
+			ModelName:       "m1",
+			Provider:        &fakeProvider{},
+			ProviderProfile: saved[1],
+			SavedProviders:  saved,
+			NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+				return &fakeProvider{}, nil
+			},
+		})
+	}
+
+	t.Run("unreadable config", func(t *testing.T) {
+		m := newSwitchModel(t, `{"providers":[`) // invalid JSON
+		next, status, ok, _ := m.switchProviderModel("OpenAI", "gpt-5.5")
+		if !ok {
+			t.Fatalf("the in-session switch must still succeed: %s", status)
+		}
+		if !strings.Contains(status, "config.json could not be read") {
+			t.Fatalf("status = %q, want a persistence note", status)
+		}
+		// The session did switch, which is exactly why the note has to be there.
+		if next.providerName != "OpenAI" {
+			t.Fatalf("providerName = %q, want OpenAI", next.providerName)
+		}
+	})
+
+	t.Run("ambiguous rows block the write", func(t *testing.T) {
+		// Duplicate case variants pass the persisted gate but make the write
+		// itself unresolvable.
+		m := newSwitchModel(t, `{"providers":[{"name":"OpenAI"},{"name":"openai"}]}`)
+		_, status, ok, _ := m.switchProviderModel("OpenAI", "gpt-5.5")
+		if !ok {
+			t.Fatalf("the in-session switch must still succeed: %s", status)
+		}
+		if !strings.Contains(status, "config.json was not updated") {
+			t.Fatalf("status = %q, want the active-provider persistence note", status)
+		}
+	})
+
+	t.Run("env-derived provider stays silent", func(t *testing.T) {
+		// No row to update is not a failure, so it must not produce a note.
+		m := newSwitchModel(t, `{"providers":[{"name":"ollama","model":"m1"}]}`)
+		_, status, ok, _ := m.switchProviderModel("OpenAI", "gpt-5.5")
+		if !ok {
+			t.Fatalf("switch failed: %s", status)
+		}
+		if strings.Contains(status, "Note:") {
+			t.Fatalf("status = %q, want no note for a provider with no persisted row", status)
 		}
 	})
 }

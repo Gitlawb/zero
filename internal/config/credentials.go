@@ -109,10 +109,18 @@ func PublishProviderCredential(path string, exactName string, key string) error 
 	if err := MarkProviderAPIKeyStored(path, exactName); err != nil {
 		// Put the store back exactly as it was: restore a prior key rather than
 		// deleting it, and only delete when this call created the entry.
+		var rollbackErr error
 		if hadPrevious {
-			_ = store.Set(exactName, previous)
+			rollbackErr = store.Set(exactName, previous)
 		} else {
-			_, _ = store.Delete(exactName)
+			_, rollbackErr = store.Delete(exactName)
+		}
+		if rollbackErr != nil {
+			// A failed rollback is the state the caller most needs to hear
+			// about: the store now holds a key the config does not describe.
+			// Never let it be reported as a plain publication failure. The key
+			// value itself stays out of the message.
+			return fmt.Errorf("%w (credential store rollback also failed: %v)", err, rollbackErr)
 		}
 		return err
 	}

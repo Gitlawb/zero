@@ -287,12 +287,7 @@ func (m model) handleProviderManageListKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			// Resolve the retention outcome now, from the same predicate the
 			// delete uses, so the confirmation cannot promise a key removal the
 			// delete will not perform.
-			wizard.manageDeleteKeepsKey = false
-			if path := strings.TrimSpace(m.userConfigPath); path != "" {
-				if retained, err := config.ProviderKeyRetainedAfterRemoval(path, row.profile.Name); err == nil {
-					wizard.manageDeleteKeepsKey = retained
-				}
-			}
+			wizard.manageDeleteKeyNote = providerDeleteKeyNote(m.userConfigPath, row.profile.Name)
 		}
 		return m, nil
 	}
@@ -425,6 +420,26 @@ func removeSavedProvider(saved []config.ProviderProfile, name string) []config.P
 		kept = append(kept, profile)
 	}
 	return kept
+}
+
+// providerDeleteKeyNote is the delete confirmation's sentence about the stored
+// key, computed from the same helpers the delete itself uses so the prompt can
+// never promise an outcome the delete will not produce. It returns "" — no
+// claim at all — for a row with nothing to say: an env-derived provider with no
+// persisted row, no user config path, or a config whose ambiguity will make the
+// delete fail before it touches anything.
+func providerDeleteKeyNote(configPath string, name string) string {
+	if strings.TrimSpace(configPath) == "" {
+		return ""
+	}
+	retained, err := config.ProviderKeyRetainedAfterRemoval(configPath, name)
+	if err != nil {
+		return ""
+	}
+	if retained {
+		return "Its stored API key is kept — another saved provider still uses that credential."
+	}
+	return "This also removes its stored API key."
 }
 
 func samePersistedProviderName(left, right string) bool {
@@ -792,11 +807,11 @@ func (wizard *providerWizardState) renderManageStep(width int) []string {
 		}
 		lines = append(lines, fitStyledLine(zeroTheme.faint.Render(detail), width))
 		if wizard.manageDeleting {
-			keyNote := "This also removes its stored API key."
-			if wizard.manageDeleteKeepsKey {
-				keyNote = "Its stored API key is kept — another saved provider shares that credential."
+			prompt := "Delete " + row.profile.Name + "?"
+			if note := strings.TrimSpace(wizard.manageDeleteKeyNote); note != "" {
+				prompt += " " + note
 			}
-			lines = append(lines, fitStyledLine(zeroTheme.red.Render("Delete "+row.profile.Name+"? "+keyNote+"  Enter/y confirm · Esc/n cancel"), width))
+			lines = append(lines, fitStyledLine(zeroTheme.red.Render(prompt+"  Enter/y confirm · Esc/n cancel"), width))
 		}
 	}
 	return lines

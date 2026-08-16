@@ -402,7 +402,7 @@ func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testi
 		t.Fatal(err)
 	}
 	if !ok || key != "sk-working" {
-		t.Fatalf("stored key = %q (present=%v), want the previous sk-working restored", key, ok)
+		t.Fatalf("stored key does not match the previous value (present=%v, len=%d), want sk-working restored", ok, len(key))
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
@@ -452,7 +452,7 @@ func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
 	}
 	key, ok, err := store.Get("openrouter")
 	if err != nil || !ok || key != "sk-new" {
-		t.Fatalf("stored key = %q (present=%v, err=%v), want sk-new", key, ok, err)
+		t.Fatalf("stored key does not match (present=%v, len=%d, err=%v), want sk-new", ok, len(key), err)
 	}
 	var cfg FileConfig
 	data, err := os.ReadFile(path)
@@ -463,6 +463,6 @@ func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !cfg.Providers[0].APIKeyStored || strings.TrimSpace(cfg.Providers[0].APIKeyEnv) != "" {
-		t.Fatalf("marker not published: %+v", cfg.Providers[0])
+		t.Fatalf("marker not published: apiKeyStored=%v apiKeyEnv=%q", cfg.Providers[0].APIKeyStored, cfg.Providers[0].APIKeyEnv)
 	}
 }

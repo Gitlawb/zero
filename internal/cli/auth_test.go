@@ -459,7 +459,7 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !ok || key != "sk-working" {
-		t.Fatalf("stored key = %q (present=%v), want the previous sk-working preserved", key, ok)
+		t.Fatalf("stored key does not match (present=%v, len=%d), want the previous sk-working preserved", ok, len(key))
 	}
 	// The minted key is still handed over for manual use.
 	if !strings.Contains(stdout.String(), "sk-minted") {

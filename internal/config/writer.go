@@ -189,7 +189,14 @@ func ProviderKeyRetainedAfterRemoval(path string, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	name = strings.TrimSpace(name)
+	// Resolve first, for the same reason the delete does: callers hand this a
+	// spelling from a resolved list, which may not be the row's own. Previewing
+	// against an unresolved name removes nothing, so a "key is kept" preview
+	// could precede a delete that resolves the row and takes the key with it.
+	name, err = resolvePersistedProviderName(providers, name)
+	if err != nil {
+		return false, err
+	}
 	remaining := make([]ProviderProfile, 0, len(providers))
 	removed := false
 	for _, provider := range providers {

@@ -449,13 +449,13 @@ type providerWizardState struct {
 	manageRows     []providerManagerRow
 	manageCursor   int
 	manageDeleting bool
-	// manageDeleteKeepsKey is resolved when the delete confirmation opens, from
+	// manageDeleteKeyNote is resolved when the delete confirmation opens, from
 	// config.ProviderKeyRetainedAfterRemoval, so the prompt and the delete agree
-	// about whether the stored key survives.
-	manageDeleteKeepsKey bool
-	manageStatus         string
-	manageCredGen        int
-	manageActiveName     string
+	// about what happens to the stored key. "" means make no claim.
+	manageDeleteKeyNote string
+	manageStatus        string
+	manageCredGen       int
+	manageActiveName    string
 	// Edit state: field-level editor for one saved profile.
 	editOriginal config.ProviderProfile
 	editDraft    config.ProviderProfile

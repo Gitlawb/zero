@@ -828,7 +828,7 @@ func TestProviderManagerDeleteConfirmMatchesKeyRetentionPolicy(t *testing.T) {
 			[]config.ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "WORK", APIKeyStored: true}},
 			1,
 		)
-		if !m.providerWizard.manageDeleteKeepsKey {
+		if m.providerWizard.manageDeleteKeyNote == "" {
 			t.Fatal("retention not resolved for a survivor that claims the credential")
 		}
 		view := strings.Join(m.providerWizard.renderManageStep(80), "\n")
@@ -843,8 +843,8 @@ func TestProviderManagerDeleteConfirmMatchesKeyRetentionPolicy(t *testing.T) {
 			[]config.ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "other"}},
 			0,
 		)
-		if m.providerWizard.manageDeleteKeepsKey {
-			t.Fatal("retention must be false when no survivor claims the credential")
+		if m.providerWizard.manageDeleteKeyNote == "" {
+			t.Fatal("delete confirmation made no claim about a persisted row's key")
 		}
 		view := strings.Join(m.providerWizard.renderManageStep(80), "\n")
 		if !strings.Contains(view, "also removes its stored API key") {
@@ -892,5 +892,61 @@ func TestProviderManagerRemoveDeletesKeyWhenSurvivorNeverClaimedIt(t *testing.T)
 	}
 	if status := next.providerWizard.manageStatus; !strings.Contains(status, "stored API key will also be deleted") {
 		t.Fatalf("delete status = %q, want the key-deletion note", status)
+	}
+}
+
+// A row visible only because Resolve() synthesized it from an env var has no
+// persisted profile and no stored key, so the confirmation must make no claim
+// about a key rather than promising a removal that cannot happen. The same
+// holds when the config is too ambiguous for the delete to proceed at all.
+func TestProviderDeleteKeyNoteMakesNoClaimWithoutAResolvableRow(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+
+	cases := []struct {
+		name       string
+		configJSON string
+		row        string
+	}{
+		{
+			name:       "env-derived row with no persisted profile",
+			configJSON: `{"providers":[{"name":"other"}]}`,
+			row:        "openai",
+		},
+		{
+			name:       "ambiguous duplicate rows the delete cannot resolve",
+			configJSON: `{"providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`,
+			row:        "Work",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(testCase.configJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if note := providerDeleteKeyNote(path, testCase.row); note != "" {
+				t.Fatalf("note = %q, want no claim about the stored key", note)
+			}
+		})
+	}
+	// No user config path at all: nothing can be promised either.
+	if note := providerDeleteKeyNote("", "work"); note != "" {
+		t.Fatalf("note = %q, want no claim without a config path", note)
+	}
+}
+
+// The preview must resolve the row the same way the delete does: a case-variant
+// spelling that removes nothing would preview "key kept" for a delete that
+// resolves the row and takes the key with it.
+func TestProviderDeleteKeyNoteResolvesCaseVariantSpelling(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"WORK","apiKeyStored":true},{"name":"other"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// "work" addresses the sole WORK row, whose removal takes the key with it.
+	note := providerDeleteKeyNote(path, "work")
+	if !strings.Contains(note, "also removes its stored API key") {
+		t.Fatalf("note = %q, want the key-removal wording for the resolved row", note)
 	}
 }

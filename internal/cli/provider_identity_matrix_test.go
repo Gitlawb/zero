@@ -80,8 +80,8 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		if cfg := readFileConfig(t, configPath); len(cfg.Providers) != 0 {
 			t.Fatalf("providers = %#v, want the row removed", cfg.Providers)
 		}
-		if key, ok := storedProviderKey(t, configPath, "work"); ok {
-			t.Fatalf("stored key %q survived removal of its only owner", key)
+		if _, ok := storedProviderKey(t, configPath, "work"); ok {
+			t.Fatal("stored key survived removal of its only owner")
 		}
 	})
 
@@ -123,7 +123,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 			t.Fatalf("rejected removal rewrote config:\n%s", after)
 		}
 		if key, ok := storedProviderKey(t, configPath, "work"); !ok || key != "sk-work" {
-			t.Fatalf("stored key = %q (present=%v), want sk-work untouched", key, ok)
+			t.Fatalf("stored key does not match (present=%v, len=%d), want sk-work untouched", ok, len(key))
 		}
 	})
 
@@ -143,7 +143,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		}
 		key, ok := storedProviderKey(t, configPath, "WORK")
 		if !ok || key != "sk-shared" {
-			t.Fatalf("stored key = %q (present=%v), want the survivor's sk-shared kept", key, ok)
+			t.Fatalf("stored key does not match (present=%v, len=%d), want the survivor's sk-shared kept", ok, len(key))
 		}
 		// The survivor must actually be able to load it.
 		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
@@ -151,7 +151,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 			t.Fatal(err)
 		}
 		if loaded := config.ApplyStoredAPIKey(cfg.Providers[0], store); strings.TrimSpace(loaded.APIKey) != "sk-shared" {
-			t.Fatalf("survivor loaded APIKey = %q, want sk-shared", loaded.APIKey)
+			t.Fatalf("survivor did not load the retained key (len=%d), want sk-shared", len(strings.TrimSpace(loaded.APIKey)))
 		}
 	})
 
@@ -167,8 +167,8 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		}
 		// The surviving WORK row never claimed the credential, so keeping the
 		// secret would only orphan it behind a marker ApplyStoredAPIKey skips.
-		if key, ok := storedProviderKey(t, configPath, "WORK"); ok {
-			t.Fatalf("stored key %q was orphaned behind a markerless survivor", key)
+		if _, ok := storedProviderKey(t, configPath, "WORK"); ok {
+			t.Fatal("stored key was orphaned behind a markerless survivor")
 		}
 		if !strings.Contains(stdout.String(), "Deleted its stored API key.") {
 			t.Fatalf("stdout = %q, want the key-deletion note", stdout.String())
@@ -225,10 +225,10 @@ func TestProviderIdentityMatrix(t *testing.T) {
 			t.Fatalf("config = %#v, want only the long-s row remaining", cfg)
 		}
 		if key, ok := storedProviderKey(t, configPath, "ſ"); !ok || key != "sk-long" {
-			t.Fatalf("long-s key = %q (present=%v), want sk-long untouched", key, ok)
+			t.Fatalf("long-s key does not match (present=%v, len=%d), want sk-long untouched", ok, len(key))
 		}
-		if key, ok := storedProviderKey(t, configPath, "s"); ok {
-			t.Fatalf("latin-s key %q survived removal of its only owner", key)
+		if _, ok := storedProviderKey(t, configPath, "s"); ok {
+			t.Fatal("latin-s key survived removal of its only owner")
 		}
 	})
 }
