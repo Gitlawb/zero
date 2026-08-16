@@ -3,40 +3,35 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T17:22:05.174Z",
-  "durationMs": 37433231,
+  "endedAt": "2026-08-16T17:33:54.512Z",
+  "durationMs": 38142574,
   "status": "running",
   "tokens": {
-    "total": 305982,
-    "input": 674,
-    "output": 305308
+    "total": 310807,
+    "input": 688,
+    "output": 310119
   },
   "cost": {
-    "usd": 71.8196
+    "usd": 73.643
   },
-  "toolCalls": 329,
+  "toolCalls": 336,
   "lines": {
-    "added": 350,
-    "removed": 6
+    "added": 37,
+    "removed": 12
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
-    "internal/agent/guardrails.go",
-    "internal/agent/guardrails_false_admission_test.go",
-    "internal/measurements/measurements.go",
-    "internal/measurements/measurements_test.go",
-    "internal/memory/escape_test.go",
-    "internal/memory/memory.go"
+    "internal/memory/escape_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "df228770581bdacb3a5ea03e1dce18bd12c64fe3",
+    "headAfter": "1f28bcb8a6f29ac7d0bf57f8c314cb758a7eb3e4",
     "commitShas": [
-      "df228770581bdacb3a5ea03e1dce18bd12c64fe3"
+      "1f28bcb8a6f29ac7d0bf57f8c314cb758a7eb3e4"
     ]
   },
-  "summary": "Now re-syncing #829 to all three moved heads:",
+  "summary": "My **test** is wrong, not the production code. On Windows `linkDir` makes a *junction* — a directory — so `.gitignore` becomes a directory and the write fails with \"is a directory\" instead of `ErrNotPrivate`. It still fails closed; my assertion was just too strict about which error:",
   "originUrl": "https://getorigin.io/sessions/local-abff1ceb-89a0-4779-bf13-17d2552ca680"
 }
