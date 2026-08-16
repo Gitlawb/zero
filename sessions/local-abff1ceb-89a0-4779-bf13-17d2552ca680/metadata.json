@@ -3,36 +3,36 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T10:48:21.949Z",
-  "durationMs": 13810008,
+  "endedAt": "2026-08-16T10:57:28.324Z",
+  "durationMs": 14356385,
   "status": "running",
   "tokens": {
-    "total": 127201,
-    "input": 356,
-    "output": 126845
+    "total": 147843,
+    "input": 392,
+    "output": 147451
   },
   "cost": {
-    "usd": 34.2034
+    "usd": 37.1452
   },
-  "toolCalls": 174,
+  "toolCalls": 192,
   "lines": {
-    "added": 238,
-    "removed": 21
+    "added": 284,
+    "removed": 58
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
-    "internal/memory/escape_test.go",
-    "internal/memory/memory.go"
+    "internal/measurements/measurements.go",
+    "internal/measurements/measurements_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "61a8cbe748e6d37149d35ddf9b138050911af2dc",
+    "headAfter": "f0fb7bb2c333c8864c207adff1f8194a6b0f74a1",
     "commitShas": [
-      "61a8cbe748e6d37149d35ddf9b138050911af2dc"
+      "f0fb7bb2c333c8864c207adff1f8194a6b0f74a1"
     ]
   },
-  "summary": "The message is actionable — it names the promise broken and the exact file. Committing:",
+  "summary": "That skills flake recurred. Since it's now appeared in multiple worktrees, let me capture what it actually says:",
   "originUrl": "https://getorigin.io/sessions/local-abff1ceb-89a0-4779-bf13-17d2552ca680"
 }
