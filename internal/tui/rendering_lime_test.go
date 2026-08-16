@@ -1122,6 +1122,20 @@ func TestToolCardHeadCollapsesMultilineCommand(t *testing.T) {
 	}
 }
 
+func TestToolCardHeadStylesShellCommandButNotCommandOutput(t *testing.T) {
+	previous := zeroTheme
+	defer func() { zeroTheme = previous }()
+	_, zeroTheme = themeForMode("nord", true)
+
+	head := toolCardHead("bash", "gofmt -w calculator.go && go run . divide 9 2", "", "", "", "", false, zeroTheme.green, false, 120, cardRenderOptions{})
+	if !strings.Contains(head, "\x1b[") {
+		t.Fatalf("shell command head should be styled, got %q", head)
+	}
+	if plain := ansiPattern.ReplaceAllString(head, ""); !strings.Contains(plain, "Ran gofmt -w calculator.go && go run . divide 9 2") {
+		t.Fatalf("shell command head changed visible text to %q", plain)
+	}
+}
+
 func TestExecCommandCardBodyShowsSessionAndExit(t *testing.T) {
 	m := limeTestModel()
 	runningDetail := "output:\nServing HTTP on 0.0.0.0 port 8000\nsession_id: 1000\nUse write_stdin with session_id 1000 to poll, send input, or interrupt it."

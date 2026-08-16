@@ -96,7 +96,11 @@ func themeForMode(mode themeMode, terminalDark bool) (themeMode, tuiTheme) {
 		return themeSystem, buildSystemTheme()
 	}
 	if entry, ok := lookupTheme(string(mode)); ok {
-		return themeMode(entry.Name), buildTheme(paletteForTerminal(entry.Palette, entry.IsDark, terminalDark))
+		theme := buildTheme(paletteForTerminal(entry.Palette, entry.IsDark, terminalDark))
+		if entry.IsDark == terminalDark {
+			theme.codeTheme = codeThemeForMode(themeMode(entry.Name))
+		}
+		return themeMode(entry.Name), theme
 	}
 	return themeSystem, buildSystemTheme()
 }

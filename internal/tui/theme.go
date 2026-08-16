@@ -15,6 +15,11 @@ import (
 // no hex literal may appear outside theme_palettes.go (the palette tables + theme
 // registry).
 type tuiTheme struct {
+	// codeTheme supplies lexical colors for code views and diff bodies. It is nil
+	// when the active palette has no matching code palette, in which case the
+	// renderer uses the existing semantic token colors below.
+	codeTheme *codeSyntaxTheme
+
 	// Base tokens.
 	ink        lipgloss.Style // primary text
 	muted      lipgloss.Style // secondary text, assistant interim prose

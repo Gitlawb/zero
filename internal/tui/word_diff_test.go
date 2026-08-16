@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/alecthomas/chroma/v2"
 )
 
 func TestChangedSpan(t *testing.T) {
@@ -62,5 +64,39 @@ func TestDiffBodyWordHighlightRenders(t *testing.T) {
 	// addBgWord #2e654d -> "46;101;77"; delBgWord #502d30 -> "80;45;48"
 	if !strings.Contains(joined, "46;101;77") || !strings.Contains(joined, "80;45;48") {
 		t.Errorf("expected changed spans on the brighter word bg, got:\n%s", joined)
+	}
+}
+
+func TestMixedDiffSyntaxHighlightsCodeOnBothSides(t *testing.T) {
+	previous := zeroTheme
+	defer func() { zeroTheme = previous }()
+	_, zeroTheme = themeForMode("nord", true)
+
+	diff := strings.Join([]string{
+		"--- a/main.go",
+		"+++ b/main.go",
+		"@@ -1,5 +1,8 @@",
+		" package main",
+		" ",
+		"-import \"old\"",
+		"+import \"fmt\"",
+		" ",
+		" func greeting(name string) string {",
+		"+\tif name == \"\" {",
+		"+\t\tname = \"friend\"",
+		"+\t}",
+		" \treturn fmt.Sprintf(\"Hello, %s!\", name)",
+		" }",
+	}, "\n")
+	body := diffCardBody(diff, 100, cardRenderOptions{bodyCap: 20})
+	joined := strings.Join(body.lines, "\n")
+
+	addedKeyword := tokenStyle(chroma.Keyword).Background(zeroTheme.addLine.GetBackground()).Render("if")
+	if !strings.Contains(joined, addedKeyword) {
+		t.Fatalf("mixed diff added code must retain syntax colors, got:\n%s", joined)
+	}
+	contextKeyword := tokenStyle(chroma.Keyword).Render("func")
+	if !strings.Contains(joined, contextKeyword) {
+		t.Fatalf("mixed diff context code must retain syntax colors, got:\n%s", joined)
 	}
 }
