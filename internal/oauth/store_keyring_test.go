@@ -512,10 +512,10 @@ func TestStoreKeyringIndexGrowthInterruptionsPreserveOldLayout(t *testing.T) {
 		}
 		return data
 	}
-	mutations := func() map[string]bool {
-		m := make(map[string]bool, len(added))
+	mutations := func() map[string]mutationIntent {
+		m := make(map[string]mutationIntent, len(added))
 		for _, key := range added {
-			m[key] = false
+			m[key] = mutationReplace
 		}
 		return m
 	}
@@ -3112,7 +3112,7 @@ func TestKeyringWriteAbortsBeforeAnyMutationOnLeaseLoss(t *testing.T) {
 	}
 	alreadyLost := func() error { return fmt.Errorf("simulated lease loss") }
 
-	err = b.write(data, map[string]bool{ProviderKey("alpha"): false}, alreadyLost)
+	err = b.write(data, map[string]mutationIntent{ProviderKey("alpha"): mutationReplace}, alreadyLost)
 	if err == nil || !strings.Contains(err.Error(), "simulated lease loss") {
 		t.Fatalf("write err = %v, want the simulated lease-loss error surfaced", err)
 	}
@@ -3136,11 +3136,11 @@ func TestKeyringWriteAbortsMidSequenceOnLeaseLoss(t *testing.T) {
 
 	names := []string{"alpha", "bravo", "charlie", "delta", "echo"}
 	tokens := make(map[string]Token, len(names))
-	mutations := make(map[string]bool, len(names))
+	mutations := make(map[string]mutationIntent, len(names))
 	for _, name := range names {
 		key := ProviderKey(name)
 		tokens[key] = Token{AccessToken: name}
-		mutations[key] = false
+		mutations[key] = mutationReplace
 	}
 	state := storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens}
 	data, err := json.Marshal(state)
@@ -3385,7 +3385,7 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := blob.write(state, map[string]bool{ProviderKey("gamma"): false}, noLeaseLoss); err != nil {
+	if err := blob.write(state, map[string]mutationIntent{ProviderKey("gamma"): mutationReplace}, noLeaseLoss); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	// beta entry must still exist (not deleted: it was absent from truncated livePrior).
@@ -3492,7 +3492,7 @@ func TestWritePreservesMissingMiddleChunkSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := blob.write(data, map[string]bool{ProviderKey("fill-000"): false}, noLeaseLoss); err != nil {
+	if err := blob.write(data, map[string]mutationIntent{ProviderKey("fill-000"): mutationReplace}, noLeaseLoss); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -3638,15 +3638,36 @@ func TestStoreKeyringReloginRetiresLegacyOriginPrecedence(t *testing.T) {
 	if _, ok, err := s1.Load(ProviderKey("alpha")); err != nil || !ok {
 		t.Fatalf("initial Load(alpha): ok=%v, err=%v", ok, err)
 	}
+	if err := s1.saveRefreshed(ProviderKey("beta"), Token{AccessToken: "beta-token"}); err != nil {
+		t.Fatalf("saveRefreshed(beta) to persist legacyOrigin: %v", err)
+	}
 
-	// 2. Old binary logs out alpha by writing {beta} to the legacy blob.
+	// 2. A token refresh of an origin-marked key must keep the origin so
+	// that an old-binary logout remains visible to a later absence-heuristic
+	// pass. Save() would retire the origin and hide the logout.
+	if err := s1.saveRefreshed(ProviderKey("alpha"), Token{AccessToken: "refreshed-alpha-token"}); err != nil {
+		t.Fatalf("saveRefreshed(alpha): %v", err)
+	}
+	originBlob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+	originAfterRefresh, err := originBlob.readLegacyOrigin()
+	if err != nil {
+		t.Fatalf("readLegacyOrigin after refresh: %v", err)
+	}
+	if !originAfterRefresh[ProviderKey("alpha")] {
+		t.Fatal("saveRefreshed(alpha) retired legacyOrigin; old-binary logout would no longer be observed")
+	}
+	if tok, ok, err := s1.Load(ProviderKey("alpha")); err != nil || !ok || tok.AccessToken != "refreshed-alpha-token" {
+		t.Fatalf("Load(alpha) after refresh: tok=%v, ok=%v, err=%v", tok, ok, err)
+	}
+
+	// 3. Old binary logs out alpha by writing {beta} to the legacy blob.
 	legacyTokensAfterLogout := map[string]Token{
 		ProviderKey("beta"): {AccessToken: "beta-token"},
 	}
 	legacyRaw2, _ := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: legacyTokensAfterLogout})
 	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyRaw2)
 
-	// 3. New binary explicitly logs into alpha with a new token.
+	// 4. New binary explicitly logs into alpha with a new token.
 	if err := s1.Save(ProviderKey("alpha"), Token{AccessToken: "new-alpha-token"}); err != nil {
 		t.Fatalf("Save(alpha): %v", err)
 	}
@@ -3730,11 +3751,11 @@ func TestKeyringWriteSynchronousCheckLeaseAbortsOnReplacedLock(t *testing.T) {
 
 	names := []string{"p1", "p2", "p3"}
 	tokens := make(map[string]Token, len(names))
-	mutations := make(map[string]bool, len(names))
+	mutations := make(map[string]mutationIntent, len(names))
 	for _, n := range names {
 		k := ProviderKey(n)
 		tokens[k] = Token{AccessToken: n}
-		mutations[k] = false
+		mutations[k] = mutationReplace
 	}
 	state := storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens}
 	data, err := json.Marshal(state)

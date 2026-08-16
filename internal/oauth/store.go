@@ -431,8 +431,30 @@ func sanitizeLockComponent(s string) string {
 // backend, or a "keyring:..." identifier for the keyring backend).
 func (s *Store) FilePath() string { return s.blob.location() }
 
+// mutationIntent is why a key appears in a write's mutation set. Save and
+// Delete replace or remove a credential and must retire legacy-origin
+// precedence for that key. A token refresh is not a login or logout, so it
+// must keep the origin marker: otherwise an old-binary logout that happened
+// after this process last read the legacy blob is lost, and a later
+// absence-heuristic pass cannot delete the leftover indexed copy.
+type mutationIntent int
+
+const (
+	mutationReplace mutationIntent = iota
+	mutationDelete
+	mutationRefresh
+)
+
 // Save persists a token under key, replacing any existing entry.
 func (s *Store) Save(key string, token Token) error {
+	return s.save(key, token, mutationReplace)
+}
+
+func (s *Store) saveRefreshed(key string, token Token) error {
+	return s.save(key, token, mutationRefresh)
+}
+
+func (s *Store) save(key string, token Token, intent mutationIntent) error {
 	if err := ValidateKey(key); err != nil {
 		return err
 	}
@@ -444,7 +466,7 @@ func (s *Store) Save(key string, token Token) error {
 			return err
 		}
 		state.Tokens[key] = token
-		return s.writeState(state, map[string]bool{key: false}, check)
+		return s.writeState(state, map[string]mutationIntent{key: intent}, check)
 	})
 }
 
@@ -491,7 +513,7 @@ func (s *Store) Delete(key string) (bool, error) {
 		if _, ok := state.Tokens[key]; ok {
 			delete(state.Tokens, key)
 			removed = true
-			return s.writeState(state, map[string]bool{key: true}, check)
+			return s.writeState(state, map[string]mutationIntent{key: mutationDelete}, check)
 		}
 		// readState no longer exposes the key (a tombstone hides it, or an
 		// interrupted delete already finished the logical logout) but a keyring
@@ -506,7 +528,7 @@ func (s *Store) Delete(key string) (bool, error) {
 			}
 			if resident {
 				removed = true
-				return s.writeState(state, map[string]bool{key: true}, check)
+				return s.writeState(state, map[string]mutationIntent{key: mutationDelete}, check)
 			}
 		}
 		return nil
@@ -589,10 +611,11 @@ func (s *Store) readState() (storeFile, error) {
 	return state, nil
 }
 
-// writeState persists state. mutations identifies explicitly saved (false) and
-// deleted (true) keys. The keyring backend uses it to order durable tombstone
-// transitions; file and encrypted-file backends ignore it.
-func (s *Store) writeState(state storeFile, mutations map[string]bool, checkLease leaseCheck) error {
+// writeState persists state. mutations identifies explicit Save, Delete, and
+// refresh writes. The keyring backend uses that intent to order durable
+// tombstone transitions and to decide whether to retire legacy-origin
+// precedence; file and encrypted-file backends ignore it.
+func (s *Store) writeState(state storeFile, mutations map[string]mutationIntent, checkLease leaseCheck) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -619,10 +642,11 @@ type blobStore interface {
 	// read returns the stored blob; ok is false when nothing is stored yet.
 	read() (data []byte, ok bool, err error)
 	// write replaces the stored blob. mutations is keyring-only and identifies
-	// explicit saves (false) and deletes (true) for durable tombstone ordering.
-	// File backends ignore it. checkLease must be consulted immediately before
-	// each externally visible mutation write() performs; see leaseCheck.
-	write(data []byte, mutations map[string]bool, checkLease leaseCheck) error
+	// explicit Save, Delete, and refresh writes for durable tombstone
+	// ordering. File backends ignore it. checkLease must be consulted
+	// immediately before each externally visible mutation write() performs;
+	// see leaseCheck.
+	write(data []byte, mutations map[string]mutationIntent, checkLease leaseCheck) error
 	// withLock runs fn under whatever cross-process exclusion the backend offers
 	// (a lock file for the file backend; leased lock files for the keyring backend;
 	// Store.mu provides in-process serialization).
@@ -654,7 +678,7 @@ func (b fileBlob) read() ([]byte, bool, error) {
 	return data, true, nil
 }
 
-func (b fileBlob) write(data []byte, _ map[string]bool, _ leaseCheck) error {
+func (b fileBlob) write(data []byte, _ map[string]mutationIntent, _ leaseCheck) error {
 	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
 		return err
 	}
@@ -979,7 +1003,7 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // legacy blob would require a snapshot-then-Set that cannot be locked against
 // old writers on other config roots, so it would trade a bounded downgrade
 // window for unbounded loss of concurrent old-binary logins.
-func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease leaseCheck) error {
+func (b keyringBlob) write(data []byte, mutations map[string]mutationIntent, checkLease leaseCheck) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
@@ -1000,8 +1024,8 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 	}
 	// Record durable deletion markers before mutating entries so a crash
 	// mid-write cannot leave a logged-out key importable from legacy alone.
-	for key, deleted := range mutations {
-		if deleted {
+	for key, intent := range mutations {
+		if intent == mutationDelete {
 			tombstones[key] = true
 		}
 	}
@@ -1028,7 +1052,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 			if ValidateKey(key) != nil {
 				continue
 			}
-			if mutations[key] || tombstones[key] {
+			if _, mutated := mutations[key]; mutated || tombstones[key] {
 				continue
 			}
 			if _, exists := state.Tokens[key]; exists {
@@ -1065,7 +1089,10 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 			}
 		}
 	}
-	for key := range mutations {
+	for key, intent := range mutations {
+		if intent == mutationRefresh {
+			continue
+		}
 		if legacyOrigin[key] {
 			delete(legacyOrigin, key)
 			legacyOriginChanged = true
@@ -1227,8 +1254,8 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool, checkLease le
 	// index are durable. If any earlier step fails, legacy fallback remains
 	// suppressed instead of restoring the revoked credential.
 	tombstonesChanged := false
-	for key, deleted := range mutations {
-		if !deleted && tombstones[key] {
+	for key, intent := range mutations {
+		if intent != mutationDelete && tombstones[key] {
 			delete(tombstones, key)
 			tombstonesChanged = true
 		}
