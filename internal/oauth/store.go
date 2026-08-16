@@ -249,6 +249,49 @@ func (s *Store) Save(key string, token Token) error {
 	})
 }
 
+// CommitDeviceToken saves token for key while holding the store-scoped lock
+// across snapshot, pre-write cancellation check, write, and rollback on post-write cancellation.
+func (s *Store) CommitDeviceToken(key string, token Token, checkCancel func() error, hook func()) error {
+	if err := ValidateKey(key); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.blob.withLock(s.now, func() error {
+		if checkCancel != nil {
+			if err := checkCancel(); err != nil {
+				return err
+			}
+		}
+		state, err := s.readState()
+		if err != nil {
+			return err
+		}
+		prevToken, prevOK := state.Tokens[key]
+		if hook != nil {
+			hook()
+		}
+		state.Tokens[key] = token
+		if err := s.writeState(state); err != nil {
+			return err
+		}
+		if checkCancel != nil {
+			if err := checkCancel(); err != nil {
+				if prevOK {
+					state.Tokens[key] = prevToken
+				} else {
+					delete(state.Tokens, key)
+				}
+				if rerr := s.writeState(state); rerr != nil {
+					return errors.Join(err, fmt.Errorf("oauth: rollback device token commit: %w", rerr))
+				}
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // Load returns the token for key; the bool is false when none is stored.
 func (s *Store) Load(key string) (Token, bool, error) {
 	if err := ValidateKey(key); err != nil {

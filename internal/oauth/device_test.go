@@ -166,3 +166,74 @@ func TestPollDeviceTokenAccessDenied(t *testing.T) {
 		t.Fatalf("err = %v, want access denied", err)
 	}
 }
+
+// TestRequestDeviceCodeAppliesExtraHeaders pins that Config.ExtraHeaders land
+// on the device-authorization request (Kimi's X-Msh-* identity path).
+func TestRequestDeviceCodeAppliesExtraHeaders(t *testing.T) {
+	var got http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"U","verification_uri":"https://x","expires_in":600,"interval":5}`))
+	}))
+	defer server.Close()
+	cfg := Config{
+		ClientID:                    "c",
+		DeviceAuthorizationEndpoint: server.URL,
+		ExtraHeaders: map[string]string{
+			"X-Msh-Device-Id": "test-device-id",
+			"X-Msh-Platform":  "kimi_code_cli",
+		},
+	}
+	if _, err := RequestDeviceCode(context.Background(), server.Client(), cfg, nil); err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	if got.Get("X-Msh-Device-Id") != "test-device-id" {
+		t.Fatalf("X-Msh-Device-Id = %q, want test-device-id", got.Get("X-Msh-Device-Id"))
+	}
+	if got.Get("X-Msh-Platform") != "kimi_code_cli" {
+		t.Fatalf("X-Msh-Platform = %q, want kimi_code_cli", got.Get("X-Msh-Platform"))
+	}
+}
+
+// TestRequestDeviceCodeWithoutExtraHeadersSendsNone pins that providers with
+// no ExtraHeaders do not inject vendor identity headers.
+func TestRequestDeviceCodeWithoutExtraHeadersSendsNone(t *testing.T) {
+	var got http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"U","verification_uri":"https://x","expires_in":600,"interval":5}`))
+	}))
+	defer server.Close()
+	cfg := Config{ClientID: "c", DeviceAuthorizationEndpoint: server.URL}
+	if _, err := RequestDeviceCode(context.Background(), server.Client(), cfg, nil); err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	for _, key := range []string{"X-Msh-Device-Id", "X-Msh-Platform", "X-Msh-Version"} {
+		if got.Get(key) != "" {
+			t.Fatalf("unexpected ExtraHeader %s=%q on a provider without ExtraHeaders", key, got.Get(key))
+		}
+	}
+}
+
+// TestPollDeviceTokenAppliesExtraHeaders pins ExtraHeaders on the device-token
+// poll request path (same identity headers Kimi requires on every poll).
+func TestPollDeviceTokenAppliesExtraHeaders(t *testing.T) {
+	var got http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = w.Write([]byte(`{"access_token":"at","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+	cfg := Config{
+		ClientID:      "c",
+		TokenEndpoint: server.URL,
+		ExtraHeaders:  map[string]string{"X-Msh-Device-Id": "poll-device-id"},
+	}
+	auth := DeviceAuth{DeviceCode: "dc", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+	if _, err := PollDeviceToken(context.Background(), server.Client(), cfg, auth, nil); err != nil {
+		t.Fatalf("PollDeviceToken: %v", err)
+	}
+	if got.Get("X-Msh-Device-Id") != "poll-device-id" {
+		t.Fatalf("X-Msh-Device-Id = %q, want poll-device-id", got.Get("X-Msh-Device-Id"))
+	}
+}

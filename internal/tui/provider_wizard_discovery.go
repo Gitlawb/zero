@@ -43,8 +43,12 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode && m.providerWizard.currentProvider().OAuth {
 		provider := m.providerWizard.currentProvider()
 		// Headless/SSH boxes can't open a browser — use device code there by
-		// default (the user can also force it with "d" from the list).
-		if provider.OAuthDeviceFlow && oauthPreferDeviceFlow() {
+		// default (the user can also force it with "d" from the list). A
+		// device-ONLY provider (Kimi Code has no loopback/authorize endpoint at
+		// all) must also go straight to device login here: this is the mouse
+		// double-click activation path, which bypasses the keyboard Enter
+		// handler's OAuthDeviceOnly check further up in provider_wizard.go.
+		if provider.OAuthDeviceFlow && (provider.OAuthDeviceOnly || oauthPreferDeviceFlow()) {
 			return m.startProviderDeviceLogin()
 		}
 		attemptID := m.providerWizard.beginOAuthAttempt(false)

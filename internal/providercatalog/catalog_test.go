@@ -2,10 +2,35 @@ package providercatalog
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// isolateKimiDeviceIDStorage redirects os.UserConfigDir so Get("kimi-code")
+// (which runs RuntimeHeaders → kimiidentity.Headers) never writes
+// kimi-device-id under the real user config root. DeviceID is path-keyed, so
+// setting these env vars is enough (no separate cache reset).
+func isolateKimiDeviceIDStorage(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("APPDATA", root)
+	t.Setenv("HOME", root)
+}
+
+// kimiDeviceIDFile returns the path kimiidentity would use under the current
+// (possibly test-redirected) os.UserConfigDir.
+func kimiDeviceIDFile(t *testing.T) string {
+	t.Helper()
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir: %v", err)
+	}
+	return filepath.Join(configDir, "zero", "kimi-device-id")
+}
 
 var expectedCatalogIDs = []string{
 	"gitlawb-opengateway",
@@ -19,6 +44,7 @@ var expectedCatalogIDs = []string{
 	"openrouter",
 	"huggingface",
 	"chatgpt",
+	"kimi-code",
 	"groq",
 	"deepseek",
 	"together",
@@ -201,6 +227,23 @@ func TestAtlasCloudDescriptor(t *testing.T) {
 }
 
 func TestCatalogDescriptorsExposeRequiredDefaults(t *testing.T) {
+	knownTransports := map[Transport]bool{
+		TransportOpenAI:              true,
+		TransportAnthropic:           true,
+		TransportGoogle:              true,
+		TransportBedrock:             true,
+		TransportVertex:              true,
+		TransportOpenAICompatible:    true,
+		TransportAnthropicCompatible: true,
+	}
+	knownFormats := map[APIFormat]bool{
+		APIFormatOpenAIResponses:       true,
+		APIFormatOpenAIChatCompletions: true,
+		APIFormatAnthropicMessages:     true,
+		APIFormatGoogleGenerateContent: true,
+		APIFormatBedrockConverse:       true,
+		APIFormatVertexGenerateContent: true,
+	}
 	for _, descriptor := range All() {
 		if descriptor.ID == "" {
 			t.Fatal("provider ID is required")
@@ -211,7 +254,7 @@ func TestCatalogDescriptorsExposeRequiredDefaults(t *testing.T) {
 		if descriptor.Transport == "" {
 			t.Fatalf("provider %q should expose a transport", descriptor.ID)
 		}
-		if !ValidTransport(descriptor.Transport) {
+		if !knownTransports[descriptor.Transport] {
 			t.Fatalf("provider %q has unknown transport %q", descriptor.ID, descriptor.Transport)
 		}
 		if descriptor.DefaultBaseURL == "" {
@@ -224,16 +267,10 @@ func TestCatalogDescriptorsExposeRequiredDefaults(t *testing.T) {
 			t.Fatalf("provider %q should expose at least one supported API format", descriptor.ID)
 		}
 		for _, format := range descriptor.SupportedAPIFormats {
-			if !ValidAPIFormat(format) {
+			if !knownFormats[format] {
 				t.Fatalf("provider %q has unknown API format %q", descriptor.ID, format)
 			}
 		}
-	}
-	if ValidTransport("missing") {
-		t.Fatal("ValidTransport should reject unknown transports")
-	}
-	if ValidAPIFormat("missing") {
-		t.Fatal("ValidAPIFormat should reject unknown API formats")
 	}
 }
 
@@ -361,41 +398,6 @@ func TestLookupNormalizesIDsAndAliases(t *testing.T) {
 	}
 }
 
-func TestListByTransportPreservesCatalogOrder(t *testing.T) {
-	cases := map[Transport][]string{
-		TransportOpenAI:          {"openai"},
-		TransportAnthropic:       {"anthropic"},
-		TransportGoogle:          {"google"},
-		TransportBedrock:         {"bedrock"},
-		TransportVertex:          {"vertex"},
-		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
-	}
-
-	for transport, wantIDs := range cases {
-		descriptors := ListByTransport(transport)
-		gotIDs := make([]string, 0, len(descriptors))
-		for _, descriptor := range descriptors {
-			if descriptor.Transport != Transport(NormalizeID(string(transport))) {
-				t.Fatalf("ListByTransport(%q) returned provider %q with transport %q", transport, descriptor.ID, descriptor.Transport)
-			}
-			gotIDs = append(gotIDs, descriptor.ID)
-		}
-		if !reflect.DeepEqual(gotIDs, wantIDs) {
-			t.Fatalf("ListByTransport(%q) IDs = %#v, want %#v", transport, gotIDs, wantIDs)
-		}
-	}
-	if descriptors := ListByTransport("missing"); len(descriptors) != 0 {
-		t.Fatalf("ListByTransport(missing) returned %#v, want empty", descriptors)
-	}
-	if gotIDs := descriptorIDs(ListByTransport(TransportOpenAICompatible)); !reflect.DeepEqual(gotIDs, cases[TransportOpenAICompat]) {
-		t.Fatalf("ListByTransport(openai-compatible alias) IDs = %#v, want %#v", gotIDs, cases[TransportOpenAICompat])
-	}
-	if gotIDs := descriptorIDs(ListByTransport(TransportAnthropicCompatible)); !reflect.DeepEqual(gotIDs, cases[TransportAnthropicCompat]) {
-		t.Fatalf("ListByTransport(anthropic-compatible alias) IDs = %#v, want %#v", gotIDs, cases[TransportAnthropicCompat])
-	}
-}
-
 func TestReturnedDescriptorsAreCopies(t *testing.T) {
 	descriptors := All()
 	descriptors[0].ID = "changed"
@@ -426,9 +428,53 @@ func TestReturnedDescriptorsAreCopies(t *testing.T) {
 	}
 }
 
+func TestListByTransportPreservesCatalogOrder(t *testing.T) {
+	cases := map[Transport][]string{
+		TransportOpenAI:    {"openai"},
+		TransportAnthropic: {"anthropic"},
+		TransportGoogle:    {"google"},
+		TransportBedrock:   {"bedrock"},
+		TransportVertex:    {"vertex"},
+		TransportAnthropicCompat: {
+			"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible",
+		},
+		TransportOpenAICompat: {
+			"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter",
+			"huggingface", "chatgpt", "kimi-code", "groq", "deepseek", "together", "fireworks", "dashscope",
+			"moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice",
+			"xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat",
+			"chatgpt-proxy", "custom-openai-compatible",
+		},
+	}
+
+	for transport, wantIDs := range cases {
+		descriptors := ListByTransport(transport)
+		gotIDs := make([]string, 0, len(descriptors))
+		for _, descriptor := range descriptors {
+			if descriptor.Transport != Transport(NormalizeID(string(transport))) {
+				t.Fatalf("ListByTransport(%q) returned provider %q with transport %q", transport, descriptor.ID, descriptor.Transport)
+			}
+			gotIDs = append(gotIDs, descriptor.ID)
+		}
+		if !reflect.DeepEqual(gotIDs, wantIDs) {
+			t.Fatalf("ListByTransport(%q) IDs = %#v, want %#v", transport, gotIDs, wantIDs)
+		}
+	}
+	if descriptors := ListByTransport("missing"); len(descriptors) != 0 {
+		t.Fatalf("ListByTransport(missing) returned %#v, want empty", descriptors)
+	}
+	if gotIDs := descriptorIDs(ListByTransport(TransportOpenAICompatible)); !reflect.DeepEqual(gotIDs, cases[TransportOpenAICompat]) {
+		t.Fatalf("ListByTransport(openai-compatible alias) IDs = %#v, want %#v", gotIDs, cases[TransportOpenAICompat])
+	}
+	if gotIDs := descriptorIDs(ListByTransport(TransportAnthropicCompatible)); !reflect.DeepEqual(gotIDs, cases[TransportAnthropicCompat]) {
+		t.Fatalf("ListByTransport(anthropic-compatible alias) IDs = %#v, want %#v", gotIDs, cases[TransportAnthropicCompat])
+	}
+}
+
 func TestOAuthProviderClassification(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
 	oauthIDs := descriptorIDs(OAuthProviders())
-	if want := []string{"openrouter", "huggingface", "chatgpt", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
+	if want := []string{"openrouter", "huggingface", "chatgpt", "kimi-code", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
 		t.Fatalf("OAuthProviders() = %#v, want %#v", oauthIDs, want)
 	}
 	if d, _ := Get("openrouter"); !d.OAuthMintsKey {
@@ -437,11 +483,89 @@ func TestOAuthProviderClassification(t *testing.T) {
 	if d, _ := Get("xai"); !d.OAuthDeviceFlow {
 		t.Fatal("xai should advertise device-code flow")
 	}
+	if d, _ := Get("kimi-code"); !d.OAuthDeviceFlow || !d.OAuthDeviceOnly {
+		t.Fatal("kimi-code should advertise device-only code flow")
+	}
 	if d, _ := Get("huggingface"); !d.OAuthDeviceFlow {
 		t.Fatal("huggingface should advertise device-code flow")
 	}
 	if d, _ := Get("chatgpt"); d.OAuthDeviceFlow {
 		t.Fatal("chatgpt should NOT advertise device-code flow (loopback only)")
+	}
+}
+
+// TestKimiAliasStillResolvesToMoonshot pins the alias-collision fix: moonshot
+// already exposes "kimi" as an alias for its API-key endpoint. The Kimi Code
+// OAuth descriptor must use a non-conflicting ID ("kimi-code") so resolving
+// "kimi" continues to land on moonshot (endpoint, default model, MOONSHOT_API_KEY).
+func TestKimiAliasStillResolvesToMoonshot(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	d, ok := Get("kimi")
+	if !ok {
+		t.Fatal(`Get("kimi") returned false`)
+	}
+	if d.ID != "moonshot" {
+		t.Fatalf(`Get("kimi").ID = %q, want "moonshot" (kimi-code must not steal this alias)`, d.ID)
+	}
+	if d.DefaultBaseURL != "https://api.moonshot.ai/v1" {
+		t.Fatalf(`Get("kimi").DefaultBaseURL = %q, want moonshot API-key endpoint`, d.DefaultBaseURL)
+	}
+	if len(d.AuthEnvVars) == 0 || d.AuthEnvVars[0] != "MOONSHOT_API_KEY" {
+		t.Fatalf(`Get("kimi").AuthEnvVars = %#v, want MOONSHOT_API_KEY`, d.AuthEnvVars)
+	}
+	if d.OAuth {
+		t.Fatal(`Get("kimi") must not be OAuth (that is kimi-code, not the moonshot alias)`)
+	}
+
+	code, ok := Get("kimi-code")
+	if !ok {
+		t.Fatal(`Get("kimi-code") returned false`)
+	}
+	if code.ID != "kimi-code" {
+		t.Fatalf(`Get("kimi-code").ID = %q`, code.ID)
+	}
+	if code.DefaultBaseURL != "https://api.kimi.com/coding/v1" {
+		t.Fatalf(`Get("kimi-code").DefaultBaseURL = %q, want managed coding endpoint`, code.DefaultBaseURL)
+	}
+	if !code.OAuth || !code.OAuthDeviceOnly {
+		t.Fatalf(`Get("kimi-code") oauth flags wrong: OAuth=%v OAuthDeviceOnly=%v`, code.OAuth, code.OAuthDeviceOnly)
+	}
+}
+
+// TestKimiRuntimeHeadersOnlyOnGet ensures listing providers (All / OAuthProviders)
+// does not populate kimi-code's CustomHeaders (which mints a device-id file),
+// while Get does so resolve-time request building still gets the vendor headers.
+func TestKimiRuntimeHeadersOnlyOnGet(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	for _, d := range All() {
+		if d.ID == "kimi-code" && d.CustomHeaders != nil {
+			t.Fatalf("All() must not populate kimi-code CustomHeaders: %#v", d.CustomHeaders)
+		}
+	}
+	for _, d := range OAuthProviders() {
+		if d.ID == "kimi-code" && d.CustomHeaders != nil {
+			t.Fatalf("OAuthProviders() must not populate kimi-code CustomHeaders: %#v", d.CustomHeaders)
+		}
+	}
+	// Listing must not mint a device id even if a regression invokes
+	// RuntimeHeaders and discards the returned headers.
+	devicePath := kimiDeviceIDFile(t)
+	if _, err := os.Stat(devicePath); err == nil {
+		t.Fatalf("listing created kimi device id at %s; All/OAuthProviders must not persist identity", devicePath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat kimi device id after listing: %v", err)
+	}
+	d, ok := Get("kimi-code")
+	if !ok {
+		t.Fatal(`Get("kimi-code") returned false`)
+	}
+	for _, header := range []string{"X-Msh-Platform", "X-Msh-Version", "X-Msh-Device-Name", "X-Msh-Device-Model", "X-Msh-Os-Version", "X-Msh-Device-Id"} {
+		if d.CustomHeaders[header] == "" {
+			t.Fatalf("Get(kimi-code).CustomHeaders[%q] empty, want vendor-identity header for completions", header)
+		}
+	}
+	if _, err := os.Stat(devicePath); err != nil {
+		t.Fatalf("Get(kimi-code) should persist device id at %s: %v", devicePath, err)
 	}
 }
 

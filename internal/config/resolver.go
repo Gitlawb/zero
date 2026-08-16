@@ -1105,6 +1105,10 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 		}
 		merged := copyStringMap(catalogHeaders)
 		for key, value := range profile.CustomHeaders {
+			// Do not let stored X-Msh-* headers override fresh RuntimeHeaders.
+			if descriptor.RuntimeHeaders != nil && providercatalog.IsRuntimeIdentityHeader(key) {
+				continue
+			}
 			// Header names are case-insensitive. Preserve the catalog spelling while
 			// replacing its value so request construction cannot see two colliding
 			// map entries whose eventual winner depends on iteration order.
@@ -1122,17 +1126,33 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 			merged[key] = value
 		}
 		profile.CustomHeaders = merged
-	} else if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") && !canonicalCatalogEndpoint {
-		// AIMLAPI attribution is owned by the catalog endpoint. A profile can retain
-		// those generated headers after its base URL is edited; strip their names
-		// before sending requests to an arbitrary staging/proxy host while preserving
-		// unrelated headers explicitly supplied by the user.
+	} else if !canonicalCatalogEndpoint && (len(descriptor.CustomHeaders) > 0 || descriptor.RuntimeHeaders != nil) {
+		// Catalog-owned headers (AIMLAPI attribution, Kimi's X-Msh-* device
+		// identity, etc.) are only valid against the catalog endpoint. A profile
+		// can retain those generated headers after its base URL is edited; strip
+		// their names before sending requests to an arbitrary staging/proxy host
+		// while preserving unrelated headers explicitly supplied by the user.
+		//
+		// Gate on RuntimeHeaders as well as CustomHeaders: kimi-code's identity
+		// headers are produced lazily by RuntimeHeaders at Get/Require time. If
+		// that map is empty (or a caller holds a listing descriptor that never
+		// ran RuntimeHeaders), we still must strip any persisted X-Msh-* keys
+		// rather than forwarding them to a retargeted host.
 		for profileKey := range profile.CustomHeaders {
 			for catalogKey := range descriptor.CustomHeaders {
 				if strings.EqualFold(profileKey, catalogKey) {
 					delete(profile.CustomHeaders, profileKey)
 					break
 				}
+			}
+			// Only a descriptor that mints runtime headers owns the X-Msh-*
+			// namespace, so only it may drop keys by prefix. This branch is also
+			// reached by descriptors that merely carry static CustomHeaders
+			// (AIMLAPI attribution, say), and those must not delete a user's own
+			// X-Msh-* header they had nothing to do with. Matches the same
+			// RuntimeHeaders test on the canonical-endpoint path above.
+			if descriptor.RuntimeHeaders != nil && providercatalog.IsRuntimeIdentityHeader(profileKey) {
+				delete(profile.CustomHeaders, profileKey)
 			}
 		}
 	}

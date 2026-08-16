@@ -1185,8 +1185,10 @@ func (m model) noBlockingModal() bool {
 
 func (m model) quit() (tea.Model, tea.Cmd) {
 	if m.providerWizard != nil {
+		m.providerWizard.cancelDeviceLogin()
 		m.providerWizard.resetAimlapiOnboard()
 	}
+	m.setup.cancelDeviceLogin()
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
 	m.shutdownLSPManager()

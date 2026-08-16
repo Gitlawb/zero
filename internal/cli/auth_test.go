@@ -100,6 +100,58 @@ func TestRunAuthLoginValidation(t *testing.T) {
 	}
 }
 
+// TestRunAuthKimiAliasForwardsToLoginKimiCode pins the `zero auth kimi`
+// sugar: it must forward through runAuthLogin with the kimi-code preset, so
+// --help prints parser help without starting a device authorization, and
+// invalid flags/positionals are rejected exactly like the canonical
+// `zero auth login kimi-code` invocation.
+func TestRunAuthKimiAliasForwardsToLoginKimiCode(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+
+	// --help must produce the login parser's help (exitSuccess) and never
+	// begin a device authorization.
+	if code := runWithDeps([]string{"auth", "kimi", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("auth kimi --help exit = %d, stderr=%q", code, stderr.String())
+	}
+	helpOut := stdout.String()
+	for _, want := range []string{"kimi", "login", "--device"} {
+		if !strings.Contains(helpOut, want) {
+			t.Fatalf("auth kimi --help missing %q:\n%s", want, helpOut)
+		}
+	}
+
+	// An unknown flag must be rejected identically to auth login kimi-code.
+	for _, args := range [][]string{
+		{"auth", "kimi", "--bogus"},
+		{"auth", "login", "kimi-code", "--bogus"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := runWithDeps(args, &stdout, &stderr, appDeps{}); code == exitSuccess {
+			t.Fatalf("%v should be rejected", args)
+		}
+		if !strings.Contains(stderr.String(), "unknown flag") {
+			t.Fatalf("%v stderr = %q, want unknown-flag rejection", args, stderr.String())
+		}
+	}
+
+	// A stray positional must be rejected identically to auth login kimi-code.
+	for _, args := range [][]string{
+		{"auth", "kimi", "extra-positional"},
+		{"auth", "login", "kimi-code", "extra-positional"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := runWithDeps(args, &stdout, &stderr, appDeps{}); code == exitSuccess {
+			t.Fatalf("%v should be rejected", args)
+		}
+		if !strings.Contains(stderr.String(), "usage:") {
+			t.Fatalf("%v stderr = %q, want usage error", args, stderr.String())
+		}
+	}
+}
+
 func TestRunAuthLoginUnknownProvider(t *testing.T) {
 	withAuthStore(t)
 	var stdout, stderr bytes.Buffer
@@ -320,4 +372,37 @@ func readCLIConfigFixture(t *testing.T, path string) config.FileConfig {
 		t.Fatalf("decode config: %v", err)
 	}
 	return cfg
+}
+
+func TestRunAuthKimiHelp(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "kimi", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("auth kimi --help exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "zero auth login") {
+		t.Fatalf("help text missing login guidance, got: %q", stdout.String())
+	}
+}
+
+func TestRunAuthKimiUnknownFlag(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "kimi", "--invalid-flag"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
+		t.Fatal("auth kimi --invalid-flag should fail")
+	}
+	if !strings.Contains(stderr.String(), "unknown flag") {
+		t.Fatalf("expected unknown flag error, got stderr=%q", stderr.String())
+	}
+}
+
+func TestRunAuthKimiExtraPositional(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "kimi", "unexpected-extra"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
+		t.Fatal("auth kimi unexpected-extra should fail")
+	}
+	if !strings.Contains(stderr.String(), "usage: zero auth login") {
+		t.Fatalf("expected login usage error, got stderr=%q", stderr.String())
+	}
 }

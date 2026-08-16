@@ -35,6 +35,10 @@ type Manager struct {
 	// openBrowser is invoked with the authorization URL for loopback logins.
 	// Tests inject a function that drives the loopback redirect.
 	openBrowser func(authURL string) error
+	// beforeDeviceCommit is a test-only hook invoked between reading the store
+	// state and writing the committed device token, so tests can cancel the
+	// attempt mid-commit and assert the rollback path.
+	beforeDeviceCommit func()
 	// refreshLocks serializes concurrent refreshes per key so parallel callers
 	// don't each spend the single-use refresh token; the loser reuses the rotated
 	// token. refreshMu guards the map (M7).
@@ -199,7 +203,7 @@ func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg 
 		return Status{}, err
 	}
 	key := ProviderKey(provider)
-	if err := m.store.Save(key, token); err != nil {
+	if err := m.store.CommitDeviceToken(key, token, ctx.Err, m.beforeDeviceCommit); err != nil {
 		return Status{}, err
 	}
 	return m.statusFor(key)

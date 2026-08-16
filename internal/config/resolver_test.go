@@ -1577,6 +1577,156 @@ func TestApplyCatalogDescriptorStripsAimlapiAttributionFromRetargetedProfile(t *
 	}
 }
 
+// TestApplyCatalogDescriptorKeepsUserXMshOnNonKimiRetarget pins that the
+// X-Msh-* namespace is only strippable by a descriptor that actually mints
+// those headers. AIMLAPI reaches the same retarget branch because it carries
+// static CustomHeaders, but it has no RuntimeHeaders and no claim on X-Msh-*,
+// so a header the user set themselves must survive.
+func TestApplyCatalogDescriptorKeepsUserXMshOnNonKimiRetarget(t *testing.T) {
+	descriptor, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.RuntimeHeaders != nil {
+		t.Fatal("setup: aimlapi is expected to have no RuntimeHeaders; pick another non-runtime descriptor")
+	}
+	profile := ProviderProfile{
+		BaseURL: "https://proxy.example.test/v1",
+		CustomHeaders: map[string]string{
+			"x-aimlapi-partner-id": "persisted-partner",
+			"X-Msh-Trace":          "user-supplied",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	if profile.CustomHeaders["X-Msh-Trace"] != "user-supplied" {
+		t.Fatalf("a descriptor that does not own X-Msh-* deleted the user's own header: %#v", profile.CustomHeaders)
+	}
+	// The descriptor's own catalog headers must still be stripped.
+	for key := range profile.CustomHeaders {
+		if strings.HasPrefix(strings.ToLower(key), "x-aimlapi-") {
+			t.Fatalf("catalog attribution survived retargeting: %#v", profile.CustomHeaders)
+		}
+	}
+}
+
+// isolateKimiDeviceIDStorage redirects os.UserConfigDir() to a throwaway temp
+// dir before the kimi-code descriptor's RuntimeHeaders (kimiidentity.Headers)
+// run, so tests never create or touch the real kimi-device-id file. Sets all
+// three env vars os.UserConfigDir may consult so isolation is portable.
+// DeviceID is path-keyed, so no separate cache reset is required.
+func isolateKimiDeviceIDStorage(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("APPDATA", root)
+	t.Setenv("HOME", root)
+}
+
+func TestApplyCatalogDescriptorStripsKimiIdentityFromRetargetedProfile(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	descriptor, err := providercatalog.Require("kimi-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{
+		BaseURL: "https://proxy.example.test/v1",
+		CustomHeaders: map[string]string{
+			"x-msh-platform":  "kimi_code_cli",
+			"X-Msh-Device-Id": "persisted-device-id",
+			"X-Environment":   "staging",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	for key := range profile.CustomHeaders {
+		if strings.HasPrefix(strings.ToLower(key), "x-msh-") {
+			t.Fatalf("kimi identity headers survived retargeting: %#v", profile.CustomHeaders)
+		}
+	}
+	if profile.CustomHeaders["X-Environment"] != "staging" {
+		t.Fatalf("user header was removed: %#v", profile.CustomHeaders)
+	}
+}
+
+// TestApplyCatalogDescriptorStripsXMshWhenRuntimeHeadersOnly covers the case
+// the x-msh- prefix branch exists for: a listing-style descriptor that has
+// RuntimeHeaders set but empty CustomHeaders. The EqualFold catalog-key loop
+// alone cannot strip persisted identity headers when CustomHeaders is empty.
+func TestApplyCatalogDescriptorStripsXMshWhenRuntimeHeadersOnly(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	descriptor := providercatalog.Descriptor{
+		ID:             "kimi-code",
+		DefaultBaseURL: "https://api.kimi.com/coding/v1",
+		RuntimeHeaders: func() map[string]string {
+			return map[string]string{"X-Msh-Device-Id": "fresh-from-runtime"}
+		},
+		// CustomHeaders deliberately empty — listing clones never run RuntimeHeaders.
+	}
+	profile := ProviderProfile{
+		BaseURL: "https://proxy.example.test/v1",
+		CustomHeaders: map[string]string{
+			"X-Msh-Device-Id":   "stale-persisted",
+			"X-Msh-Device-Name": "hostname-from-disk",
+			"X-User-Agent":      "keep-me",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	for key := range profile.CustomHeaders {
+		if strings.HasPrefix(strings.ToLower(key), "x-msh-") {
+			t.Fatalf("x-msh- header survived retargeting with empty catalog CustomHeaders: %#v", profile.CustomHeaders)
+		}
+	}
+	if profile.CustomHeaders["X-User-Agent"] != "keep-me" {
+		t.Fatalf("user header was removed: %#v", profile.CustomHeaders)
+	}
+}
+
+// TestApplyCatalogDescriptorFreshRuntimeHeadersWinOverStalePersisted pins the
+// stored-header override guard: a stale X-Msh-Device-Id in config.json must
+// lose to the freshly minted RuntimeHeaders value on the canonical endpoint.
+func TestApplyCatalogDescriptorFreshRuntimeHeadersWinOverStalePersisted(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	const freshID = "fresh-runtime-device-id"
+	descriptor := providercatalog.Descriptor{
+		ID:             "kimi-code",
+		DefaultBaseURL: "https://api.kimi.com/coding/v1",
+		CustomHeaders: map[string]string{
+			"X-Msh-Platform":  "kimi_code_cli",
+			"X-Msh-Device-Id": freshID,
+		},
+		RuntimeHeaders: func() map[string]string {
+			return map[string]string{
+				"X-Msh-Platform":  "kimi_code_cli",
+				"X-Msh-Device-Id": freshID,
+			}
+		},
+	}
+	profile := ProviderProfile{
+		BaseURL: "https://api.kimi.com/coding/v1",
+		CustomHeaders: map[string]string{
+			"X-Msh-Device-Id": "stale-persisted-device-id",
+			"X-User-Agent":    "keep-me",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, false)
+
+	if got := profile.CustomHeaders["X-Msh-Device-Id"]; got != freshID {
+		t.Fatalf("X-Msh-Device-Id = %q, want fresh runtime value %q (stale persist must not win)", got, freshID)
+	}
+	if profile.CustomHeaders["X-User-Agent"] != "keep-me" {
+		t.Fatalf("user header was removed: %#v", profile.CustomHeaders)
+	}
+	if profile.CustomHeaders["X-Msh-Platform"] != "kimi_code_cli" {
+		t.Fatalf("catalog platform header missing: %#v", profile.CustomHeaders)
+	}
+}
+
 func TestResolveProviderProfileParseThinkTagsFalseAlias(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "custom",

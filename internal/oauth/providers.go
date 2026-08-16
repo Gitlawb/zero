@@ -77,6 +77,7 @@ func (r *Registry) ResolveConfig(name string, env map[string]string) (Config, Fl
 		DeviceAuthorizationEndpoint: firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "DEVICE_URL"))), preset.DeviceAuthorizationEndpoint),
 		IssuerURL:                   firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "ISSUER_URL"))), preset.IssuerURL),
 		Scopes:                      scopesOrPreset(envValue(env, envKey(name, "SCOPES")), preset.Scopes),
+		ExtraHeaders:                providerExtraHeaders(name, envValue(env, envKey(name, "AUTHORIZE_URL")), envValue(env, envKey(name, "TOKEN_URL")), envValue(env, envKey(name, "DEVICE_URL")), envValue(env, envKey(name, "ISSUER_URL"))),
 	}
 	if cfg.ClientID == "" {
 		hint := ""

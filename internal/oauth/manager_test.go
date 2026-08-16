@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -291,5 +292,169 @@ func TestManagerLogout(t *testing.T) {
 	}
 	if removed2, _ := m.Logout("demo"); removed2 {
 		t.Fatal("second logout should report nothing removed")
+	}
+}
+
+func TestCompleteDeviceLoginCancelAtCommitRollsBackNewToken(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"authorized-token"}`)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+	}
+	m := managerFor(t, env, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m.beforeDeviceCommit = func() {
+		// Cancel the attempt during commit.
+		cancel()
+	}
+	defer func() { m.beforeDeviceCommit = nil }()
+
+	cfg := Config{ClientID: "client", TokenEndpoint: fp.server.URL + "/token"}
+	auth := DeviceAuth{DeviceCode: "dc", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+
+	_, err := m.CompleteDeviceLogin(ctx, "demo", cfg, auth)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CompleteDeviceLogin err = %v, want context.Canceled", err)
+	}
+
+	_, ok, err := m.store.Load(ProviderKey("demo"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if ok {
+		t.Fatal("expected store to have no token after rollback")
+	}
+}
+
+func TestCompleteDeviceLoginCancelAtCommitRestoresPreviousToken(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"new-token"}`)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+	}
+	m := managerFor(t, env, nil)
+
+	prevToken := Token{AccessToken: "previous-valid-token", RefreshToken: "prev-rt"}
+	_ = m.store.Save(ProviderKey("demo"), prevToken)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m.beforeDeviceCommit = func() {
+		cancel()
+	}
+	defer func() { m.beforeDeviceCommit = nil }()
+
+	cfg := Config{ClientID: "client", TokenEndpoint: fp.server.URL + "/token"}
+	auth := DeviceAuth{DeviceCode: "dc", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+
+	_, err := m.CompleteDeviceLogin(ctx, "demo", cfg, auth)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CompleteDeviceLogin err = %v, want context.Canceled", err)
+	}
+
+	stored, ok, err := m.store.Load(ProviderKey("demo"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected previous token to be present")
+	}
+	if stored.AccessToken != "previous-valid-token" {
+		t.Fatalf("expected previous token %q restored, got %q", "previous-valid-token", stored.AccessToken)
+	}
+}
+
+func TestCompleteDeviceLoginTwoManagersSharingStore(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"concurrent-token"}`)
+	storePath := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := NewStore(StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+	}
+	m1, err := NewManager(ManagerOptions{Store: store, Env: env})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := NewManager(ManagerOptions{Store: store, Env: env})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{ClientID: "client", TokenEndpoint: fp.server.URL + "/token"}
+	auth := DeviceAuth{DeviceCode: "dc", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+
+	status, err := m1.CompleteDeviceLogin(context.Background(), "demo", cfg, auth)
+	if err != nil {
+		t.Fatalf("m1 CompleteDeviceLogin: %v", err)
+	}
+	if !status.HasToken {
+		t.Fatal("expected status to report HasToken")
+	}
+
+	tok, ok, err := m2.store.Load(ProviderKey("demo"))
+	if err != nil || !ok || tok.AccessToken != "concurrent-token" {
+		t.Fatalf("m2 saw token = %+v, ok = %v, err = %v", tok, ok, err)
+	}
+}
+
+func TestCompleteDeviceLoginTwoManagersSharingStoreConcurrent(t *testing.T) {
+	fp1 := newFakeProvider(t, `{"access_token":"token-1"}`)
+	fp2 := newFakeProvider(t, `{"access_token":"token-2"}`)
+	storePath := filepath.Join(t.TempDir(), "tokens.json")
+	// Two independent Store values over the same file exercise the cross-process
+	// file lock (fileBlob.withLock), not just the in-process Store.mu, which is
+	// what two concurrent Zero processes actually rely on.
+	store1, err := NewStore(StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store2, err := NewStore(StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m1, err := NewManager(ManagerOptions{Store: store1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := NewManager(ManagerOptions{Store: store2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg1 := Config{ClientID: "client1", TokenEndpoint: fp1.server.URL + "/token"}
+	auth1 := DeviceAuth{DeviceCode: "dc1", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+
+	cfg2 := Config{ClientID: "client2", TokenEndpoint: fp2.server.URL + "/token"}
+	auth2 := DeviceAuth{DeviceCode: "dc2", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = m1.CompleteDeviceLogin(context.Background(), "prov1", cfg1, auth1)
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = m2.CompleteDeviceLogin(context.Background(), "prov2", cfg2, auth2)
+	}()
+	wg.Wait()
+
+	tok1, ok1, err1 := store2.Load(ProviderKey("prov1"))
+	tok2, ok2, err2 := store2.Load(ProviderKey("prov2"))
+	if err1 != nil || !ok1 || tok1.AccessToken != "token-1" {
+		t.Fatalf("prov1: tok=%+v ok=%v err=%v", tok1, ok1, err1)
+	}
+	if err2 != nil || !ok2 || tok2.AccessToken != "token-2" {
+		t.Fatalf("prov2: tok=%+v ok=%v err=%v", tok2, ok2, err2)
 	}
 }

@@ -50,23 +50,34 @@ type setupState struct {
 	oauthMode      bool
 	oauthPending   bool
 	oauthErr       string
+	// oauthAttemptID identifies the current OAuth attempt so a late phase-one
+	// or poll-result message from an attempt the user already abandoned (Esc,
+	// then restarted the same provider) cannot be mistaken for the current
+	// one — providerID alone is not enough since the provider doesn't change
+	// across attempts.
+	oauthAttemptID int
 	// Device-code login (RFC 8628) state while an OAuth login is in flight.
 	oauthDevice           bool
 	deviceUserCode        string
 	deviceVerificationURI string
-	stage                 setupStage
-	err                   string
-	baseURL               string
-	name                  string
-	apiKey                textinput.Model
-	models                []providerWizardModel
-	modelIndex            int
-	modelQuery            string
-	modelForID            string
-	modelLoad             bool
-	modelErr              string
-	modelSrc              string
-	modelGen              uint64
+	// deviceLoginCancel cancels the background context backing an in-flight
+	// device-code poll (setupDevicePollCmd), so abandoning setup (Esc) actually
+	// stops the poll instead of leaving it to run for up to 10 minutes and
+	// silently save a credential the user backed out of.
+	deviceLoginCancel context.CancelFunc
+	stage             setupStage
+	err               string
+	baseURL           string
+	name              string
+	apiKey            textinput.Model
+	models            []providerWizardModel
+	modelIndex        int
+	modelQuery        string
+	modelForID        string
+	modelLoad         bool
+	modelErr          string
+	modelSrc          string
+	modelGen          uint64
 	// aimlapi holds the shared aimlapi.com onboarding sub-flow while
 	// setup is on setupStageAimlapi.
 	aimlapi *aimlapiOnboardState
@@ -93,16 +104,25 @@ type setupOAuthMsg struct {
 	apiKey     string
 	tokenLogin bool
 	providerID string
+	attemptID  int
 	err        error
 }
 
 // setupOAuthProviderOptions filters the full provider list to the OAuth-capable
 // ones for the OAuth method path. ChatGPT/Claude are not here — they can't do
 // real in-app OAuth (use "browse" + a local proxy); see docs/oauth-subscriptions.md.
+//
+// Uses OAuthProviders() (listing clones) rather than Get(): Get runs
+// RuntimeHeaders and would mint ~/.config/zero/kimi-device-id for every user
+// who merely paints the "How do you want to connect?" screen.
 func setupOAuthProviderOptions(all []SetupProviderOption) []SetupProviderOption {
+	oauthIDs := map[string]struct{}{}
+	for _, descriptor := range providercatalog.OAuthProviders() {
+		oauthIDs[descriptor.ID] = struct{}{}
+	}
 	out := []SetupProviderOption{}
 	for _, option := range all {
-		if descriptor, ok := providercatalog.Get(option.ID); ok && descriptor.OAuth {
+		if _, ok := oauthIDs[option.ID]; ok {
 			out = append(out, option)
 		}
 	}
@@ -154,10 +174,18 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.setup.oauthPending {
 		switch {
 		case keyCtrl(msg, 'c'):
+			// Stop a device-code poll actually running in the background instead
+			// of merely quitting the UI — otherwise completing the login later
+			// in the browser still silently saves the credential.
+			m.setup.cancelDeviceLogin()
 			return m, tea.Quit
 		case keyIs(msg, tea.KeyEsc):
 			m.setup.oauthPending = false
 			m.setup.oauthDevice = false
+			// Stop a device-code poll actually running in the background instead
+			// of merely dismissing the UI — otherwise completing the login later
+			// in the browser still silently saves the credential.
+			m.setup.cancelDeviceLogin()
 		}
 		return m, nil
 	}
@@ -182,6 +210,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc):
 		if m.setup.stage > setupStageWelcome {
@@ -194,6 +223,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.setup.required {
+			m.setup.cancelDeviceLogin()
 			return m, tea.Quit
 		}
 		return m.exitSetupToChat()
@@ -244,6 +274,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		switch keyText(msg) {
 		case "q":
+			m.setup.cancelDeviceLogin()
 			return m, tea.Quit
 		case "k":
 			if m.setup.stage == setupStageProvider {
@@ -279,6 +310,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.advanceSetup()
 		}
 	case "q":
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case "k":
 		switch m.setup.stage {
@@ -537,7 +569,7 @@ func (m *model) moveSetupMethod(delta int) {
 
 // setupOAuthCmd runs the chosen provider's browser OAuth login off the UI
 // goroutine for first-run setup. Mirrors the /provider wizard's flow.
-func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
+func setupOAuthCmd(provider providercatalog.Descriptor, attemptID int) tea.Cmd {
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
@@ -545,17 +577,17 @@ func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
 				OpenBrowser: browser.OpenURL,
 				Timeout:     3 * time.Minute,
 			})
-			return setupOAuthMsg{apiKey: key, providerID: provider.ID, err: err}
+			return setupOAuthMsg{apiKey: key, providerID: provider.ID, attemptID: attemptID, err: err}
 		}
 	case provider.ID == "chatgpt":
 		return func() tea.Msg {
 			err := runProviderChatGPTLogin()
-			return setupOAuthMsg{tokenLogin: true, providerID: provider.ID, err: err}
+			return setupOAuthMsg{tokenLogin: true, providerID: provider.ID, attemptID: attemptID, err: err}
 		}
 	default:
 		name := provider.ID
 		return func() tea.Msg {
-			return setupOAuthMsg{tokenLogin: true, providerID: name, err: runProviderTokenLogin(name)}
+			return setupOAuthMsg{tokenLogin: true, providerID: name, attemptID: attemptID, err: runProviderTokenLogin(name)}
 		}
 	}
 }
@@ -564,6 +596,7 @@ func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
 // for first-run setup: the user_code + verification URI to display.
 type setupOAuthDeviceMsg struct {
 	providerID string
+	attemptID  int
 	userCode   string
 	verifyURL  string
 	cfg        oauth.Config
@@ -571,14 +604,15 @@ type setupOAuthDeviceMsg struct {
 	err        error
 }
 
-func setupDevicePrepareCmd(name string) tea.Cmd {
+func setupDevicePrepareCmd(name string, attemptID int) tea.Cmd {
 	return func() tea.Msg {
 		auth, cfg, err := oauthDevicePrepare(name)
 		if err != nil {
-			return setupOAuthDeviceMsg{providerID: name, err: err}
+			return setupOAuthDeviceMsg{providerID: name, attemptID: attemptID, err: err}
 		}
 		return setupOAuthDeviceMsg{
 			providerID: name,
+			attemptID:  attemptID,
 			userCode:   auth.UserCode,
 			verifyURL:  oauthDeviceVerifyTarget(auth),
 			cfg:        cfg,
@@ -587,10 +621,50 @@ func setupDevicePrepareCmd(name string) tea.Cmd {
 	}
 }
 
-func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+// setupDevicePollCmd runs phase 2 (poll for the token + store) off the UI
+// goroutine and reports completion as a regular OAuth result. ctx must be
+// cancelable by the caller so abandoning setup actually stops the poll.
+func setupDevicePollCmd(ctx context.Context, name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
 	return func() tea.Msg {
-		return setupOAuthMsg{tokenLogin: true, providerID: name, err: oauthDeviceComplete(name, cfg, auth)}
+		return setupOAuthMsg{tokenLogin: true, providerID: name, attemptID: attemptID, err: oauthDeviceComplete(ctx, name, cfg, auth)}
 	}
+}
+
+// cancelDeviceLogin stops an in-flight device-code poll, if any, and clears
+// the stored cancel func. Safe to call even when no poll is running.
+func (setup *setupState) cancelDeviceLogin() {
+	if setup == nil || setup.deviceLoginCancel == nil {
+		return
+	}
+	setup.deviceLoginCancel()
+	setup.deviceLoginCancel = nil
+}
+
+// beginSetupOAuthAttempt starts a new first-run OAuth attempt and returns its
+// id. A new attempt supersedes any poll left over from a previous one and
+// bumps oauthAttemptID so a late phase-one/poll-result message tagged with an
+// older id is rejected by setupOAuthResultMatches even though the provider
+// (and oauthPending) look the same as the new attempt.
+func (setup *setupState) beginSetupOAuthAttempt(device bool) int {
+	setup.cancelDeviceLogin()
+	setup.oauthAttemptID++
+	setup.oauthPending = true
+	setup.oauthDevice = device
+	setup.oauthErr = ""
+	setup.deviceUserCode = ""
+	setup.deviceVerificationURI = ""
+	return setup.oauthAttemptID
+}
+
+// setupOAuthResultMatches reports whether an OAuth result message still
+// belongs to the in-flight attempt, rejecting a stale message left over from
+// an attempt the user abandoned (Esc) and then restarted against the same
+// provider.
+func (setup *setupState) setupOAuthResultMatches(providerID string, attemptID int) bool {
+	if setup == nil || !setup.visible || !setup.oauthPending || strings.TrimSpace(providerID) == "" {
+		return false
+	}
+	return setup.oauthAttemptID == attemptID
 }
 
 // startSetupDeviceLogin begins the device-code flow for the selected OAuth
@@ -599,23 +673,14 @@ func (m model) startSetupDeviceLogin(descriptor providercatalog.Descriptor) (tea
 	if !descriptor.OAuth || !descriptor.OAuthDeviceFlow {
 		return m, nil
 	}
-	m.setup.oauthPending = true
-	m.setup.oauthDevice = true
-	m.setup.oauthErr = ""
-	m.setup.deviceUserCode = ""
-	m.setup.deviceVerificationURI = ""
-	return m, setupDevicePrepareCmd(descriptor.ID)
+	attemptID := m.setup.beginSetupOAuthAttempt(true)
+	return m, setupDevicePrepareCmd(descriptor.ID, attemptID)
 }
 
 // applySetupOAuthDeviceCode handles phase 1 of device-code login: show the code,
 // then start phase 2 (the token poll). On error the redacted message is shown.
 func (m model) applySetupOAuthDeviceCode(msg setupOAuthDeviceMsg) (tea.Model, tea.Cmd) {
-	if !m.setup.visible || !m.setup.oauthPending {
-		return m, nil
-	}
-	// Ignore a stale result from a login the user has since replaced with a
-	// different provider (an in-flight prepare landing after the switch).
-	if msg.providerID != "" && msg.providerID != m.setupProviderDescriptor().ID {
+	if !m.setup.setupOAuthResultMatches(msg.providerID, msg.attemptID) {
 		return m, nil
 	}
 	if msg.err != nil {
@@ -626,22 +691,26 @@ func (m model) applySetupOAuthDeviceCode(msg setupOAuthDeviceMsg) (tea.Model, te
 	}
 	m.setup.deviceUserCode = msg.userCode
 	m.setup.deviceVerificationURI = msg.verifyURL
-	return m, setupDevicePollCmd(msg.providerID, msg.cfg, msg.auth)
+	// The poll runs off the UI goroutine for up to 10 minutes; give it a
+	// context setup can cancel (Esc) so abandoning the flow actually stops it
+	// instead of leaving it to complete in the background. m.ctx is the
+	// parent so quitting zero entirely also unblocks the poll.
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.setup.deviceLoginCancel = cancel
+	return m, setupDevicePollCmd(ctx, msg.providerID, msg.attemptID, msg.cfg, msg.auth)
 }
 
 // applySetupOAuth folds an OAuth login result into the first-run setup: on success
 // the credential is captured (minted key) or relied upon (stored token) and setup
 // jumps to model selection; on failure the redacted error is shown.
 func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
-	if !m.setup.visible || !m.setup.oauthPending {
-		return m, nil
-	}
-	// Ignore a stale result for a provider the user has since switched away from,
-	// so a late login can't capture a credential against the wrong provider.
-	if msg.providerID != "" && msg.providerID != m.setupProviderDescriptor().ID {
+	if !m.setup.setupOAuthResultMatches(msg.providerID, msg.attemptID) {
 		return m, nil
 	}
 	m.setup.oauthPending = false
+	// The poll (if this was a device-code login) is done either way; release
+	// its context.
+	m.setup.cancelDeviceLogin()
 	if msg.err != nil {
 		m.setup.oauthErr = redaction.RedactString(msg.err.Error(), redaction.Options{})
 		return m, nil
@@ -784,13 +853,16 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 			if descriptor.OAuth {
 				// Headless/SSH boxes can't open a browser — use device code there
 				// by default (the user can also force it with "d" from the list).
-				if descriptor.OAuthDeviceFlow && oauthPreferDeviceFlow() {
+				// A device-only provider (no loopback/authorization endpoint)
+				// must take this path on desktops too: the generic manager
+				// would still run the device flow, but with no UI its
+				// verification URL and user code are discarded and the
+				// "browser login" spinner just times out.
+				if descriptor.OAuthDeviceFlow && (descriptor.OAuthDeviceOnly || oauthPreferDeviceFlow()) {
 					return m.startSetupDeviceLogin(descriptor)
 				}
-				m.setup.oauthPending = true
-				m.setup.oauthDevice = false
-				m.setup.oauthErr = ""
-				return m, setupOAuthCmd(descriptor)
+				attemptID := m.setup.beginSetupOAuthAttempt(false)
+				return m, setupOAuthCmd(descriptor, attemptID)
 			}
 		}
 		if m.setup.stage == setupStageProvider {
@@ -1134,6 +1206,7 @@ func (m model) setupNameInputActive() bool {
 func (m model) handleSetupEndpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()
@@ -1155,6 +1228,7 @@ func (m model) handleSetupEndpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handleSetupNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()
@@ -1176,6 +1250,7 @@ func (m model) handleSetupNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handleSetupCredentialKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()

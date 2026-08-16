@@ -429,7 +429,7 @@ func providerProfileForAdd(options providerAddOptions) (config.ProviderProfile, 
 	baseURL := firstNonEmptyCLI(options.baseURL, descriptor.DefaultBaseURL)
 	var catalogHeaders map[string]string
 	if sameProviderSetupBaseURL(baseURL, descriptor.DefaultBaseURL) {
-		catalogHeaders = descriptor.CustomHeaders
+		catalogHeaders = stripRuntimeIdentityHeaders(descriptor.CustomHeaders)
 		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {
 			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
 		}
@@ -450,6 +450,23 @@ func providerProfileForAdd(options providerAddOptions) (config.ProviderProfile, 
 		Model:         firstNonEmptyCLI(options.model, descriptor.DefaultModel),
 	}
 	return profile, nil
+}
+
+func stripRuntimeIdentityHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	cleaned := make(map[string]string, len(headers))
+	for k, v := range headers {
+		if providercatalog.IsRuntimeIdentityHeader(k) {
+			continue
+		}
+		cleaned[k] = v
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
 
 func sameProviderSetupBaseURL(left string, right string) bool {

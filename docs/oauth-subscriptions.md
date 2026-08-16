@@ -37,8 +37,8 @@ before. Tokens are stored 0600 (or the OS keyring with
 Running `/provider` opens a **"How do you want to connect?"** chooser:
 
 ```text
-❯ Sign in with OAuth                 One-click browser login (OpenRouter, xAI, ChatGPT, Hugging Face)
-  Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
+❯ Sign in with OAuth                 No API key to copy — one-click browser login (OpenRouter, xAI, ChatGPT, Hugging Face) or device code (Kimi Code).
+  Paste an API key / browse providers  Any of 20+ providers, a local model, or a subscription via proxy.
 ```
 
 Pick **Sign in with OAuth** → the list of providers that do real OAuth → choose one:
@@ -46,23 +46,30 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
 ```text
 ❯ OpenRouter      browser sign-in · creates a key
   xAI (Grok)      browser or device code
+  Kimi Code       device code (managed coding endpoint)
   ChatGPT         browser (Codex backend, ChatGPT Plus/Pro)
   Hugging Face    browser or device code
 ```
 
 - **OpenRouter / xAI / ChatGPT / Hugging Face** are real OAuth: your browser
-  opens to approve → done (no key to paste). OpenRouter mints a key; xAI /
-  ChatGPT / Hugging Face store a refreshable bearer. Hugging Face requires a
-  one-time OAuth-app registration (no secret needed for "public" apps); the
-  preset pre-fills scopes, endpoints, and the OIDC issuer. The same chooser
-  appears in first-run onboarding. (xAI uses an opt-in preset — set
-  `ZERO_OAUTH_ALLOW_PRESETS=1` or your own `ZERO_OAUTH_XAI_*`; see below.)
-- **Device code (headless / SSH):** for a provider that supports it (xAI,
-  Hugging Face), press **d** on the list to get a code to enter on another
-  device instead of opening a browser. On an SSH session or headless Linux box
-  (no `DISPLAY`) device code is used automatically; set `ZERO_OAUTH_DEVICE=1`
-  to force it anywhere. The CLI equivalent is
-  `zero auth login <name> --device`.
+   opens to approve → done (no key to paste). OpenRouter mints a key; xAI /
+   ChatGPT / Hugging Face store a refreshable bearer. Hugging Face requires a
+   one-time OAuth-app registration (no secret needed for "public" apps); the
+   preset pre-fills scopes, endpoints, and the OIDC issuer. Kimi Code is also
+   real OAuth but has no browser flow at all — see the device-code bullet
+   below. The same chooser appears in first-run onboarding. (`zero auth login`
+   and the interactive wizard use built-in presets for OpenRouter, xAI,
+   Kimi Code, ChatGPT, and Hugging Face without exporting
+   `ZERO_OAUTH_ALLOW_PRESETS`; any field is still overridable with
+   `ZERO_OAUTH_<NAME>_*` — see below.)
+- **Device code (headless / SSH):** for a provider that supports it (xAI, Kimi
+   Code, Hugging Face), press **d** on the list to get a code to enter on
+   another device instead of opening a browser. On an SSH session or headless
+   Linux box (no `DISPLAY`) device code is used automatically; set
+   `ZERO_OAUTH_DEVICE=1` to force it anywhere. The CLI equivalent is
+   `zero auth login <name> --device`. (Kimi Code is **device-code only** — it
+   has no loopback/browser flow, so `zero auth kimi` always uses the device
+   path and pressing plain Enter on it in the wizard does too.)
 - **ChatGPT / Claude are intentionally not in this list for the proxy path** —
   use the dedicated `chatgpt-proxy` / `custom-anthropic-compatible` preset
   (see §2) for subscription-via-proxy. ChatGPT *is* a first-class OAuth
@@ -76,17 +83,49 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
   In the interactive setup wizard, pick **OpenRouter** and press **ctrl+o** at the
   key step to do the same inline ("Log in with OAuth"). The minted key is saved to
   the provider profile and used normally.
-- **xAI (Grok) — opt-in preset** — xAI's flow needs an OAuth `client_id`. Zero
-  ships a built-in preset for the public Grok-CLI client, but to keep third-party
-  client identities out of the default credential path it is **off by default**.
-  Enable it with `export ZERO_OAUTH_ALLOW_PRESETS=1`, then `zero auth login xai`
-  (browser, or `--device` for headless) works one-click; the token is used directly
-  on `api.x.ai/v1`. Without the opt-in, set `ZERO_OAUTH_XAI_CLIENT_ID` (and
-  endpoints, or an issuer) yourself via `ZERO_OAUTH_XAI_*`. Either way the preset is
+- **xAI (Grok) — built-in preset** — xAI's flow needs an OAuth `client_id`. Zero
+  ships a built-in preset for the public Grok-CLI client. `zero auth login xai`
+  (browser, or `--device` for headless) and the interactive wizard enable that
+  preset automatically (no `ZERO_OAUTH_ALLOW_PRESETS=1` required on those
+  paths); the token is used directly on `api.x.ai/v1`. Library callers that
+  construct an `oauth.Manager` without `AllowPresets: true` still need
+  `ZERO_OAUTH_ALLOW_PRESETS=1`, or can set `ZERO_OAUTH_XAI_CLIENT_ID` (and
+  endpoints, or an issuer) via `ZERO_OAUTH_XAI_*`. Either way the preset is
   fully overridable by `ZERO_OAUTH_XAI_*` (env wins), and it requires a
   SuperGrok / X Premium+ subscription; the client_id is an undocumented public
   Grok-CLI client that may change without notice.
-- **ChatGPT (Codex) — opt-in preset** — `zero auth chatgpt` opens a browser, you
+- **Kimi Code — built-in preset, device-code only** — `zero auth kimi` (or
+   `zero auth login kimi-code --device`) runs the RFC 8628 device-code flow
+   against `https://auth.kimi.com`. You approve on another device and enter the
+   code; the returned access token is stored and used **directly** as a bearer
+   on Kimi's managed coding endpoint `https://api.kimi.com/coding/v1` (an
+   OpenAI-compatible chat-completions endpoint) — no ID-token claim extraction
+   is needed. Kimi has **no browser/loopback flow**, so the device code is the
+   only path (it is used automatically, and `--device` is accepted but
+   redundant). The catalog/provider ID is `kimi-code`, not `kimi` — the
+   `moonshot` provider already uses `kimi` as an alias for its separate,
+   API-key-based endpoint, so `zero auth kimi` is CLI sugar that forwards to
+   `kimi-code` rather than reusing that name. Like xAI, the preset ships the
+   public kimi-cli client identity (`17e5f671-d194-4dfb-9706-5516cb48c098`).
+   Both `zero auth kimi` and `zero auth login kimi-code` run through the
+   `auth login` engine, which enables presets unconditionally — no
+   `ZERO_OAUTH_ALLOW_PRESETS=1` is needed (same rule as xAI on those paths).
+   Any field is still overridable with
+   `ZERO_OAUTH_KIMI_CODE_*`. Kimi's backend also requires a handful of
+   vendor-identity `X-Msh-*` headers across all applicable OAuth and API calls
+   (device authorization, polling, code exchange, refresh, and managed
+   runtime/completions requests). One of these, `X-Msh-Device-Name`, is your
+   machine's hostname: it is sent to the provider on every OAuth request and
+   completion, so the provider sees the device name that is authorizing and
+   calling. These headers are reverse-engineered from kimi-cli,
+   not from public documentation — verify against a real login before relying
+   on this.
+   This is distinct from the `moonshot` catalog entry, which is the API-key path at
+   `https://api.moonshot.ai/v1` (set `MOONSHOT_API_KEY`). To override the managed
+   endpoint, set `baseURL` on the provider profile; to override the OAuth host,
+   set `ZERO_OAUTH_KIMI_CODE_ISSUER_URL`/`ZERO_OAUTH_KIMI_CODE_DEVICE_URL`/`ZERO_OAUTH_KIMI_CODE_TOKEN_URL`
+   (the provider resolves as `kimi-code`, so the env prefix is `KIMI_CODE`).
+- **ChatGPT (Codex) — built-in preset** — `zero auth chatgpt` opens a browser, you
   approve with your ChatGPT Plus/Pro/Business/Enterprise account, and the bearer is
   stored. The bearer routes to `https://chatgpt.com/backend-api/codex/responses`
   (the same endpoint the openai/codex CLI uses), with `originator: codex_cli_rs` and
@@ -95,20 +134,18 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
   bearer; if the claim is missing (older ChatGPT accounts, or a rotated
   authorization server), the Codex backend will 401 and `zero auth status chatgpt`
   will show the warning. Like xAI, the preset uses the publicly-shipped Codex CLI
-  client identity (`app_EMoamEEZ73f0CkXaXp7hrann`) and is opt-in via
-  `ZERO_OAUTH_ALLOW_PRESETS=1`. As of mid-2026 the Codex backend is
+  client identity (`app_EMoamEEZ73f0CkXaXp7hrann`) and `zero auth chatgpt` or the
+  interactive wizard enables it automatically. As of mid-2026 the Codex backend is
   Cloudflare-gated: requests from a non-Codex client can still be challenged, and
   the `chatgpt-proxy` route in §2 is the conservative fallback.
-- **Hugging Face — opt-in preset, BYO client_id** — `zero auth login huggingface`
+- **Hugging Face — built-in preset, BYO client_id** — `zero auth login huggingface`
   (or `--device` for headless) opens a Hugging Face OAuth flow. The bearer works on
   the OpenAI-compatible router at `https://router.huggingface.co/v1` for hundreds
   of OSS models (Llama, Qwen, DeepSeek, Mistral, etc.). HF does not ship a
   globally-known client_id, so the preset ships endpoints + scopes + the OIDC
   issuer pre-filled; you must register a "public" OAuth app (no secret) at
   <https://huggingface.co/settings/applications/new> and set the resulting
-  `client_id` via `ZERO_OAUTH_HUGGINGFACE_CLIENT_ID`. Enable the preset with
-  `ZERO_OAUTH_ALLOW_PRESETS=1` (or omit it — the BYO client_id path uses
-  `client_credentials = none` and doesn't need the opt-in). Free tier has strict
+  `client_id` via `ZERO_OAUTH_HUGGINGFACE_CLIENT_ID`. Free tier has strict
   rate limits; Pro removes them.
 
 Any field of a preset is overridable via `ZERO_OAUTH_<NAME>_*`. For a fully custom

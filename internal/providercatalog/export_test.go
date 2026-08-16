@@ -9,12 +9,15 @@ func IDs() []string {
 	return ids
 }
 
+// ListByTransport returns catalog descriptors for transport, preserving catalog
+// order. Listing clones only (no RuntimeHeaders) so tests never mint Kimi's
+// on-disk device id.
 func ListByTransport(transport Transport) []Descriptor {
 	normalized := Transport(NormalizeID(string(transport)))
 	items := make([]Descriptor, 0)
 	for _, descriptor := range descriptors {
 		if descriptor.Transport == normalized {
-			items = append(items, cloneDescriptor(descriptor))
+			items = append(items, cloneDescriptor(descriptor, false))
 		}
 	}
 	return items

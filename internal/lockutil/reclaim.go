@@ -11,6 +11,13 @@ import (
 // portably on a healthy filesystem.
 var restoreLockFile = restoreLiveLock
 
+// readSidelinedLock is swappable for the same reason: a healthy filesystem
+// does not fail a read of a file this process just renamed, so the
+// unreadable-lock path of ReclaimStaleLockRooted needs a seam to exercise.
+var readSidelinedLock = func(root *os.Root, name string) ([]byte, error) {
+	return root.ReadFile(name)
+}
+
 // restoreLiveLock puts a lock that turned out to be live back at path after
 // ReclaimStaleLock moved it aside to inspect it. It first tries a fast,
 // replacing rename straight from reclaimed to path: a single syscall, which
@@ -79,4 +86,89 @@ func ReclaimStaleLock(lockPath, suffix string, isLive func(reclaimedPath string)
 	}
 	_ = RemoveLockFile(reclaimed)
 	return true, nil
+}
+
+// linkRootedLock is swappable so tests can exercise the hard-link-incapable
+// filesystem fallback in restoreRootedLock.
+var linkRootedLock = func(root *os.Root, oldname, newname string) error {
+	return root.Link(oldname, newname)
+}
+
+// ReclaimStaleLockRooted is ReclaimStaleLock for a lock file inside an
+// already-opened *os.Root. Every rename/read/remove goes through the root
+// handle, so a symlink or reparse point swapped in under lockName after the
+// root was opened cannot redirect the operations (the path-based variant
+// would re-walk root.Name()+lockName as plain paths). lockName must be a bare
+// file name; the root supplies the directory. isLive receives the raw
+// sidelined contents and is called only when they were read successfully, so
+// it never has to invent a policy for contents it cannot see: an unreadable
+// lock is restored here without consulting it.
+func ReclaimStaleLockRooted(root *os.Root, lockName, suffix string, isLive func(raw []byte) bool) (bool, error) {
+	reclaimed := lockName + ".stale." + suffix
+	if err := root.Rename(lockName, reclaimed); err != nil {
+		if errors.Is(err, os.ErrNotExist) || isReclaimContended(err) {
+			return false, nil // another racer already moved/removed it, or it vanished
+		}
+		return false, err
+	}
+	raw, err := readSidelinedLock(root, reclaimed)
+	if err != nil {
+		// Decide here rather than handing nil to isLive. The callback answers
+		// "do these contents describe a live holder", and a caller can very
+		// reasonably treat empty or unparseable contents as dead so a holder
+		// that crashed mid-write is recoverable: kimiidentity's lockHolderAlive
+		// does exactly that. Passing nil then classified an unreadable lock as
+		// dead and removed it, which is the opposite of failing closed. A read
+		// failure is not proof of death, so restore and let the caller wait.
+		if rerr := restoreRootedLock(root, reclaimed, lockName); rerr != nil {
+			if errors.Is(rerr, os.ErrExist) {
+				_ = root.Remove(reclaimed)
+				return false, nil
+			}
+			return false, rerr
+		}
+		return false, nil
+	}
+	if isLive(raw) {
+		// Put the live lock back instead of stealing it, and let the caller wait.
+		if rerr := restoreRootedLock(root, reclaimed, lockName); rerr != nil {
+			if errors.Is(rerr, os.ErrExist) {
+				_ = root.Remove(reclaimed)
+				return false, nil
+			}
+			return false, rerr
+		}
+		return false, nil
+	}
+	if err := root.Remove(reclaimed); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// restoreRootedLock puts a lock that turned out to be live, or that could not
+// be read, back at lockName after ReclaimStaleLockRooted moved it aside. It
+// tries a no-replace hard link first, so a competing lock created in the gap
+// wins (os.ErrExist) instead of being overwritten, then an O_EXCL probe and
+// rename for filesystems without hard links without depending on reading contents.
+func restoreRootedLock(root *os.Root, reclaimed, lockName string) error {
+	if err := linkRootedLock(root, reclaimed, lockName); err == nil {
+		// Restore is complete; the sidelined name is now a redundant link.
+		// Cleanup is best-effort: a leftover .stale file is harmless, and
+		// returning a cleanup error here would report the restore as failed
+		// when it actually succeeded.
+		_ = root.Remove(reclaimed)
+		return nil
+	} else if errors.Is(err, os.ErrExist) {
+		return err
+	}
+	// Hard-link incapable filesystem (FAT, some FUSE/network mounts): probe
+	// lockName with O_EXCL so we never overwrite a racer, then atomically
+	// rename the sidelined file back without depending on reading its contents.
+	probe, err := root.OpenFile(lockName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_ = probe.Close()
+	return root.Rename(reclaimed, lockName)
 }
