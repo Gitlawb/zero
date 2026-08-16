@@ -679,7 +679,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// a number that contradicts what actually ran has to be raised now or
 			// never. Each name is raised at most once by the ledger, so an answer
 			// that comes back unchanged is returned rather than asked again.
-			if nudge := measurements.Nudge(measured.Conflicts(collected.Text)); nudge != "" {
+			// ACROSS RUNS, because a final answer may summarise several commands
+			// and this caller cannot say which one any given number came from.
+			// Holding it to a single run would accuse the model of inventing a
+			// number one of the other commands really printed.
+			if nudge := measurements.Nudge(measured.ConflictsAcrossRuns(collected.Text)); nudge != "" {
 				messages = append(messages, zeroruntime.Message{
 					Role:    zeroruntime.MessageRoleUser,
 					Content: nudge,
@@ -759,8 +763,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			options.Trace.Counter(trace.CounterToolCalls, 1)
 			recordOutputBudgetTrace(options.Trace, toolResult)
 			// Read before anything can truncate or summarize it: this is the only
-			// place the command's own words are in hand.
-			measured.Record(toolResult.Output)
+			// place the command's own words are in hand — and the only place the
+			// CALL that produced them is in hand too. Recording which tool and
+			// which arguments printed a timing is what stops a claim about one
+			// command being answered by a number a different one produced: a
+			// `-race` run is routinely several times slower, which is the size of
+			// discrepancy this check exists to catch.
+			measured.Record(measurements.Run{Command: call.Name, Args: []string{call.Arguments}}, toolResult.Output)
 			task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: call.Arguments, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)

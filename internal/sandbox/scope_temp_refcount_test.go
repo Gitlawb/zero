@@ -152,3 +152,148 @@ func TestAReadCoveredByATemporaryWriteSurvivesItsRelease(t *testing.T) {
 		t.Errorf("the root outlived its last holder: %v", scope.ReadRoots())
 	}
 }
+
+func hasExtraRoot(scope *Scope, root string) bool {
+	for _, existing := range scope.ExtraRoots() {
+		if existing == root {
+			return true
+		}
+	}
+	return false
+}
+
+// A PERMANENT GRANT MUST OUTLIVE THE TEMPORARY ONE IT LANDED ON TOP OF.
+//
+// extraRoots holds temporary write roots alongside permanent ones, so Add asked
+// only "is this already covered" — and a session-scoped grant made while a
+// temporary holder happened to cover the path recorded nothing, then vanished
+// when that holder released. Outliving the request that prompted it is the
+// entire difference between Add and AddTemporaryWrite.
+func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
+	t.Run("write, same root", func(t *testing.T) {
+		workspace, outside := scopeOutsideRoots(t)
+		scope, err := NewScope(workspace, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, releaseTemp, err := scope.AddTemporaryWrite(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := scope.Add(outside); err != nil {
+			t.Fatal(err)
+		}
+		releaseTemp()
+		if !hasExtraRoot(scope, outside) {
+			t.Error("the temporary holder's release revoked a permanent write grant")
+		}
+	})
+
+	t.Run("read, same root", func(t *testing.T) {
+		workspace, outside := scopeOutsideRoots(t)
+		scope, err := NewScope(workspace, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, releaseTemp, err := scope.AddTemporaryRead(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := scope.AddRead(outside); err != nil {
+			t.Fatal(err)
+		}
+		releaseTemp()
+		if !hasReadRoot(scope, outside) {
+			t.Error("the temporary holder's release revoked a permanent read grant")
+		}
+	})
+
+	// The nested shape: a BROAD temporary root covering a NARROW permanent one.
+	// Promoting in place cannot help here — the narrow root has to be recorded
+	// in its own right, or it goes when the broad one does.
+	t.Run("broad temporary over narrow permanent", func(t *testing.T) {
+		workspace, outside := scopeOutsideRoots(t)
+		inner := filepath.Join(outside, "inner")
+		if err := os.MkdirAll(inner, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		scope, err := NewScope(workspace, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, releaseBroad, err := scope.AddTemporaryWrite(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := scope.Add(inner); err != nil {
+			t.Fatal(err)
+		}
+		releaseBroad()
+		covered := false
+		for _, existing := range scope.ExtraRoots() {
+			if pathWithinRoot(existing, inner) {
+				covered = true
+			}
+		}
+		if !covered {
+			t.Error("a narrower permanent grant died with the broader temporary root it sat under")
+		}
+	})
+}
+
+// ONE HOLDER'S UNDO DROPS ONE HOLDER'S REFERENCE, HOWEVER OFTEN IT IS CALLED.
+//
+// The count flooring at zero stops it going negative; it does not stop a
+// holder's second call consuming somebody else's reference. With two readers,
+// calling the first's undo twice took the count 2 -> 1 -> 0 and removed a root
+// the second was still using — the exact revocation this refcount exists to
+// prevent, reached through a duplicate call rather than a sibling's cleanup.
+// Deferred cleanups in a retry path are how a real caller does this by accident.
+func TestOneHoldersUndoIsIdempotent(t *testing.T) {
+	workspace, outside := scopeOutsideRoots(t)
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, undoFirst, err := scope.AddTemporaryRead(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, undoSecond, err := scope.AddTemporaryRead(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	undoFirst()
+	undoFirst()
+	undoFirst()
+	if !hasReadRoot(scope, outside) {
+		t.Fatal("repeated calls to one holder's undo revoked a live holder's access")
+	}
+	undoSecond()
+	if hasReadRoot(scope, outside) {
+		t.Error("the root outlived its last holder")
+	}
+
+	// The write side takes the same rule.
+	writeScope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, undoWriteFirst, err := writeScope.AddTemporaryWrite(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, undoWriteSecond, err := writeScope.AddTemporaryWrite(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	undoWriteFirst()
+	undoWriteFirst()
+	if !hasExtraRoot(writeScope, outside) {
+		t.Fatal("repeated calls to one write holder's undo revoked a live holder's access")
+	}
+	undoWriteSecond()
+	if hasExtraRoot(writeScope, outside) {
+		t.Error("the write root outlived its last holder")
+	}
+}

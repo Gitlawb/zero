@@ -123,7 +123,12 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 				toolCalls.Add(1)
 			}
 			if event.Type == streamjson.EventToolResult {
-				measured.Record(event.Output)
+				// WITH THE CALL THAT PRODUCED IT. The stream carries the tool,
+				// its arguments and the directory, so a timing is recorded
+				// against the command that printed it rather than pooled with
+				// every other command's — which is what let a claim about one run
+				// be satisfied by a number a different run produced.
+				measured.Record(runForEvent(event), event.Output)
 				if len(event.ChangedFiles) > 0 {
 					changedMu.Lock()
 					for _, file := range event.ChangedFiles {
@@ -248,7 +253,11 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		// too much is the worst possible response to it.
 		// CHECKED AFTER THE CHILD HAS FINISHED, against the output it is handing
 		// back. Only conflicts are recorded, so an honest task carries nothing.
-		for _, conflict := range measured.Conflicts(result.Output) {
+		// ACROSS RUNS: the child's output summarises everything it ran, so there
+		// is no single command to hold each number to, and holding it to one
+		// would accuse the child of inventing a figure another of its own
+		// commands really printed.
+		for _, conflict := range measured.ConflictsAcrossRuns(result.Output) {
 			result.MeasurementConflicts = append(result.MeasurementConflicts,
 				fmt.Sprintf("%s: reported %s, but this task's own commands printed %s",
 					conflict.Name, formatConflictSeconds(conflict.Claimed), formatRecorded(conflict.Recorded)))
@@ -611,4 +620,16 @@ func planTaskHandoff(changed map[string]bool, existing string) string {
 	b.WriteString("Their contents on disk are where the work got to — read them before continuing, " +
 		"because they may be mid-change and need not compile.")
 	return b.String()
+}
+
+// runForEvent describes the command a tool result came from, for the
+// measurements ledger. Args is rendered rather than structured because the
+// ledger only ever compares and displays it — two calls differing in their
+// arguments must land in different runs, and that is all this has to guarantee.
+func runForEvent(event streamjson.Event) measurements.Run {
+	run := measurements.Run{Command: event.Name, Dir: event.Cwd}
+	if event.Args != nil {
+		run.Args = []string{fmt.Sprint(event.Args)}
+	}
+	return run
 }
