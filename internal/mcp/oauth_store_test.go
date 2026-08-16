@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -452,6 +454,61 @@ func TestResolveTokenStorePathUsesXDG(t *testing.T) {
 	want := filepath.Join(configHome, "zero", "mcp-oauth-tokens.json")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+func TestStoreTokenSourceRefreshUsesSaveRefreshed(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	server := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false)
+	server.OAuth = &OAuthConfig{ClientID: "client"}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("grant_type") != "refresh_token" {
+			t.Errorf("grant_type = %q", r.Form.Get("grant_type"))
+		}
+		_, _ = w.Write([]byte(`{"access_token":"mcp-refreshed","expires_in":3600}`))
+	}))
+	t.Cleanup(tokenServer.Close)
+	server.OAuth.TokenEndpoint = tokenServer.URL
+
+	if err := store.SaveForServer(server, StoredToken{AccessToken: "stale", RefreshToken: "rt"}); err != nil {
+		t.Fatalf("SaveForServer() error = %v", err)
+	}
+	source := &storeTokenSource{server: server, store: store, httpClient: tokenServer.Client(), now: time.Now}
+	got, err := source.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got != "mcp-refreshed" {
+		t.Fatalf("Refresh() = %q, want mcp-refreshed", got)
+	}
+	loaded, ok, err := store.LoadForServer(server)
+	if err != nil || !ok || loaded.AccessToken != "mcp-refreshed" {
+		t.Fatalf("LoadForServer after refresh = %#v ok=%v err=%v", loaded, ok, err)
+	}
+}
+
+func TestSaveRefreshedForServerAbortsWhenTokenGone(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	server := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false)
+	if err := store.SaveForServer(server, StoredToken{AccessToken: "live", RefreshToken: "rt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeleteForServerName("demo"); err != nil {
+		t.Fatal(err)
+	}
+	err = store.saveRefreshedForServer(server, StoredToken{AccessToken: "resurrected", RefreshToken: "rt"})
+	if err == nil {
+		t.Fatal("saveRefreshedForServer after delete succeeded")
+	}
+	if _, ok, err := store.LoadForServer(server); err != nil || ok {
+		t.Fatalf("LoadForServer after aborted refresh = ok %v err %v; token resurrected", ok, err)
 	}
 }
 

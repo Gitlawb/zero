@@ -342,6 +342,25 @@ func TestRefreshUsesConfigScopesWhenTokenHasNone(t *testing.T) {
 	}
 }
 
+func TestRefreshSendsSelectedScopeOnTokenEndpointError(t *testing.T) {
+	var gotScope string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotScope = r.FormValue("scope")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"token expired"}`))
+	}))
+	defer server.Close()
+	cfg := Config{ClientID: "c", TokenEndpoint: server.URL, Scopes: []string{"fallback-scope"}}
+	_, err := Refresh(context.Background(), server.Client(), cfg, Token{RefreshToken: "expired-rt", Scopes: []string{"custom-scope"}}, nil)
+	if err == nil {
+		t.Fatal("expected refresh failure on HTTP 400")
+	}
+	if gotScope != "custom-scope" {
+		t.Fatalf("refresh form scope = %q, want current token scopes on the failure path", gotScope)
+	}
+}
+
 func TestRefreshFailsOnHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

@@ -341,17 +341,23 @@ func (m *Manager) refreshAndSave(ctx context.Context, key string, cfg Config, cu
 	lock := m.keyLock(key)
 	lock.Lock()
 	defer lock.Unlock()
-	// Re-load inside the critical section: if a concurrent caller already refreshed
-	// (the access token changed), reuse it rather than spending the single-use
-	// refresh token a second time — the provider would reject the second use (M7).
-	if reloaded, err := m.loadToken(key); err == nil && reloaded.AccessToken != current.AccessToken {
+	// Re-load inside the critical section. A concurrent refresh that already
+	// rotated the access token is reused so we do not spend the single-use
+	// refresh token a second time. Any load error, including ErrNoToken from a
+	// concurrent logout, aborts: refresh is not login and must not recreate a
+	// credential the user just removed.
+	reloaded, err := m.loadToken(key)
+	if err != nil {
+		return "", err
+	}
+	if reloaded.AccessToken != current.AccessToken {
 		return reloaded.AccessToken, nil
 	}
 	refreshed, err := Refresh(ctx, m.client, cfg, current, m.now)
 	if err != nil {
 		return "", err
 	}
-	if err := m.store.saveRefreshed(key, refreshed); err != nil {
+	if err := m.store.SaveRefreshed(key, refreshed); err != nil {
 		return "", err
 	}
 	return refreshed.AccessToken, nil

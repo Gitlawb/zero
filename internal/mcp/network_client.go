@@ -869,7 +869,7 @@ func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := source.store.SaveForServer(source.server, refreshed); err != nil {
+	if err := source.store.saveRefreshedForServer(source.server, refreshed); err != nil {
 		return "", err
 	}
 	return refreshed.AccessToken, nil

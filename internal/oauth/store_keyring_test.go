@@ -2637,6 +2637,16 @@ func TestStoreKeyringHonorsLogoutFromRunningLegacyBinary(t *testing.T) {
 		t.Fatalf("Load after migration = %#v, ok %v, err %v; want the legacy token indexed", got, ok, err)
 	}
 
+	// A later refresh of the migrated key must keep origin so the logout
+	// below is still visible. This is the production GetFresh path.
+	if err := s.SaveRefreshed(key, Token{AccessToken: "refreshed-from-old"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err = s.Load(key)
+	if err != nil || !ok || got.AccessToken != "refreshed-from-old" {
+		t.Fatalf("Load after refresh = %#v, ok %v, err %v", got, ok, err)
+	}
+
 	// Step 3: the still-running old binary logs the user out of alpha. It has
 	// no concept of the index or tombstones, so the only thing it can do —
 	// and the only thing this test can simulate — is rewrite the legacy entry
@@ -3046,14 +3056,14 @@ func TestWithLeasedLocksReleasesOnPanic(t *testing.T) {
 // TestLeaseRefreshStopsWhenLockReplaced is the regression for ownership-aware
 // lease refresh: if a holder pauses past fileLockStaleAfter and a peer replaces
 // the lock, the original holder must not Chtimes the replacement (which would
-// keep both critical sections alive) and must fail closed.
+// keep both critical sections alive). When fn itself returned nil, post-fn
+// lease loss is not a persist failure.
 func TestLeaseRefreshStopsWhenLockReplaced(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "stolen.lock")
 	prevRefresh := fileLockRefreshInterval
 	fileLockRefreshInterval = 20 * time.Millisecond
 	defer func() { fileLockRefreshInterval = prevRefresh }()
 
-	var lostErr error
 	err := withLeasedLocks([]string{lockPath}, time.Now, func(leaseCheck) error {
 		// Replace the lock as a reclaiming peer would after a long pause.
 		if err := os.WriteFile(lockPath, []byte("replacement-holder"), 0o600); err != nil {
@@ -3073,18 +3083,12 @@ func TestLeaseRefreshStopsWhenLockReplaced(t *testing.T) {
 			return err
 		}
 		// Allow equal (coarse FS) but not strictly newer from our stolen lease.
-		// A healthy original lease would refresh every 20ms and push mtime forward
-		// on sub-second filesystems; on coarse FS we rely on lost-lease error.
 		_ = first
 		_ = info
 		return nil
 	})
-	lostErr = err
-	if lostErr == nil {
-		t.Fatal("expected lost-lease error after lock replacement, got nil")
-	}
-	if !strings.Contains(lostErr.Error(), "lost token lock lease") {
-		t.Fatalf("error = %v, want lost token lock lease", lostErr)
+	if err != nil {
+		t.Fatalf("withLeasedLocks after successful fn: %v", err)
 	}
 	// Replacement content must still be present: original release is ownership-aware.
 	data, err := os.ReadFile(lockPath)
@@ -3638,15 +3642,15 @@ func TestStoreKeyringReloginRetiresLegacyOriginPrecedence(t *testing.T) {
 	if _, ok, err := s1.Load(ProviderKey("alpha")); err != nil || !ok {
 		t.Fatalf("initial Load(alpha): ok=%v, err=%v", ok, err)
 	}
-	if err := s1.saveRefreshed(ProviderKey("beta"), Token{AccessToken: "beta-token"}); err != nil {
-		t.Fatalf("saveRefreshed(beta) to persist legacyOrigin: %v", err)
+	if err := s1.SaveRefreshed(ProviderKey("beta"), Token{AccessToken: "beta-token"}); err != nil {
+		t.Fatalf("SaveRefreshed(beta) to persist legacyOrigin: %v", err)
 	}
 
 	// 2. A token refresh of an origin-marked key must keep the origin so
 	// that an old-binary logout remains visible to a later absence-heuristic
 	// pass. Save() would retire the origin and hide the logout.
-	if err := s1.saveRefreshed(ProviderKey("alpha"), Token{AccessToken: "refreshed-alpha-token"}); err != nil {
-		t.Fatalf("saveRefreshed(alpha): %v", err)
+	if err := s1.SaveRefreshed(ProviderKey("alpha"), Token{AccessToken: "refreshed-alpha-token"}); err != nil {
+		t.Fatalf("SaveRefreshed(alpha): %v", err)
 	}
 	originBlob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
 	originAfterRefresh, err := originBlob.readLegacyOrigin()
@@ -3654,7 +3658,7 @@ func TestStoreKeyringReloginRetiresLegacyOriginPrecedence(t *testing.T) {
 		t.Fatalf("readLegacyOrigin after refresh: %v", err)
 	}
 	if !originAfterRefresh[ProviderKey("alpha")] {
-		t.Fatal("saveRefreshed(alpha) retired legacyOrigin; old-binary logout would no longer be observed")
+		t.Fatal("SaveRefreshed(alpha) retired legacyOrigin; old-binary logout would no longer be observed")
 	}
 	if tok, ok, err := s1.Load(ProviderKey("alpha")); err != nil || !ok || tok.AccessToken != "refreshed-alpha-token" {
 		t.Fatalf("Load(alpha) after refresh: tok=%v, ok=%v, err=%v", tok, ok, err)
@@ -4038,6 +4042,27 @@ func TestLockOwnershipLossOnReleaseFails(t *testing.T) {
 	if err := unlock(); err == nil || !strings.Contains(err.Error(), "lost token lock ownership") {
 		t.Fatalf("expected lost token lock ownership error, got %v", err)
 	}
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("replacement lock missing after failed release: %v", err)
+	}
+	if string(data) != "foreign-token" {
+		t.Fatalf("release deleted a replacement lock: got %q", data)
+	}
+}
+
+func TestLockReleaseRemovesOwnedFile(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "owned.lock")
+	unlock, _, err := acquireFileLock(lockPath, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(); err != nil {
+		t.Fatalf("unlock owned lock: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("owned lock still present after release: %v", err)
+	}
 }
 
 func TestStoreKeyringDeletedLegacyAccountReconciliation(t *testing.T) {
@@ -4144,5 +4169,211 @@ func TestStoreKeyringFailedLegacyGetPreservesIndexedTokens(t *testing.T) {
 	}
 	if len(st) != 1 || st[0].Key != key {
 		t.Fatalf("Status = %+v, want 1 token with key %s", st, key)
+	}
+}
+
+func writeLegacyTokens(t *testing.T, kr *fakeKR, tokens map[string]Token) {
+	t.Helper()
+	raw, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(raw)
+}
+
+func TestStoreKeyringRefreshSeedsLegacyOriginOnFirstPersist(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+	writeLegacyTokens(t, kr, map[string]Token{key: {AccessToken: "from-old-binary"}})
+
+	if err := s.SaveRefreshed(key, Token{AccessToken: "refreshed-first"}); err != nil {
+		t.Fatalf("SaveRefreshed first persist: %v", err)
+	}
+	origin, err := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}.readLegacyOrigin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !origin[key] {
+		t.Fatal("first persist via SaveRefreshed did not seed legacyOrigin")
+	}
+
+	writeLegacyTokens(t, kr, map[string]Token{})
+	if _, ok, err := s.Load(key); err != nil || ok {
+		t.Fatalf("Load after legacy logout = ok %v, err %v; want hidden", ok, err)
+	}
+	statuses, err := s.Status("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range statuses {
+		if status.Key == key {
+			t.Fatalf("Status still lists %q after legacy logout: %#v", key, status)
+		}
+	}
+}
+
+func TestStoreKeyringMCPIdentityRefreshKeepsLegacyOrigin(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := KeyPrefixMCP + "demo.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := ValidateKey(key); err != nil {
+		t.Fatalf("fixture key: %v", err)
+	}
+	writeLegacyTokens(t, kr, map[string]Token{key: {AccessToken: "mcp-legacy"}})
+
+	if err := s.SaveRefreshed(key, Token{AccessToken: "mcp-refreshed"}); err != nil {
+		t.Fatalf("SaveRefreshed MCP identity: %v", err)
+	}
+	origin, err := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}.readLegacyOrigin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !origin[key] {
+		t.Fatal("MCP refresh retired or never seeded legacyOrigin")
+	}
+
+	writeLegacyTokens(t, kr, map[string]Token{})
+	if _, ok, err := s.Load(key); err != nil || ok {
+		t.Fatalf("LoadForServer-equivalent after legacy logout = ok %v, err %v; want hidden", ok, err)
+	}
+}
+
+func TestStoreKeyringRefreshAbortsWhenTokenGone(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+	if err := s.Save(key, Token{AccessToken: "live"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Delete(key); err != nil {
+		t.Fatal(err)
+	}
+	err = s.SaveRefreshed(key, Token{AccessToken: "resurrected"})
+	if err == nil || !errors.Is(err, ErrNoToken) {
+		t.Fatalf("SaveRefreshed after delete = %v, want ErrNoToken", err)
+	}
+	if _, ok, err := s.Load(key); err != nil || ok {
+		t.Fatalf("Load after aborted refresh = ok %v, err %v; token resurrected", ok, err)
+	}
+	tombstones, err := s.blob.(keyringBlob).readTombstones()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tombstones[key] {
+		t.Fatal("refresh cleared the logout tombstone")
+	}
+}
+
+func TestKeyringWriteRefreshDoesNotClearTombstone(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+	key := ProviderKey("alpha")
+	if err := b.writeTombstones(map[string]bool{key: true}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		key: {AccessToken: "refreshed"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.write(data, map[string]mutationIntent{key: mutationRefresh}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.readTombstones()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[key] {
+		t.Fatal("mutationRefresh cleared a logout tombstone")
+	}
+}
+
+func TestKeyringWriteRefreshSkipsOnlyRefreshedKeyInAbsenceHeuristic(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+	alpha := ProviderKey("alpha")
+	beta := ProviderKey("beta")
+	writeLegacyTokens(t, kr, map[string]Token{})
+	if err := b.writeLegacyOrigin(map[string]bool{alpha: true, beta: true}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.writeKeyIndex([]string{alpha, beta}, 0, 0, nil, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		alpha: {AccessToken: "refreshed-alpha"},
+		beta:  {AccessToken: "stale-beta"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.write(data, map[string]mutationIntent{alpha: mutationRefresh}, noLeaseLoss); err != nil {
+		t.Fatal(err)
+	}
+	tombstones, err := b.readTombstones()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tombstones[beta] {
+		t.Fatal("absence heuristic skipped beta because alpha was being refreshed")
+	}
+	if tombstones[alpha] {
+		t.Fatal("absence heuristic treated the refreshed key as a logout")
+	}
+	origin, err := b.readLegacyOrigin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !origin[alpha] {
+		t.Fatal("refresh retired alpha origin")
+	}
+	if origin[beta] {
+		t.Fatal("logged-out beta kept its origin marker")
+	}
+}
+
+func TestSaveRefreshedSucceedsWhenLeaseLostAfterPersist(t *testing.T) {
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"XDG_CONFIG_HOME": t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("alpha")
+	if err := s.Save(key, Token{AccessToken: "old", RefreshToken: "rt"}); err != nil {
+		t.Fatal(err)
+	}
+	blob := s.blob.(keyringBlob)
+	testAfterCriticalSection = func() {
+		_ = os.WriteFile(blob.lockPath, []byte("stolen-holder"), 0o600)
+	}
+	t.Cleanup(func() { testAfterCriticalSection = nil })
+
+	if err := s.SaveRefreshed(key, Token{AccessToken: "new", RefreshToken: "rt"}); err != nil {
+		t.Fatalf("SaveRefreshed after post-success lease loss: %v", err)
+	}
+	got, ok, err := s.Load(key)
+	if err != nil || !ok || got.AccessToken != "new" {
+		t.Fatalf("Load after post-success lease loss = %#v ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestWithLeasedLocksTreatsPostSuccessLeaseLossAsSuccess(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "post.lock")
+	err := withLeasedLocks([]string{lockPath}, time.Now, func(leaseCheck) error {
+		return os.WriteFile(lockPath, []byte("replacement"), 0o600)
+	})
+	if err != nil {
+		t.Fatalf("withLeasedLocks after successful fn: %v", err)
 	}
 }

@@ -282,6 +282,50 @@ func TestManagerHandle401ForcesRefresh(t *testing.T) {
 	}
 }
 
+func TestManagerRefreshAndSaveAbortsWhenLoggedOut(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		_, _ = io.WriteString(w, `{"access_token":"resurrected","expires_in":3600}`)
+	}))
+	t.Cleanup(server.Close)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+		"ZERO_OAUTH_DEMO_TOKEN_URL": server.URL,
+	}
+	m := managerFor(t, env, nil)
+	key := ProviderKey("demo")
+	if err := m.store.Save(key, Token{AccessToken: "stale", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.GetFresh(context.Background(), key)
+		done <- err
+	}()
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("refresh finished before token endpoint: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("token endpoint was never hit")
+	}
+	if _, err := m.Logout("demo"); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	close(release)
+	err := <-done
+	if err == nil || !errors.Is(err, ErrNoToken) {
+		t.Fatalf("GetFresh after logout = %v, want ErrNoToken", err)
+	}
+	if _, ok, err := m.store.Load(key); err != nil || ok {
+		t.Fatalf("Load after concurrent logout = ok %v err %v; token resurrected", ok, err)
+	}
+}
+
 func TestManagerLogout(t *testing.T) {
 	m := managerFor(t, map[string]string{"ZERO_OAUTH_DEMO_CLIENT_ID": "c"}, nil)
 	_ = m.store.Save(ProviderKey("demo"), Token{AccessToken: "a"})

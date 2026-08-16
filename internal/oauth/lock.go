@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,17 +77,7 @@ func acquireFileLock(lockPath string, now func() time.Time) (unlock func() error
 					return nil
 				}
 				released = true
-				data, rerr := os.ReadFile(lockPath)
-				if rerr != nil {
-					return fmt.Errorf("oauth: verify token lock on release %s: %w", filepath.Base(lockPath), rerr)
-				}
-				if string(data) != token {
-					return fmt.Errorf("oauth: lost token lock ownership on release %s", filepath.Base(lockPath))
-				}
-				if err := lockutil.RemoveLockFile(lockPath); err != nil {
-					return fmt.Errorf("oauth: release token lock %s: %w", filepath.Base(lockPath), err)
-				}
-				return nil
+				return releaseOwnedLock(lockPath, token)
 			}, token, nil
 		}
 		// On Windows a concurrent holder's os.Remove leaves the lock file in a
@@ -153,4 +144,38 @@ func acquireFileLock(lockPath string, now func() time.Time) (unlock func() error
 func ownLockFile(path, token string) bool {
 	data, err := os.ReadFile(path)
 	return err == nil && string(data) == token
+}
+
+// releaseOwnedLock removes lockPath only if it still contains token.
+// Validation and removal are bound to one rename-aside of the same inode
+// so a replacement lock cannot be deleted after a stale read.
+func releaseOwnedLock(lockPath, token string) error {
+	aside := lockPath + ".release." + token
+	if err := os.Rename(lockPath, aside); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("oauth: verify token lock on release %s: %w", filepath.Base(lockPath), err)
+		}
+		return fmt.Errorf("oauth: release token lock %s: %w", filepath.Base(lockPath), err)
+	}
+	data, err := os.ReadFile(aside)
+	if err != nil {
+		if rerr := lockutil.RestoreLockFile(aside, lockPath); rerr != nil && !errors.Is(rerr, os.ErrExist) {
+			_ = lockutil.RemoveLockFile(aside)
+			return fmt.Errorf("oauth: verify token lock on release %s: %w (restore: %v)", filepath.Base(lockPath), err, rerr)
+		}
+		return fmt.Errorf("oauth: verify token lock on release %s: %w", filepath.Base(lockPath), err)
+	}
+	if string(data) != token {
+		if rerr := lockutil.RestoreLockFile(aside, lockPath); rerr != nil {
+			_ = lockutil.RemoveLockFile(aside)
+			if !errors.Is(rerr, os.ErrExist) {
+				return fmt.Errorf("oauth: lost token lock ownership on release %s: restore: %v", filepath.Base(lockPath), rerr)
+			}
+		}
+		return fmt.Errorf("oauth: lost token lock ownership on release %s", filepath.Base(lockPath))
+	}
+	if err := lockutil.RemoveLockFile(aside); err != nil {
+		return fmt.Errorf("oauth: release token lock %s: %w", filepath.Base(lockPath), err)
+	}
+	return nil
 }

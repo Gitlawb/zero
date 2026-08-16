@@ -431,12 +431,18 @@ func sanitizeLockComponent(s string) string {
 // backend, or a "keyring:..." identifier for the keyring backend).
 func (s *Store) FilePath() string { return s.blob.location() }
 
-// mutationIntent is why a key appears in a write's mutation set. Save and
-// Delete replace or remove a credential and must retire legacy-origin
-// precedence for that key. A token refresh is not a login or logout, so it
-// must keep the origin marker: otherwise an old-binary logout that happened
-// after this process last read the legacy blob is lost, and a later
-// absence-heuristic pass cannot delete the leftover indexed copy.
+// Mixed-version key lifecycle (keyring backend). File backends ignore intent.
+//
+//	State                         Load/Status              After refresh persist              After explicit Save                 After old binary drops the key from oauth-tokens
+//	----------------------------  -----------------------  ---------------------------------  ---------------------------------  ------------------------------------------------
+//	Legacy-only, not yet indexed  serve from legacy        index + set legacyOrigin           index + set origin                 hide + tombstone once origin is known
+//	Indexed, legacyOrigin set     serve indexed            update material, keep origin       update + retire origin             hide via origin absence (tombstone on write)
+//	Pure new-format (never legacy) serve indexed           update only                        update only                        N/A (origin never set)
+//	User logged out (tombstone)   hidden                   abort: do not refresh or persist   clear tombstone after durable write already hidden
+//
+// Refresh is not login. mutationRefresh seeds origin, never retires it, never
+// clears a tombstone, and never creates a credential that Load no longer sees.
+// Rules must key off intent, not "is this key in the mutation map?".
 type mutationIntent int
 
 const (
@@ -450,7 +456,11 @@ func (s *Store) Save(key string, token Token) error {
 	return s.save(key, token, mutationReplace)
 }
 
-func (s *Store) saveRefreshed(key string, token Token) error {
+// SaveRefreshed persists a token obtained by refreshing an existing
+// credential. Unlike Save this is not a login: it keeps mixed-version
+// origin markers, refuses to create a missing credential, and does not
+// clear a logout tombstone.
+func (s *Store) SaveRefreshed(key string, token Token) error {
 	return s.save(key, token, mutationRefresh)
 }
 
@@ -464,6 +474,11 @@ func (s *Store) save(key string, token Token, intent mutationIntent) error {
 		state, err := s.readState()
 		if err != nil {
 			return err
+		}
+		if intent == mutationRefresh {
+			if _, ok := state.Tokens[key]; !ok {
+				return fmt.Errorf("%w for %q", ErrNoToken, key)
+			}
 		}
 		state.Tokens[key] = token
 		return s.writeState(state, map[string]mutationIntent{key: intent}, check)
@@ -736,6 +751,11 @@ func createPublicationFile(path string) (*os.File, string, error) {
 // is no ownership loss for fn to observe mid-critical-section.
 func noLeaseLoss() error { return nil }
 
+// testAfterCriticalSection, if set, runs after the backend critical section
+// returns and before lock release / post-fn lease check. Tests use it to
+// simulate a peer reclaiming the lock after a successful persist.
+var testAfterCriticalSection func()
+
 func (b fileBlob) withLock(now func() time.Time, fn func(check leaseCheck) error) error {
 	unlock, _, err := acquireFileLock(b.path+".lockfile", now)
 	if err != nil {
@@ -743,10 +763,16 @@ func (b fileBlob) withLock(now func() time.Time, fn func(check leaseCheck) error
 	}
 	defer func() { _ = unlock() }()
 	fnErr := fn(noLeaseLoss)
-	if uerr := unlock(); uerr != nil && fnErr == nil {
-		return uerr
+	if hook := testAfterCriticalSection; hook != nil {
+		hook()
 	}
-	return fnErr
+	if fnErr != nil {
+		return fnErr
+	}
+	// Persist is the atomic rename inside fn. A later ownership loss on
+	// unlock is mutex cleanup and must not invert a successful write.
+	_ = unlock()
+	return nil
 }
 
 // withReadLock is deliberately lock-free: write() replaces the file with an
@@ -946,8 +972,9 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 }
 
 // readLegacy reads the pre-migration whole-blob entry, for installs that
-// haven't written since upgrading. The next write() migrates them: it writes
-// per-key entries and an index, then deletes this entry.
+// haven't written since upgrading. The next write() indexes per-key entries
+// from it and leaves oauth-tokens untouched. Tombstones and legacy-origin
+// handle logout and mixed-version detection.
 func (b keyringBlob) readLegacy() ([]byte, bool, error) {
 	enc, ok, err := b.kr.Get(b.service, b.legacyAccount)
 	if err != nil || !ok {
@@ -1078,17 +1105,23 @@ func (b keyringBlob) write(data []byte, mutations map[string]mutationIntent, che
 		return err
 	}
 	legacyOriginChanged := false
+	// Seed origin for every live legacy key except an in-flight delete.
+	// Refresh is often the first indexed write and must record origin so a
+	// later old-binary logout is distinguishable from "never in legacy".
 	for key := range legacyTokens {
 		if ValidateKey(key) != nil {
 			continue
 		}
-		if !legacyOrigin[key] {
-			if _, mutated := mutations[key]; !mutated {
-				legacyOrigin[key] = true
-				legacyOriginChanged = true
-			}
+		if legacyOrigin[key] {
+			continue
 		}
+		if intent, mutated := mutations[key]; mutated && intent == mutationDelete {
+			continue
+		}
+		legacyOrigin[key] = true
+		legacyOriginChanged = true
 	}
+	// Retire origin only on explicit login or logout, never on refresh.
 	for key, intent := range mutations {
 		if intent == mutationRefresh {
 			continue
@@ -1100,7 +1133,12 @@ func (b keyringBlob) write(data []byte, mutations map[string]mutationIntent, che
 	}
 	if len(legacyOrigin) > 0 {
 		for key := range state.Tokens {
-			if _, mutated := mutations[key]; mutated || !legacyOrigin[key] {
+			// Skip only the key being refreshed. Other origin-marked keys
+			// absent from legacy are still a logout, including on this pass.
+			if intent, mutated := mutations[key]; mutated && intent == mutationRefresh {
+				continue
+			}
+			if !legacyOrigin[key] {
 				continue
 			}
 			if legacyTokens != nil {
@@ -1251,11 +1289,13 @@ func (b keyringBlob) write(data []byte, mutations map[string]mutationIntent, che
 		}
 	}
 	// A re-login clears its tombstone only after the replacement entry and exact
-	// index are durable. If any earlier step fails, legacy fallback remains
+	// index are durable. Refresh is not re-login: if a concurrent logout
+	// published a tombstone, keep it so the persist cannot resurrect the
+	// credential. If any earlier step fails, legacy fallback remains
 	// suppressed instead of restoring the revoked credential.
 	tombstonesChanged := false
 	for key, intent := range mutations {
-		if intent != mutationDelete && tombstones[key] {
+		if intent == mutationReplace && tombstones[key] {
 			delete(tombstones, key)
 			tombstonesChanged = true
 		}
@@ -1957,9 +1997,11 @@ func (l *leasedPath) release() error {
 // cannot leave an earlier lock looking abandoned. Locks are released in
 // reverse order once fn returns — including when fn panics — so a recovered
 // panic cannot leave a forever-refreshed lock that wedges every later waiter.
-// If a lease is replaced under us mid-critical-section, the operation fails
-// closed after fn returns (or with fn's error) rather than treating a dual-
-// entry window as success.
+// Mid-fn lease loss is fail-closed: fn must consult checkLease before each
+// mutation, and a non-nil fn error is returned as-is. After fn returns nil,
+// every mutation it intended has already passed that fence, so a later lease
+// loss is mutex cleanup and must not invert success (a retry can burn a
+// single-use refresh token).
 // leaseCheck reports whether every lock backing the current critical section
 // is still owned, at the instant it is called. fn must call it immediately
 // before each externally visible mutation (a keyring Set/Delete, not a read),
@@ -2024,12 +2066,15 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func(check leaseCh
 		return err
 	}
 	err := fn(check)
+	if hook := testAfterCriticalSection; hook != nil {
+		hook()
+	}
 	if lostErr := check(); lostErr != nil {
 		_ = releaseAll()
 		if err != nil {
 			return err
 		}
-		return lostErr
+		return nil
 	}
 	if relErr := releaseAll(); relErr != nil {
 		if err != nil {

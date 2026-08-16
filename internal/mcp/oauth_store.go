@@ -163,6 +163,17 @@ func (store *TokenStore) SaveForServer(server Server, token StoredToken) error {
 	return store.store.Save(key, storedToOAuth(token))
 }
 
+// saveRefreshedForServer persists a token obtained by refreshing an existing
+// MCP credential. It is not a login: mixed-version origin markers stay put
+// and a concurrent logout cannot be overwritten.
+func (store *TokenStore) saveRefreshedForServer(server Server, token StoredToken) error {
+	key, err := mcpIdentityKey(server)
+	if err != nil {
+		return err
+	}
+	return store.store.SaveRefreshed(key, storedToOAuth(token))
+}
+
 // Load returns the stored token for a server. The second return value is false
 // when no token has been stored for the server.
 func (store *TokenStore) Load(serverName string) (StoredToken, bool, error) {

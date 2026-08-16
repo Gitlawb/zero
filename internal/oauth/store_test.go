@@ -74,6 +74,34 @@ func TestStoreStatusFiltersByPrefix(t *testing.T) {
 	}
 }
 
+func TestFileBackendSaveSucceedsWhenLockOwnershipLostAfterWrite(t *testing.T) {
+	s, path := newTestStore(t)
+	lockPath := path + ".lockfile"
+	testAfterCriticalSection = func() {
+		_ = os.WriteFile(lockPath, []byte("stolen-holder"), 0o600)
+	}
+	t.Cleanup(func() { testAfterCriticalSection = nil })
+
+	if err := s.Save(ProviderKey("demo"), Token{AccessToken: "new"}); err != nil {
+		t.Fatalf("Save after lock theft: %v", err)
+	}
+	got, ok, err := s.Load(ProviderKey("demo"))
+	if err != nil || !ok || got.AccessToken != "new" {
+		t.Fatalf("Load = %#v ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestFileBlobWithLockIgnoresUnlockErrorAfterSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	b := fileBlob{path: path}
+	err := b.withLock(time.Now, func(leaseCheck) error {
+		return os.WriteFile(path+".lockfile", []byte("stolen-holder"), 0o600)
+	})
+	if err != nil {
+		t.Fatalf("withLock: %v", err)
+	}
+}
+
 func TestStoreFileMode0600(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix file modes")
