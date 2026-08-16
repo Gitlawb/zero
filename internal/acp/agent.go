@@ -2,9 +2,11 @@ package acp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -82,6 +84,8 @@ func NewAgent(conn *Conn, deps Deps) *Agent {
 	conn.Handle(MethodInitialize, a.handleInitialize)
 	conn.Handle(MethodSessionNew, a.handleSessionNew)
 	conn.Handle(MethodSessionLoad, a.handleSessionLoad)
+	conn.Handle(MethodSessionList, a.handleSessionList)
+	conn.Handle(MethodSessionResume, a.handleSessionResume)
 	conn.Handle(MethodSessionPrompt, a.handleSessionPrompt)
 	conn.Handle(MethodSessionSetMode, a.handleSetMode)
 	conn.Handle(MethodSessionSetConfigOption, a.handleSetConfigOption)
@@ -110,11 +114,11 @@ func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any
 	return InitializeResult{
 		ProtocolVersion: negotiated,
 		AgentCapabilities: AgentCapabilities{
-			// Only advertise what ZERO actually implements: session/load (loadSession)
-			// and image prompts. session/resume + the session-capability sub-object
-			// are intentionally omitted since there is no resume handler yet.
-			LoadSession:        true,
-			PromptCapabilities: PromptCapabilities{Image: true},
+			// ACP v1 optional methods are advertised as empty capability objects;
+			// clients must gate session/list and session/resume on their presence.
+			LoadSession:         true,
+			PromptCapabilities:  PromptCapabilities{Image: true},
+			SessionCapabilities: &SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}},
 		},
 		AgentInfo: &info,
 		// ZERO owns credentials (BYOK) and does not delegate auth to the editor.
@@ -154,6 +158,22 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/load params")
 	}
+	return a.activatePersistedSession(ctx, p, true)
+}
+
+func (a *Agent) handleSessionResume(ctx context.Context, params json.RawMessage) (any, error) {
+	var p ResumeSessionParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, RPCError(codeInvalidParams, "invalid session/resume params")
+	}
+	return a.activatePersistedSession(ctx, p, false)
+}
+
+// activatePersistedSession restores the agent's internal conversation context
+// for both lifecycle methods. session/load additionally replays user-visible
+// history as ordered session/update notifications; session/resume deliberately
+// does not, which makes it safe for an already-rendered desktop reconnect.
+func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParams, replay bool) (any, error) {
 	meta, err := a.deps.Store.Get(p.SessionID)
 	if err != nil || meta == nil {
 		return nil, RPCError(codeInvalidParams, "session not found: "+p.SessionID)
@@ -169,7 +189,7 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	// Load history BEFORE publishing the session so no concurrent prompt observes
 	// a half-initialized session (registerSession sets history under the lock and
 	// reuses an already-live session rather than orphaning its in-flight turn).
-	history, historyErr := a.loadHistory(meta.SessionID)
+	history, messages, historyErr := a.loadHistory(meta.SessionID)
 	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
@@ -181,8 +201,14 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 		}
 	}
 	sess := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
+	note := &notifier{conn: a.conn, sessionID: sess.id}
+	if replay && historyErr == nil {
+		for _, message := range messages {
+			note.send(replayMessageChunk(message.role, replayMessageID(message.eventID), message.content))
+		}
+	}
 	a.warnPersistence(
-		&notifier{conn: a.conn, sessionID: sess.id},
+		note,
 		"load session history",
 		"Could not load session history. The session is open, but earlier turns may be missing until storage recovers.",
 		historyErr,
@@ -191,6 +217,37 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 		ConfigOptions: a.configOptions(sess),
 		Modes:         a.modeState(sess),
 	}, nil
+}
+
+func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (any, error) {
+	var p ListSessionsParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, RPCError(codeInvalidParams, "invalid session/list params")
+		}
+	}
+	if p.Cursor != "" {
+		return nil, RPCError(codeInvalidParams, "invalid session/list cursor")
+	}
+	items, err := a.deps.Store.ListResumable()
+	if err != nil {
+		return nil, RPCError(codeInternalError, "list sessions: "+err.Error())
+	}
+	cwd := strings.TrimSpace(p.Cwd)
+	result := ListSessionsResult{Sessions: make([]SessionInfo, 0, len(items))}
+	for _, item := range items {
+		if cwd != "" && item.Cwd != cwd {
+			continue
+		}
+		result.Sessions = append(result.Sessions, SessionInfo{
+			SessionID: item.SessionID,
+			Title:     item.Title,
+			Cwd:       item.Cwd,
+			UpdatedAt: item.UpdatedAt,
+			Meta:      &SessionInfoMeta{ModelID: item.ModelID, CreatedAt: item.CreatedAt},
+		})
+	}
+	return result, nil
 }
 
 // ---- prompt turn ----
@@ -567,15 +624,22 @@ func (a *Agent) persistTurn(sess *acpSession, user, assistant string) error {
 	return err
 }
 
-func (a *Agent) loadHistory(sessionID string) ([]turnRecord, error) {
+type persistedMessage struct {
+	eventID string
+	role    string
+	content string
+}
+
+func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage, error) {
 	if a.deps.Store == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	events, err := a.deps.Store.ReadEvents(sessionID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var records []turnRecord
+	var messages []persistedMessage
 	var pendingUser string
 	havePending := false
 	for _, e := range events {
@@ -595,12 +659,14 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, error) {
 		}
 		switch msg.Role {
 		case "user":
+			messages = append(messages, persistedMessage{eventID: persistedMessageIdentity(sessionID, e), role: msg.Role, content: msg.Content})
 			if havePending {
 				records = append(records, turnRecord{user: pendingUser})
 			}
 			pendingUser = msg.Content
 			havePending = true
 		case "assistant":
+			messages = append(messages, persistedMessage{eventID: persistedMessageIdentity(sessionID, e), role: msg.Role, content: msg.Content})
 			records = append(records, turnRecord{user: pendingUser, assistant: msg.Content})
 			pendingUser = ""
 			havePending = false
@@ -609,7 +675,26 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, error) {
 	if havePending {
 		records = append(records, turnRecord{user: pendingUser})
 	}
-	return records, nil
+	return records, messages, nil
+}
+
+func persistedMessageIdentity(sessionID string, event sessions.Event) string {
+	if event.ID != "" {
+		return event.ID
+	}
+	return fmt.Sprintf("%s:%d", sessionID, event.Sequence)
+}
+
+// replayMessageID maps ZERO's stable event identity to a standards-shaped UUID
+// without leaking or parsing the event id on the wire. The same stored message
+// receives the same opaque id across loads, which also gives clients an exact
+// chunk boundary when two adjacent persisted messages have the same role.
+func replayMessageID(eventID string) string {
+	sum := sha256.Sum256([]byte("zero-acp-message:" + eventID))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func (a *Agent) warnPersistence(note *notifier, action string, message string, err error) {

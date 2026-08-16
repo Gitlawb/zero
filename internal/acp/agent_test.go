@@ -67,9 +67,10 @@ func testDeps(t *testing.T) Deps {
 // clientHarness wires a client Conn to an Agent over in-memory pipes and collects
 // session/update text chunks.
 type clientHarness struct {
-	client  *Conn
-	updates chan string
-	stop    func()
+	client        *Conn
+	updates       chan string
+	notifications chan ContentChunk
+	stop          func()
 }
 
 func newHarness(t *testing.T, deps Deps) *clientHarness {
@@ -80,18 +81,16 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 	client := NewConn(br, bw)
 	a := NewAgent(agentConn, deps)
 
-	h := &clientHarness{client: client, updates: make(chan string, 128)}
+	h := &clientHarness{client: client, updates: make(chan string, 128), notifications: make(chan ContentChunk, 128)}
 	client.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
 		var probe struct {
-			Update struct {
-				SessionUpdate string `json:"sessionUpdate"`
-				Content       struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"update"`
+			Update ContentChunk `json:"update"`
 		}
 		if json.Unmarshal(params, &probe) != nil {
 			return
+		}
+		if probe.Update.SessionUpdate == UpdateAgentMessageChunk || probe.Update.SessionUpdate == UpdateUserMessageChunk {
+			h.notifications <- probe.Update
 		}
 		if probe.Update.SessionUpdate == UpdateAgentMessageChunk {
 			h.updates <- probe.Update.Content.Text
@@ -124,7 +123,8 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	if initRes.ProtocolVersion != ProtocolVersion {
 		t.Fatalf("protocol version = %d", initRes.ProtocolVersion)
 	}
-	if !initRes.AgentCapabilities.LoadSession || !initRes.AgentCapabilities.PromptCapabilities.Image {
+	if !initRes.AgentCapabilities.LoadSession || !initRes.AgentCapabilities.PromptCapabilities.Image ||
+		initRes.AgentCapabilities.SessionCapabilities == nil || initRes.AgentCapabilities.SessionCapabilities.List == nil || initRes.AgentCapabilities.SessionCapabilities.Resume == nil {
 		t.Fatalf("unexpected capabilities: %+v", initRes.AgentCapabilities)
 	}
 
@@ -161,6 +161,105 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	// The streamed agent_message_chunk(s) should carry the assistant text.
 	if got := drainText(t, h.updates); !strings.Contains(got, "Hello from ZERO") {
 		t.Fatalf("streamed text = %q, want it to contain the assistant message", got)
+	}
+}
+
+func TestACPListsOnlyResumableSessionMetadata(t *testing.T) {
+	deps := testDeps(t)
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	for _, input := range []sessions.CreateInput{
+		{SessionID: "desktop-a", Title: "First", Cwd: workspaceA, ModelID: "model-a"},
+		{SessionID: "desktop-b", Title: "Second", Cwd: workspaceB, ModelID: "model-b"},
+		{SessionID: "child-run", SessionKind: sessions.SessionKindChild, Title: "Internal child", Cwd: workspaceA},
+	} {
+		if _, err := deps.Store.Create(input); err != nil {
+			t.Fatalf("create %s: %v", input.SessionID, err)
+		}
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var all ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &all); err != nil {
+		t.Fatalf("session/list: %v", err)
+	}
+	if len(all.Sessions) != 2 {
+		t.Fatalf("all sessions = %+v, want two resumable sessions", all.Sessions)
+	}
+	byID := make(map[string]SessionInfo, len(all.Sessions))
+	for _, item := range all.Sessions {
+		byID[item.SessionID] = item
+	}
+	if _, found := byID["child-run"]; found {
+		t.Fatal("agent-owned child session leaked into the desktop session picker")
+	}
+	if got := byID["desktop-a"]; got.Title != "First" || got.Cwd != workspaceA || got.Meta == nil || got.Meta.ModelID != "model-a" || got.Meta.CreatedAt == "" || got.UpdatedAt == "" {
+		t.Fatalf("desktop-a summary = %+v", got)
+	}
+
+	var filtered ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: workspaceB}, &filtered); err != nil {
+		t.Fatalf("filtered session/list: %v", err)
+	}
+	if len(filtered.Sessions) != 1 || filtered.Sessions[0].SessionID != "desktop-b" {
+		t.Fatalf("filtered sessions = %+v, want only desktop-b", filtered.Sessions)
+	}
+}
+
+func TestACPLoadReplaysHistoryAndResumeDoesNot(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "replay-session", Title: "Replay", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "first user"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "first answer"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "second user"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	loader := newHarness(t, deps)
+	var loaded LoadSessionResult
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	wantKinds := []string{UpdateUserMessageChunk, UpdateAgentMessageChunk, UpdateUserMessageChunk}
+	wantText := []string{"first user", "first answer", "second user"}
+	seenIDs := map[string]bool{}
+	for i := range wantKinds {
+		select {
+		case update := <-loader.notifications:
+			if update.SessionUpdate != wantKinds[i] || update.Content.Text != wantText[i] {
+				t.Fatalf("history update %d = %+v", i, update)
+			}
+			if update.MessageID == "" || seenIDs[update.MessageID] {
+				t.Fatalf("history update %d has missing/duplicate message id %q", i, update.MessageID)
+			}
+			seenIDs[update.MessageID] = true
+		case <-ctx.Done():
+			t.Fatalf("history update %d was not replayed", i)
+		}
+	}
+	loader.stop()
+
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	select {
+	case update := <-resumer.notifications:
+		t.Fatalf("session/resume replayed history: %+v", update)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
