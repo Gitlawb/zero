@@ -3456,15 +3456,62 @@ func overlayViewportLines(lines []string, overlay string, width int) []string {
 	return lines
 }
 
-// scrimViewportLine dims one backdrop line: it strips the line's own colors and
-// re-renders the text faint, so the dimmed transcript recedes behind the overlay.
+// scrimViewportLine dims one backdrop line while keeping semantic styling intact.
+// A transcript can contain syntax colors, diff backgrounds, warnings, and errors;
+// reducing all of them to faint grey makes an overlay harder to understand instead
+// of merely less prominent. Plain text uses the regular faint style. ANSI-styled
+// text keeps its colors and is made faint between resets, which lets the overlay
+// take focus while red, green, and syntax roles remain legible.
 // Blank lines are left untouched.
 func scrimViewportLine(line string, width int) string {
-	plain := ansi.Strip(line)
-	if strings.TrimSpace(plain) == "" {
+	if strings.TrimSpace(ansi.Strip(line)) == "" {
 		return line
 	}
-	return zeroTheme.faint.Render(plain)
+	if !hasExternalANSIStyle(line) {
+		return zeroTheme.faint.Render(line)
+	}
+
+	const faintSGR = "\x1b[2m"
+	const resetSGR = "\x1b[0m"
+	var out strings.Builder
+	out.Grow(len(line) + 16)
+	out.WriteString(faintSGR)
+	for index := 0; index < len(line); {
+		if line[index] == '\x1b' {
+			if end := ansiSequenceEnd(line, index); end > index {
+				sequence := line[index:end]
+				out.WriteString(sequence)
+				if sgrClearsFaint(sequence) {
+					out.WriteString(faintSGR)
+				}
+				index = end
+				continue
+			}
+		}
+		out.WriteByte(line[index])
+		index++
+	}
+	out.WriteString(resetSGR)
+	return out.String()
+}
+
+// sgrClearsFaint reports whether an SGR sequence resets intensity. Lipgloss
+// commonly emits ESC[0m around styled spans, but 22 also clears faint/bold, so
+// both need the faint scrim reapplied for the next unstyled segment.
+func sgrClearsFaint(sequence string) bool {
+	if !strings.HasPrefix(sequence, "\x1b[") || !strings.HasSuffix(sequence, "m") {
+		return false
+	}
+	params := strings.TrimSuffix(strings.TrimPrefix(sequence, "\x1b["), "m")
+	if params == "" {
+		return true
+	}
+	for _, param := range strings.Split(params, ";") {
+		if param == "0" || param == "22" {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeOverlayBlock(lines []string, width int) (int, []string, int) {

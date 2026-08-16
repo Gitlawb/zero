@@ -2964,21 +2964,27 @@ func TestScrimViewportLine(t *testing.T) {
 	if got := scrimViewportLine("   ", 10); got != "   " {
 		t.Fatalf("blank line should be untouched, got %q", got)
 	}
-	// Non-blank lines keep their text (only the styling is dimmed), so the backdrop
-	// stays readable behind the overlay.
+	// Non-blank plain lines keep their text and become faint, so the backdrop stays
+	// readable behind the overlay without competing with its focus surface.
 	got := scrimViewportLine("transcript content", 40)
 	if ansi.Strip(got) != "transcript content" {
 		t.Fatalf("scrim must preserve text, got %q", ansi.Strip(got))
 	}
-	// A pre-styled line must have its OWN styling stripped (so the dim wins), while
-	// the text content survives. This fails if scrim stops re-styling the backdrop.
-	styled := "\x1b[31mred backdrop\x1b[0m text"
+	// Styled transcript content must retain its semantic foreground and background
+	// colors. The scrim adds faintness around resets rather than flattening a diff
+	// or syntax-highlighted line to a single grey style.
+	styled := "\x1b[38;2;235;80;110mremoved\x1b[0m \x1b[48;2;35;80;58madded\x1b[0m"
 	scrimmed := scrimViewportLine(styled, 40)
-	if ansi.Strip(scrimmed) != "red backdrop text" {
+	if ansi.Strip(scrimmed) != "removed added" {
 		t.Fatalf("scrim must preserve styled line's text, got %q", ansi.Strip(scrimmed))
 	}
-	if strings.Contains(scrimmed, "\x1b[31m") {
-		t.Fatalf("scrim must strip the line's original styling, got %q", scrimmed)
+	for _, sequence := range []string{"\x1b[38;2;235;80;110m", "\x1b[48;2;35;80;58m"} {
+		if !strings.Contains(scrimmed, sequence) {
+			t.Fatalf("scrim must preserve semantic ANSI sequence %q, got %q", sequence, scrimmed)
+		}
+	}
+	if !strings.Contains(scrimmed, "\x1b[2m") {
+		t.Fatalf("scrim must apply faint styling around semantic colors, got %q", scrimmed)
 	}
 }
 
