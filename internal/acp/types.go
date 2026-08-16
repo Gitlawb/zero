@@ -12,6 +12,8 @@ const (
 	MethodAuthenticate           = "authenticate"
 	MethodSessionNew             = "session/new"
 	MethodSessionLoad            = "session/load"
+	MethodSessionList            = "session/list"
+	MethodSessionResume          = "session/resume"
 	MethodSessionPrompt          = "session/prompt"
 	MethodSessionCancel          = "session/cancel" // notification
 	MethodSessionUpdate          = "session/update" // notification (agent -> client)
@@ -62,8 +64,16 @@ type PromptCapabilities struct {
 }
 
 type AgentCapabilities struct {
-	LoadSession        bool               `json:"loadSession"`
-	PromptCapabilities PromptCapabilities `json:"promptCapabilities"`
+	LoadSession         bool                 `json:"loadSession"`
+	PromptCapabilities  PromptCapabilities   `json:"promptCapabilities"`
+	SessionCapabilities *SessionCapabilities `json:"sessionCapabilities,omitempty"`
+}
+
+// Empty capability objects are presence flags in ACP v1. Pointers preserve
+// the wire distinction between an advertised `{}` and an omitted capability.
+type SessionCapabilities struct {
+	List   *struct{} `json:"list,omitempty"`
+	Resume *struct{} `json:"resume,omitempty"`
 }
 
 type AuthMethod struct {
@@ -140,6 +150,35 @@ type LoadSessionResult struct {
 	Modes         *SessionModeState     `json:"modes,omitempty"`
 }
 
+// ListSessionsParams and the following types implement ACP v1 session/list.
+// Transcript contents stay behind session/load; this method returns metadata
+// only and leaves the optional pagination cursor opaque.
+type ListSessionsParams struct {
+	Cwd    string `json:"cwd,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type SessionInfoMeta struct {
+	ModelID   string `json:"modelId,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+type SessionInfo struct {
+	SessionID string           `json:"sessionId"`
+	Cwd       string           `json:"cwd"`
+	Title     string           `json:"title,omitempty"`
+	UpdatedAt string           `json:"updatedAt,omitempty"`
+	Meta      *SessionInfoMeta `json:"_meta,omitempty"`
+}
+
+type ListSessionsResult struct {
+	Sessions   []SessionInfo `json:"sessions"`
+	NextCursor string        `json:"nextCursor,omitempty"`
+}
+
+type ResumeSessionParams = LoadSessionParams
+type ResumeSessionResult = LoadSessionResult
+
 // ---- prompt turn ----
 
 type PromptParams struct {
@@ -174,6 +213,7 @@ type SessionNotification struct {
 // ContentBlock under "content"; the variant is set via SessionUpdate.
 type ContentChunk struct {
 	SessionUpdate string       `json:"sessionUpdate"`
+	MessageID     string       `json:"messageId,omitempty"`
 	Content       ContentBlock `json:"content"`
 }
 
