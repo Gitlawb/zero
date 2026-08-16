@@ -2460,8 +2460,19 @@ func TestRunApprovedGitPushPromptAppliesTurnNetworkGrant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
+	})
+	var overlay []sandbox.NetworkMode
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewScopedBashTool(root, nil))
+	registry.Register(&networkOverlayProbeTool{
+		delegate: tools.NewScopedBashTool(root, nil),
+		engine:   engine,
+		observed: &overlay,
+		t:        t,
+	})
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2482,11 +2493,7 @@ func TestRunApprovedGitPushPromptAppliesTurnNetworkGrant(t *testing.T) {
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
 		Autonomy:       "medium",
-		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
-			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
-			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
-		}),
+		Sandbox:        engine,
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
 			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approve network once"}, nil
@@ -2523,6 +2530,59 @@ func TestRunApprovedGitPushPromptAppliesTurnNetworkGrant(t *testing.T) {
 	if !strings.Contains(lastMessage.Content, "fake git push gitlawb://example.com/repo.git main") {
 		t.Fatalf("expected approved network command output after degraded execution, got %q", lastMessage.Content)
 	}
+	// The command running is not proof the GRANT was applied: under
+	// BackendUnavailable the degraded path executes regardless. Assert the turn
+	// overlay itself — the approval must have widened the plan's policy to
+	// NetworkAllow while the tool ran, and must not outlive the turn.
+	if len(overlay) != 1 {
+		t.Fatalf("expected one recorded overlay observation, got %#v", overlay)
+	}
+	if overlay[0] != sandbox.NetworkAllow {
+		t.Fatalf("plan policy network = %q during the approved call, want %q", overlay[0], sandbox.NetworkAllow)
+	}
+	if after := planNetworkMode(t, engine); after == sandbox.NetworkAllow {
+		t.Fatalf("turn network grant outlived the turn: policy network = %q", after)
+	}
+}
+
+// planNetworkMode reads the network mode the engine would actually build a
+// command plan with, which is where a turn grant's overlay becomes observable.
+func planNetworkMode(t *testing.T, engine *sandbox.Engine) sandbox.NetworkMode {
+	t.Helper()
+
+	plan, err := engine.BuildCommandPlan(sandbox.CommandSpec{Name: "git", Args: []string{"push"}})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan returned error: %v", err)
+	}
+	return sandbox.NormalizeNetworkMode(plan.Policy.Network)
+}
+
+// networkOverlayProbeTool is a bash-named shell tool that records the network
+// mode in effect at the moment the approved call runs, then delegates to the
+// real scoped bash tool so the command still executes.
+type networkOverlayProbeTool struct {
+	delegate tools.Tool
+	engine   *sandbox.Engine
+	observed *[]sandbox.NetworkMode
+	t        *testing.T
+}
+
+func (tool *networkOverlayProbeTool) Name() string        { return tool.delegate.Name() }
+func (tool *networkOverlayProbeTool) Description() string { return tool.delegate.Description() }
+func (tool *networkOverlayProbeTool) Parameters() tools.Schema {
+	return tool.delegate.Parameters()
+}
+
+func (tool *networkOverlayProbeTool) Safety() tools.Safety {
+	if safe, ok := tool.delegate.(interface{ Safety() tools.Safety }); ok {
+		return safe.Safety()
+	}
+	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt}
+}
+
+func (tool *networkOverlayProbeTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	*tool.observed = append(*tool.observed, planNetworkMode(tool.t, tool.engine))
+	return tool.delegate.Run(ctx, args)
 }
 
 func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {

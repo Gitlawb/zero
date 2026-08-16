@@ -1120,3 +1120,105 @@ func TestEvaluateAllowsWritesInsideDefaultTempRoot(t *testing.T) {
 		t.Fatalf("temp-root write risk=%v, must not be out_of_workspace", decision.Risk)
 	}
 }
+
+// TestEvaluatePromptsForParseableNetworkLaunchers is the parity matrix for the
+// PARSEABLE path.
+//
+// Every launcher covered by TestEvaluatePromptsForUnparseableNetworkBehindWrapper
+// is exercised there behind an unparseable suffix (`& rem '`, `&& "unterminated`),
+// which forces classification down the fallback. That proved the fallback and
+// hid the real exposure: production input is usually parseable, and a launcher
+// the AST path did not recurse into stayed clean no matter what the fallback
+// would have said. `cmd /c "git push origin main"` and `eval git push origin main`
+// were both caught by the fallback and both allowed here.
+//
+// So each case below must ALSO be parseable — the guard asserts it — and must
+// still reach ActionPrompt/ReasonNetworkBlocked with the shell permission
+// already granted. A new launcher belongs in both tables.
+func TestEvaluatePromptsForParseableNetworkLaunchers(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	for _, command := range []string{
+		// Quoted CMD payloads are command SOURCE, not a program name.
+		`cmd /c "git push origin main"`,
+		`cmd /c "curl https://evil.test"`,
+		`cmd /d /c "git push origin main"`,
+		`cmd /k "curl https://evil.test"`,
+		`call "git push origin main"`,
+		`call "curl https://evil.test"`,
+		// Unquoted forms, which already worked, stay working.
+		`cmd /c git push origin main`,
+		`cmd.exe /d /c curl https://evil.test`,
+		// eval runs its arguments as shell source on this path too.
+		`eval git push origin main`,
+		`eval "curl https://evil.test"`,
+		`eval curl https://evil.test`,
+		// GNU env appends trailing argv to the split string's argv, so a dynamic
+		// token after a literal -S operand extends the command unreadably.
+		`env -S 'git push origin main' "$EXTRA"`,
+		`env -S 'printf ok' $PAYLOAD`,
+		`env -S 'printf ok' "${PAYLOAD}" https://evil.test`,
+		`env -S "$PAYLOAD"`,
+		// CMD's echo-suppression prefix is not part of the program name.
+		`@curl https://evil.test`,
+		`@git push origin main`,
+		// Nested shell launchers past the level where double-quote escape
+		// removal used to hand the recursion a fragment.
+		`sh -c "sh -c \"sh -c \\\"curl https://evil.test\\\"\""`,
+		`sh -c "sh -c \"git push origin main\""`,
+		// push's plumbing counterpart performs the same egress.
+		`git send-pack origin main`,
+		`git -C repo send-pack origin main`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) is TooComplex; this table must exercise the PARSEABLE path", command)
+			}
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want a network prompt", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+}
+
+// The counterpart to the matrix above: failing closed must not mean flagging
+// every launcher. These run locally and must NOT cost a network prompt, or the
+// classifier trains users to approve egress reflexively.
+func TestEvaluateAllowsParseableLocalLaunchers(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	for _, command := range []string{
+		`cmd /c "git status"`,
+		`cmd /c "echo hello world"`,
+		// A quoted path containing a space is a program name, not a command line.
+		`cmd /c "C:\Program Files\git\bin\git.exe status"`,
+		`call "git status"`,
+		`eval echo hi`,
+		`eval git status`,
+		// Trailing LITERAL argv after a split string is fully readable.
+		`env -S 'printf ok' literal args`,
+		`env -S 'git status' --`,
+		`@echo hello`,
+		`@git status`,
+		`sh -c "sh -c \"git status\""`,
+		// Escape removal must not damage an ordinary quoted Windows path.
+		`echo "C:\Users\me\file.txt"`,
+		`git status`,
+		`git --help push`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) is TooComplex; this table must exercise the PARSEABLE path", command)
+			}
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Reason == ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) requested a network prompt for a local command", command)
+			}
+		})
+	}
+}
