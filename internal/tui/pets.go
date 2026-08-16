@@ -396,9 +396,6 @@ func (m model) petLayoutActive() bool {
 		return false
 	}
 	layoutWidth := m.width
-	if m.sidebarActive() {
-		layoutWidth = m.chatColumnWidth()
-	}
 	if !m.altScreen || layoutWidth < petImageColumns+4 || m.height < petImageRows+8 || m.subchat.active || m.transcriptDetailed {
 		return false
 	}
@@ -615,9 +612,6 @@ func resizePetCoordinate(value, oldMaximum, newMaximum, edgeThreshold int) int {
 }
 
 func (m model) petHomePosition(width, height int) (int, int) {
-	if m.sidebarActive() {
-		width = m.chatColumnWidth()
-	}
 	maxX := maxInt(0, width-petImageColumns)
 	maxY := maxInt(0, height-petImageRows)
 	return clampInt(width-petImageColumns-2, 0, maxX), clampInt(height-petImageRows-1, 0, maxY)

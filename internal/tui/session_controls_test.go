@@ -839,31 +839,17 @@ func TestUnpricedUsageStatusUsesLatestEventNotCumulative(t *testing.T) {
 	}
 }
 
-func TestStatusLineDropsTokenFigureWhenSidebarShowsIt(t *testing.T) {
+func TestStatusLineShowsTokenFigureWithoutPersistentRail(t *testing.T) {
 	m := sidebarTestModel()
 	m, _ = m.recordUsageEvent("test-model", zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})
-	if !m.sidebarActive() {
-		t.Fatal("expected the sidebar to be active for this model")
-	}
-
-	// The sidebar owns the token readout at its floor.
+	// Run details retains the full token count on demand.
 	if got := m.sidebarTokenText(); !strings.Contains(got, "120 tokens") {
 		t.Fatalf("sidebar token text = %q, want it to carry the 120-token figure", got)
 	}
-	// With the sidebar open, the status line must not repeat the token figure.
+	// The status line is the always-visible token readout.
 	status := plainRender(t, m.statusLine(m.width))
-	if strings.Contains(status, "tok") {
-		t.Fatalf("status line = %q, should not duplicate the token figure while the sidebar shows it", status)
-	}
-
-	// Sidebar hidden → the status line is the only home for the figure again.
-	m.sidebarHidden = true
-	if m.sidebarActive() {
-		t.Fatal("sidebar should be inactive once hidden")
-	}
-	hidden := plainRender(t, m.statusLine(m.width))
-	if !strings.Contains(hidden, "120 tok") {
-		t.Fatalf("status line with sidebar hidden = %q, want the token figure back", hidden)
+	if !strings.Contains(status, "120 tok") {
+		t.Fatalf("status line = %q, want the token figure", status)
 	}
 }
 

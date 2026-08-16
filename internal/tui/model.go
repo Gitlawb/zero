@@ -332,17 +332,13 @@ type model struct {
 	pendingSpecReview *pendingSpecReviewPrompt
 	width             int
 	height            int
-	// hidePinnedPlan suppresses the pinned plan panel above the composer. Set on
-	// the chat-column model copy in the two-column layout, where the plan is
-	// surfaced in the context sidebar instead so it isn't shown twice.
-	hidePinnedPlan bool
-	// sidebarHidden is the user's Ctrl+B preference to collapse the right context
-	// sidebar; when set, the chat reflows to full width. Distinct from the
-	// availability conditions in sidebarAvailable (geometry / mode / overlays).
-	sidebarHidden bool
-	// selectedFile is the touched file selected by clicking its FILES sidebar
-	// row: its edit cards tint in the chat (rowTouchesSelectedFile) and a second
-	// click opens the drill-in file view. "" when nothing is selected; Esc clears.
+	// runDetailsOpen keeps the optional run summary focused without permanently
+	// shrinking the conversation surface.
+	runDetailsOpen bool
+	sidebarHidden  bool
+	// selectedFile is the touched file selected from a file summary: its edit
+	// cards tint in the chat (rowTouchesSelectedFile) and a second click opens
+	// the drill-in file view. "" when nothing is selected; Esc clears.
 	selectedFile string
 	// fileView is the drill-in view for a touched file (file_view.go): while
 	// active the chat column's body shows the file's diff/content instead of the
@@ -1587,6 +1583,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch {
+		case m.runDetailsOpen:
+			if keyIs(msg, tea.KeyEsc) || m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) {
+				m.runDetailsOpen = false
+			}
+			return m, nil
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
@@ -1861,23 +1862,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && canFireComposerGatedToggle(m.keyBindings.toggleSidebar, defaultToggleSidebarChord, m.composerValue() == ""):
-			// Ctrl+B collapses / restores the right context sidebar. The composer-empty
-			// requirement only applies when the binding resolves to the conflicting
-			// default Ctrl+B chord (unset, or explicitly configured to the same
-			// chord), which readline navigation (move-to-beginning-of-line) also
-			// claims while typing; a binding that resolves to a genuinely different
-			// chord still fires mid-type. Only acts when
-			// the sidebar would otherwise be on screen (managed mode, wide enough,
-			// real conversation) so it's a no-op — not a confusing notice — on the
-			// home screen or a narrow terminal. Hiding reflows the chat to full
-			// width, so mirror the width-change bookkeeping (re-wrap the streaming
-			// fade, resize the composer) the WindowSizeMsg path does.
-			if !m.transcriptDetailed && m.noBlockingModal() && m.sidebarToggleAllowed() {
-				// Just show/hide — no transcript notice. The reflow IS the feedback,
-				// and emitting a line every toggle piled up noise in the chat.
-				m.sidebarHidden = !m.sidebarHidden
-				m.lineAges = nil
-				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
+			// Ctrl+B opens a compact, on-demand run summary. The composer-empty rule
+			// preserves readline's Ctrl+B move-to-beginning behavior; a remapped
+			// binding continues to work while composing.
+			if !m.transcriptDetailed && m.noBlockingModal() && m.runDetailsAllowed() {
+				m.runDetailsOpen = !m.runDetailsOpen
 				return m, nil
 			}
 		case keyCtrl(msg, 'v'), keySuper(msg, 'v'):
@@ -2375,6 +2364,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeFreePetPosition(m.width, m.height, msg.Width, msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
+		if msg.Width < runDetailsMinWidth {
+			m.runDetailsOpen = false
+		}
 		// A resize re-wraps content at a new width, shifting every row's bodyY;
 		// a stale transcript-hover target could coincidentally land on an
 		// unrelated clickable row (same reasoning as clearHover's other callers).
@@ -3028,14 +3020,6 @@ func (m model) transcriptEmpty() bool {
 // the managed conversation view. Streaming/modal blocks and composer chrome are
 // always rendered here.
 func (m model) transcriptView() string {
-	// Two-column layout: in alt-screen managed mode on a wide-enough terminal,
-	// the chat renders into a left column and a context sidebar (FILES / PLAN /
-	// tokens) into a right column. The chat is rendered by the existing scroll
-	// engine at the reduced column width via a model copy, then joined with the
-	// sidebar row-by-row. The subchat drill-in keeps its own single-column view.
-	if m.sidebarActive() && !m.subchat.active {
-		return m.twoColumnTranscriptView()
-	}
 	if m.petLayoutActive() {
 		return m.floatingPetTranscriptView()
 	}
@@ -3066,6 +3050,7 @@ func (m model) transcriptView() string {
 	}
 
 	suggestionOverlay := m.suggestionOverlay(width)
+	runDetailsOverlay := m.runDetailsOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
 	mcpOverlay := m.mcpManagerOverlay(width)
@@ -3079,6 +3064,8 @@ func (m model) transcriptView() string {
 		viewportOverlay = helpOverlayContent
 	case leaderHelpOverlayContent != "":
 		viewportOverlay = leaderHelpOverlayContent
+	case runDetailsOverlay != "":
+		viewportOverlay = runDetailsOverlay
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
 	case mcpAddOverlay != "":
@@ -3262,14 +3249,14 @@ func (m model) composerIdleHint() string {
 		hint = "? shortcuts"
 	case tierMedium:
 		parts := []string{"? shortcuts", "Ctrl+X cmds"}
-		if m.sidebarAvailable() {
-			parts = append(parts, sidebarKey+" sidebar")
+		if m.runDetailsAvailable() {
+			parts = append(parts, sidebarKey+" details")
 		}
 		hint = strings.Join(parts, " · ")
 	default:
 		parts := []string{"? shortcuts", "Ctrl+X cmds"}
-		if m.sidebarAvailable() {
-			parts = append(parts, sidebarKey+" sidebar")
+		if m.runDetailsAvailable() {
+			parts = append(parts, sidebarKey+" details")
 		}
 		parts = append(parts, detailKey+" detail", mouseKey+" copy", "Shift+Tab mode")
 		hint = strings.Join(parts, " · ")
@@ -3794,13 +3781,9 @@ func (m model) workingStatusLine() string {
 	// If the model has gone quiet (no streamed text, reasoning, OR tool-call output
 	// for a while — common when a provider buffers a large tool call instead of
 	// streaming it), say so plainly with an advancing timer, so a long silent
-	// generation never reads as a frozen screen. Only on the working line when the
-	// context sidebar isn't showing it — the sidebar's ACTIVITY pulse carries it
-	// whenever the sidebar is up, so it never appears in both places at once.
-	if !m.sidebarActive() {
-		if hint := m.quietGenerationHint(); hint != "" {
-			line += zeroTheme.amber.Render("  ·  " + hint)
-		}
+	// generation never reads as a frozen screen.
+	if hint := m.quietGenerationHint(); hint != "" {
+		line += zeroTheme.amber.Render("  ·  " + hint)
 	}
 	// A second line carries live plan progress (how far along + the current step)
 	// so a long working stretch shows the task advancing without consulting the

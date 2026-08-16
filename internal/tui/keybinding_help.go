@@ -67,7 +67,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 				{"\u2191 / \u2193", "scroll, or move within a popup / multi-line input"},
 				{"Ctrl+P / Ctrl+N", "previous / next item in menus (emacs-style)"},
 				{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
-				{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), "hide / show the right context sidebar"},
+				{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), "show / hide run details"},
 				{labelOr(m.keyBindings.toggleMouse, "Ctrl+E"), "release the mouse to drag-select & copy text"},
 				{"Tab", "accept the autocomplete / picker selection"},
 			},

@@ -129,8 +129,8 @@ func TestSidebarLineAtMouseHitsMemberRow(t *testing.T) {
 	}
 }
 
-func TestSidebarMemberClickRoutesToSubchatDrillIn(t *testing.T) {
-	// A real session so the click can actually drill in (not just be "handled").
+func TestSidebarMemberClickDoesNotInterceptFullWidthChat(t *testing.T) {
+	// A real member session proves that a stale rail coordinate cannot open it.
 	store := testSessionStore(t)
 	session, err := store.Create(sessions.CreateInput{Title: "member: build the homepage", ModelID: "gpt-4.1", Provider: "openai"})
 	if err != nil {
@@ -147,13 +147,11 @@ func TestSidebarMemberClickRoutesToSubchatDrillIn(t *testing.T) {
 	m.sessionStore = store
 	x := m.chatColumnWidth() + 3 + 2
 	next, _, handled := m.handleTranscriptSelectionMouse(testMouseClick(tea.MouseLeft, x, 1))
-	if !handled {
-		t.Fatal("clicking a clickable member row should be handled")
+	if handled {
+		t.Fatal("an invisible rail coordinate must not be handled")
 	}
-	// It must actually enter the member's subchat session, not merely consume the click.
-	if !next.subchat.active || next.subchat.childSessionID != session.SessionID {
-		t.Fatalf("click should drill into member session %q, got active=%v id=%q",
-			session.SessionID, next.subchat.active, next.subchat.childSessionID)
+	if next.subchat.active {
+		t.Fatalf("an invisible rail coordinate must not enter member session %q", session.SessionID)
 	}
 }
 
@@ -263,13 +261,10 @@ func TestSidebarToggleHidesAndShows(t *testing.T) {
 	}
 }
 
-func TestChatColumnWidthLeavesRoomForSidebar(t *testing.T) {
+func TestChatColumnWidthUsesFullConversationWidth(t *testing.T) {
 	m := sidebarTestModel()
-	chatW := m.chatColumnWidth()
-	sidebarW := sidebarWidth(m.width)
-	if chatW+3+sidebarW != m.width {
-		t.Fatalf("chat(%d) + divider(3) + sidebar(%d) = %d, want total width %d",
-			chatW, sidebarW, chatW+3+sidebarW, m.width)
+	if got, want := m.chatColumnWidth(), chatWidth(m.width); got != want {
+		t.Fatalf("chat width = %d, want full width %d", got, want)
 	}
 
 	// When the sidebar is inactive, chat width is the full chat width.
@@ -625,52 +620,52 @@ func TestJoinColumnsAligns(t *testing.T) {
 	}
 }
 
-func TestTwoColumnTranscriptViewWidth(t *testing.T) {
+func TestTranscriptViewUsesFullWidth(t *testing.T) {
 	m := sidebarTestModel()
-	out := m.twoColumnTranscriptView()
+	out := m.transcriptView()
 	lines := strings.Split(out, "\n")
 	if len(lines) != m.height {
-		t.Fatalf("two-column view = %d lines, want terminal height %d", len(lines), m.height)
+		t.Fatalf("transcript view = %d lines, want terminal height %d", len(lines), m.height)
 	}
 	for i, line := range lines {
-		if w := lipgloss.Width(line); w != m.width {
-			t.Fatalf("two-column row %d width = %d, want full width %d", i, w, m.width)
+		if w := lipgloss.Width(line); w > m.width {
+			t.Fatalf("row %d width = %d, exceeds full width %d", i, w, m.width)
 		}
 	}
+	for _, line := range lines {
+		if strings.HasPrefix(ansiPattern.ReplaceAllString(line, ""), "╭") && lipgloss.Width(line) == m.width {
+			return
+		}
+	}
+	t.Fatal("full-width composer frame not found")
 }
 
-func TestTwoColumnSidebarRemainsFullHeightBesideFooter(t *testing.T) {
+func TestFullWidthFooterKeepsContextAndComposerVisible(t *testing.T) {
 	m := sidebarTestModel()
 	m.width, m.height = 120, 34
 	m.unpricedTokens = 10000
-	out := plainRender(t, m.twoColumnTranscriptView())
+	out := plainRender(t, m.transcriptView())
 	lines := strings.Split(out, "\n")
 
 	tokenRow := -1
 	composerTop := -1
 	for index, line := range lines {
-		if strings.Contains(line, "10K tokens") {
+		if strings.Contains(line, "10K tok") {
 			tokenRow = index
 		}
 		if strings.HasPrefix(line, "╭") {
 			composerTop = index
 		}
 	}
-	if tokenRow != len(lines)-1 {
-		t.Fatalf("sidebar token summary should remain pinned to the bottom, row=%d last=%d\n%s", tokenRow, len(lines)-1, out)
+	if tokenRow < 0 {
+		t.Fatalf("footer should retain context information:\n%s", out)
 	}
 	if composerTop < 0 {
 		t.Fatalf("chat composer missing:\n%s", out)
 	}
 	composerRunes := []rune(lines[composerTop])
-	if len(composerRunes) != m.width || composerRunes[m.chatColumnWidth()-1] != '╮' {
-		t.Fatalf("composer should retain the chat-column width, got %q", lines[composerTop])
-	}
-	for index, line := range lines {
-		runes := []rune(line)
-		if len(runes) != m.width || runes[m.chatColumnWidth()+1] != '│' {
-			t.Fatalf("sidebar divider ended early on row %d: %q", index, line)
-		}
+	if len(composerRunes) != m.width || composerRunes[m.width-1] != '╮' {
+		t.Fatalf("composer should use the full conversation width, got %q", lines[composerTop])
 	}
 }
 
@@ -679,13 +674,9 @@ func stripSidebar(lines []string) string {
 	return ansiPattern.ReplaceAllString(strings.Join(lines, "\n"), "")
 }
 
-// The `/` command palette must NOT collapse the sidebar. It is a centred box
-// capped at suggestionPaletteMaxWidth floating over the chat column, not a
-// full-screen overlay — suppressing the second column for it dropped the plan
-// out of the sidebar and re-rendered it inline at the bottom on every `/`,
-// which is at its most disruptive mid-run with a live plan on screen. The
-// genuinely full-width overlays must still suppress it.
-func TestSidebarSurvivesCommandPalette(t *testing.T) {
+// The `/` command palette must not hide the pinned plan or reduce the
+// conversation width.
+func TestCommandPaletteKeepsPinnedPlan(t *testing.T) {
 	base := func() model {
 		m := runningPlanModel(t, 3)
 		m.altScreen = true
@@ -696,40 +687,19 @@ func TestSidebarSurvivesCommandPalette(t *testing.T) {
 	}
 
 	m := base()
-	if !m.sidebarActive() {
-		t.Fatal("precondition: sidebar should be active for a wide alt-screen model with a plan")
-	}
-
-	// `/` palette open: sidebar stays, so the plan keeps its home and the layout
-	// does not reflow.
+	// `/` palette open: the plan stays pinned and the layout does not reflow.
 	m.suggestions = []commandSuggestion{{Name: "/model", Desc: "Pick a model."}, {Name: "/plan", Desc: "Show planning mode status."}}
 	if !m.suggestionsActive() {
 		t.Fatal("precondition: suggestions should be active")
 	}
-	if !m.sidebarActive() {
-		t.Error("command palette must not collapse the sidebar")
+	if got := m.renderPinnedPlanPanel(m.chatColumnWidth(), 10); got == "" {
+		t.Error("plan must remain visible above the composer")
 	}
-	if got := m.renderPinnedPlanPanel(m.chatColumnWidth(), 10); got != "" {
-		t.Errorf("plan must stay in the sidebar, not fall back to the pinned panel:\n%s", got)
-	}
-	// The palette never contends for the sidebar's cells: the two-column path
-	// renders it at width = chatColumnWidth, so it is centred inside the chat
-	// column and cannot overlap the sidebar.
+	// The palette is bounded within the full-width transcript.
 	chatW := m.chatColumnWidth()
 	for _, line := range strings.Split(plainRender(t, m.suggestionOverlay(chatW)), "\n") {
 		if w := lipgloss.Width(line); w > chatW {
 			t.Errorf("palette line is %d wide, wider than the chat column %d — it would overlap the sidebar", w, chatW)
 		}
-	}
-	// Clicks still belong to the palette, not the sidebar rows beneath it.
-	if _, ok := m.sidebarLineAtMouse(tea.MouseClickMsg{Button: tea.MouseLeft}); ok {
-		t.Error("sidebar must not take mouse hits while the palette is open")
-	}
-
-	// A genuinely full-width overlay still suppresses the sidebar.
-	full := base()
-	full.picker = &commandPicker{}
-	if full.sidebarActive() {
-		t.Error("a full-screen picker must still collapse the sidebar")
 	}
 }

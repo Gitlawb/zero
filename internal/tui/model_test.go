@@ -1525,16 +1525,15 @@ func TestStaleExplanationDropped(t *testing.T) {
 	}
 }
 
-// TestBeginRunResetsSidebarHidden: a new run clears the sidebar's content, so the
-// stale Ctrl+B hide preference is reset (the new run's sidebar isn't suppressed)
-// and the explanation generation advances.
-func TestBeginRunResetsSidebarHidden(t *testing.T) {
+// TestBeginRunKeepsRunDetailsClosed verifies a new run starts on the focused
+// conversation surface and advances the explanation generation.
+func TestBeginRunKeepsRunDetailsClosed(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.sidebarHidden = true
+	m.runDetailsOpen = true
 	gen := m.planDetailGen
 	m = m.beginRun(nil)
-	if m.sidebarHidden {
-		t.Error("beginRun should reset the Ctrl+B hide preference for the new run")
+	if m.runDetailsOpen {
+		t.Error("beginRun should close run details for the new turn")
 	}
 	if m.planDetailGen <= gen {
 		t.Errorf("beginRun should bump planDetailGen, was %d now %d", gen, m.planDetailGen)
@@ -2584,14 +2583,10 @@ func TestComposerIdleHintAndJumpCue(t *testing.T) {
 				t.Fatalf("empty sidebar should not be advertised, got %q", hint)
 			}
 
-			withSidebar := idle
-			withSidebar.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
-			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-				t.Fatalf("available sidebar should be advertised, got %q", hint)
-			}
-			withSidebar.sidebarHidden = true
-			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-				t.Fatalf("collapsed sidebar should keep its restore shortcut, got %q", hint)
+			withDetails := idle
+			withDetails.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
+			if hint := plainRender(t, withDetails.composerIdleHint()); !strings.Contains(hint, "Ctrl+B details") {
+				t.Fatalf("available run details should be advertised, got %q", hint)
 			}
 		})
 	}

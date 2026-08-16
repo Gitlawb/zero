@@ -248,7 +248,7 @@ func (m model) renderPlanPanel(width int) string {
 	// The header already carries done/total and the per-step ✓/•/✗ icons convey
 	// progress; a separate filled █/░ bar restates it and reads heavier than the
 	// reference agents, so it's dropped.
-	header := renderPlanHeader(state, m.spinnerGlyph(), done, total, elapsed)
+	header := renderPlanHeader(state, done, total, elapsed)
 
 	lines := []string{header}
 
@@ -274,18 +274,6 @@ func (m model) renderPlanPanel(width int) string {
 // full list via m.plan.expanded, but the height budget always wins to keep the
 // composer on screen.
 func (m model) renderPinnedPlanPanel(width int, maxHeight int) string {
-	// The pinned panel is only for terminals where the context sidebar CANNOT
-	// host the plan (too narrow / inline mode). Whenever the two-column layout is
-	// available — whether the sidebar is shown OR collapsed with Ctrl+B — the
-	// plan's home is the sidebar, so suppress the pinned copy: a Ctrl+B hide
-	// should hide the plan entirely, not resurrect it above the composer. Gating
-	// on sidebarAvailable (not sidebarActive) covers the hidden case too. The
-	// hidePinnedPlan flag additionally suppresses it in the two-column chat-column
-	// copy. Both the view and the mouse-geometry frame call footerView, so this
-	// stays consistent.
-	if m.hidePinnedPlan || m.sidebarAvailable() {
-		return ""
-	}
 	if !m.plan.visible(m.now()) {
 		return ""
 	}
@@ -332,7 +320,7 @@ func (m model) renderPlanSummaryLine(width int) string {
 	if state.isComplete() {
 		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN · %d/%d complete", done, total))
 	}
-	label := fmt.Sprintf("%s PLAN · %d/%d · ", m.spinnerGlyph(), done, total)
+	label := fmt.Sprintf("PLAN · %d/%d · ", done, total)
 	room := width - len([]rune(label)) - 1
 	if room < 4 {
 		room = 4
@@ -361,11 +349,9 @@ func currentStepContent(steps []planStep) string {
 	return ""
 }
 
-// renderPlanHeader builds the single header line. While running it shows the
-// live spinner, the truncated first step, the done/total count, and the
-// elapsed time in the accent color; once complete it shows a green check and
-// "PLAN COMPLETE".
-func renderPlanHeader(state planPanelState, spinnerView string, done, total int, elapsed time.Duration) string {
+// renderPlanHeader builds the single header line. It remains stable while the
+// plan runs; the turn-level Working line is the single owner of animation.
+func renderPlanHeader(state planPanelState, done, total int, elapsed time.Duration) string {
 	// Show the step the plan is currently ON (in_progress, else first incomplete),
 	// not always step 1 — otherwise the header text never advances and a running
 	// plan reads as stuck even while the done/total count climbs.
@@ -376,7 +362,7 @@ func renderPlanHeader(state planPanelState, spinnerView string, done, total int,
 	if state.isComplete() {
 		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN COMPLETE · %d/%d · %s", done, total, formatElapsedSeconds(elapsed)))
 	}
-	return zeroTheme.accent.Render(fmt.Sprintf("%s PLAN · %s · %d/%d · %s", spinnerView, current, done, total, formatElapsedSeconds(elapsed)))
+	return zeroTheme.accent.Render(fmt.Sprintf("PLAN · %s · %d/%d · %s", current, done, total, formatElapsedSeconds(elapsed)))
 }
 
 // renderPlanStepLine renders one step row: an indent, a status icon, the

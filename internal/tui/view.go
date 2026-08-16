@@ -950,9 +950,9 @@ func (m model) themePickerPreviewLines(width int) []string {
 	// The preview stays transparent. A candidate-colored background becomes a
 	// disconnected slab that competes with the list; foreground roles are enough
 	// to show the palette while keeping the terminal canvas visually calm.
-	codeOpen := preview.accent.Render("func") + preview.ink.Render(" shipIt() {")
-	codeWork := preview.blue.Render("  tests") + preview.ink.Render("++")
-	codeComment := preview.faint.Render("  // no bugs, probably")
+	codeOpen := tokenStyleForTheme(preview, chroma.Keyword).Render("func") + preview.ink.Render(" ") + tokenStyleForTheme(preview, chroma.NameFunction).Render("shipIt") + preview.ink.Render("() {")
+	codeWork := preview.ink.Render("  ") + tokenStyleForTheme(preview, chroma.Name).Render("tests") + tokenStyleForTheme(preview, chroma.Operator).Render("++")
+	codeComment := tokenStyleForTheme(preview, chroma.Comment).Render("  // no bugs, probably")
 	codeClose := preview.ink.Render("}")
 	status := preview.green.Render("✓") + preview.faint.Render(" tests   ") + preview.accent.Render("0") + preview.faint.Render(" bugs (probably)")
 	return []string{
