@@ -16,14 +16,35 @@ import (
 // form, and it caught the first version of this test.
 func scopeOutsideRoots(t *testing.T) (workspace string, outside string) {
 	t.Helper()
-	base, err := os.MkdirTemp("/Users/Shared", "zeromax-scope-")
+	// The home directory, which no platform lists as a default write root —
+	// Windows takes %TEMP%/%TMP% and the rest take /tmp plus $TMPDIR. The first
+	// version reached for /Users/Shared and fell back to /var/empty, both of
+	// which exist only on this side of the fence: on Windows neither resolves,
+	// the helper skipped, and every test built on it reported green having
+	// asserted nothing. A skip is not a pass. scope_extra_read_test.go already
+	// places its grant under home for the same reason.
+	home, err := os.UserHomeDir()
 	if err != nil {
-		base, err = os.MkdirTemp("/var/empty", "zeromax-scope-")
-		if err != nil {
-			t.Skipf("no directory outside a default write root is available: %v", err)
-		}
+		t.Skipf("no home directory to place a grant outside the default write roots: %v", err)
+	}
+	base, err := os.MkdirTemp(home, "zeromax-scope-")
+	if err != nil {
+		t.Skipf("cannot create a directory outside the default write roots: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	// PROVED, not assumed. The whole point of this helper is that a temporary
+	// grant here is not already covered, and asserting it against the same list
+	// production consults means a future default write root turns these tests
+	// into an honest skip rather than a silent no-op.
+	resolved, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		resolved = base
+	}
+	for _, root := range defaultTempWriteRoots() {
+		if pathWithinRoot(root, resolved) {
+			t.Skipf("%s is already covered by the default write root %s, so a temporary grant here would prove nothing", resolved, root)
+		}
+	}
 	workspace = filepath.Join(base, "ws")
 	outside = filepath.Join(base, "outside")
 	for _, dir := range []string{workspace, outside} {
@@ -187,12 +208,17 @@ func TestConcurrentHoldersOfOneRoot(t *testing.T) {
 	start := make(chan struct{})
 	release := make(chan struct{})
 	failures := make(chan string, holders)
+	// Signalled by EVERY holder once its own AddTemporaryRead has returned,
+	// failure included: the gate below waits for all of them, so a holder that
+	// returned early without signalling would hang this test rather than fail it.
+	acquired := make(chan struct{}, holders)
 	for i := 0; i < holders; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
 			_, undo, err := scope.AddTemporaryRead(outside)
+			acquired <- struct{}{}
 			if err != nil {
 				failures <- err.Error()
 				return
@@ -209,12 +235,15 @@ func TestConcurrentHoldersOfOneRoot(t *testing.T) {
 		}()
 	}
 	close(start)
-	// Let every holder acquire before any releases, so the windows overlap.
-	for {
-		if !hasReadRoot(scope, outside) {
-			continue
-		}
-		break
+	// EVERY holder, not the first one. Spinning on hasReadRoot only waited for
+	// somebody to hold the root, and the spin is tight enough to win that race
+	// against the goroutines still being scheduled: measured over 200 runs, 194
+	// of them peaked at a single simultaneous holder and none ever reached
+	// eight. A test named for concurrent holders was testing one holder at a
+	// time, and would have passed against an implementation with no refcount at
+	// all. Counting the acquisitions makes the overlap real instead of hoped for.
+	for i := 0; i < holders; i++ {
+		<-acquired
 	}
 	close(release)
 	wg.Wait()
