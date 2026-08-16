@@ -570,6 +570,30 @@ func TestRecentModelPairsForPickerPinsActiveDedupesAndCaps(t *testing.T) {
 	}
 }
 
+func TestRecentModelPairsForPickerCanonicalizesChatGPTOpenAIModelAliases(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "chatgpt",
+		ModelName:    "gpt-5.6-sol",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "chatgpt",
+			CatalogID: "chatgpt",
+		},
+		RecentModels: []config.RecentModelEntry{
+			{Provider: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+		},
+	})
+
+	got := m.recentModelPairsForPicker()
+	want := []config.RecentModelEntry{
+		{Provider: "chatgpt", Model: "gpt-5.6-sol"},
+		{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recentModelPairsForPicker() = %#v, want %#v", got, want)
+	}
+}
+
 // The picker's cross-group de-dup must key on provider+model, not model id
 // alone: the same model id can be offered by two different providers, and
 // those are distinct, independently selectable rows (issue: recents should

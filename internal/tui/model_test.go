@@ -20,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -563,6 +564,72 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 		if !strings.Contains(next.transientNotice.text, want) {
 			t.Fatalf("expected model notice to contain %q, got %q", want, next.transientNotice.text)
 		}
+	}
+}
+
+func TestModelCommandAcceptsChatGPTCatalogModelID(t *testing.T) {
+	var rebuilt config.ProviderProfile
+	nextProvider := &fakeProvider{}
+	m := newModel(context.Background(), Options{
+		ProviderName: "chatgpt",
+		ModelName:    "gpt-5.6-terra",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "chatgpt",
+			CatalogID:    "chatgpt",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://chatgpt.com/backend-api/codex",
+			Model:        "gpt-5.6-terra",
+		},
+		Provider: &fakeProvider{},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			rebuilt = profile
+			return nextProvider, nil
+		},
+	})
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"chatgpt": {{ID: "gpt-5.6-sol"}},
+	}
+	m.input.SetValue("/model openai/gpt-5.6-sol")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-5.6-sol" || next.provider != nextProvider {
+		t.Fatalf("expected ChatGPT model switch to use bare catalog ID, got model=%q provider=%#v", next.modelName, next.provider)
+	}
+	if rebuilt.Model != "gpt-5.6-sol" {
+		t.Fatalf("expected provider rebuild with bare ChatGPT model ID, got %#v", rebuilt)
+	}
+}
+
+func TestProviderModelSwitchCandidatesPreserveGatewayModelIDs(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider string
+		input    string
+		want     []string
+	}{
+		{
+			name:     "ChatGPT accepts the models.dev OpenAI namespace",
+			provider: "chatgpt",
+			input:    "openai/gpt-5.6-sol",
+			want:     []string{"openai/gpt-5.6-sol", "gpt-5.6-sol"},
+		},
+		{
+			name:     "gateway keeps qualified model ID",
+			provider: "openrouter",
+			input:    "openai/gpt-5.6-sol",
+			want:     []string{"openai/gpt-5.6-sol"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := providerModelSwitchCandidates(test.provider, test.input); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("providerModelSwitchCandidates(%q, %q) = %#v, want %#v", test.provider, test.input, got, test.want)
+			}
+		})
 	}
 }
 

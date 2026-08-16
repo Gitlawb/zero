@@ -522,7 +522,41 @@ func (m model) recentModelPairsForPicker() []config.RecentModelEntry {
 	pairs := make([]config.RecentModelEntry, 0, len(m.recentModels)+1)
 	pairs = append(pairs, config.RecentModelEntry{Provider: m.providerName, Model: m.modelName})
 	pairs = append(pairs, m.recentModels...)
+	for index := range pairs {
+		pairs[index] = m.canonicalRecentModelPair(pairs[index])
+	}
 	return config.NormalizeRecentModels(pairs)
+}
+
+// canonicalRecentModelPair collapses legacy OpenAI-prefixed model IDs for a
+// ChatGPT profile. ChatGPT's Codex endpoint uses bare model IDs, while older
+// hand-entered configuration could retain the equivalent openai/<id> spelling.
+// Keep this picker-only so OpenAI-compatible gateway IDs remain untouched.
+func (m model) canonicalRecentModelPair(pair config.RecentModelEntry) config.RecentModelEntry {
+	pair.Provider = strings.TrimSpace(pair.Provider)
+	pair.Model = strings.TrimSpace(pair.Model)
+	if !m.recentPairUsesChatGPT(pair.Provider) {
+		return pair
+	}
+	if len(pair.Model) >= len("openai/") && strings.EqualFold(pair.Model[:len("openai/")], "openai/") {
+		pair.Model = strings.TrimSpace(pair.Model[len("openai/"):])
+	}
+	return pair
+}
+
+func (m model) recentPairUsesChatGPT(providerName string) bool {
+	if profile, ok := m.savedProviderByName(providerName); ok {
+		if descriptor, hasDescriptor := m.descriptorForProfile(profile); hasDescriptor {
+			return providercatalog.NormalizeID(descriptor.ID) == "chatgpt"
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(providerName), strings.TrimSpace(m.providerName)) {
+		return false
+	}
+	if descriptor, ok := m.activeProviderDescriptor(); ok {
+		return providercatalog.NormalizeID(descriptor.ID) == "chatgpt"
+	}
+	return providercatalog.NormalizeID(m.providerProfile.CatalogID) == "chatgpt"
 }
 
 // modelPickerRecentItem resolves one "Recent" row for a provider+model pair,

@@ -108,6 +108,14 @@ func (m model) modelSupportsVisionTUI() bool {
 	for _, models := range m.modelPickerLiveByProvider {
 		for _, dm := range models {
 			if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
+				// A provider's authenticated listing may only establish which models
+				// are available, without repeating modalities. Treat an empty list as
+				// unknown rather than as an explicit image-input denial, so the
+				// curated registry/name capability fallback remains available while
+				// models.dev metadata is temporarily unavailable.
+				if len(dm.InputModalities) == 0 {
+					continue
+				}
 				for _, modality := range dm.InputModalities {
 					if strings.EqualFold(strings.TrimSpace(modality), "image") {
 						return true

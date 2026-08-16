@@ -139,6 +139,66 @@ func TestMergeChatGPTModelsKeepsLiveOnlyEntries(t *testing.T) {
 	}
 }
 
+func TestDiscoverCatalogChatGPTMergesOpenAIModelsDevMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api.json":
+			_, _ = w.Write([]byte(`{
+				"openai": {"models": {
+					"gpt-5.6-sol": {
+						"id": "gpt-5.6-sol",
+						"name": "GPT-5.6 Sol",
+						"description": "Frontier coding model",
+						"tool_call": true,
+						"reasoning": true,
+						"reasoning_efforts": ["low", "high", "max"],
+						"limit": {"context": 1050000},
+						"modalities": {"input": ["text", "image", "pdf"], "output": ["text"]}
+					}
+				}}
+			}`))
+		case "/backend-api/codex/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-sol"}]}`))
+		default:
+			t.Fatalf("unexpected request path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider, ok := providercatalog.Get("chatgpt")
+	if !ok {
+		t.Fatal("ChatGPT provider missing from catalog")
+	}
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		Name:         "chatgpt",
+		CatalogID:    "chatgpt",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/backend-api/codex",
+	}, Options{
+		HTTPClient:   server.Client(),
+		ModelsDevURL: server.URL + "/api.json",
+		OAuthResolver: func(context.Context, bool) (string, string, bool, error) {
+			return "Authorization", "Bearer test", true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog returned error: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("models = %#v, want one ChatGPT live model", models)
+	}
+	model := models[0]
+	if model.ID != "gpt-5.6-sol" || model.ContextWindow != 1050000 || !model.ToolCall || !model.Reasoning {
+		t.Fatalf("merged ChatGPT model = %#v, want models.dev metadata", model)
+	}
+	if got := strings.Join(model.InputModalities, ","); got != "text,image,pdf" {
+		t.Fatalf("input modalities = %q, want text,image,pdf", got)
+	}
+	if got := strings.Join(model.ReasoningEfforts, ","); got != "low,high,max" {
+		t.Fatalf("reasoning efforts = %q, want low,high,max", got)
+	}
+}
+
 func TestMergeLiveModelsUsesLiveDefaultsAndReasoningCapability(t *testing.T) {
 	models := mergeLiveModels(
 		providercatalog.Descriptor{ID: "chatgpt"},
