@@ -214,9 +214,25 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 				// command that makes no network call.
 				result.Network = true
 			case source.payload != "":
-				if depth >= maxAnalyzerDepth || textualPayloadUsesNetwork(source.payload, depth+1) {
+				if classifyCommandText(source.payload, depth+1) {
 					result.Network = true
 				}
+			}
+		}
+		// eval runs its remaining arguments as shell source, exactly like the
+		// fallback path already treats it. Without this branch a parseable
+		// `eval git push origin main` resolved to the program "eval" and no
+		// network, while the same text behind an unparseable suffix was caught
+		// — the fallback and the AST disagreeing about the same launcher.
+		if prog == "eval" && len(rest) > 0 {
+			if payload, ok := literalCallFields(rest); ok {
+				if classifyCommandText(strings.Join(payload, " "), depth+1) {
+					result.Network = true
+				}
+			} else {
+				// Source assembled from an expansion is source this scan cannot
+				// read, and eval will run it regardless.
+				result.Network = true
 			}
 		}
 		if cmdLauncherUsesNetwork(prog, rest, depth) {
@@ -257,7 +273,12 @@ func commandWordsUseNetwork(prog string, words []string) bool {
 }
 
 func commandWordsUseNetworkAt(prog string, words []string, depth int) bool {
-	prog = normalizeProgramToken(prog)
+	// CMD's echo-suppression prefix is not part of the program name: `@curl …`
+	// runs curl. The fallback tokenizer already strips it (trimCMDEchoPrefix),
+	// so without the same normalization here the AST path called the program
+	// "@curl" and found no network, while the identical text behind an
+	// unparseable suffix was flagged. Stripping it can only ADD the category.
+	prog = normalizeProgramToken(trimCMDEchoPrefixToken(prog))
 	originalWords := words
 	normalized := make([]string, len(words))
 	for index := range words {
@@ -360,7 +381,11 @@ func gitUsesNetwork(words []string) bool {
 		return false
 	}
 	switch invocation.subcommand {
-	case "clone", "fetch", "pull", "push", "ls-remote":
+	// send-pack is push's plumbing counterpart — `git send-pack origin main`
+	// performs exactly the egress `git push` does, so leaving it out gave the
+	// same operation two different answers depending on which spelling was
+	// used.
+	case "clone", "fetch", "pull", "push", "ls-remote", "send-pack":
 		return true
 	case "archive":
 		// `git archive HEAD` streams a tree out of the local object store and needs
@@ -497,6 +522,18 @@ func parseGitInvocation(words []string) gitInvocation {
 // `--exec-path` is deliberately absent: its value is inline-only
 // (`--exec-path=<path>`), and the bare spelling is terminal — see
 // gitTerminalGlobalOptions.
+// GitTerminalGlobalOption reports whether a git global option makes git print
+// something from the local installation and exit, so nothing after it is a
+// subcommand. It is the exported view of gitTerminalGlobalOptions, shared with
+// internal/agent's command-prefix parser for the same reason
+// GitGlobalOptionConsumesValue is: while each scan carried its own option
+// grammar, `git --help status` was the safe prefix `git status` to one parser
+// and a terminal help invocation to the other, and every new option had to be
+// remembered in two places.
+func GitTerminalGlobalOption(option string) bool {
+	return gitTerminalGlobalOptions[strings.ToLower(strings.TrimSpace(option))]
+}
+
 func GitGlobalOptionConsumesValue(option string) bool {
 	switch strings.ToLower(option) {
 	case "-c", "--attr-source", "--config-env", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
@@ -572,8 +609,19 @@ func envSplitSourceDynamic(args []*syntax.Word) bool {
 			continue
 		}
 		if seenSplit {
-			// The operand of a separated -S is literal; the ordinary literal path
-			// already reads it.
+			// The -S operand is literal, but that is only proof about the SPLIT
+			// STRING, not about the invocation: GNU env appends the remaining
+			// argv to the argv the split string produced, so
+			// `env -S 'sh -c' "$PAYLOAD"` runs an argument this scan cannot
+			// read. Keep scanning; a dynamic token anywhere after the split
+			// string extends the command unknowably and fails closed. Trailing
+			// LITERAL tokens are fine — the ordinary literal path reads the
+			// whole reconstructed argv, this one included.
+			for rest := index + 1; rest < len(args); rest++ {
+				if !isLiteralWord(args[rest]) {
+					return true
+				}
+			}
 			return false
 		}
 		if strings.Contains(text, "=") && !strings.HasPrefix(text, "=") && !strings.HasPrefix(text, "-") {
@@ -688,9 +736,31 @@ func cmdLauncherUsesNetwork(program string, args []*syntax.Word, depth int) bool
 		})
 	}
 	for _, body := range cmdCommandBodyTokenInfoCandidates(tokens) {
-		if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+		if cmdBodyUsesNetwork(body, depth) {
 			return true
 		}
+	}
+	return false
+}
+
+// cmdBodyUsesNetwork classifies one CMD payload candidate.
+//
+// A single QUOTED token is genuinely ambiguous: `cmd /c "git push origin main"`
+// is a command line, while `cmd /c "C:\Program Files\curl.exe"` is one program
+// path that happens to contain a space. CMD itself resolves that by trying the
+// path first and falling back to parsing it as a command line, so this
+// classifies it BOTH ways and fails closed if either reading reaches the
+// network. Treating it only as a program name — taking its basename — is what
+// made `git push origin main` look like an unrecognized executable.
+func cmdBodyUsesNetwork(body []fallbackCommandToken, depth int) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+		return true
+	}
+	if len(body) == 1 && body[0].quoted && strings.ContainsAny(body[0].value, " \t") {
+		return classifyCommandText(body[0].value, depth+1)
 	}
 	return false
 }
@@ -707,15 +777,40 @@ func literalWordIsQuoted(word *syntax.Word) bool {
 	}
 }
 
-// textualPayloadUsesNetwork classifies source carried by another interpreter
-// without leaking the nested parser's TooComplex bit into the outer command.
-func textualPayloadUsesNetwork(payload string, depth int) bool {
-	if depth > maxAnalyzerDepth {
+// classifyCommandText is the single entry point for interpreter SOURCE — a
+// string another program will run as a command line — as opposed to argv
+// tokens naming a program to execute. It is the difference between
+// `cmd /c "git push origin main"` meaning "run the command line git push
+// origin main" and meaning "run the program named `git push origin main`";
+// reading the second as the first is what let quoted one-liners through.
+//
+// Every launcher that carries command text routes through here: CMD /c and
+// /k, CALL, start, eval, shell -c/--command, PowerShell -Command, and the
+// fallback tokenizer's equivalents. It re-tokenizes the payload rather than
+// taking its basename, runs BOTH the AST scan and the unparseable matcher (a
+// CMD one-liner is legitimately not POSIX, so the parser failing on it is
+// expected, not proof of safety), and fails closed when the text cannot be
+// read at all.
+func classifyCommandText(payload string, depth int) bool {
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
 		return false
+	}
+	if depth > maxAnalyzerDepth {
+		// The text exists and is about to run, but the budget to inspect it is
+		// gone. An unread payload is not a safe one.
+		return true
 	}
 	result := AnalysisResult{}
 	analyzeInto(payload, &result, map[string]bool{}, depth)
-	return result.Network || (result.TooComplex && matchesUnparseableNetworkAt(payload, depth))
+	if result.Network {
+		return true
+	}
+	// The fallback matcher is the reader for text the POSIX parser rejects, and
+	// it is also a second opinion on text the parser accepted: the two
+	// tokenizers disagree about CMD quoting and echo prefixes, and only one of
+	// them needs to see the network program.
+	return matchesUnparseableNetworkAt(payload, depth)
 }
 
 func pythonModuleUsesNetwork(words []string) bool {
@@ -777,6 +872,45 @@ func firstSubcommand(words []string, aliases map[string]string) string {
 // wordText returns the literal text of a shell word, concatenating its plain and
 // quoted literal parts (so "vim", 'vim', and vim all yield "vim"). Parts that are
 // expansions ($x, $(...)) contribute nothing — the program name is taken as-is.
+// unescapeDoubleQuoted applies POSIX double-quote escape removal to the literal
+// text the parser preserves verbatim inside a double-quoted word.
+//
+// The parser keeps `\"` as two characters because escape removal is the
+// shell's job at expansion time, not the parser's. For an argv token that is
+// harmless; for the `-c` operand of a shell launcher it is not, because the
+// text IS the next command. Without this, one level of
+// `sh -c "sh -c \"curl …\""` handed the recursion the fragment `\"sh` — the
+// rest of the payload silently dropped — and the nested curl disappeared from
+// classification entirely at nesting level 3.
+//
+// Inside double quotes a backslash is special ONLY before $, `, ", \, and a
+// newline; everywhere else it is a literal backslash and must be preserved, or
+// a Windows path inside quotes would lose its separators.
+func unescapeDoubleQuoted(value string) string {
+	if !strings.Contains(value, `\`) {
+		return value
+	}
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\\' || index+1 >= len(value) {
+			builder.WriteByte(value[index])
+			continue
+		}
+		switch next := value[index+1]; next {
+		case '$', '`', '"', '\\':
+			builder.WriteByte(next)
+			index++
+		case '\n':
+			// A quoted line continuation removes both characters.
+			index++
+		default:
+			builder.WriteByte('\\')
+		}
+	}
+	return builder.String()
+}
+
 func wordText(word *syntax.Word) string {
 	if word == nil {
 		return ""
@@ -791,7 +925,7 @@ func wordText(word *syntax.Word) string {
 		case *syntax.DblQuoted:
 			for _, inner := range typed.Parts {
 				if lit, ok := inner.(*syntax.Lit); ok {
-					builder.WriteString(lit.Value)
+					builder.WriteString(unescapeDoubleQuoted(lit.Value))
 				}
 			}
 		}
