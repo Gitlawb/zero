@@ -178,6 +178,13 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if err != nil || meta == nil {
 		return nil, RPCError(codeInvalidParams, "session not found: "+p.SessionID)
 	}
+	if strings.TrimSpace(meta.Cwd) == "" {
+		return nil, RPCError(codeInvalidParams, "session has no persisted workspace: "+p.SessionID)
+	}
+	persistedRoot, err := a.deps.ResolveWorkspaceRoot(meta.Cwd)
+	if err != nil {
+		return nil, RPCError(codeInvalidParams, "persisted session workspace is unavailable: "+err.Error())
+	}
 	cwdInput := p.Cwd
 	if strings.TrimSpace(cwdInput) == "" {
 		cwdInput = meta.Cwd
@@ -185,6 +192,12 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	root, err := a.deps.ResolveWorkspaceRoot(cwdInput)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, err.Error())
+	}
+	// ACP session cwd is immutable. Loading history under a different root
+	// would give a conversation from one workspace access to another
+	// workspace's configuration, files, and tools.
+	if root != persistedRoot {
+		return nil, RPCError(codeInvalidParams, "session cwd does not match its persisted workspace")
 	}
 	// Load history BEFORE publishing the session so no concurrent prompt observes
 	// a half-initialized session (registerSession sets history under the lock and
@@ -233,11 +246,21 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 	if err != nil {
 		return nil, RPCError(codeInternalError, "list sessions: "+err.Error())
 	}
-	cwd := strings.TrimSpace(p.Cwd)
+	var cwd string
+	if strings.TrimSpace(p.Cwd) != "" {
+		var err error
+		cwd, err = a.deps.ResolveWorkspaceRoot(p.Cwd)
+		if err != nil {
+			return nil, RPCError(codeInvalidParams, err.Error())
+		}
+	}
 	result := ListSessionsResult{Sessions: make([]SessionInfo, 0, len(items))}
 	for _, item := range items {
-		if cwd != "" && item.Cwd != cwd {
-			continue
+		if cwd != "" {
+			itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)
+			if err != nil || itemRoot != cwd {
+				continue
+			}
 		}
 		result.Sessions = append(result.Sessions, SessionInfo{
 			SessionID: item.SessionID,
