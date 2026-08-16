@@ -3,35 +3,36 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T10:17:04.361Z",
-  "durationMs": 11932398,
+  "endedAt": "2026-08-16T10:27:33.004Z",
+  "durationMs": 12561062,
   "status": "running",
   "tokens": {
-    "total": 76576,
-    "input": 234,
-    "output": 76342
+    "total": 98973,
+    "input": 282,
+    "output": 98691
   },
   "cost": {
-    "usd": 26.3318
+    "usd": 29.2341
   },
-  "toolCalls": 114,
+  "toolCalls": 138,
   "lines": {
-    "added": 40,
-    "removed": 11
+    "added": 117,
+    "removed": 2
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
-    "internal/sandbox/scope_temporary_test.go"
+    "internal/agent/guardrails.go",
+    "internal/agent/guardrails_false_admission_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "a12050e0a4f0ad783646a20c1c3c458936115b2c",
+    "headAfter": "39db7aa01d0abf8a698d3b2e76197554a5e80d5c",
     "commitShas": [
-      "a12050e0a4f0ad783646a20c1c3c458936115b2c"
+      "39db7aa01d0abf8a698d3b2e76197554a5e80d5c"
     ]
   },
-  "summary": "**40/40 caught, up from 7/40.** Committing #911:",
+  "summary": "Only the two pre-existing `main` failures (no network in this sandbox). Committing #912:",
   "originUrl": "https://getorigin.io/sessions/local-abff1ceb-89a0-4779-bf13-17d2552ca680"
 }
