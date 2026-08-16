@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func TestMouseHoverPredicate(t *testing.T) {
@@ -75,6 +76,43 @@ func TestUpdateHoverTargetOnPlainTextIsNone(t *testing.T) {
 	m = updated.(model)
 	if m.hover.kind != hoverNone {
 		t.Fatalf("hover.kind = %v, want hoverNone over plain (non-clickable) text", m.hover.kind)
+	}
+}
+
+func TestDiffHeaderDoesNotHoverOrToggle(t *testing.T) {
+	m := mouseTestModel()
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+		kind:   rowToolResult,
+		id:     "diff",
+		tool:   "write_file",
+		status: tools.StatusOK,
+		detail: "--- go.mod\n+++ go.mod\n@@ -0,0 +1,3 @@\n+module greeting\n+\n+go 1.25",
+	})
+	rowIndex := len(m.transcript) - 1
+	width := m.chatColumnWidth()
+	body, selectable := m.transcriptBody(width, "")
+	start, _, top := m.transcriptViewportStart(body, width)
+	var target transcriptSelectableLine
+	for _, line := range selectable {
+		if line.rowIndex == rowIndex {
+			target = line
+			break
+		}
+	}
+	if target.text == "" {
+		t.Fatalf("expected a selectable diff header, got %#v", selectable)
+	}
+
+	updated, _ := m.Update(testMouseMotion(tea.MouseNone, target.textStart, top+target.bodyY-start))
+	m = updated.(model)
+	if m.hover.kind != hoverNone {
+		t.Fatalf("diff header must not hover as a control, got %#v", m.hover)
+	}
+
+	updated, _ = m.Update(testMouseClick(tea.MouseLeft, target.textStart, top+target.bodyY-start))
+	m = updated.(model)
+	if m.transcript[rowIndex].expanded {
+		t.Fatal("clicking an always-visible diff header must not toggle it")
 	}
 }
 

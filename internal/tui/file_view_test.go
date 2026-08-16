@@ -161,9 +161,9 @@ func TestFileViewSwapsTranscriptBody(t *testing.T) {
 	}
 }
 
-// TestSubchatEntryClosesFileView: drilling into an AGENTS row while a file view
-// is open closes the file view first (the subchat owns the single-column view).
-func TestSubchatEntryClosesFileView(t *testing.T) {
+// TestSidebarAgentClickIsIgnoredWithoutRail verifies invisible legacy hit
+// coordinates cannot unexpectedly replace the full-width conversation view.
+func TestSidebarAgentClickIsIgnoredWithoutRail(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
 	if _, err := store.Create(sessions.CreateInput{SessionID: "sess-1"}); err != nil {
 		t.Fatal(err)
@@ -185,14 +185,14 @@ func TestSubchatEntryClosesFileView(t *testing.T) {
 	}
 	click := testMouseClick(tea.MouseLeft, m.chatColumnWidth()+3, agents[0].lineOffset)
 	updated, _, handled := m.handleTranscriptSelectionMouse(click)
-	if !handled {
-		t.Fatal("agent row click should be handled")
+	if handled {
+		t.Fatal("invisible rail coordinates must not handle clicks")
 	}
-	if updated.fileView.active {
-		t.Fatal("entering the subchat should close the file view")
+	if !updated.fileView.active {
+		t.Fatal("an ignored rail click must leave the active file view alone")
 	}
-	if !updated.subchat.active {
-		t.Fatal("subchat should be active")
+	if updated.subchat.active {
+		t.Fatal("an ignored rail click must not enter a subchat")
 	}
 }
 
