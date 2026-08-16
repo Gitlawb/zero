@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -214,6 +215,29 @@ func TestChangedFilesRehydration(t *testing.T) {
 	}
 	if summaries := rows[0].changeSummaries; len(summaries) != 1 || summaries[0].Path != "node_modules/" || !summaries[0].Aggregated {
 		t.Fatalf("changeSummaries not rehydrated: %#v", summaries)
+	}
+}
+
+// TestResumedFileEditUsesPersistedDisplayPreview keeps the reviewable diff a
+// user saw while the run was live. The provider-facing output is intentionally
+// a short confirmation, so it cannot substitute for the card-only preview.
+func TestResumedFileEditUsesPersistedDisplayPreview(t *testing.T) {
+	preview := "--- a/calculator.go\n+++ b/calculator.go\n@@ -4,1 +4,1 @@\n-oldValue := 1\n+newValue := 2"
+	events := []sessions.Event{{
+		Type:    sessions.EventToolResult,
+		Payload: json.RawMessage(`{"toolCallId":"edit-1","name":"edit_file","status":"ok","output":"Successfully edited calculator.go (replaced 1 occurrence).","displayPreview":` + strconv.Quote(preview) + `}`),
+	}}
+
+	rows := transcriptRowsFromSessionEvents(events)
+	if len(rows) != 1 {
+		t.Fatalf("expected one restored row, got %d", len(rows))
+	}
+	if rows[0].detail != preview {
+		t.Fatalf("resume should restore the saved diff preview, got %q", rows[0].detail)
+	}
+	card := renderToolResultCard(rows[0], 80, rowContext{}, cardRenderOptions{})
+	if plain := plainRender(t, card); !strings.Contains(plain, "newValue := 2") {
+		t.Fatalf("resumed edit should render its diff preview, got %q", plain)
 	}
 }
 
