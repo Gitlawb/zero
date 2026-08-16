@@ -165,6 +165,7 @@ type model struct {
 	responseStyle                 string
 	petClient                     *terminalpet.Client
 	petRenderer                   *terminalpet.ImageRenderer
+	attachmentRenderers           []*terminalpet.ImageRenderer
 	petEntries                    map[string]terminalpet.Entry
 	petID                         string
 	petName                       string
@@ -560,6 +561,10 @@ type model struct {
 	// no attachments = today's text-only behavior exactly.
 	pendingImages      []zeroruntime.ImageBlock
 	pendingImageLabels []string
+	// pendingImageThumbnails are decoded previews for a bounded gallery of staged
+	// images. They are only rendered by terminals with an inline-image protocol;
+	// every other terminal continues to use the compact text attachment row.
+	pendingImageThumbnails []*terminalpet.Animation
 
 	// pendingDocuments holds PDF text layers staged by /image for the next user
 	// turn; the text is prepended to the prompt as a preamble at submit time and
@@ -2979,6 +2984,9 @@ func (m model) View() tea.View {
 	if m.petRenderer != nil {
 		m.petRenderer.Set(m.petImageDraw(content))
 	}
+	for index, renderer := range m.attachmentRenderers {
+		renderer.Set(m.attachmentImageDraw(index))
+	}
 
 	view := tea.NewView(content)
 	view.AltScreen = m.altScreen
@@ -4373,9 +4381,23 @@ func (m model) composerBox(width int) string {
 
 	rendered := make([]string, 0, len(lines)+3)
 	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", boxWidth-2)+"╮")+rightPad)
-	// Attachment chips ([Image #1] …) render INSIDE the box, above the input line,
-	// instead of as a separate row above the box.
-	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
+	// On graphics-capable terminals the first image receives a real thumbnail in
+	// this compact strip. Text-only terminals retain the numbered chip row below.
+	if m.attachmentThumbnailVisible(width) {
+		for _, line := range m.attachmentThumbnailLines(innerWidth) {
+			fitted := fitStyledLine(line, innerWidth)
+			pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+			rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+		}
+		// A thumbnail gallery makes the first few attachments visible. Keep a compact
+		// numbered row whenever there is more than one item (or a document), so the
+		// rest of a longer batch is never silently hidden.
+		if chips := m.attachmentThumbnailSupplementalChips(); chips != "" {
+			fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
+			pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+			rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+		}
+	} else if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
 		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
 		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
@@ -5053,6 +5075,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.pendingImages = m.lastImages
 		m.pendingImageLabels = m.lastImageLabels
 		m.pendingDocuments = m.lastDocuments
+		m.refreshPendingImageThumbnail()
 		return m.launchPrompt(m.lastPrompt)
 	case commandEdit:
 		if strings.TrimSpace(m.lastPrompt) == "" {
@@ -5067,6 +5090,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.pendingImages = m.lastImages
 		m.pendingImageLabels = m.lastImageLabels
 		m.pendingDocuments = m.lastDocuments
+		m.refreshPendingImageThumbnail()
 		m.input.SetValue(m.lastPrompt)
 		return m, nil
 	case commandCopy:
@@ -5124,7 +5148,17 @@ func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage)
 		m.lastImages = m.pendingImages
 		m.lastImageLabels = m.pendingImageLabels
 		m.lastDocuments = m.pendingDocuments
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
+		attachments := transcriptAttachmentSummary{
+			images:    len(m.pendingImages),
+			documents: len(m.pendingDocuments),
+		}
+		// A switched model may no longer accept a staged image. The matching
+		// system notice below explains the drop; the sent user row must not claim
+		// the image was included.
+		if attachments.images > 0 && !m.modelSupportsVisionTUI() {
+			attachments.images = 0
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt, attachments: attachments})
 	} else {
 		m.transcript = appendTranscriptRow(m.transcript, peerTranscriptRow(peerDisplayName(peer.From), peer.Body))
 	}
@@ -5172,6 +5206,15 @@ func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage)
 			"role":    "user",
 			"content": prompt,
 		}
+		if peer == nil {
+			attachments := m.transcript[len(m.transcript)-1].attachments
+			if !attachments.empty() {
+				messagePayload["attachments"] = map[string]int{
+					"images":    attachments.images,
+					"documents": attachments.documents,
+				}
+			}
+		}
 		if peer != nil {
 			messagePayload["origin"] = "cross_session"
 			messagePayload["from"] = peerDisplayName(peer.From)
@@ -5211,6 +5254,7 @@ func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage)
 	if peer == nil {
 		m.pendingImages = nil
 		m.pendingImageLabels = nil
+		m.pendingImageThumbnails = nil
 	}
 	runCtx, cancel := context.WithCancel(m.ctx)
 	if peer != nil {

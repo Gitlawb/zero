@@ -95,6 +95,7 @@ func (m model) startNewSession() model {
 	// documents, or queued text.
 	m.pendingImages = nil
 	m.pendingImageLabels = nil
+	m.pendingImageThumbnails = nil
 	m.pendingDocuments = nil
 	m.queuedMessage = ""
 	// The remembered /retry attachment snapshot belongs to the previous session
@@ -582,7 +583,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			}
 			switch role {
 			case "user":
-				rows = append(rows, transcriptRow{kind: rowUser, text: content})
+				rows = append(rows, transcriptRow{kind: rowUser, text: content, attachments: attachmentSummaryFromPayload(payload)})
 			case "assistant":
 				// A persisted assistant message was a turn's final answer. Tool/timing
 				// counters were not recorded; the completion line omits those segments.
@@ -888,6 +889,25 @@ func payloadBool(payload map[string]any, key string) bool {
 	default:
 		return false
 	}
+}
+
+func attachmentSummaryFromPayload(payload map[string]any) transcriptAttachmentSummary {
+	attachments, ok := payloadMap(payload, "attachments")
+	if !ok {
+		return transcriptAttachmentSummary{}
+	}
+	return transcriptAttachmentSummary{
+		images:    payloadNonNegativeInt(attachments, "images"),
+		documents: payloadNonNegativeInt(attachments, "documents"),
+	}
+}
+
+func payloadNonNegativeInt(payload map[string]any, key string) int {
+	value, ok := payload[key].(float64)
+	if !ok || value <= 0 {
+		return 0
+	}
+	return int(value)
 }
 
 func payloadMap(payload map[string]any, key string) (map[string]any, bool) {

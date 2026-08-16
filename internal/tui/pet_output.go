@@ -22,13 +22,19 @@ type terminalOutputFile interface {
 
 type petImageOutput struct {
 	output         terminalOutputFile
-	renderer       *terminalpet.ImageRenderer
-	renderDisabled bool
+	renderers      []*terminalpet.ImageRenderer
+	renderDisabled []bool
 	mu             sync.Mutex
 }
 
-func newPetImageOutput(output terminalOutputFile, renderer *terminalpet.ImageRenderer) *petImageOutput {
-	return &petImageOutput{output: output, renderer: renderer}
+func newPetImageOutput(output terminalOutputFile, renderers ...*terminalpet.ImageRenderer) *petImageOutput {
+	active := make([]*terminalpet.ImageRenderer, 0, len(renderers))
+	for _, renderer := range renderers {
+		if renderer != nil {
+			active = append(active, renderer)
+		}
+	}
+	return &petImageOutput{output: output, renderers: active, renderDisabled: make([]bool, len(active))}
 }
 
 func (o *petImageOutput) Read(value []byte) (int, error) {
@@ -39,11 +45,13 @@ func (o *petImageOutput) Write(value []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	leavingAltScreen := bytes.Contains(value, []byte("\x1b[?1049l"))
-	kittyImage := o.renderer.Support().Protocol == terminalpet.ImageProtocolKitty ||
-		o.renderer.Support().Protocol == terminalpet.ImageProtocolKittyLocalFile
-	if leavingAltScreen && !kittyImage {
-		if err := o.writeImageUpdate(o.renderer.Clear); err != nil {
-			return 0, err
+	if leavingAltScreen {
+		for _, renderer := range o.renderers {
+			if !rendererUsesKitty(renderer) {
+				if err := o.writeImageUpdate(renderer.Clear); err != nil {
+					return 0, err
+				}
+			}
 		}
 	}
 	if leavingAltScreen {
@@ -51,26 +59,36 @@ func (o *petImageOutput) Write(value []byte) (int, error) {
 		if err != nil {
 			return written, err
 		}
-		if kittyImage {
-			if err := o.writeImageUpdate(o.renderer.Clear); err != nil {
-				return written, err
+		for _, renderer := range o.renderers {
+			if rendererUsesKitty(renderer) {
+				if err := o.writeImageUpdate(renderer.Clear); err != nil {
+					return written, err
+				}
 			}
 		}
 		return written, nil
 	}
 	if bytes.Contains(value, []byte(ansi.EraseEntireScreen)) ||
 		bytes.Contains(value, []byte(ansi.SetModeAltScreenSaveCursor)) {
-		o.renderer.Invalidate()
+		for _, renderer := range o.renderers {
+			renderer.Invalidate()
+		}
 	}
 
 	var imageUpdate bytes.Buffer
-	if !o.renderDisabled {
-		if err := o.renderer.Render(&imageUpdate); err != nil {
-			// Companions are decorative. Disable them for this output session after
-			// a renderer failure instead of terminating the interactive shell.
-			o.renderDisabled = true
-			imageUpdate.Reset()
+	for index, renderer := range o.renderers {
+		if o.renderDisabled[index] {
+			continue
 		}
+		var rendererUpdate bytes.Buffer
+		if err := renderer.Render(&rendererUpdate); err != nil {
+			// Terminal images are decorative. Disable only the failing renderer for
+			// this output session so an attachment issue cannot hide a companion
+			// (or vice versa) or terminate the interactive shell.
+			o.renderDisabled[index] = true
+			continue
+		}
+		imageUpdate.Write(rendererUpdate.Bytes())
 	}
 	if imageUpdate.Len() == 0 {
 		return writeChecked(o.output, value)
@@ -118,6 +136,15 @@ func (o *petImageOutput) Write(value []byte) (int, error) {
 		return written, writeErr
 	}
 	return written, endErr
+}
+
+func rendererUsesKitty(renderer *terminalpet.ImageRenderer) bool {
+	switch renderer.Support().Protocol {
+	case terminalpet.ImageProtocolKitty, terminalpet.ImageProtocolKittyLocalFile:
+		return true
+	default:
+		return false
+	}
 }
 
 func writeChecked(writer io.Writer, value []byte) (int, error) {
@@ -180,9 +207,15 @@ func (o *petImageOutput) clearImage() error {
 		if _, err := io.WriteString(writer, ansi.ResetModeMouseExtSgrPixel); err != nil {
 			return err
 		}
-		if err := o.renderer.Clear(writer); err != nil {
-			return err
+		for _, renderer := range o.renderers {
+			if err := renderer.Clear(writer); err != nil {
+				return err
+			}
 		}
-		return o.renderer.DeleteImages(writer, petAmbientImageID, petPreviewImageID)
+		if len(o.renderers) == 0 {
+			return nil
+		}
+		ids := append([]uint32{petAmbientImageID, petPreviewImageID}, attachmentPreviewImageIDs()...)
+		return o.renderers[0].DeleteImages(writer, ids...)
 	})
 }

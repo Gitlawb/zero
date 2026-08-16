@@ -523,15 +523,29 @@ func splitPreservingWidth(text string, measure int) []string {
 func renderUserRow(row transcriptRow, width int) string {
 	contentWidth := userPromptContentWidth(width)
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
-	lines := make([]string, 0, len(wrapped)+1)
+	lines := make([]string, 0, len(wrapped)+2)
 	// A single plain blank line delimits the turn — no full-width painted band.
 	// The ▌ accent gutter alone marks it as the user's, matching the clean
 	// reference agents instead of a heavy chat bubble.
 	lines = append(lines, "")
+	if attachment := renderUserAttachmentSummary(row.attachments); attachment != "" {
+		lines = append(lines, renderUserPromptStyledLine(zeroTheme.muted.Render(attachment), contentWidth))
+	}
 	for _, line := range wrapped {
 		lines = append(lines, renderUserPromptStyledLine(zeroTheme.ink.Bold(true).Render(line), contentWidth))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderUserAttachmentSummary(summary transcriptAttachmentSummary) string {
+	parts := make([]string, 0, summary.images+summary.documents)
+	for index := 1; index <= summary.images; index++ {
+		parts = append(parts, fmt.Sprintf("[Image #%d]", index))
+	}
+	for index := 1; index <= summary.documents; index++ {
+		parts = append(parts, fmt.Sprintf("[Document #%d]", index))
+	}
+	return strings.Join(parts, " ")
 }
 
 const userPromptPrefix = "▌  "

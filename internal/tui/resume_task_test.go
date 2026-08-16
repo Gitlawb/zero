@@ -34,3 +34,16 @@ func TestHydrationKeepsFailedTaskWithoutSpecialist(t *testing.T) {
 		t.Fatalf("a Task with a specialist card must NOT also show raw Task rows, got %#v", withSpecialist)
 	}
 }
+
+func TestHydrationPreservesSentAttachmentSummary(t *testing.T) {
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{
+		Type:    sessions.EventMessage,
+		Payload: json.RawMessage(`{"role":"user","content":"describe this","attachments":{"images":1,"documents":2}}`),
+	}})
+	if len(rows) != 1 || rows[0].kind != rowUser {
+		t.Fatalf("hydrated rows = %#v, want one user row", rows)
+	}
+	if got := renderUserAttachmentSummary(rows[0].attachments); got != "[Image #1] [Document #1] [Document #2]" {
+		t.Fatalf("hydrated attachment summary = %q", got)
+	}
+}
