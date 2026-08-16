@@ -374,6 +374,8 @@ func TestExtendedThemeContrastInvariants(t *testing.T) {
 		// Dune Dark status-card borders (running / error / permission) are
 		// non-text UI: WCAG 1.4.11 requires >=3:1 against the panel. cardPerm
 		// also frames filled permission cards, so it must clear 3:1 on permBg.
+		// Light Dune's cardRun/cardErr/cardPerm are unchanged from main and
+		// already accepted; this branch only audits the new Dune Dark tokens.
 		if name == "dune-dark" {
 			for _, pair := range []struct{ name, fg, bg string }{
 				{"cardRun on panel", pal.cardRun, pal.panel},
@@ -433,7 +435,10 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	}
 
 	for _, themeName := range []string{"dune", "dune-dark"} {
-		pal := palettes[themeName]
+		pal, ok := palettes[themeName]
+		if !ok {
+			t.Fatalf("theme %q is not registered", themeName)
+		}
 		if sep := wcagRatio(t, q(pal.selBg), q(pal.panel)); sep < 1.10 {
 			t.Errorf("%s: selBg vs panel separation %.2f < 1.10 after xterm-256 quantization (%s vs %s)", themeName, sep, q(pal.selBg), q(pal.panel))
 		}
@@ -479,7 +484,10 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 		}
 	}
 
-	neon := palettes["neon"]
+	neon, ok := palettes["neon"]
+	if !ok {
+		t.Fatal("theme \"neon\" is not registered")
+	}
 	if q(neon.addBg) == q(neon.delBg) || !greenish(q(neon.addBg)) || !reddish(q(neon.delBg)) {
 		t.Errorf("neon: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
 			neon.addBg, q(neon.addBg), neon.delBg, q(neon.delBg))
@@ -527,7 +535,10 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	// Prior cardRun #3399ff was only audited in truecolor/16-color elsewhere;
 	// cardErr/cardPerm were never checked here. Keep running/error/permission
 	// borders distinct so state identity survives quantization.
-	duneDark := palettes["dune-dark"]
+	duneDark, ok := palettes["dune-dark"]
+	if !ok {
+		t.Fatal("theme \"dune-dark\" is not registered")
+	}
 	for _, pair := range []struct{ name, fg, bg string }{
 		{"cardRun on panel", duneDark.cardRun, duneDark.panel},
 		{"cardErr on panel", duneDark.cardErr, duneDark.panel},
@@ -561,23 +572,13 @@ func ansi16Hex(t *testing.T, hexColor string) string {
 // rendered Dune Dark diff pairs — and the selected-row affordances that use
 // the same cool success/permission tokens — after the real ANSI conversion.
 func TestDuneDarkANSI16Contrast(t *testing.T) {
-	var pal palette
-	found := false
-	for _, entry := range themeRegistry {
-		if entry.Name == "dune-dark" {
-			pal = entry.Palette
-			found = true
-			break
-		}
-	}
-	if !found {
+	entry, ok := lookupTheme("dune-dark")
+	if !ok {
 		t.Fatal("theme 'dune-dark' is not registered")
 	}
+	pal := entry.Palette
 	q := func(hexColor string) string { return ansi16Hex(t, hexColor) }
 
-	// Diff sign text and changed-word text: the pairs users actually read on
-	// add/del rows under 16-color. Prior values were bright-blue-on-green
-	// (1.67:1) and bright-red-on-maroon (2.74:1).
 	// Diff sign text, changed-word text, and gutter line numbers (faintest on
 	// addBg/delBg): users actually read these under 16-color. Prior values were
 	// bright-blue-on-green (1.67:1), bright-red-on-maroon (2.74:1), and
