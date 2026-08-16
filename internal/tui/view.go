@@ -260,22 +260,19 @@ func (m model) statusLine(width int) string {
 	}
 
 	rightGroups := []string{}
-	// Context-fill gauge: surface it down to the narrow tier (where it matters
-	// most), but skip it when the context sidebar is already showing the % so the
-	// figure isn't duplicated.
+	// Context-fill gauge: surface it down to the narrow tier, where it is most
+	// useful for deciding whether a session needs compaction.
 	gaugeShown := false
-	if tier >= tierNarrow && !m.sidebarActive() {
+	if tier >= tierNarrow {
 		if gauge := m.contextWindowSegment(); gauge != "" {
 			rightGroups = append(rightGroups, gauge)
 			gaugeShown = true
 		}
 	}
-	// The sidebar pins the token readout at its floor, and the gauge's "used"
-	// figure is the exact same number (both read latestUsageTokens) — either
-	// one showing means the plain usage segment must drop its own token count
-	// to just the cost, or the count renders twice side by side.
+	// The gauge and the usage segment read the same token total, so once the
+	// gauge is present the usage segment only contributes cost.
 	usage := m.usageStatusSegment()
-	if m.sidebarActive() || gaugeShown {
+	if gaugeShown {
 		usage = m.usageCostSegment()
 	}
 	if usage != "" {

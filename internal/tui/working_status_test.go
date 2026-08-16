@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/charmbracelet/colorprofile"
 )
 
 // TestWorkingPlanLine: the working indicator's second line carries the plan's
@@ -77,6 +79,53 @@ func TestWorkingActivityNamesCurrentPhase(t *testing.T) {
 				t.Fatalf("workingActivity() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestWorkingStatusLabelSweepsAcrossActiveRun(t *testing.T) {
+	previousProfile := lipgloss.Writer.Profile
+	lipgloss.Writer.Profile = colorprofile.TrueColor
+	t.Cleanup(func() { lipgloss.Writer.Profile = previousProfile })
+
+	m := newModel(t.Context(), Options{})
+	m.width = 100
+	m.pending = true
+	m.reducedMotion = false
+
+	m.spinnerPhase = 0
+	first := m.workingStatusLine()
+	m.spinnerPhase = 2
+	second := m.workingStatusLine()
+	if first == second {
+		t.Fatalf("working status label did not advance across phases:\nfirst:  %q\nsecond: %q", first, second)
+	}
+	if firstPlain, secondPlain := plainRender(t, first), plainRender(t, second); firstPlain != secondPlain || !strings.Contains(firstPlain, "Working") {
+		t.Fatalf("animation changed status content:\nfirst:  %q\nsecond: %q", firstPlain, secondPlain)
+	}
+	// The peak and its neighboring characters use distinct points from the
+	// active accent→ink palette, rather than a single hard accent jump.
+	m.spinnerPhase = workingStatusWaveTail * 2
+	label := m.workingStatusLabel()
+	if !strings.Contains(label, streamingFadePalette[0].Render("W")) ||
+		!strings.Contains(label, streamingFadePalette[3].Render("o")) ||
+		!strings.Contains(label, streamingFadePalette[6].Render("r")) {
+		t.Fatalf("working label does not render a palette wave: %q", label)
+	}
+
+	m.reducedMotion = true
+	m.spinnerPhase = 0
+	first = m.workingStatusLine()
+	m.spinnerPhase = 2
+	second = m.workingStatusLine()
+	if first != second {
+		t.Fatalf("reduced-motion working label should stay stable:\nfirst:  %q\nsecond: %q", first, second)
+	}
+}
+
+func TestModelUsesSmoothActiveAnimationCadence(t *testing.T) {
+	m := newModel(t.Context(), Options{})
+	if got := m.spinner.Spinner.FPS; got != activeAnimationFrameInterval {
+		t.Fatalf("active spinner FPS = %v, want %v", got, activeAnimationFrameInterval)
 	}
 }
 
@@ -202,24 +251,20 @@ func TestQuietGenerationHintEscalatesPastHalfIdleTimeout(t *testing.T) {
 	}
 }
 
-// TestQuietHintHiddenWhenSidebarShowsIt: when the context sidebar is up (it
-// carries the "generating…" pulse in ACTIVITY), the working line must NOT also
-// show the hint — it appears in exactly one place.
-func TestQuietHintHiddenWhenSidebarShowsIt(t *testing.T) {
+// TestQuietHintShownWithRunDetails verifies a silent generation remains visible
+// in the working line, including while run details are available on demand.
+func TestQuietHintShownWithRunDetails(t *testing.T) {
 	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
 	m := sidebarTestModel() // alt-screen + a plan -> sidebar active
 	m.now = func() time.Time { return base.Add(30 * time.Second) }
 	m.activeRunID = 7
 	m.turnStartedAt = base
 	m.lastStreamActivity = base.Add(2 * time.Second) // 28s quiet
-	if !m.sidebarActive() {
-		t.Fatal("precondition: sidebar should be active for this model")
-	}
-	if line := plainRender(t, m.workingStatusLine()); strings.Contains(line, "still generating") {
-		t.Errorf("working line must NOT duplicate the hint when the sidebar shows it:\n%s", line)
+	if line := plainRender(t, m.workingStatusLine()); !strings.Contains(line, "still generating") {
+		t.Errorf("working line should carry the quiet hint:\n%s", line)
 	}
 	if act := plainRender(t, strings.Join(m.sidebarActivityLines(sidebarWidth(m.width), 10), "\n")); !strings.Contains(act, "generating") {
-		t.Errorf("the sidebar ACTIVITY should carry the generating pulse instead:\n%s", act)
+		t.Errorf("run details should retain the generating pulse:\n%s", act)
 	}
 }
 

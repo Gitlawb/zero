@@ -1473,7 +1473,7 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	glyph := zeroTheme.faintest.Render("…")
 	active := m.pending && row.runID != 0 && row.runID == m.activeRunID
 	if active {
-		glyph = zeroTheme.accent.Render(m.spinnerGlyph())
+		glyph = zeroTheme.accent.Render("›")
 	}
 	// The call row carries its own argHints; rc.hints/args only matter for
 	// result rows, whose detail is the tool output.
@@ -1485,13 +1485,11 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	if arg == "" {
 		arg = rc.args[rcKey(row.runID, row.id)]
 	}
-	// Running cards keep the normal name color; the accent spinner glyph at the
-	// front already marks them live (and orphaned dead cards must not look active).
+	// Running cards keep the normal name color; the static accent marker identifies
+	// the active operation while the turn-level status owns animation.
 	head := toolCardHead(toolRowName(row), hint, arg, "", "", "", true, zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
 	if active {
-		// A quiet breathing rail distinguishes the one operation that is live now
-		// without giving completed or rehydrated cards a false sense of activity.
-		return renderLeftRuleCard(width, []string{glyph + " " + head}, runningRailStyle(m.spinnerPhase, m.reducedMotion))
+		return renderLeftRuleCard(width, []string{glyph + " " + head}, zeroTheme.cardRun)
 	}
 	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
 }

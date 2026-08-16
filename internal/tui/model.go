@@ -45,6 +45,10 @@ import (
 const tuiToolOutputLimit = 240
 const defaultResponseStyle = "concise"
 const chatWheelScrollLines = 5
+
+// activeAnimationFrameInterval keeps active-only status motion smooth without
+// running a timer when Zero is idle. It also drives the shared liveness spinner.
+const activeAnimationFrameInterval = time.Second / 30
 const ctrlCExitConfirmDuration = 3 * time.Second
 const ctrlCExitConfirmText = "Press Ctrl+C again to exit"
 
@@ -253,14 +257,13 @@ type model struct {
 	altScreen       bool
 	setup           setupState
 	setupSave       func(SetupSelection) (SetupResult, error)
-	// spinner animates the running-tool glyph in card heads. Its tick is started
-	// with each run and stops itself once pending clears (the TickMsg is simply
-	// not forwarded), so an idle UI schedules no timers.
+	// spinner animates the turn-level activity glyph. Its tick is started with
+	// each run and stops itself once pending clears (the TickMsg is simply not
+	// forwarded), so an idle UI schedules no timers.
 	spinner spinner.Model
-	// spinnerPhase advances once per spinner tick while a run is in flight and is
-	// the shared animation clock for the cosine ripple on the working status line
-	// (ripple.go). Reusing the spinner's existing tick keeps a single ~80ms timer
-	// driving both the braille glyph and the colour wave — no second ticker.
+	// spinnerPhase advances once per spinner tick while a run is in flight. It
+	// drives only bounded secondary motion such as the streaming caret and agent
+	// lifecycle fades; it never creates a second live spinner.
 	spinnerPhase int
 	// spinnerTicking tracks whether the spinner's self-scheduling tick loop is
 	// currently alive, so a kick (ensureSpinnerTick) never double-issues the tick
@@ -921,6 +924,7 @@ func newModel(ctx context.Context, options Options) model {
 	input.Focus()
 
 	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	runSpinner.Spinner.FPS = activeAnimationFrameInterval
 
 	notifier := notify.New(os.Stderr, notify.Config{
 		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
@@ -2290,10 +2294,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in flight or the sidebar holds agents — exactly when this can change).
 		m.stampSwarmDone()
 		// Not forwarding the tick while idle stops the spinner's self-scheduling,
-		// so no timer fires between runs. The one exception is an active sidebar
-		// holding agents: their cool ripple animation needs the phase to keep
-		// advancing even when no run is pending, so the tick loop stays alive while
-		// sidebarHasAgents() holds (and stops the moment the agents/sidebar clear).
+		// so no timer fires between runs. The one exception is active agent state:
+		// its short lifecycle fade needs the phase to keep advancing until the
+		// agents clear.
 		if !m.pending && !m.compactInFlight && !m.doctorInFlight {
 			// The tick also keeps advancing while the aimlapi.com onboarding sub-flow is
 			// busy (its progress screen is spinner-only), even though no agent run is in
@@ -2317,8 +2320,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerTicking = true
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		// Advance the shared ripple phase in lock-step with the spinner glyph;
-		// frozen under reduced motion so the colour wave stops with the glyph.
+		// Advance bounded secondary motion in lock-step with the activity glyph;
+		// freeze it under reduced motion.
 		if !m.reducedMotion {
 			m.spinnerPhase++
 		}
@@ -2386,9 +2389,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.headerPrinted = true
 			m.flushQueue = append(m.flushQueue, m.titleBar(chatWidth(msg.Width)))
 		}
-		// A resumed/idle session may already hold sidebar agents now that geometry
-		// (and thus sidebarActive) is known; kick the ripple tick loop if so. No-op
-		// when the loop is already running or there is nothing to animate.
+		// A resumed/idle session may already hold agents; keep their short lifecycle
+		// fade alive. No-op when the loop is already running or nothing animates.
 		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
@@ -3669,16 +3671,17 @@ func (m model) interimBlock(width int) string {
 	if writing := m.streamingToolCallView(width); writing != "" {
 		blocks = append(blocks, writing)
 	}
-	// Always show the live working line (spinner + verb + elapsed) BELOW the
+	// Always show the live working line (motion cue + verb + elapsed) BELOW the
 	// streamed text so an upstream stall keeps animating, never a frozen screen.
 	blocks = append(blocks, m.workingStatusLine())
 	return strings.Join(blocks, "\n")
 }
 
 // workingStatusLine renders the live "working" indicator shown on every pending
-// render: an animated spinner, the rotating working verb, and the elapsed time.
+// render: a quiet moving accent across the active label, the current phase, and
+// the elapsed time.
 // It is shown even once partial text has streamed so an upstream stall never
-// looks like a frozen terminal — the spinner tick (~80ms, time-based) drives the
+// looks like a frozen terminal — the spinner tick (~33ms, time-based) drives the
 // re-render, so the elapsed clock keeps advancing for ANY provider/model even
 // when no stream data arrives.
 // spinnerGlyph is the liveness glyph every renderer should use instead of
@@ -3690,6 +3693,40 @@ func (m model) spinnerGlyph() string {
 		return "•"
 	}
 	return m.spinner.View()
+}
+
+const (
+	workingStatusLabelText = "Working"
+	workingStatusWaveTail  = 3
+)
+
+// workingStatusLabel renders the sole motion cue for an active run. A short
+// accent-to-ink wave crosses the label on the shared spinner clock, using the
+// same palette rebuilt by /theme for streaming text. It adds no timer or
+// competing indicator. Reduced-motion keeps the label stable and legible.
+func (m model) workingStatusLabel() string {
+	if m.reducedMotion {
+		return zeroTheme.ink.Render(workingStatusLabelText)
+	}
+
+	label := []rune(workingStatusLabelText)
+	// Let the three dimmest wave steps enter and leave the label before the
+	// bright peak reaches an edge. That makes wrapping visually continuous.
+	period := len(label) + 2*workingStatusWaveTail
+	peak := (m.spinnerPhase/2)%period - workingStatusWaveTail
+	var out strings.Builder
+	out.Grow(len(label) * 8)
+	for index, char := range label {
+		distance := index - peak
+		if distance < 0 {
+			distance = -distance
+		}
+		// Each step moves three places through the twelve-color fade ramp:
+		// accent at the peak, softer neighbours, then base ink.
+		paletteIndex := minInt(streamingFadeSteps-1, distance*3)
+		out.WriteString(streamingFadePalette[paletteIndex].Render(string(char)))
+	}
+	return out.String()
 }
 
 // workingActivity labels the current live phase for the working status line.
@@ -3760,12 +3797,9 @@ func toolCardSuppressedInTranscript(name string) bool {
 }
 
 func (m model) workingStatusLine() string {
-	// Cosine ripple FX: "Working" breathes through a cold-to-warm theme ramp, the
-	// wave moving one character per spinner tick (shared m.spinnerPhase clock). A
-	// 6-char wavelength fits the 7-letter word so a full oscillation is visible.
-	// Under reduced motion the phase is frozen, so this renders a static gradient.
-	working := rippleText("Working", ripplePalette(), m.spinnerPhase, 6)
-	line := zeroTheme.accent.Render(m.spinnerGlyph()) + " " + working
+	// Tool and plan labels stay still, leaving the moving Working label as the
+	// single calm, unambiguous liveness signal for the run.
+	line := m.workingStatusLabel()
 	// Phase label so a long, output-less step reads as live progress rather than a
 	// frozen screen: "writing" while the answer streams, "thinking" otherwise
 	// (reasoning, waiting on the model, or running a tool).
@@ -5171,10 +5205,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.stepExplanation = nil
 	m.planDetailOpen = false
 	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
-	// A new run clears the sidebar's content (plan/agents), so the user's Ctrl+B
-	// hide was for the OLD context — reset it so the new run's sidebar isn't
-	// suppressed by a stale preference.
-	m.sidebarHidden = false
+	m.runDetailsOpen = false
 	m.turnStartedAt = m.now()
 	m.turnTimer = newActiveTurnTimer(m.turnStartedAt)
 	m.lastStreamActivity = m.turnStartedAt
@@ -5184,11 +5215,10 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 }
 
 // ensureSpinnerTick returns the spinner.Tick cmd to (re)start the self-scheduling
-// tick loop when an active sidebar holds agents to animate but the loop is not
-// already running (e.g. a resumed session whose swarm members exist before any
-// run started this process). It returns nil — issuing no second timer — when the
-// loop is already alive, when reduced motion is set, or when there is nothing to
-// animate, so an idle plain session schedules no timer.
+// tick loop when active agent state needs its short lifecycle fade but the loop
+// is not already running (e.g. a resumed session with live agents before any
+// run starts). It returns nil — issuing no second timer — when the loop is
+// already alive, reduced motion is set, or nothing needs animation.
 func (m *model) ensureSpinnerTick() tea.Cmd {
 	if m.spinnerTicking || m.reducedMotion {
 		return nil
