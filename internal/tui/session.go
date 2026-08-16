@@ -640,13 +640,17 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				status = tools.StatusOK
 			}
 			output := payloadString(payload, "output")
+			detail := payloadString(payload, "displayPreview")
+			if detail == "" {
+				detail = output
+			}
 			rows = append(rows, transcriptRow{
 				kind:            rowToolResult,
 				id:              effectiveToolRowID(id, callSeq[id]),
 				text:            fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
 				tool:            name,
 				status:          status,
-				detail:          output,
+				detail:          detail,
 				meta:            payloadStringMap(payload, "meta"),
 				changedFiles:    payloadStringSlice(payload, "changedFiles"),
 				changeSummaries: payloadExecutionChanges(payload, "changeSummaries"),

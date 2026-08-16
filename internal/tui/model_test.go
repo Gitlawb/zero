@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -1465,6 +1466,28 @@ func TestToolResultDetailPrefersPreview(t *testing.T) {
 	errResult := agent.ToolResult{Name: "write_file", Status: tools.StatusError, Output: "Error: permission denied", Display: tools.Display{Preview: "must not show on error"}}
 	if got := toolResultDetail(errResult); got != "Error: permission denied" {
 		t.Errorf("error result must use Output (the failure), got %q", got)
+	}
+}
+
+func TestToolResultSessionPayloadKeepsPreviewForResume(t *testing.T) {
+	preview := "--- a/calculator.go\n+++ b/calculator.go\n@@ -4,1 +4,1 @@\n-oldValue := 1\n+newValue := 2"
+	payload := toolResultSessionPayload(agent.ToolResult{
+		ToolCallID: "edit-1",
+		Name:       "edit_file",
+		Status:     tools.StatusOK,
+		Output:     "Successfully edited calculator.go (replaced 1 occurrence).",
+		Display:    tools.Display{Preview: preview},
+	})
+	if got, want := payload["displayPreview"], preview; got != want {
+		t.Fatalf("persisted display preview = %#v, want %q", got, want)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal session payload: %v", err)
+	}
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: encoded}})
+	if len(rows) != 1 || rows[0].detail != preview {
+		t.Fatalf("resumed row lost the display preview: %#v", rows)
 	}
 }
 

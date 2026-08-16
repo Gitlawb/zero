@@ -5750,27 +5750,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					}
 				}
 			}
-			toolPayload := map[string]any{
-				"toolCallId": result.ToolCallID,
-				"name":       result.Name,
-				"status":     string(result.Status),
-				"output":     result.Output,
-			}
-			if result.Redacted {
-				toolPayload["redacted"] = true
-			}
-			if len(result.Meta) > 0 {
-				toolPayload["meta"] = result.Meta
-			}
-			if len(result.ChangedFiles) > 0 {
-				toolPayload["changedFiles"] = result.ChangedFiles
-			}
-			if len(result.ChangeSummaries) > 0 {
-				toolPayload["changeSummaries"] = result.ChangeSummaries
-			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventToolResult,
-				Payload: toolPayload,
+				Payload: toolResultSessionPayload(result),
 			})
 			// Complete specialist tracking when the Task tool returns.
 			if result.Name == "Task" {
@@ -5989,6 +5971,36 @@ func toolResultDetail(result agent.ToolResult) string {
 		return display.Preview
 	}
 	return result.ModelOutput()
+}
+
+// toolResultSessionPayload preserves both views of a tool result: output remains
+// the provider-facing text used for session context, while displayPreview keeps
+// the richer card body that was visible during the live run. The preview is only
+// stored when it differs, so ordinary tool results retain their compact event.
+func toolResultSessionPayload(result agent.ToolResult) map[string]any {
+	output := result.ModelOutput()
+	payload := map[string]any{
+		"toolCallId": result.ToolCallID,
+		"name":       result.Name,
+		"status":     string(result.Status),
+		"output":     output,
+	}
+	if preview := toolResultDetail(result); strings.TrimSpace(preview) != "" && preview != output {
+		payload["displayPreview"] = preview
+	}
+	if result.Redacted {
+		payload["redacted"] = true
+	}
+	if len(result.Meta) > 0 {
+		payload["meta"] = result.Meta
+	}
+	if len(result.ChangedFiles) > 0 {
+		payload["changedFiles"] = result.ChangedFiles
+	}
+	if len(result.ChangeSummaries) > 0 {
+		payload["changeSummaries"] = result.ChangeSummaries
+	}
+	return payload
 }
 
 func toolResultRowText(result agent.ToolResult) string {
