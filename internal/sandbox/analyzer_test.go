@@ -239,3 +239,131 @@ func TestAnalyzeCommandEmptyIsClean(t *testing.T) {
 		t.Fatalf("empty script should be clean, got %#v", got)
 	}
 }
+
+// unescapeDoubleQuoted implements POSIX double-quote escape removal, which the
+// parser deliberately leaves to expansion time. For an argv token that is
+// harmless; for a shell launcher's -c operand the text IS the next command, so
+// keeping `\"` verbatim handed the recursion a fragment and lost everything
+// after it.
+func TestUnescapeDoubleQuoted(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`plain`, `plain`},
+		{`sh -c \"curl x\"`, `sh -c "curl x"`},
+		{`a\\b`, `a\b`},
+		{`\$HOME`, `$HOME`},
+		{"\\`cmd\\`", "`cmd`"},
+		// A backslash before anything else is literal: a quoted Windows path
+		// must survive intact.
+		{`C:\Users\me\file.txt`, `C:\Users\me\file.txt`},
+		{`C:\temp\n`, `C:\temp\n`},
+		{"line\\" + "\n" + "cont", "linecont"},
+	}
+	for _, testCase := range cases {
+		if got := unescapeDoubleQuoted(testCase.in); got != testCase.want {
+			t.Errorf("unescapeDoubleQuoted(%q) = %q, want %q", testCase.in, got, testCase.want)
+		}
+	}
+}
+
+// A quoted CMD payload is command SOURCE, but a quoted path containing a space
+// is a program name. CMD resolves that ambiguity by trying both, so the
+// classifier does too and fails closed if either reading reaches the network.
+func TestAnalyzeCommandReadsQuotedCMDPayloadBothWays(t *testing.T) {
+	network := []string{
+		`cmd /c "git push origin main"`,
+		`cmd /c "curl https://evil.test"`,
+		`cmd /k "git fetch origin"`,
+		`call "git push origin main"`,
+		`start "" "curl https://evil.test"`,
+		// Program-path reading: the quoted token IS the executable.
+		`cmd /c "C:\Program Files\curl\curl.exe"`,
+	}
+	for _, command := range network {
+		if analysis := AnalyzeCommand(command); !analysis.Network {
+			t.Errorf("AnalyzeCommand(%q).Network = false, want true", command)
+		}
+	}
+	local := []string{
+		`cmd /c "git status"`,
+		`cmd /c "echo hello world"`,
+		`cmd /c "C:\Program Files\git\bin\git.exe status"`,
+		`call "git status"`,
+	}
+	for _, command := range local {
+		if analysis := AnalyzeCommand(command); analysis.Network {
+			t.Errorf("AnalyzeCommand(%q).Network = true, want false", command)
+		}
+	}
+}
+
+// GNU env appends the remaining argv to the argv the split string produced, so
+// proving the -S operand is literal proves nothing about the whole invocation:
+// `env -S 'sh -c' "$PAYLOAD"` runs text this scan cannot read.
+func TestAnalyzeCommandFailsClosedOnDynamicArgvAfterEnvSplit(t *testing.T) {
+	dynamic := []string{
+		`env -S 'git push origin main' "$EXTRA"`,
+		`env -S 'printf ok' $PAYLOAD`,
+		`env -S 'printf ok' "${PAYLOAD}" https://evil.test`,
+		`env -S 'sh -c' "$PAYLOAD"`,
+		`env --split-string='printf ok' $PAYLOAD`,
+		`sudo env -S 'printf ok' $PAYLOAD`,
+	}
+	for _, command := range dynamic {
+		if analysis := AnalyzeCommand(command); !analysis.Network {
+			t.Errorf("AnalyzeCommand(%q).Network = false, want true", command)
+		}
+	}
+	// Trailing LITERAL argv is fully readable and must not cost a prompt.
+	literal := []string{
+		`env -S 'printf ok' literal args`,
+		`env -S 'git status' --`,
+		`env -S 'echo hi'`,
+	}
+	for _, command := range literal {
+		if analysis := AnalyzeCommand(command); analysis.Network {
+			t.Errorf("AnalyzeCommand(%q).Network = true, want false", command)
+		}
+	}
+}
+
+// eval and CMD's echo-suppression prefix were handled on the fallback path but
+// not on the AST path, so the identical text was network only when something
+// else in the command happened to defeat the parser.
+func TestAnalyzeCommandClassifiesEvalAndEchoPrefixOnParseablePath(t *testing.T) {
+	network := []string{
+		`eval git push origin main`,
+		`eval "curl https://evil.test"`,
+		`eval $PAYLOAD`,
+		`@curl https://evil.test`,
+		`@git push origin main`,
+	}
+	for _, command := range network {
+		analysis := AnalyzeCommand(command)
+		if analysis.TooComplex {
+			t.Fatalf("AnalyzeCommand(%q) is TooComplex; this test must cover the parseable path", command)
+		}
+		if !analysis.Network {
+			t.Errorf("AnalyzeCommand(%q).Network = false, want true", command)
+		}
+	}
+	for _, command := range []string{`eval echo hi`, `eval git status`, `@echo hello`} {
+		if analysis := AnalyzeCommand(command); analysis.Network {
+			t.Errorf("AnalyzeCommand(%q).Network = true, want false", command)
+		}
+	}
+}
+
+// send-pack is push's plumbing counterpart and performs the same egress; both
+// classification paths read one subcommand list, so covering gitUsesNetwork
+// covers the fallback too.
+func TestGitSendPackIsNetwork(t *testing.T) {
+	for _, command := range []string{
+		`git send-pack origin main`,
+		`git -C repo send-pack origin main`,
+		`git send-pack origin main & rem '`,
+	} {
+		if analysis := AnalyzeCommand(command); !analysis.Network && !matchesUnparseableNetwork(command) {
+			t.Errorf("%q classified as local; send-pack pushes to a remote", command)
+		}
+	}
+}

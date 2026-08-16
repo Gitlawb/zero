@@ -399,6 +399,14 @@ func gitSubcommand(command []string) (int, string, bool) {
 			index++
 			continue
 		}
+		// A terminal global makes git print and exit, so the token after it is
+		// help text rather than a subcommand. Stopping here keeps this parser
+		// aligned with the sandbox classifier, which already stops: without it
+		// `git --help status` resolved to the read-only prefix `git status`
+		// and was auto-approved as a command it is not.
+		if sandbox.GitTerminalGlobalOption(arg) {
+			return 0, "", false
+		}
 		if gitOptionHasInlineValue(arg) || arg == "--" || strings.HasPrefix(arg, "-") {
 			continue
 		}

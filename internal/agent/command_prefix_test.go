@@ -205,3 +205,32 @@ func TestProposedCommandPrefixRejectsRequestedUnsafeLauncherPrefix(t *testing.T)
 		t.Fatalf("unsafe requested launcher prefix should be rejected, got %#v", got)
 	}
 }
+
+// A terminal global makes git print and exit, so nothing after it is a
+// subcommand. The sandbox classifier already stopped there; this parser walked
+// past it and resolved `git --help status` to the read-only prefix
+// `git status`, auto-approving a command the user never ran. The two scans read
+// one option grammar (sandbox.GitTerminalGlobalOption) so they cannot drift.
+func TestSafeGitCommandStopsAtTerminalGlobalOptions(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "--help", "status"},
+		{"git", "-h", "status"},
+		{"git", "--version", "log"},
+		{"git", "--exec-path", "status"},
+		{"git", "-C", "repo", "--help", "diff"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; a terminal global ends the subcommand scan", command)
+		}
+	}
+	// An inline --exec-path=<path> is a value-carrying global, not terminal, so
+	// the subcommand after it is still real.
+	for _, command := range [][]string{
+		{"git", "--exec-path=/usr/libexec/git-core", "status"},
+		{"git", "--namespace", "ns", "status"},
+	} {
+		if !safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = false; want true", command)
+		}
+	}
+}

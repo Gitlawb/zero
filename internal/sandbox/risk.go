@@ -99,7 +99,7 @@ func matchesUnparseableNetwork(command string) bool {
 func matchesUnparseableNetworkAt(command string, depth int) bool {
 	if depth < maxUnparseableShellDepth {
 		for _, payload := range fallbackCMDForFCommands(command) {
-			if textualPayloadUsesNetwork(payload, depth+1) || matchesUnparseableNetworkAt(payload, depth+1) {
+			if classifyCommandText(payload, depth+1) {
 				return true
 			}
 		}
@@ -122,7 +122,10 @@ func matchesUnparseableNetworkAt(command string, depth int) bool {
 			}
 		}
 		for _, body := range cmdCommandBodyTokenInfoCandidates(tokenInfo) {
-			if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+			// Shared with the AST path's cmdLauncherUsesNetwork so a quoted
+			// payload cannot be command text on one path and a program name on
+			// the other.
+			if cmdBodyUsesNetwork(body, depth) {
 				return true
 			}
 		}
@@ -199,7 +202,7 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	// source just as we do for `sh -c`; otherwise quoting the same curl/git
 	// invocation behind eval would hide it from this fail-closed path.
 	if program == "eval" && len(args) > 0 {
-		if depth >= maxUnparseableShellDepth || matchesUnparseableNetworkAt(strings.Join(args, " "), depth+1) {
+		if classifyCommandText(strings.Join(args, " "), depth+1) {
 			return true
 		}
 	}
@@ -216,9 +219,7 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	if shellPrograms[program] {
 		if payloadIndex, found := shellCommandPayloadIndex(program, args); found && payloadIndex < len(args) {
 			if payload := args[payloadIndex]; payload != "" {
-				if fallbackTokenLooksDynamic(payload) ||
-					depth >= maxUnparseableShellDepth ||
-					matchesUnparseableNetworkAt(payload, depth+1) {
+				if fallbackTokenLooksDynamic(payload) || classifyCommandText(payload, depth+1) {
 					return true
 				}
 			}
@@ -236,8 +237,7 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	// flag. That payload is valid shell input even when the POSIX parser that
 	// sent us here cannot parse it (for example, `cmd /c curl ... & rem '`).
 	if payload := fallbackCommandInterpreterPayload(program, args); payload != "" {
-		if depth >= maxUnparseableShellDepth ||
-			matchesUnparseableNetworkAt(payload, depth+1) ||
+		if classifyCommandText(payload, depth+1) ||
 			fallbackPayloadUsesNetwork(strings.Join(fallbackCommandInterpreterArgs(program, args), " "), depth+1) {
 			return true
 		}
@@ -466,6 +466,13 @@ func splitCMDEscapedWhitespace(value string) []string {
 		parts = append(parts, part)
 	}
 	return parts
+}
+
+// trimCMDEchoPrefixToken strips CMD's echo-suppression prefix from a single
+// program token. It is the one-token form of trimCMDEchoPrefix, shared so the
+// AST and fallback paths cannot disagree about whether "@curl" names curl.
+func trimCMDEchoPrefixToken(token string) string {
+	return strings.TrimLeft(strings.TrimSpace(token), "@")
 }
 
 func trimCMDEchoPrefix(fields []fallbackCommandToken) []fallbackCommandToken {
