@@ -3,36 +3,36 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T15:09:05.486Z",
-  "durationMs": 29453546,
+  "endedAt": "2026-08-16T17:15:01.810Z",
+  "durationMs": 37009869,
   "status": "running",
   "tokens": {
-    "total": 257301,
-    "input": 602,
-    "output": 256699
+    "total": 301370,
+    "input": 664,
+    "output": 300706
   },
   "cost": {
-    "usd": 60.0626
+    "usd": 70.4969
   },
-  "toolCalls": 294,
+  "toolCalls": 324,
   "lines": {
-    "added": 90,
-    "removed": 6
+    "added": 103,
+    "removed": 2
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
-    "internal/measurements/measurements.go",
-    "internal/measurements/measurements_test.go"
+    "internal/agent/guardrails.go",
+    "internal/agent/guardrails_false_admission_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "2318710a8747b3139b9b026dca0fa2042e062bb9",
+    "headAfter": "42a6f6cab3e60c7f7cd9825297a0913f5009b968",
     "commitShas": [
-      "2318710a8747b3139b9b026dca0fa2042e062bb9"
+      "42a6f6cab3e60c7f7cd9825297a0913f5009b968"
     ]
   },
-  "summary": "Now it's clear and worth stating precisely: **the sort is the actual fix** (reverting both fails at attempt 1); the namespace change is a separate semantic choice. Let me pin that behaviour explicitly rather than leave it implied:",
+  "summary": "Clean. Committing all three, starting with #912:",
   "originUrl": "https://getorigin.io/sessions/local-abff1ceb-89a0-4779-bf13-17d2552ca680"
 }
