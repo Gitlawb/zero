@@ -411,7 +411,7 @@ func xterm256Hex(t *testing.T, hexColor string) string {
 // Hex-level AA does not guarantee the rendered pairs hold on a 256-color
 // terminal, which quantizes every token to its nearest xterm entry first.
 // Guard the pairs that regressed: Dune's selected-row affordances (accent
-// caret/favorite star and blue local-model dot over selBg via onSel) and
+// caret/favorite star and blue local-model dot over selBg) and
 // diff bands (whose previous addBg/delBg and addBgWord/delBgWord values all
 // quantized to the same grays), plus the rendered add-diff content itself
 // (gutter and changed-word text, which quantization made unreadable even

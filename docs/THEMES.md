@@ -34,12 +34,14 @@ adding a new `palette{...}` literal, a `themeRegistry` entry, and test
 coverage for the new palette (see below).
 
 Registry-wide tests in `internal/tui/theme_select_test.go` assert the basic
-WCAG AA text tokens, the gray-ramp order, the diff word-span pairs, and the
-selected-row band for every entry. The rendered-surface invariants beyond
-those (permission surfaces, selected-row secondary text, diff gutters, and
-the xterm-256 downsampling checks) are asserted per palette, not against the
-whole registry: `TestExtendedThemeContrastInvariants` and
-`TestExtendedThemeANSI256Contrast` enumerate the palettes they cover. A new
-theme must be added to those tests (or given equivalent palette-specific
-assertions), or CI can stay green while its permission, selected-row, and
-diff surfaces ship unreadable.
+WCAG AA text tokens, the gray-ramp order, the selected-row band, and (via
+`TestDiffHighlightWordSpans`) the word-span *contrast* pairs for every
+entry. The remaining rendered-surface invariants (permission surfaces,
+selected-row secondary text, xterm-256 quantization, and the quantized
+add/del band *identity* check that `addBg`/`delBg` stay green/red and
+distinct) are asserted per palette, not against the whole registry:
+`TestExtendedThemeContrastInvariants` and `TestExtendedThemeANSI256Contrast`
+enumerate the palettes they cover. A new theme must be added to those
+tests (or given equivalent palette-specific assertions), or CI can stay
+green while its permission, selected-row, and quantized-diff surfaces
+ship unreadable.
