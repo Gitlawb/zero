@@ -3,36 +3,36 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T11:00:33.410Z",
-  "durationMs": 14541472,
+  "endedAt": "2026-08-16T11:06:14.846Z",
+  "durationMs": 14882905,
   "status": "running",
   "tokens": {
-    "total": 156827,
-    "input": 408,
-    "output": 156419
+    "total": 171644,
+    "input": 440,
+    "output": 171204
   },
   "cost": {
-    "usd": 38.5181
+    "usd": 41.3006
   },
-  "toolCalls": 200,
+  "toolCalls": 216,
   "lines": {
-    "added": 125,
-    "removed": 1
+    "added": 219,
+    "removed": 14
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
-    "internal/agent/guardrails.go",
-    "internal/agent/guardrails_false_admission_test.go"
+    "internal/sandbox/scope.go",
+    "internal/sandbox/scope_temp_refcount_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "bd3887b7ad0b08a2cbdd5a11c29d2ee3e05ac444",
+    "headAfter": "4a7063aa2c26bb8f80df4483fec55164b341e805",
     "commitShas": [
-      "bd3887b7ad0b08a2cbdd5a11c29d2ee3e05ac444"
+      "4a7063aa2c26bb8f80df4483fec55164b341e805"
     ]
   },
-  "summary": "All four admissions caught, all five findings preserved. Adding the permanent regression and mutation-checking:",
+  "summary": "Both mutation-verified. Gauntlet and push:",
   "originUrl": "https://getorigin.io/sessions/local-abff1ceb-89a0-4779-bf13-17d2552ca680"
 }
