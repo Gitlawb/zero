@@ -3,36 +3,37 @@
   "sessionId": "local-abff1ceb-89a0-4779-bf13-17d2552ca680",
   "model": "claude-opus-5",
   "startedAt": "2026-08-16T06:58:11.927Z",
-  "endedAt": "2026-08-16T10:27:33.004Z",
-  "durationMs": 12561062,
+  "endedAt": "2026-08-16T10:30:02.220Z",
+  "durationMs": 12710278,
   "status": "running",
   "tokens": {
-    "total": 98973,
-    "input": 282,
-    "output": 98691
+    "total": 101517,
+    "input": 290,
+    "output": 101227
   },
   "cost": {
-    "usd": 29.2341
+    "usd": 29.717
   },
-  "toolCalls": 138,
+  "toolCalls": 142,
   "lines": {
-    "added": 117,
-    "removed": 2
+    "added": 157,
+    "removed": 13
   },
   "filesChanged": [
     "/Users/kratos/dev/f909/internal/measurements/measurements.go",
     "/Users/kratos/dev/f897/internal/memory/memory_test.go",
     "internal/agent/guardrails.go",
-    "internal/agent/guardrails_false_admission_test.go"
+    "internal/agent/guardrails_false_admission_test.go",
+    "internal/sandbox/scope_temporary_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "39db7aa01d0abf8a698d3b2e76197554a5e80d5c",
+    "headAfter": "da56b1369344671f13f1d52cd02ca3464856b135",
     "commitShas": [
-      "39db7aa01d0abf8a698d3b2e76197554a5e80d5c"
+      "da56b1369344671f13f1d52cd02ca3464856b135"
     ]
   },
-  "summary": "Only the two pre-existing `main` failures (no network in this sandbox). Committing #912:",
+  "summary": "Full suite clean on #829 (it carries `internal/cli` changes that the two network-dependent doctor tests pass under). Committing:",
   "originUrl": "https://getorigin.io/sessions/local-abff1ceb-89a0-4779-bf13-17d2552ca680"
 }
