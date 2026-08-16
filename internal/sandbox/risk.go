@@ -261,7 +261,7 @@ func applyPatchRequestPaths(args map[string]any) []string {
 	}
 	cwd := firstArgString(args, "cwd")
 	var paths []string
-	for _, path := range patchHeaderPaths(patch) {
+	for _, path := range applyPatchPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -281,7 +281,7 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	if patch == "" {
 		return nil
 	}
-	for _, path := range patchHeaderPaths(patch) {
+	for _, path := range applyPatchPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -294,6 +294,34 @@ func applyPatchPathBlock(request Request) *pathBlock {
 		}
 	}
 	return nil
+}
+
+func applyPatchPaths(patch string) []string {
+	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
+		return structuredPatchHeaderPaths(patch)
+	}
+	return patchHeaderPaths(patch)
+}
+
+// structuredPatchHeaderPaths is intentionally a small, conservative scanner for
+// the sandbox boundary. The executor validates the complete hunk grammar before
+// writing; the sandbox only needs every possible target path so it can reject an
+// unsafe request before the tool runs.
+func structuredPatchHeaderPaths(patch string) []string {
+	var paths []string
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "} {
+			if path, ok := strings.CutPrefix(trimmed, prefix); ok {
+				path = strings.TrimSpace(path)
+				if path != "" {
+					paths = append(paths, path)
+				}
+				break
+			}
+		}
+	}
+	return paths
 }
 
 func patchHeaderPaths(patch string) []string {

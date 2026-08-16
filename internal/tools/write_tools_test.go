@@ -513,6 +513,125 @@ func TestApplyPatchToolAppliesUnifiedDiff(t *testing.T) {
 	}
 }
 
+func TestApplyPatchToolAppliesStructuredPatch(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "hello.txt"), "hello\nold\n")
+
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: hello.txt",
+		"@@",
+		" hello",
+		"-old",
+		"+new",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch should apply, got %s: %s", result.Status, result.Output)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.ReplaceAll(string(content), "\r\n", "\n"); got != "hello\nnew\n" {
+		t.Fatalf("structured patch content = %q", got)
+	}
+}
+
+func TestApplyPatchToolAppliesStructuredAddAndMove(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "old.txt"), "old\n")
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: nested/new.txt",
+		"+created",
+		"*** Update File: old.txt",
+		"*** Move to: moved.txt",
+		"@@",
+		"-old",
+		"+moved",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch should apply, got %s: %s", result.Status, result.Output)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "nested", "new.txt")); err != nil || string(got) != "created\n" {
+		t.Fatalf("added file = %q, err = %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "moved.txt")); err != nil || string(got) != "moved\n" {
+		t.Fatalf("moved file = %q, err = %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "old.txt")); !os.IsNotExist(err) {
+		t.Fatalf("old source should be removed, stat err = %v", err)
+	}
+	if got := result.ChangedFiles; strings.Join(got, ",") != "nested/new.txt,old.txt,moved.txt" {
+		t.Fatalf("ChangedFiles = %v", got)
+	}
+}
+
+func TestApplyPatchToolStructuredPatchMatchesWhitespaceTolerantly(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "hello.txt"), "  hello   \n")
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: hello.txt",
+		"@@",
+		"-hello",
+		"+goodbye",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch should tolerate surrounding whitespace, got %s: %s", result.Status, result.Output)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(content); got != "goodbye\n" {
+		t.Fatalf("structured patch content = %q", got)
+	}
+}
+
+func TestApplyPatchToolRejectsMalformedOrEscapingStructuredPatchBeforeWriting(t *testing.T) {
+	root := t.TempDir()
+	tool := NewScopedApplyPatchTool(root, nil)
+	for name, patch := range map[string]string{
+		"empty update": strings.Join([]string{
+			"*** Begin Patch",
+			"*** Update File: target.txt",
+			"*** End Patch",
+		}, "\n"),
+		"escape": strings.Join([]string{
+			"*** Begin Patch",
+			"*** Add File: ../outside.txt",
+			"+nope",
+			"*** End Patch",
+		}, "\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := tool.Run(context.Background(), map[string]any{"patch": patch})
+			if result.Status != StatusError {
+				t.Fatalf("expected error, got %s: %s", result.Status, result.Output)
+			}
+			if strings.Contains(result.Output, "No valid patches") {
+				t.Fatalf("structured patch should fail before git apply, got %q", result.Output)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "outside.txt")); !os.IsNotExist(err) {
+		t.Fatalf("escaping patch must not write outside workspace, stat err = %v", err)
+	}
+}
+
 // A hunk-body line that removes content beginning with "-- " appears in the diff
 // as "--- ..."; it must NOT be mistaken for a file header (which previously made
 // apply_patch reject a valid patch as targeting an outside path).
