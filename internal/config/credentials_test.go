@@ -371,3 +371,98 @@ func TestClearProviderKeyStoredCaseVariantsPreservesDistinctUnicodeIdentity(t *t
 		t.Fatal("long-s marker belongs to a distinct credential-store identity and must remain set")
 	}
 }
+
+// A rejected publication must leave the user exactly where they started: the
+// previous working key intact, not deleted by a rollback that assumed this
+// call had created the entry.
+func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	// Legacy duplicate rows: the write-time validator rejects this config, so
+	// the marker publication fails after the credential has been captured.
+	original := []byte(`{"providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openrouter", "sk-working"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PublishProviderCredential(path, "openrouter", "sk-new"); err == nil {
+		t.Fatal("publication must be rejected for an ambiguous persisted config")
+	}
+
+	key, ok, err := store.Get("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || key != "sk-working" {
+		t.Fatalf("stored key = %q (present=%v), want the previous sk-working restored", key, ok)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("config was rewritten by a rejected publication:\n%s", after)
+	}
+}
+
+// When the call created the entry there is nothing to restore, so a rejected
+// publication must not leave an orphaned secret behind either.
+func TestPublishProviderCredentialDeletesEntryItCreatedWhenMarkerRejected(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work"},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishProviderCredential(path, "work", "sk-new"); err == nil {
+		t.Fatal("publication must be rejected for an ambiguous persisted config")
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Get("work"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("rejected publication left an orphaned secret in the store")
+	}
+}
+
+func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"openrouter","apiKeyEnv":"OPENROUTER_API_KEY"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishProviderCredential(path, "openrouter", "sk-new"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok, err := store.Get("openrouter")
+	if err != nil || !ok || key != "sk-new" {
+		t.Fatalf("stored key = %q (present=%v, err=%v), want sk-new", key, ok, err)
+	}
+	var cfg FileConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Providers[0].APIKeyStored || strings.TrimSpace(cfg.Providers[0].APIKeyEnv) != "" {
+		t.Fatalf("marker not published: %+v", cfg.Providers[0])
+	}
+}

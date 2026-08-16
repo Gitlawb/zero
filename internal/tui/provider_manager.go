@@ -281,9 +281,18 @@ func (m model) handleProviderManageListKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		return m, nil
 	case strings.EqualFold(keyText(msg), "d"):
-		if _, ok := wizard.currentManagerRow(); ok {
+		if row, ok := wizard.currentManagerRow(); ok {
 			wizard.manageDeleting = true
 			wizard.manageStatus = ""
+			// Resolve the retention outcome now, from the same predicate the
+			// delete uses, so the confirmation cannot promise a key removal the
+			// delete will not perform.
+			wizard.manageDeleteKeepsKey = false
+			if path := strings.TrimSpace(m.userConfigPath); path != "" {
+				if retained, err := config.ProviderKeyRetainedAfterRemoval(path, row.profile.Name); err == nil {
+					wizard.manageDeleteKeepsKey = retained
+				}
+			}
 		}
 		return m, nil
 	}
@@ -357,17 +366,24 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	var activeAfter string
 	var cleanup tea.Cmd
 	if persisted {
-		cfg, err := config.RemoveProvider(m.userConfigPath, name)
+		// The manager row carries a RESOLVED name, which may not be the persisted
+		// row's own spelling; RemoveProvider targets rows exactly. Bridge first.
+		exactName, err := config.ResolvePersistedProviderName(m.userConfigPath, name)
+		if err != nil {
+			wizard.manageStatus = "Delete failed: " + err.Error()
+			return m, nil
+		}
+		cfg, err := config.RemoveProvider(m.userConfigPath, exactName)
 		if err != nil {
 			wizard.manageStatus = "Delete failed: " + err.Error()
 			return m, nil
 		}
 		activeAfter = cfg.ActiveProvider
-		deleteStoredKey := !providerIdentitySurvives(cfg.Providers, name)
+		deleteStoredKey := !config.CredentialKeyRetained(cfg.Providers, exactName)
 		if deleteStoredKey {
 			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
 		} else {
-			notes = []string{"Deleted " + name + ". Kept its stored API key because another provider uses the same credential identity."}
+			notes = []string{"Deleted " + name + ". Kept its stored API key because another saved provider still uses that credential."}
 		}
 		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, deleteStoredKey)
 	} else {
@@ -409,15 +425,6 @@ func removeSavedProvider(saved []config.ProviderProfile, name string) []config.P
 		kept = append(kept, profile)
 	}
 	return kept
-}
-
-func providerIdentitySurvives(providers []config.ProviderProfile, removedName string) bool {
-	for _, provider := range providers {
-		if config.SameProviderIdentity(provider.Name, removedName) {
-			return true
-		}
-	}
-	return false
 }
 
 func samePersistedProviderName(left, right string) bool {
@@ -619,13 +626,21 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		wizard.err = "provider " + oldName + " is not saved in config.json, so there is no saved profile to edit"
 		return m, nil
 	}
+	// The edited row came from the resolved list, whose spelling can differ from
+	// the persisted row's; EditProvider matches rows exactly. Bridge before both
+	// the credential capture and the write so they target the same row.
+	exactName, err := config.ResolvePersistedProviderName(m.userConfigPath, oldName)
+	if err != nil {
+		wizard.err = err.Error()
+		return m, nil
+	}
 	newName := strings.TrimSpace(wizard.editDraft.Name)
 	if newName == "" {
 		wizard.err = "name cannot be empty"
 		return m, nil
 	}
 	edit := config.ProviderEdit{
-		Name:        oldName,
+		Name:        exactName,
 		NewName:     newName,
 		BaseURL:     strings.TrimSpace(wizard.editDraft.BaseURL),
 		Model:       strings.TrimSpace(wizard.editDraft.Model),
@@ -636,7 +651,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 			wizard.err = err.Error()
 			return m, nil
 		}
-		captured := config.SecureProviderProfile(config.ProviderProfile{Name: oldName, APIKey: key}, m.userConfigPath)
+		captured := config.SecureProviderProfile(config.ProviderProfile{Name: exactName, APIKey: key}, m.userConfigPath)
 		// On a store failure SecureProviderProfile keeps the inline key, which
 		// EditProvider then persists (the startup migration re-captures later) —
 		// the same fail-soft posture as every other capture path.
@@ -777,7 +792,11 @@ func (wizard *providerWizardState) renderManageStep(width int) []string {
 		}
 		lines = append(lines, fitStyledLine(zeroTheme.faint.Render(detail), width))
 		if wizard.manageDeleting {
-			lines = append(lines, fitStyledLine(zeroTheme.red.Render("Delete "+row.profile.Name+"? This also removes its stored API key.  Enter/y confirm · Esc/n cancel"), width))
+			keyNote := "This also removes its stored API key."
+			if wizard.manageDeleteKeepsKey {
+				keyNote = "Its stored API key is kept — another saved provider shares that credential."
+			}
+			lines = append(lines, fitStyledLine(zeroTheme.red.Render("Delete "+row.profile.Name+"? "+keyNote+"  Enter/y confirm · Esc/n cancel"), width))
 		}
 	}
 	return lines

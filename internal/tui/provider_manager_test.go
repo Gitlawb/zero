@@ -793,3 +793,104 @@ func TestProviderManagerCaseVariantEditDoesNotChangeLiveSibling(t *testing.T) {
 		t.Fatalf("wrong persisted edit target: %+v", cfg.Providers)
 	}
 }
+
+// The confirmation prompt must promise what the delete actually does: with a
+// case variant that still claims the shared credential, the key is kept, so
+// the prompt must not say it is about to be removed.
+func TestProviderManagerDeleteConfirmMatchesKeyRetentionPolicy(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+
+	newManagerAtRow := func(t *testing.T, configJSON string, profiles []config.ProviderProfile, cursor int) model {
+		t.Helper()
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{
+			ProviderName:    profiles[0].Name,
+			ProviderProfile: profiles[0],
+			SavedProviders:  profiles,
+			UserConfigPath:  configPath,
+		})
+		m, _ = m.openProviderManager()
+		m.providerWizard.manageCursor = cursor
+		next, _ := m.handleProviderWizardKey(testKeyText("d"))
+		if !next.providerWizard.manageDeleting {
+			t.Fatal("d must arm the delete confirm")
+		}
+		return next
+	}
+
+	t.Run("shared credential is kept", func(t *testing.T) {
+		m := newManagerAtRow(t,
+			`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`,
+			[]config.ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "WORK", APIKeyStored: true}},
+			1,
+		)
+		if !m.providerWizard.manageDeleteKeepsKey {
+			t.Fatal("retention not resolved for a survivor that claims the credential")
+		}
+		view := strings.Join(m.providerWizard.renderManageStep(80), "\n")
+		if !strings.Contains(view, "stored API key is kept") {
+			t.Fatalf("confirm text = %q, want the key-kept wording", view)
+		}
+	})
+
+	t.Run("last owner removal deletes the key", func(t *testing.T) {
+		m := newManagerAtRow(t,
+			`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"other"}]}`,
+			[]config.ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "other"}},
+			0,
+		)
+		if m.providerWizard.manageDeleteKeepsKey {
+			t.Fatal("retention must be false when no survivor claims the credential")
+		}
+		view := strings.Join(m.providerWizard.renderManageStep(80), "\n")
+		if !strings.Contains(view, "also removes its stored API key") {
+			t.Fatalf("confirm text = %q, want the key-removal wording", view)
+		}
+	})
+}
+
+// A markerless case variant does not own the shared credential, so removing
+// the only row that claimed it must delete the secret rather than orphan it
+// behind a profile ApplyStoredAPIKey will never read.
+func TestProviderManagerRemoveDeletesKeyWhenSurvivorNeverClaimedIt(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	profiles := []config.ProviderProfile{
+		{Name: "work", APIKeyStored: true},
+		{Name: "WORK"},
+	}
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: profiles[0],
+		SavedProviders:  profiles,
+		UserConfigPath:  configPath,
+	})
+	m, _ = m.openProviderManager()
+	m.providerWizard.manageCursor = 0
+	next, cmd := m.deleteManagerSelection()
+	next = drainProviderManagerCmds(t, next, cmd)
+
+	if _, ok, getErr := store.Get("WORK"); getErr != nil {
+		t.Fatal(getErr)
+	} else if ok {
+		t.Fatal("shared key was orphaned behind a markerless survivor")
+	}
+	if status := next.providerWizard.manageStatus; !strings.Contains(status, "stored API key will also be deleted") {
+		t.Fatalf("delete status = %q, want the key-deletion note", status)
+	}
+}

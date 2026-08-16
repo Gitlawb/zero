@@ -580,9 +580,28 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	)
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(target.Name)
+	persistNote := ""
 	if strings.TrimSpace(m.userConfigPath) != "" {
-		_, _ = config.SetActiveProvider(m.userConfigPath, target.Name)
-		_, _ = config.SetProviderModel(m.userConfigPath, target.Name, target.Model)
+		// SetActiveProvider accepts any spelling of the credential identity and
+		// returns the config with the persisted row's OWN spelling in
+		// ActiveProvider. SetProviderModel matches rows exactly, so persist with
+		// that resolved name — passing the session's spelling silently wrote
+		// nothing whenever the two differed (session "openai", row "OpenAI").
+		//
+		// Env-derived providers have no row to update, so they are skipped
+		// silently; a failure to write a row that DOES exist is surfaced rather
+		// than swallowed, since the session and config.json then disagree.
+		persisted, err := config.ProviderPersisted(m.userConfigPath, target.Name)
+		switch {
+		case err != nil:
+			persistNote = "\nNote: the switch applies to this session, but config.json could not be read: " + redaction.RedactString(err.Error(), redaction.Options{})
+		case persisted:
+			if cfg, err := config.SetActiveProvider(m.userConfigPath, target.Name); err != nil {
+				persistNote = "\nNote: the switch applies to this session, but config.json was not updated: " + redaction.RedactString(err.Error(), redaction.Options{})
+			} else if _, err := config.SetProviderModel(m.userConfigPath, cfg.ActiveProvider, target.Model); err != nil {
+				persistNote = "\nNote: the active provider was saved, but its model was not: " + redaction.RedactString(err.Error(), redaction.Options{})
+			}
+		}
 	}
 	// Warm discovery for the provider we just switched to, same as Init() does
 	// for the provider active at launch — otherwise the context-usage gauge has
@@ -597,6 +616,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 		}
 	}
 	status := fmt.Sprintf("Model\nSwitched to %s · %s", target.Name, target.Model)
+	status += persistNote
 	if warn := m.visionDropWarning(); warn != "" {
 		status += "\n" + warn
 	}
@@ -713,7 +733,14 @@ func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error
 		// Env-derived providers have no config.json row to update.
 		return false, nil
 	}
-	if _, err := config.SetProviderModel(path, name, model); err != nil {
+	// ProviderPersisted matches credential identity; SetProviderModel matches
+	// the row exactly. Resolve the session's spelling to the row's own before
+	// writing, or a case difference makes this a silent no-op.
+	exactName, err := config.ResolvePersistedProviderName(path, name)
+	if err != nil {
+		return false, err
+	}
+	if _, err := config.SetProviderModel(path, exactName, model); err != nil {
 		return false, err
 	}
 	return true, nil

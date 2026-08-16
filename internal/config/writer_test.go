@@ -1295,3 +1295,161 @@ func TestValidatePersistedProviderNamesRejectsImplicitOpenAICollision(t *testing
 		t.Fatalf("error = %v, want empty persisted-provider name rejection", err)
 	}
 }
+
+func TestResolvePersistedProviderNameBridgesIdentityToExactSpelling(t *testing.T) {
+	cases := []struct {
+		name      string
+		providers []ProviderProfile
+		input     string
+		want      string
+		wantErr   string
+	}{
+		{
+			name:      "exact spelling",
+			providers: []ProviderProfile{{Name: "OpenAI"}},
+			input:     "OpenAI",
+			want:      "OpenAI",
+		},
+		{
+			name:      "case variant resolves to the row's own spelling",
+			providers: []ProviderProfile{{Name: "WORK"}},
+			input:     "work",
+			want:      "WORK",
+		},
+		{
+			name:      "exact spelling wins over an earlier case variant",
+			providers: []ProviderProfile{{Name: "WORK"}, {Name: "work"}},
+			input:     "work",
+			want:      "work",
+		},
+		{
+			name:      "ambiguous identity is an error, not an arbitrary pick",
+			providers: []ProviderProfile{{Name: "WORK"}, {Name: "Work"}},
+			input:     "work",
+			wantErr:   "ambiguous provider",
+		},
+		{
+			// The credential store keeps "s" and Unicode long-s apart, so these
+			// are two identities and neither resolves the other.
+			name:      "unicode long-s is a distinct identity",
+			providers: []ProviderProfile{{Name: "ſ"}},
+			input:     "s",
+			wantErr:   "not found",
+		},
+		{
+			name:      "unknown name",
+			providers: []ProviderProfile{{Name: "openai"}},
+			input:     "anthropic",
+			wantErr:   "not found",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "zero.json")
+			writeConfigFixture(t, path, FileConfig{Providers: testCase.providers}, 0o600)
+			got, err := ResolvePersistedProviderName(path, testCase.input)
+			if testCase.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, testCase.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != testCase.want {
+				t.Fatalf("resolved = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+// Credential ownership is the marker, not the name: a surviving case variant
+// that never claimed the shared key cannot keep it alive, or the secret is
+// orphaned behind a profile ApplyStoredAPIKey will never read.
+func TestCredentialKeyRetainedRequiresASurvivingOwner(t *testing.T) {
+	cases := []struct {
+		name      string
+		providers []ProviderProfile
+		removed   string
+		want      bool
+	}{
+		{
+			name:      "survivor claims the credential",
+			providers: []ProviderProfile{{Name: "WORK", APIKeyStored: true}},
+			removed:   "work",
+			want:      true,
+		},
+		{
+			name:      "survivor exists but never claimed the credential",
+			providers: []ProviderProfile{{Name: "WORK"}},
+			removed:   "work",
+			want:      false,
+		},
+		{
+			name:      "no survivor shares the identity",
+			providers: []ProviderProfile{{Name: "other", APIKeyStored: true}},
+			removed:   "work",
+			want:      false,
+		},
+		{
+			name:      "unicode long-s does not share the identity",
+			providers: []ProviderProfile{{Name: "ſ", APIKeyStored: true}},
+			removed:   "s",
+			want:      false,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := CredentialKeyRetained(testCase.providers, testCase.removed); got != testCase.want {
+				t.Fatalf("CredentialKeyRetained = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+// The delete confirmation must be able to promise exactly what the delete does,
+// so the pre-mutation answer has to match the post-mutation one.
+func TestProviderKeyRetainedAfterRemovalMatchesPostRemovalAnswer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "WORK", APIKeyStored: true}},
+	}, 0o600)
+
+	before, err := ProviderKeyRetainedAfterRemoval(path, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before {
+		t.Fatal("pre-removal answer = false, want true (WORK still claims the credential)")
+	}
+	cfg, err := RemoveProvider(path, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := CredentialKeyRetained(cfg.Providers, "work"); after != before {
+		t.Fatalf("post-removal answer = %v, want %v", after, before)
+	}
+}
+
+// Repairing a case-duplicate config can leave activeProvider on a third
+// spelling that matches no remaining row exactly, which every exact mutator
+// then fails against. Removal re-points it at the survivor's own spelling.
+func TestRemoveProviderNormalizesStaleActiveProviderSpelling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "WoRk",
+		Providers:      []ProviderProfile{{Name: "work"}, {Name: "WORK"}},
+	}, 0o600)
+
+	cfg, err := RemoveProvider(path, "WORK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ActiveProvider != "work" {
+		t.Fatalf("activeProvider = %q, want the surviving row's spelling work", cfg.ActiveProvider)
+	}
+	if _, err := SetProviderModel(path, cfg.ActiveProvider, "gpt-4"); err != nil {
+		t.Fatalf("exact mutator still cannot find the active row: %v", err)
+	}
+}

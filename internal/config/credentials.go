@@ -66,6 +66,59 @@ func SecureProviderProfile(profile ProviderProfile, configPath string) ProviderP
 	return secured
 }
 
+// PublishProviderCredential captures key into the credential store beside path
+// and publishes the matching APIKeyStored marker for exactName as ONE
+// operation, so a rejected publication cannot leave the user worse off than
+// before the call.
+//
+// Hand-rolled Set-then-Mark sequences got this wrong in both directions: they
+// wrote the secret before any validation could reject the config, and their
+// rollback deleted the entry outright — destroying a working key that some
+// other row (the store folds "openrouter" and "OPENROUTER" onto one entry) was
+// still using. This validates first, snapshots whatever the store held, and on
+// a marker failure restores that snapshot rather than deleting.
+//
+// exactName must be a persisted row's own spelling; callers holding user or
+// session input resolve it with ResolvePersistedProviderName first.
+func PublishProviderCredential(path string, exactName string, key string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+	exactName = strings.TrimSpace(exactName)
+	if exactName == "" {
+		return fmt.Errorf("provider name is required")
+	}
+	if strings.TrimSpace(key) == "" {
+		return fmt.Errorf("api key is required")
+	}
+	if err := PreflightUserConfig(path); err != nil {
+		return err
+	}
+	store, err := ProviderKeyStoreAt(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	previous, hadPrevious, err := store.Get(exactName)
+	if err != nil {
+		return err
+	}
+	if err := store.Set(exactName, key); err != nil {
+		return err
+	}
+	if err := MarkProviderAPIKeyStored(path, exactName); err != nil {
+		// Put the store back exactly as it was: restore a prior key rather than
+		// deleting it, and only delete when this call created the entry.
+		if hadPrevious {
+			_ = store.Set(exactName, previous)
+		} else {
+			_, _ = store.Delete(exactName)
+		}
+		return err
+	}
+	return nil
+}
+
 // ForgetProviderKey removes a provider's stored API key from the credential store,
 // reporting whether one existed. Used by the lifecycle "remove key" / auth logout.
 func ForgetProviderKey(provider string) (bool, error) {

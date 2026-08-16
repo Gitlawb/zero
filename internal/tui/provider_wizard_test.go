@@ -1244,8 +1244,10 @@ func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
 		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "Stored key removal failed") {
 			t.Fatalf("wizard did not remain open with deletion error: %+v", next.providerWizard)
 		}
-		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
-			t.Fatal("deletion failure cleared the persisted marker")
+		// Marker first, secret second: a failed delete leaves an orphaned secret
+		// that nothing reads, never a marker claiming a key that is gone.
+		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); cfg.Providers[0].APIKeyStored {
+			t.Fatal("marker must be cleared before the secret delete is attempted")
 		}
 	})
 
@@ -1928,5 +1930,61 @@ func TestProviderWizardModelRowsStayDistinctWithProseDescriptions(t *testing.T) 
 	// the prose blurb must not be a row label
 	if strings.Contains(view, "❯ Open-weight GPT model") {
 		t.Errorf("prose blurb still used as a row label:\n%s", view)
+	}
+}
+
+// The disk write is only half the removal: the live session still holds
+// APIKeyStored:true until it is reconciled, so /providers and a re-entered
+// wizard would keep offering keep/replace for a key that is gone.
+func TestProviderWizardManageKeyRemoveSyncsSessionState(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-secret"); err != nil {
+		t.Fatal(err)
+	}
+	profile := config.ProviderProfile{Name: "work", APIKeyStored: true}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    "work",
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+	})
+	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "WORK", manageKeyCursor: 2}
+
+	next, _ := m.applyManageKeyChoice()
+
+	if next.providerProfile.APIKeyStored {
+		t.Fatal("live profile still claims a stored key after removal")
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].APIKeyStored {
+		t.Fatalf("saved providers not reconciled: %+v", next.savedProviders)
+	}
+	// The caller's copy must be untouched: savedProviders is mutated by copy.
+	if !m.savedProviders[0].APIKeyStored {
+		t.Fatal("session sync mutated the pre-removal model's slice in place")
+	}
+}
+
+// wizardProviderStoredKey answers a credential question, so it must use the
+// store's normalization: strings.EqualFold folds "s" and Unicode long-s into
+// one identity that the store keeps apart.
+func TestWizardProviderStoredKeyDistinguishesUnicodeIdentities(t *testing.T) {
+	m := model{savedProviders: []config.ProviderProfile{
+		{Name: "ſ", APIKeyStored: true},
+	}}
+	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "s", ID: "s"}); ok {
+		t.Fatalf("latin-s descriptor matched the long-s profile %q", name)
+	}
+	name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "ſ", ID: "ſ"})
+	if !ok || name != "ſ" {
+		t.Fatalf("long-s descriptor = %q, %v; want its own profile", name, ok)
 	}
 }

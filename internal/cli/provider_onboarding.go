@@ -414,15 +414,25 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 			return exit
 		}
 	}
+	// ProviderPersisted above answers a credential-identity question, but
+	// RemoveProvider targets a row by its exact spelling. Bridge the two, so
+	// `zero providers remove work` against a sole saved "WORK" row removes it
+	// instead of failing "not found" right after the persisted check passed.
+	name, err = config.ResolvePersistedProviderName(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	cfg, err := config.RemoveProvider(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	// Delete the key from the store BESIDE the config being edited — the same
 	// store setup/rename write to — not the default-path store, so a
-	// non-default config path cannot leave the encrypted key behind.
+	// non-default config path cannot leave the encrypted key behind. A surviving
+	// case variant that still claims the credential keeps it (see
+	// config.CredentialKeyRetained); a survivor that never claimed it does not.
 	keyRemoved, keyErr := false, error(nil)
-	if !providerIdentitySurvives(cfg.Providers, name) {
+	if !config.CredentialKeyRetained(cfg.Providers, name) {
 		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, name)
 	}
 	if options.json {
@@ -476,15 +486,6 @@ func removeStoredProviderKeyAt(configPath string, provider string) (bool, error)
 	return store.Delete(provider)
 }
 
-func providerIdentitySurvives(providers []config.ProviderProfile, removedName string) bool {
-	for _, provider := range providers {
-		if config.SameProviderIdentity(provider.Name, removedName) {
-			return true
-		}
-	}
-	return false
-}
-
 // runProvidersRename renames a saved provider profile, migrating its stored
 // API key and the activeProvider pointer along with it (config.RenameProvider).
 func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -512,13 +513,19 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 			return exit
 		}
 	}
-	cfg, err := config.RenameProvider(configPath, options.names[0], options.names[1])
+	// Same bridge as remove: the persisted check matches credential identity
+	// while RenameProvider matches the row's exact spelling.
+	oldName, err = config.ResolvePersistedProviderName(configPath, oldName)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	cfg, err := config.RenameProvider(configPath, oldName, options.names[1])
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{
-			"renamed":        map[string]string{"from": options.names[0], "to": options.names[1]},
+			"renamed":        map[string]string{"from": oldName, "to": options.names[1]},
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
 		}); err != nil {
@@ -526,7 +533,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintf(stdout, "Renamed provider %s to %s\n", options.names[0], options.names[1]); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Renamed provider %s to %s\n", oldName, options.names[1]); err != nil {
 		return exitCrash
 	}
 	return exitSuccess

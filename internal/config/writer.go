@@ -109,21 +109,97 @@ func PreflightProviderWrite(path, name string) error {
 	return nil
 }
 
-// PersistedProviderNames returns the exact name of every row in the persisted
-// user config, in file order. Callers that must reason about the SET of saved
-// rows — e.g. deciding whether removing one row leaves a case variant behind
-// that still reads the same credential-store entry — get the raw names here
-// rather than re-implementing FileConfig parsing.
-func PersistedProviderNames(path string) ([]string, error) {
+// ResolvePersistedProviderName maps a user- or session-supplied provider
+// spelling to the EXACT name of the persisted row it addresses, so a caller
+// that gated on credential identity (ProviderPersisted, a resolved provider
+// list, a live session's provider name) can hand a row-targeting mutator
+// (RemoveProvider, RenameProvider, EditProvider, SetProviderModel,
+// MarkProviderAPIKeyStored) a spelling those mutators can actually find.
+//
+// It is the one bridge between the two identity rules this package defines:
+// an exact spelling always wins, credential identity is a fallback, and an
+// identity that matches more than one row is an error rather than an
+// arbitrary pick — the same ambiguity ValidatePersistedProviderNames rejects
+// at write time, reported here for configs that predate that validation.
+func ResolvePersistedProviderName(path string, input string) (string, error) {
 	providers, err := persistedProviders(path)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	names := make([]string, 0, len(providers))
+	return resolvePersistedProviderName(providers, input)
+}
+
+func resolvePersistedProviderName(providers []ProviderProfile, input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", fmt.Errorf("provider name is required")
+	}
+	match := ""
+	matches := 0
 	for _, provider := range providers {
-		names = append(names, strings.TrimSpace(provider.Name))
+		name := strings.TrimSpace(provider.Name)
+		if name == input {
+			return name, nil
+		}
+		if sameProviderIdentity(name, input) {
+			match = name
+			matches++
+		}
 	}
-	return names, nil
+	switch {
+	case matches == 1:
+		return match, nil
+	case matches > 1:
+		return "", fmt.Errorf("ambiguous provider %q: %d rows in config.json differ only by case; rename or remove one row", input, matches)
+	default:
+		return "", fmt.Errorf("provider %q not found", input)
+	}
+}
+
+// CredentialKeyRetained reports whether, after removedName's row is gone, some
+// REMAINING row still owns the credential-store entry that row pointed at — so
+// deleting the shared secret would break a profile the user did not remove.
+//
+// Ownership is the marker, not the name: the store normalizes "work" and
+// "WORK" to one entry, but a surviving row with apiKeyStored:false never reads
+// it (ApplyStoredAPIKey gates on the marker), so keeping the secret for that
+// row would only orphan it. Retain the key when a survivor actually claims it;
+// otherwise the removal took the last owner with it and the key must go.
+func CredentialKeyRetained(providers []ProviderProfile, removedName string) bool {
+	removedName = strings.TrimSpace(removedName)
+	if removedName == "" {
+		return false
+	}
+	for _, provider := range providers {
+		if provider.APIKeyStored && sameProviderIdentity(strings.TrimSpace(provider.Name), removedName) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProviderKeyRetainedAfterRemoval answers CredentialKeyRetained's question
+// against the config on disk, simulating the removal of name's row. Callers
+// that must know the outcome BEFORE mutating anything use this — a delete
+// confirmation has to promise exactly what the delete will do, and computing
+// it from a different rule is how the prompt came to claim "this also removes
+// its stored API key" for a delete that keeps the key.
+func ProviderKeyRetainedAfterRemoval(path string, name string) (bool, error) {
+	providers, err := persistedProviders(path)
+	if err != nil {
+		return false, err
+	}
+	name = strings.TrimSpace(name)
+	remaining := make([]ProviderProfile, 0, len(providers))
+	removed := false
+	for _, provider := range providers {
+		if !removed && strings.TrimSpace(provider.Name) == name {
+			removed = true
+			continue
+		}
+		remaining = append(remaining, provider)
+	}
+	return CredentialKeyRetained(remaining, name), nil
 }
 
 // persistedProviders reads the provider rows out of the user config at path.
@@ -232,8 +308,10 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 		return EnsuredProvider{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(provider.CatalogID), descriptor.ID) ||
-			strings.EqualFold(strings.TrimSpace(provider.Name), descriptor.ID) {
+		// Which persisted row already serves this catalog entry is a provider
+		// identity question, so it uses the credential store's rule.
+		if sameProviderIdentity(strings.TrimSpace(provider.CatalogID), descriptor.ID) ||
+			sameProviderIdentity(strings.TrimSpace(provider.Name), descriptor.ID) {
 			return EnsuredProvider{Name: provider.Name, Active: cfg.ActiveProvider}, nil
 		}
 	}
@@ -308,17 +386,19 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 
-	for _, provider := range cfg.Providers {
-		if sameProviderIdentity(provider.Name, name) {
-			cfg.ActiveProvider = provider.Name
-			if err := writeConfigFile(path, cfg); err != nil {
-				return FileConfig{}, err
-			}
-			return cfg, nil
-		}
+	// Activation accepts any spelling that names this credential identity, then
+	// records the row's own spelling so every later row-targeting mutator can
+	// find it. ResolvePersistedProviderName is that bridge — see its doc for
+	// why an ambiguous identity is an error rather than an arbitrary pick.
+	resolved, err := resolvePersistedProviderName(cfg.Providers, name)
+	if err != nil {
+		return FileConfig{}, err
 	}
-
-	return FileConfig{}, fmt.Errorf("provider %q not found", name)
+	cfg.ActiveProvider = resolved
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
 }
 
 // ProviderPersisted reports whether a provider profile named name actually has
@@ -406,6 +486,16 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 		cfg.ActiveProvider = ""
 		if len(cfg.Providers) > 0 {
 			cfg.ActiveProvider = cfg.Providers[0].Name
+		}
+	} else if active := strings.TrimSpace(cfg.ActiveProvider); active != "" {
+		// Repairing a case-duplicate config can strand activeProvider on a third
+		// spelling ("WoRk" with rows "work"/"WORK"): the pointer survived the
+		// removal but now matches no remaining row exactly, so every exact
+		// mutator fails until the user hand-edits config.json. Re-point it at the
+		// survivor's own spelling when exactly one row still carries the
+		// identity; leave it alone when it is still ambiguous or already exact.
+		if resolved, resolveErr := resolvePersistedProviderName(cfg.Providers, active); resolveErr == nil {
+			cfg.ActiveProvider = resolved
 		}
 	}
 	if err := writeConfigFile(path, cfg); err != nil {

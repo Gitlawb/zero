@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,7 +38,9 @@ func ensureLoginProviderProfile(deps appDeps, provider string) string {
 	if err != nil {
 		return "warning: login saved, but no provider profile was written: " + err.Error()
 	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	// Both sides are persisted provider names, so this is a provider-identity
+	// question and uses the credential store's rule rather than EqualFold.
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name)
@@ -111,10 +112,13 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	key = strings.TrimSpace(key)
 	line, err := saveOpenRouterProviderKey(deps, key)
 	if err != nil {
+		// The key was minted, so still hand it over for manual use — but a login
+		// that could not be persisted is a failure, not a success: exiting 0 here
+		// told scripts (and users) the provider was configured when it was not.
 		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it: %s\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", err, key); writeErr != nil {
 			return exitCrash
 		}
-		return exitSuccess
+		return exitCrash
 	}
 	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key saved.\n%s\n", line); err != nil {
 		return exitCrash
@@ -131,24 +135,24 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Validate the persisted config BEFORE EnsureCatalogProvider's lookup, which
+	// matches case-insensitively and would happily return one of a pair of legacy
+	// duplicate rows — whose shared credential the capture below then overwrites
+	// for a config that can never be published.
+	if err := config.PreflightUserConfig(configPath); err != nil {
+		return "", err
+	}
 	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
 	if err != nil {
 		return "", err
 	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
+	// One operation owns validate → capture → publish, and restores the previous
+	// stored key if publication is rejected, so a failed login never costs the
+	// user the key they were already working with.
+	if err := config.PublishProviderCredential(configPath, ensured.Name, key); err != nil {
 		return "", err
 	}
-	if err := store.Set(ensured.Name, key); err != nil {
-		return "", err
-	}
-	if err := config.MarkProviderAPIKeyStored(configPath, ensured.Name); err != nil {
-		// Best-effort rollback: don't leave the key orphaned in the credential
-		// store while config.json still says it isn't there.
-		_, _ = store.Delete(ensured.Name)
-		return "", err
-	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name), nil
@@ -456,14 +460,24 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// Also drop any stored API key and its marker so `auth logout` clears the whole
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
 	// failures rather than reporting success while a credential remains.
-	keyRemoved, keyErr := config.ForgetProviderKey(provider)
-	if keyErr != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
-	}
+	// Marker first, then the secret: the reverse order leaves apiKeyStored:true
+	// with nothing behind it if the config write fails. Both halves address the
+	// store BESIDE the config being edited (where setup/rename captured the key),
+	// so a non-default config path cannot clear a marker here while the secret
+	// stays in the default-path store.
 	if configPath != "" {
 		if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, provider); clearErr != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 		}
+	}
+	keyRemoved, keyErr := false, error(nil)
+	if configPath != "" {
+		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, provider)
+	} else {
+		keyRemoved, keyErr = config.ForgetProviderKey(provider)
+	}
+	if keyErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
 	removed = removed || keyRemoved
 	if parsed.json {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -333,7 +334,10 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 		modelLine += "  (recorded: " + recorded + ")"
 	}
 	providerLine := "provider: " + displayValue(m.providerName, "none")
-	if recorded := strings.TrimSpace(session.Provider); recorded != "" && !strings.EqualFold(recorded, m.providerName) {
+	// Provider names are compared with the credential store's rule, so a
+	// recorded spelling that is a genuinely different provider (Unicode long-s)
+	// is reported as a difference rather than folded into a silent match.
+	if recorded := strings.TrimSpace(session.Provider); recorded != "" && !config.SameProviderIdentity(recorded, m.providerName) {
 		providerLine += "  (recorded: " + recorded + ")"
 	}
 	lines := []string{

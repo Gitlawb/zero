@@ -210,8 +210,10 @@ func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) 
 		return saved
 	}
 	for _, profile := range saved {
-		if strings.EqualFold(strings.TrimSpace(profile.CatalogID), descriptor.ID) ||
-			strings.EqualFold(strings.TrimSpace(profile.Name), descriptor.ID) {
+		// "Does this profile already serve the catalog entry?" is a provider
+		// identity question — same rule as everywhere else, not EqualFold.
+		if config.SameProviderIdentity(profile.CatalogID, descriptor.ID) ||
+			config.SameProviderIdentity(profile.Name, descriptor.ID) {
 			return saved
 		}
 	}
@@ -443,13 +445,17 @@ type providerWizardState struct {
 	// the wizard is on providerWizardStepAimlapi.
 	aimlapi *aimlapiOnboardState
 	// Manager state (provider_manager.go): the list-first /provider surface.
-	manage           bool
-	manageRows       []providerManagerRow
-	manageCursor     int
-	manageDeleting   bool
-	manageStatus     string
-	manageCredGen    int
-	manageActiveName string
+	manage         bool
+	manageRows     []providerManagerRow
+	manageCursor   int
+	manageDeleting bool
+	// manageDeleteKeepsKey is resolved when the delete confirmation opens, from
+	// config.ProviderKeyRetainedAfterRemoval, so the prompt and the delete agree
+	// about whether the stored key survives.
+	manageDeleteKeepsKey bool
+	manageStatus         string
+	manageCredGen        int
+	manageActiveName     string
 	// Edit state: field-level editor for one saved profile.
 	editOriginal config.ProviderProfile
 	editDraft    config.ProviderProfile
@@ -1302,18 +1308,44 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 // wizardProviderStoredKey reports the saved provider name that has a key in the
 // credential store matching the wizard-selected descriptor, so the wizard can offer
 // keep/replace/remove instead of forcing a new key entry.
+//
+// The name comparisons ask a credential question — "does this profile's store
+// entry serve the descriptor?" — so they use the store's own normalization
+// rather than strings.EqualFold, which folds "s" and Unicode long-s "ſ" into
+// one identity the store keeps apart.
 func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (string, bool) {
 	for _, profile := range m.savedProviders {
 		if !profile.APIKeyStored {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.Name)) ||
-			strings.EqualFold(strings.TrimSpace(profile.CatalogID), strings.TrimSpace(provider.ID)) ||
-			strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.ID)) {
+		if config.SameProviderIdentity(profile.Name, provider.Name) ||
+			config.SameProviderIdentity(profile.CatalogID, provider.ID) ||
+			config.SameProviderIdentity(profile.Name, provider.ID) {
 			return profile.Name, true
 		}
 	}
 	return "", false
+}
+
+// applyProviderKeyRemovalToSession mirrors a stored-key removal into the live
+// session: every in-memory profile that shares the removed credential identity
+// drops its APIKeyStored marker, matching what
+// ClearProviderKeyStoredCaseVariants just wrote to disk.
+func (m model) applyProviderKeyRemovalToSession(name string) model {
+	// Copy before mutating: model is passed by value, but the slice header is
+	// shared, so an in-place write would reach every other copy of the model.
+	updated := make([]config.ProviderProfile, len(m.savedProviders))
+	copy(updated, m.savedProviders)
+	for index := range updated {
+		if config.SameProviderIdentity(updated[index].Name, name) {
+			updated[index].APIKeyStored = false
+		}
+	}
+	m.savedProviders = updated
+	if config.SameProviderIdentity(m.providerProfile.Name, name) {
+		m.providerProfile.APIKeyStored = false
+	}
+	return m
 }
 
 // applyManageKeyChoice acts on the keep/replace/remove selection. Keep closes the
@@ -1338,16 +1370,26 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		if _, err := m.deleteProviderKey(m.userConfigPath, name); err != nil {
-			wizard.err = "Stored key removal failed: " + redaction.ErrorMessage(err, redaction.Options{})
-			return m, nil
-		}
+		// Marker first, secret second. The reverse order (which logout already
+		// fixed) leaves apiKeyStored:true with no secret behind it if the marker
+		// write fails — a profile that claims a credential every lookup misses.
+		// Clearing first can at worst orphan a secret no profile reads.
 		if strings.TrimSpace(m.userConfigPath) != "" {
 			if _, err := m.clearProviderKeyStored(m.userConfigPath, name); err != nil {
 				wizard.err = "Stored key marker cleanup failed: " + redaction.ErrorMessage(err, redaction.Options{})
 				return m, nil
 			}
 		}
+		if _, err := m.deleteProviderKey(m.userConfigPath, name); err != nil {
+			wizard.err = "Stored key removal failed: " + redaction.ErrorMessage(err, redaction.Options{}) +
+				" — the saved-key marker was already cleared, so no profile claims it, but the secret may still be in the credential store."
+			return m, nil
+		}
+		// Reconcile the live session with the disk write: savedProviders and
+		// providerProfile still carry APIKeyStored:true otherwise, so /providers
+		// and a re-entered wizard would offer keep/replace for a key that is gone
+		// until the next restart.
+		m = m.applyProviderKeyRemovalToSession(name)
 		m.providerWizard = nil
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + name + ". Re-add it any time with /provider."})
 		return m, nil
