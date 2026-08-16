@@ -166,6 +166,7 @@ func TestACPEndToEndPrompt(t *testing.T) {
 
 func TestACPListsOnlyResumableSessionMetadata(t *testing.T) {
 	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) { return filepath.Clean(cwd), nil }
 	workspaceA := t.TempDir()
 	workspaceB := t.TempDir()
 	for _, input := range []sessions.CreateInput{
@@ -208,6 +209,21 @@ func TestACPListsOnlyResumableSessionMetadata(t *testing.T) {
 	if len(filtered.Sessions) != 1 || filtered.Sessions[0].SessionID != "desktop-b" {
 		t.Fatalf("filtered sessions = %+v, want only desktop-b", filtered.Sessions)
 	}
+
+	var equivalent ListSessionsResult
+	equivalentPath := workspaceB + string(os.PathSeparator) + "."
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: equivalentPath}, &equivalent); err != nil {
+		t.Fatalf("equivalent-path session/list: %v", err)
+	}
+	if len(equivalent.Sessions) != 1 || equivalent.Sessions[0].SessionID != "desktop-b" {
+		t.Fatalf("equivalent-path sessions = %+v, want only desktop-b", equivalent.Sessions)
+	}
+
+	err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cursor: "not-issued"}, &ListSessionsResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+		t.Fatalf("invalid cursor error = %v, want invalid params", err)
+	}
 }
 
 func TestACPLoadReplaysHistoryAndResumeDoesNot(t *testing.T) {
@@ -235,6 +251,7 @@ func TestACPLoadReplaysHistoryAndResumeDoesNot(t *testing.T) {
 	wantKinds := []string{UpdateUserMessageChunk, UpdateAgentMessageChunk, UpdateUserMessageChunk}
 	wantText := []string{"first user", "first answer", "second user"}
 	seenIDs := map[string]bool{}
+	firstLoadIDs := make([]string, 0, len(wantKinds))
 	for i := range wantKinds {
 		select {
 		case update := <-loader.notifications:
@@ -245,11 +262,27 @@ func TestACPLoadReplaysHistoryAndResumeDoesNot(t *testing.T) {
 				t.Fatalf("history update %d has missing/duplicate message id %q", i, update.MessageID)
 			}
 			seenIDs[update.MessageID] = true
+			firstLoadIDs = append(firstLoadIDs, update.MessageID)
 		case <-ctx.Done():
 			t.Fatalf("history update %d was not replayed", i)
 		}
 	}
 	loader.stop()
+	secondLoader := newHarness(t, deps)
+	if err := secondLoader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("second session/load: %v", err)
+	}
+	for i, wantID := range firstLoadIDs {
+		select {
+		case update := <-secondLoader.notifications:
+			if update.MessageID != wantID {
+				t.Fatalf("second load message id %d = %q, want stable %q", i, update.MessageID, wantID)
+			}
+		case <-ctx.Done():
+			t.Fatalf("second load history update %d was not replayed", i)
+		}
+	}
+	secondLoader.stop()
 
 	resumer := newHarness(t, deps)
 	defer resumer.stop()
@@ -260,6 +293,38 @@ func TestACPLoadReplaysHistoryAndResumeDoesNot(t *testing.T) {
 	case update := <-resumer.notifications:
 		t.Fatalf("session/resume replayed history: %+v", update)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestACPLoadAndResumeStayBoundToThePersistedWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "workspace-bound", Cwd: workspaceA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		err := h.client.Call(ctx, method, LoadSessionParams{SessionID: created.SessionID, Cwd: workspaceB, McpServers: []McpServer{}}, &LoadSessionResult{})
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || !strings.Contains(rpcErr.Message, "persisted workspace") {
+			t.Fatalf("%s with mismatched cwd error = %v, want persisted-workspace invalid params", method, err)
+		}
+	}
+
+	missing, err := deps.Store.Create(sessions.CreateInput{SessionID: "workspace-missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: missing.SessionID, Cwd: workspaceA, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || !strings.Contains(rpcErr.Message, "no persisted workspace") {
+		t.Fatalf("resume with missing persisted cwd error = %v, want invalid params", err)
 	}
 }
 
