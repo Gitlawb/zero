@@ -206,9 +206,16 @@ func (tracker *FileTracker) RecordEdit(absPath string, before, after []byte, inf
 	if !tracked {
 		return
 	}
-	if observation.whole {
+	// The DERIVED answer, not the raw flag. Branching on observation.whole here
+	// sent a file read whole in two chunks — seenWhole true, flag false — into
+	// the split path below, where it stopped being seen whole after one edit.
+	if seenWhole(observation) {
 		// Still whole: every line was read, and an edit of ours does not make
-		// that untrue.
+		// that untrue. Re-baseline as a single covering observation so the
+		// answer survives regardless of how the ranges shifted.
+		observation.whole = true
+		observation.ranges = nil
+		observation.byteRanges = nil
 		observation.total = countLines(after)
 		observation.totalBytes = len(after)
 		tracker.seen[absPath] = observation
@@ -294,8 +301,25 @@ func splitLinesForTracking(text string) []string {
 	return strings.Split(text, "\n")
 }
 
+// countLines reports the line count a READER would give the content, which is
+// what observation.total is compared against.
+//
+// The trailing newline does not open a line. strings.Split leaves an empty final
+// element for "a\nb\nc\n" and so counted 4 where a read reports 3 — and because
+// SeenWhole asks whether the ranges cover 1..total, an inflated total made full
+// coverage unreachable for the very file that had just been read in full. Almost
+// every text file ends in a newline, so this was the common case rather than an
+// edge one.
+//
+// splitLinesForTracking keeps its own behaviour: changedLineSpan diffs the two
+// slices against each other, where the trailing element is harmless because both
+// sides carry it.
 func countLines(content []byte) int {
-	return len(splitLinesForTracking(string(content)))
+	lines := splitLinesForTracking(string(content))
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		return n - 1
+	}
+	return len(lines)
 }
 
 // coversFully reports whether ranges together cover every line in [start, end].
@@ -407,14 +431,27 @@ func (tracker *FileTracker) SeenWhole(absPath string) bool {
 	if !ok {
 		return false
 	}
+	return seenWhole(observation)
+}
+
+// seenWhole is the DERIVED answer to "has every line been seen", and the single
+// place that decides it. Callers must hold the lock.
+//
+// Derived from the ranges rather than read off the flag, because the flag is
+// only ever set by a SINGLE read covering the file: a file read in two halves
+// stayed "not seen whole" forever even though SeenRange agreed every line had
+// been seen, and write_file, which gates on this, refused the overwrite with
+// advice to read the file that could not change the answer.
+//
+// IT HAS TO BE ONE FUNCTION. RecordEdit branched on the raw flag while this
+// derived the answer, so the very case the derivation exists to rescue fell into
+// the wrong arm and lost: a file read whole in two chunks reported SeenWhole
+// true, then reported false after a single edit, putting the write_file refusal
+// back within one edit of where it was fixed.
+func seenWhole(observation fileObservation) bool {
 	if observation.whole {
 		return true
 	}
-	// Derived from the ranges rather than tracked as its own flag. The flag was
-	// only ever set by a SINGLE read covering the file, so a file read in two
-	// halves stayed "not seen whole" forever even though SeenRange agreed every
-	// line had been seen — and write_file, which gates on this, then refused the
-	// overwrite with advice to read the file that could not change the answer.
 	if observation.total > 0 && coversFully(observation.ranges, 1, observation.total) {
 		return true
 	}

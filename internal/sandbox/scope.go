@@ -164,7 +164,23 @@ func (s *Scope) AddTemporaryRead(path string) (string, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writeRootCoversLocked(root) {
-		// A write root already covers it, permanently. Nothing to release.
+		// Covered by a write root — which is NOT necessarily permanent.
+		// writeRootCoversLocked scans extraRoots, and AddTemporaryWrite appends
+		// TEMPORARY write roots there, so the covering grant may belong to
+		// another holder who is going to release it. Take a reference in that
+		// case, exactly as the read-covered-by-read path below does: without one
+		// the write holder's cleanup silently revokes this reader's access —
+		// the same defect this refcount exists to close, reached across the
+		// read/write boundary rather than within one side of it.
+		for existing := range s.tempWrites {
+			if pathWithinRoot(existing, root) {
+				s.tempWrites[existing]++
+				covering := existing
+				return root, func() { s.releaseTemporaryWrite(covering) }, nil
+			}
+		}
+		// Genuinely permanent — the workspace root, or a session-scoped grant.
+		// Nothing to release.
 		return root, func() {}, nil
 	}
 	for _, existing := range s.readRoots {

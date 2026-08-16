@@ -55,6 +55,9 @@ var (
 	goTestCaseLine = regexp.MustCompile(`(?m)^\s*--- (?:PASS|FAIL|SKIP):\s+(\S+)\s+\(([0-9]+(?:\.[0-9]+)?)s\)`)
 	// A duration as an answer would write it, in seconds or milliseconds.
 	claimedDuration = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(ms|s)\b`)
+	// The compound Go duration form, tried FIRST: "1m10s" must not be read as its
+	// seconds remainder. The seconds group is optional so a bare "2m" also parses.
+	claimedMinuteDuration = regexp.MustCompile(`([0-9]+)m(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
 )
 
 // ParseGoTest pulls every timing out of `go test` output.
@@ -184,24 +187,108 @@ func (l *Ledger) Conflicts(claim string) []Conflict {
 // disagreement rather than find one.
 func claimedSecondsFor(claim, name string) (float64, bool) {
 	for _, line := range strings.Split(claim, "\n") {
-		index := strings.Index(line, name)
-		if index < 0 {
-			continue
+		for start := 0; start < len(line); {
+			index := strings.Index(line[start:], name)
+			if index < 0 {
+				break
+			}
+			absolute := start + index
+			end := absolute + len(name)
+			start = absolute + 1
+			if !nameBoundary(line, absolute, end) {
+				continue
+			}
+			if value, ok := parseClaimedDuration(line[end:]); ok {
+				return value, true
+			}
 		}
-		match := claimedDuration.FindStringSubmatch(line[index+len(name):])
-		if match == nil {
-			continue
-		}
-		value, err := strconv.ParseFloat(match[1], 64)
-		if err != nil {
-			continue
-		}
-		if match[2] == "ms" {
-			value /= 1000
-		}
-		return value, true
 	}
 	return 0, false
+}
+
+// nameBoundary reports whether line[from:to] is a whole token rather than the
+// head of a longer one.
+//
+// A raw substring search made an HONEST report look like a fabrication whenever
+// one recorded name is a prefix of another, which `go test -v` guarantees: it
+// prints the parent above every subtest and the ledger records both, so a
+// truthful "TestParent/subcase took 0.02s" matched the ledger entry for
+// TestParent and was told it invented the number. Package names collide the same
+// way with no subtests at all — internal/agent is a prefix of internal/agentinit,
+// and this repo has several such pairs. A tripwire that accuses honest reports is
+// one that gets switched off, and then it catches nothing.
+//
+// "/" and "." continue a name rather than ending it, so TestParent does not match
+// inside TestParent/subcase and internal/agent does not match inside
+// internal/agentinit.
+func nameBoundary(line string, from, to int) bool {
+	continues := func(b byte) bool {
+		switch {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+			return true
+		case b == '_', b == '/', b == '.', b == '-':
+			return true
+		}
+		return false
+	}
+	if from > 0 && continues(line[from-1]) {
+		return false
+	}
+	if to < len(line) && continues(line[to]) {
+		return false
+	}
+	return true
+}
+
+// parseClaimedDuration reads the FIRST duration in tail, in seconds.
+//
+// MINUTES COUNT. The pattern was ms-or-s only, so "1m10s" failed on "1m", the
+// scan moved on, and "10s" won: a truthful restatement of a recorded 70 seconds
+// was reported as a conflict, and the nudge then quoted 10s back at the model — a
+// number its answer never contained. Anything over a minute is ordinary in this
+// repo's own suite.
+//
+// POSITION DECIDES, NOT PATTERN ORDER. Trying the minute form over the whole
+// tail first reached past a nearer seconds figure to claim a later one:
+//
+//	"took 0.86s (package total 1m20s)"  ->  80, not 0.86
+//
+// The claim being checked is the test's own 0.86s; 1m20s is the package total
+// that happens to trail it. Reading the far number as the claim invented a
+// conflict against a number the model got right, which is the one failure this
+// package must never produce. Both patterns are located, and the minute form
+// wins only when it starts no later than the seconds form.
+func parseClaimedDuration(tail string) (float64, bool) {
+	minute := claimedMinuteDuration.FindStringSubmatchIndex(tail)
+	plain := claimedDuration.FindStringSubmatchIndex(tail)
+	switch {
+	case minute == nil && plain == nil:
+		return 0, false
+	case minute != nil && (plain == nil || minute[0] <= plain[0]):
+		minutes, err := strconv.ParseFloat(tail[minute[2]:minute[3]], 64)
+		if err != nil {
+			return 0, false
+		}
+		seconds := 0.0
+		// Group 2 is optional: "1m" alone leaves it unset, which regexp reports
+		// as index -1 rather than an empty span.
+		if minute[4] >= 0 {
+			parsed, secErr := strconv.ParseFloat(tail[minute[4]:minute[5]], 64)
+			if secErr != nil {
+				return 0, false
+			}
+			seconds = parsed
+		}
+		return minutes*60 + seconds, true
+	}
+	value, err := strconv.ParseFloat(tail[plain[2]:plain[3]], 64)
+	if err != nil {
+		return 0, false
+	}
+	if tail[plain[4]:plain[5]] == "ms" {
+		value /= 1000
+	}
+	return value, true
 }
 
 // Nudge renders conflicts as the correction a model is asked to act on. Empty

@@ -56,6 +56,15 @@ const tempExt = ".tmp"
 // write cannot quietly fill a repo.
 const maxNoteBytes = 64 << 10
 
+// maxDescriptionBytes bounds the ONE-LINE summary, separately from the note.
+//
+// The listing prints every note's description, so the field is shared screen
+// space: the total-size check alone let a single note carry a 60 KiB single-line
+// description and consume the listing everyone else has to fit in. A description
+// is a sentence telling a reader whether to open the note — anything past this is
+// the note's own body in the wrong field, so it is truncated rather than refused.
+const maxDescriptionBytes = 200
+
 // namePattern is an ALLOW-LIST, the same rule plan names use
 // (specialist/manifest.go): enumerate what is permitted rather than forbidding
 // traversal, because every deny-list in this repo has leaked at least once.
@@ -492,7 +501,7 @@ func renderNote(name, description, body string) string {
 	b.WriteString(name)
 	if trimmed := strings.TrimSpace(description); trimmed != "" {
 		b.WriteString("\ndescription: ")
-		b.WriteString(singleLine(trimmed))
+		b.WriteString(boundedDescription(singleLine(trimmed)))
 	}
 	b.WriteString("\n---\n\n")
 	b.WriteString(strings.TrimRight(body, "\n"))
@@ -516,6 +525,35 @@ func renderNote(name, description, body string) string {
 // back as LF and one WITHOUT kept its CRLF — a difference no caller asked for and
 // nothing documented. The file on disk is untouched either way; this is only
 // what the reader is handed.
+// boundedDescription caps the summary so one note cannot crowd out the listing.
+// Truncated on a rune boundary with an ellipsis, so the result stays readable and
+// is visibly cut rather than looking like the whole of a short description.
+func boundedDescription(text string) string {
+	if len(text) <= maxDescriptionBytes {
+		return text
+	}
+	const ellipsis = "…"
+	// WALK FORWARD ONCE. The first version dropped a rune per iteration and
+	// re-encoded the whole slice each time to measure it, which is quadratic in
+	// the input — and maxNoteBytes lets a 64 KiB description through the write
+	// path, so the cap was at its slowest on exactly the input it exists for:
+	//
+	//	 1 KiB ->   1.6ms      16 KiB -> 381ms      64 KiB -> 13.3s
+	//
+	// Ranging over the string yields rune boundaries with their byte offsets
+	// directly, so the cut point is found in one pass and no intermediate string
+	// is built.
+	budget := maxDescriptionBytes - len(ellipsis)
+	cut := 0
+	for index := range text {
+		if index > budget {
+			break
+		}
+		cut = index
+	}
+	return text[:cut] + ellipsis
+}
+
 func splitFrontmatter(content string) (description string, body string) {
 	normalized := strings.ReplaceAll(content, "\r\n", "\n")
 	if !strings.HasPrefix(normalized, "---\n") {
@@ -528,7 +566,11 @@ func splitFrontmatter(content string) (description string, body string) {
 	}
 	for _, line := range strings.Split(rest[:end], "\n") {
 		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "description:"); ok {
-			description = strings.TrimSpace(value)
+			// Bounded HERE, not only where a note is written. A project-scope
+			// note arrives with a clone, so its description never passed through
+			// this process's write path — leaving the listing crowdable by a file
+			// nobody here created.
+			description = boundedDescription(strings.TrimSpace(value))
 		}
 	}
 	return description, strings.TrimLeft(rest[end+len("\n---\n"):], "\n")

@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -151,5 +153,55 @@ func TestMemoryForgetReportsAbsenceRatherThanClaimingSuccess(t *testing.T) {
 	// The real note is untouched.
 	if _, err := memory.Read(paths, memory.ScopeLocal, "real-note"); err != nil {
 		t.Errorf("the existing note was disturbed: %v", err)
+	}
+}
+
+// One unreadable note must not empty the listing. memory.List deliberately
+// returns what it could read alongside the failures; the tool returning an error
+// instead threw that away, turning partial success back into total failure one
+// bad directory entry away from an empty memory.
+func TestAnUnreadableNoteDoesNotEmptyTheListing(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeProject, "readable", "still here", "body"); err != nil {
+		t.Fatal(err)
+	}
+	// A note too large to read back: the ceiling holds on the way out.
+	oversized := strings.Repeat("x", 70<<10)
+	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "huge.md"), []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+	if !strings.Contains(result.Output, "readable") {
+		t.Errorf("the readable note was dropped because another failed: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "could not be read") {
+		t.Errorf("the failure was not reported alongside the notes: %q", result.Output)
+	}
+}
+
+// A failure in the project scope must not hide the user's own local note.
+// Project is searched first and arrives with a clone; local is the default write
+// scope, so the shared scope masking the private one is the wrong way round.
+func TestAProjectFailureDoesNotHideTheLocalNote(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeLocal, "findings", "mine", "the local body"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An unreadable project note of the SAME name, searched first.
+	oversized := strings.Repeat("x", 70<<10)
+	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "findings.md"), []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{"name": "findings"})
+	if result.Status == StatusError {
+		t.Fatalf("a project-scope failure hid the readable local note: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "the local body") {
+		t.Errorf("the local note was not returned: %q", result.Output)
 	}
 }

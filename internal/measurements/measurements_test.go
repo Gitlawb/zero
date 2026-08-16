@@ -13,8 +13,16 @@ ok  	github.com/Gitlawb/zero/internal/config	20.047s	coverage: 61.2% of statemen
 ok  	github.com/Gitlawb/zero/internal/minify	(cached)
 --- PASS: TestChattyChild (0.86s)
 --- FAIL: TestWallBackstop (1.00s)
+--- PASS: TestNested (0.03s)
     --- PASS: TestNested/subcase (0.02s)
 `
+
+// THE PARENT LINE ABOVE IS NOT OPTIONAL. go test -v always prints a parent
+// before its subtests, and the earlier fixture omitted it — a shape the tool
+// never emits. That single omission hid a whole class: with only the subtest
+// present, no ledger name was ever a strict prefix of another, so the raw
+// substring match in claimedSecondsFor looked correct. A fixture has to be the
+// output a real run produced, because the trimming is where the bug lives.
 
 func TestParseGoTestReadsBothLineShapes(t *testing.T) {
 	got := ParseGoTest(goTestOutput)
@@ -170,5 +178,90 @@ func TestTheLedgerIsSafeUnderConcurrentRecording(t *testing.T) {
 	wait.Wait()
 	if got := ledger.Conflicts("TestChattyChild took 4.20s."); len(got) != 1 {
 		t.Fatalf("got %d conflicts after concurrent recording, want 1", len(got))
+	}
+}
+
+// An HONEST report must not be called a fabrication because one recorded name is
+// a prefix of another. go test -v guarantees the collision: it prints the parent
+// above every subtest and the ledger records both, so a truthful subtest claim
+// matched the parent's entry and was told it invented the number. Package names
+// collide with no subtests at all — internal/agent is a prefix of
+// internal/agentinit, and this repo has several such pairs.
+func TestAPrefixNameDoesNotAccuseAnHonestClaim(t *testing.T) {
+	ledger := NewLedger()
+	// Exactly what go test -v emits: parent first, subtest indented under it.
+	ledger.Record("--- PASS: TestNested (0.03s)\n    --- PASS: TestNested/subcase (0.01s)\n")
+	if conflicts := ledger.Conflicts("TestNested/subcase took 0.01s"); len(conflicts) != 0 {
+		t.Errorf("an honest subtest claim was reported as a conflict: %+v", conflicts)
+	}
+
+	packages := NewLedger()
+	packages.Record("ok  \tgithub.com/Gitlawb/zero/internal/agent\t35.58s\nok  \tgithub.com/Gitlawb/zero/internal/agentinit\t1.66s\n")
+	if conflicts := packages.Conflicts("github.com/Gitlawb/zero/internal/agentinit took 1.66s"); len(conflicts) != 0 {
+		t.Errorf("an honest package claim was reported as a conflict: %+v", conflicts)
+	}
+
+	// And the check still bites: a genuinely wrong subtest number is caught, and
+	// attributed to the subtest rather than to its parent.
+	caught := NewLedger()
+	caught.Record("--- PASS: TestNested (0.03s)\n    --- PASS: TestNested/subcase (0.01s)\n")
+	conflicts := caught.Conflicts("TestNested/subcase took 4.20s")
+	if len(conflicts) != 1 || conflicts[0].Name != "TestNested/subcase" {
+		t.Errorf("a fabricated subtest number was not caught against its own name: %+v", conflicts)
+	}
+}
+
+// A duration carrying a minute component must be read whole. The pattern was
+// ms-or-s only, so "1m10s" failed on "1m" and "10s" won — a truthful restatement
+// of a recorded 70 seconds became a conflict, and the nudge quoted 10s back at
+// the model, a number its answer never contained.
+func TestAMinuteDurationIsReadWhole(t *testing.T) {
+	ledger := NewLedger()
+	ledger.Record("--- PASS: TestSlow (70.00s)\n")
+	if conflicts := ledger.Conflicts("TestSlow took 1m10s"); len(conflicts) != 0 {
+		t.Errorf("an honest 1m10s claim was reported as a conflict: %+v", conflicts)
+	}
+
+	bare := NewLedger()
+	bare.Record("--- PASS: TestTwoMinutes (120.00s)\n")
+	if conflicts := bare.Conflicts("TestTwoMinutes took 2m"); len(conflicts) != 0 {
+		t.Errorf("an honest bare-minute claim was reported as a conflict: %+v", conflicts)
+	}
+
+	// Still caught when the minutes really disagree.
+	wrong := NewLedger()
+	wrong.Record("--- PASS: TestSlow (70.00s)\n")
+	conflicts := wrong.Conflicts("TestSlow took 5m00s")
+	if len(conflicts) != 1 || conflicts[0].Claimed != 300 {
+		t.Errorf("a fabricated 5m00s was not caught as 300s: %+v", conflicts)
+	}
+}
+
+// The nearest duration is the claim, whichever form it is written in. Every case
+// above puts the minute figure FIRST, so trying that pattern over the whole tail
+// ahead of the seconds pattern passed them all while reaching past a nearer
+// seconds figure to claim a later one — inventing a conflict against a number the
+// model had right, the one failure this package must never produce.
+func TestTheNearestDurationIsTheClaim(t *testing.T) {
+	honest := NewLedger()
+	honest.Record("--- PASS: TestChattyChild (0.86s)\n")
+	// The package total trails the test's own timing, exactly as `go test` prints it.
+	if conflicts := honest.Conflicts("TestChattyChild took 0.86s (package total 1m20s)"); len(conflicts) != 0 {
+		t.Errorf("a correct 0.86s claim was reported as a conflict because a later 1m20s was read instead: %+v", conflicts)
+	}
+
+	ms := NewLedger()
+	ms.Record("--- PASS: TestQuick (0.45s)\n")
+	if conflicts := ms.Conflicts("TestQuick took 450ms, well under the 2m budget"); len(conflicts) != 0 {
+		t.Errorf("a correct 450ms claim was reported as a conflict: %+v", conflicts)
+	}
+
+	// And a seconds figure sitting nearby does not rescue a wrong minute claim
+	// when the minute figure is the one being stated.
+	wrong := NewLedger()
+	wrong.Record("--- PASS: TestSlow (70.00s)\n")
+	conflicts := wrong.Conflicts("TestSlow took 5m00s, not the 70s you might expect")
+	if len(conflicts) != 1 || conflicts[0].Claimed != 300 {
+		t.Errorf("a fabricated 5m00s was not caught as 300s: %+v", conflicts)
 	}
 }

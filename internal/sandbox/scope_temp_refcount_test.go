@@ -100,3 +100,55 @@ func TestTemporaryReadGrantsSurviveConcurrentReleases(t *testing.T) {
 		t.Fatalf("%d failures, first: %s", len(failures), failures[0])
 	}
 }
+
+// A read covered by a TEMPORARY WRITE root must take a reference too.
+//
+// writeRootCoversLocked scans extraRoots, and AddTemporaryWrite appends
+// temporary write roots there — so "covered by a write root" does not mean
+// "covered permanently". Without a reference the write holder's cleanup silently
+// revoked the reader's access: the same defect the refcount closes, reached
+// across the read/write boundary instead of within one side of it.
+func TestAReadCoveredByATemporaryWriteSurvivesItsRelease(t *testing.T) {
+	workspace := t.TempDir()
+	outer := filepath.Join(t.TempDir(), "outer")
+	inner := filepath.Join(outer, "inner")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Built directly for the same reason scopeOutsideDefaults is: NewScope's
+	// default temp write root would cover the fixture and short-circuit this.
+	scope := &Scope{workspaceRoot: workspace}
+
+	_, releaseWrite, err := scope.AddTemporaryWrite(outer)
+	if err != nil {
+		t.Fatalf("temporary write: %v", err)
+	}
+	readRoot, releaseRead, err := scope.AddTemporaryRead(inner)
+	if err != nil {
+		t.Fatalf("temporary read: %v", err)
+	}
+
+	covered := func() bool {
+		for _, root := range scope.ReadRoots() {
+			if pathWithinRoot(root, readRoot) {
+				return true
+			}
+		}
+		return false
+	}
+	if !covered() {
+		t.Fatal("the reader did not hold access before any release")
+	}
+
+	// The WRITE holder finishes first; the reader has not released.
+	releaseWrite()
+	if !covered() {
+		t.Errorf("the write holder's cleanup revoked a live read grant on %s", readRoot)
+	}
+
+	// And once the reader releases too, the root is genuinely gone.
+	releaseRead()
+	if covered() {
+		t.Errorf("the root outlived its last holder: %v", scope.ReadRoots())
+	}
+}

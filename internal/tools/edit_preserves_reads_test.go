@@ -239,3 +239,58 @@ func TestChangedSpanHelpers(t *testing.T) {
 		}
 	})
 }
+
+// A file read whole IN PIECES must stay seen-whole after an edit. SeenWhole
+// derives its answer from the ranges precisely because the raw flag is only set
+// by a single covering read; RecordEdit branching on the flag instead sent this
+// case down the split path, and the write_file refusal the derived answer exists
+// to prevent came back within one edit.
+func TestAFileReadWholeInPiecesStaysWholeAfterAnEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chunked.go")
+	content := "l1\nl2\nl3\nl4\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tracker := NewFileTracker()
+	info, _ := os.Stat(path)
+	tracker.Record(path, []byte(content), info)
+	// Two reads that together cover the file, neither covering it alone.
+	tracker.RecordSeenRange(path, 1, 2, 4)
+	tracker.RecordSeenRange(path, 3, 4, 4)
+	if !tracker.SeenWhole(path) {
+		t.Fatal("two chunked reads did not add up to seen-whole")
+	}
+
+	updated := "l1\nl2X\nl3\nl4\n"
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newInfo, _ := os.Stat(path)
+	tracker.RecordEdit(path, []byte(content), []byte(updated), newInfo)
+
+	if !tracker.SeenWhole(path) {
+		t.Error("a file read whole in two chunks stopped being seen whole after one edit")
+	}
+}
+
+// observation.total is compared against read ranges, so it has to be the line
+// count a READER would give. strings.Split leaves an empty final element for
+// content ending in a newline, which counted one line too many — and since
+// SeenWhole asks whether the ranges cover 1..total, that made full coverage
+// unreachable for a file that had just been read in full.
+func TestCountLinesMatchesWhatAReaderWouldSay(t *testing.T) {
+	for _, testCase := range []struct {
+		content string
+		want    int
+	}{
+		{"a\nb\nc\n", 3}, // the common case: trailing newline opens no line
+		{"a\nb\nc", 3},
+		{"\n", 1},
+		{"", 0},
+	} {
+		if got := countLines([]byte(testCase.content)); got != testCase.want {
+			t.Errorf("countLines(%q) = %d, want %d", testCase.content, got, testCase.want)
+		}
+	}
+}

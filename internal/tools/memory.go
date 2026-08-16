@@ -90,28 +90,40 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 
 	if strings.TrimSpace(name) == "" {
 		notes, listErr := memory.List(tool.paths, scopes...)
+		// BESIDE the notes, not instead of them. memory.List deliberately returns
+		// what it could read alongside the failures, and returning an error here
+		// threw that away — turning the library's careful partial success back
+		// into total failure, one unreadable directory entry away from an empty
+		// memory. A store that cannot be read still has to be reported, so it is
+		// appended rather than substituted.
+		rendered := renderMemoryList(notes)
 		if listErr != nil {
-			// A store that could not be read is reported rather than rendered as
-			// an empty memory: "you have no notes" and "your notes could not be
-			// read" are different answers, and only one of them should lead the
-			// model to write the note again.
-			return errorResult("Error: reading saved notes: " + listErr.Error())
+			rendered += "\n\nSome notes could not be read: " + listErr.Error()
 		}
-		return okResult(renderMemoryList(notes))
+		return okResult(rendered)
 	}
+	// A failure in one scope must not hide a readable note in the next. Project is
+	// searched first, is checked in, and arrives with a clone; local is the user's
+	// own default write scope. An unreadable project note called "findings" would
+	// otherwise make the user's own local "findings" unreachable — the shared,
+	// externally-supplied scope masking the private one. The failure is carried and
+	// reported only when nothing readable turns up.
+	var problems []error
 	for _, candidate := range scopes {
 		note, readErr := memory.Read(tool.paths, candidate, name)
 		if readErr != nil {
-			// Absence is the only reason to try the next scope. A refused link,
-			// an oversized note or a permission error is an operational failure,
-			// and reporting it as "no memory named" is how the model concludes
-			// the note is gone and writes over whatever is actually there.
-			if errors.Is(readErr, memory.ErrNotFound) {
-				continue
+			// Absence is silent; anything else is an operational failure worth
+			// telling the caller about, since reporting it as "no memory named" is
+			// how the model concludes the note is gone and writes over it.
+			if !errors.Is(readErr, memory.ErrNotFound) {
+				problems = append(problems, fmt.Errorf("%s: %w", candidate, readErr))
 			}
-			return errorResult(fmt.Sprintf("Error: reading memory %q (%s): %v", name, candidate, readErr))
+			continue
 		}
 		return okResult(fmt.Sprintf("memory %q (%s)\n\n%s", note.Name, note.Scope, note.Body))
+	}
+	if len(problems) > 0 {
+		return errorResult(fmt.Sprintf("Error: reading memory %q: %v", name, errors.Join(problems...)))
 	}
 	return errorResult(fmt.Sprintf("Error: no memory named %q. Call memory with no arguments to see what exists.", name))
 }
