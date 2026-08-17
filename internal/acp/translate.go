@@ -21,6 +21,10 @@ func agentThoughtChunk(delta string) ContentChunk {
 	return ContentChunk{SessionUpdate: UpdateAgentThoughtChunk, Content: TextBlock(delta)}
 }
 
+func userMessageChunk(delta string) ContentChunk {
+	return ContentChunk{SessionUpdate: UpdateUserMessageChunk, Content: TextBlock(delta)}
+}
+
 // toolKindFor maps a ZERO tool name to the closest ACP ToolKind so editors can
 // pick an icon/affordance. Unknown tools fall back to "other".
 func toolKindFor(name string) string {
@@ -198,6 +202,34 @@ func (n *notifier) text(delta string) {
 func (n *notifier) thought(delta string) {
 	if delta != "" {
 		n.send(agentThoughtChunk(delta))
+	}
+}
+
+// replayHistory re-sends a loaded conversation so the client can render it.
+//
+// WITHOUT THIS, session/load RESTORED NOTHING THE USER COULD SEE. The turns
+// were read from the store into the agent's own memory and used to build every
+// subsequent prompt, but not one notification was sent — so a client that
+// resumed a session got an empty transcript and a model that nevertheless
+// remembered everything. Ask a follow-up like "now do the other one" and ZERO
+// answers correctly, about a question no longer on screen.
+//
+// Sent as whole messages rather than per-token deltas: this is not streaming,
+// it is a transcript, and a client folds a chunk into a message the same way
+// either way.
+//
+// Each turn is user-then-assistant, and an empty assistant is skipped — a turn
+// can be persisted with the question but no answer if the previous run ended
+// mid-turn, and inventing an empty reply for it would put a blank agent bubble
+// on screen.
+func (n *notifier) replayHistory(turns []turnRecord) {
+	for _, turn := range turns {
+		if turn.user != "" {
+			n.send(userMessageChunk(turn.user))
+		}
+		if turn.assistant != "" {
+			n.send(agentMessageChunk(turn.assistant))
+		}
 	}
 }
 

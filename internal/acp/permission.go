@@ -15,14 +15,7 @@ import (
 // PermissionOptions. Only the actions ZERO actually presented (AvailableDecisions)
 // are surfaced; the optionId is the ZERO action string for a clean round-trip.
 func buildPermissionOptions(req agent.PermissionRequest) []PermissionOption {
-	actions := req.AvailableDecisions
-	if len(actions) == 0 {
-		// Sensible default if ZERO didn't enumerate: allow once / reject.
-		actions = []agent.PermissionDecisionAction{
-			agent.PermissionDecisionAllow,
-			agent.PermissionDecisionDeny,
-		}
-	}
+	actions := offeredDecisions(req)
 	options := make([]PermissionOption, 0, len(actions))
 	for _, action := range actions {
 		kind, name := optionKindFor(action, req.PrefixApprovalEscalates)
@@ -38,6 +31,32 @@ func buildPermissionOptions(req agent.PermissionRequest) []PermissionOption {
 	return options
 }
 
+// offeredDecisions resolves what this request actually offers the client.
+//
+// ONE RESOLVER, USED BY BOTH SIDES, and that is the entire point of it existing.
+// The fallback below used to live inside buildPermissionOptions while
+// requestPermission validated the client's answer against the raw
+// req.AvailableDecisions. When ZERO did not enumerate — which is every
+// permission event that is not a prompt, and includes a shell call whose sandbox
+// decision came back deny — the two disagreed completely: the client was sent
+// "Allow" and "Reject", and validation was performed against an EMPTY list, so
+// every option the client could possibly click failed closed to deny with
+// "permission option was not offered".
+//
+// The user clicked Allow and ZERO recorded a denial. Nothing surfaced it,
+// because a denial is a legitimate answer — the tool was simply refused and the
+// turn carried on as though the user had rejected it.
+func offeredDecisions(req agent.PermissionRequest) []agent.PermissionDecisionAction {
+	if len(req.AvailableDecisions) > 0 {
+		return req.AvailableDecisions
+	}
+	// Sensible default if ZERO didn't enumerate: allow once / reject.
+	return []agent.PermissionDecisionAction{
+		agent.PermissionDecisionAllow,
+		agent.PermissionDecisionDeny,
+	}
+}
+
 // optionKindFor maps a ZERO decision action to an ACP PermissionOptionKind and a
 // human label. Returns an empty kind for actions that ACP expresses through the
 // outcome rather than an option (cancel).
@@ -49,8 +68,16 @@ func buildPermissionOptions(req agent.PermissionRequest) []PermissionOption {
 // disclosure cannot be TUI-only.
 func optionKindFor(action agent.PermissionDecisionAction, escalates bool) (kind, name string) {
 	switch action {
-	case agent.PermissionDecisionAllow, agent.PermissionDecisionAllowStrict:
+	case agent.PermissionDecisionAllow:
 		return PermAllowOnce, "Allow"
+	case agent.PermissionDecisionAllowStrict:
+		// SPLIT FROM PLAIN ALLOW because the label is the only thing an ACP
+		// client shows. Both were labelled "Allow", and request_permissions
+		// offers them together — so the panel presented two identical buttons,
+		// and whichever the user picked looked the same while one of them
+		// silently turned on strict auto-review of what was granted. The option
+		// id carries no room for the distinction, so it has to be in the name.
+		return PermAllowOnce, "Allow with strict review"
 	case agent.PermissionDecisionAllowForSession:
 		return PermAllowAlways, "Allow for this session"
 	case agent.PermissionDecisionAllowPrefix:

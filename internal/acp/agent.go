@@ -181,12 +181,17 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 		}
 	}
 	sess := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
+	note := &notifier{conn: a.conn, sessionID: sess.id}
 	a.warnPersistence(
-		&notifier{conn: a.conn, sessionID: sess.id},
+		note,
 		"load session history",
 		"Could not load session history. The session is open, but earlier turns may be missing until storage recovers.",
 		historyErr,
 	)
+	// BEFORE RETURNING, so a client that renders on the reply already has the
+	// transcript. Loading history that only the model can see is what made a
+	// resumed session open blank; see notifier.replayHistory.
+	note.replayHistory(sess.snapshotHistory())
 	return LoadSessionResult{
 		ConfigOptions: a.configOptions(sess),
 		Modes:         a.modeState(sess),
@@ -296,6 +301,16 @@ func stopReasonFor(result agent.Result, err error) (string, error) {
 		if errors.Is(err, context.Canceled) {
 			return StopCancelled, nil
 		}
+		// A CLIENT THAT CANCELLED A PERMISSION PROMPT DID NOT FAIL. Only
+		// context.Canceled was matched here, so dismissing a permission dialog —
+		// a deliberate action, and for apply_patch the only refusal a client is
+		// offered — came back as JSON-RPC -32603 carrying the internal sentinel
+		// text. Editors and the desktop app both render that as a crashed turn,
+		// so declining a tool looked like ZERO falling over. It is a
+		// cancellation, and StopCancelled is what ACP has for saying so.
+		if errors.Is(err, agent.ErrPermissionApprovalCanceled) {
+			return StopCancelled, nil
+		}
 		return "", err
 	}
 	if result.FinishReason == "length" {
@@ -323,7 +338,10 @@ func (a *Agent) requestPermission(ctx context.Context, sessionID string, req age
 		}
 		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission request failed: " + err.Error()}, nil
 	}
-	return decisionFromOutcome(result.Outcome, req.AvailableDecisions), nil
+	// Validated against what was actually SENT, not against the raw field. See
+	// offeredDecisions: those two differ whenever ZERO did not enumerate, and
+	// validating against the field turned every offered option into a denial.
+	return decisionFromOutcome(result.Outcome, offeredDecisions(req)), nil
 }
 
 func (a *Agent) emitPlan(registry *tools.Registry, note *notifier) {

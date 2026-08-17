@@ -1853,7 +1853,7 @@ func TestRunAbortsWhenPermissionRequestCanceled(t *testing.T) {
 		},
 	})
 
-	if !errors.Is(err, errPermissionApprovalCanceled) {
+	if !errors.Is(err, ErrPermissionApprovalCanceled) {
 		t.Fatalf("expected permission approval cancel error, got %v", err)
 	}
 	if result.FinalAnswer != "" {

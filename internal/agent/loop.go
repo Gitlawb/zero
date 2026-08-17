@@ -40,7 +40,15 @@ const (
 	toolResultControlSpecReview = "spec_review_required"
 )
 
-var errPermissionApprovalCanceled = errors.New("permission approval cancelled")
+// ErrPermissionApprovalCanceled ends a run because the caller cancelled a
+// permission prompt, rather than because anything failed.
+//
+// EXPORTED FOR THE SURFACES. A cancel is a normal ending and each surface says
+// so its own way — the TUI unwinds, and ACP has a "cancelled" stop reason for
+// exactly this. While it was unexported ACP could not distinguish it from a
+// fault and reported it as an internal error, so declining a tool looked like
+// the agent crashing.
+var ErrPermissionApprovalCanceled = errors.New("permission approval cancelled")
 
 // isImageRejectionError reports whether err is a provider 400 that rejects
 // image/multimodal content. This is checked BEFORE the compaction-retry path
@@ -1364,7 +1372,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			}
 		case PermissionDecisionCancel:
 			emitCanceledPermission(options, call, requestEvent, decisionReason)
-			return canceledPermissionResult(call, decisionReason, requestEvent), fmt.Errorf("%w for %s", errPermissionApprovalCanceled, call.Name)
+			return canceledPermissionResult(call, decisionReason, requestEvent), fmt.Errorf("%w for %s", ErrPermissionApprovalCanceled, call.Name)
 		default:
 			emitDeniedPermission(options, call, requestEvent, decisionReason)
 			return deniedPermissionResult(call, decisionReason, requestEvent), nil
@@ -1548,7 +1556,7 @@ func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry 
 	case PermissionDecisionCancel:
 		emitCanceledPermission(options, call, requestEvent, reason)
 		canceled := canceledPermissionResult(call, reason, requestEvent)
-		return result, &canceled, true, decision.Action, reason, nil, fmt.Errorf("%w for %s", errPermissionApprovalCanceled, call.Name)
+		return result, &canceled, true, decision.Action, reason, nil, fmt.Errorf("%w for %s", ErrPermissionApprovalCanceled, call.Name)
 	default:
 		emitDeniedPermission(options, call, requestEvent, reason)
 		denied := deniedPermissionResult(call, reason, requestEvent)
@@ -1596,7 +1604,7 @@ func maybeRetryWithNetworkAfterSandboxDenial(ctx context.Context, registry *tool
 	case PermissionDecisionCancel:
 		emitCanceledPermission(options, call, requestEvent, reason)
 		canceled := canceledPermissionResult(call, reason, requestEvent)
-		return result, &canceled, true, decision.Action, reason, fmt.Errorf("%w for %s", errPermissionApprovalCanceled, call.Name)
+		return result, &canceled, true, decision.Action, reason, fmt.Errorf("%w for %s", ErrPermissionApprovalCanceled, call.Name)
 	default:
 		emitDeniedPermission(options, call, requestEvent, reason)
 		denied := deniedPermissionResult(call, reason, requestEvent)
