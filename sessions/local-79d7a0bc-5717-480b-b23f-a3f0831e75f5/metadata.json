@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "sessionId": "local-79d7a0bc-5717-480b-b23f-a3f0831e75f5",
+  "model": "claude-opus-5",
+  "startedAt": "2026-08-17T18:14:28.203Z",
+  "endedAt": "2026-08-17T18:52:28.580Z",
+  "durationMs": 2280364,
+  "status": "running",
+  "tokens": {
+    "total": 58044,
+    "input": 132,
+    "output": 57912
+  },
+  "cost": {
+    "usd": 25.2515
+  },
+  "toolCalls": 62,
+  "lines": {
+    "added": 120,
+    "removed": 25
+  },
+  "filesChanged": [
+    "/Users/kratos/.claude/projects/-Users-kratos-dev-zero/memory/pr-review-loop.md",
+    "internal/measurements/measurements.go",
+    "internal/measurements/measurements_test.go"
+  ],
+  "git": {
+    "branch": "HEAD",
+    "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
+    "headAfter": "db58dbf63a6e0a57b391198b4d485f0295ac2920",
+    "commitShas": [
+      "db58dbf63a6e0a57b391198b4d485f0295ac2920"
+    ]
+  },
+  "summary": "Confirmed — the mutation fails with exactly the pre-fix values (600 instead of 4200). The panic in the mutated state also exposed something worth hardening: the fall-through dereferences `plain` and only an implicit chain of conditions guarantees it's non-nil:",
+  "originUrl": "https://getorigin.io/sessions/local-79d7a0bc-5717-480b-b23f-a3f0831e75f5"
+}
