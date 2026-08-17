@@ -105,6 +105,12 @@ func TestStreamCompletionPostsChatCompletionRequest(t *testing.T) {
 	if tool["type"] != "function" {
 		t.Fatalf("unexpected tool wrapper: %#v", tool)
 	}
+	functionDefinition := tool["function"].(map[string]any)
+	parameters := functionDefinition["parameters"].(map[string]any)
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok || len(properties) != 0 {
+		t.Fatalf("parameters.properties = %#v, want empty object", parameters["properties"])
+	}
 }
 
 func TestNewRequiresModelButNotAPIKey(t *testing.T) {
