@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -762,4 +763,166 @@ func drainTextUntil(t *testing.T, ch <-chan string, done func(string) bool) stri
 			return b.String()
 		}
 	}
+}
+
+// normalisingResolver reproduces what ResolveWorkspaceRoot actually does — abs,
+// Clean, and a stat that the path exists — WITHOUT resolving symlinks or folding
+// case, which is the behaviour that makes two spellings of one directory produce
+// two different roots.
+//
+// The package's own testDeps resolver is the identity function. Under it the
+// workspace guard degenerates to "are these two strings different", fed two
+// unrelated temp directories, so it can only ever answer yes: the rejection
+// direction is pinned and the acceptance direction is asserted nowhere.
+func normalisingResolver(t *testing.T) func(string) (string, error) {
+	t.Helper()
+	return func(cwd string) (string, error) {
+		absolute, err := filepath.Abs(cwd)
+		if err != nil {
+			return "", err
+		}
+		absolute = filepath.Clean(absolute)
+		info, err := os.Stat(absolute)
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", errors.New("workspace is not a directory")
+		}
+		return absolute, nil
+	}
+}
+
+// ONE DIRECTORY UNDER TWO SPELLINGS IS ONE WORKSPACE.
+//
+// A session persisted from the TUI has to stay resumable from an editor holding
+// a different spelling of the same project folder — the two processes most
+// likely to disagree about spelling, and the case this feature exists for. It
+// failed closed, so it blocked legitimate resumes rather than admitting foreign
+// ones, but session/list filtered by the other spelling returned nothing, which
+// makes it an invisible failure rather than a reported one.
+func TestACPResumesAcrossTwoSpellingsOfOneWorkspace(t *testing.T) {
+	real := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("cannot create a directory alias here: %v", err)
+	}
+	// The premise: the resolver really does produce two different strings.
+	resolve := normalisingResolver(t)
+	realRoot, err := resolve(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot, err := resolve(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realRoot == aliasRoot {
+		t.Skipf("this filesystem folds the alias away (%q == %q); the guard cannot be exercised", realRoot, aliasRoot)
+	}
+
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = resolve
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "aliased-workspace", Cwd: real})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// ACCEPTANCE: resume and load under the OTHER spelling must both work.
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		var result LoadSessionResult
+		if err := h.client.Call(ctx, method, LoadSessionParams{SessionID: created.SessionID, Cwd: alias, McpServers: []McpServer{}}, &result); err != nil {
+			t.Errorf("%s under an alias of the persisted workspace failed: %v", method, err)
+		}
+	}
+
+	// And session/list filtered by the alias must still find it.
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: alias}, &listed); err != nil {
+		t.Fatalf("session/list: %v", err)
+	}
+	found := false
+	for _, item := range listed.Sessions {
+		if item.SessionID == created.SessionID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("session/list filtered by an alias of its own workspace returned %d sessions without it", len(listed.Sessions))
+	}
+
+	// REJECTION still holds: a genuinely different directory is refused.
+	other := t.TempDir()
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: other, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+		t.Errorf("resume from an unrelated workspace = %v, want invalid params", err)
+	}
+}
+
+// THE WIRE KEYS ARE AN EXTERNAL CONTRACT, not internal names.
+//
+// Nothing pinned them, so renaming a Go field — or dropping an omitempty —
+// would break every client and leave the suite green. These are the keys this
+// feature adds to the protocol; a change here is a change to what editors
+// consume.
+func TestSessionWireKeysAreStable(t *testing.T) {
+	marshalled := func(v any) map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	has := func(where string, got map[string]any, want ...string) {
+		t.Helper()
+		for _, key := range want {
+			if _, ok := got[key]; !ok {
+				t.Errorf("%s is missing the wire key %q; got %v", where, key, keysOf(got))
+			}
+		}
+	}
+
+	has("SessionInfo", marshalled(SessionInfo{
+		SessionID: "s1", Cwd: "/w", Title: "t", UpdatedAt: "now",
+		Meta: &SessionInfoMeta{ModelID: "m", CreatedAt: "then"},
+	}), "sessionId", "cwd", "title", "updatedAt", "_meta")
+
+	has("SessionInfoMeta", marshalled(SessionInfoMeta{ModelID: "m", CreatedAt: "then"}),
+		"modelId", "createdAt")
+
+	has("ListSessionsResult", marshalled(ListSessionsResult{
+		Sessions: []SessionInfo{}, NextCursor: "c",
+	}), "sessions", "nextCursor")
+
+	has("ListSessionsParams", marshalled(ListSessionsParams{Cwd: "/w", Cursor: "c"}),
+		"cwd", "cursor")
+
+	// sessionCapabilities is omitempty, so it must appear when SET — a client
+	// discovers list/resume support through it.
+	has("AgentCapabilities", marshalled(AgentCapabilities{
+		LoadSession:         true,
+		SessionCapabilities: &SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}},
+	}), "loadSession", "promptCapabilities", "sessionCapabilities")
+
+	capabilities := marshalled(SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}})
+	has("SessionCapabilities", capabilities, "list", "resume")
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
