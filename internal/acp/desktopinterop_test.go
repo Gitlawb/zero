@@ -38,7 +38,7 @@ func TestAnOfferedOptionIsAccepted(t *testing.T) {
 	for _, option := range options {
 		decision := decisionFromOutcome(
 			RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: option.OptionID},
-			offeredDecisions(req),
+			buildPermissionOptions(req),
 		)
 		if string(decision.Action) != option.OptionID {
 			t.Fatalf("option %q was answered with %q (%s) — an offered option must be accepted",
@@ -54,7 +54,7 @@ func TestAnOptionThatWasNotOfferedIsStillRefused(t *testing.T) {
 
 	decision := decisionFromOutcome(
 		RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: string(agent.PermissionDecisionAlwaysAllow)},
-		offeredDecisions(req),
+		buildPermissionOptions(req),
 	)
 	if decision.Action != agent.PermissionDecisionDeny {
 		t.Fatalf("an unoffered broader grant was accepted as %q", decision.Action)
@@ -72,9 +72,9 @@ func TestOfferedDecisionsMatchWhatWasSent(t *testing.T) {
 			agent.PermissionDecisionDeny,
 		}},
 	} {
-		offered := offeredDecisions(req)
+		offered := buildPermissionOptions(req)
 		for _, option := range buildPermissionOptions(req) {
-			if !actionOffered(agent.PermissionDecisionAction(option.OptionID), offered) {
+			if !actionOffered(option.OptionID, offered) {
 				t.Fatalf("option %q was sent but is not in the offered set %v", option.OptionID, offered)
 			}
 		}
@@ -119,7 +119,7 @@ func TestStrictAllowStillRoundTrips(t *testing.T) {
 	}
 	decision := decisionFromOutcome(
 		RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: string(agent.PermissionDecisionAllowStrict)},
-		offeredDecisions(req),
+		buildPermissionOptions(req),
 	)
 	if decision.Action != agent.PermissionDecisionAllowStrict {
 		t.Fatalf("strict allow round-tripped as %q", decision.Action)
@@ -162,5 +162,56 @@ func TestPermissionCancellationSurvivesWrapping(t *testing.T) {
 	}
 	if errors.Is(errors.New("something else"), agent.ErrPermissionApprovalCanceled) {
 		t.Fatal("an unrelated error was reported as a permission cancellation")
+	}
+}
+
+// A decision that never became an option cannot be selected.
+//
+// PermissionDecisionCancel is the case that exists today: optionKindFor drops
+// it because ACP expresses cancellation through the outcome, yet ZERO
+// enumerates it in AvailableDecisions for shell commands and apply_patch. While
+// the reply was validated against the DECISIONS rather than the sent options, a
+// client could return {"outcome":"selected","optionId":"cancel"} — an id it was
+// never shown — and abort the whole turn.
+//
+// Written over every option-less decision rather than over "cancel", so a
+// future action that optionKindFor declines to render is covered the day it is
+// added rather than the day someone remembers this test.
+func TestADecisionThatIsNotAnOptionCannotBeSelected(t *testing.T) {
+	for _, toolName := range []string{"bash", "apply_patch"} {
+		req := agent.PermissionRequest{
+			ToolName: toolName,
+			AvailableDecisions: []agent.PermissionDecisionAction{
+				agent.PermissionDecisionAllow,
+				agent.PermissionDecisionDeny,
+				agent.PermissionDecisionCancel,
+			},
+		}
+		options := buildPermissionOptions(req)
+
+		for _, action := range req.AvailableDecisions {
+			if actionOffered(string(action), options) {
+				continue // it was sent; selecting it is legitimate
+			}
+			decision := decisionFromOutcome(
+				RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: string(action)},
+				options,
+			)
+			if decision.Action != agent.PermissionDecisionDeny {
+				t.Fatalf("%s: %q was never sent as an option but was accepted as %q",
+					toolName, action, decision.Action)
+			}
+		}
+	}
+}
+
+// Cancelling is still reachable — through the outcome, which is where ACP puts
+// it. Closing the selected-id route must not close the real one.
+func TestCancellingThroughTheOutcomeStillWorks(t *testing.T) {
+	options := buildPermissionOptions(agent.PermissionRequest{ToolName: "apply_patch"})
+
+	decision := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeCancelled}, options)
+	if decision.Action != agent.PermissionDecisionCancel {
+		t.Fatalf("outcome=cancelled gave %q, want cancel", decision.Action)
 	}
 }

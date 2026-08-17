@@ -321,10 +321,14 @@ func stopReasonFor(result agent.Result, err error) (string, error) {
 // session/request_permission request and maps the outcome back. Failure to reach
 // the client fails closed to deny.
 func (a *Agent) requestPermission(ctx context.Context, sessionID string, req agent.PermissionRequest) (agent.PermissionDecision, error) {
+	// Built ONCE and used for both halves. Sending one list and validating the
+	// reply against another is the defect this whole path had; see
+	// decisionFromOutcome.
+	options := buildPermissionOptions(req)
 	params := RequestPermissionParams{
 		SessionID: sessionID,
 		ToolCall:  permissionToolCall(req),
-		Options:   buildPermissionOptions(req),
+		Options:   options,
 	}
 	var result RequestPermissionResult
 	if err := a.conn.Call(ctx, MethodSessionRequestPerm, params, &result); err != nil {
@@ -333,10 +337,7 @@ func (a *Agent) requestPermission(ctx context.Context, sessionID string, req age
 		}
 		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission request failed: " + err.Error()}, nil
 	}
-	// Validated against what was actually SENT, not against the raw field. See
-	// offeredDecisions: those two differ whenever ZERO did not enumerate, and
-	// validating against the field turned every offered option into a denial.
-	return decisionFromOutcome(result.Outcome, offeredDecisions(req)), nil
+	return decisionFromOutcome(result.Outcome, options), nil
 }
 
 func (a *Agent) emitPlan(registry *tools.Registry, note *notifier) {

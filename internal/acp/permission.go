@@ -97,19 +97,31 @@ func optionKindFor(action agent.PermissionDecisionAction, escalates bool) (kind,
 
 // decisionFromOutcome maps the client's permission outcome back to a ZERO
 // decision. A cancelled outcome cancels the run; a selected option id is the ZERO
-// action verbatim (validated against what was offered); anything unrecognized
-// fails closed to deny.
-func decisionFromOutcome(outcome RequestPermissionOutcome, offered []agent.PermissionDecisionAction) agent.PermissionDecision {
+// action verbatim (validated against what was actually sent); anything
+// unrecognized fails closed to deny.
+//
+// IT TAKES THE OPTIONS THAT WERE SENT, not the decisions the request offered,
+// and the two are not the same list. Some actions never become options —
+// PermissionDecisionCancel is dropped by optionKindFor because ACP expresses
+// cancellation through the outcome instead — yet it IS enumerated in
+// AvailableDecisions for shell commands and apply_patch, the two commonest
+// prompts. Validating against the decisions therefore accepted
+// {"outcome":"selected","optionId":"cancel"}: an identifier no client was ever
+// shown, aborting the whole turn.
+//
+// Passing the sent options makes "what we offered" and "what we accept" the
+// same slice rather than two things kept in step, so anything optionKindFor
+// declines to render is excluded structurally instead of by name.
+func decisionFromOutcome(outcome RequestPermissionOutcome, offered []PermissionOption) agent.PermissionDecision {
 	switch outcome.Outcome {
 	case OutcomeCancelled:
 		return agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "client cancelled"}
 	case OutcomeSelected:
-		action := agent.PermissionDecisionAction(outcome.OptionID)
 		// Bind to what was actually offered for THIS call: a client must not be able
 		// to return a broader grant (always_allow / allow_for_session) that wasn't
 		// presented. Anything not offered fails closed to deny.
-		if actionOffered(action, offered) {
-			return agent.PermissionDecision{Action: action}
+		if actionOffered(outcome.OptionID, offered) {
+			return agent.PermissionDecision{Action: agent.PermissionDecisionAction(outcome.OptionID)}
 		}
 		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission option was not offered"}
 	default:
@@ -117,9 +129,9 @@ func decisionFromOutcome(outcome RequestPermissionOutcome, offered []agent.Permi
 	}
 }
 
-func actionOffered(action agent.PermissionDecisionAction, offered []agent.PermissionDecisionAction) bool {
-	for _, a := range offered {
-		if a == action {
+func actionOffered(optionID string, offered []PermissionOption) bool {
+	for _, option := range offered {
+		if option.OptionID == optionID {
 			return true
 		}
 	}
