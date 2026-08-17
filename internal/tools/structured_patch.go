@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -498,7 +499,7 @@ func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, conte
 	if err := root.MkdirAll(filepath.Dir(target.relative), 0o755); err != nil {
 		return fmt.Errorf("creating parent directory for %s: %w", target.relative, err)
 	}
-	tempName := ".zero-patch-tmp"
+	tempName := fmt.Sprintf(".zero-patch-%d", time.Now().UnixNano())
 	temp, err := root.OpenFile(tempName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode.Perm())
 	if err != nil {
 		return fmt.Errorf("writing %s: %w", target.relative, err)
