@@ -119,17 +119,23 @@ func buildRowContext(rows []transcriptRow) rowContext {
 	return rc
 }
 
-// isHiddenPlumbingTool reports whether a tool is internal mechanism the user
-// never needs to see in the transcript: update_plan (the plan is surfaced live
-// in the context sidebar and the clickable step detail) and tool_search (the
-// on-demand loading of tool schemas — the "select:…" noise). Their cards are
-// suppressed so the chat reads as a clean narrative of real work.
+// isHiddenPlumbingTool reports whether a tool is an internal mechanism whose
+// human-facing result is rendered elsewhere. Task/TaskOutput are represented by
+// specialist cards, and tool_search only loads schemas. Their successful cards
+// are suppressed so the transcript remains a narrative of the actual work.
 func isHiddenPlumbingTool(name string) bool {
 	switch name {
-	case "update_plan", "tool_search":
+	case "Task", "TaskOutput", "tool_search":
 		return true
 	}
 	return false
+}
+
+// toolCallCardSuppressedInTranscript also hides an in-flight update_plan call.
+// Its completed result is deliberately kept: renderPlanUpdateCard turns it into
+// the durable, readable checklist in the transcript.
+func toolCallCardSuppressedInTranscript(name string) bool {
+	return isHiddenPlumbingTool(name) || name == "update_plan"
 }
 
 // skip reports whether a row renders nothing itself: a tool call whose result
@@ -139,16 +145,16 @@ func isHiddenPlumbingTool(name string) bool {
 func (rc rowContext) skip(row transcriptRow) bool {
 	switch row.kind {
 	case rowToolCall:
-		// Pure-plumbing tools (the plan lives in the sidebar; tool_search just
-		// loads tool schemas) are mechanism the user never needs — drop their
-		// call and result cards so the chat stays a readable narrative of work.
-		if isHiddenPlumbingTool(row.tool) {
+		// Pure-plumbing calls do not have useful standalone content. A successful
+		// update_plan is the exception at result time, where it becomes a plan
+		// checklist rather than a generic tool card.
+		if toolCallCardSuppressedInTranscript(row.tool) {
 			return true
 		}
 		return row.id != "" && rc.resolved[rcKey(row.runID, row.id)]
 	case rowToolResult:
-		// Hide only SUCCESSFUL plumbing results; a failed update_plan/tool_search
-		// must still surface its error.
+		// Hide only successful plumbing results; failures must still surface their
+		// specific error even when a dedicated summary normally owns the tool.
 		return isHiddenPlumbingTool(row.tool) && row.status != tools.StatusError
 	case rowPermission:
 		event := row.permission
@@ -267,6 +273,11 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 	case rowToolResult:
 		if isInternalToolArgumentError(row) {
 			return ""
+		}
+		if row.tool == "update_plan" && row.status != tools.StatusError {
+			if card, ok := renderPlanUpdateCard(row.detail, width); ok {
+				return card
+			}
 		}
 		return renderToolResultCard(row, width, rc, opts)
 	case rowPermission:

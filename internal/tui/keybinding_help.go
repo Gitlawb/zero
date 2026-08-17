@@ -1,5 +1,5 @@
 // keybinding_help.go renders the `?` keyboard-shortcut overlay. Zero has a
-// rich set of chord bindings (Ctrl+T effort, Ctrl+P plan, drill-in subchat,
+// rich set of chord bindings (Ctrl+T effort, drill-in subchat,
 // Shift+Tab permission mode, …) that are otherwise invisible — only learnable
 // by reading the source. A single-key `?` overlay (opened on an empty composer)
 // lists them grouped, so the keymap is discoverable the way the reference TUIs
@@ -7,7 +7,7 @@
 // model.go's Update switch; keep them in sync when a binding changes.
 //
 // Configurable bindings (toggleDetailed, toggleMouse, cycleReasoning,
-// togglePlan, toggleSidebar) pull their key label from m.keyBindings so a user
+// toggleSidebar) pull their key label from m.keyBindings so a user
 // who remaps them in config.json sees the actual chords, not the defaults.
 package tui
 
@@ -57,7 +57,6 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			bindings: []keybinding{
 				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), "cycle reasoning effort (auto \u2192 low \u2192 medium \u2192 high)"},
 				{"Shift+Tab", "cycle permission mode (auto \u2194 ask)"},
-				{labelOr(m.keyBindings.togglePlan, "Ctrl+P"), "expand / collapse the plan panel (when no menu is open)"},
 			},
 		},
 		{

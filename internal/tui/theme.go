@@ -265,16 +265,39 @@ func invertPaletteColor(value string) string {
 	return fmt.Sprintf("#%06x", 0xffffff^rgb)
 }
 
-// buildSystemTheme preserves the terminal canvas and its foreground color. It uses
-// a small ANSI role set for semantic cues, which follows the user's terminal
-// palette rather than imposing a second opaque color scheme on top of it.
+// buildSystemTheme is the dark-terminal default for package-level render helpers
+// and tests. The running TUI resolves the matching contrast direction through
+// buildSystemThemeForTerminal.
 func buildSystemTheme() tuiTheme {
+	return buildSystemThemeForTerminal(true)
+}
+
+// buildSystemThemeForTerminal preserves the terminal canvas and its foreground
+// color. It uses ANSI role colors for semantic cues and confines fixed local
+// surfaces to selected and diff rows, so those states remain visible even in
+// terminals where reverse-video is disabled or visually indistinguishable.
+func buildSystemThemeForTerminal(terminalDark bool) tuiTheme {
 	base := lipgloss.NewStyle()
 	accentColor := lipgloss.Color("6")
 	greenColor := lipgloss.Color("2")
 	redColor := lipgloss.Color("1")
 	amberColor := lipgloss.Color("3")
 	blueColor := lipgloss.Color("4")
+	// Local surfaces use quiet truecolor tints. They do not alter the terminal
+	// canvas, but remain legible beside syntax colors on terminals that support
+	// them. The dark diff values are intentionally close to the canvas.
+	selectionBg := lipgloss.Color("#2b2f2d")
+	addBg := lipgloss.Color("#212922")
+	delBg := lipgloss.Color("#3c170f")
+	addBgWord := addBg
+	delBgWord := delBg
+	if !terminalDark {
+		selectionBg = lipgloss.Color("#e7e9e7")
+		addBg = lipgloss.Color("#dafbe1")
+		delBg = lipgloss.Color("#ffebe9")
+		addBgWord = lipgloss.Color("#aceebb")
+		delBgWord = lipgloss.Color("#ffcecb")
+	}
 	noColor := lipgloss.NoColor{}
 	accent := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
 	green := lipgloss.NewStyle().Foreground(greenColor)
@@ -295,7 +318,7 @@ func buildSystemTheme() tuiTheme {
 		gitDel:     red,
 		line:       base.Faint(true),
 		lineStrong: base.Faint(true),
-		selection:  base.Reverse(true),
+		selection:  base.Background(selectionBg),
 		hover:      base.Underline(true),
 
 		badge: base.Foreground(accentColor).Bold(true),
@@ -313,14 +336,14 @@ func buildSystemTheme() tuiTheme {
 		diffAdd:     green,
 		diffDel:     red,
 		diffMeta:    base.Faint(true),
-		addLineWord: green.Bold(true).Underline(true),
-		delLineWord: red.Bold(true).Underline(true),
-		addLine:     green,
-		delLine:     red,
-		addLineNum:  base.Faint(true),
-		delLineNum:  base.Faint(true),
-		addSign:     green,
-		delSign:     red,
+		addLineWord: green.Bold(true).Underline(true).Background(addBgWord),
+		delLineWord: red.Bold(true).Underline(true).Background(delBgWord),
+		addLine:     base.Background(addBg),
+		delLine:     base.Background(delBg),
+		addLineNum:  base.Faint(true).Background(addBg),
+		delLineNum:  base.Faint(true).Background(delBg),
+		addSign:     green.Background(addBg),
+		delSign:     red.Background(delBg),
 		delText:     red,
 
 		permBadge:  amber.Bold(true),
@@ -339,7 +362,7 @@ func buildSystemTheme() tuiTheme {
 		inkColor:    noColor,
 		bgPanel:     noColor,
 		bgPrompt:    noColor,
-		bgSel:       noColor,
+		bgSel:       selectionBg,
 		bgPerm:      noColor,
 	}
 }

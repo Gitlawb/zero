@@ -3208,7 +3208,9 @@ func runtimeToolDefinition(tool tools.Tool) zeroruntime.ToolDefinition {
 }
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {
-	return ToolAllowedByFilters(tool.Name(), enabledTools, disabledTools) && ToolAdvertised(tool, permissionMode)
+	return tools.ModelVisible(tool) &&
+		ToolAllowedByFilters(tool.Name(), enabledTools, disabledTools) &&
+		ToolAdvertised(tool, permissionMode)
 }
 
 func ToolAllowedByFilters(name string, enabledTools []string, disabledTools []string) bool {

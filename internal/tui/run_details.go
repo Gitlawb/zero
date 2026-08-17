@@ -15,7 +15,7 @@ func (m model) runDetailsAvailable() bool {
 // that already own the keyboard.
 func (m model) runDetailsAllowed() bool {
 	return m.altScreen && m.height > 0 && m.width >= runDetailsMinWidth && !m.subchat.active && !m.transcriptEmpty() &&
-		m.setup.visible == false && m.providerWizard == nil && m.mcpAddWizard == nil &&
+		!m.setup.visible && m.providerWizard == nil && m.mcpAddWizard == nil &&
 		m.mcpManager == nil && m.picker == nil && m.renamePrompt == nil && !m.suggestionsActive()
 }
 

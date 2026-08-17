@@ -67,3 +67,21 @@ func TestEagerToolSchemaTokenBudget(t *testing.T) {
 		t.Fatalf("eager tool schemas are %d tokens, over the %d ceiling — trim a schema, drop a core tool, or raise the ceiling deliberately (deferring will NOT help: this test disables deferral)", got, maxEagerToolSchemaTokens)
 	}
 }
+
+func TestAgentAdvertisesPatchInsteadOfAmbiguousStringReplacement(t *testing.T) {
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreToolsScoped(t.TempDir(), nil) {
+		registry.Register(tool)
+	}
+	exposed, _ := partitionTools(registry, PermissionModeAsk, Options{}, map[string]bool{})
+	names := make(map[string]bool, len(exposed))
+	for _, definition := range exposed {
+		names[definition.Name] = true
+	}
+	if !names["apply_patch"] {
+		t.Fatal("agent must retain apply_patch for existing-file changes")
+	}
+	if names["edit_file"] {
+		t.Fatal("agent must not receive the ambiguous string-replacement tool")
+	}
+}

@@ -52,18 +52,32 @@ func TestStyleAssistantMarkdownLinePassesAnsiVerbatim(t *testing.T) {
 	}
 }
 
-// update_plan and Task render as a dedicated UI (plan panel / specialist card),
-// so their transcript tool cards are suppressed; everything else still shows.
-func TestToolCardSuppressedInTranscript(t *testing.T) {
-	for _, name := range []string{"Task", "update_plan"} {
-		if !toolCardSuppressedInTranscript(name) {
-			t.Errorf("%q should be suppressed from the transcript (shown by a dedicated UI)", name)
+// Task and TaskOutput render through specialist cards. update_plan hides only
+// while in flight; its successful result is the durable transcript checklist.
+func TestToolCallCardSuppressedInTranscript(t *testing.T) {
+	for _, name := range []string{"Task", "update_plan", "TaskOutput"} {
+		if !toolCallCardSuppressedInTranscript(name) {
+			t.Errorf("%q call should be suppressed from the transcript", name)
 		}
 	}
 	for _, name := range []string{"read_file", "write_file", "edit_file", "bash", "swarm_spawn"} {
-		if toolCardSuppressedInTranscript(name) {
+		if toolCallCardSuppressedInTranscript(name) {
 			t.Errorf("%q must still show its transcript card", name)
 		}
+	}
+}
+
+func TestSuppressedToolFailuresRemainVisible(t *testing.T) {
+	for _, name := range []string{"Task", "TaskOutput"} {
+		if !toolResultCardSuppressedInTranscript(name, tools.StatusOK) {
+			t.Errorf("successful %q result should be suppressed", name)
+		}
+		if toolResultCardSuppressedInTranscript(name, tools.StatusError) {
+			t.Errorf("failed %q result must remain visible", name)
+		}
+	}
+	if toolResultCardSuppressedInTranscript("update_plan", tools.StatusOK) {
+		t.Error("successful update_plan result must render as a transcript checklist")
 	}
 }
 

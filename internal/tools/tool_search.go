@@ -130,6 +130,9 @@ func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []str
 	var deferred []Tool
 	if tool.registry != nil {
 		for _, candidate := range tool.registry.All() {
+			if !ModelVisible(candidate) {
+				continue
+			}
 			if !IsDeferred(candidate) {
 				continue
 			}
@@ -158,6 +161,9 @@ func (tool toolSearchTool) visibleEagerToolNames(enabled []string, disabled []st
 		return names
 	}
 	for _, candidate := range tool.registry.All() {
+		if !ModelVisible(candidate) {
+			continue
+		}
 		if IsDeferred(candidate) || candidate.Name() == ToolSearchToolName {
 			continue
 		}

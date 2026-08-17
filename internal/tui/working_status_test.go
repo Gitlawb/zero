@@ -10,33 +10,14 @@ import (
 	"github.com/charmbracelet/colorprofile"
 )
 
-// TestWorkingPlanLine: the working indicator's second line carries the plan's
-// done/total and the in-progress step while a plan is active, and is empty when
-// there's no plan or the plan is complete.
-func TestWorkingPlanLine(t *testing.T) {
+// TestWorkingStatusDoesNotDuplicatePlan keeps the activity cue focused on the
+// current model/tool phase. Full plan state belongs to its transcript update.
+func TestWorkingStatusDoesNotDuplicatePlan(t *testing.T) {
 	m := model{now: time.Now}
-	if got := m.workingPlanLine(); got != "" {
-		t.Errorf("no plan: want empty, got %q", got)
-	}
-
-	m.plan.steps = []planStep{
-		{content: "Research the topic", status: "completed"},
-		{content: "Add product catalog", status: "in_progress"},
-		{content: "Write the docs", status: "pending"},
-	}
-	got := plainRender(t, m.workingPlanLine())
-	if !strings.Contains(got, "plan 1/3") {
-		t.Errorf("active plan line missing count: %q", got)
-	}
-	if !strings.Contains(got, "Add product catalog") {
-		t.Errorf("active plan line missing current step: %q", got)
-	}
-
-	for i := range m.plan.steps {
-		m.plan.steps[i].status = "completed"
-	}
-	if got := m.workingPlanLine(); got != "" {
-		t.Errorf("complete plan: want empty, got %q", got)
+	m.plan.steps = []planStep{{content: "Add product catalog", status: "in_progress"}}
+	got := plainRender(t, m.workingStatusLine())
+	if strings.Contains(got, "plan") || strings.Contains(got, "Add product catalog") {
+		t.Fatalf("working line duplicated plan state: %q", got)
 	}
 }
 
@@ -82,7 +63,7 @@ func TestWorkingActivityNamesCurrentPhase(t *testing.T) {
 	}
 }
 
-func TestWorkingStatusLabelSweepsAcrossActiveRun(t *testing.T) {
+func TestWorkingStatusAnimationAdvancesAcrossActiveRun(t *testing.T) {
 	previousProfile := lipgloss.Writer.Profile
 	lipgloss.Writer.Profile = colorprofile.TrueColor
 	t.Cleanup(func() { lipgloss.Writer.Profile = previousProfile })
@@ -94,22 +75,34 @@ func TestWorkingStatusLabelSweepsAcrossActiveRun(t *testing.T) {
 
 	m.spinnerPhase = 0
 	first := m.workingStatusLine()
-	m.spinnerPhase = 2
+	m.spinnerPhase = 3
 	second := m.workingStatusLine()
 	if first == second {
-		t.Fatalf("working status label did not advance across phases:\nfirst:  %q\nsecond: %q", first, second)
+		t.Fatalf("working status animation did not advance across phases:\nfirst:  %q\nsecond: %q", first, second)
 	}
-	if firstPlain, secondPlain := plainRender(t, first), plainRender(t, second); firstPlain != secondPlain || !strings.Contains(firstPlain, "Working") {
-		t.Fatalf("animation changed status content:\nfirst:  %q\nsecond: %q", firstPlain, secondPlain)
+	firstPlain, secondPlain := []rune(plainRender(t, first)), []rune(plainRender(t, second))
+	if len(firstPlain) < 3 || len(secondPlain) < 3 || string(firstPlain[2:]) != string(secondPlain[2:]) || !strings.Contains(string(firstPlain), "Working") {
+		t.Fatalf("status animation must preserve its text while the grid moves:\nfirst:  %q\nsecond: %q", string(firstPlain), string(secondPlain))
 	}
-	// The peak and its neighboring characters use distinct points from the
-	// active accent→ink palette, rather than a single hard accent jump.
-	m.spinnerPhase = workingStatusWaveTail * 2
-	label := m.workingStatusLabel()
-	if !strings.Contains(label, streamingFadePalette[0].Render("W")) ||
-		!strings.Contains(label, streamingFadePalette[3].Render("o")) ||
-		!strings.Contains(label, streamingFadePalette[6].Render("r")) {
-		t.Fatalf("working label does not render a palette wave: %q", label)
+	if got := plainRender(t, m.workingStatusIndicator()); len([]rune(got)) != 2 {
+		t.Fatalf("working status indicator = %q, want a compact two-cell 3x3 grid", got)
+	}
+	m.spinnerPhase = 0
+	firstLabel := m.workingStatusLabel()
+	m.spinnerPhase = 3
+	secondLabel := m.workingStatusLabel()
+	if firstLabel == secondLabel {
+		t.Fatalf("working label shimmer did not advance across phases:\nfirst:  %q\nsecond: %q", firstLabel, secondLabel)
+	}
+	if got := plainRender(t, firstLabel); got != "Working" {
+		t.Fatalf("working label shimmer changed its text: %q", got)
+	}
+
+	if got := workingDriveLevels(0)[3]; got != workingDriveBright {
+		t.Fatalf("chevron lead cell level = %v, want bright", got)
+	}
+	if got := workingDriveLevelAt(12, 4*workingDriveStep); got != workingDriveBright {
+		t.Fatalf("first Working letter level = %v, want bright after the grid", got)
 	}
 
 	m.reducedMotion = true
@@ -118,7 +111,13 @@ func TestWorkingStatusLabelSweepsAcrossActiveRun(t *testing.T) {
 	m.spinnerPhase = 2
 	second = m.workingStatusLine()
 	if first != second {
-		t.Fatalf("reduced-motion working label should stay stable:\nfirst:  %q\nsecond: %q", first, second)
+		t.Fatalf("reduced-motion working status should stay stable:\nfirst:  %q\nsecond: %q", first, second)
+	}
+	if got := m.workingStatusIndicator(); got != "" {
+		t.Fatalf("reduced-motion status indicator = %q, want empty", got)
+	}
+	if got := plainRender(t, m.workingStatusLabel()); got != "Working" {
+		t.Fatalf("reduced-motion working label = %q, want Working", got)
 	}
 }
 
@@ -129,35 +128,47 @@ func TestModelUsesSmoothActiveAnimationCadence(t *testing.T) {
 	}
 }
 
-// TestHiddenPlumbingToolsSkippedFromTranscript: the plumbing tools (update_plan,
-// tool_search) render nothing — their call AND result rows are dropped; real
-// work tools still render.
+// TestHiddenPlumbingToolsSkippedFromTranscript: tool-search and specialist
+// plumbing render nothing on success. update_plan hides only its call; the
+// completed result is the user-facing plan checklist in the transcript.
 func TestHiddenPlumbingToolsSkippedFromTranscript(t *testing.T) {
 	rows := []transcriptRow{
 		{kind: rowToolCall, tool: "update_plan", id: "c1", runID: 1},
 		{kind: rowToolResult, tool: "update_plan", id: "c1", runID: 1, text: "10 steps · 2 done"},
 		{kind: rowToolCall, tool: "tool_search", id: "c2", runID: 1},
 		{kind: rowToolResult, tool: "tool_search", id: "c2", runID: 1, text: "select:swarm_spawn,…"},
-		{kind: rowToolResult, tool: "bash", id: "c3", runID: 1, text: "ok"},
+		{kind: rowToolCall, tool: "TaskOutput", id: "c3", runID: 1},
+		{kind: rowToolResult, tool: "TaskOutput", id: "c3", runID: 1, text: "task result"},
+		{kind: rowToolResult, tool: "bash", id: "c4", runID: 1, text: "ok"},
 	}
 	rc := buildRowContext(rows)
-	for _, i := range []int{0, 1, 2, 3} {
+	for _, i := range []int{0, 2, 3, 4, 5} {
 		if !rc.skip(rows[i]) {
 			t.Errorf("plumbing row %d (%s/%v) should be skipped", i, rows[i].tool, rows[i].kind)
 		}
 	}
-	if rc.skip(rows[4]) {
+	if rc.skip(rows[1]) {
+		t.Error("completed update_plan result should render as a transcript checklist")
+	}
+	if rc.skip(rows[6]) {
 		t.Error("a normal tool result (bash) must not be skipped")
 	}
 
 	// A FAILED plumbing result must still render — its error has to surface.
-	failed := transcriptRow{kind: rowToolResult, tool: "update_plan", id: "c9", runID: 1, status: tools.StatusError, text: "tool result: update_plan error boom"}
-	if buildRowContext([]transcriptRow{failed}).skip(failed) {
-		t.Error("a failed plumbing result must NOT be skipped (the error must show)")
+	for _, failed := range []transcriptRow{
+		{kind: rowToolResult, tool: "update_plan", id: "c9", runID: 1, status: tools.StatusError, text: "tool result: update_plan error boom"},
+		{kind: rowToolResult, tool: "TaskOutput", id: "c10", runID: 1, status: tools.StatusError, text: "tool result: TaskOutput error boom"},
+	} {
+		if buildRowContext([]transcriptRow{failed}).skip(failed) {
+			t.Errorf("a failed plumbing result (%s) must NOT be skipped", failed.tool)
+		}
 	}
 
-	if !isHiddenPlumbingTool("update_plan") || !isHiddenPlumbingTool("tool_search") {
-		t.Error("update_plan and tool_search must be hidden plumbing")
+	if !isHiddenPlumbingTool("tool_search") || !isHiddenPlumbingTool("TaskOutput") {
+		t.Error("tool_search and TaskOutput must be hidden plumbing")
+	}
+	if isHiddenPlumbingTool("update_plan") {
+		t.Error("update_plan result must remain visible as its dedicated checklist")
 	}
 	if isHiddenPlumbingTool("write_file") || isHiddenPlumbingTool("web_search") {
 		t.Error("real work tools must NOT be hidden")

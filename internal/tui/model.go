@@ -1863,13 +1863,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
-		case m.keyMatch(m.keyBindings.togglePlan, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'p') }):
-			// Ctrl+P toggles the plan panel expansion (collapse/expand step list).
-			// Modal selection is handled before this switch so menus win over toggle.
-			if m.noBlockingModal() && !m.plan.isEmpty() {
-				m.plan.expanded = !m.plan.expanded
-				return m, nil
-			}
 		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && canFireComposerGatedToggle(m.keyBindings.toggleSidebar, defaultToggleSidebarChord, m.composerValue() == ""):
 			// Ctrl+B opens a compact, on-demand run summary. The composer-empty rule
 			// preserves readline's Ctrl+B move-to-beginning behavior; a remapped
@@ -3116,35 +3109,6 @@ func (m model) transcriptView() string {
 	return body + footer
 }
 
-// twoColumnTranscriptView renders the alt-screen chat into a left column and
-// the context sidebar (FILES / PLAN / tokens) into a right column. The chat is
-// produced by the existing scroll engine at the reduced chat-column width (via
-// chatColumnWidth, which every frame/geometry caller already routes through),
-// yielding exactly m.height lines at the column width; the sidebar block is
-// built to the same height and joined row-by-row. Overlays/wizards never reach
-// here — sidebarActive() returns false while any is up, falling back to the
-// single-column path. Caller guarantees sidebarActive() && !subchat.active.
-func (m model) twoColumnTranscriptView() string {
-	chatW := m.chatColumnWidth()
-	sidebarW := sidebarWidth(m.width)
-
-	width := chatW
-
-	suggestionOverlay := m.suggestionOverlay(width)
-	bodyItems := m.transcriptBodyItems(width, "", false)
-	footer := m.footerView(width)
-	overlayForViewport := suggestionOverlay
-	if m.transcriptEmpty() && !m.pending {
-		overlayForViewport = ""
-	}
-
-	header := m.pinnedTitleBar(width)
-	chatBlock := viewLines(m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport))
-	sidebar := m.renderContextSidebar(sidebarW, len(chatBlock))
-	rows := joinColumns(chatBlock, sidebar, chatW, sidebarW)
-	return strings.Join(rows, "\n")
-}
-
 func (m model) titleBarInTranscriptBody() bool {
 	return !m.altScreen && !m.headerPrinted
 }
@@ -3188,19 +3152,6 @@ func (m model) footerView(width int) string {
 	if m.pendingPermission != nil {
 		footer.WriteString(m.footerStatusLine(width))
 		return footer.String()
-	}
-	// Pinned plan panel: sits directly above the composer so it stays visible
-	// while the transcript scrolls underneath (a streaming turn no longer pushes
-	// the plan off-screen). Budgeted to at most a third of the screen height; a
-	// taller plan collapses to a one-line summary so the composer always stays
-	// on screen. Skipped in the subchat drill-in: m.plan belongs to the PARENT
-	// run, not the subagent/swarm child session being viewed there, so pinning it
-	// above that composer would show unrelated state.
-	if !m.subchat.active {
-		if plan := m.renderPinnedPlanPanel(width, m.pinnedPlanMaxHeight()); plan != "" {
-			footer.WriteString(plan)
-			footer.WriteString("\n")
-		}
 	}
 	// The row above the composer: transient copy feedback takes priority; otherwise
 	// a faint idle affordance — discoverable key hints on the left, a jump-to-bottom
@@ -3282,21 +3233,6 @@ func (m model) jumpToBottomHint() string {
 		return ""
 	}
 	return zeroTheme.faint.Render(fmt.Sprintf("↓ %d more · PgDn", m.chatScrollOffset))
-}
-
-// pinnedPlanMaxHeight is the line budget for the pinned plan panel: at most a
-// third of the screen, so even a long plan can't crowd out the transcript or
-// the composer. Beyond this the panel collapses to its one-line summary. Falls
-// back to a generous cap when the height isn't known yet (unmeasured/headless).
-func (m model) pinnedPlanMaxHeight() int {
-	if m.height <= 0 {
-		return 12
-	}
-	budget := m.height / 3
-	if budget < 3 {
-		budget = 3
-	}
-	return budget
 }
 
 type tuiRect struct {
@@ -3733,8 +3669,7 @@ func (m model) interimBlock(width int) string {
 }
 
 // workingStatusLine renders the live "working" indicator shown on every pending
-// render: a quiet moving accent across the active label, the current phase, and
-// the elapsed time.
+// render: a subtle liveness pulse, the current phase, and the elapsed time.
 // It is shown even once partial text has streamed so an upstream stall never
 // looks like a frozen terminal — the spinner tick (~33ms, time-based) drives the
 // re-render, so the elapsed clock keeps advancing for ANY provider/model even
@@ -3748,40 +3683,6 @@ func (m model) spinnerGlyph() string {
 		return "•"
 	}
 	return m.spinner.View()
-}
-
-const (
-	workingStatusLabelText = "Working"
-	workingStatusWaveTail  = 3
-)
-
-// workingStatusLabel renders the sole motion cue for an active run. A short
-// accent-to-ink wave crosses the label on the shared spinner clock, using the
-// same palette rebuilt by /theme for streaming text. It adds no timer or
-// competing indicator. Reduced-motion keeps the label stable and legible.
-func (m model) workingStatusLabel() string {
-	if m.reducedMotion {
-		return zeroTheme.ink.Render(workingStatusLabelText)
-	}
-
-	label := []rune(workingStatusLabelText)
-	// Let the three dimmest wave steps enter and leave the label before the
-	// bright peak reaches an edge. That makes wrapping visually continuous.
-	period := len(label) + 2*workingStatusWaveTail
-	peak := (m.spinnerPhase/2)%period - workingStatusWaveTail
-	var out strings.Builder
-	out.Grow(len(label) * 8)
-	for index, char := range label {
-		distance := index - peak
-		if distance < 0 {
-			distance = -distance
-		}
-		// Each step moves three places through the twelve-color fade ramp:
-		// accent at the peak, softer neighbours, then base ink.
-		paletteIndex := minInt(streamingFadeSteps-1, distance*3)
-		out.WriteString(streamingFadePalette[paletteIndex].Render(string(char)))
-	}
-	return out.String()
 }
 
 // workingActivity labels the current live phase for the working status line.
@@ -3843,18 +3744,18 @@ func (m model) activeToolCall() (transcriptRow, bool) {
 	return transcriptRow{}, false
 }
 
-// toolCardSuppressedInTranscript reports tools whose transcript card is redundant
-// because a dedicated UI surface already shows their state: Task (its specialist
-// card) and update_plan (the pinned plan panel + PLAN sidebar). Their session
-// events are still recorded; only the visible card is skipped.
-func toolCardSuppressedInTranscript(name string) bool {
-	return name == "Task" || name == "update_plan"
+func toolResultCardSuppressedInTranscript(name string, status tools.Status) bool {
+	return isHiddenPlumbingTool(name) && status != tools.StatusError
 }
 
 func (m model) workingStatusLine() string {
-	// Tool and plan labels stay still, leaving the moving Working label as the
-	// single calm, unambiguous liveness signal for the run.
+	// Keep one quiet liveness signal at the start of the line. Tool and plan
+	// labels stay still, so the display reads as active without competing motion
+	// scattered through the transcript.
 	line := m.workingStatusLabel()
+	if indicator := m.workingStatusIndicator(); indicator != "" {
+		line = indicator + line
+	}
 	// Phase label so a long, output-less step reads as live progress rather than a
 	// frozen screen: "writing" while the answer streams, "thinking" otherwise
 	// (reasoning, waiting on the model, or running a tool).
@@ -3874,35 +3775,7 @@ func (m model) workingStatusLine() string {
 	if hint := m.quietGenerationHint(); hint != "" {
 		line += zeroTheme.amber.Render("  ·  " + hint)
 	}
-	// A second line carries live plan progress (how far along + the current step)
-	// so a long working stretch shows the task advancing without consulting the
-	// sidebar. Replaces the old per-call update_plan transcript cards. Empty when
-	// there is no active plan.
-	if planLine := m.workingPlanLine(); planLine != "" {
-		line += "\n" + planLine
-	}
 	return line
-}
-
-// workingPlanLine is the optional second line under the working indicator: the
-// plan's done/total and the step currently in progress. Empty when there is no
-// plan or the plan is already complete.
-func (m model) workingPlanLine() string {
-	if m.plan.isEmpty() || m.plan.isComplete() {
-		return ""
-	}
-	total := len(m.plan.steps)
-	done := 0
-	for _, step := range m.plan.steps {
-		if step.status == "completed" || step.status == "failed" {
-			done++
-		}
-	}
-	text := fmt.Sprintf("· plan %d/%d", done, total)
-	if current := truncateStep(currentStepContent(m.plan.steps), 48); current != "" {
-		text += " · " + current
-	}
-	return "  " + zeroTheme.faint.Render(text)
 }
 
 // workingTokenIndicator renders a live "↑ <n> tok" estimate of the tokens
@@ -5751,10 +5624,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				arg:    argHintSecondary(call.Arguments),
 				runID:  runID,
 			}
-			// A Task delegation is shown by the specialist card below, and update_plan
-			// is shown by the pinned plan panel + PLAN sidebar, so skip both redundant
-			// transcript cards — the dedicated UI supersedes them.
-			if !toolCardSuppressedInTranscript(call.Name) {
+			// Specialist delegation and an in-flight plan update have dedicated UI, so
+			// omit their redundant call cards from the transcript. The completed plan
+			// result remains as a durable checklist in the conversation history.
+			if !toolCallCardSuppressedInTranscript(call.Name) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
@@ -5838,13 +5711,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				changedFiles:    result.ChangedFiles,
 				changeSummaries: result.ChangeSummaries,
 			}
-			// A Task result is shown by the specialist card, and update_plan by the
-			// plan panel/sidebar, so skip both redundant transcript rows.
-			if !toolCardSuppressedInTranscript(result.Name) {
+			// A successful Task/TaskOutput result is represented by a specialist card.
+			// update_plan stays in the transcript as a rendered checklist; failures
+			// always remain visible because a dedicated surface cannot explain them.
+			if !toolResultCardSuppressedInTranscript(result.Name, result.Status) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
-			// Sync the sticky plan panel when update_plan runs.
+			// Keep the latest plan state in sync for run details and step drill-in.
 			if result.Name == "update_plan" && m.registry != nil {
 				if planTool, ok := m.registry.Get("update_plan"); ok {
 					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {

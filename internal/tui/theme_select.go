@@ -93,7 +93,7 @@ func applyTheme(mode themeMode, terminalDark bool) themeMode {
 // uses it to render a contained preview while the active UI remains untouched.
 func themeForMode(mode themeMode, terminalDark bool) (themeMode, tuiTheme) {
 	if mode == themeSystem || mode == themeAuto || mode == "" {
-		return themeSystem, buildSystemTheme()
+		return themeSystem, buildSystemThemeForTerminal(terminalDark)
 	}
 	if entry, ok := lookupTheme(string(mode)); ok {
 		theme := buildTheme(paletteForTerminal(entry.Palette, entry.IsDark, terminalDark))
@@ -102,7 +102,7 @@ func themeForMode(mode themeMode, terminalDark bool) (themeMode, tuiTheme) {
 		}
 		return themeMode(entry.Name), theme
 	}
-	return themeSystem, buildSystemTheme()
+	return themeSystem, buildSystemThemeForTerminal(terminalDark)
 }
 
 // handleThemeCommand implements /theme [name]: `list` shows state, a registered

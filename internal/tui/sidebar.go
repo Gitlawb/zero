@@ -41,34 +41,6 @@ func (m model) sidebarActive() bool {
 	return !m.sidebarHidden && m.sidebarAvailable()
 }
 
-// sidebarToggleAllowed reports whether the toggle-sidebar keybinding should
-// respond. Unlike sidebarAvailable it OMITS the content check
-// (sidebarHasContent) so the user can toggle their show/hide preference even
-// when the sidebar auto-hid due to having nothing to show. The content gate
-// is still applied at render time (sidebarActive chains sidebarAvailable), so
-// toggling on when there's no content just records the preference for when
-// content arrives — the sidebar stays hidden until then.
-func (m model) sidebarToggleAllowed() bool {
-	if !m.altScreen || m.height <= 0 || m.subchat.active {
-		return false
-	}
-	if sidebarWidth(m.width) <= 0 {
-		return false
-	}
-	if widthTier(m.width) < tierMedium {
-		return false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.renamePrompt != nil || m.suggestionsActive() {
-		return false
-	}
-	// Home/welcome screen: stay single-column until there's real conversation.
-	if m.transcriptEmpty() {
-		return false
-	}
-	return true
-}
-
 // sidebarAvailable reports whether the two-column layout CAN render: only in
 // alt-screen managed mode, with a measured height, on a wide-enough terminal,
 // outside subchat/overlays, with real conversation. It ignores the user's Ctrl+B
@@ -162,15 +134,6 @@ func transcriptContentWidth(columnWidth int) int {
 		return columnWidth
 	}
 	return cw
-}
-
-// sidebarWidthForLayout returns the active sidebar column width, or 0 when the
-// two-column layout is not active.
-func (m model) sidebarWidthForLayout() int {
-	if !m.sidebarActive() {
-		return 0
-	}
-	return sidebarWidth(m.width)
 }
 
 // sidebarSpecialists returns the specialist delegations worth surfacing in the

@@ -674,26 +674,16 @@ func stripSidebar(lines []string) string {
 	return ansiPattern.ReplaceAllString(strings.Join(lines, "\n"), "")
 }
 
-// The `/` command palette must not hide the pinned plan or reduce the
-// conversation width.
-func TestCommandPaletteKeepsPinnedPlan(t *testing.T) {
-	base := func() model {
-		m := runningPlanModel(t, 3)
-		m.altScreen = true
-		m.height = 40
-		m.headerPrinted = true
-		m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
-		return m
-	}
-
-	m := base()
-	// `/` palette open: the plan stays pinned and the layout does not reflow.
+// The `/` command palette must not reduce the conversation width.
+func TestCommandPaletteKeepsConversationWidth(t *testing.T) {
+	m := sidebarTestModel()
+	m.altScreen = true
+	m.height = 40
+	m.headerPrinted = true
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
 	m.suggestions = []commandSuggestion{{Name: "/model", Desc: "Pick a model."}, {Name: "/plan", Desc: "Show planning mode status."}}
 	if !m.suggestionsActive() {
 		t.Fatal("precondition: suggestions should be active")
-	}
-	if got := m.renderPinnedPlanPanel(m.chatColumnWidth(), 10); got == "" {
-		t.Error("plan must remain visible above the composer")
 	}
 	// The palette is bounded within the full-width transcript.
 	chatW := m.chatColumnWidth()
