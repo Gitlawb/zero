@@ -245,16 +245,35 @@ func firstExactStringArg(args map[string]any, keys ...string) string {
 	return ""
 }
 
+// pathArgKeys is the alias list the sandbox inspects for path-carrying tool
+// arguments. Keep it aligned with the alias lists the tools themselves accept
+// (see aliasedStringArg in write_file/edit_file/read_file/grep/glob/list): the
+// sandbox gates by arg-key name, so any alias a tool resolves but the sandbox
+// does not inspect would let a model route a write/read around the
+// workspace+symlink boundary.
+var pathArgKeys = []string{"path", "file", "file_path", "filepath", "filename", "cwd", "workdir", "dir", "directory"}
+
 func requestPaths(request Request) []string {
 	paths := []string{}
-	// Keep this aligned with the path-arg alias lists the tools accept (see
-	// aliasedStringArg in write_file/edit_file/read_file/grep/glob/list). The
-	// sandbox gates by arg-key name, so any alias a tool resolves but the sandbox
-	// does not inspect would let a model route a write/read around the
-	// workspace+symlink boundary.
-	for _, key := range []string{"path", "file", "file_path", "filepath", "filename", "cwd", "workdir", "dir", "directory"} {
-		if value := argString(request.Args, key); value != "" {
-			paths = append(paths, value)
+	for _, key := range pathArgKeys {
+		// Gate on the EXACT bytes, because that is what the tool will open:
+		// aliasedStringArg does not trim, so a trimming gate inspects a
+		// different pathname than the one that gets read. A credential file
+		// whose name carries meaningful whitespace ("bridge-token " on Unix)
+		// was protected under its real spelling while the gate checked the
+		// trimmed name and allowed the read.
+		//
+		// The trimmed spelling is still emitted when it differs, so the gate
+		// never inspects LESS than it did before this became exact — a
+		// whitespace-padded argument is now checked both ways rather than only
+		// the way the tool does not use.
+		value, ok := request.Args[key].(string)
+		if !ok || value == "" {
+			continue
+		}
+		paths = append(paths, value)
+		if trimmed := strings.TrimSpace(value); trimmed != "" && trimmed != value {
+			paths = append(paths, trimmed)
 		}
 	}
 	if request.ToolName == "apply_patch" {

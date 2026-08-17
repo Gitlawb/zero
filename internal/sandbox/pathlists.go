@@ -70,6 +70,32 @@ func selectedDaemonRemoteTokenFile() string {
 	return configured
 }
 
+// The daemon-token pathname contract
+//
+// Every layer that interprets ZERO_DAEMON_REMOTE_TOKEN_FILE must agree on the
+// SAME bytes, or one layer protects a pathname a different layer never checks.
+// Each round of review on this surface came from a new place that disagreed, so
+// the rule is written down once here:
+//
+//  1. The env value is pathname DATA, not a word. Only an all-whitespace value
+//     counts as unset (selectedDaemonRemoteTokenFile). It is never trimmed,
+//     never shell-split, and "~" is never expanded — os.ReadFile, the daemon's
+//     own reader, treats it literally, so anything else protects a file the
+//     daemon does not read.
+//  2. Both the SELECTED spelling and the target it currently resolves to are
+//     protected (daemonTokenDenyPaths). `serve-remote` canonicalizes what it
+//     selects, but an inherited symlinked value must not leave the link
+//     replaceable.
+//  3. Tool arguments are compared as EXACT bytes, because that is what the tool
+//     opens (aliasedStringArg does not trim). requestPaths gates on the exact
+//     argument; see the comment there for the read_file bypass that trimming
+//     produced.
+//  4. Protection is NOT re-includable. AllowRead, a permission grant, and a
+//     session profile all leave it in place, on every platform.
+//
+// A new consumer of the token pathname belongs on one of these four rules. If
+// it needs a fifth, the contract is what changes — not just that call site.
+//
 // protectedCredentialPaths returns credential files that Zero's own in-process
 // file tools must never read or modify, independent of Policy.
 //
@@ -355,6 +381,25 @@ func readDeniedResolved(workspaceRoot string, denyRoots, allowRoots []string, pa
 		}
 	}
 	return false
+}
+
+// ProtectedCredentialExclusions returns exclusions covering ONLY the automatic,
+// non-overrideable credential paths — no policy involved.
+//
+// Every other exclusion set is built from an Engine, which is the right shape
+// for a tool invoked through the agent. But the protected-credential set comes
+// from this process's own environment rather than from any policy, so a tool
+// reached WITHOUT an engine (MCP, legacy registry.Run) has no reason to be less
+// protected than the same tool reached with one. Callers on that path use this
+// to keep the bridge bearer token out of their output.
+//
+// Active() only when a credential is actually selected, so the no-token case
+// stays a no-op and the walk behaves exactly as it did before.
+func ProtectedCredentialExclusions(workspaceRoot string) ReadExclusions {
+	return ReadExclusions{
+		workspaceRoot:  workspaceRoot,
+		protectedRoots: protectedCredentialPaths(),
+	}
 }
 
 // ReadExclusions holds the resolved DenyRead/AllowRead roots for a policy so a

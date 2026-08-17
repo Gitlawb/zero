@@ -19,6 +19,16 @@ import (
 // the exclusion is not re-includable.
 func daemonTokenFixture(t *testing.T) (string, string, *sandbox.Engine) {
 	t.Helper()
+	return daemonTokenFixtureNamed(t, "bridge-token")
+}
+
+// daemonTokenFixtureNamed is daemonTokenFixture with the token's filename under
+// the caller's control, so a test can pin a spelling the gate and the tool must
+// agree on byte for byte (a trailing space, for instance). It skips rather than
+// fails when the host filesystem refuses the name — Windows rejects trailing
+// spaces and dots — so the matrix still runs everywhere it can.
+func daemonTokenFixtureNamed(t *testing.T, tokenName string) (string, string, *sandbox.Engine) {
+	t.Helper()
 	ws, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
@@ -26,9 +36,27 @@ func daemonTokenFixture(t *testing.T) (string, string, *sandbox.Engine) {
 	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main // bridge-secret\n"), 0o600); err != nil {
 		t.Fatalf("write main.go: %v", err)
 	}
-	token := filepath.Join(ws, "bridge-token")
+	token := filepath.Join(ws, tokenName)
 	if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
-		t.Fatalf("write token: %v", err)
+		t.Skipf("filesystem rejects token name %q: %v", tokenName, err)
+	}
+	// Windows silently strips trailing spaces/dots rather than erroring, and it
+	// strips them from the lookup too, so an Lstat of the requested name would
+	// happily find the normalized file and the test would assert against a
+	// spelling that never existed. Compare against the real directory entry.
+	entries, err := os.ReadDir(ws)
+	if err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	stored := false
+	for _, entry := range entries {
+		if entry.Name() == tokenName {
+			stored = true
+			break
+		}
+	}
+	if !stored {
+		t.Skipf("filesystem did not preserve token name %q", tokenName)
 	}
 	t.Setenv(remote.EnvToken, "")
 	t.Setenv(remote.EnvTokenFile, token)

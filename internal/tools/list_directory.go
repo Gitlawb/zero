@@ -46,11 +46,15 @@ func NewScopedListDirectoryTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result {
-	return tool.run(args, readExcluder{}, true)
+	return tool.run(args, sandboxReadExcluderWithin(nil, tool.workspaceRoot), true)
 }
 
+// Registry.Run funnels into RunWithOptions with empty options, so a nil engine
+// here is the MCP / legacy path rather than a test shape. Listing a directory
+// must not disclose the bridge token's filename merely because the caller
+// arrived without a sandbox — see sandboxReadExcluderWithin.
 func (tool listDirectoryTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
-	return tool.run(args, sandboxReadExcluder(options.Sandbox), false)
+	return tool.run(args, sandboxReadExcluderWithin(options.Sandbox, tool.workspaceRoot), false)
 }
 
 func (tool listDirectoryTool) run(args map[string]any, exclude readExcluder, directBudget bool) Result {
