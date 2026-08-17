@@ -549,12 +549,17 @@ func renderUserRow(row transcriptRow, width int) string {
 }
 
 func renderUserAttachmentSummary(summary transcriptAttachmentSummary) string {
-	parts := make([]string, 0, summary.images+summary.documents)
-	for index := 1; index <= summary.images; index++ {
+	visibleImages := min(summary.images, attachmentSummaryVisibleItems)
+	visibleDocuments := min(summary.documents, attachmentSummaryVisibleItems)
+	parts := make([]string, 0, visibleImages+visibleDocuments+1)
+	for index := 1; index <= visibleImages; index++ {
 		parts = append(parts, fmt.Sprintf("[Image #%d]", index))
 	}
-	for index := 1; index <= summary.documents; index++ {
+	for index := 1; index <= visibleDocuments; index++ {
 		parts = append(parts, fmt.Sprintf("[Document #%d]", index))
+	}
+	if hidden := summary.images + summary.documents - visibleImages - visibleDocuments; hidden > 0 {
+		parts = append(parts, fmt.Sprintf("[+%d attachments]", hidden))
 	}
 	return strings.Join(parts, " ")
 }

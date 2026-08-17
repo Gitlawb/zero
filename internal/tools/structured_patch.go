@@ -350,7 +350,18 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 			lineIndex = index + 1
 		}
 		if len(chunk.old) == 0 {
-			replacements = append(replacements, structuredReplacement{start: len(lines), replacement: append([]string(nil), chunk.new...)})
+			// A context anchor identifies the line immediately before a pure
+			// insertion. Only an explicit end-of-file hunk (or an unanchored
+			// insertion) belongs at the file end.
+			start := lineIndex
+			if chunk.endOfFile || !chunk.hasContext {
+				start = len(lines)
+			}
+			if start > len(lines) {
+				start = len(lines)
+			}
+			replacements = append(replacements, structuredReplacement{start: start, replacement: append([]string(nil), chunk.new...)})
+			lineIndex = start
 			continue
 		}
 		index := findStructuredPatchSequence(lines, chunk.old, lineIndex, chunk.endOfFile)

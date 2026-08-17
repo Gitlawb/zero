@@ -601,6 +601,33 @@ func TestApplyPatchToolStructuredPatchMatchesWhitespaceTolerantly(t *testing.T) 
 	}
 }
 
+func TestApplyPatchToolStructuredPatchInsertsAtContext(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "example.txt"), "anchor\nmiddle\nremove\n")
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: example.txt",
+		"@@ anchor",
+		"+inserted",
+		"@@ middle",
+		"-remove",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured insertion failed: %s", result.Output)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "example.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(content), "anchor\ninserted\nmiddle\n"; got != want {
+		t.Fatalf("structured insertion content = %q, want %q", got, want)
+	}
+}
+
 func TestApplyPatchToolRejectsMalformedOrEscapingStructuredPatchBeforeWriting(t *testing.T) {
 	root := t.TempDir()
 	tool := NewScopedApplyPatchTool(root, nil)
@@ -624,6 +651,11 @@ func TestApplyPatchToolRejectsMalformedOrEscapingStructuredPatchBeforeWriting(t 
 			}
 			if strings.Contains(result.Output, "No valid patches") {
 				t.Fatalf("structured patch should fail before git apply, got %q", result.Output)
+			}
+			if name == "empty update" {
+				if _, err := os.Stat(filepath.Join(root, "target.txt")); !os.IsNotExist(err) {
+					t.Fatalf("empty update must not write target file, stat err = %v", err)
+				}
 			}
 		})
 	}

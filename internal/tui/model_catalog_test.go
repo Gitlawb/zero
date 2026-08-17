@@ -47,8 +47,9 @@ func TestModelSupportsVisionTUIChecksDiscoveredBeforeHeuristic(t *testing.T) {
 }
 
 func TestModelSupportsVisionTUIFallsBackWhenLiveMetadataOmitsModalities(t *testing.T) {
-	registry := mustTestModelRegistry(t, testModelEntry("custom-known", 12345, []modelregistry.ModelCapability{
+	registry := mustTestModelRegistry(t, testModelEntry("gpt-5.6-sol", 12345, []modelregistry.ModelCapability{
 		modelregistry.ModelCapabilityChat,
+		modelregistry.ModelCapabilityVision,
 	}))
 	m := model{
 		modelName:    "gpt-5.6-sol",

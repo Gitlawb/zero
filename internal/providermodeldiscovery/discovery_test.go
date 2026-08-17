@@ -160,7 +160,9 @@ func TestDiscoverCatalogChatGPTMergesOpenAIModelsDevMetadata(t *testing.T) {
 		case "/backend-api/codex/models":
 			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-sol"}]}`))
 		default:
-			t.Fatalf("unexpected request path %q", r.URL.Path)
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
 		}
 	}))
 	defer server.Close()

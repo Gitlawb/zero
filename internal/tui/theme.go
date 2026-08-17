@@ -262,7 +262,87 @@ func invertPaletteColor(value string) string {
 	if err != nil {
 		return value
 	}
-	return fmt.Sprintf("#%06x", 0xffffff^rgb)
+	r := float64((rgb>>16)&0xff) / 255
+	g := float64((rgb>>8)&0xff) / 255
+	b := float64(rgb&0xff) / 255
+	h, s, l := rgbToHSL(r, g, b)
+	r, g, b = hslToRGB(h, s, 1-l)
+	return fmt.Sprintf("#%02x%02x%02x", colorChannel(r), colorChannel(g), colorChannel(b))
+}
+
+func rgbToHSL(r, g, b float64) (h, s, l float64) {
+	max, min := r, r
+	for _, component := range []float64{g, b} {
+		if component > max {
+			max = component
+		}
+		if component < min {
+			min = component
+		}
+	}
+	l = (max + min) / 2
+	delta := max - min
+	if delta == 0 {
+		return 0, 0, l
+	}
+	if l > 0.5 {
+		s = delta / (2 - max - min)
+	} else {
+		s = delta / (max + min)
+	}
+	switch max {
+	case r:
+		h = (g - b) / delta
+		if g < b {
+			h += 6
+		}
+	case g:
+		h = (b-r)/delta + 2
+	default:
+		h = (r-g)/delta + 4
+	}
+	return h / 6, s, l
+}
+
+func hslToRGB(h, s, l float64) (r, g, b float64) {
+	if s == 0 {
+		return l, l, l
+	}
+	q := l * (1 + s)
+	if l >= 0.5 {
+		q = l + s - l*s
+	}
+	p := 2*l - q
+	return hueToRGB(p, q, h+1.0/3), hueToRGB(p, q, h), hueToRGB(p, q, h-1.0/3)
+}
+
+func hueToRGB(p, q, t float64) float64 {
+	if t < 0 {
+		t++
+	}
+	if t > 1 {
+		t--
+	}
+	switch {
+	case t < 1.0/6:
+		return p + (q-p)*6*t
+	case t < 0.5:
+		return q
+	case t < 2.0/3:
+		return p + (q-p)*(2.0/3-t)*6
+	default:
+		return p
+	}
+}
+
+func colorChannel(value float64) int {
+	if value <= 0 {
+		return 0
+	}
+	if value >= 1 {
+		return 255
+	}
+	return int(value*255 + 0.5)
 }
 
 // buildSystemTheme is the dark-terminal default for package-level render helpers

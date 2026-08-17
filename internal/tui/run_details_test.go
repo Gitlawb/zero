@@ -55,3 +55,12 @@ func TestRunDetailsClosesWhenTerminalBecomesTooNarrow(t *testing.T) {
 		t.Fatal("narrow resize should close an unavailable run-details overlay")
 	}
 }
+
+func TestRunDetailsOverlayHidesBehindPicker(t *testing.T) {
+	m := sidebarTestModel()
+	m.runDetailsOpen = true
+	m.picker = &commandPicker{}
+	if got := m.runDetailsOverlay(m.width); got != "" {
+		t.Fatalf("run details must yield to a picker that owns the keyboard, got:\n%s", got)
+	}
+}

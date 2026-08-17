@@ -68,10 +68,16 @@ func validThemeMode(s string) bool {
 	return ok
 }
 
-// ValidThemeArg reports whether s is an acceptable --theme / ZERO_THEME value
-// (`system`, legacy `auto`, or a visible named palette). Exported so the CLI flag
-// validator shares this one source of truth instead of hardcoding the theme list.
-func ValidThemeArg(s string) bool { return validThemeMode(s) }
+// ValidThemeArg reports whether s is an acceptable --theme / ZERO_THEME value.
+// It accepts retired dark/light preferences so existing scripts and environment
+// variables migrate to System, while validThemeMode keeps them out of the picker.
+func ValidThemeArg(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == string(themeDark) || s == string(themeLight) {
+		return true
+	}
+	return validThemeMode(s)
+}
 
 // applyTheme swaps the active palette (zeroTheme) and the globals derived from it
 // — the streaming-fade ramp and the static render cache — so a committed switch

@@ -907,6 +907,9 @@ func payloadNonNegativeInt(payload map[string]any, key string) int {
 	if !ok || value <= 0 {
 		return 0
 	}
+	if value > persistedAttachmentCountLimit {
+		return persistedAttachmentCountLimit
+	}
 	return int(value)
 }
 

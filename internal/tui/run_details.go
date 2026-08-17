@@ -20,7 +20,7 @@ func (m model) runDetailsAllowed() bool {
 }
 
 func (m model) runDetailsOverlay(width int) string {
-	if !m.runDetailsOpen || width < runDetailsMinWidth {
+	if !m.runDetailsOpen || width < runDetailsMinWidth || !m.runDetailsAllowed() {
 		return ""
 	}
 	overlayWidth := minInt(72, maxInt(40, width-8))

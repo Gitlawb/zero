@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strconv"
 	"strings"
@@ -146,6 +147,17 @@ func TestResolveThemeModePrecedence(t *testing.T) {
 	}
 }
 
+func TestLegacyThemeArgumentsRemainAcceptedOutsidePicker(t *testing.T) {
+	for _, value := range []string{"dark", "light"} {
+		if !ValidThemeArg(value) {
+			t.Errorf("ValidThemeArg(%q) = false, want true for migration compatibility", value)
+		}
+		if validThemeMode(value) {
+			t.Errorf("validThemeMode(%q) = true, retired values must stay out of the picker", value)
+		}
+	}
+}
+
 // applyTheme keeps system canvas-native and mirrors named palettes when their
 // intended surface polarity differs from the terminal.
 func TestApplyThemeResolution(t *testing.T) {
@@ -178,6 +190,27 @@ func TestApplyThemeResolution(t *testing.T) {
 		gotR, gotG, gotB, _ := zeroTheme.inkColor.RGBA()
 		if gotR != wantR || gotG != wantG || gotB != wantB {
 			t.Errorf("applyTheme(%q,%v): zeroTheme.inkColor not the %q ink", c.mode, c.darkBg, c.want)
+		}
+	}
+}
+
+func TestInvertedPalettePreservesSemanticHues(t *testing.T) {
+	inverted := invertedPalette(nordPalette)
+	for _, test := range []struct {
+		name     string
+		value    string
+		dominant int
+	}{
+		{"success", inverted.green, 1},
+		{"error", inverted.red, 0},
+	} {
+		r, g, b, _ := lipgloss.Color(test.value).RGBA()
+		channels := []uint32{r, g, b}
+		for index, channel := range channels {
+			if index != test.dominant && channels[test.dominant] <= channel {
+				t.Errorf("inverted %s color %s lost its semantic hue", test.name, test.value)
+				break
+			}
 		}
 	}
 }
@@ -251,8 +284,8 @@ func TestHandleThemeCommand(t *testing.T) {
 	if m.themeMode != themeMode("dracula") {
 		t.Fatalf("after /theme dracula, mode = %q", m.themeMode)
 	}
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, draculaPalette.ink) {
-		t.Error("/theme dracula did not apply the palette")
+	if got, want := colorHex(t, zeroTheme.inkColor), draculaPalette.ink; got != want {
+		t.Errorf("/theme dracula ink = %s, want %s", got, want)
 	}
 	if !strings.Contains(out, "dracula") {
 		t.Errorf("output should confirm dracula: %q", out)
@@ -315,13 +348,13 @@ func TestNewThemePresetsResolveThroughCLIAndEnvPath(t *testing.T) {
 	}
 
 	applyTheme(themeMode("dune"), true)
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, invertPaletteColor(dunePalette.ink)) {
-		t.Error("applying \"dune\" did not adapt the dune palette to a dark terminal")
+	if got, want := colorHex(t, zeroTheme.inkColor), invertPaletteColor(dunePalette.ink); got != want {
+		t.Errorf("applying dune ink = %s, want %s", got, want)
 	}
 
 	applyTheme(themeMode("neon"), true)
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, neonPalette.ink) {
-		t.Error("applying \"neon\" did not swap zeroTheme to the neon palette")
+	if got, want := colorHex(t, zeroTheme.inkColor), neonPalette.ink; got != want {
+		t.Errorf("applying neon ink = %s, want %s", got, want)
 	}
 }
 
@@ -492,8 +525,8 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	}
 }
 
-func mustR(t *testing.T, hex string) uint32 {
+func colorHex(t *testing.T, value color.Color) string {
 	t.Helper()
-	r, _, _, _ := lipgloss.Color(hex).RGBA()
-	return r
+	r, g, b, _ := value.RGBA()
+	return fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
 }

@@ -176,8 +176,8 @@ func TestThemePickerCommitAppliesAndRecords(t *testing.T) {
 	if m.themeMode != themeMode("dracula") {
 		t.Fatalf("committed mode = %q, want dracula", m.themeMode)
 	}
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, draculaPalette.ink) {
-		t.Error("commit did not leave the dracula palette applied")
+	if got, want := colorHex(t, zeroTheme.inkColor), draculaPalette.ink; got != want {
+		t.Errorf("committed dracula ink = %s, want %s", got, want)
 	}
 	if m.transientNotice.text != "Theme: Dracula" {
 		t.Errorf("commit notice = %q, want Theme: Dracula", m.transientNotice.text)

@@ -110,7 +110,7 @@ func TestSidebarLineAtMouseHitsMemberRow(t *testing.T) {
 	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
 	// Sidebar starts at screen X = chatColumnWidth + 3 (the " │ " divider); the
 	// first member row is at sidebar line 1 → screen Y 1.
-	x := m.chatColumnWidth() + 3 + 2
+	x := m.width - sidebarWidth(m.width) + 2
 	hit, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 1))
 	if !ok || hit.sessionID != "sess-1" {
 		t.Fatalf("expected to hit member row (sess-1), got ok=%v hit=%+v", ok, hit)
@@ -145,7 +145,7 @@ func TestSidebarMemberClickDoesNotInterceptFullWidthChat(t *testing.T) {
 
 	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": session.SessionID})
 	m.sessionStore = store
-	x := m.chatColumnWidth() + 3 + 2
+	x := m.width - sidebarWidth(m.width) + 2
 	next, _, handled := m.handleTranscriptSelectionMouse(testMouseClick(tea.MouseLeft, x, 1))
 	if handled {
 		t.Fatal("an invisible rail coordinate must not be handled")

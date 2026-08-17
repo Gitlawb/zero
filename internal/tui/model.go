@@ -5016,12 +5016,13 @@ func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage)
 	// attachments too: launchPrompt clears the pending queues below, so /retry
 	// re-stages these to resend an identical vision/PDF-backed request rather than
 	// a degraded text-only one.
+	var attachments transcriptAttachmentSummary
 	if peer == nil {
 		m.lastPrompt = prompt
 		m.lastImages = m.pendingImages
 		m.lastImageLabels = m.pendingImageLabels
 		m.lastDocuments = m.pendingDocuments
-		attachments := transcriptAttachmentSummary{
+		attachments = transcriptAttachmentSummary{
 			images:    len(m.pendingImages),
 			documents: len(m.pendingDocuments),
 		}
@@ -5080,7 +5081,6 @@ func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage)
 			"content": prompt,
 		}
 		if peer == nil {
-			attachments := m.transcript[len(m.transcript)-1].attachments
 			if !attachments.empty() {
 				messagePayload["attachments"] = map[string]int{
 					"images":    attachments.images,

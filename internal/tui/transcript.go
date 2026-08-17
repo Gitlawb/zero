@@ -73,6 +73,11 @@ type transcriptAttachmentSummary struct {
 	documents int
 }
 
+const (
+	persistedAttachmentCountLimit = 64
+	attachmentSummaryVisibleItems = 4
+)
+
 func (summary transcriptAttachmentSummary) empty() bool {
 	return summary.images <= 0 && summary.documents <= 0
 }

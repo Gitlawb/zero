@@ -47,3 +47,16 @@ func TestHydrationPreservesSentAttachmentSummary(t *testing.T) {
 		t.Fatalf("hydrated attachment summary = %q", got)
 	}
 }
+
+func TestHydrationCapsMalformedAttachmentCounts(t *testing.T) {
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{
+		Type:    sessions.EventMessage,
+		Payload: json.RawMessage(`{"role":"user","content":"describe this","attachments":{"images":1000000000,"documents":1000000000}}`),
+	}})
+	if len(rows) != 1 || rows[0].attachments.images != persistedAttachmentCountLimit || rows[0].attachments.documents != persistedAttachmentCountLimit {
+		t.Fatalf("hydrated attachment counts = %#v, want each capped at %d", rows[0].attachments, persistedAttachmentCountLimit)
+	}
+	if got := renderUserAttachmentSummary(rows[0].attachments); got != "[Image #1] [Image #2] [Image #3] [Image #4] [Document #1] [Document #2] [Document #3] [Document #4] [+120 attachments]" {
+		t.Fatalf("capped attachment summary = %q", got)
+	}
+}
