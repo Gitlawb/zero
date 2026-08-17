@@ -1647,25 +1647,6 @@ func toolCardAlwaysExpands(name string) bool {
 	return false
 }
 
-// toolResultCanToggle reports whether the current live card actually has a
-// collapsed body to reveal (or an expanded body to fold). Keep it aligned with
-// renderToolResultCard so permanent diff cards are ordinary selectable text,
-// not misleading hoverable controls.
-func toolResultCanToggle(row transcriptRow, bodyCap int) bool {
-	name := toolRowName(row)
-	failed := row.status == tools.StatusError
-	if bodyCap <= 0 || toolCardAlwaysExpands(name) {
-		return false
-	}
-	if !failed && looksLikeRedundantConfirmation(row.detail) {
-		return false
-	}
-	if !failed && (isExploreTool(name) || isLocalControlTool(name)) {
-		return false
-	}
-	return collapsedToolFooter(row.detail) != ""
-}
-
 // collapsedToolFooter summarizes the hidden output for a collapsed tool card, or
 // "" when the output is short enough to render inline. Only output longer than
 // the live body cap (the noisy "… N more lines" case, e.g. a web-search dump)
