@@ -341,15 +341,15 @@ func writeCommand(t *testing.T, script commandScript) string {
 			// assertion fail is far more diagnosable than blocking until the
 			// timeout fires and reporting an unrelated error. Each iteration is
 			// about a second, since `ping -n 2` sleeps between its two echoes,
-			// so the ceiling is roughly 15s: far longer than any cold PowerShell
-			// start seen on a runner, and far shorter than
+			// so the ceiling is roughly 45s: enough for a heavily loaded Windows
+			// runner while remaining below the
 			// providerCommandTestBudget, so giving up surfaces a legible
 			// PID-file failure rather than a timeout that hides the real cause.
 			lines = append(lines,
 				":zeroWaitReady",
 				"if exist \""+readyFile+"\" goto zeroReady",
 				"set /a ZERO_READY_TRIES+=1",
-				"if %ZERO_READY_TRIES% GEQ 15 goto zeroReady",
+				"if %ZERO_READY_TRIES% GEQ 45 goto zeroReady",
 				"ping -n 2 127.0.0.1 >nul",
 				"goto zeroWaitReady",
 				":zeroReady",
