@@ -1247,7 +1247,9 @@ func TestEditProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T
 
 func assertAmbiguousConfigUnchanged(t *testing.T, path string, before []byte, err error, first, second string) {
 	t.Helper()
-	want := fmt.Sprintf("ambiguous persisted provider names %q and %q differ only by case; rename or remove one row in config.json", first, second)
+	// The message must name the repair command: this rejection reaches the user
+	// at config read time, where it blocks interactive startup entirely.
+	want := fmt.Sprintf("ambiguous persisted provider names %q and %q differ only by case; run `zero providers remove %s` (exact spelling) or rename one row in config.json", first, second, second)
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
 	}

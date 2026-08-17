@@ -36,7 +36,12 @@ func ValidatePersistedProviderNames(cfg FileConfig) error {
 			return fmt.Errorf("duplicate persisted provider name %q; remove one of the rows in config.json", name)
 		}
 		if ok {
-			return fmt.Errorf("ambiguous persisted provider names %q and %q differ only by case; rename or remove one row in config.json", previous, name)
+			// Name the repair command, not just the problem: this rejection is
+			// reached at config READ time, so a legacy duplicate blocks the
+			// interactive shell and the TUI outright. `zero providers remove`
+			// reads config.json directly instead of going through Resolve, so
+			// it still works while everything else refuses to start.
+			return fmt.Errorf("ambiguous persisted provider names %q and %q differ only by case; run `zero providers remove %s` (exact spelling) or rename one row in config.json", previous, name, name)
 		}
 		seen[folded] = name
 	}

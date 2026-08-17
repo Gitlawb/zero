@@ -106,8 +106,10 @@ func (m model) reloadProviderManagerRows() (model, tea.Cmd) {
 	m.providerWizard.manageRows = rows
 	m.providerWizard.manageCursor = clampInt(m.providerWizard.manageCursor, 0, maxInt(0, len(rows)-1))
 	// The session's live provider is the truth the user cares about (config's
-	// activeProvider follows it on every switch).
-	m.providerWizard.manageActiveName = m.providerName
+	// activeProvider follows it on every switch). Resolve it to the row it
+	// refers to once, here, so the render's exact comparison and the sync paths
+	// below share one value instead of each re-deciding what "active" means.
+	m.providerWizard.manageActiveName = sessionRowName(m.providerName, m.savedProviders)
 	m.providerWizard.manageCredGen++
 	return m, providerManagerCredsCmd(m.providerWizard.manageCredGen, rows, m.userConfigPath)
 }
@@ -390,11 +392,16 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		}
 	}
 
+	// Decide whether the deleted row is the one this session runs on BEFORE the
+	// list shrinks: sessionRowName counts identity-carrying rows, and removing
+	// one of them changes that count.
+	deletedLiveRow := sessionRefersToPersistedRow(m.providerName, name, m.savedProviders)
+
 	// Surgical removal — see saveManagerEdit for why the raw cfg.Providers list
 	// must not replace the resolved/filtered savedProviders wholesale.
 	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
-	if samePersistedProviderName(m.providerName, name) {
+	if deletedLiveRow {
 		notes = append(notes, "This session keeps running on it until you switch.")
 	} else if activeAfter != "" && !samePersistedProviderName(activeAfter, name) {
 		notes = append(notes, "Active provider: "+activeAfter+".")
@@ -444,6 +451,54 @@ func providerDeleteKeyNote(configPath string, name string) string {
 
 func samePersistedProviderName(left, right string) bool {
 	return strings.TrimSpace(left) == strings.TrimSpace(right)
+}
+
+// sessionRowName resolves the LIVE session's provider spelling to the persisted
+// row it actually refers to. This answers a third question, distinct from the
+// two identity rules config defines: not "which stored secret is this?"
+// (config.SameProviderIdentity) and not "which row does this mutator target?"
+// (exact trimmed equality), but "is this the provider I am running on?".
+//
+// An exact spelling always wins, so sibling rows that differ only by case
+// ("work" and "WORK") stay distinct — a session on "work" must never follow an
+// edit or delete aimed at "WORK", and "s"/"ſ" must not re-merge. Only when the
+// credential identity is carried by exactly ONE row is the session's spelling
+// resolved to that row's own, which is what lines a session launched with
+// ZERO_PROVIDER=openai (or resumed session metadata, or a `zero providers use
+// openai` run in another terminal) up with the sole saved "OpenAI" row.
+//
+// When nothing resolves — env-derived providers, ambiguous duplicate identities
+// — the live spelling comes back unchanged, so every comparison built on this
+// degrades to exact equality rather than guessing.
+func sessionRowName(live string, providers []config.ProviderProfile) string {
+	live = strings.TrimSpace(live)
+	if live == "" {
+		return ""
+	}
+	match := ""
+	matches := 0
+	for _, provider := range providers {
+		name := strings.TrimSpace(provider.Name)
+		if name == live {
+			return name
+		}
+		if config.SameProviderIdentity(name, live) {
+			match = name
+			matches++
+		}
+	}
+	if matches == 1 {
+		return match
+	}
+	return live
+}
+
+// sessionRefersToPersistedRow reports whether the live session runs on row.
+// See sessionRowName for why this is neither blind SameProviderIdentity nor
+// plain exact equality.
+func sessionRefersToPersistedRow(live string, row string, providers []config.ProviderProfile) bool {
+	resolved := sessionRowName(live, providers)
+	return resolved != "" && resolved == strings.TrimSpace(row)
 }
 
 // providerManagerCleanupMsg reports the off-thread half of a delete: the
@@ -669,7 +724,9 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		captured := config.SecureProviderProfile(config.ProviderProfile{Name: exactName, APIKey: key}, m.userConfigPath)
 		// On a store failure SecureProviderProfile keeps the inline key, which
 		// EditProvider then persists (the startup migration re-captures later) —
-		// the same fail-soft posture as every other capture path.
+		// the same fail-soft posture as every other capture path. A failed
+		// EditProvider below does not roll the capture back either; atomic
+		// capture+publish for this path is #894, not this PR.
 		edit.APIKey = captured.APIKey
 		edit.APIKeyStored = captured.APIKeyStored
 	}
@@ -677,6 +734,11 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		wizard.err = err.Error()
 		return m, nil
 	}
+	// Decide whether the edited row is the live one BEFORE the list is rewritten:
+	// a rename changes which rows carry the session's credential identity, and
+	// sessionRowName's sole-row resolution depends on that count.
+	editedLiveRow := sessionRefersToPersistedRow(m.providerName, oldName, m.savedProviders)
+
 	// Mirror the edit into the in-memory list surgically. savedProviders was
 	// seeded from the RESOLVED (project-config layered) and usability-FILTERED
 	// provider set — substituting the raw user-file list here would drop
@@ -685,7 +747,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	// Keep the live session's identity in sync with a rename of the provider it
 	// is running on: the exported ZERO_PROVIDER must resolve for spawned children.
-	if samePersistedProviderName(m.providerName, oldName) {
+	if editedLiveRow {
 		m.providerName = newName
 		m.providerProfile.Name = newName
 		config.SetActiveProviderEnv(newName)
@@ -693,7 +755,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	wizard.step = providerWizardStepManage
 	next, cmd := m.reloadProviderManagerRows()
-	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next.providerName, newName)
+	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next.providerName, newName, next.savedProviders)
 	return next, cmd
 }
 
@@ -701,12 +763,36 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 // this session is running on — endpoint/model/key changes only apply to the
 // built client after a switch (Enter on the row re-activates and rebuilds).
 // liveName is the session's provider AFTER any rename sync, so a single
-// comparison against the edited profile's final name suffices.
-func providerEditRestartNote(liveName string, editedName string) string {
-	if samePersistedProviderName(liveName, editedName) {
+// comparison against the edited profile's final name suffices — routed through
+// sessionRefersToPersistedRow so a sole row the session spells differently
+// (live "openai", row "OpenAI") still gets the note, while case-variant
+// siblings do not.
+func providerEditRestartNote(liveName string, editedName string, providers []config.ProviderProfile) string {
+	if sessionRefersToPersistedRow(liveName, editedName, providers) {
 		return " Press Enter on it to apply the changes to this session."
 	}
 	return ""
+}
+
+// syncSavedProviderModel mirrors a model that was just written to config.json
+// into the in-memory saved list — the single reconciliation point every path
+// that persists a model must call.
+//
+// The provider manager builds its rows from savedProviders (see
+// reloadProviderManagerRows) and renders each row's model from that list, as do
+// the picker's saved-provider model sections. A switch that updates the live
+// client and config.json but not this list leaves those surfaces showing the
+// previous model until the TUI restarts and re-resolves providers from config
+// — the same "disk says X, session says Y" drift the wizard's key removal
+// fixed with applyProviderKeyRemovalToSession.
+//
+// exactName must be the PERSISTED row's spelling — the one SetProviderModel was
+// handed, not the session's — because savedProviders carries row spellings.
+func syncSavedProviderModel(saved []config.ProviderProfile, exactName string, model string) []config.ProviderProfile {
+	if strings.TrimSpace(exactName) == "" || strings.TrimSpace(model) == "" {
+		return saved
+	}
+	return applySavedProviderEdit(saved, exactName, config.ProviderEdit{Name: exactName, Model: model})
 }
 
 // applySavedProviderEdit mirrors a persisted config.EditProvider into the

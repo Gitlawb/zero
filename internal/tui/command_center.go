@@ -449,7 +449,12 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if err != nil {
 		return m, "Model\n" + err.Error()
 	}
-	persisted, persistErr := m.persistSelectedModel(nextProfile)
+	persisted, persistedName, persistErr := m.persistSelectedModel(nextProfile)
+	if persisted {
+		// Same reconciliation switchProviderModel does: the manager and picker
+		// read models from savedProviders, not from the live profile.
+		m.savedProviders = syncSavedProviderModel(m.savedProviders, persistedName, nextProfile.Model)
+	}
 
 	m.providerProfile = nextProfile
 	m.provider = nextProvider
@@ -600,6 +605,10 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 				persistNote = "\nNote: the switch applies to this session, but config.json was not updated: " + redaction.RedactString(err.Error(), redaction.Options{})
 			} else if _, err := config.SetProviderModel(m.userConfigPath, cfg.ActiveProvider, target.Model); err != nil {
 				persistNote = "\nNote: the active provider was saved, but its model was not: " + redaction.RedactString(err.Error(), redaction.Options{})
+			} else {
+				// Reconcile the in-memory list the manager and picker read from,
+				// or those surfaces keep showing the previous model until restart.
+				m.savedProviders = syncSavedProviderModel(m.savedProviders, cfg.ActiveProvider, target.Model)
 			}
 		}
 	}
@@ -712,38 +721,42 @@ func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
 	return config.ProviderProfile{}, false
 }
 
-func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error) {
+// persistSelectedModel writes profile's model to its config.json row and
+// returns the EXACT row spelling it wrote to, so the caller can mirror the same
+// change into savedProviders with syncSavedProviderModel rather than re-deriving
+// the row from the session's spelling.
+func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, string, error) {
 	path := strings.TrimSpace(m.userConfigPath)
 	if path == "" {
-		return false, nil
+		return false, "", nil
 	}
 	name := strings.TrimSpace(profile.Name)
 	if name == "" {
-		return false, nil
+		return false, "", nil
 	}
 	model := strings.TrimSpace(profile.Model)
 	if model == "" {
-		return false, nil
+		return false, "", nil
 	}
 	persisted, err := config.ProviderPersisted(path, name)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if !persisted {
 		// Env-derived providers have no config.json row to update.
-		return false, nil
+		return false, "", nil
 	}
 	// ProviderPersisted matches credential identity; SetProviderModel matches
 	// the row exactly. Resolve the session's spelling to the row's own before
 	// writing, or a case difference makes this a silent no-op.
 	exactName, err := config.ResolvePersistedProviderName(path, name)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if _, err := config.SetProviderModel(path, exactName, model); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return true, nil
+	return true, exactName, nil
 }
 
 type modelSwitchTarget struct {

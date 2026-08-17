@@ -749,7 +749,13 @@ func TestProviderManagerKeepsDistinctUnicodeLiveProviderOnOtherRowMutation(t *te
 	})
 }
 
-func TestProviderManagerCaseVariantEditDoesNotChangeLiveSibling(t *testing.T) {
+// A session can spell its provider differently from the row it runs on —
+// ZERO_PROVIDER=work against a saved "WORK", resumed session metadata, or a
+// `zero providers use work` from another terminal. When that row is the SOLE
+// carrier of the credential identity there is no other row the session could
+// mean, so the manager must mark it active and carry a rename onto the live
+// session; otherwise ZERO_PROVIDER keeps exporting a name no row answers to.
+func TestProviderManagerSoleRowCaseVariantTracksLiveSession(t *testing.T) {
 	t.Setenv(config.ActiveProviderEnv, "work")
 	profile := config.ProviderProfile{
 		Name:         "WORK",
@@ -772,18 +778,25 @@ func TestProviderManagerCaseVariantEditDoesNotChangeLiveSibling(t *testing.T) {
 		UserConfigPath:  path,
 	})
 	m, _ = m.openProviderManager()
+
+	// The row the session actually runs on must render as active even though
+	// the session spells it differently.
+	if got := m.providerWizard.manageActiveName; got != "WORK" {
+		t.Fatalf("manageActiveName = %q, want the sole row's spelling WORK", got)
+	}
+
 	m.providerWizard.beginProviderEdit(profile)
 	m.providerWizard.editDraft.Name = "OFFICE"
 	next, _ := m.saveManagerEdit()
 
-	if next.providerName != "work" || next.providerProfile.Name != "work" {
-		t.Fatalf("editing WORK rewrote live work identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
-	}
-	if got := os.Getenv(config.ActiveProviderEnv); got != "work" {
-		t.Fatalf("%s = %q, want live work unchanged", config.ActiveProviderEnv, got)
-	}
 	if next.providerWizard == nil || next.providerWizard.err != "" {
-		t.Fatalf("case-variant sibling edit failed: %+v", next.providerWizard)
+		t.Fatalf("sole-row case-variant edit failed: %+v", next.providerWizard)
+	}
+	if next.providerName != "OFFICE" || next.providerProfile.Name != "OFFICE" {
+		t.Fatalf("rename did not follow the live session: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "OFFICE" {
+		t.Fatalf("%s = %q, want the renamed row so spawned children resolve it", config.ActiveProviderEnv, got)
 	}
 	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "OFFICE" {
 		t.Fatalf("wrong in-memory edit target: %+v", next.savedProviders)
@@ -791,6 +804,50 @@ func TestProviderManagerCaseVariantEditDoesNotChangeLiveSibling(t *testing.T) {
 	cfg := readManagerConfig(t, path)
 	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "OFFICE" {
 		t.Fatalf("wrong persisted edit target: %+v", cfg.Providers)
+	}
+}
+
+// The sole-row resolution above must NOT reach case-variant siblings: with both
+// "work" and "WORK" persisted, a session on "work" is one specific row, and a
+// delete aimed at the other must leave it alone. (Edit cannot be exercised here
+// — EditProvider validates the duplicate-identity config before mutating.)
+func TestProviderManagerCaseVariantDeleteDoesNotChangeLiveSibling(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	t.Setenv(config.ActiveProviderEnv, "work")
+	profiles := []config.ProviderProfile{
+		{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "work-model"},
+		{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://other.example/v1", Model: "other-model"},
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"activeProvider":"work","providers":[{"name":"work"},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: profiles[0],
+		SavedProviders:  profiles,
+		UserConfigPath:  path,
+	})
+	m, _ = m.openProviderManager()
+	// Exact spelling wins, so the live row is "work" and not its sibling.
+	if got := m.providerWizard.manageActiveName; got != "work" {
+		t.Fatalf("manageActiveName = %q, want the exact live row work", got)
+	}
+
+	m.providerWizard.manageCursor = 1
+	next, _ := m.deleteManagerSelection()
+
+	if next.providerName != "work" || next.providerProfile.Name != "work" {
+		t.Fatalf("deleting WORK rewrote live work identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "work" {
+		t.Fatalf("%s = %q, want live work unchanged", config.ActiveProviderEnv, got)
+	}
+	if status := next.providerWizard.manageStatus; strings.Contains(status, "keeps running on it until you switch") {
+		t.Fatalf("delete of the sibling row claimed the live session runs on it: %q", status)
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "work" {
+		t.Fatalf("wrong in-memory removal target: %+v", next.savedProviders)
 	}
 }
 

@@ -1274,6 +1274,8 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		// Capture flip: move the freshly entered key into the encrypted credential
 		// store before persisting, so config.json never holds the cleartext. The
 		// provider was already built above from runtimeProfile, which has the key.
+		// Fail-soft capture with no rollback if the config write below fails —
+		// see the note in cli/provider_setup.go; atomicity is #894.
 		secret := profile.APIKey
 		if !preserveExistingCredentialReference {
 			profile = config.SecureProviderProfile(profile, m.userConfigPath)

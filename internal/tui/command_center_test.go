@@ -30,12 +30,17 @@ func TestModelPersistenceUsesResolvedPersistedSpelling(t *testing.T) {
 		configPath := newConfig(t)
 		m := newModel(context.Background(), Options{UserConfigPath: configPath})
 		// The session spelling "openai" addresses the persisted "OpenAI" row.
-		persisted, err := m.persistSelectedModel(config.ProviderProfile{Name: "openai", Model: "gpt-5.5"})
+		persisted, persistedName, err := m.persistSelectedModel(config.ProviderProfile{Name: "openai", Model: "gpt-5.5"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !persisted {
 			t.Fatal("persistSelectedModel reported no write for a persisted case variant")
+		}
+		// The returned spelling is what the caller mirrors into savedProviders,
+		// so it has to be the row's own — not the session's.
+		if persistedName != "OpenAI" {
+			t.Fatalf("persisted row = %q, want the row's spelling OpenAI", persistedName)
 		}
 		cfg := readTUIConfigFixture(t, configPath)
 		if cfg.Providers[0].Model != "gpt-5.5" {
@@ -71,6 +76,74 @@ func TestModelPersistenceUsesResolvedPersistedSpelling(t *testing.T) {
 		}
 		if cfg.Providers[0].Model != "gpt-5.5" {
 			t.Fatalf("model = %q, want gpt-5.5 persisted onto the OpenAI row", cfg.Providers[0].Model)
+		}
+	})
+}
+
+// The provider manager's rows and the picker's model sections are built from
+// savedProviders, not from the live profile: a switch that updates the client
+// and config.json without mirroring the list leaves those surfaces showing the
+// previous model until the TUI restarts and re-resolves providers from config.
+func TestModelSwitchSyncsSavedProviders(t *testing.T) {
+	newSession := func(t *testing.T) model {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"activeProvider":"OpenAI","providers":[{"name":"OpenAI","catalogID":"openai","model":"gpt-5.1"},{"name":"ollama","catalogID":"ollama","provider_kind":"openai-compatible","baseURL":"http://localhost:11434/v1","model":"m1"}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		saved := []config.ProviderProfile{
+			{Name: "OpenAI", CatalogID: "openai", Model: "gpt-5.1", APIKey: "sk-test"},
+			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "m1"},
+		}
+		return newModel(context.Background(), Options{
+			UserConfigPath:  path,
+			ProviderName:    "ollama",
+			ModelName:       "m1",
+			Provider:        &fakeProvider{},
+			ProviderProfile: saved[1],
+			SavedProviders:  saved,
+			NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+				return &fakeProvider{}, nil
+			},
+		})
+	}
+
+	t.Run("switchProviderModel", func(t *testing.T) {
+		m := newSession(t)
+		// "openai" is the picker row's owner spelling, not the persisted one:
+		// the mirror must land on the row SetProviderModel actually wrote.
+		next, status, ok, _ := m.switchProviderModel("openai", "gpt-5.5")
+		if !ok {
+			t.Fatalf("switch failed: %s", status)
+		}
+		if next.savedProviders[0].Model != "gpt-5.5" {
+			t.Fatalf("savedProviders model = %q, want the switched gpt-5.5 without a restart", next.savedProviders[0].Model)
+		}
+		if next.savedProviders[1].Model != "m1" {
+			t.Fatalf("switch touched an unrelated row: %+v", next.savedProviders[1])
+		}
+		// The manager renders each row's model straight off this list.
+		if meta := providerManagerRowMeta(next.savedProviders[0]); !strings.Contains(meta, "gpt-5.5") {
+			t.Fatalf("manager row meta = %q, want the switched model", meta)
+		}
+	})
+
+	t.Run("persistSelectedModel mirror", func(t *testing.T) {
+		m := newSession(t)
+		profile := config.ProviderProfile{Name: "openai", Model: "gpt-5.5"}
+		persisted, persistedName, err := m.persistSelectedModel(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !persisted {
+			t.Fatal("expected the persisted row to be written")
+		}
+		saved := syncSavedProviderModel(m.savedProviders, persistedName, profile.Model)
+		if saved[0].Model != "gpt-5.5" {
+			t.Fatalf("savedProviders model = %q, want gpt-5.5", saved[0].Model)
+		}
+		if saved[1].Model != "m1" {
+			t.Fatalf("mirror touched an unrelated row: %+v", saved[1])
 		}
 	})
 }
