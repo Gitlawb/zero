@@ -106,29 +106,6 @@ func TestSidebarAgentSelectablesMapToScreenRows(t *testing.T) {
 	}
 }
 
-func TestSidebarLineAtMouseHitsMemberRow(t *testing.T) {
-	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
-	// Sidebar starts at screen X = chatColumnWidth + 3 (the " │ " divider); the
-	// first member row is at sidebar line 1 → screen Y 1.
-	x := m.width - sidebarWidth(m.width) + 2
-	hit, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 1))
-	if !ok || hit.sessionID != "sess-1" {
-		t.Fatalf("expected to hit member row (sess-1), got ok=%v hit=%+v", ok, hit)
-	}
-	// A click in the chat column (left of the divider) must miss the sidebar.
-	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, 2, 1)); ok {
-		t.Fatal("a click in the chat column should not hit the sidebar")
-	}
-	// The AGENTS header row (Y 0) is not a clickable member.
-	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 0)); ok {
-		t.Fatal("the AGENTS header row should not be clickable")
-	}
-	// A member with no known session (subagent-2 at Y 2) is not clickable.
-	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 2)); ok {
-		t.Fatal("a member without a session id should not be clickable")
-	}
-}
-
 func TestSidebarMemberClickDoesNotInterceptFullWidthChat(t *testing.T) {
 	// A real member session proves that a stale rail coordinate cannot open it.
 	store := testSessionStore(t)

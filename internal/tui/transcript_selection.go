@@ -555,7 +555,7 @@ func (m model) renderExploreResultGroup(rows []transcriptRow, width int, rc rowC
 		body = append(body, exploreCardLine(toolRowName(row), rc.hints[key], rc.args[key], row.detail, width, opts, marker))
 	}
 	head := zeroTheme.green.Bold(true).Render("Explored")
-	return toolCard(head, zeroTheme.green.Render("•"), body, zeroTheme.faint.Render("▸ details"), zeroTheme.line, width)
+	return toolCard(head, zeroTheme.green.Render("•"), body, "", zeroTheme.line, width)
 }
 
 // transcriptBodyItemsFromRows builds body items from an arbitrary set of
