@@ -1,11 +1,12 @@
 package tools
 
 import (
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 const (
@@ -499,8 +500,7 @@ func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, conte
 	if err := root.MkdirAll(filepath.Dir(target.relative), 0o755); err != nil {
 		return fmt.Errorf("creating parent directory for %s: %w", target.relative, err)
 	}
-	tempName := fmt.Sprintf(".zero-patch-%d", time.Now().UnixNano())
-	temp, err := root.OpenFile(tempName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode.Perm())
+	tempName, temp, err := createStructuredPatchTemp(root, mode.Perm())
 	if err != nil {
 		return fmt.Errorf("writing %s: %w", target.relative, err)
 	}
@@ -520,6 +520,24 @@ func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, conte
 		return fmt.Errorf("writing %s: %w", target.relative, err)
 	}
 	return nil
+}
+
+func createStructuredPatchTemp(root *os.Root, mode os.FileMode) (string, *os.File, error) {
+	for range 16 {
+		var suffix [12]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", nil, err
+		}
+		name := fmt.Sprintf(".zero-patch-%x", suffix)
+		file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+		if err == nil {
+			return name, file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", nil, err
+		}
+	}
+	return "", nil, fmt.Errorf("creating unique patch temporary file: too many collisions")
 }
 
 func recordStructuredPatchFile(tracker *FileTracker, absolute string, created bool) {
