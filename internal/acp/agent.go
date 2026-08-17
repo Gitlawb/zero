@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 
@@ -196,7 +197,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// ACP session cwd is immutable. Loading history under a different root
 	// would give a conversation from one workspace access to another
 	// workspace's configuration, files, and tools.
-	if root != persistedRoot {
+	if !sameWorkspace(root, persistedRoot) {
 		return nil, RPCError(codeInvalidParams, "session cwd does not match its persisted workspace")
 	}
 	// Load history BEFORE publishing the session so no concurrent prompt observes
@@ -258,7 +259,7 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 	for _, item := range items {
 		if cwd != "" {
 			itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)
-			if err != nil || itemRoot != cwd {
+			if err != nil || !sameWorkspace(itemRoot, cwd) {
 				continue
 			}
 		}
@@ -874,4 +875,38 @@ func (s *acpSession) snapshotHistory() []turnRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]turnRecord(nil), s.history...)
+}
+
+// sameWorkspace reports whether two resolved roots name the same directory.
+//
+// STRING EQUALITY IS NOT DIRECTORY IDENTITY. ResolveWorkspaceRoot is abs plus
+// filepath.Clean plus a stat: it does not fold case and does not resolve
+// junctions, so one directory reached by two spellings produces two different
+// roots. A session persisted from the TUI was then unresumable from an editor
+// holding a different spelling of the same project folder, and session/list
+// filtered by the other spelling returned nothing — not a failed resume but an
+// invisible one, on exactly the case this feature exists for.
+//
+// filepath.EvalSymlinks is NOT the fix on Windows: it normalises a drive letter
+// but returns a junction path unchanged, so the alias survives it. Junctions need
+// no privilege, so this is ordinary rather than exotic. os.SameFile compares the
+// filesystem's own identity for the two directories, which is the question being
+// asked.
+//
+// The string comparison stays as the fast path, and a stat failure falls back to
+// it rather than widening the match — this gate refuses access to another
+// workspace's files and configuration, so an unanswerable comparison denies.
+func sameWorkspace(left, right string) bool {
+	if left == right {
+		return true
+	}
+	leftInfo, err := os.Stat(left)
+	if err != nil {
+		return false
+	}
+	rightInfo, err := os.Stat(right)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(leftInfo, rightInfo)
 }
