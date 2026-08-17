@@ -28,6 +28,9 @@ func TestRenderPlanUpdateCardLeavesMalformedOutputToGenericCard(t *testing.T) {
 	if _, ok := renderPlanUpdateCard("unexpected error text", 80); ok {
 		t.Error("malformed plan output should fall back to the generic tool card")
 	}
+	if _, ok := renderPlanUpdateCard("1. [pending] disguised diagnostic", 80); ok {
+		t.Error("numbered status lines without a Current Plan header must fall back to the generic card")
+	}
 }
 
 func TestUpdatePlanResultRendersChecklistInTranscript(t *testing.T) {

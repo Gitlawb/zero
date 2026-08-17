@@ -125,6 +125,7 @@ func Run(ctx context.Context, options Options) int {
 	}
 	if clearErr != nil {
 		fmt.Fprintln(os.Stderr, "zero: terminal companion cleanup error:", clearErr)
+		return 1
 	}
 	return 0
 }

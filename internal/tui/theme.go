@@ -366,18 +366,15 @@ func buildSystemThemeForTerminal(terminalDark bool) tuiTheme {
 	// Local surfaces use quiet truecolor tints. They do not alter the terminal
 	// canvas, but remain legible beside syntax colors on terminals that support
 	// them. The dark diff values are intentionally close to the canvas.
-	selectionBg := lipgloss.Color("#2b2f2d")
-	addBg := lipgloss.Color("#212922")
-	delBg := lipgloss.Color("#3c170f")
-	addBgWord := addBg
-	delBgWord := delBg
+	surfaces := darkSystemSurfaces
 	if !terminalDark {
-		selectionBg = lipgloss.Color("#e7e9e7")
-		addBg = lipgloss.Color("#dafbe1")
-		delBg = lipgloss.Color("#ffebe9")
-		addBgWord = lipgloss.Color("#aceebb")
-		delBgWord = lipgloss.Color("#ffcecb")
+		surfaces = lightSystemSurfaces
 	}
+	selectionBg := lipgloss.Color(surfaces.selection)
+	addBg := lipgloss.Color(surfaces.add)
+	delBg := lipgloss.Color(surfaces.del)
+	addBgWord := lipgloss.Color(surfaces.addWord)
+	delBgWord := lipgloss.Color(surfaces.delWord)
 	noColor := lipgloss.NoColor{}
 	accent := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
 	green := lipgloss.NewStyle().Foreground(greenColor)

@@ -23,7 +23,14 @@ var planUpdateLinePattern = regexp.MustCompile(`^\s*\d+\.\s+\[([^\]]+)\]\s*(.+?)
 func parsePlanUpdateItems(detail string) ([]planUpdateItem, bool) {
 	lines := strings.Split(strings.ReplaceAll(detail, "\r\n", "\n"), "\n")
 	items := make([]planUpdateItem, 0, len(lines))
+	foundHeader := false
 	for _, line := range lines {
+		if !foundHeader {
+			if strings.TrimSpace(line) == "Current Plan:" {
+				foundHeader = true
+			}
+			continue
+		}
 		if match := planUpdateLinePattern.FindStringSubmatch(line); len(match) == 3 {
 			items = append(items, planUpdateItem{
 				status:  strings.TrimSpace(match[1]),
@@ -39,7 +46,7 @@ func parsePlanUpdateItems(detail string) ([]planUpdateItem, bool) {
 			items[len(items)-1].notes = strings.TrimSpace(strings.TrimPrefix(trimmed, "Notes:"))
 		}
 	}
-	return items, len(items) > 0
+	return items, foundHeader && len(items) > 0
 }
 
 // renderPlanUpdateCard mirrors the transcript-first plan layout: a quiet

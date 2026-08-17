@@ -117,7 +117,7 @@ func TestThemeArgSkipsPicker(t *testing.T) {
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.picker != nil {
-		t.Fatalf("explicit /theme dark must not open a picker, got %#v", m.picker)
+		t.Fatalf("explicit /theme dracula must not open a picker, got %#v", m.picker)
 	}
 	if m.themeMode != themeMode("dracula") {
 		t.Fatalf("after /theme dracula, mode = %q", m.themeMode)

@@ -55,6 +55,7 @@ type structuredPatchChange struct {
 	to     structuredPatchTarget
 	before string
 	after  string
+	mode   os.FileMode
 }
 
 func isStructuredPatch(patch string) bool {
@@ -285,7 +286,7 @@ func planStructuredPatch(root string, operations []structuredPatchOperation, tra
 			seen[target.absolute] = struct{}{}
 		}
 
-		change := structuredPatchChange{kind: operation.kind, from: from, to: to}
+		change := structuredPatchChange{kind: operation.kind, from: from, to: to, mode: 0o644}
 		switch operation.kind {
 		case structuredPatchAdd:
 			if _, err := os.Lstat(to.absolute); err == nil {
@@ -295,6 +296,11 @@ func planStructuredPatch(root string, operations []structuredPatchOperation, tra
 			}
 			change.after = operation.contents
 		case structuredPatchDelete, structuredPatchUpdate:
+			info, err := os.Stat(from.absolute)
+			if err != nil {
+				return nil, fmt.Errorf("stating %s: %w", from.relative, err)
+			}
+			change.mode = info.Mode()
 			content, err := os.ReadFile(from.absolute)
 			if err != nil {
 				return nil, fmt.Errorf("reading %s: %w", from.relative, err)
@@ -422,43 +428,101 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 }
 
 func applyStructuredPatchChanges(root string, changes []structuredPatchChange) error {
+	applied := make([]structuredPatchChange, 0, len(changes))
 	for _, change := range changes {
-		for _, target := range []structuredPatchTarget{change.from, change.to} {
-			if err := recheckWorkspaceWriteTarget(root, target.requested); err != nil {
-				return err
+		if err := applyStructuredPatchChange(root, change); err != nil {
+			if rollbackErr := rollbackStructuredPatchChanges(root, append(applied, change)); rollbackErr != nil {
+				return fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
 			}
+			return err
 		}
-		switch change.kind {
-		case structuredPatchDelete:
+		applied = append(applied, change)
+	}
+	return nil
+}
+
+func applyStructuredPatchChange(root string, change structuredPatchChange) error {
+	for _, target := range []structuredPatchTarget{change.from, change.to} {
+		if err := recheckWorkspaceWriteTarget(root, target.requested); err != nil {
+			return err
+		}
+	}
+	switch change.kind {
+	case structuredPatchDelete:
+		if err := os.Remove(change.from.absolute); err != nil {
+			return fmt.Errorf("deleting %s: %w", change.from.relative, err)
+		}
+	case structuredPatchAdd:
+		if err := writeStructuredPatchFile(root, change.to, change.after, change.mode); err != nil {
+			return err
+		}
+	case structuredPatchUpdate:
+		if err := writeStructuredPatchFile(root, change.to, change.after, change.mode); err != nil {
+			return err
+		}
+		if change.from.absolute != change.to.absolute {
 			if err := os.Remove(change.from.absolute); err != nil {
-				return fmt.Errorf("deleting %s: %w", change.from.relative, err)
-			}
-		case structuredPatchAdd:
-			if err := writeStructuredPatchFile(root, change.to, change.after); err != nil {
-				return err
-			}
-		case structuredPatchUpdate:
-			if err := writeStructuredPatchFile(root, change.to, change.after); err != nil {
-				return err
-			}
-			if change.from.absolute != change.to.absolute {
-				if err := os.Remove(change.from.absolute); err != nil {
-					return fmt.Errorf("removing moved source %s: %w", change.from.relative, err)
-				}
+				return fmt.Errorf("removing moved source %s: %w", change.from.relative, err)
 			}
 		}
 	}
 	return nil
 }
 
-func writeStructuredPatchFile(root string, target structuredPatchTarget, content string) error {
+func rollbackStructuredPatchChanges(root string, changes []structuredPatchChange) error {
+	for index := len(changes) - 1; index >= 0; index-- {
+		change := changes[index]
+		switch change.kind {
+		case structuredPatchAdd:
+			if err := os.Remove(change.to.absolute); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing created %s: %w", change.to.relative, err)
+			}
+		case structuredPatchDelete:
+			if err := writeStructuredPatchFile(root, change.from, change.before, change.mode); err != nil {
+				return fmt.Errorf("restoring %s: %w", change.from.relative, err)
+			}
+		case structuredPatchUpdate:
+			if change.from.absolute != change.to.absolute {
+				if err := os.Remove(change.to.absolute); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("removing moved destination %s: %w", change.to.relative, err)
+				}
+			}
+			if err := writeStructuredPatchFile(root, change.from, change.before, change.mode); err != nil {
+				return fmt.Errorf("restoring %s: %w", change.from.relative, err)
+			}
+		}
+	}
+	return nil
+}
+
+func writeStructuredPatchFile(root string, target structuredPatchTarget, content string, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(target.absolute), 0o755); err != nil {
 		return fmt.Errorf("creating parent directory for %s: %w", target.relative, err)
 	}
 	if err := recheckWorkspaceWriteTarget(root, target.requested); err != nil {
 		return err
 	}
-	if err := os.WriteFile(target.absolute, []byte(content), 0o644); err != nil {
+	temp, err := os.CreateTemp(filepath.Dir(target.absolute), ".zero-patch-*")
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	tempPath := temp.Name()
+	defer func() { _ = os.Remove(tempPath) }()
+	if _, err := temp.WriteString(content); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	if err := temp.Chmod(mode.Perm()); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	if err := recheckWorkspaceWriteTarget(root, target.requested); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, target.absolute); err != nil {
 		return fmt.Errorf("writing %s: %w", target.relative, err)
 	}
 	return nil

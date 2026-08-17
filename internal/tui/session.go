@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -904,7 +905,7 @@ func attachmentSummaryFromPayload(payload map[string]any) transcriptAttachmentSu
 
 func payloadNonNegativeInt(payload map[string]any, key string) int {
 	value, ok := payload[key].(float64)
-	if !ok || value <= 0 {
+	if !ok || value <= 0 || value != math.Trunc(value) {
 		return 0
 	}
 	if value > persistedAttachmentCountLimit {

@@ -60,3 +60,13 @@ func TestHydrationCapsMalformedAttachmentCounts(t *testing.T) {
 		t.Fatalf("capped attachment summary = %q", got)
 	}
 }
+
+func TestHydrationRejectsFractionalAttachmentCounts(t *testing.T) {
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{
+		Type:    sessions.EventMessage,
+		Payload: json.RawMessage(`{"role":"user","content":"describe this","attachments":{"images":1.5,"documents":2.25}}`),
+	}})
+	if len(rows) != 1 || !rows[0].attachments.empty() {
+		t.Fatalf("fractional attachment counts must be ignored, got %#v", rows)
+	}
+}

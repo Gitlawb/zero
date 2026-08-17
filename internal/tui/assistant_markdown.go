@@ -356,6 +356,9 @@ func hasExternalANSIStyle(line string) bool {
 }
 
 func markdownDisplayStyleForRune(r rune, current markdownDisplayStyle) markdownDisplayStyle {
+	if current == markdownDisplayCode {
+		return current
+	}
 	switch r {
 	case '│', '─', '┼', '╭', '╮', '╰', '╯', '├', '┤', '┬', '┴':
 		return markdownDisplayRule
@@ -1086,6 +1089,12 @@ func wrapMarkdownInlineWithPrefixes(firstPrefix string, continuationPrefix strin
 func markdownInlineWords(segments []markdownInlineSegment) []markdownInlineSegment {
 	words := []markdownInlineSegment{}
 	for _, segment := range segments {
+		if segment.code {
+			if segment.text != "" {
+				words = append(words, segment)
+			}
+			continue
+		}
 		for _, word := range strings.Fields(segment.text) {
 			words = append(words, markdownInlineSegment{text: word, bold: segment.bold, code: segment.code})
 		}

@@ -313,7 +313,7 @@ func structuredPatchHeaderPaths(patch string) []string {
 		trimmed := strings.TrimSpace(line)
 		for _, prefix := range []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "} {
 			if path, ok := strings.CutPrefix(trimmed, prefix); ok {
-				path = strings.TrimSpace(path)
+				path = strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(path)), "\\", "/")
 				if path != "" {
 					paths = append(paths, path)
 				}

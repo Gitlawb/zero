@@ -115,9 +115,9 @@ func (theme codeSyntaxTheme) styleFor(tt chroma.TokenType) (codeSyntaxStyle, boo
 		style = theme.function
 	case tt == chroma.NameClass || tt == chroma.NameBuiltin || tt == chroma.NameNamespace || tt == chroma.NameDecorator || tt == chroma.NameAttribute || tt == chroma.NameTag:
 		style = theme.name
-	case tt.InCategory(chroma.LiteralString):
+	case tt.InSubCategory(chroma.LiteralString):
 		style = theme.string
-	case tt.InCategory(chroma.LiteralNumber):
+	case tt.InSubCategory(chroma.LiteralNumber):
 		style = theme.number
 	case tt.InCategory(chroma.Operator):
 		style = theme.operator

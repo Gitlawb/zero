@@ -37,7 +37,7 @@ func TestStreamingInlineCodeUsesFinalStyleWithoutReverseVideoFlash(t *testing.T)
 	if strings.Contains(out, markdownCodeStart) || strings.Contains(out, markdownCodeEnd) {
 		t.Fatalf("streaming inline code must not emit reverse-video markers: %q", out)
 	}
-	for _, code := range []string{"calculator.go", "go", "test", "./..."} {
+	for _, code := range []string{"calculator.go", "go test ./..."} {
 		if want := inlineCodeStyle().Render(code); !strings.Contains(out, want) {
 			t.Fatalf("streaming inline code %q should use its final style:\n%s", code, out)
 		}

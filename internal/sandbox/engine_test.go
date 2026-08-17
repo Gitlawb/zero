@@ -320,18 +320,20 @@ func TestEngineDeniesStructuredApplyPatchEscapesFromPatchBody(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
 
-	decision := engine.Evaluate(context.Background(), Request{
-		ToolName:       "apply_patch",
-		SideEffect:     SideEffectWrite,
-		Permission:     PermissionPrompt,
-		PermissionMode: PermissionModeAsk,
-		Args: map[string]any{
-			"patch": "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch\n",
-		},
-	})
-
-	if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockOutsideWorkspace {
-		t.Fatalf("escaping structured apply_patch decision = %#v, want outside-workspace deny", decision)
+	for _, patch := range []string{
+		"*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch\n",
+		"*** Begin Patch\n*** Add File: ..\\escape.txt\n+x\n*** End Patch\n",
+	} {
+		decision := engine.Evaluate(context.Background(), Request{
+			ToolName:       "apply_patch",
+			SideEffect:     SideEffectWrite,
+			Permission:     PermissionPrompt,
+			PermissionMode: PermissionModeAsk,
+			Args:           map[string]any{"patch": patch},
+		})
+		if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockOutsideWorkspace {
+			t.Fatalf("escaping structured apply_patch decision = %#v, want outside-workspace deny", decision)
+		}
 	}
 }
 

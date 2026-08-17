@@ -108,6 +108,14 @@ func TestRunningToolCardUsesLiveRailOnlyForActiveRun(t *testing.T) {
 	if strings.HasPrefix(inactive, "│ ") {
 		t.Fatalf("inactive card should not retain a live rail, got %q", inactive)
 	}
+
+	m.pending = true
+	stale := row
+	stale.runID = m.activeRunID + 1
+	staleCard := plainRender(t, m.renderRunningToolCard(stale, 80, buildRowContext([]transcriptRow{stale}), cardRenderOptions{}))
+	if strings.HasPrefix(staleCard, "│ ") {
+		t.Fatalf("a stale run card should not receive a live rail, got %q", staleCard)
+	}
 }
 
 func TestAskUserQuestionnaireNamesWaitingForAnswer(t *testing.T) {

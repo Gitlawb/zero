@@ -13,6 +13,30 @@ import "strings"
 // their diff bands and word spans; the muted>faint>faintest ramp monotonic toward
 // the surface; and selBg visibly separated from panel while its label stays legible.
 
+type systemSurfacePalette struct {
+	selection string
+	add       string
+	del       string
+	addWord   string
+	delWord   string
+}
+
+var darkSystemSurfaces = systemSurfacePalette{
+	selection: "#2b2f2d",
+	add:       "#212922",
+	del:       "#3c170f",
+	addWord:   "#212922",
+	delWord:   "#3c170f",
+}
+
+var lightSystemSurfaces = systemSurfacePalette{
+	selection: "#e7e9e7",
+	add:       "#dafbe1",
+	del:       "#ffebe9",
+	addWord:   "#aceebb",
+	delWord:   "#ffcecb",
+}
+
 // darkPalette is the original Lime palette: a near-black chat surface with one
 // lime accent. bg (#070708) is the terminal's own canvas — deliberately never
 // painted — so no token references it.
