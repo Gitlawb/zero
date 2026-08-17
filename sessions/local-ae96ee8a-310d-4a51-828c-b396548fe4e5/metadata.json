@@ -3,32 +3,34 @@
   "sessionId": "local-ae96ee8a-310d-4a51-828c-b396548fe4e5",
   "model": "claude-opus-5",
   "startedAt": "2026-08-17T04:16:16.153Z",
-  "endedAt": "2026-08-17T06:27:18.513Z",
-  "durationMs": 7862348,
+  "endedAt": "2026-08-17T06:33:07.915Z",
+  "durationMs": 8211749,
   "status": "running",
   "tokens": {
-    "total": 45703,
-    "input": 68,
-    "output": 45635
+    "total": 46492,
+    "input": 70,
+    "output": 46422
   },
   "cost": {
-    "usd": 10.5369
+    "usd": 10.8442
   },
-  "toolCalls": 32,
+  "toolCalls": 33,
   "lines": {
-    "added": 95,
-    "removed": 6
+    "added": 166,
+    "removed": 7
   },
   "filesChanged": [
+    "internal/agent/guardrails.go",
+    "internal/agent/guardrails_false_admission_test.go",
     "internal/memory/escape_test.go",
     "internal/memory/memory.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "068a921f233142701db7c844ff703c0c0b955260",
+    "headAfter": "1b1ce2db07291ccb174109c531c32ef42bb0d36d",
     "commitShas": [
-      "068a921f233142701db7c844ff703c0c0b955260"
+      "1b1ce2db07291ccb174109c531c32ef42bb0d36d"
     ]
   },
   "summary": "anandh8x adds the detail that makes it tractable: **the junction's target is outside the workspace**, so the component exists on disk while the handle reports it absent. That's a discriminator:",
