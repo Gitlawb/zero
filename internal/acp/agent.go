@@ -181,17 +181,12 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 		}
 	}
 	sess := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
-	note := &notifier{conn: a.conn, sessionID: sess.id}
 	a.warnPersistence(
-		note,
+		&notifier{conn: a.conn, sessionID: sess.id},
 		"load session history",
 		"Could not load session history. The session is open, but earlier turns may be missing until storage recovers.",
 		historyErr,
 	)
-	// BEFORE RETURNING, so a client that renders on the reply already has the
-	// transcript. Loading history that only the model can see is what made a
-	// resumed session open blank; see notifier.replayHistory.
-	note.replayHistory(sess.snapshotHistory())
 	return LoadSessionResult{
 		ConfigOptions: a.configOptions(sess),
 		Modes:         a.modeState(sess),
