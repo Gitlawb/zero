@@ -202,7 +202,7 @@ func TestManagerBeforeSaveFailureLeavesStoreUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.Save(ProviderKey("existing"), Token{AccessToken: "keep"}); err != nil {
+			if err := store.Save(ProviderKey("demo"), Token{AccessToken: "keep"}); err != nil {
 				t.Fatal(err)
 			}
 			manager, err := NewManager(ManagerOptions{Store: store, Env: env, BeforeSave: func() error { return beforeSaveErr }})
@@ -212,11 +212,8 @@ func TestManagerBeforeSaveFailureLeavesStoreUnchanged(t *testing.T) {
 			if err := test.run(context.Background(), manager); !errors.Is(err, beforeSaveErr) {
 				t.Fatalf("error = %v, want exact BeforeSave error", err)
 			}
-			if _, ok, err := store.Load(ProviderKey("demo")); err != nil || ok {
-				t.Fatalf("rejected token was persisted: ok=%v err=%v", ok, err)
-			}
-			if token, ok, err := store.Load(ProviderKey("existing")); err != nil || !ok || token.AccessToken != "keep" {
-				t.Fatalf("existing store entry changed: token=%+v ok=%v err=%v", token, ok, err)
+			if token, ok, err := store.Load(ProviderKey("demo")); err != nil || !ok || token.AccessToken != "keep" {
+				t.Fatalf("existing provider token was replaced: token=%+v ok=%v err=%v", token, ok, err)
 			}
 		})
 	}

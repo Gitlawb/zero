@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -440,6 +441,8 @@ const (
 	PersistedIdentityCatalog
 )
 
+var errAmbiguousPersistedProviderIdentity = errors.New("ambiguous persisted provider identity")
+
 // ResolvePersistedProviderIdentity finds the persisted user-config row that
 // owns identity and reports how it was addressed.
 //
@@ -498,7 +501,7 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 		return *foldedName, PersistedIdentityName, nil
 	}
 	if foldedMatches > 1 {
-		return ProviderProfile{}, PersistedIdentityNone, fmt.Errorf("ambiguous provider name %q matches multiple persisted rows that differ only by case; use the exact spelling from config.json", identity)
+		return ProviderProfile{}, PersistedIdentityNone, fmt.Errorf("%w: ambiguous provider name %q matches multiple persisted rows that differ only by case; use the exact spelling from config.json", errAmbiguousPersistedProviderIdentity, identity)
 	}
 	if catalogMatches == 1 {
 		return *catalogRow, PersistedIdentityCatalog, nil
@@ -546,8 +549,8 @@ func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 // The canonical name is returned separately for marker mutations. On a config
 // read error, callers still receive the requested spelling so logout can delete
 // the credential it was explicitly asked to clear before reporting the error.
-// An ambiguous catalog id is different: it returns no candidates at all, so a
-// destructive caller cannot act on a spelling several profiles could own.
+// An ambiguous provider identity is different: it returns no candidates at all,
+// so a destructive caller cannot act on a spelling several profiles could own.
 func ProviderCredentialCandidates(path, addressedName string) (candidates []string, canonicalName string, err error) {
 	add := func(candidate string) {
 		candidate = strings.TrimSpace(candidate)
@@ -559,6 +562,9 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 	add(canonicalName)
 	row, match, err := ResolvePersistedProviderIdentity(path, addressedName)
 	if err != nil {
+		if errors.Is(err, errAmbiguousPersistedProviderIdentity) {
+			return nil, canonicalName, err
+		}
 		return candidates, canonicalName, err
 	}
 	if match == PersistedIdentityNone {
@@ -595,19 +601,12 @@ func PreflightProviderWrite(path, name string) error {
 	if err := PreflightUserConfig(path); err != nil {
 		return err
 	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
+	providers, err := persistedProviders(path)
 	if err != nil {
-		return fmt.Errorf("read config %s: %w", path, err)
-	}
-	var cfg FileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("invalid config JSON %s: %w", path, err)
+		return err
 	}
 	name = strings.TrimSpace(name)
-	for _, provider := range cfg.Providers {
+	for _, provider := range providers {
 		existing := strings.TrimSpace(provider.Name)
 		if sameProviderIdentity(existing, name) && existing != name {
 			return fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", name, existing)

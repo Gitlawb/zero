@@ -1822,4 +1822,27 @@ func TestProviderCredentialCandidates(t *testing.T) {
 			t.Fatalf("ambiguous alias candidates = %q err = %v, want no destructive candidates and an error", candidates, err)
 		}
 	})
+
+	t.Run("returns no candidates for an ambiguous folded name", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+			{Name: "work"},
+			{Name: "WORK"},
+		}}, 0o600)
+		candidates, canonical, err := ProviderCredentialCandidates(path, "wOrK")
+		if err == nil || len(candidates) != 0 || canonical != "wOrK" {
+			t.Fatalf("candidates = %q canonical = %q err = %v, want no candidates, requested canonical name, and an ambiguity error", candidates, canonical, err)
+		}
+	})
+
+	t.Run("retains the requested candidate on a config read failure", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"providers":`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		candidates, canonical, err := ProviderCredentialCandidates(path, "work")
+		if err == nil || !slices.Equal(candidates, []string{"work"}) || canonical != "work" {
+			t.Fatalf("candidates = %q canonical = %q err = %v, want requested candidate retained with the config error", candidates, canonical, err)
+		}
+	})
 }

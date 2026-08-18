@@ -1269,6 +1269,10 @@ func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
 		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); cfg.Providers[0].APIKeyStored {
 			t.Fatal("marker must be cleared before the secret delete is attempted")
 		}
+		persisted := readProviderWizardConfigFixture(t, configPath)
+		if len(persisted.Providers) != 1 || persisted.Providers[0].Name != "acme" || persisted.Providers[0].APIKeyStored {
+			t.Fatalf("persisted providers = %+v, want acme marker cleared", persisted.Providers)
+		}
 	})
 
 	t.Run("persisted marker cleanup", func(t *testing.T) {
@@ -1283,6 +1287,10 @@ func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
 		}
 		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
 			t.Fatal("injected marker failure unexpectedly changed config")
+		}
+		persisted := readProviderWizardConfigFixture(t, configPath)
+		if len(persisted.Providers) != 2 || persisted.Providers[0].Name != "work-acme" || persisted.Providers[0].APIKeyStored || persisted.Providers[1].Name != "personal-acme" || !persisted.Providers[1].APIKeyStored {
+			t.Fatalf("persisted providers = %+v, want only work-acme marker cleared", persisted.Providers)
 		}
 	})
 }
@@ -2016,7 +2024,7 @@ func TestExistingAimlapiConfigurationRequiresCatalogOwnership(t *testing.T) {
 	}}}
 
 	profile, runtimeKey, ok := m.existingAimlapiConfiguration()
-	if !ok || runtimeKey != "legacy-secret" || profile.Name != "aimlapi" || profile.Model != "legacy-model" {
+	if !ok || runtimeKey != "legacy-secret" || profile.Name != "aimlapi" || profile.BaseURL != "https://api.aimlapi.com/v1" || profile.Model != "legacy-model" {
 		t.Fatalf("legacy configuration = (%+v, %q, %v), want settings preserved", profile, runtimeKey, ok)
 	}
 }
