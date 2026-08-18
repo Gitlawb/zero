@@ -429,7 +429,7 @@ func newCompactionState(options Options, task *taskState) *compactionState {
 		preserveLast: options.CompactionPreserveLast,
 		onUsage:      options.OnUsage,
 		task:         task,
-		planner:      newContextPlanner(contextPlannerConfig{contextWindow: options.ContextWindow}),
+		planner:      newContextPlanner(contextPlannerConfig{contextWindow: options.ContextWindow, serviceTier: options.ServiceTier}),
 		trace:        options.Trace,
 	}
 	return state

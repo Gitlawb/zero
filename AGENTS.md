@@ -91,6 +91,14 @@ These classes drive multi-round reviews. Fix them before requesting review:
   final-component-only no-follow is insufficient. On multi-step setup, roll back
   only what this run created; never destroy pre-existing resources you did
   not create; never report success when cleanup or unlock failed.
+- **Normalize before matching:** Any transform that REMOVES bytes without
+  leaving a gap is also a reassembler, so it has to run before whatever matches
+  on the result. Redacting by shape and then stripping control bytes lets a
+  credential split by a NUL, an ESC or a C1 byte pass the patterns as two
+  fragments and be rejoined on the way out; comparing a path against a form
+  produced by the same resolver the kernel just used makes a redirect agree with
+  itself. Strip, decode, or canonicalize first, then match. The unsplit value
+  passing is not evidence, so the test needs a split case.
 - **Atomic shared state:** Write a complete temporary file, then atomically
   replace the destination so concurrent readers never see a partial write.
   Exclusive create or a write lock alone is not enough for readers. Serialize

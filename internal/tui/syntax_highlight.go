@@ -101,6 +101,27 @@ func highlightCodeForPath(code []string, path string, measure int, bg color.Colo
 	return highlightCodeWithLexer(cachedLexerForPath(path), code, measure, bg)
 }
 
+// highlightSpan overlays a background on a rune range in one source line while
+// retaining the lexer-selected foreground. Diff rendering uses it to keep the
+// precise changed word visible inside a syntax-highlighted add/delete row.
+type highlightSpan struct {
+	line       int
+	start, end int
+	background color.Color
+}
+
+func highlightCodeForPathWithSpans(code []string, path string, measure int, bg color.Color, spans []highlightSpan) ([]string, bool) {
+	return highlightCodeWithLexerAndSpans(cachedLexerForPath(path), code, measure, bg, spans)
+}
+
+// highlightCodeForPathWithLineBackgrounds applies syntax highlighting to a
+// single source unit while preserving a distinct background for every source
+// line. The diff viewer uses one lexer pass per hunk so multiline syntax keeps
+// its state across changed and unchanged lines.
+func highlightCodeForPathWithLineBackgrounds(code []string, path string, measure int, backgrounds []color.Color, spans []highlightSpan) ([]string, bool) {
+	return highlightCodeWithLexerAndLineBackgrounds(cachedLexerForPath(path), code, measure, backgrounds, spans)
+}
+
 func inferCodeLanguage(code []string) string {
 	for _, line := range code {
 		trimmed := strings.TrimSpace(line)
@@ -151,6 +172,18 @@ func inferCodeLanguage(code []string) string {
 }
 
 func highlightCodeWithLexer(lexer chroma.Lexer, code []string, measure int, bg color.Color) ([]string, bool) {
+	return highlightCodeWithLexerAndSpans(lexer, code, measure, bg, nil)
+}
+
+func highlightCodeWithLexerAndSpans(lexer chroma.Lexer, code []string, measure int, bg color.Color, spans []highlightSpan) ([]string, bool) {
+	backgrounds := make([]color.Color, len(code))
+	for index := range backgrounds {
+		backgrounds[index] = bg
+	}
+	return highlightCodeWithLexerAndLineBackgrounds(lexer, code, measure, backgrounds, spans)
+}
+
+func highlightCodeWithLexerAndLineBackgrounds(lexer chroma.Lexer, code []string, measure int, backgrounds []color.Color, spans []highlightSpan) ([]string, bool) {
 	if measure < 4 {
 		return nil, false
 	}
@@ -163,6 +196,10 @@ func highlightCodeWithLexer(lexer chroma.Lexer, code []string, measure int, bg c
 	}
 
 	lines := []string{}
+	spansByLine := make(map[int][]highlightSpan, len(spans))
+	for _, span := range spans {
+		spansByLine[span.line] = append(spansByLine[span.line], span)
+	}
 	var cur strings.Builder
 	curWidth := 0
 	flushLine := func() {
@@ -170,18 +207,52 @@ func highlightCodeWithLexer(lexer chroma.Lexer, code []string, measure int, bg c
 		cur.Reset()
 		curWidth = 0
 	}
-	emit := func(style lipgloss.Style, s string) {
-		if bg != nil {
-			style = style.Background(bg)
-		}
+	emit := func(style lipgloss.Style, s string, line, column int) {
 		var chunk strings.Builder
+		var chunkStyle lipgloss.Style
+		var chunkBackground color.Color
+		var haveChunkStyle bool
+		var styledBackground color.Color
+		var styleWithBackground lipgloss.Style
+		var haveStyledBackground bool
 		flushChunk := func() {
 			if chunk.Len() > 0 {
-				cur.WriteString(style.Render(chunk.String()))
+				cur.WriteString(chunkStyle.Render(chunk.String()))
 				chunk.Reset()
+				haveChunkStyle = false
+				chunkBackground = nil
 			}
 		}
-		for _, r := range s {
+		for offset, r := range []rune(s) {
+			var background color.Color
+			if line < len(backgrounds) {
+				background = backgrounds[line]
+			}
+			for _, span := range spansByLine[line] {
+				if column+offset >= span.start && column+offset < span.end {
+					background = span.background
+					break
+				}
+			}
+			if !haveStyledBackground || !sameHighlightColor(background, styledBackground) {
+				styleWithBackground = style
+				if background != nil {
+					styleWithBackground = styleWithBackground.Background(background)
+				}
+				styledBackground = background
+				haveStyledBackground = true
+			}
+			runeStyle := styleWithBackground
+			if !haveChunkStyle {
+				chunkStyle = runeStyle
+				chunkBackground = background
+				haveChunkStyle = true
+			} else if !sameHighlightColor(background, chunkBackground) {
+				flushChunk()
+				chunkStyle = runeStyle
+				chunkBackground = background
+				haveChunkStyle = true
+			}
 			rw := lipgloss.Width(string(r))
 			if curWidth+rw > measure {
 				flushChunk()
@@ -193,13 +264,17 @@ func highlightCodeWithLexer(lexer chroma.Lexer, code []string, measure int, bg c
 		flushChunk()
 	}
 
+	line, column := 0, 0
 	for _, token := range iterator.Tokens() {
 		style := tokenStyle(token.Type)
 		for index, part := range strings.Split(token.Value, "\n") {
 			if index > 0 {
 				flushLine()
+				line++
+				column = 0
 			}
-			emit(style, part)
+			emit(style, part, line, column)
+			column += len([]rune(part))
 		}
 	}
 	flushLine()
@@ -208,4 +283,13 @@ func highlightCodeWithLexer(lexer chroma.Lexer, code []string, measure int, bg c
 		lines = lines[:n-1]
 	}
 	return lines, true
+}
+
+func sameHighlightColor(a, b color.Color) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ar, ag, ab, aa := a.RGBA()
+	br, bg, bb, ba := b.RGBA()
+	return ar == br && ag == bg && ab == bb && aa == ba
 }
