@@ -82,7 +82,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
-		if err := mergeProjectConfig(&cfg, fileConfig); err != nil {
+		if err := mergeProjectConfig(&cfg, fileConfig, options.Env); err != nil {
 			return ResolvedConfig{}, err
 		}
 	}
@@ -285,7 +285,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 }
 
-func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
+func mergeProjectConfig(dst *FileConfig, src FileConfig, env map[string]string) error {
 	if activeProvider := strings.TrimSpace(src.ActiveProvider); activeProvider != "" {
 		dst.ActiveProvider = activeProvider
 	}
@@ -294,7 +294,7 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	for _, provider := range src.Providers {
 		candidate := providerMergeCandidate(*dst, provider)
-		if err := validateProjectProviderMerge(provider, candidate); err != nil {
+		if err := validateProjectProviderMerge(provider, candidate, env); err != nil {
 			return err
 		}
 		mergeProvider(dst, provider)
@@ -384,7 +384,7 @@ func providerMergeName(cfg FileConfig, provider ProviderProfile) string {
 	return name
 }
 
-func validateProjectProviderMerge(project ProviderProfile, candidate ProviderProfile) error {
+func validateProjectProviderMerge(project ProviderProfile, candidate ProviderProfile, env map[string]string) error {
 	if strings.TrimSpace(project.APIKeyEnv) != "" &&
 		projectEndpointNeedsCredentialGuard(candidate) &&
 		!projectAPIKeyEnvAllowed(candidate, project.APIKeyEnv) {
@@ -392,7 +392,7 @@ func validateProjectProviderMerge(project ProviderProfile, candidate ProviderPro
 	}
 	if strings.TrimSpace(project.BaseURL) != "" &&
 		projectEndpointNeedsCredentialGuard(candidate) &&
-		hasInheritedProviderCredentialMaterial(project, candidate) &&
+		hasInheritedProviderCredentialMaterial(project, candidate, env) &&
 		!projectBaseURLAllowed(candidate) {
 		return providerError(candidate, "project provider %s cannot override baseURL for a credentialed custom provider endpoint", candidate.Name)
 	}
@@ -435,7 +435,7 @@ func projectBaseURLAllowed(profile ProviderProfile) bool {
 	return ok && sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
 }
 
-func hasInheritedProviderCredentialMaterial(project ProviderProfile, candidate ProviderProfile) bool {
+func hasInheritedProviderCredentialMaterial(project ProviderProfile, candidate ProviderProfile, env map[string]string) bool {
 	if strings.TrimSpace(project.APIKey) == "" && strings.TrimSpace(candidate.APIKey) != "" {
 		return true
 	}
@@ -448,22 +448,44 @@ func hasInheritedProviderCredentialMaterial(project ProviderProfile, candidate P
 	if project.CustomHeaders == nil && hasCustomHeaderMaterial(candidate.CustomHeaders) {
 		return true
 	}
-	if hasInheritedOAuthLogin(candidate) {
+	if hasInheritedOAuthLogin(candidate, env) {
 		return true
 	}
 	return false
 }
 
-func hasInheritedOAuthLogin(candidate ProviderProfile) bool {
+// storedOAuthLogin reports whether any of names has a stored OAuth token under
+// env. Tests replace this so Resolve stays hermetic and does not block on a
+// real keychain. A non-nil error means the lookup could not tell.
+var storedOAuthLogin = lookupStoredOAuthLogin
+
+func lookupStoredOAuthLogin(env map[string]string, names []string) (bool, error) {
+	store, err := oauth.NewStore(oauth.StoreOptions{Env: env})
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		_, ok, err := store.Load(oauth.ProviderKey(name))
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func hasInheritedOAuthLogin(candidate ProviderProfile, env map[string]string) bool {
 	names := candidate.OAuthLoginCandidates()
 	if len(names) == 0 {
 		return false
 	}
-	store, err := oauth.NewStore(oauth.StoreOptions{})
+	ok, err := storedOAuthLogin(env, names)
 	if err != nil {
-		return false
+		// Fail closed: a store or load error means credential material may exist.
+		return true
 	}
-	_, _, ok := oauth.FirstStored(store, names)
 	return ok
 }
 

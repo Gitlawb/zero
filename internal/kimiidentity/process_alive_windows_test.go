@@ -84,6 +84,17 @@ func TestProcessAliveRunningChildIsLive(t *testing.T) {
 	}
 	pid := cmd.Process.Pid
 	waitRan := false
+	defer func() {
+		if !waitRan {
+			if err := cmd.Process.Kill(); err != nil {
+				t.Errorf("Kill cleanup: %v", err)
+			}
+			if err := cmd.Wait(); err != nil {
+				t.Errorf("Wait cleanup: %v", err)
+			}
+		}
+	}()
+
 	// Keep our own SYNCHRONIZE handle open across the post-kill probe:
 	// cmd.Wait() can close the process handle held by cmd.Process, and without
 	// a retained handle OpenProcess(pid) could fail with
@@ -93,36 +104,28 @@ func TestProcessAliveRunningChildIsLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenProcess: %v", err)
 	}
-	defer func() {
-		if err := windows.CloseHandle(handle); err != nil {
-			t.Errorf("CloseHandle: %v", err)
-		}
-	}()
-	defer func() {
-		if !waitRan {
-			if err := cmd.Process.Kill(); err != nil {
-				t.Errorf("Kill cleanup: %v", err)
-			}
-			waitRan = true
-			if err := cmd.Wait(); err != nil {
-				t.Errorf("Wait cleanup: %v", err)
-			}
-		}
-	}()
 
 	if !processAlive(pid) {
+		_ = windows.CloseHandle(handle)
 		t.Fatalf("processAlive(%d) = false while running; want true", pid)
 	}
 
 	if err := cmd.Process.Kill(); err != nil {
-		t.Errorf("Kill: %v", err)
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("Kill: %v", err)
 	}
 	if _, err := windows.WaitForSingleObject(handle, windows.INFINITE); err != nil {
+		_ = windows.CloseHandle(handle)
 		t.Fatalf("WaitForSingleObject: %v", err)
 	}
 	if processAlive(pid) {
+		_ = windows.CloseHandle(handle)
 		t.Fatalf("processAlive(%d) = true after kill; want false (dead)", pid)
 	}
+	if err := windows.CloseHandle(handle); err != nil {
+		t.Errorf("CloseHandle: %v", err)
+	}
+
 	waitRan = true
 	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError

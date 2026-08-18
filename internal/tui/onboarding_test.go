@@ -2417,6 +2417,13 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 // the generic browser-login command, whose manager would run the device flow
 // with a discarded output writer and leave the spinner to time out.
 func TestSetupEnterStartsDeviceFlowForDeviceOnlyProvider(t *testing.T) {
+	// Isolate config dirs before setupProviderDescriptor → Get("kimi-code")
+	// so the test never mints ~/.config/zero/kimi-device-id on the host.
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("APPDATA", root)
+	t.Setenv("HOME", root)
+
 	// Force a "normal desktop with a browser available" environment:
 	// oauthPreferDeviceFlow() already picks device flow on headless boxes,
 	// which would mask the bug this test exists to catch.

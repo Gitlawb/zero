@@ -98,18 +98,7 @@ func DeviceID() string {
 // subdirectory so a symlink at zero cannot redirect device-id, lock, or
 // temporary-file traffic outside the configuration root.
 func loadOrCreateDeviceIDAt(path string) string {
-	if path == "" {
-		return generateDeviceID()
-	}
-	root, name, err := openDeviceIDDir(path)
-	if err != nil {
-		return generateDeviceID()
-	}
-	defer root.Close()
-	if id := readValidDeviceID(root, name); id != "" {
-		return id
-	}
-	return publishOrAdoptDeviceID(context.Background(), root, name, generateDeviceID())
+	return loadOrCreateDeviceIDAtContext(context.Background(), path)
 }
 
 // loadOrCreateDeviceIDAtContext is loadOrCreateDeviceIDAt with a caller

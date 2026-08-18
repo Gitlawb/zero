@@ -496,8 +496,6 @@ func TestResolveRejectsProjectBaseURLOverrideWithInheritedCompatibleCredentials(
 func TestResolveRejectsProjectBaseURLOverrideWithStoredKimiOAuth(t *testing.T) {
 	isolateKimiDeviceIDStorage(t)
 	tokenPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
-	t.Setenv("ZERO_OAUTH_STORAGE", "file")
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: tokenPath})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -505,6 +503,11 @@ func TestResolveRejectsProjectBaseURLOverrideWithStoredKimiOAuth(t *testing.T) {
 	if err := store.Save(oauth.ProviderKey("kimi-code"), oauth.Token{AccessToken: "kimi-secret-token"}); err != nil {
 		t.Fatalf("seed Kimi login: %v", err)
 	}
+
+	// Poison process env so a store built from ambient env would miss the token
+	// and fail open. The lookup must use ResolveOptions.Env instead.
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "ambient-empty.json"))
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
 
 	userPath := writeConfig(t, `{
 		"activeProvider": "kimi-code",
@@ -523,7 +526,10 @@ func TestResolveRejectsProjectBaseURLOverrideWithStoredKimiOAuth(t *testing.T) {
 	_, err = Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
-		Env:               map[string]string{},
+		Env: map[string]string{
+			"ZERO_OAUTH_TOKENS_PATH": tokenPath,
+			"ZERO_OAUTH_STORAGE":     "file",
+		},
 	})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want project baseURL override rejection for stored OAuth")
@@ -534,6 +540,71 @@ func TestResolveRejectsProjectBaseURLOverrideWithStoredKimiOAuth(t *testing.T) {
 	if !strings.Contains(err.Error(), "cannot override baseURL") {
 		t.Fatalf("error = %q, want project baseURL override rejection", err.Error())
 	}
+}
+
+func TestResolveRejectsProjectBaseURLWhenOAuthLookupErrors(t *testing.T) {
+	isolateKimiDeviceIDStorage(t)
+	userPath, projectPath := writeKimiProjectBaseURLOverride(t)
+
+	t.Run("injected lookup error", func(t *testing.T) {
+		prev := storedOAuthLogin
+		var sawEnv map[string]string
+		storedOAuthLogin = func(env map[string]string, names []string) (bool, error) {
+			sawEnv = env
+			return false, errors.New("keychain unavailable")
+		}
+		t.Cleanup(func() { storedOAuthLogin = prev })
+
+		env := map[string]string{"ZERO_OAUTH_TOKENS_PATH": filepath.Join(t.TempDir(), "unused.json")}
+		_, err := Resolve(ResolveOptions{
+			UserConfigPath:    userPath,
+			ProjectConfigPath: projectPath,
+			Env:               env,
+		})
+		if err == nil {
+			t.Fatal("Resolve() error = nil, want fail-closed rejection when OAuth lookup errors")
+		}
+		if !strings.Contains(err.Error(), "cannot override baseURL") {
+			t.Fatalf("error = %q, want project baseURL override rejection", err.Error())
+		}
+		if sawEnv["ZERO_OAUTH_TOKENS_PATH"] != env["ZERO_OAUTH_TOKENS_PATH"] {
+			t.Fatalf("storedOAuthLogin env = %#v, want ResolveOptions.Env", sawEnv)
+		}
+	})
+
+	t.Run("store construction error", func(t *testing.T) {
+		_, err := Resolve(ResolveOptions{
+			UserConfigPath:    userPath,
+			ProjectConfigPath: projectPath,
+			Env: map[string]string{
+				"ZERO_OAUTH_STORAGE": "not-a-backend",
+			},
+		})
+		if err == nil {
+			t.Fatal("Resolve() error = nil, want fail-closed rejection when OAuth store construction fails")
+		}
+		if !strings.Contains(err.Error(), "cannot override baseURL") {
+			t.Fatalf("error = %q, want project baseURL override rejection", err.Error())
+		}
+	})
+}
+
+func writeKimiProjectBaseURLOverride(t *testing.T) (userPath string, projectPath string) {
+	t.Helper()
+	userPath = writeConfig(t, `{
+		"activeProvider": "kimi-code",
+		"providers": [{
+			"name": "kimi-code",
+			"catalogID": "kimi-code"
+		}]
+	}`)
+	projectPath = writeConfig(t, `{
+		"providers": [{
+			"name": "kimi-code",
+			"baseURL": "https://attacker.example/v1"
+		}]
+	}`)
+	return userPath, projectPath
 }
 
 func TestResolveAllowsProjectCatalogAPIKeyEnvOnCatalogEndpoint(t *testing.T) {
@@ -2281,7 +2352,7 @@ func TestMergeProjectConfigIgnoresAdditionalWriteRoots(t *testing.T) {
 	dst.Sandbox.AdditionalWriteRoots = []string{"/global/one"}
 	src := FileConfig{}
 	src.Sandbox.AdditionalWriteRoots = []string{"/repo/sneaky"}
-	if err := mergeProjectConfig(&dst, src); err != nil {
+	if err := mergeProjectConfig(&dst, src, nil); err != nil {
 		t.Fatalf("mergeProjectConfig: %v", err)
 	}
 	if !reflect.DeepEqual(dst.Sandbox.AdditionalWriteRoots, []string{"/global/one"}) {
@@ -2425,7 +2496,7 @@ func TestCrossSessionInboundProjectConfigCanOnlyTighten(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := FileConfig{CrossSessionInbound: test.user}
-			if err := mergeProjectConfig(&cfg, FileConfig{CrossSessionInbound: test.project}); err != nil {
+			if err := mergeProjectConfig(&cfg, FileConfig{CrossSessionInbound: test.project}, nil); err != nil {
 				t.Fatal(err)
 			}
 			if cfg.CrossSessionInbound != test.want {
