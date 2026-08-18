@@ -194,6 +194,11 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 		// server the user disabled (a user-level disable is sticky, but the user
 		// scope itself may lift it).
 		mergeMCPConfig(&cfg.MCP, fileConfig.MCP, true)
+		// A user who disabled the default Zero used to ship never consented to
+		// its replacement. Carry that decision across the rename here, while the
+		// user layer is the only one merged, so it counts as a user-level
+		// disable that the project layer below cannot lift.
+		applyLegacyDefaultDisable(&cfg.MCP)
 	}
 	// Drop the project layer when the workspace is untrusted, so a cloned repo's
 	// ./.zero/config.json cannot register (and spawn) MCP servers. Fail-closed:

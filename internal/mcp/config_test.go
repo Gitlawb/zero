@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -239,4 +241,49 @@ func TestCopyStringMapTrimsKeysAndPreservesValues(t *testing.T) {
 	if copied["TOKEN"] != "  keep surrounding spaces  " {
 		t.Fatalf("copied[TOKEN] = %q, want value preserved verbatim", copied["TOKEN"])
 	}
+}
+
+// Startup behavior for the firecrawl -> exa default migration: a user who
+// disabled the retired default must end up with no Exa server to connect to,
+// not merely a disabled entry in the resolved config.
+func TestNormalizeConfigSkipsExaAfterLegacyFirecrawlDisable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ResolveMCP(config.ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig: %v", err)
+	}
+	for _, server := range servers {
+		if server.Name == "exa" {
+			t.Fatalf("exa must not be started after the user disabled the default it replaced: %#v", server)
+		}
+	}
+}
+
+// The same path with no legacy disable still starts Exa, so the migration
+// cannot quietly switch off the default for everyone else.
+func TestNormalizeConfigStartsExaWithoutLegacyDisable(t *testing.T) {
+	cfg, err := config.ResolveMCP(config.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig: %v", err)
+	}
+	for _, server := range servers {
+		if server.Name == "exa" {
+			if !server.UnconfiguredDefault {
+				t.Fatalf("an untouched exa default should be flagged unconfigured: %#v", server)
+			}
+			return
+		}
+	}
+	t.Fatal("expected the exa default to be started out of the box")
 }

@@ -130,3 +130,98 @@ func TestResolveMCPUserCanOverrideDefaultURLKeepingOtherFields(t *testing.T) {
 		t.Fatalf("override should keep the default's other fields (type), got %#v", exa)
 	}
 }
+
+func TestResolveMCPCarriesLegacyDefaultDisableToSuccessor(t *testing.T) {
+	// Upgrade path: the user disabled the firecrawl default Zero used to ship.
+	// Swapping the default to exa must not re-open an outbound connection they
+	// explicitly switched off.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if !cfg.Servers["exa"].Disabled {
+		t.Fatalf("a prior disable of the retired default must carry to its replacement: %#v", cfg.Servers["exa"])
+	}
+}
+
+func TestResolveMCPExplicitSuccessorBeatsLegacyDefaultDisable(t *testing.T) {
+	// The user disabled the old default but has since explicitly configured exa.
+	// Their newer, explicit choice wins — the migration must not override it.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true},"exa":{"disabled":false}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	exa := cfg.Servers["exa"]
+	if exa.Disabled {
+		t.Fatalf("an explicit exa entry must survive the legacy-disable migration: %#v", exa)
+	}
+	if IsUnconfiguredDefault("exa", exa) {
+		t.Fatal("an explicitly configured exa is not an untouched default")
+	}
+}
+
+func TestResolveMCPLegacyDefaultLeftEnabledDoesNotDisableSuccessor(t *testing.T) {
+	// A user who configured firecrawl without disabling it (e.g. added a header)
+	// never opted out of the default search server, so exa stays enabled.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"headers":{"Authorization":"Bearer k"}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if cfg.Servers["exa"].Disabled {
+		t.Fatal("only an explicit disable of the retired default should carry over")
+	}
+}
+
+func TestResolveMCPLegacyDefaultDisableIsLiftableByOverride(t *testing.T) {
+	// The carried-over disable is a user-level decision, not a permanent one:
+	// `zero mcp enable exa` merges through the CLI override scope, which is the
+	// one layer allowed to re-enable.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enabled := MCPServerConfig{Disabled: false, disabledSet: true}
+	cfg, err := ResolveMCP(ResolveOptions{
+		UserConfigPath: path,
+		Overrides:      Overrides{MCP: MCPConfig{Servers: map[string]MCPServerConfig{"exa": enabled}}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if cfg.Servers["exa"].Disabled {
+		t.Fatalf("an explicit enable must lift the carried-over disable: %#v", cfg.Servers["exa"])
+	}
+}
+
+func TestResolveMCPLegacyDisableSurvivesProjectReenable(t *testing.T) {
+	// The project layer is lower-trust and must not lift the carried-over
+	// user-level disable — the same guard a direct `zero mcp disable exa` gets.
+	dir := t.TempDir()
+	userPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(userPath, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(dir, "project.json")
+	if err := os.WriteFile(projectPath, []byte(`{"mcp":{"servers":{"exa":{"disabled":false}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if !cfg.Servers["exa"].Disabled {
+		t.Fatal("project config must not re-enable a server the user disabled")
+	}
+}

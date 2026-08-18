@@ -56,3 +56,42 @@ func IsUnconfiguredDefault(name string, server MCPServerConfig) bool {
 	def, ok := DefaultMCPServers()[strings.TrimSpace(name)]
 	return ok && !server.configured && reflect.DeepEqual(def, server)
 }
+
+// legacyDefaultMCPServers maps a built-in default Zero no longer ships to the
+// default that replaced it (retired name -> successor name).
+//
+// A user who ran `zero mcp disable <old default>` made an explicit choice not
+// to open that outbound connection. Renaming the default underneath them must
+// not silently re-open it under the new name — and the reopened server would
+// look like an untouched default, so even the startup warning stays quiet
+// (see IsUnconfiguredDefault and issue #552).
+var legacyDefaultMCPServers = map[string]string{
+	"firecrawl": "exa",
+}
+
+// applyLegacyDefaultDisable carries a user's explicit disable of a retired
+// built-in default onto the default that replaced it, so upgrading Zero never
+// turns a connection back on that the user switched off.
+//
+// It runs immediately after the user layer merges (see ResolveMCP), which
+// scopes it to user-level disables — the only scope whose disable is sticky.
+// It applies only when the user never declared the successor themselves: an
+// explicit `exa` entry wins whether it enables or disables. Because the
+// carried-over disable is recorded as a user-level decision, the lower-trust
+// project layer cannot lift it, while `zero mcp enable exa` still can (the CLI
+// override scope merges with canReenable=true).
+func applyLegacyDefaultDisable(cfg *MCPConfig) {
+	for legacy, successor := range legacyDefaultMCPServers {
+		retired, ok := cfg.Servers[legacy]
+		if !ok || !retired.disabledSet || !retired.Disabled {
+			continue
+		}
+		replacement, ok := cfg.Servers[successor]
+		if !ok || replacement.configured {
+			continue
+		}
+		replacement.Disabled = true
+		replacement.disabledSet = true
+		cfg.Servers[successor] = replacement
+	}
+}
