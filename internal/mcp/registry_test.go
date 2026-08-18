@@ -153,16 +153,16 @@ func TestRegisterToolsSkipsUnreachableServerAndKeepsOthers(t *testing.T) {
 }
 
 func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
-	// firecrawl is seeded by config.DefaultMCPServers with no credentials; when a
-	// user never configures it, a connect failure (e.g. the real HTTP 401 from
-	// issue #552) must be recorded as UnconfiguredDefault so callers can avoid
+	// Exa is seeded by config.DefaultMCPServers with no credentials; when a
+	// user never configures it, a connect failure must be recorded as
+	// UnconfiguredDefault so callers can avoid
 	// warning about a server the user never asked for. "custom" is configured by
 	// the user and must NOT be flagged even though it also fails to connect.
 	registry := tools.NewRegistry()
 
 	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-		"firecrawl": config.DefaultMCPServers()["firecrawl"],
-		"custom":    {Type: "stdio", Command: "custom-mcp"},
+		"exa":    config.DefaultMCPServers()["exa"],
+		"custom": {Type: "stdio", Command: "custom-mcp"},
 	}}, RegisterOptions{
 		ClientFactory: func(_ context.Context, server Server) (ToolClient, error) {
 			return nil, errors.New(server.Name + " connect failed")
@@ -177,12 +177,12 @@ func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
 	for _, skipped := range runtime.Skipped() {
 		byName[skipped.Name] = skipped
 	}
-	firecrawl, ok := byName["firecrawl"]
+	exa, ok := byName["exa"]
 	if !ok {
-		t.Fatalf("Skipped() = %#v, want an entry for firecrawl", runtime.Skipped())
+		t.Fatalf("Skipped() = %#v, want an entry for exa", runtime.Skipped())
 	}
-	if !firecrawl.UnconfiguredDefault {
-		t.Fatalf("Skipped()[firecrawl] = %#v, want UnconfiguredDefault", firecrawl)
+	if !exa.UnconfiguredDefault {
+		t.Fatalf("Skipped()[exa] = %#v, want UnconfiguredDefault", exa)
 	}
 	custom, ok := byName["custom"]
 	if !ok {

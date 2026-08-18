@@ -90,7 +90,7 @@ func TestNormalizeConfigValidatesTransportBoundaries(t *testing.T) {
 
 func TestNormalizeConfigFlagsUnconfiguredDefault(t *testing.T) {
 	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-		"firecrawl": config.DefaultMCPServers()["firecrawl"],
+		"exa": config.DefaultMCPServers()["exa"],
 		"web": {
 			Type: "http",
 			URL:  "https://example.com/mcp",
@@ -107,8 +107,8 @@ func TestNormalizeConfigFlagsUnconfiguredDefault(t *testing.T) {
 		byName[server.Name] = server
 	}
 
-	if !byName["firecrawl"].UnconfiguredDefault {
-		t.Fatal("an untouched firecrawl default should be flagged UnconfiguredDefault")
+	if !byName["exa"].UnconfiguredDefault {
+		t.Fatal("an untouched exa default should be flagged UnconfiguredDefault")
 	}
 	if byName["web"].UnconfiguredDefault {
 		t.Fatal("a server the user configured must not be flagged UnconfiguredDefault")
