@@ -781,7 +781,6 @@ func syncSavedProviderModel(saved []config.ProviderProfile, exactName string, mo
 // applySavedProviderEdit mirrors a persisted config.EditProvider into the
 // in-memory saved list without wholesale replacement (see saveManagerEdit).
 func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit config.ProviderEdit) []config.ProviderProfile {
-	oldName = strings.TrimSpace(oldName)
 	for index := range saved {
 		if strings.TrimSpace(saved[index].Name) != strings.TrimSpace(oldName) {
 			continue
