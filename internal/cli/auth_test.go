@@ -921,6 +921,7 @@ func TestRunAuthLoginRejectsAmbiguousCatalogAddress(t *testing.T) {
 // persisted row matched case-insensitively without matching exactly, so the
 // documented command left the token and any stored key in place.
 func TestRunAuthLogoutResolvesCatalogIdentity(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	storePath := withAuthStore(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"ChatGPT","catalogId":"chatgpt"}]}`), 0o600); err != nil {
@@ -958,6 +959,7 @@ func TestRunAuthLogoutResolvesCatalogIdentity(t *testing.T) {
 // xai`) left the "xai" OAuth token behind when logged out as "my-xai",
 // because logout only ever deleted the exact spelling the user typed.
 func TestRunAuthLogoutDeletesCatalogIDToken(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	storePath := withAuthStore(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-xai","catalogId":"xai"}]}`), 0o600); err != nil {

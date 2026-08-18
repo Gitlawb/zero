@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -279,6 +280,7 @@ func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) 
 // It serializes plaintext capture with every other provider config/key writer.
 func MigratePlaintextProviderKeysTransactional(path string) (int, error) {
 	migrated := 0
+	var skipped error
 	_, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
 		for index := range op.config.Providers {
 			profile := &op.config.Providers[index]
@@ -287,6 +289,8 @@ func MigratePlaintextProviderKeysTransactional(path string) (int, error) {
 				continue
 			}
 			if err := op.setKey(profile.Name, key); err != nil {
+				// Leave the plaintext key untouched; a failed Set must not strand it.
+				skipped = errors.Join(skipped, fmt.Errorf("migrate stored key for %q: %w", profile.Name, err))
 				continue
 			}
 			profile.APIKey = ""
@@ -296,7 +300,7 @@ func MigratePlaintextProviderKeysTransactional(path string) (int, error) {
 		op.publish = migrated > 0
 		return nil
 	})
-	return migrated, err
+	return migrated, errors.Join(err, skipped)
 }
 
 // HasConfiguredCredential reports whether the profile is set up to authenticate

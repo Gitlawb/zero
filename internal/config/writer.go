@@ -273,28 +273,62 @@ func PreflightCatalogProviderLogin(path, catalogID string) error {
 	if err := PreflightUserConfig(path); err != nil {
 		return err
 	}
+	providers, err := persistedProviders(path)
+	if err != nil {
+		return err
+	}
+	return validateCatalogProviderLogin(FileConfig{Providers: providers}, catalogID)
+}
+
+func validateCatalogProviderLogin(cfg FileConfig, catalogID string) error {
 	descriptor, catalogProvider := providercatalog.Get(catalogID)
 	if catalogProvider {
-		providers, err := persistedProviders(path)
-		if err != nil {
-			return err
-		}
 		// An adoptable row is as good as an owning one here: the login writes
 		// the catalog id onto that existing row instead of minting a spelling,
 		// so the collision check below does not apply to it either.
-		if _, ownership, err := catalogProviderOwner(providers, descriptor.ID); err != nil {
+		if _, ownership, err := catalogProviderOwner(cfg.Providers, descriptor.ID); err != nil {
 			return err
 		} else if ownership != catalogOwnershipNone {
 			return nil
 		}
-		return PreflightProviderWrite(path, descriptor.ID)
+		return validateProviderWrite(cfg, descriptor.ID)
 	}
-	if _, owned, err := PersistedProviderIdentity(path, catalogID); err != nil {
-		return err
-	} else if owned {
+
+	identity := strings.TrimSpace(catalogID)
+	catalogMatches := 0
+	for _, provider := range cfg.Providers {
+		if sameProviderIdentity(provider.Name, identity) {
+			return nil
+		}
+		if sameProviderIdentity(provider.CatalogID, identity) {
+			catalogMatches++
+		}
+	}
+	if catalogMatches > 1 {
+		return fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id", identity, catalogMatches)
+	}
+	if catalogMatches == 1 {
 		return nil
 	}
-	return PreflightProviderWrite(path, catalogID)
+	return validateProviderWrite(cfg, identity)
+}
+
+// CommitCatalogProviderLogin holds the provider config/key transaction lock
+// while validating catalog ownership and persisting an OAuth token. Keeping the
+// lock through persist closes the gap where a concurrent provider mutation could
+// invalidate ownership after validation but before the token write.
+func CommitCatalogProviderLogin(path, catalogID string, persist func() error) error {
+	if persist == nil {
+		return fmt.Errorf("persist OAuth token callback is required")
+	}
+	_, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		op.publish = false
+		if err := validateCatalogProviderLogin(op.config, catalogID); err != nil {
+			return err
+		}
+		return persist()
+	})
+	return err
 }
 
 // providerOwnsCatalog is the positive ownership test for catalog login and
@@ -694,6 +728,10 @@ func PreflightProviderWrite(path, name string) error {
 	if err != nil {
 		return err
 	}
+	return validateProviderWrite(cfg, name)
+}
+
+func validateProviderWrite(cfg FileConfig, name string) error {
 	name = strings.TrimSpace(name)
 	for _, provider := range providers {
 		existing := strings.TrimSpace(provider.Name)
@@ -1116,14 +1154,13 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 	return runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
 		cfg := &op.config
 		index := -1
-		newIdentity := credstore.NormalizeProvider(newName)
 		for i, provider := range cfg.Providers {
 			providerName := strings.TrimSpace(provider.Name)
 			if providerName == oldName {
 				index = i
 				continue
 			}
-			if credstore.NormalizeProvider(providerName) == newIdentity {
+			if sameProviderIdentity(providerName, newName) {
 				return fmt.Errorf("provider %q already exists", newName)
 			}
 		}
@@ -1131,21 +1168,22 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 			return fmt.Errorf("provider %q not found", oldName)
 		}
 		previousName := cfg.Providers[index].Name
-		if key := strings.TrimSpace(edit.APIKey); key != "" {
-			if err := op.setKey(previousName, key); err != nil {
-				return fmt.Errorf("store API key for %q: %w", previousName, err)
-			}
+		key := strings.TrimSpace(edit.APIKey)
+		if key != "" {
 			edit.APIKeyStored = true
 		}
 		renamed := previousName != newName
 		if renamed && (cfg.Providers[index].APIKeyStored || edit.APIKeyStored) && !sameProviderIdentity(previousName, newName) {
-			store, err := op.credentialStore()
-			if err != nil {
-				return err
-			}
-			key, ok, err := store.Get(previousName)
-			if err != nil {
-				return err
+			ok := key != ""
+			if !ok {
+				store, err := op.credentialStore()
+				if err != nil {
+					return err
+				}
+				key, ok, err = store.Get(previousName)
+				if err != nil {
+					return err
+				}
 			}
 			if ok && strings.TrimSpace(key) != "" {
 				if err := op.setKey(newName, key); err != nil {
@@ -1154,6 +1192,10 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 				if _, err := op.deleteKey(previousName); err != nil {
 					return fmt.Errorf("migrate stored key for %q: %w", oldName, err)
 				}
+			}
+		} else if key != "" {
+			if err := op.setKey(newName, key); err != nil {
+				return fmt.Errorf("store API key for %q: %w", newName, err)
 			}
 		}
 		if renamed && sameProviderIdentity(cfg.ActiveProvider, previousName) {

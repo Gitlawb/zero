@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -285,6 +286,7 @@ func TestProviderCommitProcessHelper(t *testing.T) {
 }
 
 func TestCommitProviderProfileFailsClosedWhenLockIsBusy(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	lockPath := filepath.Join(dir, ".zero-provider-write.lock")
@@ -312,6 +314,7 @@ func TestCommitProviderProfileFailsClosedWhenLockIsBusy(t *testing.T) {
 }
 
 func TestCommitProviderProfileFailsClosedWhenLockCannotBeCreated(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "not-a-directory")
 	if err := os.WriteFile(blocker, []byte("file"), 0o600); err != nil {
@@ -344,6 +347,115 @@ func TestCommitProviderProfileRollsBackKeyWhenPublicationFails(t *testing.T) {
 	}
 	if key, ok, err := store.Get("work"); err != nil || !ok || key != "sk-original" {
 		t.Fatalf("rollback key = %q ok=%v err=%v, want original", key, ok, err)
+	}
+}
+
+func TestCommitProviderProfileReportsRollbackFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory write permissions are not represented by Unix mode bits")
+	}
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	path := filepath.Join(dir, "config.json")
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-original"); err != nil {
+		t.Fatal(err)
+	}
+	oldPublish := publishProviderConfig
+	publishProviderConfig = func(string, FileConfig) error {
+		if err := os.Chmod(dir, 0o500); err != nil {
+			return err
+		}
+		return errors.New("disk full")
+	}
+	t.Cleanup(func() {
+		publishProviderConfig = oldPublish
+		_ = os.Chmod(dir, 0o700)
+	})
+
+	_, err = CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{Name: "work", APIKey: "sk-new"}})
+	if err == nil || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), "restore credential") {
+		t.Fatalf("CommitProviderProfile error = %v, want publication and rollback failures", err)
+	}
+}
+
+func TestProviderWritePermissionErrorIsNotReportedAsContention(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports delete-pending lock contention as access denied")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	_, err := CommitProviderProfile(filepath.Join(dir, "config.json"), ProviderCommit{Profile: ProviderProfile{Name: "work"}})
+	if err == nil || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("CommitProviderProfile error = %v, want permission failure", err)
+	}
+	if strings.Contains(err.Error(), "busy") {
+		t.Fatalf("permission failure was misreported as contention: %v", err)
+	}
+}
+
+func TestCommitCatalogProviderLoginHoldsLockThroughPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "xai",
+		Providers:      []ProviderProfile{{Name: "xai", CatalogID: "xai"}},
+	}, 0o600)
+
+	persisting := make(chan struct{})
+	releasePersist := make(chan struct{})
+	commitDone := make(chan error, 1)
+	go func() {
+		commitDone <- CommitCatalogProviderLogin(path, "xai", func() error {
+			close(persisting)
+			<-releasePersist
+			return nil
+		})
+	}()
+	<-persisting
+
+	removeDone := make(chan error, 1)
+	go func() {
+		_, err := RemoveProvider(path, "xai")
+		removeDone <- err
+	}()
+	select {
+	case err := <-removeDone:
+		t.Fatalf("provider mutation completed while token persistence held the lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releasePersist)
+	if err := <-commitDone; err != nil {
+		t.Fatalf("CommitCatalogProviderLogin() error = %v", err)
+	}
+	if err := <-removeDone; err != nil {
+		t.Fatalf("RemoveProvider() error = %v", err)
+	}
+}
+
+func TestCommitCatalogProviderLoginRejectsOwnershipBeforePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+		{Name: "work", CatalogID: "xai"},
+		{Name: "personal", CatalogID: "xai"},
+	}}, 0o600)
+	called := false
+	err := CommitCatalogProviderLogin(path, "xai", func() error {
+		called = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("CommitCatalogProviderLogin error = %v, want ownership ambiguity", err)
+	}
+	if called {
+		t.Fatal("token persistence ran after ownership validation failed")
 	}
 }
 

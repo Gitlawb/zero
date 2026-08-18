@@ -752,7 +752,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// the encrypted credential store (interactive runs only; headless exec keeps
 	// its existing behavior). Non-fatal — a missing keyring or write error leaves
 	// the inline key in place and this run still uses the already-resolved key.
-	_, _ = config.MigratePlaintextProviderKeysTransactional(userConfigPath)
+	if _, migrationErr := config.MigratePlaintextProviderKeysTransactional(userConfigPath); migrationErr != nil {
+		_, _ = fmt.Fprintf(stderr, "[zero] warning: could not migrate every plaintext provider API key: %s\n", redaction.ErrorMessage(migrationErr, redaction.Options{}))
+	}
 	doctorUserConfigPath := ""
 	projectConfigPath := ""
 	if resolveOptions, optErr := config.DefaultResolveOptions(workspaceRoot); optErr == nil {

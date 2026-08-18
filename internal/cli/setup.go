@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -111,6 +112,17 @@ type setupVerification struct {
 func verifySetupProvider(deps appDeps, profile config.ProviderProfile) (setupVerification, error) {
 	if deps.probeProviderHealth == nil {
 		return setupVerification{Ran: false, Summary: "probe unavailable; skipped"}, nil
+	}
+	if profile.APIKeyStored && strings.TrimSpace(profile.APIKey) == "" {
+		configPath, err := deps.userConfigPath()
+		if err != nil {
+			return setupVerification{Ran: true, Summary: "stored api key unavailable"}, err
+		}
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+		if err != nil {
+			return setupVerification{Ran: true, Summary: "stored api key unavailable"}, err
+		}
+		profile = config.ApplyStoredAPIKey(profile, store)
 	}
 	// Distinguish "no key configured" from "key rejected": probing a remote provider
 	// with no credential yields a generic "the provider rejected the API key", which
@@ -271,12 +283,7 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
-	// As in `providers add`: adopt the committed name and stored-key state, but
-	// keep the plaintext key on the returned profile because verifySetupProvider
-	// probes with it before this process exits.
-	profile.Name = committed.Persisted.Name
-	profile.APIKeyStored = committed.Persisted.APIKeyStored
-	return tui.SetupResult{ConfigPath: configPath, Provider: profile}, nil
+	return tui.SetupResult{ConfigPath: configPath, Provider: committed.Persisted}, nil
 }
 
 func setupProviderOptions() []tui.SetupProviderOption {

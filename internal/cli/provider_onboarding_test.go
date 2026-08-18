@@ -247,6 +247,34 @@ func TestProviderRemoveRejectsAmbiguousFoldedName(t *testing.T) {
 		t.Fatalf("surviving credential present=%v err=%v matched=%v, want preserved", ok, err, key == "sk-lower")
 	}
 }
+func TestProviderMutationsRejectAmbiguousCatalogID(t *testing.T) {
+	for _, command := range []string{"use", "remove", "rename"} {
+		t.Run(command, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+				ActiveProvider: "other",
+				Providers: []config.ProviderProfile{
+					{Name: "work", CatalogID: "acme", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "m1"},
+					{Name: "personal", CatalogID: "acme", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://personal.example/v1", Model: "m2"},
+					{Name: "other", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://other.example/v1", Model: "m3"},
+				},
+			})
+			args := []string{"providers", command, "acme"}
+			if command == "rename" {
+				args = append(args, "renamed")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath)); code == exitSuccess {
+				t.Fatalf("ambiguous catalog id mutated a profile; stdout = %q", stdout.String())
+			}
+			cfg := readFileConfig(t, configPath)
+			if cfg.ActiveProvider != "other" || len(cfg.Providers) != 3 ||
+				cfg.Providers[0].Name != "work" || cfg.Providers[1].Name != "personal" || cfg.Providers[2].Name != "other" {
+				t.Fatalf("config mutated on an ambiguous address: %+v", cfg)
+			}
+		})
+	}
+}
 func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

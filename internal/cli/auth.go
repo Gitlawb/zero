@@ -223,10 +223,15 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
+	manager, err := oauth.NewManager(oauth.ManagerOptions{
+		Store:       store,
+		Now:         deps.now,
+		CommitToken: catalogOAuthTokenCommit(store, configPath, provider),
+	})
+	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := store.Save(oauth.ProviderKey(provider), token); err != nil {
+	if _, err := manager.SaveLogin(provider, token); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	statuses, err := oauthFormatChatGPTStatus(token)
@@ -357,7 +362,7 @@ func validateAuthFlags(sub string, a authArgs) error {
 // ZERO_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it. Setting
 // ZERO_OAUTH_STORAGE=encrypted-file selects the AES-256-GCM encrypted-at-rest
 // backend (a per-user secret is created beside the token file).
-func newAuthManager(deps appDeps, out io.Writer, beforeSave func() error) (*oauth.Manager, error) {
+func newAuthManager(deps appDeps, out io.Writer, configPath, provider string) (*oauth.Manager, error) {
 	// Validate ZERO_OAUTH_STORAGE up front: a mistyped value must fail fast rather
 	// than silently change the backend. Empty = default (plaintext 0600 file);
 	// "encrypted-file" = AES-256-GCM; "keyring" = the OS keyring.
@@ -386,8 +391,19 @@ func newAuthManager(deps appDeps, out io.Writer, beforeSave func() error) (*oaut
 		// `zero auth login <preset>` (e.g. xai) should resolve the baked-in preset
 		// without the operator exporting ZERO_OAUTH_ALLOW_PRESETS first.
 		AllowPresets: true,
-		BeforeSave:   beforeSave,
+		CommitToken:  catalogOAuthTokenCommit(store, configPath, provider),
 	})
+}
+
+func catalogOAuthTokenCommit(store *oauth.Store, configPath, provider string) func(string, oauth.Token) error {
+	if strings.TrimSpace(configPath) == "" || strings.TrimSpace(provider) == "" {
+		return nil
+	}
+	return func(key string, token oauth.Token) error {
+		return config.CommitCatalogProviderLogin(configPath, provider, func() error {
+			return store.Save(key, token)
+		})
+	}
 }
 
 func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -424,9 +440,7 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	manager, err := newAuthManager(deps, stdout, func() error {
-		return config.PreflightCatalogProviderLogin(configPath, provider)
-	})
+	manager, err := newAuthManager(deps, stdout, configPath, provider)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -473,7 +487,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	manager, err := newAuthManager(deps, stdout, nil)
+	manager, err := newAuthManager(deps, stdout, "", "")
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -552,7 +566,7 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 	}
-	manager, err := newAuthManager(deps, stdout, nil)
+	manager, err := newAuthManager(deps, stdout, "", "")
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -602,7 +616,7 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if len(credentialCandidates) == 0 {
 		return writeAppError(stderr, redaction.ErrorMessage(fmt.Errorf("provider identity %q resolved to no credential candidates", provider), redaction.Options{}), exitCrash)
 	}
-	manager, err := newAuthManager(deps, stdout, nil)
+	manager, err := newAuthManager(deps, stdout, "", "")
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
