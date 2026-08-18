@@ -297,7 +297,7 @@ func shellIssueBlockResult(issue shellIssue) Result {
 // commandText. PowerShell is preferred on Windows, with cmd.exe retained as
 // the fallback. Only cmd.exe needs the raw command-line override.
 func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
-	hostShell := detectShellRuntime(runtime.GOOS)
+	hostShell := shellRuntimeForEngine(engine, absoluteCwd)
 	spec := zeroSandbox.CommandSpec{
 		Name: hostShell.Executable,
 		Args: hostShell.arguments(commandText),
@@ -332,6 +332,39 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 	command.Dir = spec.Dir
 	applyWindowsShellCommandLine(command, commandText, plan.Wrapped, hostShell.Kind == shellKindCmd)
 	return command, plan, nil
+}
+
+// shellRuntimeForEngine resolves the shell to run commandText with. When a
+// sandbox engine will wrap the command, the shell must be probed through that
+// engine: a candidate that starts fine in this process can be unable to start
+// under the sandbox's restricted token, and picking it strands every command.
+// Without an engine the command runs unwrapped, so the direct probe is already
+// asking the right question.
+func shellRuntimeForEngine(engine *zeroSandbox.Engine, absoluteCwd string) shellRuntime {
+	if engine == nil || runtime.GOOS != "windows" {
+		return detectShellRuntime(runtime.GOOS)
+	}
+	return detectShellRuntimeSandboxed(func(path string) bool {
+		return shellStartsUnderEngine(engine, path, absoluteCwd)
+	})
+}
+
+// shellStartsUnderEngine reports whether path can start a trivial command
+// inside the sandbox. The probe deliberately uses its own timeout rather than
+// the caller's context: the answer is cached for the process, so a cancelled
+// request must not poison it for every later command.
+func shellStartsUnderEngine(engine *zeroSandbox.Engine, path string, absoluteCwd string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command, _, err := engine.CommandContext(ctx, zeroSandbox.CommandSpec{
+		Name: path,
+		Args: []string{"-NoLogo", "-NoProfile", "-Command", "exit 0"},
+		Dir:  absoluteCwd,
+	})
+	if err != nil || command == nil {
+		return false
+	}
+	return command.Run() == nil
 }
 
 func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {

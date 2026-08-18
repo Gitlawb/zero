@@ -15,6 +15,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -22,38 +23,61 @@ import (
 
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
-	Cwd                         string
-	Version                     string // CLI build version, shown on the home screen; empty hides it
-	UserConfigPath              string
-	DoctorUserConfigPath        string
-	ProjectConfigPath           string
-	ProviderName                string
-	ModelName                   string
-	ProviderProfile             config.ProviderProfile
-	SavedProviders              []config.ProviderProfile // all configured providers, for the /model multi-provider list
-	FavoriteModels              []string
-	RecentModels                []config.RecentModelEntry
-	RecapsEnabled               bool
+	Cwd                  string
+	Version              string // CLI build version, shown on the home screen; empty hides it
+	UserConfigPath       string
+	DoctorUserConfigPath string
+	ProjectConfigPath    string
+	ProviderName         string
+	ModelName            string
+	ProviderProfile      config.ProviderProfile
+	SavedProviders       []config.ProviderProfile // all configured providers, for the /model multi-provider list
+	FavoriteModels       []string
+	RecentModels         []config.RecentModelEntry
+	RecapsEnabled        bool
+	// KeepFinishedAgents seeds showDoneAgents so finished sub-agents stay in the
+	// AGENTS panel from the first render, without a click.
+	KeepFinishedAgents          bool
 	Provider                    zeroruntime.Provider
 	NewProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	ProbeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	DiscoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	DiscoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	RuntimeMessageSink          func(tea.Msg)
+	// PlanProgress is the recorder the orchestrate tool was registered with.
+	// The model re-attaches it to each run so plan lifecycle events become
+	// transcript cards. nil disables the live plan view without affecting
+	// execution — recording is best-effort everywhere on this path.
+	PlanProgress *PlanProgressBridge
+	// PlanPaths locates saved plans. Empty means saved plans are unavailable,
+	// which the commands report as such rather than as "you have none".
+	PlanPaths                   specialist.PlanPaths
 	PrepareRunCompletionWarning func()
 	RunCompletionWarning        func() string
 	Registry                    *tools.Registry
 	SessionStore                *sessions.Store
 	SandboxStore                *sandbox.GrantStore
 	MCPConfig                   config.MCPConfig
-	MCPPermissionStore          *mcp.PermissionStore
-	MCPTokenStore               *mcp.TokenStore
-	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
-	PeerService                 *peermsg.Service
+	// ZeromaxingDisabled carries resolved config's profiles.disableZeromaxing so
+	// /effort and /profile refuse the posture on exactly the same rule the
+	// headless exec path applies. Resolved config already folded the
+	// project-scope tighten-only merge, so a project .zero/config.json can set
+	// it but never clear it.
+	ZeromaxingDisabled bool
+	// ZeromaxingGate is the SHARED posture flag the orchestrate tool reads. A
+	// pointer, not a bool: the tool is registered once and the registry is
+	// cloned per run copying tool POINTERS, so the flip has to be visible
+	// through shared state rather than through re-registration or a closure
+	// over this value-typed model. nil disables the posture for the tool.
+	ZeromaxingGate      *specialist.PostureGate
+	MCPPermissionStore  *mcp.PermissionStore
+	MCPTokenStore       *mcp.TokenStore
+	MCPCommand          func(context.Context, []string) MCPCommandResult
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
+	PeerService         *peermsg.Service
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any

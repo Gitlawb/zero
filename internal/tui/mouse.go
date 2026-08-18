@@ -154,6 +154,53 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if next, cmd, handled := m.handlePetMouse(msg); handled {
 		return next, cmd
 	}
+	// Clicking the orchestrate plan's header line opens or closes it. Checked
+	// before the surface switch below because the panel lives in the FOOTER,
+	// outside every transcript/sidebar region those cases test.
+	// Clicking the posture chip opens /effort, where it can be turned off or
+	// changed. A chip that highlights under the cursor and then does nothing
+	// when pressed is worse than one that never highlighted.
+	if mouseLeftPress(msg) && m.zeromaxingChipAtMouse(msg) {
+		// Not while a turn is in flight: the effort picker refuses mid-run for
+		// the same reason /effort does, and opening one that cannot be acted on
+		// would be a dead dialog.
+		//
+		// Nor while another modal owns the screen. This branch runs BEFORE the
+		// surface switch below, so it is not covered by the guards there: with
+		// the /model picker or a provider wizard open, a click here would swap
+		// in a fresh effort picker and discard whatever the open one had loaded
+		// or the user had typed. The sidebar hit-testers each carry the same
+		// guard for the same reason.
+		if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
+			m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+			return m, nil
+		}
+		if !m.pending {
+			if picker := m.newEffortPicker(); picker != nil {
+				m.picker = picker
+			}
+		}
+		return m, nil
+	}
+	// The plan lives in the sidebar: clicking a task selects it (the TASK
+	// section below shows it), clicking the PLAN header collapses the section.
+	// Checked before the surface switch because the sidebar is not one of the
+	// regions those cases test.
+	if mouseLeftPress(msg) {
+		if index, ok := m.orchestrateTaskAtMouse(msg); ok {
+			m.orchestrateSelected = index
+			return m, nil
+		}
+		if m.orchestrateHeaderAtMouse(msg) {
+			m.orchestrate.sidebarCollapsed = !m.orchestrate.sidebarCollapsed
+			return m, nil
+		}
+	}
+	// Clicking the inline panel's header still expands it in place.
+	if mouseLeftPress(msg) && m.clickedOrchestrateHeader(msg) {
+		m.orchestrate.expanded = !m.orchestrate.expanded
+		return m, nil
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:
@@ -216,7 +263,20 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// press/drag/release cases above, so it falls through here — resolve what's
 	// under the cursor so it can render with the hover highlight.
 	if mouseHover(msg) {
-		return m.updateHoverTarget(msg), nil
+		hovered := m.updateHoverTarget(msg)
+		// Starting the tick HERE is what lets the hover flow move while the
+		// cursor rests. Bounded by zeromaxingChipAnimating: it runs only while
+		// the chip is actually hovered and stops the moment the cursor leaves,
+		// so an idle session still schedules nothing.
+		//
+		// Sequenced, never `return hovered, hovered.ensureSpinnerTick()`: the
+		// method takes a POINTER receiver and sets spinnerTicking, and Go does
+		// not specify whether the plain operand is copied before or after the
+		// call operand. Copied first, the returned model still says false and
+		// every later hover issues another Tick — the exact double-issue the
+		// flag exists to prevent.
+		cmd := hovered.ensureSpinnerTick()
+		return hovered, cmd
 	}
 
 	switch {
@@ -312,7 +372,7 @@ func (m model) sidebarLineAtMouse(msg tea.MouseMsg) (sidebarAgentHit, bool) {
 		return sidebarAgentHit{}, false
 	}
 	for _, hit := range m.sidebarAgentSelectables(sidebarW) {
-		if hit.lineOffset == y && hit.sessionID != "" {
+		if hit.lineOffset == y && (hit.sessionID != "" || hit.toggleDone) {
 			return hit, true
 		}
 	}

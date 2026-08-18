@@ -1356,6 +1356,28 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		// session, reusing the specialist-card subchat path. Checked before the
 		// transcript hit-test since the sidebar is outside the chat column.
 		if hit, ok := m.sidebarLineAtMouse(msg); ok {
+			if hit.toggleDone {
+				m.showDoneAgents = !m.showDoneAgents
+				// PERSISTED, so a click becomes the standing preference — the same
+				// way /recaps persists. A user who wants finished agents to stay
+				// clicks once and they stay every session, not just this one.
+				if err := m.persistKeepFinishedAgents(); err != nil {
+					m = m.appendPlansNotice(planControlNotice("warning", "Could not save the finished-agents preference: "+err.Error()))
+				}
+				return m, nil, true
+			}
+			if hit.expands {
+				// Toggles in place. A specialist row is keyed by its CARD, and a
+				// running plan task's card key is not a session id yet — there
+				// is nothing to drill into until it finishes, and the detail is
+				// most wanted before then. Clicking the open row closes it.
+				if m.expandedAgent == hit.sessionID {
+					m.expandedAgent = ""
+				} else {
+					m.expandedAgent = hit.sessionID
+				}
+				return m, nil, true
+			}
 			// The subchat drill-in owns the whole (single-column) view; a file
 			// drill-in can't meaningfully stay open behind it.
 			m = m.exitFileView()

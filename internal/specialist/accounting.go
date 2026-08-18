@@ -31,6 +31,12 @@ type specialistAccountingInput struct {
 	Mode            string
 	Background      bool
 	PID             int
+	// Model is what the child actually ran on. Written into the usage rollup so
+	// the tokens are priced against THAT model rather than the parent session's.
+	// The payload has always supported it; only escalation runs ever set it, so
+	// every plan task was priced as if it had run on the session's model — which
+	// stopped being true the moment tasks could name their own.
+	Model string
 }
 
 func (executor Executor) recordSpecialistStart(input specialistAccountingInput) {
@@ -99,7 +105,23 @@ func appendSpecialistUsageRollup(store *sessions.Store, input specialistAccounti
 	payload["promptTokens"] = summary.Usage.PromptTokens
 	payload["completionTokens"] = summary.Usage.CompletionTokens
 	payload["totalTokens"] = summary.Usage.EffectiveTotalTokens()
+	// PRICING FIELDS, written on exactly the same terms as usage.EventUsagePayload
+	// (non-zero only) because BuildReport reads both records with one reader.
+	// Their absence is what made every sub-agent turn cost as though nothing had
+	// been cached.
+	if summary.Usage.CachedInputTokens > 0 {
+		payload["cachedInputTokens"] = summary.Usage.CachedInputTokens
+	}
+	if summary.Usage.CacheWriteTokens > 0 {
+		payload["cacheWriteTokens"] = summary.Usage.CacheWriteTokens
+	}
+	if summary.Usage.ReasoningTokens > 0 {
+		payload["reasoningTokens"] = summary.Usage.ReasoningTokens
+	}
 	payload["usageEvents"] = summary.Usage.Events
+	if model := strings.TrimSpace(input.Model); model != "" {
+		payload["model"] = model
+	}
 	// Atomic check+append under the session lock so the TaskOutput poll and the
 	// onExit path cannot both pass the existence check and double-count usage.
 	return appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventUsage, payload, input.ChildSessionID, summary.RunID)

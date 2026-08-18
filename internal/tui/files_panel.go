@@ -204,9 +204,9 @@ type fileHit struct {
 func (m model) sidebarFilesHeader(width int) string {
 	n := len(m.touchedFiles())
 	if n == 0 {
-		return sidebarHeader("FILES", width)
+		return m.postureHeader("FILES", width)
 	}
-	return sidebarHeaderWithCount("FILES", fmt.Sprintf("%d", n), zeroTheme.muted, width)
+	return m.postureHeaderWithCount("FILES", fmt.Sprintf("%d", n), zeroTheme.muted, width)
 }
 
 // sidebarFileLines renders the FILES section body: the live "writing" pulse row
@@ -306,10 +306,14 @@ func (m model) sidebarFileSelectables(width int) []fileHit {
 		planBody = 1 // the "no active plan" placeholder occupies one line
 	}
 	base := 1 + agentBody + 2 + planBody + 2 // sections above + (blank + FILES header)
-	for i := range hits {
-		hits[i].lineOffset += base
+	kept := hits[:0]
+	for _, hit := range hits {
+		hit.lineOffset += base
+		if m.sidebarRowOnScreen(hit.lineOffset) {
+			kept = append(kept, hit)
+		}
 	}
-	return hits
+	return kept
 }
 
 // fileRowAtMouse maps a left-click in the context sidebar to a touched file,
@@ -332,7 +336,7 @@ func (m model) fileRowAtMouse(msg tea.MouseMsg) (string, bool) {
 		return "", false
 	}
 	for _, hit := range m.sidebarFileSelectables(sidebarW) {
-		if hit.lineOffset == y && hit.lineOffset < m.height-1 && hit.path != "" {
+		if hit.lineOffset == y && hit.path != "" {
 			return hit.path, true
 		}
 	}

@@ -12,13 +12,33 @@ import (
 )
 
 const (
-	defaultCompletedRetention = 30 * time.Second
-	defaultMaxProcesses       = 64
-	maxPendingOutputBytes     = 2 * 1024 * 1024
-	recentOutputBytes         = 4096
-	processStopTimeout        = 3 * time.Second
-	maxInteractiveYield       = 30 * time.Second
-	maxEmptyPollYield         = 5 * time.Minute
+	defaultMaxProcesses   = 64
+	maxPendingOutputBytes = 2 * 1024 * 1024
+	recentOutputBytes     = 4096
+	processStopTimeout    = 3 * time.Second
+	maxInteractiveYield   = 30 * time.Second
+	maxEmptyPollYield     = 5 * time.Minute
+
+	// defaultCompletedRetention is how long a finished process stays addressable.
+	//
+	// DERIVED FROM THE POLL BOUND, never chosen beside it. It was 30 seconds
+	// while maxEmptyPollYield allowed a five-minute poll, and those two numbers
+	// contradict each other: a caller Zero itself invites to wait five minutes
+	// could arrive to find the answer already forgotten. In a measured run a
+	// 60-second test was started, polled with yield_time_ms 40000, and the id was
+	// gone — so the same 60-second test was run a second time to recover a result
+	// the first one had already produced.
+	//
+	// Doubled so a caller that waits the full poll still has as long again to come
+	// back with what it learned. TestCompletedRetentionCoversTheLongestPoll pins
+	// the relationship rather than the number.
+	defaultCompletedRetention = 2 * maxEmptyPollYield
+
+	// maxRememberedCompletions bounds the finished-session records kept after a
+	// process is evicted. They hold an exit code and a short output tail, so the
+	// cost is bytes; the bound exists so a long session cannot accumulate them
+	// without limit.
+	maxRememberedCompletions = 64
 )
 
 var (
@@ -33,6 +53,22 @@ type ProcessManagerOptions struct {
 
 // ProcessManager owns retained interactive-process identity, transport,
 // bounded output, continuation, cancellation, completion, and cleanup.
+// completedProcess is what a finished session leaves behind once its process is
+// gone: enough to answer a late poll honestly.
+//
+// A LATE POLL IS NOT A GUESS. Without this, an id that ran and finished is
+// indistinguishable from one a model invented, and both are answered by
+// UnknownExecSessionError — which tells the caller not to probe ids, having just
+// handed it that id and instructed it to poll. The result is a re-run of work
+// already done.
+type completedProcess struct {
+	id       int
+	command  string
+	output   string
+	exitCode int
+	exited   bool
+}
+
 type ProcessManager struct {
 	mu                 sync.Mutex
 	nextID             int
@@ -40,6 +76,10 @@ type ProcessManager struct {
 	completedRetention time.Duration
 	maxProcesses       int
 	startTransport     processTransportStarter
+	// completed remembers finished sessions after their process is evicted, in
+	// arrival order so the oldest is dropped first.
+	completed      map[int]completedProcess
+	completedOrder []int
 }
 
 type ProcessStart struct {
@@ -104,6 +144,7 @@ func NewProcessManager(options ProcessManagerOptions) *ProcessManager {
 	return &ProcessManager{
 		nextID:             1000,
 		processes:          make(map[int]*managedProcess),
+		completed:          make(map[int]completedProcess),
 		completedRetention: retention,
 		maxProcesses:       maxProcesses,
 		startTransport:     startProcessTransport,
@@ -196,6 +237,7 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 		result.Changes = more.Changes
 	}
 	if result.Exited {
+		manager.remember(result)
 		manager.Remove(process.id)
 	}
 	return result, nil
@@ -204,6 +246,14 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 func (manager *ProcessManager) Continue(ctx context.Context, input ProcessContinue) (ProcessResult, error) {
 	process, ok := manager.get(input.ProcessID)
 	if !ok {
+		// A SESSION THAT RAN AND FINISHED IS NOT A GUESSED ID. Answering both with
+		// ErrProcessNotFound told a caller "do not probe session ids" about an id
+		// this manager had issued and instructed it to poll — and threw away the
+		// result, so the work was done again. An id never issued still falls
+		// through to the error, so a real probe is still refused.
+		if finished, remembered := manager.Completed(input.ProcessID); remembered {
+			return finished, nil
+		}
 		return ProcessResult{}, ErrProcessNotFound
 	}
 	process.touch()
@@ -219,6 +269,7 @@ func (manager *ProcessManager) Continue(ctx context.Context, input ProcessContin
 	}
 	result := process.collectResult(ctx, clampContinuationWait(input.Wait, len(input.Input) == 0), input.Interrupt)
 	if result.Exited {
+		manager.remember(result)
 		manager.Remove(process.id)
 	}
 	return result, nil
@@ -294,6 +345,59 @@ func (manager *ProcessManager) Remove(id int) {
 	manager.mu.Unlock()
 }
 
+// remember records a finished session so a late poll gets its result rather than
+// an error telling it not to probe ids.
+func (manager *ProcessManager) remember(result ProcessResult) {
+	if !result.Exited || result.ProcessID == 0 {
+		return
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if _, seen := manager.completed[result.ProcessID]; !seen {
+		manager.completedOrder = append(manager.completedOrder, result.ProcessID)
+		for len(manager.completedOrder) > maxRememberedCompletions {
+			delete(manager.completed, manager.completedOrder[0])
+			manager.completedOrder = manager.completedOrder[1:]
+		}
+	}
+	manager.completed[result.ProcessID] = completedProcess{
+		id:       result.ProcessID,
+		command:  result.CommandText,
+		output:   tailProcessOutput(result.Output),
+		exitCode: result.ExitCode,
+		exited:   true,
+	}
+}
+
+// Completed reports a finished session's result when the id ran in this process
+// and has since been evicted. A never-issued id is not found, so a genuine probe
+// is still refused.
+func (manager *ProcessManager) Completed(id int) (ProcessResult, bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	record, ok := manager.completed[id]
+	if !ok {
+		return ProcessResult{}, false
+	}
+	return ProcessResult{
+		ProcessID:   record.id,
+		CommandText: record.command,
+		Output:      record.output,
+		Exited:      record.exited,
+		ExitCode:    record.exitCode,
+	}, true
+}
+
+// tailProcessOutput keeps the END of a finished session's output: the tail is
+// where a test result, a build error and an exit summary live, and the head is
+// where the noise is.
+func tailProcessOutput(output string) string {
+	if len(output) <= recentOutputBytes {
+		return output
+	}
+	return output[len(output)-recentOutputBytes:]
+}
+
 func (manager *ProcessManager) Len() int {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -353,6 +457,12 @@ func (manager *ProcessManager) processToPruneLocked() *managedProcess {
 func (manager *ProcessManager) removeCompletedLater(process *managedProcess) {
 	go func() {
 		<-process.done
+		// CAPTURED BEFORE THE WAIT, because the common case is that NOBODY polled
+		// while it ran: a caller starts a long command, goes away to do other
+		// work, and comes back after it finished. Recording only on the polling
+		// paths would leave exactly that case with nothing to hand back — which is
+		// the case that was measured, and it cost a 60-second test being run twice.
+		manager.remember(process.collectResult(context.Background(), 0, false))
 		if manager.completedRetention > 0 {
 			timer := time.NewTimer(manager.completedRetention)
 			<-timer.C
