@@ -162,6 +162,9 @@ func openDeviceIDDir(path string) (*os.Root, string, error) {
 
 var (
 	beforeRenameHook func()
+	readDeviceLock   = func(root *os.Root, name string) ([]byte, error) {
+		return root.ReadFile(name)
+	}
 	deviceIDNow      = time.Now
 	deviceIDMaxWait  = 5 * time.Second
 	deviceIDLeaseTTL = 10 * time.Second
@@ -278,12 +281,26 @@ func publishOrAdoptDeviceID(ctx context.Context, root *os.Root, name, id string)
 			return existingID
 		}
 
-		raw, rerr := root.ReadFile(lockName)
+		raw, rerr := readDeviceLock(root, lockName)
 		switch {
 		case rerr != nil && !errors.Is(rerr, os.ErrNotExist):
-			return id
+			// Windows often returns sharing-violation or access-denied
+			// while the holder is deleting the lock after publish. That is
+			// contention, not a dead store: returning a process-local id
+			// here makes concurrent first-use callers diverge.
+			if existingID := readValidDeviceID(root, name); existingID != "" {
+				return existingID
+			}
+			if !deviceIDNow().Before(deadline) || ctx.Err() != nil {
+				return id
+			}
+			time.Sleep(pollInterval)
+			continue
 		case rerr == nil && lockHolderAlive(raw):
 			if !deviceIDNow().Before(deadline) || ctx.Err() != nil {
+				if existingID := readValidDeviceID(root, name); existingID != "" {
+					return existingID
+				}
 				return id
 			}
 			time.Sleep(pollInterval)

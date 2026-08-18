@@ -2,6 +2,7 @@ package kimiidentity
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 )
@@ -41,6 +42,16 @@ func SetDeviceIDMaxWait(d time.Duration) func() {
 	prev := deviceIDMaxWait
 	deviceIDMaxWait = d
 	return func() { deviceIDMaxWait = prev }
+}
+
+// SetReadDeviceLock replaces the lock-file reader. Tests use this to inject
+// a transient Windows-style read failure while a holder is publishing.
+func SetReadDeviceLock(fn func(root *os.Root, name string) ([]byte, error)) func() {
+	prev := readDeviceLock
+	if fn != nil {
+		readDeviceLock = fn
+	}
+	return func() { readDeviceLock = prev }
 }
 
 func LoadOrCreateDeviceIDAtContext(ctx context.Context, path string) string {

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -135,6 +136,80 @@ func TestLoadOrCreateDeviceIDExclusiveCreate(t *testing.T) {
 		t.Fatalf("read persisted id: %v", err)
 	} else if got := strings.TrimSpace(string(raw)); got != winner {
 		t.Fatalf("persisted id = %q, want %q", got, winner)
+	}
+}
+
+// TestLoadOrCreateDeviceIDConvergesWhenLockReadIsTransient is the Windows
+// exclusive-create regression: a holder deleting the lock after publish can
+// make a concurrent ReadFile return a sharing-violation (not ErrNotExist).
+// That must be treated as contention so every caller adopts the persisted id.
+func TestLoadOrCreateDeviceIDConvergesWhenLockReadIsTransient(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	pause := make(chan struct{})
+	paused := make(chan struct{})
+	var once sync.Once
+	cleanupHook := SetBeforeRenameHook(func() {
+		once.Do(func() {
+			close(paused)
+			<-pause
+		})
+	})
+	defer cleanupHook()
+
+	var injected atomic.Bool
+	transientReadErr := errors.New("sharing violation")
+	cleanupRead := SetReadDeviceLock(func(root *os.Root, name string) ([]byte, error) {
+		if injected.CompareAndSwap(false, true) {
+			return nil, transientReadErr
+		}
+		return root.ReadFile(name)
+	})
+	defer cleanupRead()
+
+	var publisherID string
+	var pubWg sync.WaitGroup
+	pubWg.Add(1)
+	go func() {
+		defer pubWg.Done()
+		publisherID = loadOrCreateDeviceIDAt(path)
+	}()
+	<-paused
+
+	const workers = 8
+	ids := make([]string, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := range workers {
+		go func(i int) {
+			defer wg.Done()
+			ids[i] = loadOrCreateDeviceIDAt(path)
+		}(i)
+	}
+	// Let racers observe the lock (and the injected read failure) first.
+	time.Sleep(30 * time.Millisecond)
+	close(pause)
+	pubWg.Wait()
+	wg.Wait()
+
+	if !isUUID(publisherID) {
+		t.Fatalf("publisher id %q is not a UUID", publisherID)
+	}
+	for i, id := range ids {
+		if id != publisherID {
+			t.Fatalf("worker %d returned %q, want publisher %q (all: %v)", i, id, publisherID, ids)
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted id: %v", err)
+	}
+	if persisted := strings.TrimSpace(string(raw)); persisted != publisherID {
+		t.Fatalf("persisted %q, want publisher %q", persisted, publisherID)
 	}
 }
 
