@@ -128,22 +128,20 @@ func TestModelSwitchSyncsSavedProviders(t *testing.T) {
 		}
 	})
 
-	t.Run("persistSelectedModel mirror", func(t *testing.T) {
+	t.Run("handleModelCommand", func(t *testing.T) {
 		m := newSession(t)
-		profile := config.ProviderProfile{Name: "openai", Model: "gpt-5.5"}
-		persisted, persistedName, err := m.persistSelectedModel(profile)
-		if err != nil {
-			t.Fatal(err)
+		// Exercise the production caller that owns both persistence and the
+		// savedProviders mirror; calling the two helpers separately would stay
+		// green if their production pairing were removed.
+		m.providerName = "openai"
+		m.providerProfile = m.savedProviders[0]
+		m.modelName = m.providerProfile.Model
+		next, status := m.handleModelCommand("gpt-4.1-mini")
+		if next.savedProviders[0].Model != "gpt-4.1-mini" {
+			t.Fatalf("savedProviders model = %q, want gpt-4.1-mini; status=%q", next.savedProviders[0].Model, status)
 		}
-		if !persisted {
-			t.Fatal("expected the persisted row to be written")
-		}
-		saved := syncSavedProviderModel(m.savedProviders, persistedName, profile.Model)
-		if saved[0].Model != "gpt-5.5" {
-			t.Fatalf("savedProviders model = %q, want gpt-5.5", saved[0].Model)
-		}
-		if saved[1].Model != "m1" {
-			t.Fatalf("mirror touched an unrelated row: %+v", saved[1])
+		if next.savedProviders[1].Model != "m1" {
+			t.Fatalf("mirror touched an unrelated row: %+v", next.savedProviders[1])
 		}
 	})
 }

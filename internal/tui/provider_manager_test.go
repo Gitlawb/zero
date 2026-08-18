@@ -851,6 +851,38 @@ func TestProviderManagerCaseVariantDeleteDoesNotChangeLiveSibling(t *testing.T) 
 	}
 }
 
+func TestProviderManagerAmbiguousCaseVariantSessionDoesNotGuessLiveRow(t *testing.T) {
+	providers := []config.ProviderProfile{{Name: "work"}, {Name: "WORK"}}
+	if got := sessionRowName("Work", providers); got != "Work" {
+		t.Fatalf("sessionRowName = %q, want unresolved live spelling Work", got)
+	}
+	for _, row := range providers {
+		if sessionRefersToPersistedRow("Work", row.Name, providers) {
+			t.Fatalf("ambiguous live spelling must not select row %q", row.Name)
+		}
+	}
+}
+
+func TestProviderManagerCleanupRedactsCredentialStoreError(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	secret := "sk-proj-12345678901234567890"
+	dir := filepath.Join(t.TempDir(), secret)
+	if err := os.MkdirAll(filepath.Join(dir, "credentials.json.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	msg, ok := providerManagerCleanupCmd(filepath.Join(dir, "config.json"), config.ProviderProfile{Name: "work"}, true)().(providerManagerCleanupMsg)
+	if !ok {
+		t.Fatal("cleanup command returned the wrong message type")
+	}
+	text := strings.Join(msg.notes, " ")
+	if strings.Contains(text, secret) {
+		t.Fatalf("cleanup warning leaked credential-like text: %q", text)
+	}
+	if !strings.Contains(text, "could not be deleted") {
+		t.Fatalf("cleanup warning missing failure context: %q", text)
+	}
+}
+
 // The confirmation prompt must promise what the delete actually does: with a
 // case variant that still claims the shared credential, the key is kept, so
 // the prompt must not say it is about to be removed.

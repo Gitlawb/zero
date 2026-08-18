@@ -11,6 +11,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type providerUseOptions struct {
@@ -444,9 +445,12 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 		if keyErr != nil {
 			// A lingering secret must not read as a clean removal.
-			payload["keyError"] = keyErr.Error()
+			payload["keyError"] = redaction.ErrorMessage(keyErr, redaction.Options{})
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		if keyErr != nil {
 			return exitCrash
 		}
 		return exitSuccess
@@ -455,9 +459,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return exitCrash
 	}
 	if keyErr != nil {
-		if _, err := fmt.Fprintf(stderr, "warning: its stored API key could not be deleted and remains in the credential store: %v\n", keyErr); err != nil {
+		if _, err := fmt.Fprintf(stderr, "warning: its stored API key could not be deleted and remains in the credential store: %s\n", redaction.ErrorMessage(keyErr, redaction.Options{})); err != nil {
 			return exitCrash
 		}
+		return exitCrash
 	} else if keyRemoved {
 		if _, err := fmt.Fprintln(stdout, "Deleted its stored API key."); err != nil {
 			return exitCrash

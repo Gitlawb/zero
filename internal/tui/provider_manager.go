@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 const providerManagerMaxVisible = 10
@@ -523,7 +524,7 @@ func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile
 				_, storeErr = keyStore.Delete(name)
 			}
 			if storeErr != nil {
-				notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
+				notes = append(notes, "Warning: its stored API key could not be deleted ("+redaction.ErrorMessage(storeErr, redaction.Options{})+").")
 			}
 		}
 		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {

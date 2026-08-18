@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -415,6 +416,49 @@ func TestRunAuthLogoutRejectsAmbiguousConfigBeforeCredentialDeletion(t *testing.
 	}
 }
 
+func TestRunAuthLogoutRejectsConfigPathFailureBeforeCredentialDeletion(t *testing.T) {
+	withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+	oauthStore, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthToken := oauth.Token{AccessToken: "oauth-access", RefreshToken: "oauth-refresh", Account: "work@example.com"}
+	if err := oauthStore.Save(oauth.ProviderKey("work"), oauthToken); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	pathErr := errors.New("config path unavailable")
+	code := runWithDeps([]string{"auth", "logout", "work"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return "", pathErr },
+	})
+	if code != exitCrash {
+		t.Fatalf("logout exit = %d, want path failure", code)
+	}
+	if !strings.Contains(stderr.String(), pathErr.Error()) {
+		t.Fatalf("stderr = %q, want config path failure", stderr.String())
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("API credential changed before path rejection: present=%v len=%d err=%v", ok, len(key), getErr)
+	}
+	storedOAuth, ok, loadErr := oauthStore.Load(oauth.ProviderKey("work"))
+	if loadErr != nil || !ok {
+		t.Fatalf("OAuth credential missing after path rejection: ok=%v err=%v", ok, loadErr)
+	}
+	if storedOAuth.AccessToken != oauthToken.AccessToken || storedOAuth.RefreshToken != oauthToken.RefreshToken || storedOAuth.Account != oauthToken.Account {
+		t.Fatal("OAuth credential changed before config path rejection")
+	}
+}
+
 // A legacy duplicate-row config cannot be published, and the rejection must not
 // cost the user the OpenRouter key they were already working with: the capture
 // is validated first, and a rejected publication restores the previous secret
@@ -446,6 +490,9 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	// A login that could not be persisted is a failure, not a success.
 	if code == exitSuccess {
 		t.Fatalf("exit = %d, want non-zero for an unsaved login: %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "ambiguous persisted provider names") {
+		t.Fatalf("stdout = %q, want ambiguous persisted-name rejection", stdout.String())
 	}
 	after, err := os.ReadFile(configPath)
 	if err != nil {

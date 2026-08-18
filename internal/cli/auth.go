@@ -442,12 +442,12 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		return writeExecUsageError(stderr, "usage: zero auth logout <provider>")
 	}
 	provider := parsed.positional[0]
-	configPath := ""
-	if path, pathErr := deps.userConfigPath(); pathErr == nil {
-		configPath = path
-		if err := config.PreflightUserConfig(configPath); err != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
-		}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := config.PreflightUserConfig(configPath); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	manager, err := newAuthManager(deps, stdout)
 	if err != nil {
@@ -465,17 +465,10 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// store BESIDE the config being edited (where setup/rename captured the key),
 	// so a non-default config path cannot clear a marker here while the secret
 	// stays in the default-path store.
-	if configPath != "" {
-		if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, provider); clearErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
-		}
+	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, provider); clearErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 	}
-	keyRemoved, keyErr := false, error(nil)
-	if configPath != "" {
-		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, provider)
-	} else {
-		keyRemoved, keyErr = config.ForgetProviderKey(provider)
-	}
+	keyRemoved, keyErr := removeStoredProviderKeyAt(configPath, provider)
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}

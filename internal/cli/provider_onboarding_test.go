@@ -481,6 +481,71 @@ func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
 	}
 }
 
+func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("ZERO_CRED_STORAGE", "file")
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := config.ProviderKeyStoreAt(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Set("gw", "sk-secret"); err != nil {
+				t.Fatal(err)
+			}
+			// A directory at the lock-file path is a hermetic, cross-platform
+			// failure: Delete cannot acquire its write lock.
+			lockPath := filepath.Join(dir, "credentials.json.lock")
+			if err := os.Remove(lockPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(lockPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"providers", "remove", "gw"}
+			if jsonOutput {
+				args = append(args, "--json")
+			}
+			var stdout, stderr bytes.Buffer
+			code := runWithDeps(args, &stdout, &stderr, appDeps{
+				userConfigPath: func() (string, error) { return configPath, nil },
+			})
+			if code != exitCrash {
+				t.Fatalf("exit = %d, want cleanup failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if jsonOutput {
+				var payload struct {
+					KeyError string `json:"keyError"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+					t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+				}
+				if payload.KeyError == "" {
+					t.Fatal("JSON cleanup failure omitted keyError")
+				}
+			} else if !strings.Contains(stderr.String(), "could not be deleted") {
+				t.Fatalf("stderr = %q, want cleanup warning", stderr.String())
+			}
+
+			if err := os.Remove(lockPath); err != nil {
+				t.Fatal(err)
+			}
+			if key, ok, getErr := store.Get("gw"); getErr != nil || !ok || key != "sk-secret" {
+				t.Fatalf("failed cleanup changed key: present=%v len=%d err=%v", ok, len(key), getErr)
+			}
+		})
+	}
+}
+
 func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
