@@ -257,6 +257,13 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 	}
 	result := ListSessionsResult{Sessions: make([]SessionInfo, 0, len(items))}
 	for _, item := range items {
+		// A session with no persisted workspace cannot be resumed —
+		// activatePersistedSession refuses it — so advertising it offers the
+		// client something that only fails when taken. Listing is a menu, and
+		// every entry on it has to be orderable.
+		if strings.TrimSpace(item.Cwd) == "" {
+			continue
+		}
 		if cwd != "" {
 			itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)
 			if err != nil || !sameWorkspace(itemRoot, cwd) {

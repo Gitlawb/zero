@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -804,9 +806,7 @@ func normalisingResolver(t *testing.T) func(string) (string, error) {
 func TestACPResumesAcrossTwoSpellingsOfOneWorkspace(t *testing.T) {
 	real := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "alias")
-	if err := os.Symlink(real, alias); err != nil {
-		t.Skipf("cannot create a directory alias here: %v", err)
-	}
+	directoryAlias(t, real, alias)
 	// The premise: the resolver really does produce two different strings.
 	resolve := normalisingResolver(t)
 	realRoot, err := resolve(real)
@@ -925,4 +925,71 @@ func keysOf(m map[string]any) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// directoryAlias makes `alias` a second name for `target`.
+//
+// A JUNCTION ON WINDOWS, not a symlink. os.Symlink needs a privilege an ordinary
+// Windows session does not hold, so a test built on it SKIPS there — and Windows
+// is where junctions exist and where this bug came from. The guard would have
+// been verified only on the two platforms that never had the problem. mklink /J
+// needs no privilege, which is also how the defect was found.
+func directoryAlias(t *testing.T, target, alias string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", alias, target).CombinedOutput(); err != nil {
+			t.Skipf("cannot create a junction: %v %s", err, out)
+		}
+		return
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("cannot create a directory alias here: %v", err)
+	}
+}
+
+// A SESSION WITH NO PERSISTED WORKSPACE IS NOT RESUMABLE, SO IT IS NOT LISTED.
+//
+// activatePersistedSession refuses a session whose Cwd is empty, but the listing
+// advertised it anyway — offering the client a menu entry that only fails when
+// taken. Both halves are asserted together, because the listing is only correct
+// relative to what resume will accept.
+func TestSessionListOmitsSessionsWithoutAWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	usable, err := deps.Store.Create(sessions.CreateInput{SessionID: "has-cwd", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "no-cwd"}); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &listed); err != nil {
+		t.Fatal(err)
+	}
+	sawUsable := false
+	for _, item := range listed.Sessions {
+		if item.SessionID == "no-cwd" {
+			t.Errorf("session/list advertised a session with no persisted workspace")
+		}
+		if item.SessionID == usable.SessionID {
+			sawUsable = true
+		}
+	}
+	if !sawUsable {
+		t.Errorf("session/list dropped a usable session while filtering; got %d", len(listed.Sessions))
+	}
+
+	// The other half of the contract: resuming the omitted one really does fail,
+	// which is why omitting it is right rather than merely tidy.
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: "no-cwd", Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || !strings.Contains(rpcErr.Message, "persisted workspace") {
+		t.Errorf("resume of a workspace-less session = %v, want a persisted-workspace error", err)
+	}
 }
