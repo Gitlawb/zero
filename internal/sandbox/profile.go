@@ -788,8 +788,11 @@ func credentialRetainedDirs(denied []string, dirs []string) []string {
 // Children inside a retained carveout stay explicit denies, because the
 // carveout re-allows that subtree.
 func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead []string) credentialDenyPaths {
-	credentials.Paths = pathsOutsideRoots(credentials.Paths, userDenyRead)
-	credentials.MandatoryPaths = pathsOutsideRoots(credentials.MandatoryPaths, userDenyRead)
+	// A broader user read denial may subsume optional credential stores, but the
+	// selected daemon token remains exact and mandatory: native backends also use
+	// this entry to deny writes, which a parent read denial does not imply.
+	credentials.MandatoryPaths = dedupeStrings(credentials.MandatoryPaths)
+	credentials.Paths = dedupeStrings(append(pathsOutsideRoots(credentials.Paths, userDenyRead), credentials.MandatoryPaths...))
 	credentials.Carveouts = pathsOutsideOverlappingRoots(credentials.Carveouts, userDenyRead)
 	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
 	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)

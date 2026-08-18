@@ -244,6 +244,31 @@ func TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile(t *testing.T) {
 	}
 }
 
+func TestMandatoryTokenKeepsExactSeatbeltDenialsUnderParentDenyRead(t *testing.T) {
+	workspace, token := protectedTokenFixture(t)
+	policy := DefaultPolicy()
+	policy.DenyRead = []string{workspace}
+
+	profile := PermissionProfileFromPolicy(workspace, policy, nil)
+	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, token) {
+		t.Fatalf("DenyReadIfExists = %#v, want mandatory token %q despite parent DenyRead", profile.FileSystem.DenyReadIfExists, token)
+	}
+	if !stringSliceContains(profile.FileSystem.MandatoryDenyReadPaths, token) {
+		t.Fatalf("MandatoryDenyReadPaths = %#v, want token %q", profile.FileSystem.MandatoryDenyReadPaths, token)
+	}
+
+	sbpl := seatbeltProfileFromPermissionProfile(profile, policy, "")
+	escaped := sandboxProfileString(token)
+	for _, want := range []string{
+		`(deny file-read* (literal "` + escaped + `"))`,
+		`(deny file-write* (literal "` + escaped + `"))`,
+	} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("Seatbelt profile missing mandatory token rule %q:\n%s", want, sbpl)
+		}
+	}
+}
+
 func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows filenames cannot end in a space")

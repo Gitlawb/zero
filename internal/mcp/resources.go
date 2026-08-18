@@ -94,6 +94,9 @@ func (server toolServer) listResources() []Resource {
 		}
 		for _, file := range summary.Files {
 			absolute := filepath.Join(root, filepath.FromSlash(file.Path))
+			if server.credentialGuard.ReadExclusions().PathExcluded(absolute) {
+				continue
+			}
 			uri := fileURI(absolute)
 			if _, ok := seen[uri]; ok {
 				continue
@@ -145,6 +148,9 @@ func (server toolServer) readResource(rawParams json.RawMessage) ([]ResourceCont
 		// contents so a remote client learns nothing about the host filesystem
 		// outside the granted roots.
 		return nil, jsonRPCResourceNotFound, err
+	}
+	if server.credentialGuard.ReadExclusions().PathExcluded(absolute) {
+		return nil, jsonRPCResourceNotFound, fmt.Errorf("resource not found: %s", uri)
 	}
 
 	info, err := os.Stat(absolute)

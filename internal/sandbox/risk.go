@@ -287,7 +287,9 @@ func applyPatchRequestPaths(args map[string]any) []string {
 	if patch == "" {
 		return nil
 	}
-	cwd := firstArgString(args, "cwd")
+	// apply_patch consumes cwd as exact pathname data. Trimming here would make
+	// the gate derive targets under a different directory than git applies them.
+	cwd := firstExactStringArg(args, "cwd")
 	var paths []string
 	parsed, err := PatchHeaderPaths(patch)
 	if err != nil {
