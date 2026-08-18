@@ -57,41 +57,89 @@ func IsUnconfiguredDefault(name string, server MCPServerConfig) bool {
 	return ok && !server.configured && reflect.DeepEqual(def, server)
 }
 
-// legacyDefaultMCPServers maps a built-in default Zero no longer ships to the
-// default that replaced it (retired name -> successor name).
-//
-// A user who ran `zero mcp disable <old default>` made an explicit choice not
-// to open that outbound connection. Renaming the default underneath them must
-// not silently re-open it under the new name — and the reopened server would
-// look like an untouched default, so even the startup warning stays quiet
-// (see IsUnconfiguredDefault and issue #552).
-var legacyDefaultMCPServers = map[string]string{
-	"firecrawl": "exa",
+// retiredDefaultMCPServer describes a built-in default Zero no longer ships.
+type retiredDefaultMCPServer struct {
+	// successor is the default that replaced it.
+	successor string
+	// shipped is the value Zero used to seed for this name. A user entry
+	// written while the default was still shipped may name only an override
+	// (a header, say) and rely on these fields for the rest, so they have to
+	// outlive the default itself.
+	shipped MCPServerConfig
 }
 
-// applyLegacyDefaultDisable carries a user's explicit disable of a retired
-// built-in default onto the default that replaced it, so upgrading Zero never
-// turns a connection back on that the user switched off.
+// retiredDefaultMCPServers maps a retired built-in default to what replaced it
+// and to the value Zero used to ship for it.
+var retiredDefaultMCPServers = map[string]retiredDefaultMCPServer{
+	"firecrawl": {
+		successor: "exa",
+		shipped: MCPServerConfig{
+			Type: "http",
+			URL:  "https://mcp.firecrawl.dev/v2/mcp",
+		},
+	},
+}
+
+// migrateRetiredDefaultMCPServers keeps an upgrade across a default-provider
+// swap from changing what the user's config means. It handles the two ways a
+// rename can break a config written against the old default:
+//
+//   - A user who ran `zero mcp disable <old default>` made an explicit choice
+//     not to open that outbound connection. Without carrying that decision to
+//     the successor, the upgrade re-opens it under the new name — and because
+//     the replacement looks like an untouched default, even the startup
+//     warning stays quiet (see IsUnconfiguredDefault and issue #552).
+//   - A user who customized the old default could name only the field they
+//     were changing, because the seeded default supplied the transport. Once
+//     the default stops being seeded that entry resolves to a server with no
+//     type, url, or command, which fails NormalizeConfig and takes the whole
+//     startup down rather than just that one server.
 //
 // It runs immediately after the user layer merges (see ResolveMCP), which
-// scopes it to user-level disables — the only scope whose disable is sticky.
-// It applies only when the user never declared the successor themselves: an
-// explicit `exa` entry wins whether it enables or disables. Because the
-// carried-over disable is recorded as a user-level decision, the lower-trust
-// project layer cannot lift it, while `zero mcp enable exa` still can (the CLI
-// override scope merges with canReenable=true).
-func applyLegacyDefaultDisable(cfg *MCPConfig) {
-	for legacy, successor := range legacyDefaultMCPServers {
-		retired, ok := cfg.Servers[legacy]
-		if !ok || !retired.disabledSet || !retired.Disabled {
+// scopes it to user-level decisions — the only scope whose disable is sticky.
+// The carried-over disable applies only when the user never declared the
+// successor themselves: an explicit `exa` entry wins whether it enables or
+// disables. Because the disable is recorded as a user-level decision, the
+// lower-trust project layer cannot lift it, while `zero mcp enable exa` still
+// can (the CLI override scope merges with canReenable=true).
+func migrateRetiredDefaultMCPServers(cfg *MCPConfig) {
+	for name, retired := range retiredDefaultMCPServers {
+		entry, ok := cfg.Servers[name]
+		if !ok {
 			continue
 		}
-		replacement, ok := cfg.Servers[successor]
+		if inheritsRetiredTransport(entry) {
+			// Re-seed what Zero used to ship underneath the user's fields, so a
+			// partial entry still resolves to the complete server it named when
+			// it was written. Their own values still win — this only fills the
+			// gap the retired default used to cover.
+			entry = mergeMCPServer(retired.shipped, entry, true)
+			cfg.Servers[name] = entry
+		}
+		if !entry.disabledSet || !entry.Disabled {
+			continue
+		}
+		replacement, ok := cfg.Servers[retired.successor]
 		if !ok || replacement.configured {
 			continue
 		}
 		replacement.Disabled = true
 		replacement.disabledSet = true
-		cfg.Servers[successor] = replacement
+		cfg.Servers[retired.successor] = replacement
 	}
+}
+
+// inheritsRetiredTransport reports whether entry named no transport of its own
+// — no type, url, command, or args — and so relied entirely on the retired
+// default to supply one.
+//
+// Anything else is a complete definition the user owns (a self-hosted url, a
+// stdio command) and must be left alone: grafting the retired default's http
+// type onto an entry that names a command produces a server that is rejected
+// outright, turning a working config into a startup failure.
+func inheritsRetiredTransport(entry MCPServerConfig) bool {
+	return strings.TrimSpace(entry.Type) == "" &&
+		strings.TrimSpace(entry.URL) == "" &&
+		strings.TrimSpace(entry.Command) == "" &&
+		len(entry.Args) == 0
 }

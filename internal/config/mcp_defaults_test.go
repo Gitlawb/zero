@@ -225,3 +225,69 @@ func TestResolveMCPLegacyDisableSurvivesProjectReenable(t *testing.T) {
 		t.Fatal("project config must not re-enable a server the user disabled")
 	}
 }
+
+func TestResolveMCPKeepsRetiredDefaultTransportForPartialEntry(t *testing.T) {
+	// A user who added an API key to the firecrawl default wrote only the header
+	// — the seeded default supplied the http type and URL. Retiring the default
+	// must not strip those out from under them and leave an unusable server.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"headers":{"Authorization":"Bearer k"}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	firecrawl := cfg.Servers["firecrawl"]
+	if firecrawl.Type != "http" || firecrawl.URL != "https://mcp.firecrawl.dev/v2/mcp" {
+		t.Fatalf("a partial entry must keep the retired default's transport: %#v", firecrawl)
+	}
+	if firecrawl.Headers["Authorization"] != "Bearer k" {
+		t.Fatalf("the user's own field must still win: %#v", firecrawl)
+	}
+}
+
+func TestResolveMCPDoesNotGraftRetiredDefaultOntoOwnTransport(t *testing.T) {
+	// A self-hosted firecrawl over stdio is a complete definition the user owns.
+	// Re-seeding the retired http default under it would produce an http server
+	// carrying a command, which NormalizeConfig rejects outright.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"command":"firecrawl-mcp"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	firecrawl := cfg.Servers["firecrawl"]
+	if firecrawl.Type != "" || firecrawl.URL != "" {
+		t.Fatalf("an entry naming its own transport must be left alone: %#v", firecrawl)
+	}
+	if firecrawl.Command != "firecrawl-mcp" {
+		t.Fatalf("the user's command must survive: %#v", firecrawl)
+	}
+}
+
+func TestResolveMCPDisabledRetiredEntryStaysReEnableable(t *testing.T) {
+	// The disable carries to exa, and the retired entry itself keeps a usable
+	// transport so a later `zero mcp enable firecrawl` does not resolve to a
+	// server with no type, url, or command.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	firecrawl := cfg.Servers["firecrawl"]
+	if !firecrawl.Disabled {
+		t.Fatalf("the retired entry must stay disabled: %#v", firecrawl)
+	}
+	if firecrawl.Type != "http" || firecrawl.URL != "https://mcp.firecrawl.dev/v2/mcp" {
+		t.Fatalf("a disabled retired entry should still carry a usable transport: %#v", firecrawl)
+	}
+	if !cfg.Servers["exa"].Disabled {
+		t.Fatal("the disable must still carry to the successor")
+	}
+}
