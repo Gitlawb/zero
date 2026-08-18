@@ -152,7 +152,12 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 
 func detectInteractiveCommandAt(command string, goos string, depth int) InteractiveCommandResult {
 	if depth > maxAnalyzerDepth {
-		return InteractiveCommandResult{}
+		return InteractiveCommandResult{
+			Interactive: true,
+			Command:     "nested shell launcher",
+			Reason:      "shell launcher nesting exceeds the safe inspection limit, so its payload cannot be proven non-interactive",
+			Suggestion:  "Simplify the nested shell command or run its non-interactive payload directly.",
+		}
 	}
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -202,7 +207,9 @@ func detectInteractiveCommandAt(command string, goos string, depth int) Interact
 			if inner := detectInteractiveCommandAt(payload, goos, depth+1); inner.Interactive {
 				return inner
 			}
-			continue
+			// strings.Fields cannot preserve a quoted multi-word payload. If its
+			// best-effort read is clean, keep going so the AST pass below can
+			// inspect the actual payload rather than treating truncation as safe.
 		}
 		program, ok := interactivePrograms[first]
 		if !ok {
@@ -265,7 +272,13 @@ func inspectCommandFields(fields []string, goos string, depth int) (InteractiveC
 	if first == "" {
 		return InteractiveCommandResult{}, false
 	}
-	if payload := shellDashCPayload(first, fields); payload != "" {
+	start := programIndex(first, fields)
+	args := fields[start+1:]
+	payloadIndex, hasPayload := shellCommandPayloadIndex(first, args)
+	if hasPayload && payloadIndex < len(args) {
+		// astCommandFields already removed the launcher's outer quoting. Do not
+		// trim again: trailing quotes can belong to a nested launcher's payload.
+		payload := args[payloadIndex]
 		if inner := detectInteractiveCommandAt(payload, goos, depth+1); inner.Interactive {
 			return inner, true
 		}

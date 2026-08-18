@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -411,10 +410,14 @@ func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
 func TestDetectInteractiveCommandBoundsNestedShellLaunchers(t *testing.T) {
 	command := "vim file"
 	for range maxAnalyzerDepth + 2 {
-		command = "bash -c " + strconv.Quote(command)
+		command = "bash -c '" + strings.ReplaceAll(command, "'", `'"'"'`) + "'"
 	}
-	if got := DetectInteractiveCommand(command, "linux"); got.Interactive {
-		t.Fatalf("DetectInteractiveCommand(deep shell chain) = %+v; want bounded inspection", got)
+	got := DetectInteractiveCommand(command, "linux")
+	if !got.Interactive || got.Command != "nested shell launcher" {
+		t.Fatalf("DetectInteractiveCommand(deep shell chain) = %+v; want conservative depth-limit result", got)
+	}
+	if !strings.Contains(got.Reason, "cannot be proven non-interactive") {
+		t.Fatalf("DetectInteractiveCommand(deep shell chain).Reason = %q; want unresolved inspection reason", got.Reason)
 	}
 }
 
