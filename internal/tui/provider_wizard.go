@@ -209,10 +209,15 @@ func runProviderChatGPTLogin(configPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := preflightOAuthProviderConfig(path, "chatgpt"); err != nil {
+	manager, err := oauth.NewManager(oauth.ManagerOptions{
+		Store:       store,
+		CommitToken: tuiOAuthTokenCommit(store, path, "chatgpt"),
+	})
+	if err != nil {
 		return err
 	}
-	return store.Save(oauth.ProviderKey("chatgpt"), token)
+	_, err = manager.SaveLogin("chatgpt", token)
+	return err
 }
 
 func preflightOAuthProviderConfig(path string, providerID string) error {
@@ -298,7 +303,7 @@ func runProviderTokenLogin(name string, configPath string) error {
 		// into its baked-in preset (e.g. xAI's public client_id); without this the
 		// config never resolves and the browser never opens.
 		AllowPresets: true,
-		BeforeSave:   func() error { return preflightOAuthProviderConfig(path, name) },
+		CommitToken:  tuiOAuthTokenCommit(store, path, name),
 	})
 	if err != nil {
 		return err

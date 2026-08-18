@@ -1000,6 +1000,33 @@ func TestEditProviderRenameMigratesFreshlyCapturedKey(t *testing.T) {
 	}
 }
 
+func TestEditProviderWritesReplacementKeyUnderNewName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{
+		Name: "gw", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://gw.example.com/v1", Model: "m1",
+	}}}, 0o600)
+
+	cfg, err := EditProvider(path, ProviderEdit{Name: "gw", NewName: "gateway", APIKey: "sk-new"})
+	if err != nil {
+		t.Fatalf("EditProvider() error = %v", err)
+	}
+	if cfg.Providers[0].Name != "gateway" || !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("edited profile = %+v", cfg.Providers[0])
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key, ok, err := store.Get("gateway"); err != nil || !ok || key != "sk-new" {
+		t.Fatalf("replacement key = %q ok=%v err=%v", key, ok, err)
+	}
+	if _, ok, err := store.Get("gw"); err != nil || ok {
+		t.Fatalf("old credential survived: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestEditProviderRejectsCollisionAndUnknown(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	before := writeConfigFixture(t, path, FileConfig{

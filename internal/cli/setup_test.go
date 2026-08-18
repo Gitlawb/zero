@@ -170,8 +170,8 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 		t.Fatalf("saveSetupProvider() error = %v", err)
 	}
 
-	if result.Provider.APIKey != "sk-pasted-secret" {
-		t.Fatalf("Provider.APIKey = %q, want pasted key", result.Provider.APIKey)
+	if result.Provider.APIKey != "" || !result.Provider.APIKeyStored {
+		t.Fatalf("returned provider must be the sanitized persisted profile: %+v", result.Provider)
 	}
 	if result.Provider.APIKeyEnv != "" {
 		t.Fatalf("Provider.APIKeyEnv = %q, want empty when API key is pasted", result.Provider.APIKeyEnv)
@@ -409,5 +409,34 @@ func TestSaveSetupProviderRejectsCaseVariantBeforeCredentialCapture(t *testing.T
 	}
 	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "OLD" {
 		t.Fatalf("existing credential = %q,%v,%v; want OLD,true,nil", key, ok, getErr)
+	}
+}
+
+func TestVerifySetupProviderLoadsSanitizedStoredKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openai", "sk-stored"); err != nil {
+		t.Fatal(err)
+	}
+	var probed config.ProviderProfile
+	_, _ = verifySetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		probeProviderHealth: func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+			probed = options.Profile
+			return providerhealth.Result{}
+		},
+	}, config.ProviderProfile{
+		Name:         "openai",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		Model:        "gpt-4.1",
+		APIKeyStored: true,
+	})
+	if probed.APIKey != "sk-stored" {
+		t.Fatalf("probe API key = %q, want credential-store value", probed.APIKey)
 	}
 }

@@ -164,6 +164,30 @@ func TestMigratePlaintextProviderKeysValidatesBeforeStoreWrites(t *testing.T) {
 	}
 }
 
+func TestTransactionalMigrationReportsStoreFailureWithoutExposingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	const secret = "sk-KEEP-TRANSACTIONAL"
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"openai","apiKey":"`+secret+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_CRED_STORAGE", "not-a-backend")
+
+	migrated, err := MigratePlaintextProviderKeysTransactional(path)
+	if err == nil || migrated != 0 {
+		t.Fatalf("migration = %d, %v; want a reported store failure", migrated, err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("migration error exposed the API key: %v", err)
+	}
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(raw), secret) {
+		t.Fatalf("failed migration removed the only key copy: %s", raw)
+	}
+}
 func TestClearProviderKeyStored(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

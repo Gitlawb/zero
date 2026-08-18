@@ -166,8 +166,8 @@ func TestManagerPrepareAndCompleteDeviceLogin(t *testing.T) {
 	}
 }
 
-func TestManagerBeforeSaveFailureLeavesStoreUnchanged(t *testing.T) {
-	beforeSaveErr := errors.New("config changed before save")
+func TestManagerCommitTokenFailureLeavesStoreUnchanged(t *testing.T) {
+	commitTokenErr := errors.New("config changed before save")
 	for _, test := range []struct {
 		name string
 		run  func(context.Context, *Manager) error
@@ -205,12 +205,12 @@ func TestManagerBeforeSaveFailureLeavesStoreUnchanged(t *testing.T) {
 			if err := store.Save(ProviderKey("demo"), Token{AccessToken: "keep"}); err != nil {
 				t.Fatal(err)
 			}
-			manager, err := NewManager(ManagerOptions{Store: store, Env: env, BeforeSave: func() error { return beforeSaveErr }})
+			manager, err := NewManager(ManagerOptions{Store: store, Env: env, CommitToken: func(string, Token) error { return commitTokenErr }})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := test.run(context.Background(), manager); !errors.Is(err, beforeSaveErr) {
-				t.Fatalf("error = %v, want exact BeforeSave error", err)
+			if err := test.run(context.Background(), manager); !errors.Is(err, commitTokenErr) {
+				t.Fatalf("error = %v, want exact CommitToken error", err)
 			}
 			if token, ok, err := store.Load(ProviderKey("demo")); err != nil || !ok || token.AccessToken != "keep" {
 				t.Fatalf("existing provider token was replaced: token=%+v ok=%v err=%v", token, ok, err)

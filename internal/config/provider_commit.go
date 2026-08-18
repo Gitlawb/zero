@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -72,13 +73,11 @@ func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInp
 	}
 	op := &providerProfileOperation{path: path, config: cfg, snapshots: map[string]providerCredentialSnapshot{}, publish: true, exists: exists}
 	if err := mutate(op); err != nil {
-		op.rollbackCredentials()
-		return FileConfig{}, err
+		return FileConfig{}, errors.Join(err, op.rollbackCredentials())
 	}
 	if op.publish {
 		if err := publishProviderConfig(path, op.config); err != nil {
-			op.rollbackCredentials()
-			return FileConfig{}, err
+			return FileConfig{}, errors.Join(err, op.rollbackCredentials())
 		}
 	}
 	return op.config, nil
@@ -120,7 +119,10 @@ func (op *providerProfileOperation) setKey(name, value string) error {
 	if err != nil {
 		return err
 	}
-	store, _ := op.credentialStore()
+	store, err := op.credentialStore()
+	if err != nil {
+		return err
+	}
 	if err := store.Set(name, value); err != nil {
 		return err
 	}
@@ -135,7 +137,10 @@ func (op *providerProfileOperation) deleteKey(name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	store, _ := op.credentialStore()
+	store, err := op.credentialStore()
+	if err != nil {
+		return false, err
+	}
 	removed, err := store.Delete(name)
 	if err != nil {
 		return false, err
@@ -145,21 +150,31 @@ func (op *providerProfileOperation) deleteKey(name string) (bool, error) {
 	return removed, nil
 }
 
-func (op *providerProfileOperation) rollbackCredentials() {
+func (op *providerProfileOperation) rollbackCredentials() error {
 	if op.store == nil {
-		return
+		return nil
 	}
+	var rollbackErr error
 	for _, snapshot := range op.snapshots {
 		current, present, err := op.store.Get(snapshot.name)
-		if err != nil || present != snapshot.writtenSet || (present && current != snapshot.written) {
+		if err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("inspect credential %q during rollback: %w", snapshot.name, err))
+			continue
+		}
+		if present != snapshot.writtenSet || (present && current != snapshot.written) {
 			continue
 		}
 		if snapshot.present {
-			_ = op.store.Set(snapshot.name, snapshot.value)
+			if err := op.store.Set(snapshot.name, snapshot.value); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore credential %q during rollback: %w", snapshot.name, err))
+			}
 		} else {
-			_, _ = op.store.Delete(snapshot.name)
+			if _, err := op.store.Delete(snapshot.name); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("remove credential %q during rollback: %w", snapshot.name, err))
+			}
 		}
 	}
+	return rollbackErr
 }
 
 // ProviderCommit is one provider write: reject a colliding spelling, capture
@@ -264,8 +279,10 @@ func lockProviderWrite(configPath string) (func() error, error) {
 		}
 		// On Windows a concurrent holder's remove leaves the file delete-pending, so
 		// an O_EXCL create races it with ERROR_ACCESS_DENIED rather than ErrExist.
-		// Both mean contention.
-		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
+		// That is contention only on Windows; on Unix ErrPermission is a permanent
+		// access failure and must be returned immediately instead of timing out.
+		contention := errors.Is(err, os.ErrExist) || runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission)
+		if !contention {
 			return nil, fmt.Errorf("acquire provider config/key transaction lock: %w", err)
 		}
 		if time.Now().After(deadline) {
