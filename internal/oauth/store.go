@@ -432,17 +432,21 @@ func sanitizeLockComponent(s string) string {
 func (s *Store) FilePath() string { return s.blob.location() }
 
 // Mixed-version key lifecycle (keyring backend). File backends ignore intent.
+// Load/Status, refresh persist, login Save, Delete, and a pre-per-key binary
+// that removes a key from oauth-tokens must follow this table. write() applies
+// the persist columns; read() applies Load/Status.
 //
-//	State                         Load/Status              After refresh persist              After explicit Save                 After old binary drops the key from oauth-tokens
-//	----------------------------  -----------------------  ---------------------------------  ---------------------------------  ------------------------------------------------
-//	Legacy-only, not yet indexed  serve from legacy        index + set legacyOrigin           index + set origin                 hide + tombstone once origin is known
-//	Indexed, legacyOrigin set     serve indexed            update material, keep origin       update + retire origin             hide via origin absence (tombstone on write)
-//	Pure new-format (never legacy) serve indexed           update only                        update only                        N/A (origin never set)
-//	User logged out (tombstone)   hidden                   abort: do not refresh or persist   clear tombstone after durable write already hidden
+//	State                          Load/Status     After refresh persist            After explicit re-login (Save)            After old binary drops key from oauth-tokens
+//	-----------------------------  --------------  -------------------------------  ----------------------------------------  -------------------------------------------
+//	Legacy-only, not yet indexed   serve legacy    index + set legacyOrigin         index + set origin                        hide + tombstone (once origin is known)
+//	Indexed, legacyOrigin set      serve indexed   update material, keep origin     update + retire origin                    hide via origin absence
+//	Pure new-format (never legacy) serve indexed   update only                      update only                               N/A
+//	User logged out (tombstone)    hidden          abort: do not refresh/persist    clear tombstone after durable replace     already hidden
 //
-// Refresh is not login. mutationRefresh seeds origin, never retires it, never
-// clears a tombstone, and never creates a credential that Load no longer sees.
-// Rules must key off intent, not "is this key in the mutation map?".
+// Delete hides the key and writes a tombstone. Refresh is not login:
+// mutationRefresh seeds origin, never retires it, never clears a tombstone,
+// and never creates a credential Load no longer sees. Rules key off intent,
+// not "is this key in the mutation map?".
 type mutationIntent int
 
 const (
@@ -1030,6 +1034,9 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // legacy blob would require a snapshot-then-Set that cannot be locked against
 // old writers on other config roots, so it would trade a bounded downgrade
 // window for unbounded loss of concurrent old-binary logins.
+//
+// Persist intent (seed/retire legacyOrigin, absence heuristic, tombstone
+// clear) follows the mixed-version table on mutationIntent.
 func (b keyringBlob) write(data []byte, mutations map[string]mutationIntent, checkLease leaseCheck) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {

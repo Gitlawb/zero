@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/oauth"
 )
 
 func TestTokenStoreRoundTrip(t *testing.T) {
@@ -489,6 +493,129 @@ func TestStoreTokenSourceRefreshUsesSaveRefreshed(t *testing.T) {
 	if err != nil || !ok || loaded.AccessToken != "mcp-refreshed" {
 		t.Fatalf("LoadForServer after refresh = %#v ok=%v err=%v", loaded, ok, err)
 	}
+}
+
+func TestStoreTokenSourceRefreshHonorsLegacyBinaryLogout(t *testing.T) {
+	// Production graph: MCP 401 refresh must keep legacyOrigin so an old
+	// binary's rewrite of oauth-tokens still hides the credential.
+	kr := &memoryKeyring{data: map[string]string{}}
+	unified, err := oauth.NewStore(oauth.StoreOptions{
+		Storage: "keyring",
+		Keyring: kr,
+		Env:     map[string]string{"XDG_CONFIG_HOME": t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	store := &TokenStore{store: unified}
+	server := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false)
+	key, err := mcpIdentityKey(server)
+	if err != nil {
+		t.Fatalf("mcpIdentityKey: %v", err)
+	}
+
+	t.Run("origin marked then refresh", func(t *testing.T) {
+		writeLegacyOAuthTokens(t, kr, map[string]oauth.Token{
+			key: {AccessToken: "mcp-legacy", RefreshToken: "rt"},
+		})
+		other := testOAuthServer("other", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false)
+		if err := store.SaveForServer(other, StoredToken{AccessToken: "unrelated"}); err != nil {
+			t.Fatalf("SaveForServer(other) to seed origin: %v", err)
+		}
+		loaded, ok, err := store.LoadForServer(server)
+		if err != nil || !ok || loaded.AccessToken != "mcp-legacy" {
+			t.Fatalf("LoadForServer after origin seed = %#v ok=%v err=%v", loaded, ok, err)
+		}
+
+		refreshMCPServer(t, store, &server)
+		loaded, ok, err = store.LoadForServer(server)
+		if err != nil || !ok || loaded.AccessToken != "mcp-refreshed" {
+			t.Fatalf("LoadForServer after refresh = %#v ok=%v err=%v", loaded, ok, err)
+		}
+
+		writeLegacyOAuthTokens(t, kr, map[string]oauth.Token{})
+		if _, ok, err := store.LoadForServer(server); err != nil || ok {
+			t.Fatalf("LoadForServer after legacy logout = ok %v err %v; want hidden", ok, err)
+		}
+	})
+
+	t.Run("first persist is refresh", func(t *testing.T) {
+		kr.data = map[string]string{}
+		writeLegacyOAuthTokens(t, kr, map[string]oauth.Token{
+			key: {AccessToken: "mcp-legacy-only", RefreshToken: "rt"},
+		})
+		fresh := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false)
+		refreshMCPServer(t, store, &fresh)
+		loaded, ok, err := store.LoadForServer(fresh)
+		if err != nil || !ok || loaded.AccessToken != "mcp-refreshed" {
+			t.Fatalf("LoadForServer after first refresh persist = %#v ok=%v err=%v", loaded, ok, err)
+		}
+		writeLegacyOAuthTokens(t, kr, map[string]oauth.Token{})
+		if _, ok, err := store.LoadForServer(fresh); err != nil || ok {
+			t.Fatalf("LoadForServer after legacy logout = ok %v err %v; want hidden", ok, err)
+		}
+	})
+}
+
+func refreshMCPServer(t *testing.T, store *TokenStore, server *Server) {
+	t.Helper()
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("grant_type") != "refresh_token" {
+			t.Errorf("grant_type = %q", r.Form.Get("grant_type"))
+		}
+		_, _ = w.Write([]byte(`{"access_token":"mcp-refreshed","expires_in":3600}`))
+	}))
+	t.Cleanup(tokenServer.Close)
+	if server.OAuth == nil {
+		server.OAuth = &OAuthConfig{ClientID: "client"}
+	}
+	server.OAuth.TokenEndpoint = tokenServer.URL
+	source := &storeTokenSource{server: *server, store: store, httpClient: tokenServer.Client(), now: time.Now}
+	got, err := source.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got != "mcp-refreshed" {
+		t.Fatalf("Refresh = %q, want mcp-refreshed", got)
+	}
+}
+
+func writeLegacyOAuthTokens(t *testing.T, kr *memoryKeyring, tokens map[string]oauth.Token) {
+	t.Helper()
+	raw, err := json.Marshal(struct {
+		SchemaVersion int                    `json:"schemaVersion"`
+		Tokens        map[string]oauth.Token `json:"tokens"`
+	}{SchemaVersion: 1, Tokens: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set("zero", "oauth-tokens", base64.StdEncoding.EncodeToString(raw)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type memoryKeyring struct {
+	data map[string]string
+}
+
+func (k *memoryKeyring) slot(service, account string) string { return service + "/" + account }
+
+func (k *memoryKeyring) Get(service, account string) (string, bool, error) {
+	v, ok := k.data[k.slot(service, account)]
+	return v, ok, nil
+}
+
+func (k *memoryKeyring) Set(service, account, secret string) error {
+	k.data[k.slot(service, account)] = secret
+	return nil
+}
+
+func (k *memoryKeyring) Delete(service, account string) (bool, error) {
+	key := k.slot(service, account)
+	_, ok := k.data[key]
+	delete(k.data, key)
+	return ok, nil
 }
 
 func TestSaveRefreshedForServerAbortsWhenTokenGone(t *testing.T) {
