@@ -85,17 +85,23 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 
 	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
+	resolvedOverride := ""
+	var resolvedOverrideErr error
+	overrideDeferred := deps.getenv != nil && strings.TrimSpace(deps.getenv(providerCommandEnv)) != ""
+	if override != "" && !overrideDeferred {
+		resolvedOverride, resolvedOverrideErr = resolveActiveProviderWithoutProviderCommand(deps, configPath)
+	}
 	// A case-only difference is harmless only when resolution proves that it
 	// selects the exact user-config row just written. A project profile may use
 	// the case-variant spelling and point at a different endpoint and credential.
 	if override != "" && config.SameProviderIdentity(override, cfg.ActiveProvider) &&
-		activeProviderEnvOverrideSelectsSaved(deps, configPath, cfg.ActiveProvider) {
+		resolvedOverrideErr == nil && !overrideDeferred && resolvedOverride == strings.TrimSpace(cfg.ActiveProvider) {
 		override = ""
 	}
 	overrideResolution := activeProviderOverrideAbsent
 	var overrideResolutionErr error
 	if override != "" {
-		overrideResolution, overrideResolutionErr = activeProviderEnvOverrideResolution(deps, configPath, override)
+		overrideResolution, overrideResolutionErr = activeProviderEnvOverrideResolution(resolvedOverride, resolvedOverrideErr, overrideDeferred, override)
 	}
 	if options.json {
 		payload := map[string]any{
@@ -180,13 +186,6 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 	return override
 }
 
-// activeProviderEnvOverrideSelectsSaved reports whether resolution maps a
-// case-only override back to the exact row selected in user config.
-func activeProviderEnvOverrideSelectsSaved(deps appDeps, configPath string, selected string) bool {
-	resolved, err := resolveActiveProviderWithoutProviderCommand(deps, configPath)
-	return err == nil && resolved == strings.TrimSpace(selected)
-}
-
 // resolveActiveProviderWithoutProviderCommand resolves normal user/project/env
 // inputs without executing the arbitrary external ZERO_PROVIDER_COMMAND.
 func resolveActiveProviderWithoutProviderCommand(deps appDeps, configPath string) (string, error) {
@@ -210,16 +209,15 @@ func resolveActiveProviderWithoutProviderCommand(deps appDeps, configPath string
 	return strings.TrimSpace(resolved.ActiveProvider), nil
 }
 
-func activeProviderEnvOverrideResolution(deps appDeps, configPath string, override string) (activeProviderOverrideResolution, error) {
-	if deps.getenv != nil && strings.TrimSpace(deps.getenv(providerCommandEnv)) != "" {
+func activeProviderEnvOverrideResolution(resolved string, resolveErr error, deferred bool, override string) (activeProviderOverrideResolution, error) {
+	if deferred {
 		return activeProviderOverrideDeferred, nil
 	}
-	resolved, err := resolveActiveProviderWithoutProviderCommand(deps, configPath)
-	if err != nil {
-		if errors.Is(err, config.ErrNoActiveProvider) || errors.Is(err, config.ErrProviderRequiresModel) {
+	if resolveErr != nil {
+		if errors.Is(resolveErr, config.ErrNoActiveProvider) || errors.Is(resolveErr, config.ErrProviderRequiresModel) {
 			return activeProviderOverrideUnresolved, nil
 		}
-		return activeProviderOverrideConfigError, err
+		return activeProviderOverrideConfigError, resolveErr
 	}
 	if !config.SameProviderIdentity(resolved, override) {
 		return activeProviderOverrideUnresolved, nil

@@ -465,6 +465,22 @@ func TestRunProvidersUseReportsUnrelatedConfigError(t *testing.T) {
 	if strings.Contains(stderr.String(), "no provider named work") {
 		t.Fatalf("unrelated config error blamed on the override: %q", stderr.String())
 	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("json exit = %d, stderr = %q", code, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["envProviderResolution"] != "config-error" || payload["envProviderResolves"] != nil {
+		t.Fatalf("payload = %#v, want config-error with null resolution", payload)
+	}
+	if message, _ := payload["envProviderResolutionError"].(string); !strings.Contains(message, "deferThreshold") {
+		t.Fatalf("payload = %#v, want the unrelated configuration failure", payload)
+	}
 }
 
 func TestRunProvidersUseCaseVariantOverrideDoesNotHideProjectProvider(t *testing.T) {

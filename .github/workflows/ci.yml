@@ -76,7 +76,7 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test ./...
+        run: make test
 
       - name: Build binary
         run: go run ./cmd/zero-release build
