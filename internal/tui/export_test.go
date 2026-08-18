@@ -244,7 +244,8 @@ func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, wi
 }
 
 func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow, opts)
 }
 
 func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
