@@ -32,19 +32,29 @@ func parsePlanUpdateItems(detail string) ([]planUpdateItem, bool) {
 			continue
 		}
 		if match := planUpdateLinePattern.FindStringSubmatch(line); len(match) == 3 {
+			status := strings.ToLower(strings.TrimSpace(match[1]))
+			switch status {
+			case "pending", "in_progress", "completed", "failed":
+			default:
+				return nil, false
+			}
 			items = append(items, planUpdateItem{
-				status:  strings.TrimSpace(match[1]),
+				status:  status,
 				content: strings.TrimSpace(match[2]),
 			})
 			continue
 		}
-		if len(items) == 0 {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "Notes:") {
+		if len(items) > 0 &&
+			(strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) &&
+			strings.HasPrefix(trimmed, "Notes:") {
 			items[len(items)-1].notes = strings.TrimSpace(strings.TrimPrefix(trimmed, "Notes:"))
+			continue
 		}
+		return nil, false
 	}
 	return items, foundHeader && len(items) > 0
 }

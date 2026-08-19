@@ -684,6 +684,131 @@ func TestApplyPatchToolStructuredPatchPreservesCRLF(t *testing.T) {
 	}
 }
 
+func TestApplyPatchToolStructuredPatchPreservesMissingFinalNewline(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example.txt")
+	writeTestFile(t, path, "alpha\nbravo")
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: example.txt",
+		"@@",
+		"-alpha",
+		"+ALPHA",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	if got, want := mustReadTestFile(t, path), "ALPHA\nbravo"; got != want {
+		t.Fatalf("structured patch content = %q, want %q", got, want)
+	}
+}
+
+func TestApplyPatchToolStructuredPatchKeepsInsertedEmptyFileWithoutFinalNewline(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "empty.txt")
+	writeTestFile(t, path, "")
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: empty.txt",
+		"@@",
+		"+content",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	if got, want := mustReadTestFile(t, path), "content"; got != want {
+		t.Fatalf("structured patch content = %q, want %q", got, want)
+	}
+}
+
+func TestApplyPatchToolStructuredPatchRejectsOutOfOrderEndHunk(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example.txt")
+	original := "alpha\nbravo\ncharlie\ndelta\necho\n"
+	writeTestFile(t, path, original)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: example.txt",
+		"@@",
+		"-delta",
+		"+DELTA",
+		"@@",
+		"-delta",
+		"-echo",
+		"+tail",
+		"*** End of File",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusError {
+		t.Fatalf("out-of-order structured patch should be refused, got %s: %s", result.Status, result.Output)
+	}
+	if got := mustReadTestFile(t, path); got != original {
+		t.Fatalf("out-of-order structured patch changed the file: %q", got)
+	}
+}
+
+func TestStructuredPatchRollbackFailureClearsTrackedState(t *testing.T) {
+	root := t.TempDir()
+	trackedPath := filepath.Join(root, "tracked.txt")
+	writeTestFile(t, trackedPath, "original\n")
+	blockedPath := filepath.Join(root, "blocked")
+	if err := os.Mkdir(blockedPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(blockedPath, "sentinel"), "keep\n")
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+
+	trackedPath, err = filepath.EvalSymlinks(trackedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(trackedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := NewFileTracker()
+	tracker.Record(trackedPath, []byte("original\n"), info)
+	tracker.RecordSeenRange(trackedPath, 1, 1, 1)
+	trackedTarget := structuredPatchTarget{absolute: trackedPath, relative: "tracked.txt"}
+	changes := []structuredPatchChange{
+		{
+			kind: structuredPatchUpdate, from: trackedTarget, to: trackedTarget,
+			before: "original\n", after: "updated\n", mode: 0o644,
+		},
+		{
+			kind:  structuredPatchAdd,
+			to:    structuredPatchTarget{absolute: blockedPath, relative: "blocked"},
+			after: "cannot replace a non-empty directory\n", mode: 0o644,
+		},
+	}
+
+	err = applyStructuredPatchChanges(workspace, changes, tracker)
+	if err == nil || !strings.Contains(err.Error(), "workspace is partially modified") {
+		t.Fatalf("rollback failure = %v, want explicit partial-modification error", err)
+	}
+	if got := mustReadTestFile(t, trackedPath); got != "updated\n" {
+		t.Fatalf("fixture did not leave a partial update: %q", got)
+	}
+	if _, tracked := tracker.Version(trackedPath); tracked || tracker.SeenWhole(trackedPath) {
+		t.Fatal("rollback failure retained stale file-tracker state")
+	}
+}
+
 func TestApplyPatchToolRejectsMalformedOrEscapingStructuredPatchBeforeWriting(t *testing.T) {
 	root := t.TempDir()
 	tool := NewScopedApplyPatchTool(root, nil)

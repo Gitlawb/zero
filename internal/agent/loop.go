@@ -3087,13 +3087,15 @@ func partitionToolsCached(registry *tools.Registry, permissionMode PermissionMod
 	// Deferral may activate only when tool_search is actually runnable; otherwise
 	// the loop would hide deferred tools behind a loader the dispatch gate rejects
 	// — an inescapable dead-end. "Runnable" mirrors executeToolCall's gate:
-	// registered, not in DisabledTools, and advertised in the current permission
-	// mode (e.g. not spec-draft, where tool_search is not advertised). The
+	// registered, model-visible, not in DisabledTools, and advertised in the
+	// current permission mode (e.g. not spec-draft, where tool_search is not
+	// advertised). The
 	// EnabledTools allowlist is intentionally NOT checked here — tool_search is
 	// exempt from the allowlist at dispatch, so an allowlist that omits it must
 	// not disable deferral.
 	loader, loaderFound := registry.Get(tools.ToolSearchToolName)
 	loaderUsable := loaderFound &&
+		tools.ModelVisible(loader) &&
 		!containsToolName(options.DisabledTools, tools.ToolSearchToolName) &&
 		ToolAdvertised(loader, permissionMode)
 

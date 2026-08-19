@@ -140,6 +140,14 @@ func TestAskUserQuestionnaireNamesWaitingForAnswer(t *testing.T) {
 	}
 }
 
+func TestAskUserWaitingStateFitsNarrowCardWithoutTitle(t *testing.T) {
+	const width = 12
+	got := renderAskUserWaitingState("", width, func(style lipgloss.Style) lipgloss.Style { return style })
+	if visible := lipgloss.Width(got); visible > width-4 {
+		t.Fatalf("waiting state width = %d, want at most %d: %q", visible, width-4, plainRender(t, got))
+	}
+}
+
 func TestTranscriptSeparatesUserPromptFromContinuation(t *testing.T) {
 	m := limeTestModel()
 	m.headerPrinted = true

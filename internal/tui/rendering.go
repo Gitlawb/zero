@@ -1467,11 +1467,11 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 // answer. The state label wins over the optional title on narrow terminals.
 func renderAskUserWaitingState(title string, width int, fill func(lipgloss.Style) lipgloss.Style) string {
 	state := zeroTheme.accent.Render("●") + " " + fill(zeroTheme.faint).Render("waiting for your answer")
+	available := maxInt(1, width-4)
 	if title == "" {
-		return state
+		return fitStyledLine(state, available)
 	}
 	heading := fill(zeroTheme.ink).Render(title)
-	available := maxInt(1, width-4)
 	if gap := available - lipgloss.Width(heading) - lipgloss.Width(state); gap >= 2 {
 		return heading + strings.Repeat(" ", gap) + state
 	}

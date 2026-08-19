@@ -86,7 +86,7 @@ func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch str
 			}
 		}
 	}
-	if err := applyStructuredPatchChanges(workspace, changes); err != nil {
+	if err := applyStructuredPatchChanges(workspace, changes, options.FileTracker); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
 
@@ -361,6 +361,7 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 		content = strings.ReplaceAll(content, "\r\n", "\n")
 	}
 	lines := strings.Split(content, "\n")
+	trailingNewline := content != "" && len(lines) > 0 && lines[len(lines)-1] == ""
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
@@ -402,6 +403,13 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 		replacements = append(replacements, structuredReplacement{start: index, length: len(chunk.old), replacement: append([]string(nil), chunk.new...)})
 		lineIndex = index + len(chunk.old)
 	}
+	for index := 1; index < len(replacements); index++ {
+		previous := replacements[index-1]
+		current := replacements[index]
+		if current.start < previous.start+previous.length {
+			return "", fmt.Errorf("overlapping or out-of-order hunks in %s; provide non-overlapping context", path)
+		}
+	}
 	for index := len(replacements) - 1; index >= 0; index-- {
 		replacement := replacements[index]
 		lines = append(lines[:replacement.start], append(replacement.replacement, lines[replacement.start+replacement.length:]...)...)
@@ -409,7 +417,11 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 	if len(lines) == 0 {
 		return "", nil
 	}
-	return strings.Join(lines, lineEnding) + lineEnding, nil
+	updated := strings.Join(lines, lineEnding)
+	if trailingNewline {
+		updated += lineEnding
+	}
+	return updated, nil
 }
 
 func structuredPatchLineEnding(content string) string {
@@ -435,6 +447,9 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 	searchStart := start
 	if endOfFile {
 		searchStart = len(lines) - len(wanted)
+		if searchStart < start {
+			searchStart = start
+		}
 	}
 	for _, equal := range []func(string, string) bool{
 		func(left, right string) bool { return left == right },
@@ -466,18 +481,31 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 	return -1, false
 }
 
-func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange) error {
+func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange, tracker *FileTracker) error {
 	applied := make([]structuredPatchChange, 0, len(changes))
 	for _, change := range changes {
 		if err := applyStructuredPatchChange(root, change); err != nil {
 			if rollbackErr := rollbackStructuredPatchChanges(root, append(applied, change)); rollbackErr != nil {
-				return fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+				forgetStructuredPatchFiles(tracker, changes)
+				return fmt.Errorf("%w; rollback failed and the workspace is partially modified; re-read affected files before retrying: %v", err, rollbackErr)
 			}
 			return err
 		}
 		applied = append(applied, change)
 	}
 	return nil
+}
+
+func forgetStructuredPatchFiles(tracker *FileTracker, changes []structuredPatchChange) {
+	if tracker == nil {
+		return
+	}
+	for _, change := range changes {
+		tracker.Forget(change.from.absolute)
+		if change.to.absolute != change.from.absolute {
+			tracker.Forget(change.to.absolute)
+		}
+	}
 }
 
 func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) error {

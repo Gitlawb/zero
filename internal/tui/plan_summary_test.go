@@ -31,6 +31,12 @@ func TestRenderPlanUpdateCardLeavesMalformedOutputToGenericCard(t *testing.T) {
 	if _, ok := renderPlanUpdateCard("1. [pending] disguised diagnostic", 80); ok {
 		t.Error("numbered status lines without a Current Plan header must fall back to the generic card")
 	}
+	if _, ok := renderPlanUpdateCard("Current Plan:\n1. [invalid] Step", 80); ok {
+		t.Error("unknown plan statuses must fall back to the generic card")
+	}
+	if _, ok := renderPlanUpdateCard("Current Plan:\n1. [pending] Step\nError: persistence failed", 80); ok {
+		t.Error("trailing diagnostics must fall back to the generic card")
+	}
 }
 
 func TestUpdatePlanResultRendersChecklistInTranscript(t *testing.T) {
