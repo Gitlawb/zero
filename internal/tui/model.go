@@ -2225,6 +2225,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.BlurMsg:
+		// A focus loss ends the offer, for the same reason a paste or a click does:
+		// the offer is only valid for the keypress immediately after it, and leaving
+		// the terminal is a context switch, not that keypress. Without this, the
+		// sequence shift+tab, away, back, ctrl+g enters full-auto with no live
+		// offer in front of it and silently turns permission prompts off.
+		//
+		// Cleared BEFORE the early return below, since that return skips the
+		// keypress-wide reset entirely.
+		m.unsafeArmed = false
 		var petMouseCmd tea.Cmd
 		if m.petDragActive {
 			pixelDrag := m.petPixelDrag
