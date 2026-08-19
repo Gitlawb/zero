@@ -85,31 +85,57 @@ func DetectInstallMethod(executablePath string) InstallMethod {
 // every target from any machine. Gating it on the real GOOS made the one test
 // that matters skip on Windows, which is how a platform rule ends up unverified
 // on the platform it excludes.
+//
+// TWO CHECKS, CHEAP ONE FIRST. The path shape is a filter, not the answer: a
+// user's own /work/Cellar/tools/bin/zero has exactly the shape a keg does, and
+// classifying it as Homebrew would refuse an update that works. The keg is only
+// confirmed by Homebrew's own receipt, which it writes into every keg and
+// nothing else does.
+//
+// The receipt costs one Stat, and only on a path that already looks like a keg —
+// so the version check that runs for ordinary installs still does no filesystem
+// work here at all.
 func isHomebrewPath(goos string, executablePath string) bool {
+	keg, ok := homebrewKeg(goos, executablePath)
+	if !ok {
+		return false
+	}
+	return hasHomebrewReceipt(keg)
+}
+
+// homebrewKeg returns the <prefix>/Cellar/<formula>/<version> directory that
+// executablePath sits inside, if its shape is a keg's.
+//
+// Deliberately not matched: the formula name, because a tap may name it
+// something other than zero.
+func homebrewKeg(goos string, executablePath string) (string, bool) {
 	if goos == "windows" {
 		// Homebrew does not run here, and a Windows path is far likelier to hold
 		// an unrelated directory called Cellar than a keg.
-		return false
+		return "", false
 	}
-	// The keg SHAPE, not merely the segment: <prefix>/Cellar/<formula>/<version>/
-	// and then at least the binary. A bare Cellar segment would also match a
-	// user's own directory that happens to be called that, and the cost of a
-	// false positive here is refusing to update an install Homebrew has never
-	// touched. Requiring the two segments Homebrew always inserts costs nothing
-	// and no filesystem access.
-	//
-	// Deliberately not matched: the formula name, because a tap may name it
-	// something other than zero; and Homebrew's receipt metadata, because reading
-	// it would put filesystem I/O on a path that runs on every version check, to
-	// tighten a case a path-shape check already covers.
+	// <prefix>/Cellar/<formula>/<version>/bin/<binary> — the two segments
+	// Homebrew always inserts, then the bin directory and the binary itself.
+	// Anything shorter cannot be a keg however it is named.
 	segments := strings.Split(filepath.ToSlash(executablePath), "/")
 	for index, segment := range segments {
 		if segment != homebrewCellar {
 			continue
 		}
-		if len(segments)-index >= 4 {
-			return true
+		if len(segments)-index < 5 {
+			continue
 		}
+		return strings.Join(segments[:index+3], "/"), true
 	}
-	return false
+	return "", false
+}
+
+// homebrewReceipt is the file Homebrew writes into every keg it installs. Its
+// presence is what distinguishes a keg from a directory tree that merely looks
+// like one.
+const homebrewReceipt = "INSTALL_RECEIPT.json"
+
+func hasHomebrewReceipt(kegDir string) bool {
+	info, err := os.Stat(filepath.Join(kegDir, homebrewReceipt))
+	return err == nil && !info.IsDir()
 }

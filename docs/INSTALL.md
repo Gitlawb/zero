@@ -13,9 +13,10 @@ blessed one.
 | `go install` | `go install github.com/Gitlawb/zero/cmd/zero@latest` | rerun the command |
 | Source | `go build -o zero ./cmd/zero` | rebuild |
 
-`zero upgrade` follows whatever owns the binary. It delegates to npm for an npm
-install, refuses outright for a Homebrew keg and names `brew upgrade zero`, and
-replaces the binary in place for everything else.
+`zero upgrade` follows whatever owns the binary, with one exception it cannot
+detect. It delegates to npm for an npm install, refuses outright for a Homebrew
+keg and names `brew upgrade zero`, and replaces the binary in place for
+everything else — including a mise-managed one, which is the exception.
 
 mise is the one case it cannot detect: a mise-managed binary is an ordinary
 standalone install on disk, so `zero upgrade` will replace it and leave mise
@@ -308,6 +309,11 @@ version that is no longer there:
 - **everything else**: downloads the verified release archive and replaces the
   binary in place.
 
-Homebrew is detected by the binary living inside a Cellar keg, so an ordinary
-install under `/usr/local/bin` is left alone even on an Intel Mac where that is
-also the Homebrew prefix.
+Homebrew is detected by the binary living inside a Cellar keg that carries
+Homebrew's own `INSTALL_RECEIPT.json`. The keg shape alone is not enough: a
+directory tree you built yourself can have exactly that shape, and refusing to
+update an install Homebrew never touched would be a real cost for a made-up
+reason. The receipt is the thing only Homebrew writes.
+
+An ordinary install under `/usr/local/bin` is left alone even on an Intel Mac
+where that is also the Homebrew prefix.

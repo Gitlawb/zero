@@ -13,7 +13,11 @@ import (
 // The path rule itself, checked for every target from any machine. Gating this
 // on runtime.GOOS would skip it on Windows, leaving the Windows branch of the
 // rule to be verified by nobody.
-func TestIsHomebrewPathPerTarget(t *testing.T) {
+//
+// The keg SHAPE only. Whether a real keg lives there is a separate question with
+// a separate answer on disk — see TestOnlyAKegWithAReceiptIsHomebrew, which is
+// the check that stops a user's own Cellar directory being classified.
+func TestHomebrewKegShapePerTarget(t *testing.T) {
 	cases := []struct {
 		goos string
 		path string
@@ -27,15 +31,75 @@ func TestIsHomebrewPathPerTarget(t *testing.T) {
 		{"linux", "/opt/cellar/bin/zero", false},          // lowercase is not a keg
 		{"linux", "/opt/CellarX/bin/zero", false},         // segment must match exactly
 		{"windows", `C:\Cellar\zero\bin\zero.exe`, false}, // Homebrew does not run here
-		// A user directory that happens to be called Cellar. Too shallow to be a
-		// keg, and refusing to update this install would be the expensive mistake.
+		// User directories called Cellar. Too shallow to be a keg.
 		{"linux", "/home/someone/Cellar/zero", false},
 		{"darwin", "/Users/someone/Cellar/bin/zero", false},
+		// The case the reviewer of #910 raised. It is one segment short of a keg,
+		// so the depth rule alone already refuses it.
+		{"linux", "/work/Cellar/tools/bin/zero", false},
+		// One segment deeper it IS a keg by shape, and still not a keg. Nothing in
+		// the path can tell the difference — only the receipt can, which is what
+		// TestOnlyAKegWithAReceiptIsHomebrew covers.
+		{"linux", "/work/Cellar/tools/1.0/bin/zero", true},
 	}
 	for _, testCase := range cases {
-		if got := isHomebrewPath(testCase.goos, testCase.path); got != testCase.want {
-			t.Errorf("isHomebrewPath(%q, %q) = %v, want %v", testCase.goos, testCase.path, got, testCase.want)
+		if _, got := homebrewKeg(testCase.goos, testCase.path); got != testCase.want {
+			t.Errorf("homebrewKeg(%q, %q) = %v, want %v", testCase.goos, testCase.path, got, testCase.want)
 		}
+	}
+}
+
+// THE REGRESSION THE REVIEWER ASKED FOR, and the reason the receipt check
+// exists: a directory tree a user built themselves can have exactly a keg's
+// shape. Classifying it as Homebrew refuses a `zero upgrade` that would have
+// worked perfectly, on a machine Homebrew has never touched.
+//
+// Homebrew writes INSTALL_RECEIPT.json into every keg it installs and nothing
+// else does, so its presence is what separates the two.
+func TestOnlyAKegWithAReceiptIsHomebrew(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Homebrew branch is off on Windows; TestHomebrewKegShapePerTarget covers that")
+	}
+	root := t.TempDir()
+
+	// Same shape, same depth. The only difference is the receipt.
+	real := filepath.Join(root, "prefix", "Cellar", "zero", "0.7.1")
+	fake := filepath.Join(root, "work", "Cellar", "tools", "0.7.1")
+	for _, keg := range []string{real, fake} {
+		if err := os.MkdirAll(filepath.Join(keg, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(keg, "bin", "zero"), []byte("binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(real, "INSTALL_RECEIPT.json"), []byte(`{"source":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !isHomebrewPath(runtime.GOOS, filepath.Join(real, "bin", "zero")) {
+		t.Error("a keg with a receipt was not recognised as Homebrew")
+	}
+	if isHomebrewPath(runtime.GOOS, filepath.Join(fake, "bin", "zero")) {
+		t.Error("a user's own Cellar-shaped directory was classified as Homebrew; `zero upgrade` would refuse for nothing")
+	}
+}
+
+// A receipt that is a DIRECTORY is not a receipt. Cheap to get wrong with a
+// bare Stat, and the failure would be silent.
+func TestADirectoryNamedLikeTheReceiptIsNotOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Homebrew branch is off on Windows")
+	}
+	keg := filepath.Join(t.TempDir(), "prefix", "Cellar", "zero", "0.7.1")
+	if err := os.MkdirAll(filepath.Join(keg, "INSTALL_RECEIPT.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(keg, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if isHomebrewPath(runtime.GOOS, filepath.Join(keg, "bin", "zero")) {
+		t.Error("a directory named INSTALL_RECEIPT.json was accepted as a receipt")
 	}
 }
 
