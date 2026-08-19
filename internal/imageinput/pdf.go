@@ -40,6 +40,11 @@ const MaxDocumentBytes = 32 << 20
 // usable instead of refused outright.
 const MaxDocumentTextBytes = 256 << 10
 
+// maxPDFInfoOutputBytes bounds the small metadata response consumed from
+// pdfinfo. It is intentionally separate from the text cap because page-count
+// output is not exposed to the model.
+const maxPDFInfoOutputBytes = 64 << 10
+
 // documentTruncatedMarker is appended to capped text so the agent (and the user)
 // can tell extraction was cut short rather than the document simply ending.
 const documentTruncatedMarker = "\n\n[... document text truncated at the size limit ...]"
@@ -254,17 +259,28 @@ func extractTextPureGo(data []byte) (text string, pages int, err error) {
 	}
 	pages = reader.NumPage()
 
-	var buf strings.Builder
 	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
 	defer cancel()
 	plain, perr := reader.GetPlainText(ctx)
 	if perr != nil {
 		return "", pages, fmt.Errorf("could not extract PDF text: %w", perr)
 	}
-	if _, cerr := io.Copy(&buf, plain); cerr != nil {
+	text, _, cerr := readBoundedText(plain)
+	if cerr != nil {
 		return "", pages, fmt.Errorf("could not read PDF text: %w", cerr)
 	}
-	return strings.TrimSpace(buf.String()), pages, nil
+	return strings.TrimSpace(text), pages, nil
+}
+
+// readBoundedText reads at most one byte beyond MaxDocumentTextBytes, allowing
+// capDocumentText to add its truncation marker without ever buffering an
+// unbounded parser result. overflow reports that the source exceeded the cap.
+func readBoundedText(reader io.Reader) (text string, overflow bool, err error) {
+	data, err := io.ReadAll(io.LimitReader(reader, MaxDocumentTextBytes+1))
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), len(data) > MaxDocumentTextBytes, nil
 }
 
 // pdfPageCount returns the page count via the pure-Go reader without extracting
@@ -365,10 +381,10 @@ func extractTextWithPoppler(data []byte) (string, bool) {
 	// from stdin and writes UTF-8 text to stdout.
 	cmd := exec.CommandContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
 	cmd.Stdin = bytes.NewReader(data)
-	var stdout, stderr bytes.Buffer
+	stdout := newBoundedBuffer(MaxDocumentTextBytes)
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil || stdout.overflow {
 		return "", false
 	}
 	return strings.TrimSpace(stdout.String()), true
@@ -382,11 +398,14 @@ func pdfPageCountWithPoppler(data []byte) int {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "pdfinfo", "-")
 	cmd.Stdin = bytes.NewReader(data)
-	out, err := cmd.Output()
-	if err != nil {
+	var out boundedBuffer
+	out.limit = maxPDFInfoOutputBytes
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil || out.overflow {
 		return 0
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out.String(), "\n") {
 		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "Pages:"); ok {
 			var pages int
 			if _, err := fmt.Sscan(value, &pages); err == nil {
@@ -395,6 +414,33 @@ func pdfPageCountWithPoppler(data []byte) int {
 		}
 	}
 	return 0
+}
+
+// boundedBuffer retains at most limit+1 bytes while accepting the complete
+// write. The extra byte distinguishes exact-limit output from overflow without
+// allowing a subprocess or parser to grow memory without bound.
+type boundedBuffer struct {
+	bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func newBoundedBuffer(limit int) boundedBuffer {
+	return boundedBuffer{limit: limit}
+}
+
+func (buffer *boundedBuffer) Write(data []byte) (int, error) {
+	remaining := buffer.limit + 1 - buffer.Len()
+	if remaining > 0 {
+		if remaining > len(data) {
+			remaining = len(data)
+		}
+		_, _ = buffer.Buffer.Write(data[:remaining])
+	}
+	if len(data) > remaining {
+		buffer.overflow = true
+	}
+	return len(data), nil
 }
 
 // rasterizeWithPoppler renders the first maxPages pages to PNG via pdftoppm and

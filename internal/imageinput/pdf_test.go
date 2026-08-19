@@ -362,6 +362,31 @@ func TestCapDocumentTextRespectsCap(t *testing.T) {
 	}
 }
 
+func TestPDFOutputReadersAreBounded(t *testing.T) {
+	tooLarge := strings.Repeat("x", MaxDocumentTextBytes+1024)
+	text, overflow, err := readBoundedText(strings.NewReader(tooLarge))
+	if err != nil {
+		t.Fatalf("readBoundedText: %v", err)
+	}
+	if !overflow {
+		t.Fatal("readBoundedText should report overflow")
+	}
+	if len(text) != MaxDocumentTextBytes+1 {
+		t.Fatalf("readBoundedText buffered %d bytes, want %d", len(text), MaxDocumentTextBytes+1)
+	}
+
+	buffer := newBoundedBuffer(16)
+	if _, err := buffer.Write([]byte(strings.Repeat("y", 1024))); err != nil {
+		t.Fatalf("boundedBuffer.Write: %v", err)
+	}
+	if !buffer.overflow {
+		t.Fatal("boundedBuffer should report overflow")
+	}
+	if buffer.Len() != 17 {
+		t.Fatalf("boundedBuffer retained %d bytes, want 17", buffer.Len())
+	}
+}
+
 // pdfPageCount must report the real page count from PDF bytes (this is what
 // backs Document.Pages on the poppler text path, where pdftotext gives no count)
 // and must return 0 -- not panic -- on garbage.
