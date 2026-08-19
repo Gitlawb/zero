@@ -141,12 +141,26 @@ func TestRestrictedSIDListCarriesTheCapabilitySID(t *testing.T) {
 //
 // The consequence is that this shape, selected whenever a profile sets DenyRead,
 // has no effective write jail. If someone closes #869 by giving reads a grant
-// that is not a universal group, this test skips with a note and should be
-// replaced by the exclusion assertion rather than deleted.
+// that is not a universal group, this test FAILS and must be replaced by the
+// exclusion assertion in the same change, rather than deleted or skipped past.
 func TestNonWriteRestrictedTokenStillCarriesTheWorldSID(t *testing.T) {
 	values := restrictedSIDStrings(t, restrictedTokenForTest(t, false))
 	if !containsSID(values, "S-1-1-0") {
-		t.Skip("the World SID is gone from the DenyRead token shape; #869 may be fixed, so replace this with the exclusion assertion")
+		// FAILS rather than skips, and the difference matters more than it looks.
+		//
+		// This SID is availability-critical as well as security-relevant: without
+		// WRITE_RESTRICTED the restricted-SID check covers reads, default Windows
+		// DACLs grant BUILTINUsers, and a token carrying no universal group cannot
+		// open cmd.exe. Removing it therefore breaks every command with DenyRead at
+		// launch. A skip here would let exactly that land on green CI, which is the
+		// one outcome this test exists to prevent.
+		//
+		// If you are reading this because you deliberately changed the token shape
+		// for #869: good, and this assertion is now yours to replace, in the same
+		// change, with tests proving the new token still launches an ordinary
+		// executable, still denies the intended read path, and has not restored the
+		// broad write bypass. Deleting it without those is not the same thing.
+		t.Fatal("the World SID is gone from the DenyRead token shape: every DenyRead command now fails at launch unless reads were given a non-universal grant; replace this assertion with the #869 exclusion and launch tests")
 	}
 	t.Log("known gap (#869): the DenyRead token shape carries the World SID, so its write jail does not hold")
 }
