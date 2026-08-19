@@ -2,6 +2,7 @@ package imageinput
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,10 @@ import (
 )
 
 const minimalPDFTextChunkSize = 80
+
+type failingReader struct{ err error }
+
+func (reader failingReader) Read([]byte) (int, error) { return 0, reader.err }
 
 // buildMinimalPDF assembles a tiny, single-page PDF whose content stream draws
 // the given text. It computes a real cross-reference table and trailer so a
@@ -360,6 +365,14 @@ func TestCapDocumentTextRespectsCap(t *testing.T) {
 	if got != under {
 		t.Fatal("at-cap text must be returned unchanged")
 	}
+
+	got, truncated = capDocumentTextWithOverflow(under, true)
+	if !truncated {
+		t.Fatal("upstream overflow must preserve truncation after whitespace trimming")
+	}
+	if !strings.HasSuffix(got, documentTruncatedMarker) {
+		t.Fatal("upstream overflow should add the truncation marker")
+	}
 }
 
 func TestPDFOutputReadersAreBounded(t *testing.T) {
@@ -373,6 +386,11 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	}
 	if len(text) != MaxDocumentTextBytes+1 {
 		t.Fatalf("readBoundedText buffered %d bytes, want %d", len(text), MaxDocumentTextBytes+1)
+	}
+
+	sentinel := errors.New("sentinel read error")
+	if _, _, err := readBoundedText(failingReader{err: sentinel}); !errors.Is(err, sentinel) {
+		t.Fatalf("readBoundedText error = %v, want %v", err, sentinel)
 	}
 
 	buffer := newBoundedBuffer(16)

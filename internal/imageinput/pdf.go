@@ -167,13 +167,14 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	// extraction so a missing/failing pdftotext still reports Pages when pdfinfo
 	// or the in-process reader can.
 	text, pages := "", 0
+	textOverflow := false
 	if useExternal {
 		if t, ok := extractTextWithPoppler(data); ok {
 			text = t
 		}
 	}
 	if strings.TrimSpace(text) == "" {
-		t, p, terr := extractTextPureGo(data)
+		t, p, overflow, terr := extractTextPureGo(data)
 		if terr != nil {
 			// Only surface the pure-Go error when we have nothing else (no poppler
 			// text and no rasterized pages) to offer.
@@ -181,7 +182,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 				return Document{}, terr
 			}
 		} else {
-			text, pages = t, p
+			text, pages, textOverflow = t, p, overflow
 		}
 	}
 	// Page count is independent of which text extractor won: try the in-process
@@ -189,7 +190,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	// pdftotext can read still reports Pages when gopdf cannot count it.
 	pages = resolvePageCount(data, useExternal, pages)
 
-	text, truncated := capDocumentText(text)
+	text, truncated := capDocumentTextWithOverflow(text, textOverflow)
 
 	// Scanned-PDF guard: no text layer AND no rendered pages means we have nothing
 	// the model can use. Say so explicitly instead of returning empty success.
@@ -245,17 +246,17 @@ func readDocumentBytes(path string, workspaceRoot string) ([]byte, error) {
 // underlying reader can still panic on some malformed structures, so the whole
 // call is wrapped in a recover: a bad PDF becomes a clean error, never a crash
 // that escapes the package. It returns the joined text and the page count.
-func extractTextPureGo(data []byte) (text string, pages int, err error) {
+func extractTextPureGo(data []byte) (text string, pages int, overflow bool, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			text, pages = "", 0
+			text, pages, overflow = "", 0, false
 			err = fmt.Errorf("could not parse PDF (malformed or unsupported): %v", rec)
 		}
 	}()
 
 	reader, rerr := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
 	if rerr != nil {
-		return "", 0, fmt.Errorf("could not parse PDF: %w", rerr)
+		return "", 0, false, fmt.Errorf("could not parse PDF: %w", rerr)
 	}
 	pages = reader.NumPage()
 
@@ -263,13 +264,13 @@ func extractTextPureGo(data []byte) (text string, pages int, err error) {
 	defer cancel()
 	plain, perr := reader.GetPlainText(ctx)
 	if perr != nil {
-		return "", pages, fmt.Errorf("could not extract PDF text: %w", perr)
+		return "", pages, false, fmt.Errorf("could not extract PDF text: %w", perr)
 	}
-	text, _, cerr := readBoundedText(plain)
+	text, overflow, cerr := readBoundedText(plain)
 	if cerr != nil {
-		return "", pages, fmt.Errorf("could not read PDF text: %w", cerr)
+		return "", pages, false, fmt.Errorf("could not read PDF text: %w", cerr)
 	}
-	return strings.TrimSpace(text), pages, nil
+	return strings.TrimSpace(text), pages, overflow, nil
 }
 
 // readBoundedText reads at most one byte beyond MaxDocumentTextBytes, allowing
@@ -306,7 +307,14 @@ func pdfPageCount(data []byte) (pages int) {
 // return reports whether truncation happened. The marker is counted against the
 // cap so the returned string never exceeds MaxDocumentTextBytes.
 func capDocumentText(text string) (string, bool) {
-	if len(text) <= MaxDocumentTextBytes {
+	return capDocumentTextWithOverflow(text, false)
+}
+
+// capDocumentTextWithOverflow applies the model text cap and preserves a
+// truncation signal from a bounded upstream reader. That signal is necessary
+// when trimming whitespace makes the retained string appear to fit the cap.
+func capDocumentTextWithOverflow(text string, overflow bool) (string, bool) {
+	if !overflow && len(text) <= MaxDocumentTextBytes {
 		return text, false
 	}
 	// Reserve room for the marker so the final payload (text + marker) stays at or
@@ -315,6 +323,9 @@ func capDocumentText(text string) (string, bool) {
 	cut := MaxDocumentTextBytes - len(documentTruncatedMarker)
 	if cut < 0 {
 		cut = 0
+	}
+	if cut > len(text) {
+		cut = len(text)
 	}
 	// Back up to a rune boundary so we never split a multi-byte character.
 	for cut > 0 && !utf8RuneStart(text[cut]) {
