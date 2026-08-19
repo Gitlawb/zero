@@ -85,10 +85,15 @@ func finalWindowsPathName(path string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		if int(n) > len(buffer) {
-			// n is the required length excluding the terminator when the buffer is
-			// too small. Grow once and ask again.
-			buffer = make([]uint16, n+1)
+		if int(n) >= len(buffer) {
+			// TWO DIFFERENT CONVENTIONS, and the boundary is where they meet. On
+			// success the return value EXCLUDES the terminating null; on an
+			// insufficient buffer it INCLUDES it. So n == len(buffer) cannot be
+			// read as a complete path: a success that large would not have fitted
+			// its own terminator, which means the only reading left is a required
+			// size. Retrying on >= costs one extra call in a case that may not be
+			// reachable and removes the need to be right about which it was.
+			buffer = make([]uint16, int(n)+1)
 			continue
 		}
 		if n == 0 {
