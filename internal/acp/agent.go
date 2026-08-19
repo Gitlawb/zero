@@ -257,23 +257,32 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 	}
 	result := ListSessionsResult{Sessions: make([]SessionInfo, 0, len(items))}
 	for _, item := range items {
-		// A session with no persisted workspace cannot be resumed —
-		// activatePersistedSession refuses it — so advertising it offers the
-		// client something that only fails when taken. Listing is a menu, and
-		// every entry on it has to be orderable.
+		// EVERY ENTRY IS RESOLVED, FILTER OR NO FILTER. Listing is a menu, and
+		// every item on it has to be orderable: activatePersistedSession
+		// resolves the persisted workspace and refuses what it cannot reach, so
+		// anything this loop cannot resolve is something the client would be
+		// offered and then denied.
+		//
+		// Resolving only when a cwd filter was supplied left two shapes through —
+		// a session whose workspace has since been deleted, and a legacy entry
+		// holding a relative path, which was then reported as cwd "." even though
+		// ACP requires SessionInfo.cwd to be absolute.
 		if strings.TrimSpace(item.Cwd) == "" {
 			continue
 		}
-		if cwd != "" {
-			itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)
-			if err != nil || !sameWorkspace(itemRoot, cwd) {
-				continue
-			}
+		itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)
+		if err != nil {
+			continue
+		}
+		if cwd != "" && !sameWorkspace(itemRoot, cwd) {
+			continue
 		}
 		result.Sessions = append(result.Sessions, SessionInfo{
 			SessionID: item.SessionID,
 			Title:     item.Title,
-			Cwd:       item.Cwd,
+			// The RESOLVED root, not the stored string: absolute as ACP
+			// requires, and the same value the client will hand back on resume.
+			Cwd:       itemRoot,
 			UpdatedAt: item.UpdatedAt,
 			Meta:      &SessionInfoMeta{ModelID: item.ModelID, CreatedAt: item.CreatedAt},
 		})

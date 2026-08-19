@@ -993,3 +993,55 @@ func TestSessionListOmitsSessionsWithoutAWorkspace(t *testing.T) {
 		t.Errorf("resume of a workspace-less session = %v, want a persisted-workspace error", err)
 	}
 }
+
+// EVERY LISTED SESSION IS ONE THE CLIENT CAN ACTUALLY TAKE.
+//
+// Resolving the persisted workspace only when a cwd filter was supplied left two
+// shapes on the menu that resume then refuses: a session whose workspace has
+// since been deleted, and a legacy entry holding a relative path — reported as
+// cwd "." although ACP requires SessionInfo.cwd to be absolute.
+func TestSessionListResolvesEveryWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = normalisingResolver(t)
+
+	gone := t.TempDir()
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "gone-ws", Cwd: gone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "relative-ws", Cwd: "."}); err != nil {
+		t.Fatal(err)
+	}
+	live := t.TempDir()
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "live-ws", Cwd: live}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &listed); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]string{}
+	for _, item := range listed.Sessions {
+		seen[item.SessionID] = item.Cwd
+	}
+	if _, listedGone := seen["gone-ws"]; listedGone {
+		t.Error("a session whose workspace no longer exists was advertised; resume would refuse it")
+	}
+	if _, listedLive := seen["live-ws"]; !listedLive {
+		t.Error("a usable session was dropped while filtering unusable ones")
+	}
+	// EVERY reported cwd is absolute, which is the contract clients rely on.
+	for id, cwd := range seen {
+		if !filepath.IsAbs(cwd) {
+			t.Errorf("session %s was listed with a relative cwd %q; ACP requires an absolute path", id, cwd)
+		}
+	}
+}
