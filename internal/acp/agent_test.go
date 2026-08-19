@@ -1038,6 +1038,16 @@ func TestSessionListResolvesEveryWorkspace(t *testing.T) {
 	if _, listedLive := seen["live-ws"]; !listedLive {
 		t.Error("a usable session was dropped while filtering unusable ones")
 	}
+	// THE RELATIVE ENTRY IS RETAINED, not quietly dropped. Resolving every item
+	// could have been "fixed" by discarding anything not already absolute, which
+	// would pass the absolute-path check below while losing a resumable session —
+	// so presence is asserted separately from spelling.
+	relative, listedRelative := seen["relative-ws"]
+	if !listedRelative {
+		t.Error("a session with a resolvable relative workspace was dropped rather than normalised")
+	} else if !filepath.IsAbs(relative) {
+		t.Errorf("the relative entry was listed as %q; it must be normalised to an absolute path", relative)
+	}
 	// EVERY reported cwd is absolute, which is the contract clients rely on.
 	for id, cwd := range seen {
 		if !filepath.IsAbs(cwd) {
