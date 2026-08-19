@@ -3,34 +3,34 @@
   "sessionId": "local-76c8d781-4473-4b7d-b2a0-fda8a66e26ab",
   "model": "claude-opus-5",
   "startedAt": "2026-08-19T12:21:18.006Z",
-  "endedAt": "2026-08-19T13:07:28.529Z",
-  "durationMs": 2770510,
+  "endedAt": "2026-08-19T13:10:30.023Z",
+  "durationMs": 2952003,
   "status": "running",
   "tokens": {
-    "total": 29101,
-    "input": 54,
-    "output": 29047
+    "total": 34463,
+    "input": 62,
+    "output": 34401
   },
   "cost": {
-    "usd": 16.5261
+    "usd": 18.3912
   },
-  "toolCalls": 22,
+  "toolCalls": 26,
   "lines": {
-    "added": 101,
-    "removed": 0
+    "added": 71,
+    "removed": 10
   },
   "filesChanged": [
-    "internal/agent/guardrails.go",
-    "internal/agent/guardrails_false_admission_test.go"
+    "internal/acp/agent.go",
+    "internal/acp/agent_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "149c6f471c449fa897193d540e52aaca248bb4f9",
+    "headAfter": "0777f1261ff192c31eec28b52107e3ee83f05897",
     "commitShas": [
-      "149c6f471c449fa897193d540e52aaca248bb4f9"
+      "0777f1261ff192c31eec28b52107e3ee83f05897"
     ]
   },
-  "summary": "Both admissions caught, no false positives, and the four tests my first attempt broke now pass. Adding the regression and verifying:",
+  "summary": "All three correct — deleted workspace omitted, relative resolved to absolute, live one listed. Adding the regression:",
   "originUrl": "https://getorigin.io/sessions/local-76c8d781-4473-4b7d-b2a0-fda8a66e26ab"
 }
