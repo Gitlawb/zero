@@ -40,11 +40,12 @@ type structuredPatchOperation struct {
 }
 
 type structuredPatchChunk struct {
-	context    string
-	hasContext bool
-	old        []string
-	new        []string
-	endOfFile  bool
+	context          string
+	hasContext       bool
+	old              []string
+	new              []string
+	newSourceOffsets []int
+	endOfFile        bool
 }
 
 type structuredPatchTarget struct {
@@ -204,14 +205,19 @@ func parseStructuredPatch(patch string) ([]structuredPatchOperation, error) {
 				chunk := &op.chunks[len(op.chunks)-1]
 				switch {
 				case line == "":
+					sourceOffset := len(chunk.old)
 					chunk.old = append(chunk.old, "")
 					chunk.new = append(chunk.new, "")
+					chunk.newSourceOffsets = append(chunk.newSourceOffsets, sourceOffset)
 				case strings.HasPrefix(line, " "):
 					content := strings.TrimPrefix(line, " ")
+					sourceOffset := len(chunk.old)
 					chunk.old = append(chunk.old, content)
 					chunk.new = append(chunk.new, content)
+					chunk.newSourceOffsets = append(chunk.newSourceOffsets, sourceOffset)
 				case strings.HasPrefix(line, "+"):
 					chunk.new = append(chunk.new, strings.TrimPrefix(line, "+"))
+					chunk.newSourceOffsets = append(chunk.newSourceOffsets, -1)
 				case strings.HasPrefix(line, "-"):
 					chunk.old = append(chunk.old, strings.TrimPrefix(line, "-"))
 				default:
@@ -391,7 +397,11 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 			if start > len(lines) {
 				start = len(lines)
 			}
-			replacements = append(replacements, structuredReplacement{start: start, replacement: append([]string(nil), chunk.new...)})
+			replacement, err := structuredPatchReplacement(chunk, lines, start)
+			if err != nil {
+				return "", fmt.Errorf("building replacement for %s: %w", path, err)
+			}
+			replacements = append(replacements, structuredReplacement{start: start, replacement: replacement})
 			lineIndex = start
 			continue
 		}
@@ -402,7 +412,11 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 		if index < 0 {
 			return "", fmt.Errorf("could not find expected lines in %s:\n%s", path, strings.Join(chunk.old, "\n"))
 		}
-		replacements = append(replacements, structuredReplacement{start: index, length: len(chunk.old), replacement: append([]string(nil), chunk.new...)})
+		replacement, err := structuredPatchReplacement(chunk, lines, index)
+		if err != nil {
+			return "", fmt.Errorf("building replacement for %s: %w", path, err)
+		}
+		replacements = append(replacements, structuredReplacement{start: index, length: len(chunk.old), replacement: replacement})
 		lineIndex = index + len(chunk.old)
 	}
 	for index := 1; index < len(replacements); index++ {
@@ -424,6 +438,24 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 		updated += lineEnding
 	}
 	return updated, nil
+}
+
+func structuredPatchReplacement(chunk structuredPatchChunk, source []string, start int) ([]string, error) {
+	if len(chunk.newSourceOffsets) != len(chunk.new) {
+		return nil, fmt.Errorf("context mapping has %d entries for %d output lines", len(chunk.newSourceOffsets), len(chunk.new))
+	}
+	replacement := append([]string(nil), chunk.new...)
+	for outputIndex, sourceOffset := range chunk.newSourceOffsets {
+		if sourceOffset < 0 {
+			continue
+		}
+		sourceIndex := start + sourceOffset
+		if sourceIndex < 0 || sourceIndex >= len(source) {
+			return nil, fmt.Errorf("context source index %d is outside the matched file", sourceIndex)
+		}
+		replacement[outputIndex] = source[sourceIndex]
+	}
+	return replacement, nil
 }
 
 func structuredPatchLineEnding(content string) string {

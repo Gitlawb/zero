@@ -612,6 +612,62 @@ func TestApplyPatchToolStructuredPatchMatchesWhitespaceTolerantly(t *testing.T) 
 	}
 }
 
+func TestApplyPatchToolStructuredPatchPreservesWhitespaceTolerantContext(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example.go")
+	original := "func f() {\n\tif cond {\n\t\tdoWork()\n\t\tlogIt()\n\t}\n}\n"
+	writeTestFile(t, path, original)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: example.go",
+		"@@",
+		"     if cond {",
+		"         doWork()",
+		"-\t\tlogIt()",
+		"+\t\tlogIt(ctx)",
+		"     }",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	want := "func f() {\n\tif cond {\n\t\tdoWork()\n\t\tlogIt(ctx)\n\t}\n}\n"
+	if got := mustReadTestFile(t, path); got != want {
+		t.Fatalf("structured patch rewrote unchanged context:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestApplyPatchToolStructuredPatchPreservesMixedContextLineEndings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example.txt")
+	original := "alpha\r\n\tcontext\r\n\told\nomega\r\n"
+	writeTestFile(t, path, original)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: example.txt",
+		"@@",
+		" alpha",
+		"     context",
+		"-\told",
+		"+\tnew",
+		" omega",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	want := "alpha\r\n\tcontext\r\n\tnew\nomega\r\n"
+	if got := mustReadTestFile(t, path); got != want {
+		t.Fatalf("structured patch rewrote context line endings:\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestApplyPatchToolStructuredPatchInsertsAtContext(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "example.txt"), "anchor\nmiddle\nremove\n")
