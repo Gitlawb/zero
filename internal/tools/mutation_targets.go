@@ -5,6 +5,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
+
 // MutationTargets returns the workspace-relative paths a tool call will write to,
 // so the session layer can snapshot their before-state for safe rewind. It is a
 // pure helper (no I/O beyond path resolution) and returns nil for read-only tools

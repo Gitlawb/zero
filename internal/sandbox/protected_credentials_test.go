@@ -245,6 +245,9 @@ func TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile(t *testing.T) {
 }
 
 func TestMandatoryTokenKeepsExactSeatbeltDenialsUnderParentDenyRead(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Seatbelt is only available on macOS")
+	}
 	workspace, token := protectedTokenFixture(t)
 	policy := DefaultPolicy()
 	policy.DenyRead = []string{workspace}
