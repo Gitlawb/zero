@@ -267,6 +267,18 @@ func stripTerminalRejoiners(value string) string {
 		if unicode.Is(unicode.Cf, current) {
 			continue
 		}
+		// DEFAULT-IGNORABLE MARKS REJOIN THE SAME WAY, and they are Mn rather than
+		// Cf, so dropping Cf alone left them. A combining grapheme joiner or a
+		// variation selector inside a credential renders as nothing, so the reader
+		// sees an unbroken secret while equality redaction saw two fragments.
+		//
+		// Only the ignorable subset is dropped, NOT the Mn category: an ordinary
+		// combining acute is content in most of the world's scripts, and deleting
+		// it would corrupt the diagnostic this pass exists to show.
+		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, current) ||
+			unicode.Is(unicode.Variation_Selector, current) {
+			continue
+		}
 		out.WriteRune(current)
 	}
 	return out.String()

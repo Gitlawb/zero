@@ -121,8 +121,16 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 // recognize an opaque token by shape.
 func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets []string) string {
 	secrets := mcpServerSecretValues(raw)
+	// NO READABILITY FLOOR ON KNOWN CREDENTIAL MATERIAL. The floor exists for
+	// ambiguous configuration strings, where a short value is more likely to be a
+	// hostname fragment than a secret and blanket redaction would eat the
+	// diagnostic. A stored access token, refresh token or client secret is not
+	// ambiguous: it is a credential by provenance, whatever its length. OAuth
+	// bearer syntax is opaque, the store accepts any non-empty value, and a failed
+	// server can echo a six-character token under an arbitrary field name where no
+	// pattern will recognise it.
 	for _, value := range tokenSecrets {
-		if trimmed := strings.TrimSpace(value); len(trimmed) >= shortestMCPSecret {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
 			secrets = append(secrets, trimmed)
 		}
 	}
