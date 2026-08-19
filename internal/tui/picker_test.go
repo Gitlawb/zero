@@ -532,8 +532,8 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	if next.modelName != "openai/gpt-4.1" {
 		t.Fatalf("active model = %q, want raw OpenRouter model ID", next.modelName)
 	}
-	if !transcriptContains(next.transcript, "openai/gpt-4.1 ·") {
-		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "openai/gpt-4.1") {
+		t.Fatalf("model switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -567,6 +567,30 @@ func TestRecentModelPairsForPickerPinsActiveDedupesAndCaps(t *testing.T) {
 	}
 	if len(got) != config.MaxRecentModels {
 		t.Fatalf("len = %d, want config.MaxRecentModels (%d)", len(got), config.MaxRecentModels)
+	}
+}
+
+func TestRecentModelPairsForPickerCanonicalizesChatGPTOpenAIModelAliases(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "chatgpt",
+		ModelName:    "gpt-5.6-sol",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "chatgpt",
+			CatalogID: "chatgpt",
+		},
+		RecentModels: []config.RecentModelEntry{
+			{Provider: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+		},
+	})
+
+	got := m.recentModelPairsForPicker()
+	want := []config.RecentModelEntry{
+		{Provider: "chatgpt", Model: "gpt-5.6-sol"},
+		{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recentModelPairsForPicker() = %#v, want %#v", got, want)
 	}
 }
 
@@ -930,8 +954,8 @@ func TestModelPickerNavigatesAndChoosesAppliesHandler(t *testing.T) {
 	if m.modelName != "claude-haiku-4.5" {
 		t.Fatalf("expected model switched to claude-haiku-4.5 via handler, got %q", m.modelName)
 	}
-	if !transcriptContains(m.transcript, "Model") {
-		t.Fatal("choosing should append the model handler's status text")
+	if !strings.Contains(m.transientNotice.text, "Model:") {
+		t.Fatalf("model picker notice = %q", m.transientNotice.text)
 	}
 }
 
@@ -963,7 +987,7 @@ func TestEffortPickerOpensForSupportedModel(t *testing.T) {
 }
 
 func TestThemeCommandOpensPicker(t *testing.T) {
-	// Bare /theme opens the theme popup (live preview on move, apply on Enter),
+	// Bare /theme opens the theme popup (contained preview on move, apply on Enter),
 	// like /model and /effort. Full preview/commit/cancel behavior is covered in
 	// theme_picker_test.go; here we just pin that the no-arg command opens it.
 	defer applyTheme(themeDark, true)

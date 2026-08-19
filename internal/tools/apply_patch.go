@@ -20,11 +20,11 @@ func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
 			name:        "apply_patch",
-			description: "Apply a unified diff patch inside the workspace or an explicitly granted extra write root.",
+			description: "Apply a patch inside the workspace or an explicitly granted extra write root.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"patch": {Type: "string", Description: "Unified diff patch to apply."},
+					"patch": {Type: "string", Description: "A unified diff or a structured *** Begin Patch patch to apply."},
 					"cwd":   {Type: "string", Description: "Directory where the patch should be applied. Relative paths stay in the workspace; use an absolute path to target a granted extra write root. Defaults to workspace root.", Default: "."},
 				},
 				Required:             []string{"patch"},
@@ -55,6 +55,9 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	applyRoot, relativeRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
+	}
+	if isStructuredPatch(patch) {
+		return tool.runStructuredPatch(applyRoot, relativeRoot, patch, options)
 	}
 	if err := validatePatchPaths(applyRoot, patch); err != nil {
 		return errorResult("Error applying patch: " + err.Error())

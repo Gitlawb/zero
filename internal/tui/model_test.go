@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -558,10 +560,76 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	if rebuilt.Model != "gpt-4.1-mini" {
 		t.Fatalf("expected provider rebuild with selected model, got %#v", rebuilt)
 	}
-	for _, want := range []string{"Model", "gpt-4.1-mini · openai"} {
-		if !transcriptContains(next.transcript, want) {
-			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
+	for _, want := range []string{"Model:", "gpt-4.1-mini · openai"} {
+		if !strings.Contains(next.transientNotice.text, want) {
+			t.Fatalf("expected model notice to contain %q, got %q", want, next.transientNotice.text)
 		}
+	}
+}
+
+func TestModelCommandAcceptsChatGPTCatalogModelID(t *testing.T) {
+	var rebuilt config.ProviderProfile
+	nextProvider := &fakeProvider{}
+	m := newModel(context.Background(), Options{
+		ProviderName: "chatgpt",
+		ModelName:    "gpt-5.6-terra",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "chatgpt",
+			CatalogID:    "chatgpt",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://chatgpt.com/backend-api/codex",
+			Model:        "gpt-5.6-terra",
+		},
+		Provider: &fakeProvider{},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			rebuilt = profile
+			return nextProvider, nil
+		},
+	})
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"chatgpt": {{ID: "gpt-5.6-sol"}},
+	}
+	m.input.SetValue("/model openai/gpt-5.6-sol")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-5.6-sol" || next.provider != nextProvider {
+		t.Fatalf("expected ChatGPT model switch to use bare catalog ID, got model=%q provider=%#v", next.modelName, next.provider)
+	}
+	if rebuilt.Model != "gpt-5.6-sol" {
+		t.Fatalf("expected provider rebuild with bare ChatGPT model ID, got %#v", rebuilt)
+	}
+}
+
+func TestProviderModelSwitchCandidatesPreserveGatewayModelIDs(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider string
+		input    string
+		want     []string
+	}{
+		{
+			name:     "ChatGPT accepts the models.dev OpenAI namespace",
+			provider: "chatgpt",
+			input:    "openai/gpt-5.6-sol",
+			want:     []string{"openai/gpt-5.6-sol", "gpt-5.6-sol"},
+		},
+		{
+			name:     "gateway keeps qualified model ID",
+			provider: "openrouter",
+			input:    "openai/gpt-5.6-sol",
+			want:     []string{"openai/gpt-5.6-sol"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := providerModelSwitchCandidates(test.provider, test.input); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("providerModelSwitchCandidates(%q, %q) = %#v, want %#v", test.provider, test.input, got, test.want)
+			}
+		})
 	}
 }
 
@@ -611,8 +679,8 @@ func TestModelCommandPersistsSelectedModelToUserConfig(t *testing.T) {
 	if got := persisted.Provider.Model; got != "gpt-4.1-mini" {
 		t.Fatalf("persisted provider model = %q, want gpt-4.1-mini", got)
 	}
-	if !transcriptContains(next.transcript, "· saved") {
-		t.Fatalf("expected model transcript to mention saved user config, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "gpt-4.1-mini") {
+		t.Fatalf("expected model notice to name selected model, got %q", next.transientNotice.text)
 	}
 }
 
@@ -1468,6 +1536,28 @@ func TestToolResultDetailPrefersPreview(t *testing.T) {
 	}
 }
 
+func TestToolResultSessionPayloadKeepsPreviewForResume(t *testing.T) {
+	preview := "--- a/calculator.go\n+++ b/calculator.go\n@@ -4,1 +4,1 @@\n-oldValue := 1\n+newValue := 2"
+	payload := toolResultSessionPayload(agent.ToolResult{
+		ToolCallID: "edit-1",
+		Name:       "edit_file",
+		Status:     tools.StatusOK,
+		Output:     "Successfully edited calculator.go (replaced 1 occurrence).",
+		Display:    tools.Display{Preview: preview},
+	})
+	if got, want := payload["displayPreview"], preview; got != want {
+		t.Fatalf("persisted display preview = %#v, want %q", got, want)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal session payload: %v", err)
+	}
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: encoded}})
+	if len(rows) != 1 || rows[0].detail != preview {
+		t.Fatalf("resumed row lost the display preview: %#v", rows)
+	}
+}
+
 // TestReasoningRefreshesActivityClock: a reasoning delta is live provider output,
 // so it must bump lastStreamActivity (else the quiet hint mis-fires mid-think).
 func TestReasoningRefreshesActivityClock(t *testing.T) {
@@ -1502,16 +1592,15 @@ func TestStaleExplanationDropped(t *testing.T) {
 	}
 }
 
-// TestBeginRunResetsSidebarHidden: a new run clears the sidebar's content, so the
-// stale Ctrl+B hide preference is reset (the new run's sidebar isn't suppressed)
-// and the explanation generation advances.
-func TestBeginRunResetsSidebarHidden(t *testing.T) {
+// TestBeginRunKeepsRunDetailsClosed verifies a new run starts on the focused
+// conversation surface and advances the explanation generation.
+func TestBeginRunKeepsRunDetailsClosed(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.sidebarHidden = true
+	m.runDetailsOpen = true
 	gen := m.planDetailGen
 	m = m.beginRun(nil)
-	if m.sidebarHidden {
-		t.Error("beginRun should reset the Ctrl+B hide preference for the new run")
+	if m.runDetailsOpen {
+		t.Error("beginRun should close run details for the new turn")
 	}
 	if m.planDetailGen <= gen {
 		t.Errorf("beginRun should bump planDetailGen, was %d now %d", gen, m.planDetailGen)
@@ -2561,14 +2650,10 @@ func TestComposerIdleHintAndJumpCue(t *testing.T) {
 				t.Fatalf("empty sidebar should not be advertised, got %q", hint)
 			}
 
-			withSidebar := idle
-			withSidebar.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
-			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-				t.Fatalf("available sidebar should be advertised, got %q", hint)
-			}
-			withSidebar.sidebarHidden = true
-			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-				t.Fatalf("collapsed sidebar should keep its restore shortcut, got %q", hint)
+			withDetails := idle
+			withDetails.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
+			if hint := plainRender(t, withDetails.composerIdleHint()); !strings.Contains(hint, "Ctrl+B details") {
+				t.Fatalf("available run details should be advertised, got %q", hint)
 			}
 		})
 	}
@@ -2946,21 +3031,27 @@ func TestScrimViewportLine(t *testing.T) {
 	if got := scrimViewportLine("   ", 10); got != "   " {
 		t.Fatalf("blank line should be untouched, got %q", got)
 	}
-	// Non-blank lines keep their text (only the styling is dimmed), so the backdrop
-	// stays readable behind the overlay.
+	// Non-blank plain lines keep their text and become faint, so the backdrop stays
+	// readable behind the overlay without competing with its focus surface.
 	got := scrimViewportLine("transcript content", 40)
 	if ansi.Strip(got) != "transcript content" {
 		t.Fatalf("scrim must preserve text, got %q", ansi.Strip(got))
 	}
-	// A pre-styled line must have its OWN styling stripped (so the dim wins), while
-	// the text content survives. This fails if scrim stops re-styling the backdrop.
-	styled := "\x1b[31mred backdrop\x1b[0m text"
+	// Styled transcript content must retain its semantic foreground and background
+	// colors. The scrim adds faintness around resets rather than flattening a diff
+	// or syntax-highlighted line to a single grey style.
+	styled := "\x1b[38;2;235;80;110mremoved\x1b[0m \x1b[48;2;35;80;58madded\x1b[0m"
 	scrimmed := scrimViewportLine(styled, 40)
-	if ansi.Strip(scrimmed) != "red backdrop text" {
+	if ansi.Strip(scrimmed) != "removed added" {
 		t.Fatalf("scrim must preserve styled line's text, got %q", ansi.Strip(scrimmed))
 	}
-	if strings.Contains(scrimmed, "\x1b[31m") {
-		t.Fatalf("scrim must strip the line's original styling, got %q", scrimmed)
+	for _, sequence := range []string{"\x1b[38;2;235;80;110m", "\x1b[48;2;35;80;58m"} {
+		if !strings.Contains(scrimmed, sequence) {
+			t.Fatalf("scrim must preserve semantic ANSI sequence %q, got %q", sequence, scrimmed)
+		}
+	}
+	if !strings.Contains(scrimmed, "\x1b[2m") {
+		t.Fatalf("scrim must apply faint styling around semantic colors, got %q", scrimmed)
 	}
 }
 

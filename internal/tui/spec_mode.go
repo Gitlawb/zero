@@ -64,6 +64,7 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 	}
 	m.pendingImages = nil
 	m.pendingImageLabels = nil
+	m.pendingImageThumbnails = nil
 
 	specRegistry := cloneToolRegistry(m.registry)
 	specmode.RegisterDraftTools(specRegistry, m.cwd, m.now)

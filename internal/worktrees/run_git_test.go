@@ -10,10 +10,6 @@ import (
 	"testing"
 )
 
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
-
 // The constructor every git call goes through must carry the hardening, so a
 // future call site cannot get an unhardened command by using it.
 func TestTheGitConstructorHardens(t *testing.T) {

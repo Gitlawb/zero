@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 )
@@ -259,22 +260,19 @@ func (m model) statusLine(width int) string {
 	}
 
 	rightGroups := []string{}
-	// Context-fill gauge: surface it down to the narrow tier (where it matters
-	// most), but skip it when the context sidebar is already showing the % so the
-	// figure isn't duplicated.
+	// Context-fill gauge: surface it down to the narrow tier, where it is most
+	// useful for deciding whether a session needs compaction.
 	gaugeShown := false
-	if tier >= tierNarrow && !m.sidebarActive() {
+	if tier >= tierNarrow {
 		if gauge := m.contextWindowSegment(); gauge != "" {
 			rightGroups = append(rightGroups, gauge)
 			gaugeShown = true
 		}
 	}
-	// The sidebar pins the token readout at its floor, and the gauge's "used"
-	// figure is the exact same number (both read latestUsageTokens) — either
-	// one showing means the plain usage segment must drop its own token count
-	// to just the cost, or the count renders twice side by side.
+	// The gauge and the usage segment read the same token total, so once the
+	// gauge is present the usage segment only contributes cost.
 	usage := m.usageStatusSegment()
-	if m.sidebarActive() || gaugeShown {
+	if gaugeShown {
 		usage = m.usageCostSegment()
 	}
 	if usage != "" {
@@ -767,6 +765,9 @@ func (m model) pickerOverlay(width int) string {
 	if m.picker.kind == pickerPet {
 		return m.petPickerOverlay(width)
 	}
+	if m.picker.kind == pickerTheme {
+		return m.themePickerOverlay(width)
+	}
 	overlayWidth := minInt(width, pickerOverlayMaxWidth)
 	if overlayWidth < pickerOverlayMinWidth {
 		overlayWidth = width
@@ -842,6 +843,142 @@ func (m model) pickerOverlay(width int) string {
 	}
 	lines = append(lines, footer)
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+// themePickerOverlay keeps candidate rendering inside the picker. Moving through
+// themes therefore shows their hierarchy and code treatment without repainting the
+// transcript, terminal canvas, or any other active UI.
+func (m model) themePickerOverlay(width int) string {
+	overlayWidth := minInt(width, pickerOverlayMaxWidth)
+	if overlayWidth < pickerOverlayMinWidth {
+		overlayWidth = width
+	}
+	innerWidth := maxInt(1, overlayWidth-4)
+	listWidth, previewWidth, showPreview := themePickerColumnWidths(innerWidth)
+
+	lines := []string{
+		renderPickerSearchLine(m.picker.query, "find a theme…", innerWidth),
+		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
+	}
+	listLines := m.themePickerListLines(listWidth)
+	previewLines := m.themePickerPreviewLines(previewWidth)
+	if showPreview {
+		lines = append(lines, joinThemePickerColumns(listLines, previewLines, listWidth, previewWidth)...)
+	} else {
+		lines = append(lines, listLines...)
+		if item, ok := m.picker.current(); ok {
+			lines = append(lines, zeroTheme.faint.Render("Preview: "+item.Label+" — Enter applies"))
+		}
+	}
+	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	lines = append(lines, zeroTheme.faint.Render("↑/↓ preview   Enter apply   Esc close"))
+	title := strings.TrimSpace(m.picker.title)
+	if title == "" {
+		title = "Choose a theme"
+	}
+	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+// themePickerColumnWidths keeps the candidate list usable while reserving a
+// compact, readable preview. It is shared with pointer hit-testing so the
+// preview behaves as a display, not an accidental selection target.
+func themePickerColumnWidths(innerWidth int) (listWidth, previewWidth int, showPreview bool) {
+	if innerWidth < 72 {
+		return innerWidth, 0, false
+	}
+	listWidth = maxInt(28, (innerWidth*3)/5)
+	previewWidth = maxInt(18, innerWidth-listWidth-3)
+	return listWidth, previewWidth, true
+}
+
+func (m model) themePickerListLines(width int) []string {
+	if width < 1 {
+		return nil
+	}
+	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	start := 0
+	visible := []pickerItem{}
+	if len(m.picker.items) > 0 {
+		m.picker.selected = clampInt(m.picker.selected, 0, len(m.picker.items)-1)
+		start = selectableListStart(len(m.picker.items), maxVisible, m.picker.selected)
+		visible = m.picker.items[start : start+maxVisible]
+	}
+	lines := make([]string, 0, len(visible)+2)
+	lastGroup := ""
+	for index, item := range visible {
+		absoluteIndex := start + index
+		if item.Group != "" && item.Group != lastGroup {
+			lines = append(lines, fitStyledLine(zeroTheme.accent.Render(item.Group), width))
+			lastGroup = item.Group
+		}
+		surface := transparentSurface
+		marker := surface(zeroTheme.faintest).Render("  ")
+		if absoluteIndex == m.picker.selected {
+			surface = zeroTheme.onSel
+			marker = surface(zeroTheme.accent).Render("❯ ")
+		}
+		left := marker + surface(zeroTheme.ink).Render(item.Label)
+		right := ""
+		if item.Meta != "" {
+			right = surface(zeroTheme.faintest).Render(item.Meta)
+		}
+		gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+		line := left + surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap))) + right
+		lines = append(lines, fitStyledLine(line, width))
+	}
+	if len(visible) == 0 {
+		lines = append(lines, zeroTheme.faint.Render("  no matching themes"))
+	}
+	return lines
+}
+
+func (m model) themePickerPreviewLines(width int) []string {
+	if width < 1 {
+		return nil
+	}
+	item, ok := m.picker.current()
+	if !ok {
+		return []string{zeroTheme.faint.Render("Preview"), zeroTheme.faint.Render("No matching theme")}
+	}
+	_, preview := themeForMode(themeMode(item.Value), m.hasDarkBg)
+	fill := func(line string) string {
+		return fitStyledLine(line, width)
+	}
+	// The preview stays transparent. A candidate-colored background becomes a
+	// disconnected slab that competes with the list; foreground roles are enough
+	// to show the palette while keeping the terminal canvas visually calm.
+	codeOpen := tokenStyleForTheme(preview, chroma.Keyword).Render("func") + preview.ink.Render(" ") + tokenStyleForTheme(preview, chroma.NameFunction).Render("shipIt") + preview.ink.Render("() {")
+	codeWork := preview.ink.Render("  ") + tokenStyleForTheme(preview, chroma.Name).Render("tests") + tokenStyleForTheme(preview, chroma.Operator).Render("++")
+	codeComment := tokenStyleForTheme(preview, chroma.Comment).Render("  // no bugs, probably")
+	codeClose := preview.ink.Render("}")
+	status := preview.green.Render("✓") + preview.faint.Render(" tests   ") + preview.accent.Render("0") + preview.faint.Render(" bugs (probably)")
+	return []string{
+		fill(preview.accent.Bold(true).Render("Preview")),
+		fill(codeOpen),
+		fill(codeWork),
+		fill(codeComment),
+		fill(codeClose),
+		fill(status),
+	}
+}
+
+func joinThemePickerColumns(left, right []string, leftWidth, rightWidth int) []string {
+	count := maxInt(len(left), len(right))
+	lines := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		leftLine := ""
+		if index < len(left) {
+			leftLine = left[index]
+		}
+		rightLine := ""
+		if index < len(right) {
+			rightLine = right[index]
+		}
+		leftLine = fillPaletteLine(leftLine, leftWidth, transparentSurface)
+		rightLine = fillPaletteLine(rightLine, rightWidth, transparentSurface)
+		lines = append(lines, leftLine+zeroTheme.line.Render(" │ ")+rightLine)
+	}
+	return lines
 }
 
 func (m model) modelPickerOverlay(width int) string {

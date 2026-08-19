@@ -52,18 +52,32 @@ func TestStyleAssistantMarkdownLinePassesAnsiVerbatim(t *testing.T) {
 	}
 }
 
-// update_plan and Task render as a dedicated UI (plan panel / specialist card),
-// so their transcript tool cards are suppressed; everything else still shows.
-func TestToolCardSuppressedInTranscript(t *testing.T) {
-	for _, name := range []string{"Task", "update_plan"} {
-		if !toolCardSuppressedInTranscript(name) {
-			t.Errorf("%q should be suppressed from the transcript (shown by a dedicated UI)", name)
+// Task and TaskOutput render through specialist cards. update_plan hides only
+// while in flight; its successful result is the durable transcript checklist.
+func TestToolCallCardSuppressedInTranscript(t *testing.T) {
+	for _, name := range []string{"Task", "update_plan", "TaskOutput", "tool_search"} {
+		if !toolCallCardSuppressedInTranscript(name) {
+			t.Errorf("%q call should be suppressed from the transcript", name)
 		}
 	}
 	for _, name := range []string{"read_file", "write_file", "edit_file", "bash", "swarm_spawn"} {
-		if toolCardSuppressedInTranscript(name) {
+		if toolCallCardSuppressedInTranscript(name) {
 			t.Errorf("%q must still show its transcript card", name)
 		}
+	}
+}
+
+func TestSuppressedToolFailuresRemainVisible(t *testing.T) {
+	for _, name := range []string{"Task", "TaskOutput", "tool_search"} {
+		if !toolResultCardSuppressedInTranscript(name, tools.StatusOK) {
+			t.Errorf("successful %q result should be suppressed", name)
+		}
+		if toolResultCardSuppressedInTranscript(name, tools.StatusError) {
+			t.Errorf("failed %q result must remain visible", name)
+		}
+	}
+	if toolResultCardSuppressedInTranscript("update_plan", tools.StatusOK) {
+		t.Error("successful update_plan result must render as a transcript checklist")
 	}
 }
 
@@ -73,6 +87,64 @@ func TestUserRowRendersPromptGutter(t *testing.T) {
 	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
 	if !strings.Contains(got, "\n▌  add a --version flag") {
 		t.Fatalf("user row = %q, want rail-prefixed text", got)
+	}
+}
+
+func TestRunningToolCardUsesLiveRailOnlyForActiveRun(t *testing.T) {
+	m := limeTestModel()
+	m.pending = true
+	m.activeRunID = 4
+	row := transcriptRow{kind: rowToolCall, id: "call-1", runID: 4, tool: "read_file", detail: "main.go"}
+	active := plainRender(t, m.renderRunningToolCard(row, 80, buildRowContext([]transcriptRow{row}), cardRenderOptions{}))
+	if !strings.HasPrefix(active, "│ ") {
+		t.Fatalf("active card should begin with a live rail, got %q", active)
+	}
+	if !strings.Contains(active, "Reading") {
+		t.Fatalf("active card should retain its action label, got %q", active)
+	}
+
+	m.pending = false
+	inactive := plainRender(t, m.renderRunningToolCard(row, 80, buildRowContext([]transcriptRow{row}), cardRenderOptions{}))
+	if strings.HasPrefix(inactive, "│ ") {
+		t.Fatalf("inactive card should not retain a live rail, got %q", inactive)
+	}
+
+	m.pending = true
+	stale := row
+	stale.runID = m.activeRunID + 1
+	staleCard := plainRender(t, m.renderRunningToolCard(stale, 80, buildRowContext([]transcriptRow{stale}), cardRenderOptions{}))
+	if strings.HasPrefix(staleCard, "│ ") {
+		t.Fatalf("a stale run card should not receive a live rail, got %q", staleCard)
+	}
+}
+
+func TestAskUserQuestionnaireNamesWaitingForAnswer(t *testing.T) {
+	prompt := pendingAskUserPrompt{
+		request: agent.AskUserRequest{
+			Header: "Quick question",
+			Questions: []agent.AskUserQuestion{{
+				Question: "Which task should Zero handle first?",
+				Options:  []string{"Work helper"},
+			}},
+		},
+		states: newAskUserStates([]agent.AskUserQuestion{{
+			Question: "Which task should Zero handle first?",
+			Options:  []string{"Work helper"},
+		}}),
+	}
+	got := plainRender(t, renderAskUserQuestionnaire(prompt, "", 80))
+	for _, want := range []string{"Quick question", "waiting for your answer"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("questionnaire missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestAskUserWaitingStateFitsNarrowCardWithoutTitle(t *testing.T) {
+	const width = 12
+	got := renderAskUserWaitingState("", width, func(style lipgloss.Style) lipgloss.Style { return style })
+	if visible := lipgloss.Width(got); visible > width-4 {
+		t.Fatalf("waiting state width = %d, want at most %d: %q", visible, width-4, plainRender(t, got))
 	}
 }
 
@@ -1080,6 +1152,20 @@ func TestToolCardHeadCollapsesMultilineCommand(t *testing.T) {
 	}
 }
 
+func TestToolCardHeadStylesShellCommandButNotCommandOutput(t *testing.T) {
+	previous := zeroTheme
+	defer func() { zeroTheme = previous }()
+	_, zeroTheme = themeForMode("nord", true)
+
+	head := toolCardHead("bash", "gofmt -w calculator.go && go run . divide 9 2", "", "", "", "", false, zeroTheme.green, false, 120, cardRenderOptions{})
+	if !strings.Contains(head, "\x1b[") {
+		t.Fatalf("shell command head should be styled, got %q", head)
+	}
+	if plain := ansiPattern.ReplaceAllString(head, ""); !strings.Contains(plain, "Ran gofmt -w calculator.go && go run . divide 9 2") {
+		t.Fatalf("shell command head changed visible text to %q", plain)
+	}
+}
+
 func TestExecCommandCardBodyShowsSessionAndExit(t *testing.T) {
 	m := limeTestModel()
 	runningDetail := "output:\nServing HTTP on 0.0.0.0 port 8000\nsession_id: 1000\nUse write_stdin with session_id 1000 to poll, send input, or interrupt it."
@@ -1892,54 +1978,19 @@ func TestSessionsCardFieldsAreSanitized(t *testing.T) {
 	}
 }
 
-func TestComposerDescriptionHintRendersForSingleSlashMatch(t *testing.T) {
-	// When the user has typed a slash command that matches exactly one entry in
-	// the command palette, the composer hint line should surface that command's
-	// description below the box, claude-code style.
+func TestCommandPaletteKeepsDescriptionInsideOverlay(t *testing.T) {
 	m := limeTestModel()
 	m.input.SetValue("/effort")
 	m.recomputeSuggestions()
 	if !m.commandPaletteOpen || len(m.suggestions) != 1 || m.suggestions[0].Name != "/effort" {
 		t.Fatalf("setup: expected a single /effort suggestion, got palette=%v matches=%#v", m.commandPaletteOpen, m.suggestions)
 	}
-	got := plainRender(t, m.composerDescriptionHint(96))
-	if !strings.Contains(got, "reasoning effort") {
-		t.Fatalf("description hint = %q, want it to mention reasoning effort", got)
+	overlay := plainRender(t, m.suggestionOverlay(96))
+	if !strings.Contains(overlay, "reasoning effort") {
+		t.Fatalf("palette description = %q", overlay)
 	}
-}
-
-func TestComposerDescriptionHintStaysEmptyForAmbiguousPrefix(t *testing.T) {
-	// A prefix that still matches multiple commands should not surface a hint --
-	// the dropdown is the right affordance for an ambiguous match.
-	m := limeTestModel()
-	m.input.SetValue("/")
-	m.recomputeSuggestions()
-	if !m.commandPaletteOpen || len(m.suggestions) < 2 {
-		t.Fatalf("setup: expected multiple suggestions for bare '/', got palette=%v matches=%d", m.commandPaletteOpen, len(m.suggestions))
-	}
-	if got := m.composerDescriptionHint(96); got != "" {
-		t.Fatalf("description hint should be empty for ambiguous matches, got %q", got)
-	}
-}
-
-func TestComposerDescriptionHintStaysEmptyAfterArgs(t *testing.T) {
-	// Once the user starts typing arguments, the palette narrows off and we
-	// shouldn't keep advertising the command's description.
-	m := limeTestModel()
-	m.input.SetValue("/effort high")
-	m.recomputeSuggestions()
-	if got := m.composerDescriptionHint(96); got != "" {
-		t.Fatalf("description hint should be empty after args, got %q", got)
-	}
-}
-
-func TestComposerDescriptionHintStaysEmptyForFilePalette(t *testing.T) {
-	// The @file palette already renders its rows; the description hint is
-	// scoped to slash commands.
-	m := limeTestModel()
-	m.input.SetValue("@")
-	m.recomputeSuggestions()
-	if got := m.composerDescriptionHint(96); got != "" {
-		t.Fatalf("description hint should be empty for file palette, got %q", got)
+	footer := plainRender(t, m.footerView(96))
+	if strings.Contains(footer, "reasoning effort") {
+		t.Fatalf("composer footer duplicated palette description: %q", footer)
 	}
 }

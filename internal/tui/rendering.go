@@ -119,17 +119,23 @@ func buildRowContext(rows []transcriptRow) rowContext {
 	return rc
 }
 
-// isHiddenPlumbingTool reports whether a tool is internal mechanism the user
-// never needs to see in the transcript: update_plan (the plan is surfaced live
-// in the context sidebar and the clickable step detail) and tool_search (the
-// on-demand loading of tool schemas — the "select:…" noise). Their cards are
-// suppressed so the chat reads as a clean narrative of real work.
+// isHiddenPlumbingTool reports whether a tool is an internal mechanism whose
+// human-facing result is rendered elsewhere. Task/TaskOutput are represented by
+// specialist cards, and tool_search only loads schemas. Their successful cards
+// are suppressed so the transcript remains a narrative of the actual work.
 func isHiddenPlumbingTool(name string) bool {
 	switch name {
-	case "update_plan", "tool_search":
+	case "Task", "TaskOutput", "tool_search":
 		return true
 	}
 	return false
+}
+
+// toolCallCardSuppressedInTranscript also hides an in-flight update_plan call.
+// Its completed result is deliberately kept: renderPlanUpdateCard turns it into
+// the durable, readable checklist in the transcript.
+func toolCallCardSuppressedInTranscript(name string) bool {
+	return isHiddenPlumbingTool(name) || name == "update_plan"
 }
 
 // skip reports whether a row renders nothing itself: a tool call whose result
@@ -139,16 +145,16 @@ func isHiddenPlumbingTool(name string) bool {
 func (rc rowContext) skip(row transcriptRow) bool {
 	switch row.kind {
 	case rowToolCall:
-		// Pure-plumbing tools (the plan lives in the sidebar; tool_search just
-		// loads tool schemas) are mechanism the user never needs — drop their
-		// call and result cards so the chat stays a readable narrative of work.
-		if isHiddenPlumbingTool(row.tool) {
+		// Pure-plumbing calls do not have useful standalone content. A successful
+		// update_plan is the exception at result time, where it becomes a plan
+		// checklist rather than a generic tool card.
+		if toolCallCardSuppressedInTranscript(row.tool) {
 			return true
 		}
 		return row.id != "" && rc.resolved[rcKey(row.runID, row.id)]
 	case rowToolResult:
-		// Hide only SUCCESSFUL plumbing results; a failed update_plan/tool_search
-		// must still surface its error.
+		// Hide only successful plumbing results; failures must still surface their
+		// specific error even when a dedicated summary normally owns the tool.
 		return isHiddenPlumbingTool(row.tool) && row.status != tools.StatusError
 	case rowPermission:
 		event := row.permission
@@ -267,6 +273,11 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 	case rowToolResult:
 		if isInternalToolArgumentError(row) {
 			return ""
+		}
+		if row.tool == "update_plan" && row.status != tools.StatusError {
+			if card, ok := renderPlanUpdateCard(row.detail, width); ok {
+				return card
+			}
 		}
 		return renderToolResultCard(row, width, rc, opts)
 	case rowPermission:
@@ -523,15 +534,34 @@ func splitPreservingWidth(text string, measure int) []string {
 func renderUserRow(row transcriptRow, width int) string {
 	contentWidth := userPromptContentWidth(width)
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
-	lines := make([]string, 0, len(wrapped)+1)
+	lines := make([]string, 0, len(wrapped)+2)
 	// A single plain blank line delimits the turn — no full-width painted band.
 	// The ▌ accent gutter alone marks it as the user's, matching the clean
 	// reference agents instead of a heavy chat bubble.
 	lines = append(lines, "")
+	if attachment := renderUserAttachmentSummary(row.attachments); attachment != "" {
+		lines = append(lines, renderUserPromptStyledLine(zeroTheme.muted.Render(attachment), contentWidth))
+	}
 	for _, line := range wrapped {
 		lines = append(lines, renderUserPromptStyledLine(zeroTheme.ink.Bold(true).Render(line), contentWidth))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderUserAttachmentSummary(summary transcriptAttachmentSummary) string {
+	visibleImages := min(summary.images, attachmentSummaryVisibleItems)
+	visibleDocuments := min(summary.documents, attachmentSummaryVisibleItems)
+	parts := make([]string, 0, visibleImages+visibleDocuments+1)
+	for index := 1; index <= visibleImages; index++ {
+		parts = append(parts, fmt.Sprintf("[Image #%d]", index))
+	}
+	for index := 1; index <= visibleDocuments; index++ {
+		parts = append(parts, fmt.Sprintf("[Document #%d]", index))
+	}
+	if hidden := summary.images + summary.documents - visibleImages - visibleDocuments; hidden > 0 {
+		parts = append(parts, fmt.Sprintf("[+%d attachments]", hidden))
+	}
+	return strings.Join(parts, " ")
 }
 
 const userPromptPrefix = "▌  "
@@ -1333,9 +1363,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	multi := len(questions) > 1
 
 	var lines []string
-	if header := strings.TrimSpace(prompt.request.Header); header != "" {
-		lines = append(lines, fill(zeroTheme.ink).Render(header))
-	}
+	lines = append(lines, renderAskUserWaitingState(strings.TrimSpace(prompt.request.Header), width, fill))
 
 	// Tab row (only for multi-question prompts): each question's short title + a
 	// trailing Confirm tab; the active tab is a lime badge, answered ones get a ✓.
@@ -1433,6 +1461,23 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 }
 
+// renderAskUserWaitingState makes the paused handoff explicit inside the prompt
+// that owns the keyboard. It is intentionally steady: this is user-blocked work,
+// not background progress, so a spinner would imply Zero can advance without an
+// answer. The state label wins over the optional title on narrow terminals.
+func renderAskUserWaitingState(title string, width int, fill func(lipgloss.Style) lipgloss.Style) string {
+	state := zeroTheme.accent.Render("●") + " " + fill(zeroTheme.faint).Render("waiting for your answer")
+	available := maxInt(1, width-4)
+	if title == "" {
+		return fitStyledLine(state, available)
+	}
+	heading := fill(zeroTheme.ink).Render(title)
+	if gap := available - lipgloss.Width(heading) - lipgloss.Width(state); gap >= 2 {
+		return heading + strings.Repeat(" ", gap) + state
+	}
+	return fitStyledLine(state, available)
+}
+
 // --- Tool cards -------------------------------------------------------------
 
 // cardBodyMaxLines caps every card body; hidden lines collapse into a
@@ -1456,8 +1501,9 @@ type cardBody struct {
 // global pending flag alone would re-animate dead cards on every later run.
 func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
 	glyph := zeroTheme.faintest.Render("…")
-	if m.pending && row.runID != 0 && row.runID == m.activeRunID {
-		glyph = zeroTheme.accent.Render(m.spinnerGlyph())
+	active := m.pending && row.runID != 0 && row.runID == m.activeRunID
+	if active {
+		glyph = zeroTheme.accent.Render("›")
 	}
 	// The call row carries its own argHints; rc.hints/args only matter for
 	// result rows, whose detail is the tool output.
@@ -1469,9 +1515,12 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	if arg == "" {
 		arg = rc.args[rcKey(row.runID, row.id)]
 	}
-	// Running cards keep the normal name color; the accent spinner glyph at the
-	// front already marks them live (and orphaned dead cards must not look active).
+	// Running cards keep the normal name color; the static accent marker identifies
+	// the active operation while the turn-level status owns animation.
 	head := toolCardHead(toolRowName(row), hint, arg, "", "", "", true, zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
+	if active {
+		return renderLeftRuleCard(width, []string{glyph + " " + head}, zeroTheme.cardRun)
+	}
 	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
 }
 
@@ -1759,6 +1808,12 @@ func toolCardActionLabel(name string, detail string, running bool) string {
 			return "Listing"
 		case "terminal_session":
 			return "Running"
+		case "update_plan":
+			return "Planning"
+		case "tool_search":
+			return "Preparing tools"
+		case "Task":
+			return "Delegating"
 		default:
 			return toolDisplayName(name)
 		}
@@ -1921,10 +1976,10 @@ func singleLineToolHeadText(text string) string {
 	return strings.Join(parts, " ")
 }
 
-// toolCard draws a compact tool block: the status glyph leads the head row,
-// body lines follow directly below, and an optional footer closes the block. No
-// rail or box border is drawn, so the transcript does not carry a distracting
-// vertical activity line.
+// toolCard draws a compact completed-or-static tool block: the status glyph
+// leads the head row, body lines follow directly below, and an optional footer
+// closes the block. The one live card is rendered separately with a breathing
+// rail, so history remains visually quiet.
 func toolCard(head string, glyph string, body []string, footer string, _ lipgloss.Style, width int) string {
 	if width < 24 {
 		width = 24

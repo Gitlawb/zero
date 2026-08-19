@@ -36,7 +36,7 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 		"inspect the target file",
 		"plan then act",
 		"choose the narrowest tool",
-		"prefer edit_file or apply_patch",
+		"for edits to existing files, prefer apply_patch",
 		"verify after edits",
 		"honor the active permission mode",
 		"avoid broad refactors",

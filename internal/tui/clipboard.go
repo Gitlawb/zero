@@ -107,7 +107,6 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.picker.appendQuery([]rune(sanitizeComposerInput(content)))
-		m.previewSelectedTheme()
 		if m.picker.kind == pickerPet {
 			return m.schedulePetPreview()
 		}

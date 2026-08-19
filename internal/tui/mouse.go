@@ -287,38 +287,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// sidebarLineAtMouse maps a left-click in the AGENTS sidebar column to the swarm
-// member whose row was clicked, when that member's session is known. Geometry:
-// twoColumnTranscriptView is the full screen (sidebarActive ⇒ alt-screen), and
-// joinColumns lays out [chat(chatColumnWidth)][" │ " 3-cell divider][sidebar],
-// zipping row-by-row — so a sidebar line's screen Y equals its sidebar index and
-// the sidebar starts at screen X = chatColumnWidth + 3. Recomputed on demand
-// (View can't persist a registry on the value-receiver model), like
-// transcriptLineAtMouse.
-func (m model) sidebarLineAtMouse(msg tea.MouseMsg) (sidebarAgentHit, bool) {
-	if !m.sidebarActive() {
-		return sidebarAgentHit{}, false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
-		return sidebarAgentHit{}, false
-	}
-	sidebarW := sidebarWidth(m.width)
-	if sidebarW <= 0 {
-		return sidebarAgentHit{}, false
-	}
-	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
-	x, y := mouseX(msg), mouseY(msg)
-	if x < x0 || x >= x0+sidebarW {
-		return sidebarAgentHit{}, false
-	}
-	for _, hit := range m.sidebarAgentSelectables(sidebarW) {
-		if hit.lineOffset == y && hit.sessionID != "" {
-			return hit, true
-		}
-	}
-	return sidebarAgentHit{}, false
-}
-
 func (m model) repeatMouseSelection(target mouseSelectionTarget) bool {
 	return target.Scope != "" && m.lastMouseSelection == target
 }
@@ -531,6 +499,20 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	if !ok {
 		return mouseSelectionTarget{}, false
 	}
+	// The theme picker has a right-hand visual preview on wider terminals. It is
+	// deliberately non-interactive: clicking a color sample must not select a
+	// list item merely because it shares that row's y-coordinate.
+	if m.picker.kind == pickerTheme {
+		overlayWidth := minInt(width, pickerOverlayMaxWidth)
+		if overlayWidth < pickerOverlayMinWidth {
+			overlayWidth = width
+		}
+		listWidth, _, showPreview := themePickerColumnWidths(maxInt(1, overlayWidth-4))
+		// styledBlockFillTitle contributes a left border and one-cell inset.
+		if showPreview && hit.x >= listWidth+2 {
+			return mouseSelectionTarget{}, false
+		}
+	}
 	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
 	selected := clampInt(m.picker.selected, 0, len(m.picker.items)-1)
 	start := selectableListStart(len(m.picker.items), maxVisible, selected)
@@ -549,9 +531,6 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 		if hit.y == line {
 			index := start + offset
 			m.picker.selected = index
-			// Clicking (or hovering onto) a row live-previews it, like arrow keys,
-			// so the theme picker repaints before the confirming second click.
-			m.previewSelectedTheme()
 			return mouseSelectionTarget{Scope: "picker", Kind: int(m.picker.kind), Value: item.Value, Index: index}, true
 		}
 		line++

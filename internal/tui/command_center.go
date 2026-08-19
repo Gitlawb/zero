@@ -15,6 +15,7 @@ import (
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -731,14 +732,16 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 		}, true
 	}
 	if provider, ok := m.activeProviderDescriptor(); ok {
-		for _, model := range m.modelPickerLiveByProvider[provider.ID] {
-			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
-				return modelSwitchTarget{modelID: model.ID}, true
+		for _, candidate := range providerModelSwitchCandidates(provider.ID, args) {
+			for _, model := range m.modelPickerLiveByProvider[provider.ID] {
+				if strings.EqualFold(model.ID, candidate) {
+					return modelSwitchTarget{modelID: model.ID}, true
+				}
 			}
-		}
-		for _, model := range providermodelcatalog.Models(provider) {
-			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
-				return modelSwitchTarget{modelID: model.ID}, true
+			for _, model := range providermodelcatalog.Models(provider) {
+				if strings.EqualFold(model.ID, candidate) {
+					return modelSwitchTarget{modelID: model.ID}, true
+				}
 			}
 		}
 		if genericProviderCatalogID(provider.ID) && strings.TrimSpace(args) != "" {
@@ -746,6 +749,24 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 		}
 	}
 	return modelSwitchTarget{}, false
+}
+
+// providerModelSwitchCandidates preserves provider-owned model IDs while
+// accepting the models.dev OpenAI namespace for ChatGPT subscription models.
+// The ChatGPT backend itself publishes bare model IDs (for example,
+// "gpt-5.6-sol"); gateway providers may legitimately require "openai/..."
+// as part of their model ID, so the alias is deliberately provider-specific.
+func providerModelSwitchCandidates(providerID string, input string) []string {
+	requested := strings.TrimSpace(input)
+	candidates := []string{requested}
+	const openAIPrefix = "openai/"
+	if providercatalog.NormalizeID(providerID) != "chatgpt" || len(requested) <= len(openAIPrefix) || !strings.EqualFold(requested[:len(openAIPrefix)], openAIPrefix) {
+		return candidates
+	}
+	if bare := strings.TrimSpace(requested[len(openAIPrefix):]); bare != "" {
+		candidates = append(candidates, bare)
+	}
+	return candidates
 }
 
 func (m model) requestCompactionBeforeModelSwitch(request modelSwitchCompactionRequest, title string) (model, string, bool) {

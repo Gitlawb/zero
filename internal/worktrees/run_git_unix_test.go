@@ -14,6 +14,10 @@ import (
 	"time"
 )
 
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
 // THE HARDENING HAS TO WORK, not merely be configured.
 //
 // A leaked grandchild holding the pipes is what makes an unhardened cancel hang:

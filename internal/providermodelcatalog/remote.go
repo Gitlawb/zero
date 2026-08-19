@@ -184,6 +184,10 @@ func parseOpenAIStyleModelList(body []byte) ([]remoteModel, error) {
 
 func ModelsDevProviderID(provider providercatalog.Descriptor) string {
 	switch strings.TrimSpace(provider.ID) {
+	case "chatgpt":
+		// ChatGPT authenticates against the Codex backend, while its public
+		// model metadata is published under the OpenAI provider on models.dev.
+		return "openai"
 	case "dashscope":
 		return "alibaba"
 	case "github":

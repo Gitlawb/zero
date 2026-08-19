@@ -555,7 +555,7 @@ func (m model) renderExploreResultGroup(rows []transcriptRow, width int, rc rowC
 		body = append(body, exploreCardLine(toolRowName(row), rc.hints[key], rc.args[key], row.detail, width, opts, marker))
 	}
 	head := zeroTheme.green.Bold(true).Render("Explored")
-	return toolCard(head, zeroTheme.green.Render("•"), body, zeroTheme.faint.Render("▸ details"), zeroTheme.line, width)
+	return toolCard(head, zeroTheme.green.Render("•"), body, "", zeroTheme.line, width)
 }
 
 // transcriptBodyItemsFromRows builds body items from an arbitrary set of
@@ -1352,41 +1352,9 @@ func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) tran
 func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
 	switch {
 	case mouseLeftPress(msg):
-		// A click on a clickable AGENTS sidebar row drills into that swarm member's
-		// session, reusing the specialist-card subchat path. Checked before the
-		// transcript hit-test since the sidebar is outside the chat column.
-		if hit, ok := m.sidebarLineAtMouse(msg); ok {
-			// The subchat drill-in owns the whole (single-column) view; a file
-			// drill-in can't meaningfully stay open behind it.
-			m = m.exitFileView()
-			if errMsg := m.subchat.enter(m.sessionStore, hit.sessionID, hit.title, m.chatScrollOffset); errMsg != "" {
-				m = m.appendSystemNotice(errMsg)
-			}
-			m.chatScrollOffset = 0
-			m = m.clearHover() // bodyY numbering differs between subchat and the parent transcript
-			return m, nil, true
-		}
-		// A click on a PLAN step row drops a transcript card listing the file
-		// changes captured while that step was in progress.
-		if stepIndex, ok := m.planStepAtMouse(msg); ok {
-			// The card lands in the chat transcript; close the file drill-in so
-			// it isn't appended invisibly behind the swapped body.
-			m = m.exitFileView()
-			var cmd tea.Cmd
-			m, cmd = m.openPlanStepDetail(stepIndex)
-			return m, cmd, true
-		}
-		// A click on a FILES row: first click selects the file (its edit cards
-		// tint and the chat scrolls to the most recent one); a click on the
-		// already-selected file — or any FILES click while the drill-in is open —
-		// opens/switches the file view.
-		if path, ok := m.fileRowAtMouse(msg); ok {
-			if m.fileView.active || m.selectedFile == path {
-				m.setSelectedFile(path)
-				return m.openFileView(path), nil, true
-			}
-			return m.selectFile(path), nil, true
-		}
+		// Context data is available through the run-details overlay. The former
+		// sidebar is no longer rendered, so its legacy hit targets must never
+		// intercept clicks in the full-width transcript.
 		line, ok := m.transcriptLineAtMouse(msg)
 		if !ok {
 			if m.transcriptSelection.active {
