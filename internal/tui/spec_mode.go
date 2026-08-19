@@ -247,14 +247,7 @@ func (m model) cancelSpecReview() (tea.Model, tea.Cmd) {
 }
 
 func cloneToolRegistry(registry *tools.Registry) *tools.Registry {
-	clone := tools.NewRegistry()
-	if registry == nil {
-		return clone
-	}
-	for _, tool := range registry.All() {
-		clone.Register(tool)
-	}
-	return clone
+	return registry.Clone()
 }
 
 // renderFocusedSpecReviewPrompt draws the spec-review gate in the shared card
