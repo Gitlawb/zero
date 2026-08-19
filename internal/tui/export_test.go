@@ -112,20 +112,6 @@ func (m model) overlayMouseTop(overlayHeight int, width int) int {
 	return m.overlayMouseRect(overlayHeight, width).y
 }
 
-// height returns the number of terminal lines renderPlanPanel will occupy at
-// the given width (0 when the panel is not visible). The step list is shown
-// when the panel is expanded or still running; a collapsed, finished plan is
-// just the header and progress bar.
-func (s planPanelState) height(width int, now time.Time) int {
-	if !s.visible(now) {
-		return 0
-	}
-	if s.expanded || !s.isComplete() {
-		return 2 + len(s.steps)
-	}
-	return 2
-}
-
 func GetLocalDiffStats(baseBranch string) (additions int, deletions int, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
