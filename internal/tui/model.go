@@ -927,6 +927,13 @@ func newModel(ctx context.Context, options Options) model {
 	// terminal bracketed paste (Paste: true) is the single paste path.
 	input.KeyMap.Paste.SetEnabled(false)
 	input.Focus()
+	// The main composer paints its own cursor through composerCursorVisible.
+	// Keep the embedded textinput cursor static so the shared textinput.Blink
+	// message cannot start a second, invisible 530ms tick chain. Setup inputs
+	// still use the normal Bubbles cursor and continue blinking independently.
+	inputStyles := input.Styles()
+	inputStyles.Cursor.Blink = false
+	input.SetStyles(inputStyles)
 
 	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	runSpinner.Spinner.FPS = activeAnimationFrameInterval
