@@ -78,6 +78,14 @@ func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch str
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
+	wholeBefore := make(map[string]bool, len(changes))
+	if options.FileTracker != nil {
+		for _, change := range changes {
+			if change.kind == structuredPatchUpdate {
+				wholeBefore[change.from.absolute] = options.FileTracker.SeenWhole(change.from.absolute)
+			}
+		}
+	}
 	if err := applyStructuredPatchChanges(workspace, changes); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
@@ -87,10 +95,11 @@ func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch str
 		case structuredPatchDelete:
 			options.FileTracker.Forget(change.from.absolute)
 		case structuredPatchAdd:
-			recordStructuredPatchFile(options.FileTracker, change.to.absolute, true)
+			recordStructuredPatchFile(options.FileTracker, change.to.absolute, true, true)
 		case structuredPatchUpdate:
+			wasWhole := wholeBefore[change.from.absolute]
 			options.FileTracker.Forget(change.from.absolute)
-			recordStructuredPatchFile(options.FileTracker, change.to.absolute, false)
+			recordStructuredPatchFile(options.FileTracker, change.to.absolute, false, wasWhole)
 		}
 	}
 
@@ -347,6 +356,10 @@ func resolveStructuredPatchTarget(root, path string) (structuredPatchTarget, err
 }
 
 func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchChunk) (string, error) {
+	lineEnding := structuredPatchLineEnding(content)
+	if lineEnding == "\r\n" {
+		content = strings.ReplaceAll(content, "\r\n", "\n")
+	}
 	lines := strings.Split(content, "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
@@ -355,7 +368,10 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 	lineIndex := 0
 	for _, chunk := range chunks {
 		if chunk.hasContext {
-			index := findStructuredPatchSequence(lines, []string{chunk.context}, lineIndex, false)
+			index, ambiguous := findStructuredPatchSequence(lines, []string{chunk.context}, lineIndex, false)
+			if ambiguous {
+				return "", fmt.Errorf("context %q is ambiguous in %s; provide a more specific hunk header", chunk.context, path)
+			}
 			if index < 0 {
 				return "", fmt.Errorf("could not find context %q in %s", chunk.context, path)
 			}
@@ -376,7 +392,10 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 			lineIndex = start
 			continue
 		}
-		index := findStructuredPatchSequence(lines, chunk.old, lineIndex, chunk.endOfFile)
+		index, ambiguous := findStructuredPatchSequence(lines, chunk.old, lineIndex, chunk.endOfFile)
+		if ambiguous {
+			return "", fmt.Errorf("expected lines are ambiguous in %s; provide more surrounding context:\n%s", path, strings.Join(chunk.old, "\n"))
+		}
 		if index < 0 {
 			return "", fmt.Errorf("could not find expected lines in %s:\n%s", path, strings.Join(chunk.old, "\n"))
 		}
@@ -390,7 +409,14 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 	if len(lines) == 0 {
 		return "", nil
 	}
-	return strings.Join(lines, "\n") + "\n", nil
+	return strings.Join(lines, lineEnding) + lineEnding, nil
+}
+
+func structuredPatchLineEnding(content string) string {
+	if strings.Contains(content, "\r\n") && !strings.Contains(strings.ReplaceAll(content, "\r\n", ""), "\n") {
+		return "\r\n"
+	}
+	return "\n"
 }
 
 type structuredReplacement struct {
@@ -399,12 +425,12 @@ type structuredReplacement struct {
 	replacement []string
 }
 
-func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bool) int {
+func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bool) (int, bool) {
 	if len(wanted) == 0 {
-		return start
+		return start, false
 	}
 	if len(wanted) > len(lines) {
-		return -1
+		return -1, false
 	}
 	searchStart := start
 	if endOfFile {
@@ -417,6 +443,7 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 		},
 		func(left, right string) bool { return strings.TrimSpace(left) == strings.TrimSpace(right) },
 	} {
+		match := -1
 		for index := searchStart; index+len(wanted) <= len(lines); index++ {
 			matched := true
 			for offset, line := range wanted {
@@ -426,11 +453,17 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 				}
 			}
 			if matched {
-				return index
+				if match >= 0 {
+					return -1, true
+				}
+				match = index
 			}
 		}
+		if match >= 0 {
+			return match, false
+		}
 	}
-	return -1
+	return -1, false
 }
 
 func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange) error {
@@ -522,7 +555,7 @@ func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, conte
 	return nil
 }
 
-func recordStructuredPatchFile(tracker *FileTracker, absolute string, created bool) {
+func recordStructuredPatchFile(tracker *FileTracker, absolute string, created, seenWhole bool) {
 	if tracker == nil {
 		return
 	}
@@ -533,7 +566,10 @@ func recordStructuredPatchFile(tracker *FileTracker, absolute string, created bo
 	}
 	info, _ := os.Stat(absolute)
 	tracker.Record(absolute, content, info)
-	tracker.RecordSeenRange(absolute, 1, lineCount(string(content)), lineCount(string(content)))
+	if seenWhole {
+		lines := lineCount(string(content))
+		tracker.RecordSeenRange(absolute, 1, lines, lines)
+	}
 	if created {
 		tracker.RecordCreated(absolute)
 	}

@@ -8,6 +8,15 @@ import (
 	"testing"
 )
 
+func mustReadTestFile(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
 func TestCoreToolsExposeWriteAndPlanTools(t *testing.T) {
 	toolset := CoreToolsScoped(t.TempDir(), nil)
 	byName := make(map[string]Tool, len(toolset))
@@ -625,6 +634,53 @@ func TestApplyPatchToolStructuredPatchInsertsAtContext(t *testing.T) {
 	}
 	if got, want := string(content), "anchor\ninserted\nmiddle\n"; got != want {
 		t.Fatalf("structured insertion content = %q, want %q", got, want)
+	}
+}
+
+func TestApplyPatchToolStructuredPatchRejectsAmbiguousMatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example.go")
+	original := "func a() {\n\treturn nil\n}\n\nfunc b() {\n\treturn nil\n}\n"
+	writeTestFile(t, path, original)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: example.go",
+		"@@",
+		"-\treturn nil",
+		"+\treturn errNotFound",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusError || !strings.Contains(strings.ToLower(result.Output), "ambiguous") {
+		t.Fatalf("ambiguous structured patch should be refused, got %s: %s", result.Status, result.Output)
+	}
+	if got := mustReadTestFile(t, path); got != original {
+		t.Fatalf("ambiguous structured patch changed the file: %q", got)
+	}
+}
+
+func TestApplyPatchToolStructuredPatchPreservesCRLF(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example.txt")
+	writeTestFile(t, path, "alpha\r\nbravo\r\ncharlie\r\n")
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: example.txt",
+		"@@",
+		"-bravo",
+		"+BRAVO",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	if got, want := mustReadTestFile(t, path), "alpha\r\nBRAVO\r\ncharlie\r\n"; got != want {
+		t.Fatalf("structured patch content = %q, want %q", got, want)
 	}
 }
 
