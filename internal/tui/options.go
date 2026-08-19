@@ -43,17 +43,21 @@ type Options struct {
 	PrepareRunCompletionWarning func()
 	RunCompletionWarning        func() string
 	Registry                    *tools.Registry
-	SessionStore                *sessions.Store
-	SandboxStore                *sandbox.GrantStore
-	MCPConfig                   config.MCPConfig
-	MCPPermissionStore          *mcp.PermissionStore
-	MCPTokenStore               *mcp.TokenStore
-	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
-	PeerService                 *peermsg.Service
+	// AwaitToolReadiness gives prompt-critical integration startup a bounded
+	// chance to publish its tools before this turn snapshots the registry. The
+	// wait runs inside the asynchronous agent command, so the TUI stays usable.
+	AwaitToolReadiness  func(context.Context)
+	SessionStore        *sessions.Store
+	SandboxStore        *sandbox.GrantStore
+	MCPConfig           config.MCPConfig
+	MCPPermissionStore  *mcp.PermissionStore
+	MCPTokenStore       *mcp.TokenStore
+	MCPCommand          func(context.Context, []string) MCPCommandResult
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
+	PeerService         *peermsg.Service
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any

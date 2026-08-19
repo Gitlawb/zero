@@ -109,6 +109,48 @@ func TestPromptSubmitInjectsLiveSessionModelContext(t *testing.T) {
 	}
 }
 
+func TestPromptWaitsForToolReadinessBeforeSnapshot(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	registry := tools.NewRegistry()
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	awaited := false
+	m := newModel(context.Background(), Options{
+		Cwd:          t.TempDir(),
+		ProviderName: "test",
+		ModelName:    "test-model",
+		Provider:     provider,
+		Registry:     registry,
+		AwaitToolReadiness: func(context.Context) {
+			awaited = true
+			registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
+		},
+	})
+	m.input.SetValue("inspect the workspace")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+	next.Update(execCmd(cmd))
+
+	if !awaited {
+		t.Fatal("agent run did not await tool readiness")
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(provider.requests))
+	}
+	for _, definition := range provider.requests[0].Tools {
+		if definition.Name == "read_file" {
+			return
+		}
+	}
+	t.Fatal("provider request omitted tool published by readiness callback")
+}
+
 func TestPromptSubmitStoresReasoningSeparatelyFromAnswer(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{

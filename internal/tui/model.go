@@ -89,6 +89,7 @@ type model struct {
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	registry                    *tools.Registry
+	awaitToolReadiness          func(context.Context)
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
@@ -983,6 +984,7 @@ func newModel(ctx context.Context, options Options) model {
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
 		registry:                    registry,
+		awaitToolReadiness:          options.AwaitToolReadiness,
 		sessionStore:                sessionStore,
 		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
@@ -5422,6 +5424,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
 		var specReview *pendingSpecReviewPrompt
+		if m.awaitToolReadiness != nil {
+			m.awaitToolReadiness(runCtx)
+		}
 		options := m.agentOptions
 		options.Registry = cloneToolRegistry(m.registry)
 		goalAwareRun := !runOptions.specDraft && m.activeLoopID == "" &&
