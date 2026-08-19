@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -481,53 +483,15 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 	return -1, false
 }
 
-type structuredPatchUndoKind uint8
-
-const (
-	structuredPatchUndoRemove structuredPatchUndoKind = iota
-	structuredPatchUndoRestore
-)
-
-type structuredPatchUndo struct {
-	kind       structuredPatchUndoKind
-	target     structuredPatchTarget
-	content    string
-	mode       os.FileMode
-	createOnly bool
-	expected   *structuredPatchVersion
-}
-
-type structuredPatchVersion struct {
-	hash string
-	info os.FileInfo
-}
-
-func structuredPatchVersionAt(root *os.Root, target structuredPatchTarget) (*structuredPatchVersion, error) {
-	content, err := root.ReadFile(target.relative)
-	if err != nil {
-		return nil, err
-	}
-	info, err := root.Stat(target.relative)
-	if err != nil {
-		return nil, err
-	}
-	return &structuredPatchVersion{hash: HashContent(content), info: info}, nil
-}
-
-func structuredPatchVersionMatches(expected, actual *structuredPatchVersion) bool {
-	return expected != nil && actual != nil &&
-		expected.hash == actual.hash && os.SameFile(expected.info, actual.info)
-}
-
 func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange, tracker *FileTracker) error {
-	journal := make([]structuredPatchUndo, 0, len(changes)*2)
+	mutated := false
 	for _, change := range changes {
-		undos, err := applyStructuredPatchChange(root, change)
-		journal = append(journal, undos...)
+		committed, err := applyStructuredPatchChange(root, change)
+		mutated = mutated || committed
 		if err != nil {
-			if rollbackErr := rollbackStructuredPatchChanges(root, journal); rollbackErr != nil {
-				forgetStructuredPatchFiles(tracker, changes)
-				return fmt.Errorf("%w; rollback failed and the workspace is partially modified; re-read affected files before retrying: %v", err, rollbackErr)
+			forgetStructuredPatchFiles(tracker, changes)
+			if mutated {
+				return fmt.Errorf("%w; structured patch was partially applied; re-read affected files before retrying", err)
 			}
 			return err
 		}
@@ -547,191 +511,155 @@ func forgetStructuredPatchFiles(tracker *FileTracker, changes []structuredPatchC
 	}
 }
 
-func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) ([]structuredPatchUndo, error) {
+func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bool, error) {
 	switch change.kind {
 	case structuredPatchDelete:
 		if err := root.Remove(change.from.relative); err != nil {
-			return nil, fmt.Errorf("deleting %s: %w", change.from.relative, err)
+			return false, fmt.Errorf("deleting %s: %w", change.from.relative, err)
 		}
-		return []structuredPatchUndo{{
-			kind: structuredPatchUndoRestore, target: change.from,
-			content: change.before, mode: change.mode, createOnly: true,
-		}}, nil
+		return true, nil
 	case structuredPatchAdd:
-		committed, version, err := writeStructuredPatchFile(root, change.to, change.after, change.mode, true)
-		if !committed {
-			return nil, err
-		}
-		undo := structuredPatchUndo{kind: structuredPatchUndoRemove, target: change.to, expected: version}
-		undos := []structuredPatchUndo{undo}
-		if err != nil {
-			return undos, err
-		}
-		return undos, nil
+		return writeStructuredPatchFile(root, change.to, change.after, change.mode, true)
 	case structuredPatchUpdate:
 		moving := change.from.absolute != change.to.absolute
-		committed, version, err := writeStructuredPatchFile(root, change.to, change.after, change.mode, moving)
-		if !committed {
-			return nil, err
-		}
-		if !moving {
-			undo := structuredPatchUndo{
-				kind: structuredPatchUndoRestore, target: change.from,
-				content: change.before, mode: change.mode, expected: version,
-			}
-			undos := []structuredPatchUndo{undo}
-			if err != nil {
-				return undos, err
-			}
-			return undos, nil
-		}
-		undo := structuredPatchUndo{kind: structuredPatchUndoRemove, target: change.to, expected: version}
-		undos := []structuredPatchUndo{undo}
+		committed, err := writeStructuredPatchFile(root, change.to, change.after, change.mode, moving)
 		if err != nil {
-			return undos, err
+			return committed, err
 		}
-		if err := root.Remove(change.from.relative); err != nil {
-			return undos, fmt.Errorf("removing moved source %s: %w", change.from.relative, err)
-		}
-		undos = append(undos, structuredPatchUndo{
-			kind: structuredPatchUndoRestore, target: change.from,
-			content: change.before, mode: change.mode, createOnly: true,
-		})
-		return undos, nil
-	}
-	return nil, fmt.Errorf("unsupported structured patch operation")
-}
-
-func rollbackStructuredPatchChanges(root *os.Root, journal []structuredPatchUndo) error {
-	for index := len(journal) - 1; index >= 0; index-- {
-		undo := journal[index]
-		switch undo.kind {
-		case structuredPatchUndoRemove:
-			if err := rollbackStructuredPatchOwnedFile(root, undo); err != nil {
-				return err
-			}
-		case structuredPatchUndoRestore:
-			if undo.expected != nil {
-				if err := rollbackStructuredPatchOwnedFile(root, undo); err != nil {
-					return err
-				}
-				continue
-			}
-			committed, _, err := writeStructuredPatchFile(root, undo.target, undo.content, undo.mode, undo.createOnly)
-			if err != nil {
-				return fmt.Errorf("restoring %s: %w", undo.target.relative, err)
-			}
-			if !committed {
-				return fmt.Errorf("restoring %s: replacement was not committed", undo.target.relative)
+		if moving {
+			if err := root.Remove(change.from.relative); err != nil {
+				return true, fmt.Errorf("removing moved source %s: %w", change.from.relative, err)
 			}
 		}
+		return true, nil
 	}
-	return nil
+	return false, fmt.Errorf("unsupported structured patch operation")
 }
 
-func rollbackStructuredPatchOwnedFile(root *os.Root, undo structuredPatchUndo) error {
-	if undo.expected == nil {
-		return fmt.Errorf("rollback ownership for %s was not recorded", undo.target.relative)
-	}
-	parent := filepath.Dir(undo.target.relative)
-	quarantine, quarantineName, err := pathjail.CreateTemp(root, parent, "zero-rollback", ".tmp")
-	if err != nil {
-		return fmt.Errorf("preparing rollback for %s: %w", undo.target.relative, err)
-	}
-	if err := quarantine.Close(); err != nil {
-		_ = root.Remove(quarantineName)
-		return fmt.Errorf("preparing rollback for %s: %w", undo.target.relative, err)
-	}
-	if err := root.Rename(undo.target.relative, quarantineName); err != nil {
-		_ = root.Remove(quarantineName)
-		return fmt.Errorf("capturing %s for rollback: %w", undo.target.relative, err)
-	}
-	quarantinedTarget := undo.target
-	quarantinedTarget.relative = quarantineName
-	actual, versionErr := structuredPatchVersionAt(root, quarantinedTarget)
-	if versionErr != nil || !structuredPatchVersionMatches(undo.expected, actual) {
-		restoreErr := restoreStructuredPatchQuarantine(root, quarantineName, undo.target.relative)
-		if versionErr != nil {
-			return fmt.Errorf("verifying %s before rollback: %w; restore after failed verification: %v", undo.target.relative, versionErr, restoreErr)
-		}
-		if restoreErr != nil {
-			return fmt.Errorf("%s changed after patch commit; rollback refused and the captured file remains at %s: %v", undo.target.relative, quarantineName, restoreErr)
-		}
-		return fmt.Errorf("%s changed after patch commit; rollback refused", undo.target.relative)
-	}
-
-	switch undo.kind {
-	case structuredPatchUndoRemove:
-		if err := root.Remove(quarantineName); err != nil {
-			return fmt.Errorf("removing captured %s during rollback: %w", undo.target.relative, err)
-		}
-		return nil
-	case structuredPatchUndoRestore:
-		committed, _, err := writeStructuredPatchFile(root, undo.target, undo.content, undo.mode, true)
-		if err != nil || !committed {
-			restoreErr := restoreStructuredPatchQuarantine(root, quarantineName, undo.target.relative)
-			return fmt.Errorf("restoring %s during rollback: %v; restoring committed version: %v", undo.target.relative, err, restoreErr)
-		}
-		if err := root.Remove(quarantineName); err != nil {
-			return fmt.Errorf("removing captured committed version for %s: %w", undo.target.relative, err)
-		}
-		return nil
-	default:
-		_ = restoreStructuredPatchQuarantine(root, quarantineName, undo.target.relative)
-		return fmt.Errorf("unsupported structured patch rollback operation")
-	}
-}
-
-func restoreStructuredPatchQuarantine(root *os.Root, quarantineName, target string) error {
-	if err := root.Link(quarantineName, target); err != nil {
-		return err
-	}
-	if err := root.Remove(quarantineName); err != nil {
-		return err
-	}
-	return nil
-}
-
-func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, content string, mode os.FileMode, createOnly bool) (bool, *structuredPatchVersion, error) {
+func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, content string, mode os.FileMode, createOnly bool) (bool, error) {
 	parent := filepath.Dir(target.relative)
 	if err := root.MkdirAll(parent, 0o755); err != nil {
-		return false, nil, fmt.Errorf("creating parent directory for %s: %w", target.relative, err)
+		return false, fmt.Errorf("creating parent directory for %s: %w", target.relative, err)
 	}
 	temp, tempName, err := pathjail.CreateTemp(root, parent, "zero-patch", ".tmp")
 	if err != nil {
-		return false, nil, fmt.Errorf("writing %s: %w", target.relative, err)
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
 	}
-	defer func() { _ = root.Remove(tempName) }()
+	defer func() { _ = removeStructuredPatchTemp(root, tempName) }()
 	if _, err := temp.WriteString(content); err != nil {
 		_ = temp.Close()
-		return false, nil, fmt.Errorf("writing %s: %w", target.relative, err)
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
 	}
 	if err := temp.Chmod(mode.Perm()); err != nil {
 		_ = temp.Close()
-		return false, nil, fmt.Errorf("writing %s: %w", target.relative, err)
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
 	}
-	info, err := temp.Stat()
-	if err != nil {
-		_ = temp.Close()
-		return false, nil, fmt.Errorf("recording temporary version for %s: %w", target.relative, err)
-	}
-	version := &structuredPatchVersion{hash: HashContent([]byte(content)), info: info}
 	if err := temp.Close(); err != nil {
-		return false, nil, fmt.Errorf("writing %s: %w", target.relative, err)
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
 	}
 	if createOnly {
-		if err := root.Link(tempName, target.relative); err != nil {
-			return false, nil, fmt.Errorf("creating %s without overwrite: %w", target.relative, err)
-		}
-		if err := root.Remove(tempName); err != nil {
-			return true, version, fmt.Errorf("created %s, but removing temporary file failed: %w", target.relative, err)
-		}
-		return true, version, nil
+		return publishStructuredPatchNoReplace(root, tempName, target.relative, mode)
 	}
 	if err := root.Rename(tempName, target.relative); err != nil {
-		return false, nil, fmt.Errorf("writing %s: %w", target.relative, err)
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
 	}
-	return true, version, nil
+	return true, nil
+}
+
+func publishStructuredPatchNoReplace(root *os.Root, source, target string, mode os.FileMode) (bool, error) {
+	return publishStructuredPatchNoReplaceWith(root, source, target, mode, root.Link)
+}
+
+func publishStructuredPatchNoReplaceWith(root *os.Root, source, target string, mode os.FileMode, link func(string, string) error) (bool, error) {
+	if linkErr := link(source, target); linkErr == nil {
+		cleanupErr := removeStructuredPatchTemp(root, source)
+		chmodErr := root.Chmod(target, mode.Perm())
+		if cleanupErr != nil || chmodErr != nil {
+			return true, fmt.Errorf("publishing %s: %w", target, errors.Join(cleanupErr, chmodErr))
+		}
+		return true, nil
+	} else if errors.Is(linkErr, os.ErrExist) {
+		return false, fmt.Errorf("creating %s: %w", target, linkErr)
+	} else {
+		committed, copyErr := copyStructuredPatchNoReplace(root, source, target, mode)
+		if copyErr != nil {
+			return committed, fmt.Errorf("creating %s without overwrite: hard link failed: %w; exclusive-copy fallback failed: %w", target, linkErr, copyErr)
+		}
+		return committed, nil
+	}
+}
+
+func copyStructuredPatchNoReplace(root *os.Root, source, target string, mode os.FileMode) (bool, error) {
+	return copyStructuredPatchNoReplaceWith(root, source, target, mode, io.Copy, removeStructuredPatchTemp)
+}
+
+func copyStructuredPatchNoReplaceWith(
+	root *os.Root,
+	source, target string,
+	mode os.FileMode,
+	copyFile func(io.Writer, io.Reader) (int64, error),
+	cleanup func(*os.Root, string) error,
+) (bool, error) {
+	sourceFile, err := root.Open(source)
+	if err != nil {
+		return false, err
+	}
+	sourceClosed := false
+	defer func() {
+		if !sourceClosed {
+			_ = sourceFile.Close()
+		}
+	}()
+	targetFile, err := root.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return false, err
+	}
+	committed := true
+	cleanupTarget := func(cause error) (bool, error) {
+		_ = targetFile.Close()
+		if cleanupErr := cleanup(root, target); cleanupErr == nil {
+			return false, cause
+		} else {
+			return committed, errors.Join(cause, fmt.Errorf("cleaning partial target: %w", cleanupErr))
+		}
+	}
+	if _, err := copyFile(targetFile, sourceFile); err != nil {
+		return cleanupTarget(err)
+	}
+	if err := sourceFile.Close(); err != nil {
+		sourceClosed = true
+		return cleanupTarget(err)
+	}
+	sourceClosed = true
+	if err := targetFile.Chmod(mode.Perm()); err != nil {
+		return cleanupTarget(err)
+	}
+	if err := targetFile.Close(); err != nil {
+		if cleanupErr := cleanup(root, target); cleanupErr == nil {
+			return false, err
+		} else {
+			return true, errors.Join(err, fmt.Errorf("cleaning target after close failure: %w", cleanupErr))
+		}
+	}
+	if err := cleanup(root, source); err != nil {
+		return true, fmt.Errorf("removing published source: %w", err)
+	}
+	return true, nil
+}
+
+func removeStructuredPatchTemp(root *os.Root, name string) error {
+	chmodErr := root.Chmod(name, 0o600)
+	if os.IsNotExist(chmodErr) {
+		return nil
+	}
+	removeErr := root.Remove(name)
+	if os.IsNotExist(removeErr) {
+		removeErr = nil
+	}
+	if removeErr == nil {
+		return nil
+	}
+	return errors.Join(chmodErr, removeErr)
 }
 
 func recordStructuredPatchFile(tracker *FileTracker, absolute string, created, seenWhole bool) {
