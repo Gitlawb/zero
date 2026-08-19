@@ -2884,6 +2884,13 @@ func TestComposerBlinkStaysSolidWhileTyping(t *testing.T) {
 	}
 }
 
+func TestMainComposerDisablesEmbeddedCursorBlink(t *testing.T) {
+	m := newModel(t.Context(), Options{})
+	if m.input.Styles().Cursor.Blink {
+		t.Fatal("embedded composer cursor blink must stay disabled")
+	}
+}
+
 func TestComposerBlinkHiddenWhileUnfocused(t *testing.T) {
 	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
 	m := model{
