@@ -833,6 +833,99 @@ func TestStructuredPatchMoveRollbackDoesNotRecreateMissingSource(t *testing.T) {
 	}
 }
 
+func TestStructuredPatchRollbackPreservesReplacedDestination(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+	targetPath := filepath.Join(root, "target.txt")
+	target := structuredPatchTarget{absolute: targetPath, relative: "target.txt"}
+	writeTestFile(t, targetPath, "patch output\n")
+	expected, err := structuredPatchVersionAt(workspace, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(targetPath, filepath.Join(root, "displaced-patch-output.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, targetPath, "external replacement\n")
+
+	err = rollbackStructuredPatchChanges(workspace, []structuredPatchUndo{{
+		kind: structuredPatchUndoRemove, target: target, expected: expected,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "changed after patch commit") {
+		t.Fatalf("rollback replacement race = %v, want ownership mismatch", err)
+	}
+	if got := mustReadTestFile(t, targetPath); got != "external replacement\n" {
+		t.Fatalf("rollback removed or changed external replacement: %q", got)
+	}
+}
+
+func TestStructuredPatchRollbackPreservesSameFileExternalWrite(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+	targetPath := filepath.Join(root, "target.txt")
+	target := structuredPatchTarget{absolute: targetPath, relative: "target.txt"}
+	writeTestFile(t, targetPath, "patch output\n")
+	expected, err := structuredPatchVersionAt(workspace, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, targetPath, "external in-place write\n")
+
+	err = rollbackStructuredPatchChanges(workspace, []structuredPatchUndo{{
+		kind: structuredPatchUndoRestore, target: target,
+		content: "original\n", mode: 0o644, expected: expected,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "changed after patch commit") {
+		t.Fatalf("rollback in-place race = %v, want ownership mismatch", err)
+	}
+	if got := mustReadTestFile(t, targetPath); got != "external in-place write\n" {
+		t.Fatalf("rollback overwrote external in-place write: %q", got)
+	}
+}
+
+func TestStructuredPatchWriteVersionPrecedesPublicationRace(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+	targetPath := filepath.Join(root, "target.txt")
+	target := structuredPatchTarget{absolute: targetPath, relative: "target.txt"}
+	committed, expected, err := writeStructuredPatchFile(workspace, target, "patch output\n", 0o644, true)
+	if err != nil || !committed || expected == nil {
+		t.Fatalf("writeStructuredPatchFile = committed %v, version %#v, error %v", committed, expected, err)
+	}
+	displacedPath := filepath.Join(root, "displaced.txt")
+	if err := os.Rename(targetPath, displacedPath); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, targetPath, "external replacement\n")
+	displacedTarget := structuredPatchTarget{absolute: displacedPath, relative: "displaced.txt"}
+	displaced, err := structuredPatchVersionAt(workspace, displacedTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := structuredPatchVersionAt(workspace, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !structuredPatchVersionMatches(expected, displaced) {
+		t.Fatal("returned version does not identify the pre-publication temporary file")
+	}
+	if structuredPatchVersionMatches(expected, replacement) {
+		t.Fatal("returned version incorrectly identifies an external post-publication replacement")
+	}
+}
+
 func TestStructuredPatchSuccessfulRollbackPreservesTrackedState(t *testing.T) {
 	root := t.TempDir()
 	trackedPath := filepath.Join(root, "tracked.txt")
