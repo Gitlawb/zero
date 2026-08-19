@@ -548,10 +548,10 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.modelName != "gpt-4.1-mini" || next.provider != nextProvider {
@@ -591,10 +591,10 @@ func TestModelCommandAcceptsChatGPTCatalogModelID(t *testing.T) {
 	}
 	m.input.SetValue("/model openai/gpt-5.6-sol")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.modelName != "gpt-5.6-sol" || next.provider != nextProvider {
@@ -663,10 +663,10 @@ func TestModelCommandPersistsSelectedModelToUserConfig(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.modelName != "gpt-4.1-mini" {
@@ -2868,6 +2868,8 @@ func TestComposerBlinkStaysSolidWhileTyping(t *testing.T) {
 		terminalFocused:       true,
 		lastCharTime:          base,
 		composerCursorVisible: true,
+		composerBlinkSeq:      1,
+		composerBlinkTicking:  true,
 	}
 
 	// Each iteration simulates a keystroke (refreshing lastCharTime) followed by
@@ -2876,7 +2878,7 @@ func TestComposerBlinkStaysSolidWhileTyping(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		now = now.Add(200 * time.Millisecond)
 		m.lastCharTime = now
-		updated, _ := m.Update(composerBlinkMsg{})
+		updated, _ := m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 		m = updated.(model)
 		if !m.composerCursorVisible {
 			t.Fatalf("tick %d: expected cursor to stay visible while typing, got hidden", i)
@@ -2927,10 +2929,10 @@ func TestComposerBlinkResumesAfterRefocusAndIdle(t *testing.T) {
 		t.Fatal("expected terminalFocused to be true after FocusMsg")
 	}
 
-	updated, _ = m.Update(composerBlinkMsg{})
+	updated, _ = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	first := m.composerCursorVisible
-	updated, _ = m.Update(composerBlinkMsg{})
+	updated, _ = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	second := m.composerCursorVisible
 	if first == second {
@@ -2945,17 +2947,50 @@ func TestComposerBlinkTogglesWhenIdleAndFocused(t *testing.T) {
 		terminalFocused:       true,
 		lastCharTime:          base.Add(-time.Hour),
 		composerCursorVisible: true,
+		composerBlinkSeq:      1,
+		composerBlinkTicking:  true,
 	}
 
-	updated, _ := m.Update(composerBlinkMsg{})
+	updated, _ := m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	if m.composerCursorVisible {
 		t.Fatal("expected cursor to toggle off on first idle+focused tick")
 	}
-	updated, _ = m.Update(composerBlinkMsg{})
+	updated, _ = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	if !m.composerCursorVisible {
 		t.Fatal("expected cursor to toggle back on on second idle+focused tick")
+	}
+}
+
+func TestComposerBlinkSettlesVisibleWithoutRescheduling(t *testing.T) {
+	m := model{
+		now:                   func() time.Time { return time.Unix(100, 0) },
+		terminalFocused:       true,
+		lastCharTime:          time.Unix(0, 0),
+		composerCursorVisible: true,
+		composerBlinkSeq:      1,
+		composerBlinkTicking:  true,
+	}
+	var cmd tea.Cmd
+	for range composerBlinkIdleTicksBeforeSettle {
+		var updated tea.Model
+		updated, cmd = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
+		m = updated.(model)
+	}
+	if m.composerBlinkTicking || cmd != nil || !m.composerCursorVisible {
+		t.Fatalf("settled cursor = ticking:%v cmd:%v visible:%v", m.composerBlinkTicking, cmd != nil, m.composerCursorVisible)
+	}
+}
+
+func TestComposerInputRestartsSettledBlink(t *testing.T) {
+	m := newModel(t.Context(), Options{})
+	m.composerBlinkTicking = false
+	m.composerCursorVisible = true
+	updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	m = updated.(model)
+	if !m.composerBlinkTicking || cmd == nil || !m.composerCursorVisible {
+		t.Fatalf("restarted cursor = ticking:%v cmd:%v visible:%v", m.composerBlinkTicking, cmd != nil, m.composerCursorVisible)
 	}
 }
 
