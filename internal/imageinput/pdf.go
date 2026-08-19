@@ -169,8 +169,8 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	text, pages := "", 0
 	textOverflow := false
 	if useExternal {
-		if t, ok := extractTextWithPoppler(data); ok {
-			text = t
+		if t, overflow, ok := extractTextWithPoppler(data); ok {
+			text, textOverflow = t, overflow
 		}
 	}
 	if strings.TrimSpace(text) == "" {
@@ -262,20 +262,27 @@ func extractTextPureGo(data []byte) (text string, pages int, overflow bool, err 
 
 	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
 	defer cancel()
-	plain, perr := reader.GetPlainText(ctx)
-	if perr != nil {
-		return "", pages, false, fmt.Errorf("could not extract PDF text: %w", perr)
+	var buffer = newBoundedBuffer(MaxDocumentTextBytes)
+	for _, page := range reader.Pages() {
+		if err := ctx.Err(); err != nil {
+			return "", pages, false, fmt.Errorf("could not extract PDF text: %w", err)
+		}
+		pageText, perr := page.GetPlainText(nil)
+		if perr != nil {
+			return "", pages, false, fmt.Errorf("could not extract PDF text: %w", perr)
+		}
+		_, _ = buffer.Write([]byte(pageText))
+		if buffer.overflow {
+			break
+		}
 	}
-	text, overflow, cerr := readBoundedText(plain)
-	if cerr != nil {
-		return "", pages, false, fmt.Errorf("could not read PDF text: %w", cerr)
-	}
-	return strings.TrimSpace(text), pages, overflow, nil
+	return strings.TrimSpace(buffer.String()), pages, buffer.overflow, nil
 }
 
-// readBoundedText reads at most one byte beyond MaxDocumentTextBytes, allowing
-// capDocumentText to add its truncation marker without ever buffering an
-// unbounded parser result. overflow reports that the source exceeded the cap.
+// readBoundedText reads at most one byte beyond MaxDocumentTextBytes. It is
+// retained for direct reader consumers; PDF extraction aggregates pages through
+// boundedBuffer so it can stop after the cap rather than constructing a whole
+// document result first.
 func readBoundedText(reader io.Reader) (text string, overflow bool, err error) {
 	data, err := io.ReadAll(io.LimitReader(reader, MaxDocumentTextBytes+1))
 	if err != nil {
@@ -381,9 +388,9 @@ func popplerAvailable(name string) bool {
 // extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout) when
 // pdftotext is on PATH. The bool is false when the tool is absent or failed, so
 // the caller falls back to the pure-Go extractor. Absence is never an error.
-func extractTextWithPoppler(data []byte) (string, bool) {
+func extractTextWithPoppler(data []byte) (text string, overflow bool, ok bool) {
 	if !popplerAvailable("pdftotext") {
-		return "", false
+		return "", false, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
 	defer cancel()
@@ -395,10 +402,10 @@ func extractTextWithPoppler(data []byte) (string, bool) {
 	stdout := newBoundedBuffer(MaxDocumentTextBytes)
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil || stdout.overflow {
-		return "", false
+	if err := cmd.Run(); err != nil {
+		return "", false, false
 	}
-	return strings.TrimSpace(stdout.String()), true
+	return strings.TrimSpace(stdout.String()), stdout.overflow, true
 }
 
 func pdfPageCountWithPoppler(data []byte) int {
