@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -93,6 +95,78 @@ func TestRegistryAllReturnsToolsSortedByName(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("Registry.All() order = %v, want %v", got, want)
 	}
+}
+
+func TestRegistrySnapshotAndCloneStayOnOneGeneration(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(fakePlainTool{baseTool: baseTool{name: "alpha", description: "alpha"}})
+	first := registry.Snapshot()
+
+	registry.RegisterBatch([]Tool{
+		fakePlainTool{baseTool: baseTool{name: "charlie", description: "charlie"}},
+		fakePlainTool{baseTool: baseTool{name: "bravo", description: "bravo"}},
+	})
+	second := registry.Snapshot()
+	clone := registry.Clone()
+	registry.Register(fakePlainTool{baseTool: baseTool{name: "delta", description: "delta"}})
+
+	if got := toolNames(first.Tools); !slices.Equal(got, []string{"alpha"}) {
+		t.Fatalf("first snapshot changed after registration: %v", got)
+	}
+	if second.Generation != first.Generation+1 {
+		t.Fatalf("batch generation = %d, want %d", second.Generation, first.Generation+1)
+	}
+	if got := toolNames(second.Tools); !slices.Equal(got, []string{"alpha", "bravo", "charlie"}) {
+		t.Fatalf("second snapshot tools = %v", got)
+	}
+	if got := toolNames(clone.All()); !slices.Equal(got, toolNames(second.Tools)) {
+		t.Fatalf("clone changed with source registry: %v", got)
+	}
+}
+
+func TestRegistryBatchIsAtomicForConcurrentReaders(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(fakePlainTool{baseTool: baseTool{name: "base", description: "base"}})
+	batch := make([]Tool, 128)
+	for index := range batch {
+		name := fmt.Sprintf("tool_%03d", index)
+		batch[index] = fakePlainTool{baseTool: baseTool{name: name, description: name}}
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for {
+				count := len(registry.Snapshot().Tools)
+				if count != 1 && count != len(batch)+1 {
+					t.Errorf("reader observed partial batch with %d tools", count)
+					return
+				}
+				select {
+				case <-done:
+					return
+				default:
+				}
+			}
+		}()
+	}
+	close(start)
+	registry.RegisterBatch(batch)
+	close(done)
+	readers.Wait()
+}
+
+func toolNames(toolset []Tool) []string {
+	names := make([]string, 0, len(toolset))
+	for _, tool := range toolset {
+		names = append(names, tool.Name())
+	}
+	return names
 }
 
 func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {

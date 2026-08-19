@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -12,7 +13,17 @@ import (
 )
 
 type Registry struct {
-	tools map[string]Tool
+	mu         sync.RWMutex
+	tools      map[string]Tool
+	generation uint64
+}
+
+// RegistrySnapshot is one immutable registry generation. Tools is a detached,
+// name-sorted slice: later registrations cannot change the snapshot observed by
+// an in-flight agent turn.
+type RegistrySnapshot struct {
+	Tools      []Tool
+	Generation uint64
 }
 
 type RunOptions struct {
@@ -107,23 +118,62 @@ func IsDeferralEligible(t Tool) bool {
 }
 
 func (registry *Registry) Register(tool Tool) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
 	registry.tools[tool.Name()] = tool
+	registry.generation++
+}
+
+// RegisterBatch publishes a group of tools as one registry generation. Readers
+// observe either the complete prior generation or the complete new one.
+func (registry *Registry) RegisterBatch(batch []Tool) {
+	if len(batch) == 0 {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	for _, tool := range batch {
+		registry.tools[tool.Name()] = tool
+	}
+	registry.generation++
 }
 
 func (registry *Registry) Get(name string) (Tool, bool) {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
 	tool, ok := registry.tools[name]
 	return tool, ok
 }
 
 func (registry *Registry) All() []Tool {
+	return registry.Snapshot().Tools
+}
+
+// Snapshot returns a stable, sorted view of the registry at one generation.
+func (registry *Registry) Snapshot() RegistrySnapshot {
+	registry.mu.RLock()
 	tools := make([]Tool, 0, len(registry.tools))
 	for _, tool := range registry.tools {
 		tools = append(tools, tool)
 	}
+	generation := registry.generation
+	registry.mu.RUnlock()
 	sort.Slice(tools, func(left, right int) bool {
 		return tools[left].Name() < tools[right].Name()
 	})
-	return tools
+	return RegistrySnapshot{Tools: tools, Generation: generation}
+}
+
+// Clone returns an independent registry containing exactly one source snapshot.
+func (registry *Registry) Clone() *Registry {
+	clone := NewRegistry()
+	if registry == nil {
+		return clone
+	}
+	snapshot := registry.Snapshot()
+	clone.RegisterBatch(snapshot.Tools)
+	clone.generation = snapshot.Generation
+	return clone
 }
 
 func (registry *Registry) Run(ctx context.Context, name string, args map[string]any) Result {
