@@ -26,10 +26,15 @@ func parsePlanUpdateItems(detail string) ([]planUpdateItem, bool) {
 	foundHeader := false
 	for _, line := range lines {
 		if !foundHeader {
-			if strings.TrimSpace(line) == "Current Plan:" {
-				foundHeader = true
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
 			}
-			continue
+			if trimmed == "Current Plan:" {
+				foundHeader = true
+				continue
+			}
+			return nil, false
 		}
 		if match := planUpdateLinePattern.FindStringSubmatch(line); len(match) == 3 {
 			status := strings.ToLower(strings.TrimSpace(match[1]))

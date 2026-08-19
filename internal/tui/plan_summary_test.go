@@ -37,6 +37,9 @@ func TestRenderPlanUpdateCardLeavesMalformedOutputToGenericCard(t *testing.T) {
 	if _, ok := renderPlanUpdateCard("Current Plan:\n1. [pending] Step\nError: persistence failed", 80); ok {
 		t.Error("trailing diagnostics must fall back to the generic card")
 	}
+	if _, ok := renderPlanUpdateCard("Error: persistence failed\nCurrent Plan:\n1. [pending] Step", 80); ok {
+		t.Error("diagnostics before Current Plan must fall back to the generic card")
+	}
 }
 
 func TestUpdatePlanResultRendersChecklistInTranscript(t *testing.T) {

@@ -55,7 +55,7 @@ func TestStyleAssistantMarkdownLinePassesAnsiVerbatim(t *testing.T) {
 // Task and TaskOutput render through specialist cards. update_plan hides only
 // while in flight; its successful result is the durable transcript checklist.
 func TestToolCallCardSuppressedInTranscript(t *testing.T) {
-	for _, name := range []string{"Task", "update_plan", "TaskOutput"} {
+	for _, name := range []string{"Task", "update_plan", "TaskOutput", "tool_search"} {
 		if !toolCallCardSuppressedInTranscript(name) {
 			t.Errorf("%q call should be suppressed from the transcript", name)
 		}
@@ -68,7 +68,7 @@ func TestToolCallCardSuppressedInTranscript(t *testing.T) {
 }
 
 func TestSuppressedToolFailuresRemainVisible(t *testing.T) {
-	for _, name := range []string{"Task", "TaskOutput"} {
+	for _, name := range []string{"Task", "TaskOutput", "tool_search"} {
 		if !toolResultCardSuppressedInTranscript(name, tools.StatusOK) {
 			t.Errorf("successful %q result should be suppressed", name)
 		}
