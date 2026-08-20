@@ -441,6 +441,31 @@ func TestGrantStoreMigratesPreNormalizationPrefixInsteadOfRejectingTheFile(t *te
 	}
 }
 
+// The legacy-schema path is a separate migration from the policy bump above and
+// prunes per grant rather than wholesale, so a pre-normalization prefix must be
+// dropped there while the valid prefix beside it survives.
+func TestGrantStoreLegacyMigrationDropsOnlyThePreNormalizationPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	original := `{"schemaVersion":2,"grants":{},"commandPrefixes":{"bash":[{"toolName":"bash","prefix":["python3.11","-c"],"approvedAt":"2026-06-05T14:30:00Z"},{"toolName":"bash","prefix":["git","status"],"approvedAt":"2026-06-05T14:30:00Z"}]}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixes, err := store.ListCommandPrefixes()
+	if err != nil {
+		t.Fatalf("ListCommandPrefixes after legacy migration returned error: %v", err)
+	}
+	if len(prefixes) != 1 || !sameStringSlice(prefixes[0].Prefix, []string{"git", "status"}) {
+		t.Fatalf("prefixes = %#v, want only [git status]", prefixes)
+	}
+	if notice, err := store.ConsumeMigrationNotice(); err != nil || !strings.Contains(notice, "migrated 1, invalidated 1") {
+		t.Fatalf("notice = %q err=%v", notice, err)
+	}
+}
+
 func TestGrantStorePersistsCommandPrefixes(t *testing.T) {
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
@@ -516,6 +541,11 @@ func TestGrantStoreRejectsUnsafeCommandPrefixes(t *testing.T) {
 		{"python", "script.py"},
 		{"./script.sh"},
 		{"git"},
+		{"python3.11", "-c"},
+		{"python.exe", "-c"},
+		{"node.exe", "-e"},
+		{"git.exe"},
+		{"cmd", "/c"},
 	} {
 		if _, err := store.GrantCommandPrefix(CommandPrefixInput{ToolName: "bash", Prefix: prefix}); err == nil {
 			t.Fatalf("GrantCommandPrefix(%#v) succeeded, want validation error", prefix)
