@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -182,6 +183,14 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if strings.TrimSpace(meta.Cwd) == "" {
 		return nil, RPCError(codeInvalidParams, "session has no persisted workspace: "+p.SessionID)
 	}
+	// SAME RULE ON THE WAY IN. Omitting a relative entry from the listing is not
+	// enough: session/resume falls back to meta.Cwd when the client sends no cwd,
+	// so a stored "." resolved against this process's directory and bound the
+	// conversation to it — verified returning no error at all. A workspace that
+	// cannot be identified is not one this session can be restored into.
+	if !filepath.IsAbs(meta.Cwd) {
+		return nil, RPCError(codeInvalidParams, "session workspace is not an absolute path, so it cannot be identified: "+p.SessionID)
+	}
 	persistedRoot, err := a.deps.ResolveWorkspaceRoot(meta.Cwd)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, "persisted session workspace is unavailable: "+err.Error())
@@ -268,6 +277,16 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 		// holding a relative path, which was then reported as cwd "." even though
 		// ACP requires SessionInfo.cwd to be absolute.
 		if strings.TrimSpace(item.Cwd) == "" {
+			continue
+		}
+		// A RELATIVE PERSISTED CWD HAS NO RECOVERABLE IDENTITY. Resolving one
+		// rebases it onto wherever this ACP server happens to be running and
+		// advertises that invented absolute path as the session's workspace — so a
+		// conversation created for one project could be resumed against another
+		// project's configuration, files and tools. The original base is not
+		// knowable from the metadata, so the honest answer is to omit the entry
+		// rather than to guess at it.
+		if !filepath.IsAbs(item.Cwd) {
 			continue
 		}
 		itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)

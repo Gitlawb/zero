@@ -1038,20 +1038,50 @@ func TestSessionListResolvesEveryWorkspace(t *testing.T) {
 	if _, listedLive := seen["live-ws"]; !listedLive {
 		t.Error("a usable session was dropped while filtering unusable ones")
 	}
-	// THE RELATIVE ENTRY IS RETAINED, not quietly dropped. Resolving every item
-	// could have been "fixed" by discarding anything not already absolute, which
-	// would pass the absolute-path check below while losing a resumable session —
-	// so presence is asserted separately from spelling.
-	relative, listedRelative := seen["relative-ws"]
-	if !listedRelative {
-		t.Error("a session with a resolvable relative workspace was dropped rather than normalised")
-	} else if !filepath.IsAbs(relative) {
-		t.Errorf("the relative entry was listed as %q; it must be normalised to an absolute path", relative)
+	// THE RELATIVE ENTRY IS DROPPED. An earlier revision of this test asserted the
+	// opposite — that "." be normalised and kept — which reads as the generous
+	// choice but resolves the stored path against whatever directory this ACP
+	// server was started in. That does not recover the session's workspace; it
+	// invents one, and then advertises the invention as fact, so a conversation
+	// created for one project becomes resumable against another project's files,
+	// configuration and tools. The original base is not knowable from the
+	// metadata, so no entry is the only honest answer.
+	if invented, listedRelative := seen["relative-ws"]; listedRelative {
+		t.Errorf("a relative persisted workspace was listed as %q, rebased onto the current process directory", invented)
 	}
 	// EVERY reported cwd is absolute, which is the contract clients rely on.
 	for id, cwd := range seen {
 		if !filepath.IsAbs(cwd) {
 			t.Errorf("session %s was listed with a relative cwd %q; ACP requires an absolute path", id, cwd)
 		}
+	}
+}
+
+func TestResumeRefusesARelativePersistedWorkspace(t *testing.T) {
+	// OMITTING THE ENTRY FROM THE LISTING IS NOT THE WHOLE FIX. A client can ask
+	// to resume any id it already knows, and session/resume falls back to the
+	// persisted cwd when the request carries none — so a stored "." was resolved
+	// against this process's directory and the session bound to it, with no error
+	// returned at all. Both doors need the same lock.
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = normalisingResolver(t)
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "relative-ws", Cwd: "."}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// No cwd at all: the request that used to succeed by rebasing.
+	var out LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: "relative-ws"}, &out); err == nil {
+		t.Error("resuming a relative persisted workspace succeeded; the session was rebound to the ACP process directory")
+	}
+	// And an unrelated workspace must not be accepted as its home either.
+	elsewhere := t.TempDir()
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: "relative-ws", Cwd: elsewhere}, &out); err == nil {
+		t.Errorf("resuming a relative persisted workspace into %q succeeded", elsewhere)
 	}
 }
