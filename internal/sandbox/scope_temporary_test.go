@@ -108,7 +108,11 @@ func TestANarrowerRequestHoldsTheCoveringGrant(t *testing.T) {
 	workspace, outside := scopeOutsideRoots(t)
 	nested := filepath.Join(outside, "nested")
 	if err := os.MkdirAll(nested, 0o700); err != nil {
-		t.Skip(err)
+		// FATAL, NOT SKIP. This directory is the fixture, not a precondition the
+		// environment might reasonably withhold — skipping on it reports a broken
+		// setup as a passing run, which is the one thing a test must never do.
+		// The sibling test above already fails here for the same reason.
+		t.Fatal(err)
 	}
 	scope, err := NewScope(workspace, nil)
 	if err != nil {
@@ -207,7 +211,12 @@ func TestConcurrentHoldersOfOneRoot(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	release := make(chan struct{})
-	failures := make(chan string, holders)
+	// TWO PER HOLDER, because each one can report at both hasReadRoot checks. At
+	// one slot per holder the channel fills after eight reports, the ninth send
+	// blocks forever, wg.Done() is never reached and wg.Wait() hangs — so the
+	// test would DEADLOCK rather than fail in exactly the case it exists to
+	// catch, since nothing drains failures until after the wait.
+	failures := make(chan string, 2*holders)
 	// Signalled by EVERY holder once its own AddTemporaryRead has returned,
 	// failure included: the gate below waits for all of them, so a holder that
 	// returned early without signalling would hang this test rather than fail it.
@@ -253,5 +262,14 @@ func TestConcurrentHoldersOfOneRoot(t *testing.T) {
 	}
 	if hasReadRoot(scope, outside) {
 		t.Fatal("the root outlived every holder")
+	}
+	// AND THE BOOKKEEPING IS EMPTY, not merely invisible. hasReadRoot answers
+	// what a caller can see; a refcount entry left behind at zero is not visible
+	// that way and would still leak, one map entry per acquire/release cycle.
+	scope.mu.Lock()
+	leftover, stillCounted := scope.tempReads[outside]
+	scope.mu.Unlock()
+	if stillCounted {
+		t.Fatalf("the refcount table kept an entry for %q after every holder released: %v", outside, leftover)
 	}
 }
