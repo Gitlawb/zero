@@ -2,7 +2,6 @@ package imageinput
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,15 +13,9 @@ import (
 
 const minimalPDFTextChunkSize = 80
 
-type failingReader struct{ err error }
-
-func (reader failingReader) Read([]byte) (int, error) { return 0, reader.err }
-
 // buildMinimalPDF assembles a tiny, single-page PDF whose content stream draws
-// the given text. It computes a real cross-reference table and trailer so a
-// pure-Go PDF parser (Detective-XH/gopdf) accepts it. Generating the fixture in-test
-// keeps the repo free of opaque binary blobs while still exercising the real
-// text-extraction path on real PDF bytes.
+// the given text. It computes a real cross-reference table and trailer, keeping
+// the repo free of opaque binary blobs for PDF routing tests.
 func buildMinimalPDF(text string) []byte {
 	var buf bytes.Buffer
 	offsets := make([]int, 0, 8)
@@ -135,6 +128,7 @@ func TestLoadDocumentTextExtraction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
+	stubPDFTools(t, want, false, 1)
 
 	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{})
 	if err != nil {
@@ -224,6 +218,7 @@ func TestLoadDocumentTruncatesLongText(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "long.pdf"), buildMinimalPDF(body.String()), 0o644); err != nil {
 		t.Fatalf("write long: %v", err)
 	}
+	stubPDFTools(t, body.String(), true, 1)
 	doc, err := LoadDocument("long.pdf", root, DocumentOptions{})
 	if err != nil {
 		t.Fatalf("LoadDocument: %v", err)
@@ -253,11 +248,8 @@ func TestLoadDocumentNoTextNoRaster(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a PDF with no extractable text and no raster")
 	}
-	if !strings.Contains(err.Error(), "no extractable text") {
-		t.Fatalf("error %q should explain there is no extractable text", err.Error())
-	}
-	if !strings.Contains(err.Error(), "OCR") {
-		t.Fatalf("error %q should mention OCR is unavailable", err.Error())
+	if !strings.Contains(err.Error(), "pdftotext") {
+		t.Fatalf("error %q should explain that the safe extractor is unavailable", err.Error())
 	}
 }
 
@@ -304,20 +296,14 @@ func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	}
 }
 
-// When the external poppler tools are absent (or disabled), extraction falls
-// back to the pure-Go text path and still succeeds; absence is never an error.
-func TestLoadDocumentFallsBackToPureGo(t *testing.T) {
+func TestLoadDocumentRequiresSafeExtractor(t *testing.T) {
 	root := t.TempDir()
-	want := "Pure Go fallback text"
-	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
-	if err != nil {
-		t.Fatalf("LoadDocument (pure-Go): %v", err)
-	}
-	if !strings.Contains(doc.Text, want) {
-		t.Fatalf("pure-Go text %q should contain %q", doc.Text, want)
+	_, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
+	if err == nil || !strings.Contains(err.Error(), "pdftotext") {
+		t.Fatalf("LoadDocument error = %v, want safe-extractor guidance", err)
 	}
 }
 
@@ -327,16 +313,25 @@ func TestLoadDocumentVisionUsesText(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true, disableExternalTools: true})
+	stubPDFTools(t, want, false, 1)
+
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true})
 	if err != nil {
-		t.Fatalf("LoadDocument (vision, no raster): %v", err)
-	}
-	if len(doc.Images) != 0 {
-		t.Fatalf("no rasterizer available, expected 0 images, got %d", len(doc.Images))
+		t.Fatalf("LoadDocument: %v", err)
 	}
 	if !strings.Contains(doc.Text, want) {
-		t.Fatalf("vision-without-raster should keep text, got %q", doc.Text)
+		t.Fatalf("vision input should keep text, got %q", doc.Text)
 	}
+}
+
+func stubPDFTools(t *testing.T, text string, overflow bool, pages int) {
+	t.Helper()
+	originalTextExtractor, originalPageCounter := popplerTextExtractor, popplerPageCounter
+	popplerTextExtractor = func([]byte) (string, bool, bool) { return text, overflow, true }
+	popplerPageCounter = func([]byte) int { return pages }
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter = originalTextExtractor, originalPageCounter
+	})
 }
 
 // capDocumentText must keep the final payload (text + marker) at or under the
@@ -376,23 +371,6 @@ func TestCapDocumentTextRespectsCap(t *testing.T) {
 }
 
 func TestPDFOutputReadersAreBounded(t *testing.T) {
-	tooLarge := strings.Repeat("x", MaxDocumentTextBytes+1024)
-	text, overflow, err := readBoundedText(strings.NewReader(tooLarge))
-	if err != nil {
-		t.Fatalf("readBoundedText: %v", err)
-	}
-	if !overflow {
-		t.Fatal("readBoundedText should report overflow")
-	}
-	if len(text) != MaxDocumentTextBytes+1 {
-		t.Fatalf("readBoundedText buffered %d bytes, want %d", len(text), MaxDocumentTextBytes+1)
-	}
-
-	sentinel := errors.New("sentinel read error")
-	if _, _, err := readBoundedText(failingReader{err: sentinel}); !errors.Is(err, sentinel) {
-		t.Fatalf("readBoundedText error = %v, want %v", err, sentinel)
-	}
-
 	buffer := newBoundedBuffer(16)
 	if _, err := buffer.Write([]byte(strings.Repeat("y", 1024))); err != nil {
 		t.Fatalf("boundedBuffer.Write: %v", err)
@@ -405,56 +383,19 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	}
 }
 
-// pdfPageCount must report the real page count from PDF bytes (this is what
-// backs Document.Pages on the poppler text path, where pdftotext gives no count)
-// and must return 0 -- not panic -- on garbage.
-func TestPDFPageCount(t *testing.T) {
-	if got := pdfPageCount(buildMinimalPDF("one page")); got != 1 {
-		t.Fatalf("pdfPageCount = %d, want 1", got)
-	}
-	if got := pdfPageCount([]byte("not a pdf at all")); got != 0 {
-		t.Fatalf("pdfPageCount on garbage = %d, want 0", got)
-	}
-}
-
-func TestPDFPageCountIndependentOfTextExtraction(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("pages without pdftotext"), 0o644); err != nil {
-		t.Fatalf("write pdf: %v", err)
-	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
-	if err != nil {
-		t.Fatalf("LoadDocument: %v", err)
-	}
-	if doc.Pages != 1 {
-		t.Fatalf("Pages = %d, want 1 when text extraction uses the in-process reader", doc.Pages)
-	}
-}
-
-// pdftotext success does not record a page count, so Pages must still fall
-// through to pdfinfo when the in-process reader reports 0.
-func TestResolvePageCountFallsBackToPopplerWhenInProcessIsZero(t *testing.T) {
-	origIn, origPop := pageCountInProcess, pageCountPoppler
-	t.Cleanup(func() {
-		pageCountInProcess, pageCountPoppler = origIn, origPop
-	})
-
-	pageCountInProcess = func([]byte) int { return 0 }
-	pageCountPoppler = func([]byte) int { return 7 }
+func TestResolvePageCountUsesPdfinfoWhenAvailable(t *testing.T) {
+	original := popplerPageCounter
+	popplerPageCounter = func([]byte) int { return 7 }
+	t.Cleanup(func() { popplerPageCounter = original })
 
 	if got := resolvePageCount(nil, true, 0); got != 7 {
-		t.Fatalf("pdftotext-ok + in-process 0 + pdfinfo 7: Pages = %d, want 7", got)
+		t.Fatalf("pdfinfo count = %d, want 7", got)
 	}
 	if got := resolvePageCount(nil, false, 0); got != 0 {
 		t.Fatalf("external tools disabled: Pages = %d, want 0", got)
 	}
 	if got := resolvePageCount(nil, true, 3); got != 3 {
 		t.Fatalf("already-known count: Pages = %d, want 3", got)
-	}
-
-	pageCountInProcess = func([]byte) int { return 2 }
-	if got := resolvePageCount(nil, true, 0); got != 2 {
-		t.Fatalf("in-process count wins over pdfinfo: Pages = %d, want 2", got)
 	}
 }
 
