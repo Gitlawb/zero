@@ -64,6 +64,11 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
 		return failedAfterACL(err)
 	}
+	// The runtime stamp is written by WriteWindowsSandboxSetupMarker below, which
+	// is the one place setup records that it completed. It is reached only after
+	// the ACL and network plans have applied, so the stamp still means "this tree
+	// carries these permissions" and every caller that records a marker records
+	// the stamp with it.
 	if _, err := WriteWindowsSandboxSetupMarker(config); err != nil {
 		return failedAfterACL(err)
 	}

@@ -115,39 +115,10 @@ func runtimeRootWithinWorkspace(workspaceRoot string, root string) bool {
 }
 
 func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
-	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
-	if workspaceRoot == "" || workspaceRoot == "." {
-		return SandboxRuntime{}, nil, errors.New("sandbox runtime requires a workspace root")
-	}
-	cacheRoot, err := sandboxUserCacheDir()
-	if err != nil {
-		return SandboxRuntime{}, nil, fmt.Errorf("resolve user cache directory: %w", err)
-	}
-	// Canonicalized the SAME way as the workspace root, because
-	// sandboxRuntimeRootFor compares the two: it falls back to a private temp
-	// tree when the derived runtime root would land inside the workspace.
-	// Normalizing only one side made that comparison run on two different
-	// spellings of the same path — /var vs /private/var on macOS, an 8.3 short
-	// name vs its long form on Windows — so the containment check missed and the
-	// fallback never fired.
-	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
-	if cacheRoot == "" || cacheRoot == "." {
-		return SandboxRuntime{}, nil, errors.New("user cache directory is unavailable")
-	}
-	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	// One selection function, shared with setup. See selectSandboxRuntimeRoot.
+	root, lease, err := selectSandboxRuntimeRoot(workspaceRoot)
 	if err != nil {
 		return SandboxRuntime{}, nil, err
-	}
-	lease, err := prepareSandboxRuntimeLease(root)
-	if err != nil {
-		root, err = fallbackSandboxRuntimeRoot(workspaceRoot)
-		if err != nil {
-			return SandboxRuntime{}, nil, err
-		}
-		lease, err = prepareSandboxRuntimeLease(root)
-		if err != nil {
-			return SandboxRuntime{}, nil, err
-		}
 	}
 	prepared := false
 	defer func() {
@@ -396,4 +367,55 @@ func canonicalSandboxWorkspaceRoot(root string) string {
 		remainder = filepath.Join(filepath.Base(current), remainder)
 		current = parent
 	}
+}
+
+// selectSandboxRuntimeRoot picks the runtime root a command will actually use,
+// and holds a lease on it while the caller decides what to do with it.
+//
+// SETUP AND THE COMMAND HAVE TO SELECT THE SAME WAY, or they disagree about
+// which tree exists. Setup used to derive the cache-based root and fingerprint a
+// plan naming it, while a command derived the same root, failed to lease it, and
+// silently relocated to the temp fallback. The command's plan then named the
+// fallback and the marker rejected it:
+//
+//	windows sandbox setup is out of date: permission roots or deny lists changed
+//
+// which blames permissions for a runtime-root disagreement, and re-running setup
+// could not recover because setup deterministically chose the same unleasable
+// root again. That is a permanent brick, not a retry.
+//
+// Extracted from prepareSandboxRuntime so both sides run this one function. The
+// caller must release the returned lease.
+func selectSandboxRuntimeRoot(workspaceRoot string) (string, *sandboxRuntimeLease, error) {
+	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
+	if workspaceRoot == "" || workspaceRoot == "." {
+		return "", nil, errors.New("sandbox runtime requires a workspace root")
+	}
+	cacheRoot, err := sandboxUserCacheDir()
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve user cache directory: %w", err)
+	}
+	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
+	if cacheRoot == "" || cacheRoot == "." {
+		return "", nil, errors.New("user cache directory is unavailable")
+	}
+	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	if err != nil {
+		return "", nil, err
+	}
+	lease, err := prepareSandboxRuntimeLease(root)
+	if err == nil {
+		return root, lease, nil
+	}
+	// The preferred root could not be leased. Relocating is right, and it is what
+	// commands already did; the defect was that setup never learned about it.
+	root, err = fallbackSandboxRuntimeRoot(workspaceRoot)
+	if err != nil {
+		return "", nil, err
+	}
+	lease, err = prepareSandboxRuntimeLease(root)
+	if err != nil {
+		return "", nil, err
+	}
+	return root, lease, nil
 }
