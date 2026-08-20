@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -105,6 +106,66 @@ func TestStreamCompletionPostsChatCompletionRequest(t *testing.T) {
 	if tool["type"] != "function" {
 		t.Fatalf("unexpected tool wrapper: %#v", tool)
 	}
+	functionDefinition := tool["function"].(map[string]any)
+	parameters := functionDefinition["parameters"].(map[string]any)
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok || len(properties) != 0 {
+		t.Fatalf("parameters.properties = %#v, want empty object", parameters["properties"])
+	}
+}
+
+// TestStreamCompletionSerializesTypedNilPropertiesAsEmptyObject locks in the
+// normalizeToolParameters fix: a tool whose parameters carry a typed-nil
+// properties map must serialize "properties":{} on the wire, never
+// "properties":null, because strict OpenAI-compatible servers (LM Studio)
+// reject the null form.
+func TestStreamCompletionSerializesTypedNilPropertiesAsEmptyObject(t *testing.T) {
+	var gotBody map[string]any
+	var gotRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		gotRaw = raw
+		if err := json.Unmarshal(raw, &gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"choices":[]}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:  "sk-secret",
+		BaseURL: server.URL + "/",
+		Model:   "gpt-test",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		Tools: []zeroruntime.ToolDefinition{{
+			Name:        "no_args",
+			Description: "Takes no arguments",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any(nil)},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if !strings.Contains(string(gotRaw), `"properties":{}`) {
+		t.Fatalf("request body must serialize properties as an empty object, got: %s", gotRaw)
+	}
+	if strings.Contains(string(gotRaw), `"properties":null`) {
+		t.Fatalf("request body must not serialize properties as null, got: %s", gotRaw)
+	}
+	tools := gotBody["tools"].([]any)
+	tool := tools[0].(map[string]any)
 	functionDefinition := tool["function"].(map[string]any)
 	parameters := functionDefinition["parameters"].(map[string]any)
 	properties, ok := parameters["properties"].(map[string]any)

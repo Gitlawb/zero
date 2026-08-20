@@ -502,7 +502,8 @@ func normalizeToolParameters(parameters map[string]any) map[string]any {
 	for key, value := range parameters {
 		normalized[key] = value
 	}
-	if properties, ok := normalized["properties"]; !ok || properties == nil {
+	properties, ok := normalized["properties"].(map[string]any)
+	if !ok || properties == nil {
 		normalized["properties"] = map[string]any{}
 	}
 	return normalized
