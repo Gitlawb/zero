@@ -465,7 +465,7 @@ type MCPServerConfig struct {
 	// fields it set or what values they hold. A built-in default seeded by
 	// DefaultMCPServers() is never unmarshaled from JSON, so it starts false;
 	// any explicit entry in the user/project file — even one that happens to
-	// repeat a default's exact field values (e.g. re-declaring firecrawl's
+	// repeat a default's exact field values (e.g. re-declaring Exa's
 	// default URL) — sets it true. IsUnconfiguredDefault checks this alongside
 	// a resolved-value comparison, so redeclaring default values verbatim still
 	// counts as user-configured.

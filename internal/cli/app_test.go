@@ -211,12 +211,12 @@ func TestTUIStartupSuppressesWarningForUnconfiguredDefaultServer(t *testing.T) {
 		},
 		resolveMCPConfig: func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-				"firecrawl": config.DefaultMCPServers()["firecrawl"],
+				"exa": config.DefaultMCPServers()["exa"],
 			}}, nil
 		},
 		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return fakeMCPRuntimeWithSkips{skipped: []mcp.SkippedServer{
-				{Name: "firecrawl", Err: errors.New("returned HTTP 401"), UnconfiguredDefault: true},
+				{Name: "exa", Err: errors.New("returned HTTP 401"), UnconfiguredDefault: true},
 			}}, nil
 		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
@@ -227,7 +227,7 @@ func TestTUIStartupSuppressesWarningForUnconfiguredDefaultServer(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
 	}
-	if strings.Contains(stderr.String(), "firecrawl") {
+	if strings.Contains(stderr.String(), "exa") {
 		t.Fatalf("stderr = %q, want no warning for an unconfigured default server", stderr.String())
 	}
 }
