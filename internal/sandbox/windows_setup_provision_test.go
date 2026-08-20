@@ -91,7 +91,7 @@ func TestBuildWindowsSandboxSetupACLPlanCreatesTheRootsItGrants(t *testing.T) {
 			[]string{workspaceRoot},
 		),
 	}
-	plan, err := buildWindowsSandboxSetupACLPlan(config)
+	plan, _, err := buildWindowsSandboxSetupACLPlan(config)
 	if err != nil {
 		t.Fatalf("buildWindowsSandboxSetupACLPlan: %v", err)
 	}

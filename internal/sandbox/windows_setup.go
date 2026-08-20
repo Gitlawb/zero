@@ -436,13 +436,93 @@ func windowsSandboxProfileWithRuntime(profile PermissionProfile, workspaceRoots 
 // its own cache or temp grants itself nothing it could not create anyway, and the
 // tier that skips this is the tier that dies on "windows ACL target does not
 // exist".
-func ensureWindowsSandboxRuntimeRoots(profile PermissionProfile, workspaceRoots []string) error {
-	for _, root := range windowsSandboxRuntimeRoots(profile, workspaceRoots) {
-		if err := os.MkdirAll(root, 0o700); err != nil {
-			return fmt.Errorf("create sandbox runtime root %s: %w", root, err)
+// windowsRuntimeRootRollback removes the runtime directories one provisioning
+// call actually created, and only those.
+//
+// Setup materializes runtime roots before the network plan, the ACL apply, the
+// network apply and the marker write. Every one of those can fail, and the
+// existing rollback only restored ACL snapshots, so a failed `zero sandbox
+// setup` reported failure and left new persistent state behind. It could not
+// clean up even in principle, because provisioning returned nothing about what
+// it had made.
+type windowsRuntimeRootRollback struct {
+	// created is in creation order, outermost first, so undo walks it backwards.
+	created []string
+}
+
+// run removes what was created, innermost first.
+//
+// os.Remove rather than os.RemoveAll, deliberately. A directory that is not
+// empty by the time we get here holds something this call did not create, and
+// removing it would turn a failed setup into data loss. Refusing is the right
+// answer: the error is reported and the residue stays findable.
+func (rollback windowsRuntimeRootRollback) run() error {
+	var errs []error
+	for index := len(rollback.created) - 1; index >= 0; index-- {
+		path := rollback.created[index]
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove sandbox runtime root %s created by this run: %w", path, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// createRuntimeDirRecording is MkdirAll that reports which components it made.
+//
+// The distinction between "created" and "already there" is the whole contract:
+// a pre-existing cache or temp ancestor belongs to the user and must survive a
+// failed setup, while the components this run added must not.
+func createRuntimeDirRecording(root string) ([]string, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, nil
+	}
+	// Find the deepest ancestor that already exists, then create downwards from
+	// there, so the record contains exactly the new components.
+	var missing []string
+	current := filepath.Clean(root)
+	for {
+		if info, err := os.Lstat(current); err == nil {
+			if !info.IsDir() {
+				return nil, fmt.Errorf("sandbox runtime path %s exists and is not a directory", current)
+			}
+			break
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("inspect sandbox runtime path %s: %w", current, err)
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	var created []string
+	for index := len(missing) - 1; index >= 0; index-- {
+		if err := os.Mkdir(missing[index], 0o700); err != nil {
+			if os.IsExist(err) {
+				// Raced with something else creating it; not ours to remove.
+				continue
+			}
+			return created, fmt.Errorf("create sandbox runtime root %s: %w", missing[index], err)
+		}
+		created = append(created, missing[index])
+	}
+	return created, nil
+}
+
+func ensureWindowsSandboxRuntimeRoots(profile PermissionProfile, workspaceRoots []string) (windowsRuntimeRootRollback, error) {
+	var rollback windowsRuntimeRootRollback
+	for _, root := range windowsSandboxRuntimeRoots(profile, workspaceRoots) {
+		created, err := createRuntimeDirRecording(root)
+		// Appended before the error check: a partial creation still has to be
+		// undone, and returning the record with the error is what lets the caller
+		// do that.
+		rollback.created = append(rollback.created, created...)
+		if err != nil {
+			return rollback, err
+		}
+	}
+	return rollback, nil
 }
 
 // buildWindowsSandboxSetupACLPlan provisions the runtime roots and then builds the
@@ -455,11 +535,16 @@ func ensureWindowsSandboxRuntimeRoots(profile PermissionProfile, workspaceRoots 
 // path had the provisioning omitted once already, which turned a clean `zero
 // sandbox setup` into "windows ACL target does not exist". Keeping the two joined
 // here means a caller cannot get the plan without the trees it names.
-func buildWindowsSandboxSetupACLPlan(config WindowsSandboxSetupConfig) (WindowsACLPlan, error) {
-	if err := ensureWindowsSandboxRuntimeRoots(config.PermissionProfile, config.WorkspaceRoots); err != nil {
-		return WindowsACLPlan{}, err
+func buildWindowsSandboxSetupACLPlan(config WindowsSandboxSetupConfig) (WindowsACLPlan, windowsRuntimeRootRollback, error) {
+	rollback, err := ensureWindowsSandboxRuntimeRoots(config.PermissionProfile, config.WorkspaceRoots)
+	if err != nil {
+		return WindowsACLPlan{}, rollback, err
 	}
-	return BuildWindowsACLPlan(config.commandConfig())
+	plan, err := BuildWindowsACLPlan(config.commandConfig())
+	if err != nil {
+		return WindowsACLPlan{}, rollback, err
+	}
+	return plan, rollback, nil
 }
 
 // windowsSandboxProfileWithProvisionedRuntime is the command-side counterpart:
@@ -472,7 +557,9 @@ func buildWindowsSandboxSetupACLPlan(config WindowsSandboxSetupConfig) (WindowsA
 // names, so the runner can neither derive nor provision them. The parent still has
 // the operator's environment, so it does both and the runner only applies.
 func windowsSandboxProfileWithProvisionedRuntime(profile PermissionProfile, workspaceRoots []string) (PermissionProfile, error) {
-	if err := ensureWindowsSandboxRuntimeRoots(profile, workspaceRoots); err != nil {
+	// The command side does not roll back: it is not transactional, and a runtime
+	// root it created is the tree the command is about to use.
+	if _, err := ensureWindowsSandboxRuntimeRoots(profile, workspaceRoots); err != nil {
 		return PermissionProfile{}, err
 	}
 	return windowsSandboxProfileWithRuntime(profile, workspaceRoots), nil
