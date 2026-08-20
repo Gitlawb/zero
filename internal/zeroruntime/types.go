@@ -184,6 +184,10 @@ type StreamEvent struct {
 	ArgumentsFragment string
 	Usage             Usage
 	Error             string
+	// ResponseID is the provider's completed response identifier when one is
+	// available. Stateful turn sessions use it to chain a later compatible
+	// request; ordinary providers and consumers leave it empty.
+	ResponseID string
 	// FinishReason carries the provider's normalized terminal stop reason when a
 	// response did not end normally (e.g. FinishReasonLength when the output hit
 	// the token cap, or FinishReasonContentFilter when it was filtered). It is

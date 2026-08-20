@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providers/openai"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -88,13 +89,53 @@ func TestOptimizedTurnSessionsRejectsCompatible(t *testing.T) {
 }
 
 func TestOptimizedTurnSessionsRejectsCodexCatalog(t *testing.T) {
-	t.Setenv(openaiTurnSessionEnv, "1")
+	t.Setenv(chatGPTTurnSessionEnv, "0")
+	profile := openaiEligibleProfile()
+	profile.Name = "chatgpt"
+	profile.CatalogID = "chatgpt"
+	if _, ok := OptimizedTurnSessions(profile, buildChatGPTGateProvider(t, profile), Options{}); ok {
+		t.Fatal("the ChatGPT Codex catalog must honor the turn-session kill switch")
+	}
+}
+
+func TestOptimizedTurnSessionsEnablesChatGPTResponsesByDefault(t *testing.T) {
+	t.Setenv(chatGPTTurnSessionEnv, "")
+	profile := openaiEligibleProfile()
+	profile.Name = "chatgpt"
+	profile.CatalogID = "chatgpt"
+	provider := buildChatGPTGateProvider(t, profile)
+
+	turnSessions, ok := OptimizedTurnSessions(profile, provider, Options{})
+	if !ok || turnSessions == nil {
+		t.Fatal("ChatGPT Responses provider did not receive its default turn session")
+	}
+	if got := turnSessions.Capabilities().Model; got != profile.Model {
+		t.Fatalf("Capabilities().Model = %q, want %q", got, profile.Model)
+	}
+}
+
+func buildChatGPTGateProvider(t *testing.T, profile config.ProviderProfile) *openai.CodexProvider {
+	t.Helper()
+	provider, err := openai.NewCodexProvider(openai.CodexOptions{
+		Options: openai.Options{
+			APIKey:  "test-token",
+			BaseURL: "https://chatgpt.example/backend-api/codex",
+			Model:   profile.Model,
+		},
+		AccountID: "account-test",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	return provider
+}
+
+func TestOptimizedTurnSessionsRejectsNonCodexProviderForChatGPT(t *testing.T) {
+	t.Setenv(chatGPTTurnSessionEnv, "1")
 	profile := openaiEligibleProfile()
 	profile.CatalogID = "chatgpt"
-	// Build the provider from the base profile: the point under test is the
-	// catalog check, not Codex construction (which needs OAuth wiring).
 	if _, ok := OptimizedTurnSessions(profile, buildGateProvider(t, openaiEligibleProfile()), Options{}); ok {
-		t.Fatal("the ChatGPT Codex catalog must not get the optimized session")
+		t.Fatal("a ChatGPT catalog profile with a non-Codex provider must use the default session")
 	}
 }
 

@@ -975,8 +975,17 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
-		ProbeProviderHealth:  deps.probeProviderHealth,
-		UserAgent:            userAgent(),
+		NewTurnSessionProvider: func(profile config.ProviderProfile, provider zeroruntime.Provider) zeroruntime.TurnSessionProvider {
+			if provider == nil {
+				return nil
+			}
+			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+				return optimized
+			}
+			return providers.DefaultTurnSessions(profile, provider, providers.Options{})
+		},
+		ProbeProviderHealth: deps.probeProviderHealth,
+		UserAgent:           userAgent(),
 		PrepareRunCompletionWarning: func() {
 			scratchBaseline = scratchFileSnapshot(workspaceRoot)
 		},

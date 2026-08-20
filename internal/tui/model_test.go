@@ -151,6 +151,39 @@ func TestPromptWaitsForToolReadinessBeforeSnapshot(t *testing.T) {
 	t.Fatal("provider request omitted tool published by readiness callback")
 }
 
+func TestPromptBuildsTurnSessionForCurrentProvider(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	profile := config.ProviderProfile{Name: "chatgpt", Model: "gpt-test"}
+	called := false
+	m := newModel(context.Background(), Options{
+		Cwd:             t.TempDir(),
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		Provider:        provider,
+		Registry:        tools.NewRegistry(),
+		NewTurnSessionProvider: func(gotProfile config.ProviderProfile, gotProvider zeroruntime.Provider) zeroruntime.TurnSessionProvider {
+			called = true
+			if gotProfile.Name != profile.Name || gotProfile.Model != profile.Model || gotProvider != provider {
+				t.Fatalf("turn session factory inputs = %#v/%#v", gotProfile, gotProvider)
+			}
+			return zeroruntime.NewProviderTurnSessionProvider(gotProvider, zeroruntime.ProviderCapabilities{})
+		},
+	})
+	m.input.SetValue("inspect the workspace")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	next.Update(execCmd(cmd))
+	if !called {
+		t.Fatal("agent run did not build a turn session for the current provider")
+	}
+}
+
 func TestPromptSubmitStoresReasoningSeparatelyFromAnswer(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
