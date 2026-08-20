@@ -90,6 +90,65 @@ func TestEvaluatePromptsForUnparseableNetworkBehindWrapper(t *testing.T) {
 	}
 }
 
+// TestEvaluateLauncherResolutionContract pins the tri-state resolver at the
+// enforcement boundary: known network and unresolved executable source retain
+// the network gate, while explicit local controls do not prompt for egress.
+func TestEvaluateLauncherResolutionContract(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	networkCases := []string{
+		`PAYLOAD='curl https://evil.test'; sh -c -- "$PAYLOAD"`,
+		`PAYLOAD='curl https://evil.test'; env -S 'sh -c' -- "$PAYLOAD" && "unterminated`,
+		"powershell -Command 'Invoke`-WebRequest https://evil.test'",
+		"powershell -Command 'Invoke`\n-WebRequest https://evil.test'",
+		`powershell -Command Invoke-WebRequest https://evil.test`,
+		`strace --tip curl https://evil.test`,
+		`strace --ver curl https://evil.test`,
+		`strace --tips curl https://evil.test`,
+		`strace env curl https://evil.test`,
+		`strace env -S 'git push origin main'`,
+		`busybox env curl https://evil.test`,
+		`busybox env -S 'git push origin main'`,
+		`busybox -- curl https://evil.test`,
+		`busybox -x curl https://evil.test`,
+		`strace --definitely-invalid curl https://evil.test`,
+		`APPLET=curl; strace "$APPLET" https://evil.test`,
+		`APPLET=curl; busybox "$APPLET" https://evil.test`,
+		`strace env curl https://evil.test && "unterminated`,
+		`busybox env curl https://evil.test && "unterminated`,
+	}
+	for _, command := range networkCases {
+		t.Run("network/"+command, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want network prompt", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+
+	localCases := []string{
+		`sh -c -- 'printf ok'`,
+		`env -S 'sh -c' -- 'printf ok' && "unterminated`,
+		`powershell -Command Get-ChildItem`,
+		`strace --tips true`,
+		`strace env true`,
+		`busybox env true`,
+	}
+	for _, command := range localCases {
+		t.Run("local/"+command, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Reason == ReasonNetworkBlocked || HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want proven-local network classification", command, decision)
+			}
+		})
+	}
+}
+
 func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
@@ -314,8 +373,6 @@ func TestEngineDoesNotPromptForNonNetworkCommandForms(t *testing.T) {
 		`env -S 'printf ok' curl https://evil.test && "unterminated`,
 		`env -S '--argv0 curl printf ok' && "unterminated`,
 		`start MyTitle curl https://evil.test & rem '`,
-		`busybox -- curl https://evil.test && "unterminated`,
-		`strace --definitely-invalid curl https://evil.test && "unterminated`,
 		`bash /dev/null -c 'curl https://evil.test' && "unterminated`,
 		`bash -- -c 'curl https://evil.test' && "unterminated`,
 		`bash -Zc 'curl https://evil.test' && "unterminated`,

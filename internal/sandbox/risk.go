@@ -33,12 +33,6 @@ var (
 	// A purely local pipe into a shell (e.g. `printf … | sh`, `cat ./s | bash`)
 	// is NOT a piped installer and must not be flagged.
 	pipedInstallerPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c)\b[^|]*\|\s*(ba|z|k|da)?sh\b`)
-	// unparseableNetworkPattern is used only after the shell parser fails. At
-	// that point the command is already marked too complex, so this intentionally
-	// favors catching obvious network programs over proving exact shell syntax.
-	// Git needs token-aware handling below: a regex cannot reliably distinguish
-	// option values and executable path components from subcommands.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)^(?:(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)(\s|$)|(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|go\s+get\b|python(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|gh\s+(api|repo\s+clone|release\s+download)\b)`)
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.
@@ -79,6 +73,28 @@ func matchesDestructive(command string) bool {
 // exactly the deeply-nested launcher chains this path exists to fail closed on.
 const maxUnparseableShellDepth = maxAnalyzerDepth
 
+// commandResolution is the shared security result for executable argv and
+// interpreter source. Unresolved input is distinct from a proven-local command
+// and retains the network gate at every caller.
+type commandResolution uint8
+
+const (
+	commandKnownLocal commandResolution = iota
+	commandKnownNetwork
+	commandUnresolved
+)
+
+func (resolution commandResolution) needsNetworkGate() bool {
+	return resolution != commandKnownLocal
+}
+
+func commandNetworkResolution(network bool) commandResolution {
+	if network {
+		return commandKnownNetwork
+	}
+	return commandKnownLocal
+}
+
 func matchesUnparseableNetwork(command string) bool {
 	return matchesUnparseableNetworkAt(command, 0)
 }
@@ -99,7 +115,7 @@ func matchesUnparseableNetwork(command string) bool {
 func matchesUnparseableNetworkAt(command string, depth int) bool {
 	if depth < maxUnparseableShellDepth {
 		for _, payload := range fallbackCMDForFCommands(command) {
-			if classifyCommandText(payload, depth+1) {
+			if classifyInterpreterSource(payload, interpreterSourceCMD, depth+1).needsNetworkGate() {
 				return true
 			}
 		}
@@ -152,97 +168,107 @@ func fallbackCommandBodies(tokens []string) [][]string {
 // fallbackBodyUsesNetwork classifies one resolved command body, recursing into
 // the payloads of launchers that run command text of their own.
 func fallbackBodyUsesNetwork(body []string, depth int) bool {
+	return resolveCommandArgv(body, depth).needsNetworkGate()
+}
+
+// resolveCommandArgv is the bounded, wrapper-aware resolver shared by the AST
+// and fallback paths. It distinguishes a proven-local command from network
+// access and from argv/source that the supported launcher grammars cannot
+// resolve. Only a proven-local result may omit the network gate.
+func resolveCommandArgv(body []string, depth int) commandResolution {
 	if len(body) == 0 {
-		return false
+		return commandKnownLocal
+	}
+	if depth > maxAnalyzerDepth {
+		return commandUnresolved
+	}
+	if split := envSplitCommandFields(body); split.recognized {
+		if split.executableEnvironmentDependent || split.commandSourceEnvironmentDependent {
+			return commandUnresolved
+		}
+		if len(split.command) == 0 {
+			return commandKnownLocal
+		}
+		return resolveCommandArgv(split.command, depth+1)
+	}
+	if resolved := commandBodyFields(body); len(resolved) > 0 {
+		body = resolved
+	} else {
+		return commandKnownLocal
 	}
 	program, args := executableTokenBase(body[0]), body[1:]
-	for program == "exec" {
-		body = fallbackExecCommandArgs(args)
-		if len(body) == 0 {
-			return false
-		}
-		program, args = executableTokenBase(body[0]), body[1:]
-	}
 	if program == "%comspec%" {
 		program = "cmd"
 	}
 	if fallbackTokenLooksDynamic(body[0]) {
-		return true
+		return commandUnresolved
 	}
-	if networkPrograms[program] || localServerPrograms[program] {
-		return true
-	}
-	if program == "git" && matchesUnparseableGitNetwork(args) {
-		return true
-	}
-	if program == "busybox" {
-		if command := busyboxCommandArgs(args); len(command) > 0 {
-			if fallbackTokenLooksDynamic(command[0]) {
-				return true
-			}
-			if depth >= maxUnparseableShellDepth || fallbackBodyUsesNetwork(command, depth+1) {
-				return true
-			}
+	switch program {
+	case "busybox":
+		command, status := busyboxDelegatedCommand(args)
+		if status != commandKnownLocal {
+			return status
 		}
-	}
-	if program == "strace" {
-		if command := straceCommandArgs(args); len(command) > 0 {
-			if fallbackTokenLooksDynamic(command[0]) {
-				return true
-			}
-			if depth >= maxUnparseableShellDepth || fallbackBodyUsesNetwork(command, depth+1) {
-				return true
-			}
+		if len(command) == 0 {
+			return commandKnownLocal
 		}
-	}
-	if unparseableNetworkPattern.MatchString(strings.Join(append([]string{program}, args...), " ")) {
-		return true
-	}
-	// eval executes its remaining arguments as shell source. Recurse into that
-	// source just as we do for `sh -c`; otherwise quoting the same curl/git
-	// invocation behind eval would hide it from this fail-closed path.
-	if program == "eval" && len(args) > 0 {
-		if classifyCommandText(strings.Join(args, " "), depth+1) {
-			return true
+		return resolveCommandArgv(command, depth+1)
+	case "strace":
+		command, status := straceDelegatedCommand(args)
+		if status != commandKnownLocal {
+			return status
 		}
-	}
-	if program == "env" {
-		if split := envSplitCommand(args); split.recognized {
-			return split.executableEnvironmentDependent || split.commandSourceEnvironmentDependent ||
-				(len(split.command) > 0 && (depth >= maxUnparseableShellDepth || fallbackBodyUsesNetwork(split.command, depth+1)))
+		if len(command) == 0 {
+			return commandKnownLocal
 		}
+		return resolveCommandArgv(command, depth+1)
+	case "eval":
+		if len(args) == 0 {
+			return commandKnownLocal
+		}
+		return classifyInterpreterSource(strings.Join(args, " "), interpreterSourcePOSIX, depth+1)
+	case "call":
+		if len(args) == 0 {
+			return commandKnownLocal
+		}
+		if fallbackTokenLooksDynamic(args[0]) {
+			return commandUnresolved
+		}
+		return resolveCommandArgv(args, depth+1)
 	}
-	// `sh -c <payload>` runs the payload as a fresh command. The fallback
-	// tokenizer keeps a quoted payload as ONE token, so the network program
-	// inside it is not a token of this segment at all — recurse the way
-	// analyzeInto does on the parseable path.
 	if shellPrograms[program] {
-		if payloadIndex, found := shellCommandPayloadIndex(program, args); found && payloadIndex < len(args) {
-			if payload := args[payloadIndex]; payload != "" {
-				if fallbackTokenLooksDynamic(payload) || classifyCommandText(payload, depth+1) {
-					return true
-				}
-			}
+		index, found := shellCommandPayloadIndex(program, args)
+		if !found || index >= len(args) {
+			return commandKnownLocal
 		}
+		payload := args[index]
+		if fallbackTokenLooksDynamic(payload) {
+			return commandUnresolved
+		}
+		return classifyInterpreterSource(payload, interpreterSourcePOSIX, depth+1)
 	}
-	// PowerShell source that exists but cannot be read is not evidence that the
-	// command is local. Fail closed on it here, before payload extraction drops
-	// it as empty.
 	if program == "powershell" || program == "pwsh" {
-		if fallbackPowerShellPayload(program, args).opaque {
-			return true
+		source := fallbackPowerShellPayload(program, args)
+		switch {
+		case source.opaque:
+			return commandUnresolved
+		case source.payload == "":
+			return commandKnownLocal
+		default:
+			return classifyInterpreterSource(source.payload, interpreterSourcePowerShell, depth+1)
 		}
 	}
-	// Windows command interpreters carry command text after their command
-	// flag. That payload is valid shell input even when the POSIX parser that
-	// sent us here cannot parse it (for example, `cmd /c curl ... & rem '`).
 	if payload := fallbackCommandInterpreterPayload(program, args); payload != "" {
-		if classifyCommandText(payload, depth+1) ||
-			fallbackPayloadUsesNetwork(strings.Join(fallbackCommandInterpreterArgs(program, args), " "), depth+1) {
-			return true
+		resolution := classifyInterpreterSource(payload, interpreterSourceCMD, depth+1)
+		if resolution.needsNetworkGate() {
+			return resolution
 		}
+		if fallbackPayloadUsesNetwork(strings.Join(fallbackCommandInterpreterArgs(program, args), " "), depth+1) {
+			return commandKnownNetwork
+		}
+		return commandKnownLocal
 	}
-	return false
+	return literalProgramNetworkResolution(program, args)
 }
 
 // fallbackTokenLooksDynamic reports whether a token selected as executable
@@ -642,17 +668,6 @@ func isRedirectToken(word string) bool {
 	return strings.HasPrefix(word, ">") || strings.HasPrefix(word, "<")
 }
 
-// matchesUnparseableGitNetwork reports whether git's arguments (everything after
-// the executable) name a subcommand that talks to a remote.
-//
-// It defers to gitUsesNetwork rather than reading the option list a second time.
-// The two paths disagreeing is not a theoretical risk: while each kept its own
-// terminal-option rule, `git -h push` was network on one path and local on the
-// other, and every future option would have had to be added to both.
-func matchesUnparseableGitNetwork(args []string) bool {
-	return gitUsesNetwork(args)
-}
-
 // shellCommandPayloadIndex returns the one argv element a shell launcher will
 // execute for -c. It parses only the leading option region: a script operand or
 // `--` makes later `-c` text positional, and an invalid option cluster is not
@@ -732,7 +747,14 @@ func shellCommandPayloadIndex(program string, args []string) (int, bool) {
 			if noExecute || dumpStrings {
 				return 0, false
 			}
-			return index + 1, true
+			sourceIndex := index + 1
+			if sourceIndex < len(args) && args[sourceIndex] == "--" {
+				sourceIndex++
+			}
+			if sourceIndex >= len(args) {
+				return 0, false
+			}
+			return sourceIndex, true
 		}
 	}
 	return 0, false
@@ -923,26 +945,6 @@ func powerShellValuelessOption(program, flag string) bool {
 	default:
 		return false
 	}
-}
-
-func fallbackExecCommandArgs(args []string) []string {
-	for index := 0; index < len(args); index++ {
-		if args[index] == "--" {
-			return args[index+1:]
-		}
-		if args[index] == "-a" || args[index] == "--argv0" {
-			if index+1 >= len(args) {
-				return nil
-			}
-			index++
-			continue
-		}
-		if strings.HasPrefix(args[index], "-") {
-			continue
-		}
-		return args[index:]
-	}
-	return nil
 }
 
 func normalizeCMDToken(token string) string {
