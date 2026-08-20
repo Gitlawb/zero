@@ -160,26 +160,8 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		// Resolve the real program behind wrapper prefixes (sudo, env, nice, ...)
-		// so `sudo rm -rf`, `env curl …`, and `bash -c 'vim x'` are classified on
-		// the payload, not the launcher — matching DetectInteractiveCommand.
-		// GNU env -S/--split-string can consume the complete payload, leaving no
-		// ordinary effective program, so resolve its argv before that scan.
-		if fields, ok := literalCallFields(call.Args); ok {
-			if split := envSplitCommandFields(fields); split.recognized {
-				if split.executableEnvironmentDependent || split.commandSourceEnvironmentDependent ||
-					fallbackBodyUsesNetwork(split.command, depth+1) {
-					result.Network = true
-				}
-				return true
-			}
-		} else if envSplitSourceDynamic(call.Args) {
-			// The split string comes from an expansion, so its argv — including the
-			// executable — is unknowable here. effectiveProgram would consume -S with
-			// its operand and report no executable at all, which reads an
-			// uninspectable command as a clean one.
+		if resolveASTCommandNetwork(call.Args, depth).needsNetworkGate() {
 			result.Network = true
-			return true
 		}
 		prog, rest := effectiveProgram(call.Args)
 		if prog == "" {
@@ -189,70 +171,8 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 			seen[prog] = true
 			result.Programs = append(result.Programs, prog)
 		}
-		// `sh -c <payload>` runs the payload as a fresh command; recurse into it so
-		// a program hidden behind a shell launcher is still classified.
-		if shellPrograms[prog] {
-			if payloadIndex, found := shellCommandPayloadIndex(prog, wordTexts(rest)); found && payloadIndex < len(rest) {
-				if !isLiteralWord(rest[payloadIndex]) {
-					result.Network = true
-				} else if payload := wordText(rest[payloadIndex]); payload != "" && depth < maxAnalyzerDepth {
-					analyzeInto(payload, result, seen, depth+1)
-				} else if payload != "" {
-					result.Network = true
-				}
-			}
-		}
-		// PowerShell's Command flag also carries textual source. Analyze it in an
-		// isolated result because PowerShell syntax that the POSIX parser rejects
-		// must not make the outer command TooComplex; only fold the network fact.
-		if prog == "powershell" || prog == "pwsh" {
-			source := fallbackPowerShellPayload(prog, wordTexts(rest))
-			switch {
-			case source.opaque, powerShellSourceDynamic(source, rest):
-				// Source the scan cannot read — an undecodable encoded payload, or a
-				// Command operand built from an expansion — must not be reported as a
-				// command that makes no network call.
-				result.Network = true
-			case source.payload != "":
-				if classifyCommandText(source.payload, depth+1) {
-					result.Network = true
-				}
-			}
-		}
-		// eval runs its remaining arguments as shell source, exactly like the
-		// fallback path already treats it. Without this branch a parseable
-		// `eval git push origin main` resolved to the program "eval" and no
-		// network, while the same text behind an unparseable suffix was caught
-		// — the fallback and the AST disagreeing about the same launcher.
-		if prog == "eval" && len(rest) > 0 {
-			if payload, ok := literalCallFields(rest); ok {
-				if classifyCommandText(strings.Join(payload, " "), depth+1) {
-					result.Network = true
-				}
-			} else {
-				// Source assembled from an expansion is source this scan cannot
-				// read, and eval will run it regardless.
-				result.Network = true
-			}
-		}
-		if cmdLauncherUsesNetwork(prog, rest, depth) {
-			result.Network = true
-		}
 		if _, interactive := interactivePrograms[prog]; interactive && !replSuppressed(prog, rest) {
 			result.Interactive = true
-		}
-		// BusyBox and strace delegate to a child executable named in their own
-		// argv. Both resolvers below (busyboxCommandArgs, straceCommandArgs)
-		// operate on wordTexts, which silently drops any expansion — an
-		// unresolvable child-program token would otherwise read as a clean,
-		// unrecognized token rather than as "unknown, so assume the worst."
-		switch {
-		case prog == "busybox" && busyboxSourceDynamic(rest):
-			result.Network = true
-		case prog == "strace" && straceSourceDynamic(rest):
-			result.Network = true
-		case commandUsesNetwork(prog, rest):
-			result.Network = true
 		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
@@ -260,82 +180,126 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 			(prog == "find" && hasFindDelete(rest)) {
 			result.Destructive = true
 		}
+		if shellPrograms[prog] {
+			if index, found := shellCommandPayloadIndex(prog, wordTexts(rest)); found && index < len(rest) &&
+				isLiteralWord(rest[index]) && depth < maxAnalyzerDepth {
+				analyzeInto(wordText(rest[index]), result, seen, depth+1)
+			}
+		}
 		return true
 	})
 }
 
-func commandUsesNetwork(prog string, args []*syntax.Word) bool {
-	return commandWordsUseNetwork(prog, wordTexts(args))
+// resolveASTCommandNetwork maps shell AST words onto the same tri-state argv
+// resolver used by the unparseable fallback. Literal invocations take exactly
+// one path. For dynamic words, the literal portions still establish known
+// network programs, while executable or interpreter-source expansions remain
+// unresolved and therefore keep the network gate.
+func resolveASTCommandNetwork(words []*syntax.Word, depth int) commandResolution {
+	if depth > maxAnalyzerDepth {
+		return commandUnresolved
+	}
+	if fields, ok := literalCallFields(words); ok {
+		program, args := effectiveProgram(words)
+		switch program {
+		case "cmd", "call", "start", "%comspec%":
+			return commandNetworkResolution(cmdLauncherUsesNetwork(program, args, depth))
+		default:
+			return resolveCommandArgv(fields, depth)
+		}
+	}
+	if envSplitSourceDynamic(words) {
+		return commandUnresolved
+	}
+	program, args := effectiveProgram(words)
+	if program == "" {
+		return commandUnresolved
+	}
+	textArgs := wordTexts(args)
+	resolution := resolveCommandArgv(append([]string{program}, textArgs...), depth)
+	switch {
+	case shellPrograms[program]:
+		index, found := shellCommandPayloadIndex(program, textArgs)
+		if !found || index >= len(args) {
+			return resolution
+		}
+		if !isLiteralWord(args[index]) {
+			return commandUnresolved
+		}
+	case program == "powershell" || program == "pwsh":
+		source := fallbackPowerShellPayload(program, textArgs)
+		if source.opaque || powerShellSourceDynamic(source, args) {
+			return commandUnresolved
+		}
+	case program == "eval":
+		if _, ok := literalCallFields(args); !ok {
+			return commandUnresolved
+		}
+	case program == "cmd" || program == "call" || program == "start" || program == "%comspec%":
+		if cmdLauncherUsesNetwork(program, args, depth) {
+			return commandKnownNetwork
+		}
+	case program == "busybox" && busyboxSourceDynamic(args):
+		return commandUnresolved
+	case program == "strace" && straceSourceDynamic(args):
+		return commandUnresolved
+	}
+	return resolution
 }
 
-func commandWordsUseNetwork(prog string, words []string) bool {
-	return commandWordsUseNetworkAt(prog, words, 0)
-}
-
-func commandWordsUseNetworkAt(prog string, words []string, depth int) bool {
-	// CMD's echo-suppression prefix is not part of the program name: `@curl …`
-	// runs curl. The fallback tokenizer already strips it (trimCMDEchoPrefix),
-	// so without the same normalization here the AST path called the program
-	// "@curl" and found no network, while the identical text behind an
-	// unparseable suffix was flagged. Stripping it can only ADD the category.
+// literalProgramNetworkResolution classifies a program after launcher argv has
+// been resolved. Wrapper, delegated-child, and interpreter-source grammars live
+// in resolveCommandArgv so AST and fallback paths cannot select different
+// children before reaching this program-specific table.
+func literalProgramNetworkResolution(prog string, words []string) commandResolution {
 	prog = normalizeProgramToken(trimCMDEchoPrefixToken(prog))
-	originalWords := words
 	normalized := make([]string, len(words))
 	for index := range words {
 		normalized[index] = strings.ToLower(strings.TrimSpace(words[index]))
 	}
 	words = normalized
 	if networkPrograms[prog] || localServerPrograms[prog] {
-		return true
+		return commandKnownNetwork
 	}
 	switch prog {
 	case "python", "python2", "python3", "py":
-		return pythonModuleUsesNetwork(words)
+		return commandNetworkResolution(pythonModuleUsesNetwork(words))
 	case "npm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"x":    "exec",
-		})
+		}))
 	case "pnpm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
-		})
+		}))
 	case "yarn":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
-		})
+		}))
 	case "bun":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run": "run",
 			"x":   "exec",
-		})
+		}))
 	case "npx":
-		return npxUsesNetwork(words)
+		return commandNetworkResolution(npxUsesNetwork(words))
 	case "pip", "pip2", "pip3":
-		return firstSubcommand(words, nil) == "install"
+		return commandNetworkResolution(firstSubcommand(words, nil) == "install")
 	case "go":
-		return firstSubcommand(words, nil) == "get"
+		return commandNetworkResolution(firstSubcommand(words, nil) == "get")
 	case "git":
-		return gitUsesNetwork(words)
+		return commandNetworkResolution(gitUsesNetwork(words))
 	case "gh":
-		return ghUsesNetwork(words)
-	case "busybox":
-		if command := busyboxCommandArgs(originalWords); len(command) > 0 {
-			return fallbackBodyUsesNetwork(command, depth+1)
-		}
-	case "strace":
-		if command := straceCommandArgs(originalWords); len(command) > 0 {
-			return fallbackBodyUsesNetwork(command, depth+1)
-		}
+		return commandNetworkResolution(ghUsesNetwork(words))
 	default:
-		return false
+		return commandKnownLocal
 	}
-	return false
 }
 
 func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
@@ -760,7 +724,7 @@ func cmdBodyUsesNetwork(body []fallbackCommandToken, depth int) bool {
 		return true
 	}
 	if len(body) == 1 && body[0].quoted && strings.ContainsAny(body[0].value, " \t") {
-		return classifyCommandText(body[0].value, depth+1)
+		return classifyInterpreterSource(body[0].value, interpreterSourceCMD, depth+1).needsNetworkGate()
 	}
 	return false
 }
@@ -791,26 +755,36 @@ func literalWordIsQuoted(word *syntax.Word) bool {
 // CMD one-liner is legitimately not POSIX, so the parser failing on it is
 // expected, not proof of safety), and fails closed when the text cannot be
 // read at all.
-func classifyCommandText(payload string, depth int) bool {
+type interpreterSourceLanguage uint8
+
+const (
+	interpreterSourcePOSIX interpreterSourceLanguage = iota
+	interpreterSourceCMD
+	interpreterSourcePowerShell
+)
+
+// classifyInterpreterSource is the single bounded classifier for text a
+// launcher will execute. Language-specific syntax that the shared parser cannot
+// faithfully interpret is unresolved rather than silently treated as local.
+func classifyInterpreterSource(payload string, language interpreterSourceLanguage, depth int) commandResolution {
 	payload = strings.TrimSpace(payload)
 	if payload == "" {
-		return false
+		return commandKnownLocal
 	}
 	if depth > maxAnalyzerDepth {
-		// The text exists and is about to run, but the budget to inspect it is
-		// gone. An unread payload is not a safe one.
-		return true
+		return commandUnresolved
+	}
+	if language == interpreterSourcePowerShell && strings.ContainsRune(payload, '`') {
+		// Backtick escaping and line continuation change PowerShell token
+		// boundaries but have no equivalent in the POSIX/CMD readers below.
+		return commandUnresolved
 	}
 	result := AnalysisResult{}
 	analyzeInto(payload, &result, map[string]bool{}, depth)
-	if result.Network {
-		return true
+	if result.Network || matchesUnparseableNetworkAt(payload, depth) {
+		return commandKnownNetwork
 	}
-	// The fallback matcher is the reader for text the POSIX parser rejects, and
-	// it is also a second opinion on text the parser accepted: the two
-	// tokenizers disagree about CMD quoting and echo prefixes, and only one of
-	// them needs to see the network program.
-	return matchesUnparseableNetworkAt(payload, depth)
+	return commandKnownLocal
 }
 
 func pythonModuleUsesNetwork(words []string) bool {

@@ -323,6 +323,7 @@ var wrapperValueOptionsByProg = map[string]map[string]bool{
 	"ionice":  {"-c": true, "--class": true, "-n": true, "--classdata": true, "-p": true, "--pid": true},
 	"stdbuf":  {"-i": true, "--input": true, "-o": true, "--output": true, "-e": true, "--error": true},
 	"xargs":   {"-a": true, "--arg-file": true, "-d": true, "--delimiter": true, "-E": true, "-I": true, "--replace": true, "-L": true, "--max-lines": true, "-n": true, "--max-args": true, "-P": true, "--max-procs": true, "-s": true, "--max-chars": true},
+	"exec":    {"-a": true, "--argv0": true},
 }
 
 // wrapperConsumesValue reports whether option is a value-consuming flag of the
@@ -761,18 +762,21 @@ func validEnvSplitVariableName(name string) bool {
 	return true
 }
 
-func busyboxCommandArgs(args []string) []string {
+func busyboxDelegatedCommand(args []string) ([]string, commandResolution) {
 	if len(args) == 0 {
-		return nil
+		return nil, commandKnownLocal
 	}
 	switch args[0] {
 	case "--help", "--list", "--list-full", "--install", "--show":
-		return nil
+		return nil, commandKnownLocal
 	}
 	if strings.HasPrefix(args[0], "-") {
-		return nil
+		return nil, commandUnresolved
 	}
-	return args
+	if fallbackTokenLooksDynamic(args[0]) {
+		return nil, commandUnresolved
+	}
+	return args, commandKnownLocal
 }
 
 var (
@@ -805,45 +809,75 @@ var (
 	}
 )
 
-func straceCommandArgs(args []string) []string {
-	index, ok := straceChildIndex(args)
-	if !ok {
-		return nil
+type straceLongOptionKind uint8
+
+const (
+	straceLongOptionInvalid straceLongOptionKind = iota
+	straceLongOptionRequired
+	straceLongOptionOptional
+	straceLongOptionValueless
+	straceLongOptionTerminal
+)
+
+func straceDelegatedCommand(args []string) ([]string, commandResolution) {
+	index, status := straceChildResolution(args)
+	if status != commandKnownLocal || index < 0 || index >= len(args) {
+		return nil, status
 	}
-	return args[index:]
+	if fallbackTokenLooksDynamic(args[index]) {
+		return nil, commandUnresolved
+	}
+	return args[index:], commandKnownLocal
 }
 
-// straceChildIndex walks strace's own argv exactly as straceCommandArgs does,
-// returning the index of the traced child command instead of the resolved
-// slice. straceSourceDynamic shares this walk so its literalness check stays
-// aligned with straceCommandArgs's option grammar by construction, instead of
-// via a second hand-maintained copy that could silently drift from it.
+// straceChildIndex retains the index surface used by AST literalness checks.
+// Unresolved option grammar is deliberately not exposed as "no child"; the
+// shared argv resolver consumes straceChildResolution directly and keeps the
+// network gate in that state.
 func straceChildIndex(args []string) (int, bool) {
+	index, status := straceChildResolution(args)
+	return index, status == commandKnownLocal && index >= 0
+}
+
+func straceChildResolution(args []string) (int, commandResolution) {
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch arg {
-		case "--help", "--version":
-			return 0, false
 		case "--":
-			return index + 1, true
+			if index+1 >= len(args) {
+				return -1, commandKnownLocal
+			}
+			return index + 1, commandKnownLocal
 		case "-":
-			return index, true
+			return index, commandKnownLocal
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, hasValue := arg, false
 			if equals := strings.IndexByte(arg, '='); equals >= 0 {
 				name, hasValue = arg[:equals], true
 			}
-			switch {
-			case straceRequiredLongOptions[name]:
+			kind, ok := resolveStraceLongOption(name)
+			if !ok {
+				return -1, commandUnresolved
+			}
+			switch kind {
+			case straceLongOptionTerminal:
+				return -1, commandKnownLocal
+			case straceLongOptionRequired:
 				if !hasValue {
 					index++
+					if index >= len(args) {
+						return -1, commandUnresolved
+					}
 				}
-			case straceOptionalLongOptions[name]:
-				// getopt_long accepts optional values only in --option=value form.
-			case straceValuelessLongOptions[name] && !hasValue:
+			case straceLongOptionOptional:
+				// GNU getopt_long accepts optional values only as --option=value.
+			case straceLongOptionValueless:
+				if hasValue {
+					return -1, commandUnresolved
+				}
 			default:
-				return 0, false
+				return -1, commandUnresolved
 			}
 			continue
 		}
@@ -852,15 +886,18 @@ func straceChildIndex(args []string) (int, bool) {
 			for clusterIndex, option := range cluster {
 				switch {
 				case option == 'h' || option == 'V':
-					return 0, false
+					return -1, commandKnownLocal
 				case strings.ContainsRune("abeEIoOpPsSuUX", option):
 					if clusterIndex+1 == len(cluster) {
 						index++
+						if index >= len(args) {
+							return -1, commandUnresolved
+						}
 					}
 					clusterIndex = len(cluster)
 				case strings.ContainsRune("AcCdDfFiknNqrtTvwxyYzZ", option):
 				default:
-					return 0, false
+					return -1, commandUnresolved
 				}
 				if clusterIndex == len(cluster) {
 					break
@@ -868,9 +905,50 @@ func straceChildIndex(args []string) (int, bool) {
 			}
 			continue
 		}
-		return index, true
+		return index, commandKnownLocal
 	}
-	return 0, false
+	return -1, commandKnownLocal
+}
+
+func resolveStraceLongOption(name string) (straceLongOptionKind, bool) {
+	if kind := exactStraceLongOption(name); kind != straceLongOptionInvalid {
+		return kind, true
+	}
+	matchedKind := straceLongOptionInvalid
+	matches := 0
+	visit := func(options map[string]bool, kind straceLongOptionKind) {
+		for option := range options {
+			if strings.HasPrefix(option, name) {
+				matchedKind = kind
+				matches++
+			}
+		}
+	}
+	visit(straceRequiredLongOptions, straceLongOptionRequired)
+	visit(straceOptionalLongOptions, straceLongOptionOptional)
+	visit(straceValuelessLongOptions, straceLongOptionValueless)
+	for _, option := range []string{"--help", "--version"} {
+		if strings.HasPrefix(option, name) {
+			matchedKind = straceLongOptionTerminal
+			matches++
+		}
+	}
+	return matchedKind, matches == 1
+}
+
+func exactStraceLongOption(name string) straceLongOptionKind {
+	switch {
+	case straceRequiredLongOptions[name]:
+		return straceLongOptionRequired
+	case straceOptionalLongOptions[name]:
+		return straceLongOptionOptional
+	case straceValuelessLongOptions[name]:
+		return straceLongOptionValueless
+	case name == "--help" || name == "--version":
+		return straceLongOptionTerminal
+	default:
+		return straceLongOptionInvalid
+	}
 }
 
 // isNumericToken reports whether a token is purely digits (e.g. the duration
