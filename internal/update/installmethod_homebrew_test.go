@@ -57,9 +57,13 @@ func TestHomebrewKegShapePerTarget(t *testing.T) {
 // Homebrew writes INSTALL_RECEIPT.json into every keg it installs and nothing
 // else does, so its presence is what separates the two.
 func TestOnlyAKegWithAReceiptIsHomebrew(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the Homebrew branch is off on Windows; TestHomebrewKegShapePerTarget covers that")
-	}
+	// An explicit target rather than runtime.GOOS, so the receipt rule is checked
+	// on every platform including the one it is switched off for. isHomebrewPath
+	// already takes the target, so the skip bought nothing and cost the ability to
+	// catch a break anywhere but CI. Two tests broke exactly that way when the
+	// receipt requirement landed: they build a keg with no receipt, and only
+	// macOS and Linux ever ran them.
+	const target = "darwin"
 	root := t.TempDir()
 
 	// Same shape, same depth. The only difference is the receipt.
@@ -77,10 +81,10 @@ func TestOnlyAKegWithAReceiptIsHomebrew(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !isHomebrewPath(runtime.GOOS, filepath.Join(real, "bin", "zero")) {
+	if !isHomebrewPath(target, filepath.Join(real, "bin", "zero")) {
 		t.Error("a keg with a receipt was not recognised as Homebrew")
 	}
-	if isHomebrewPath(runtime.GOOS, filepath.Join(fake, "bin", "zero")) {
+	if isHomebrewPath(target, filepath.Join(fake, "bin", "zero")) {
 		t.Error("a user's own Cellar-shaped directory was classified as Homebrew; `zero upgrade` would refuse for nothing")
 	}
 }
@@ -88,9 +92,9 @@ func TestOnlyAKegWithAReceiptIsHomebrew(t *testing.T) {
 // A receipt that is a DIRECTORY is not a receipt. Cheap to get wrong with a
 // bare Stat, and the failure would be silent.
 func TestADirectoryNamedLikeTheReceiptIsNotOne(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the Homebrew branch is off on Windows")
-	}
+	// Explicit target, same reason as above: the rule is worth checking wherever
+	// the tests run, not only where the feature is switched on.
+	const target = "darwin"
 	keg := filepath.Join(t.TempDir(), "prefix", "Cellar", "zero", "0.7.1")
 	if err := os.MkdirAll(filepath.Join(keg, "INSTALL_RECEIPT.json"), 0o755); err != nil {
 		t.Fatal(err)
@@ -98,7 +102,7 @@ func TestADirectoryNamedLikeTheReceiptIsNotOne(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(keg, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if isHomebrewPath(runtime.GOOS, filepath.Join(keg, "bin", "zero")) {
+	if isHomebrewPath(target, filepath.Join(keg, "bin", "zero")) {
 		t.Error("a directory named INSTALL_RECEIPT.json was accepted as a receipt")
 	}
 }
@@ -113,6 +117,12 @@ func TestDetectInstallMethodRecognisesAHomebrewKeg(t *testing.T) {
 	prefix := t.TempDir()
 	keg := filepath.Join(prefix, "Cellar", "zero", "0.7.1", "bin")
 	if err := os.MkdirAll(keg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The receipt is what separates a keg from any directory that happens to sit
+	// under a path containing "Cellar". Without it detection correctly answers
+	// standalone, which is what this test would otherwise be asserting against.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(keg), homebrewReceipt), []byte(`{"source":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	binary := filepath.Join(keg, "zero")
@@ -270,6 +280,13 @@ func TestApplyRefusesToUpdateAHomebrewKeg(t *testing.T) {
 	prefix := t.TempDir()
 	keg := filepath.Join(prefix, "Cellar", "zero", "0.7.0", "bin")
 	if err := os.MkdirAll(keg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Without the receipt this is not a keg, Apply proceeds to the download, and
+	// the assertion below fails on a network error instead of on the refusal.
+	// Without the receipt this is not a keg, Apply proceeds to the download, and
+	// the assertion below fails on a network error instead of on the refusal.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(keg), homebrewReceipt), []byte(`{"source":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	binary := filepath.Join(keg, "zero")
