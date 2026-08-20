@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
@@ -69,8 +70,21 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 	tokenSecrets := tokenStore.SecretValues()
 	names := sortedMCPServerNames(cfg)
 	servers := make([]MCPServerView, 0, len(names))
-	for _, name := range names {
-		raw := cfg.Servers[name]
+	for _, rawName := range names {
+		raw := cfg.Servers[rawName]
+		// ONE IDENTITY, and it is the registry's. mcp.normalizeServer trims the
+		// config-map key before anything downstream sees it, so a server
+		// configured as " docs " is registered, recorded in SkippedServer.Name, and
+		// counted in toolCounts as "docs". This loop was iterating the RAW map keys
+		// and looking failures up with them, so failures[" docs "] missed and the
+		// entry rendered as " docs " enabled: a server that never started, shown as
+		// running, which is the one thing this panel exists to prevent. The tool
+		// count was lost the same way.
+		//
+		// Trimmed here to match normalizeServer exactly. The canonical spelling is
+		// also what gets displayed, because that is the name the server actually
+		// has everywhere else in the process.
+		name := strings.TrimSpace(rawName)
 		state := "enabled"
 		message := ""
 		switch {
@@ -135,8 +149,50 @@ func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets 
 		}
 	}
 	options := redaction.Options{ExtraSecretValues: secrets}
-	message := redaction.ErrorMessage(err, options)
-	return redaction.RedactString(stripTerminalRejoiners(message), options)
+	// BOUND THE RAW INPUT AT INGRESS, before redaction and before normalization.
+	//
+	// The cap used to live only in sanitizeTerminalReason, at the very end. So the
+	// whole server-controlled string was redacted, then walked rune by rune by
+	// stripTerminalRejoiners into a fresh builder and a fresh []rune, then redacted
+	// again, and only then cut to 16 KiB for a panel that shows at most 400 runes.
+	// A remote MCP putting a large tool name in a conflict error, or a stdio child
+	// returning large captured stderr, made every open and every refresh of /mcp
+	// pay for all of it.
+	//
+	// The bound keeps a LOOKAHEAD MARGIN past the cap, sized to the longest secret
+	// being matched. Slicing at exactly the cap would let a configured credential
+	// that straddles the cut lose its tail, and the surviving prefix would then
+	// match nothing and print: a bound that creates the leak it is supposed to be
+	// unrelated to. With the margin, any secret that begins before the cap is
+	// wholly inside the retained text and is matched in full.
+	return redaction.RedactString(stripTerminalRejoiners(boundMCPRawFailure(redaction.ErrorMessage(err, options), secrets)), options)
+}
+
+// boundMCPRawFailure truncates a server-authored failure to a bounded prefix,
+// rune-safely, keeping enough lookahead that any secret starting inside the
+// bound is still complete.
+func boundMCPRawFailure(message string, secrets []string) string {
+	longest := 0
+	for _, secret := range secrets {
+		if len(secret) > longest {
+			longest = len(secret)
+		}
+	}
+	limit := maxMCPReasonRawLen + longest
+	if len(message) <= limit {
+		return message
+	}
+	message = message[:limit]
+	// The cut lands on an arbitrary byte. Drop the rune it split so nothing
+	// downstream sees a replacement character this function produced.
+	for len(message) > 0 {
+		decoded, width := utf8.DecodeLastRuneInString(message)
+		if decoded != utf8.RuneError || width > 1 {
+			break
+		}
+		message = message[:len(message)-1]
+	}
+	return message
 }
 
 func buildMCPToolViews(cfg config.MCPConfig, registry *tools.Registry) []MCPToolView {
@@ -320,22 +376,48 @@ func redactedStringMap(values map[string]string) string {
 	return strings.Join(parts, " ")
 }
 
+// redactMCPHeaderValue redacts a "<name>: <value>" header argument for DISPLAY,
+// keeping the name. The name is what tells an operator which header was
+// rejected; the value is the credential.
+func redactMCPHeaderValue(value string) string {
+	if name, rest, ok := strings.Cut(value, ":"); ok && strings.TrimSpace(rest) != "" {
+		separator := ": "
+		if !strings.HasPrefix(rest, " ") {
+			separator = ":"
+		}
+		return name + separator + mcpDisplayRedacted
+	}
+	return mcpDisplayRedacted
+}
+
 func redactedCommandArgs(values []string) []string {
 	trimmed := make([]string, 0, len(values))
 	redactNext := false
+	// THE TARGET ROW SITS UNDER THE ERROR ROW. Redacting the failure reason while
+	// printing the same credential verbatim one line lower gives it back with the
+	// other hand, and this row is persisted to the transcript too.
+	redactNextHeader := false
 	for _, value := range values {
 		if value = strings.TrimSpace(value); value != "" {
 			if redactNext {
-				if looksLikeMCPDisplayURLValue(value) {
+				wasHeader := redactNextHeader
+				redactNext = false
+				redactNextHeader = false
+				switch {
+				case wasHeader:
+					trimmed = append(trimmed, redactMCPHeaderValue(value))
+				case looksLikeMCPDisplayURLValue(value):
 					trimmed = append(trimmed, redactMCPDisplayURL(value))
-				} else {
+				default:
 					trimmed = append(trimmed, mcpDisplayRedacted)
 				}
-				redactNext = false
 				continue
 			}
 			if key, rest, ok := strings.Cut(value, "="); ok {
 				switch {
+				case isMCPHeaderFlag(key):
+					trimmed = append(trimmed, key+"="+redactMCPHeaderValue(rest))
+					continue
 				case isSensitiveMCPDisplayKey(key):
 					trimmed = append(trimmed, key+"="+mcpDisplayRedacted)
 					continue
@@ -343,6 +425,16 @@ func redactedCommandArgs(values []string) []string {
 					trimmed = append(trimmed, key+"="+redactMCPDisplayURL(rest))
 					continue
 				}
+			}
+			if flag, rest, ok := strings.Cut(value, " "); ok && isMCPHeaderFlag(flag) {
+				trimmed = append(trimmed, flag+" "+redactMCPHeaderValue(rest))
+				continue
+			}
+			if isMCPHeaderFlag(value) {
+				trimmed = append(trimmed, value)
+				redactNext = true
+				redactNextHeader = true
+				continue
 			}
 			if isSensitiveMCPDisplayFlag(value) {
 				trimmed = append(trimmed, value)
@@ -390,12 +482,30 @@ func redactMCPDisplayRawQuery(rawQuery string) string {
 		if part == "" {
 			continue
 		}
-		key, _, hasValue := strings.Cut(part, "=")
+		key, rawValue, hasValue := strings.Cut(part, "=")
 		decodedKey, err := url.QueryUnescape(key)
 		if err != nil {
 			decodedKey = key
 		}
-		if !isSensitiveMCPDisplayKey(decodedKey) {
+		// THE PARAMETER NAME IS THE OPERATOR'S TO CHOOSE, so a name-based rule only
+		// covers the names somebody thought of. `?workspace=<token>` carried a
+		// credential straight into this row while `?api_key=` next to it was
+		// redacted, and this Target row sits directly under the Error row that IS
+		// redacted, on the same panel, so the panel gave the value back with one
+		// hand.
+		//
+		// Length decides instead, on the same floor the candidate collector uses:
+		// a value long enough to be a credential is redacted, and `v=1` or
+		// `mode=sse` stays readable so the row still describes the endpoint.
+		sensitive := isSensitiveMCPDisplayKey(decodedKey)
+		if !sensitive && hasValue {
+			decodedValue, valueErr := url.QueryUnescape(rawValue)
+			if valueErr != nil {
+				decodedValue = rawValue
+			}
+			sensitive = len(strings.TrimSpace(decodedValue)) >= shortestMCPSecret
+		}
+		if !sensitive {
 			continue
 		}
 		if hasValue {
@@ -590,9 +700,68 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	for _, value := range sensitiveMCPArgValues(raw.Args) {
 		add(value)
 	}
+	// THE ENDPOINT ITSELF CARRIES CREDENTIALS. HTTP and SSE send the configured
+	// URL verbatim, and it accepts both userinfo and arbitrary query keys, so
+	// `https://host/mcp?workspace=opaque-token` puts a credential in a parameter
+	// whose NAME the operator chose. The generic query redaction downstream only
+	// recognises conventional key names, so "workspace" walks straight through it,
+	// and equality redaction cannot help because nothing told it the value. A
+	// server that echoes its own endpoint in a failure body then reaches this
+	// panel and the transcript with the token intact.
+	//
+	// Collected as exact values here rather than by widening the sensitive-key
+	// list, which would still only cover names somebody thought of.
+	for _, value := range mcpURLSecretValues(raw.URL) {
+		add(value)
+	}
 	add(raw.Auth)
 	if raw.OAuth != nil {
 		add(raw.OAuth.ClientSecret)
+	}
+	return values
+}
+
+// mcpURLSecretValues returns the credential-bearing parts of a configured
+// endpoint: the userinfo password, the userinfo username, and every query value.
+//
+// Every query VALUE, not the sensitively-named ones, because the name is the
+// operator's to choose and the point of equality redaction is that it does not
+// have to guess. The shortestMCPSecret floor in credentialCandidates is what
+// keeps ordinary short parameters (`v=1`, `mode=sse`) out of the set, so this
+// does not blank harmless words out of unrelated text.
+//
+// The path is deliberately NOT collected. It is the part an operator needs to
+// see to recognise which endpoint failed, and it is not where a credential is
+// configured.
+func mcpURLSecretValues(rawURL string) []string {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed == nil {
+		return nil
+	}
+	values := make([]string, 0, 4)
+	if parsed.User != nil {
+		if password, ok := parsed.User.Password(); ok {
+			values = append(values, password)
+		}
+		// The username too: a token-as-username is a real shape, and the floor
+		// discards an ordinary short login.
+		values = append(values, parsed.User.Username())
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return values
+	}
+	names := make([]string, 0, len(query))
+	for name := range query {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		values = append(values, query[name]...)
 	}
 	return values
 }
@@ -652,13 +821,62 @@ func credentialCandidates(value string) []string {
 // --auth-type is collected as well. Redacting an enum out of a message costs
 // some readability; not redacting a credential costs the credential, so the
 // collection is deliberately the wider of the two.
+func isMCPHeaderFlag(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "-") {
+		return false
+	}
+	name := strings.TrimLeft(trimmed, "-")
+	if key, _, ok := strings.Cut(name, "="); ok {
+		name = key
+	}
+	if key, _, ok := strings.Cut(name, " "); ok {
+		name = key
+	}
+	if name == "H" {
+		return true
+	}
+	return strings.EqualFold(name, "header")
+}
+
 func sensitiveMCPArgValues(args []string) []string {
 	values := make([]string, 0, len(args))
 	// A candidate that is itself a flag is never a value. Reading one would put
 	// something like "--verbose" into the redaction set, and every message
 	// mentioning it would lose the word.
 	isFlag := func(value string) bool { return strings.HasPrefix(value, "-") }
+	// HEADER FLAGS ARE THEIR OWN CLASS, because the credential is in the VALUE
+	// and the flag name says nothing about it. isSensitiveMCPDisplayKey matches
+	// token/secret/auth/credential and friends against the FLAG, so
+	// `--header X-Workspace-Credential: opaque-token` was never collected: the
+	// flag is "header", which matches none of them, and the credential rides in
+	// an argument whose name the operator chose. A stdio child that rejects its
+	// invocation echoes it into captured stderr, which this panel renders and the
+	// transcript persists.
+	//
+	// The long form is matched case-insensitively. The SHORT form is not, and
+	// that is deliberate: `-H` is the header flag, `-h` is help and takes no
+	// value, so folding case here would set pending on `-h` and put the next
+	// argument into the redaction set, blanking an unrelated word out of every
+	// message that mentions it. Over-collection has already cost this panel a
+	// readable docker image name once.
+	// A header ARGUMENT carries "<name>: <value>" while a configured header
+	// contributes only the value, because a map key is not part of it. Feeding the
+	// whole argument in would make the entire line a candidate, so a server that
+	// echoes the header back would have its NAME redacted too and the message
+	// would no longer say which header was rejected. Only the value is offered;
+	// credentialCandidates still splits it further for the "<scheme> <credential>"
+	// shape.
+	headerValue := func(value string) string {
+		if _, rest, ok := strings.Cut(value, ":"); ok {
+			if trimmed := strings.TrimSpace(rest); trimmed != "" {
+				return trimmed
+			}
+		}
+		return value
+	}
 	pending := false
+	pendingHeader := false
 	for _, arg := range args {
 		arg = strings.TrimSpace(arg)
 		if arg == "" {
@@ -668,25 +886,39 @@ func sensitiveMCPArgValues(args []string) []string {
 			continue
 		}
 		if pending {
+			wasHeader := pendingHeader
 			pending = false
+			pendingHeader = false
 			if !isFlag(arg) {
-				values = append(values, arg)
+				if wasHeader {
+					values = append(values, headerValue(arg))
+				} else {
+					values = append(values, arg)
+				}
 				continue
 			}
 			// Otherwise fall through: this argument is a flag in its own right.
 		}
 		// Cut at the FIRST "=" and keep the whole tail, so base64 padding and
 		// values that themselves contain "=" survive intact.
-		if key, rest, ok := strings.Cut(arg, "="); ok && isSensitiveMCPDisplayKey(key) {
-			values = append(values, strings.TrimSpace(rest))
+		if key, rest, ok := strings.Cut(arg, "="); ok && (isSensitiveMCPDisplayKey(key) || isMCPHeaderFlag(key)) {
+			collected := strings.TrimSpace(rest)
+			if isMCPHeaderFlag(key) {
+				collected = headerValue(collected)
+			}
+			values = append(values, collected)
 			continue
 		}
 		// A flag and its value packed into a single argument. The display pass
 		// gets this shape wrong in the other direction (it prints the whole thing
 		// verbatim, then redacts the following, unrelated argument), so this
 		// cannot be delegated to it.
-		if flag, rest, ok := strings.Cut(arg, " "); ok && isSensitiveMCPDisplayFlag(flag) {
-			values = append(values, strings.TrimSpace(rest))
+		if flag, rest, ok := strings.Cut(arg, " "); ok && (isSensitiveMCPDisplayFlag(flag) || isMCPHeaderFlag(flag)) {
+			collected := strings.TrimSpace(rest)
+			if isMCPHeaderFlag(flag) {
+				collected = headerValue(collected)
+			}
+			values = append(values, collected)
 			continue
 		}
 		// Only an actual FLAG claims the next argument. isSensitiveMCPDisplayFlag
@@ -696,7 +928,8 @@ func sensitiveMCPArgValues(args []string) []string {
 		// would put the IMAGE NAME into the redaction set: the pull failure would
 		// then lose the one string that explains it. A positional argument is not
 		// a flag and does not introduce a value.
-		if isFlag(arg) && isSensitiveMCPDisplayFlag(arg) {
+		if isFlag(arg) && (isSensitiveMCPDisplayFlag(arg) || isMCPHeaderFlag(arg)) {
+			pendingHeader = isMCPHeaderFlag(arg)
 			// The value is the next argument, if there is one. A sensitive flag in
 			// the last position simply has nothing to redact.
 			pending = true

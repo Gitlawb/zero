@@ -190,7 +190,7 @@ func (m model) applyMCPCommandResult(args string, result MCPCommandResult) (mode
 		}, "\n")
 	}
 	if len(result.Config.Servers) > 0 || len(m.mcpConfig.Servers) > 0 {
-		m.mcpConfig = result.Config
+		m = m.adoptMCPConfig(result.Config)
 		m.refreshMCPViewState()
 	}
 	output := strings.TrimSpace(result.Output)
