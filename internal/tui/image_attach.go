@@ -217,12 +217,11 @@ type pendingDocument struct {
 	text  string
 }
 
-// handleDocumentAttach loads a PDF through imageinput.LoadDocument. The text
-// layer is staged for every model; when the active model supports vision and a
-// rasterizer is available, the rendered pages are staged through the existing
-// pending-image pipeline too. A scanned PDF with no text (and no rasterizer)
-// surfaces LoadDocument's explicit "no extractable text" notice and attaches
-// nothing.
+// handleDocumentAttach loads a PDF through imageinput.LoadDocument. Text
+// extraction requires Poppler's pdftotext and is staged for every model; when
+// the active model supports vision and a rasterizer is available, rendered pages
+// are staged through the existing pending-image pipeline too. Extraction errors
+// surface as a notice and attach nothing.
 func (m model) handleDocumentAttach(path string) model {
 	doc, err := imageinput.LoadDocument(path, m.cwd, imageinput.DocumentOptions{
 		Vision: m.modelSupportsVisionTUI(),

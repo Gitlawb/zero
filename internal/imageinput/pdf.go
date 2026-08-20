@@ -81,9 +81,9 @@ type DocumentOptions struct {
 	// defaultMaxRasterPages.
 	MaxPages int
 
-	// disableExternalTools forces the pure-Go path even if poppler is installed.
-	// It exists so tests are deterministic on any host; it is intentionally
-	// unexported and not part of the public surface.
+	// disableExternalTools suppresses Poppler even if it is installed. It exists
+	// so tests can cover the missing-extractor error deterministically; it is
+	// intentionally unexported and not part of the public surface.
 	disableExternalTools bool
 }
 
@@ -135,10 +135,10 @@ func LooksLikeDocumentFile(path string, workspaceRoot string) bool {
 // relative), enforces the per-document size cap, and extracts its text layer.
 // With opts.Vision and an available rasterizer it also renders the first N pages
 // to ImageBlocks. The file is identified by magic bytes, not its extension, so a
-// ".pdf"-named non-PDF is rejected with a clear error. A PDF with no text layer
-// and no rasterization/OCR available returns an explicit "no extractable text"
-// error rather than a silent empty success. Errors are plain (callers wrap them
-// into surface-specific notice text).
+// ".pdf"-named non-PDF is rejected with a clear error. Text extraction requires
+// Poppler's pdftotext; a PDF with no text layer and no rasterization/OCR
+// available returns an explicit error rather than a silent empty success. Errors
+// are plain (callers wrap them into surface-specific notice text).
 func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Document, error) {
 	data, err := readDocumentBytes(path, workspaceRoot)
 	if err != nil {
