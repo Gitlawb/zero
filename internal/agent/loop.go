@@ -697,11 +697,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				turnRequestedModel = toolResult.RequestedModel
 			}
 			messages = append(messages, zeroruntime.Message{
-				Role:         zeroruntime.MessageRoleTool,
-				Content:      toolResult.ModelOutput(),
-				ToolCallID:   toolResult.ToolCallID,
-				IsError:      toolResult.Status == tools.StatusError,
-				ChangedFiles: append([]string(nil), toolResult.ChangedFiles...),
+				Role:               zeroruntime.MessageRoleTool,
+				Content:            toolResult.ModelOutput(),
+				ToolCallID:         toolResult.ToolCallID,
+				ToolCallProviderID: call.ProviderCallID,
+				IsError:            toolResult.Status == tools.StatusError,
+				ChangedFiles:       append([]string(nil), toolResult.ChangedFiles...),
 			})
 			// Images ride a following USER message rather than the tool result
 			// above. Every provider drops images on a tool-role message —
@@ -1035,6 +1036,9 @@ func historySafeToolCalls(calls []ToolCall) []ToolCall {
 	safe := make([]ToolCall, len(calls))
 	for i, call := range calls {
 		safe[i] = call
+		if call.Freeform {
+			continue
+		}
 		args := strings.TrimSpace(call.Arguments)
 		switch {
 		case args == "":
@@ -1119,7 +1123,17 @@ func decodeToolArguments(arguments string, v any) error {
 
 func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) (ToolResult, error) {
 	args := map[string]any{}
-	if call.Arguments != "" {
+	if call.Freeform {
+		if call.Name != "apply_patch" {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: Unsupported freeform tool call for " + call.Name + ".",
+			}, nil
+		}
+		args["patch"] = call.Arguments
+	} else if call.Arguments != "" {
 		if err := decodeToolArguments(call.Arguments, &args); err != nil {
 			return ToolResult{
 				ToolCallID: call.ID,
@@ -3369,10 +3383,11 @@ func loadedToolsFromResult(meta map[string]string) []string {
 func appendAbortedToolResults(messages []Message, remaining []ToolCall) []Message {
 	for _, call := range remaining {
 		messages = append(messages, zeroruntime.Message{
-			Role:       zeroruntime.MessageRoleTool,
-			Content:    abortedToolResultNotice,
-			ToolCallID: call.ID,
-			IsError:    true,
+			Role:               zeroruntime.MessageRoleTool,
+			Content:            abortedToolResultNotice,
+			ToolCallID:         call.ID,
+			ToolCallProviderID: call.ProviderCallID,
+			IsError:            true,
 		})
 	}
 	return messages

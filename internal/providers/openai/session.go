@@ -195,7 +195,12 @@ func (s *turnSession) computeFingerprint(request zeroruntime.CompletionRequest) 
 func wireToolsDigest(tools []zeroruntime.ToolDefinition) string {
 	rendered := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		schema, err := json.Marshal(tool.Parameters)
+		wireShape := struct {
+			Type       zeroruntime.ToolDefinitionType    `json:"type,omitempty"`
+			Parameters map[string]any                    `json:"parameters,omitempty"`
+			Format     *zeroruntime.ToolDefinitionFormat `json:"format,omitempty"`
+		}{Type: tool.Type, Parameters: tool.Parameters, Format: tool.Format}
+		schema, err := json.Marshal(wireShape)
 		if err != nil {
 			rendered = append(rendered, tool.Name+"\n"+tool.Description+"\n__non_json:"+tool.Name)
 			continue

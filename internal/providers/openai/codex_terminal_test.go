@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -41,6 +42,72 @@ func TestResponsesStatePreservesDistinctCallID(t *testing.T) {
 	items := state.outputInputItems()
 	if len(items) != 1 || items[0].ID != "item-1" || items[0].CallID != "call-1" {
 		t.Fatalf("captured function call = %#v, want item id item-1 and call id call-1", items)
+	}
+}
+
+func TestCodexCustomApplyPatchStreamProducesFreeformCall(t *testing.T) {
+	provider := &CodexProvider{}
+	state := newResponsesState()
+	events := make(chan zeroruntime.StreamEvent, 16)
+	patch := "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
+	for _, payload := range []string{
+		`{"type":"response.output_item.added","item_id":"item-1","item":{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch"}}`,
+		`{"type":"response.custom_tool_call_input.delta","item_id":"item-1","call_id":"call-1","delta":"*** Begin Patch\n*** Add File: hello.txt\n"}`,
+		`{"type":"response.custom_tool_call_input.delta","item_id":"item-1","call_id":"call-1","delta":"+hello\n*** End Patch\n"}`,
+		`{"type":"response.output_item.done","item_id":"item-1","item":{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch","input":"*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"}}`,
+		`{"type":"response.completed","response":{"id":"resp-1","status":"completed"}}`,
+	} {
+		if keepReading := provider.emitResponsesEvent(context.Background(), payload, state, events); !keepReading && !state.done {
+			t.Fatalf("stream stopped before terminal event for %s", payload)
+		}
+	}
+	close(events)
+	collected := zeroruntime.CollectStream(context.Background(), events)
+	if len(collected.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want one", collected.ToolCalls)
+	}
+	call := collected.ToolCalls[0]
+	if call.ID != "item-1" || call.ProviderCallID != "call-1" || call.Name != "apply_patch" || !call.Freeform || call.Arguments != patch {
+		t.Fatalf("custom apply_patch call = %#v", call)
+	}
+}
+
+func TestCodexApplyPatchUsesFreeformWireContract(t *testing.T) {
+	provider, err := NewCodexProvider(CodexOptions{Options: Options{
+		APIKey:  "test-token",
+		BaseURL: "https://chatgpt.example/backend-api/codex",
+		Model:   "gpt-test",
+	}})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	patch := "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
+	request, err := provider.buildResponsesRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: "Add the file."},
+			{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{{
+				ID: "item-1", ProviderCallID: "call-1", Name: "apply_patch", Arguments: patch, Freeform: true,
+			}}},
+			{Role: zeroruntime.MessageRoleTool, ToolCallID: "item-1", ToolCallProviderID: "call-1", Content: "Done!"},
+		},
+		Tools: []zeroruntime.ToolDefinition{{
+			Name: "apply_patch", Description: "Apply a patch.", Parameters: map[string]any{"type": "object"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildResponsesRequest: %v", err)
+	}
+	if len(request.Tools) != 1 || request.Tools[0].Type != string(zeroruntime.ToolDefinitionFreeform) ||
+		request.Tools[0].Format == nil || request.Tools[0].Format.Syntax != "lark" || request.Tools[0].Parameters != nil {
+		t.Fatalf("apply_patch tool wire shape = %#v", request.Tools)
+	}
+	if !strings.Contains(request.Tools[0].Format.Definition, "*** Begin Patch") {
+		t.Fatalf("apply_patch grammar = %q", request.Tools[0].Format.Definition)
+	}
+	if len(request.Input) != 3 || request.Input[1].Type != "custom_tool_call" || request.Input[1].ID != "item-1" ||
+		request.Input[1].CallID != "call-1" || request.Input[1].Input != patch ||
+		request.Input[2].Type != "custom_tool_call_output" || request.Input[2].CallID != "call-1" {
+		t.Fatalf("custom apply_patch replay input = %#v", request.Input)
 	}
 }
 
