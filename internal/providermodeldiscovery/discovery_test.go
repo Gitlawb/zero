@@ -226,6 +226,29 @@ func TestMergeLiveModelsUsesLiveDefaultsAndReasoningCapability(t *testing.T) {
 	}
 }
 
+func TestMergeLocalModelsKeepsLiveOnlyEntries(t *testing.T) {
+	models := mergeLiveModels(
+		providercatalog.Descriptor{ID: "lmstudio", Local: true},
+		[]Model{
+			{ID: "qwen3-coder-30b", ContextWindow: 32768},
+			{ID: "text-embedding-local"},
+			{ID: "qwen2.5-coder-32b-instruct", Description: "live description"},
+		},
+		[]Model{{ID: "qwen2.5-coder-32b-instruct", Description: "catalog description", ToolCall: true}},
+	)
+
+	if got, want := strings.Join(modelIDs(models), ","), "qwen3-coder-30b,qwen2.5-coder-32b-instruct"; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	for _, model := range models {
+		if model.ID == "qwen2.5-coder-32b-instruct" {
+			if model.Description != "catalog description" || !model.ToolCall {
+				t.Fatalf("merged catalog metadata = %#v", model)
+			}
+		}
+	}
+}
+
 func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 	// Catalog and live endpoints return distinct payloads so the merge must keep
 	// live-only ids that are absent from the remote catalog response.
