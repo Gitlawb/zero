@@ -240,6 +240,7 @@ func executionEnforcement(plan zeroSandbox.CommandPlan) execution.Enforcement {
 		Level:           string(plan.EnforcementLevel),
 		Degraded:        plan.EnforcementLevel == zeroSandbox.EnforcementDegraded,
 		DowngradeReason: plan.DowngradeReason,
+		Notices:         append([]string(nil), plan.Notes...),
 	}
 }
 

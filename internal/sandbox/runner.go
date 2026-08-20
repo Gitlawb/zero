@@ -319,6 +319,19 @@ func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequ
 	plan.EnforcementLevel = request.EnforcementLevel
 	plan.DowngradeReason = request.DowngradeReason
 	plan.RequiresPlatformSandbox = request.RequiresPlatformSandbox
+	// THE EXECUTION PATH GETS THE SAME NOTICE THE DIAGNOSTICS DO. BackendPlan
+	// carries these for `zero sandbox policy` and `zero sandbox check`, which an
+	// operator may never run. A real tool call takes this path instead, and the
+	// Windows runner selects the token shape from the resolved profile alone: as
+	// soon as DenyRead is non-empty it drops WRITE_RESTRICTED and the write jail
+	// stops confining writes outside the workspace. Approving
+	// file_system.deny_read for one command could therefore cost the jail with
+	// nothing said about it.
+	//
+	// Derived here rather than at each caller because this is the single funnel
+	// every plan passes through, including the Windows one, so no execution
+	// caller can be added that quietly misses it.
+	plan.Notes = append(plan.Notes, windowsDenyReadWarnings(request.Backend, request.PermissionProfile)...)
 	return plan
 }
 
