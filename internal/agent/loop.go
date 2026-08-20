@@ -3224,11 +3224,15 @@ func cachedRuntimeToolDefinition(defCache map[string]zeroruntime.ToolDefinition,
 // runtimeToolDefinition renders a tool's advertised definition (name, description,
 // JSON-schema parameters) as sent to the provider.
 func runtimeToolDefinition(tool tools.Tool) zeroruntime.ToolDefinition {
-	return zeroruntime.ToolDefinition{
+	definition := zeroruntime.ToolDefinition{
 		Name:        tool.Name(),
 		Description: tool.Description(),
 		Parameters:  schemaToRuntimeMap(tool.Parameters()),
 	}
+	if tools.IsBuiltInApplyPatch(tool) {
+		definition.Type = zeroruntime.ToolDefinitionFreeform
+	}
+	return definition
 }
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {

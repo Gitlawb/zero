@@ -275,6 +275,11 @@ func TestEstimateToolDefTokensCountsDefinitions(t *testing.T) {
 	if estimateToolDefTokens(one) <= 0 {
 		t.Fatal("a tool definition (name + description + schema) should estimate > 0 tokens")
 	}
+	typed := append([]zeroruntime.ToolDefinition(nil), one...)
+	typed[0].Type = zeroruntime.ToolDefinitionFreeform
+	if estimateToolDefTokens(typed) <= estimateToolDefTokens(one) {
+		t.Fatal("a non-empty tool type must increase the estimated request cost")
+	}
 	two := append(append([]zeroruntime.ToolDefinition{}, one...), zeroruntime.ToolDefinition{
 		Name:        "write_file",
 		Description: "Write contents to a file in the workspace.",

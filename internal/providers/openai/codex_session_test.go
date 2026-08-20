@@ -293,6 +293,75 @@ func TestCodexTurnSessionDoesNotReplayAfterVisibleOutput(t *testing.T) {
 	}
 }
 
+func TestCodexTurnSessionReportsWebSocketIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.CloseNow()
+		if _, _, err := connection.Read(request.Context()); err != nil {
+			return
+		}
+		writeWebSocketEvents(request.Context(), connection,
+			`{"type":"response.output_text.delta","delta":"visible"}`,
+		)
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	provider := newCodexSessionTestProvider(t, server)
+	provider.inner.streamIdleTimeout = 20 * time.Millisecond
+	session := openCodexSession(t, provider)
+	defer session.Close()
+	stream, err := session.Stream(t.Context(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var streamError string
+	for event := range stream {
+		if event.Type == zeroruntime.StreamEventError {
+			streamError = event.Error
+			break
+		}
+	}
+	if !strings.Contains(streamError, "idle timeout after 20ms") {
+		t.Fatalf("stream error = %q, want idle-timeout detail", streamError)
+	}
+}
+
+func TestCodexTurnSessionHTTPFallbackRedactsSetupError(t *testing.T) {
+	const secret = "sk-secret-fallback"
+	provider, err := NewCodexProvider(CodexOptions{Options: Options{
+		APIKey:  secret,
+		BaseURL: "https://chatgpt.example/backend-api/codex",
+		Model:   "gpt-test",
+	}})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	session := &codexTurnSession{provider: provider}
+	events := make(chan zeroruntime.StreamEvent, 1)
+	session.forwardHTTP(t.Context(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRole(secret), Content: "invalid"}},
+	}, events)
+
+	select {
+	case event := <-events:
+		if event.Type != zeroruntime.StreamEventError {
+			t.Fatalf("fallback event type = %s, want error", event.Type)
+		}
+		if strings.Contains(event.Error, secret) {
+			t.Fatalf("fallback error leaked credential: %q", event.Error)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fallback did not emit setup error")
+	}
+}
+
 func TestCodexTurnSessionCloseDoesNotStartPrewarm(t *testing.T) {
 	provider, err := NewCodexProvider(CodexOptions{Options: Options{
 		APIKey:  "test-token",

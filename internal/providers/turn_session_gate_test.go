@@ -46,7 +46,7 @@ func TestOptimizedTurnSessionsDefaultOff(t *testing.T) {
 func TestOptimizedTurnSessionsFalseyValues(t *testing.T) {
 	profile := openaiEligibleProfile()
 	provider := buildGateProvider(t, profile)
-	for _, value := range []string{"0", "false", "FALSE", "False", " ", ""} {
+	for _, value := range []string{"0", "false", "FALSE", "False", "off", "OFF", " ", ""} {
 		t.Setenv(openaiTurnSessionEnv, value)
 		if _, ok := OptimizedTurnSessions(profile, provider, Options{}); ok {
 			t.Fatalf("gate enabled for falsey value %q", value)
@@ -56,6 +56,21 @@ func TestOptimizedTurnSessionsFalseyValues(t *testing.T) {
 		t.Setenv(openaiTurnSessionEnv, value)
 		if _, ok := OptimizedTurnSessions(profile, provider, Options{}); !ok {
 			t.Fatalf("gate disabled for truthy value %q", value)
+		}
+	}
+}
+
+func TestChatGPTTurnSessionGateValues(t *testing.T) {
+	for _, value := range []string{"0", "false", "FALSE", "off", "OFF"} {
+		t.Setenv(chatGPTTurnSessionEnv, value)
+		if chatGPTTurnSessionEnabled() {
+			t.Fatalf("ChatGPT gate enabled for falsey value %q", value)
+		}
+	}
+	for _, value := range []string{"", " ", "1", "true", "on"} {
+		t.Setenv(chatGPTTurnSessionEnv, value)
+		if !chatGPTTurnSessionEnabled() {
+			t.Fatalf("ChatGPT gate disabled for default/truthy value %q", value)
 		}
 	}
 }

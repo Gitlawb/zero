@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -91,7 +92,7 @@ func TestCodexApplyPatchUsesFreeformWireContract(t *testing.T) {
 			{Role: zeroruntime.MessageRoleTool, ToolCallID: "item-1", ToolCallProviderID: "call-1", Content: "Done!"},
 		},
 		Tools: []zeroruntime.ToolDefinition{{
-			Name: "apply_patch", Description: "Apply a patch.", Parameters: map[string]any{"type": "object"},
+			Name: "apply_patch", Description: "Apply a patch.", Type: zeroruntime.ToolDefinitionFreeform,
 		}},
 	})
 	if err != nil {
@@ -108,6 +109,38 @@ func TestCodexApplyPatchUsesFreeformWireContract(t *testing.T) {
 		request.Input[1].CallID != "call-1" || request.Input[1].Input != patch ||
 		request.Input[2].Type != "custom_tool_call_output" || request.Input[2].CallID != "call-1" {
 		t.Fatalf("custom apply_patch replay input = %#v", request.Input)
+	}
+}
+
+func TestCodexPreservesCustomApplyPatchFunction(t *testing.T) {
+	provider, err := NewCodexProvider(CodexOptions{Options: Options{
+		APIKey:  "test-token",
+		BaseURL: "https://chatgpt.example/backend-api/codex",
+		Model:   "gpt-test",
+	}})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	parameters := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"value": map[string]any{"type": "string"}},
+	}
+	request, err := provider.buildResponsesRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "Call the custom tool."}},
+		Tools: []zeroruntime.ToolDefinition{{
+			Name: "apply_patch", Description: "Custom integration tool.", Parameters: parameters,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildResponsesRequest: %v", err)
+	}
+	if len(request.Tools) != 1 {
+		t.Fatalf("tools = %#v, want one", request.Tools)
+	}
+	tool := request.Tools[0]
+	if tool.Type != string(zeroruntime.ToolDefinitionFunction) || tool.Format != nil ||
+		tool.Description != "Custom integration tool." || !reflect.DeepEqual(tool.Parameters, parameters) {
+		t.Fatalf("custom apply_patch function was rewritten: %#v", tool)
 	}
 }
 

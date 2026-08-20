@@ -21,12 +21,21 @@ const chatGPTTurnSessionEnv = "ZERO_CHATGPT_TURN_SESSION"
 
 func openaiTurnSessionEnabled() bool {
 	value := strings.TrimSpace(os.Getenv(openaiTurnSessionEnv))
-	return value != "" && value != "0" && !strings.EqualFold(value, "false")
+	return value != "" && !explicitEnvFalse(value)
 }
 
 func chatGPTTurnSessionEnabled() bool {
 	value := strings.TrimSpace(os.Getenv(chatGPTTurnSessionEnv))
-	return value == "" || (value != "0" && !strings.EqualFold(value, "false") && !strings.EqualFold(value, "off"))
+	return value == "" || !explicitEnvFalse(value)
+}
+
+func explicitEnvFalse(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "false", "off":
+		return true
+	default:
+		return false
+	}
 }
 
 // OptimizedTurnSessions returns the gated optimized TurnSessionProvider for an

@@ -16,6 +16,8 @@ type applyPatchTool struct {
 	scope         PathScope
 }
 
+func (applyPatchTool) isBuiltInApplyPatch() {}
+
 func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{

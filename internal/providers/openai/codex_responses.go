@@ -340,8 +340,7 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 	req.Instructions = strings.Join(instructions, "\n\n")
 	for _, tool := range request.Tools {
 		definition := tool
-		if definition.Name == "apply_patch" && definition.Type == "" {
-			definition.Type = zeroruntime.ToolDefinitionFreeform
+		if definition.Name == "apply_patch" && definition.Type == zeroruntime.ToolDefinitionFreeform {
 			definition.Description = "The apply_patch tool edits files from a raw structured patch. Do not wrap the patch in JSON."
 			definition.Format = &zeroruntime.ToolDefinitionFormat{Type: "grammar", Syntax: "lark", Definition: applyPatchLarkGrammar}
 		}
