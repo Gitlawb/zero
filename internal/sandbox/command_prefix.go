@@ -226,11 +226,13 @@ func normalizeLauncherName(program string) string {
 }
 
 // trimLauncherABISuffix drops CPython's ABI flags from a versioned interpreter
-// name, so "python3.7m" and "python3.6dm" reduce to their version. The flags are
-// only removed when a digit sits underneath them, which leaves ordinary names
-// that happen to end in those letters alone ("sha256sum" keeps its "sum").
+// name, so "python3.7m" and "python3.6dm" reduce to their version, and the
+// free-threaded builds "python3.13t" and "python3.13td" reduce to theirs. The
+// flags are only removed when a digit sits underneath them, which leaves
+// ordinary names that happen to end in those letters alone: "sha256sum" keeps
+// its "sum", "zstd" its "td", "cat" its "t".
 func trimLauncherABISuffix(name string) string {
-	trimmed := strings.TrimRight(name, "dmu")
+	trimmed := strings.TrimRight(name, "dmut")
 	if trimmed == name || trimmed == "" {
 		return name
 	}

@@ -15,6 +15,8 @@ func TestUnsafeCommandPrefixLauncherIgnoresVersionAndExtension(t *testing.T) {
 		"PYTHON~1.EXE", "POWERS~1.EXE", "python.exe::$DATA",
 		// Versioned and ABI-suffixed interpreters.
 		"python3.7m", "python3.6dm", "pythonw3.11", "python-3.11",
+		// Free-threaded CPython (PEP 703) ships beside the GIL build.
+		"python3.13t", "python3.13t.exe", "python3.14t", "python3.13td",
 		"perl5.36", "ruby3.2", "php8", "lua5.4", "node22.exe", "bash5",
 	} {
 		if !unsafeCommandPrefix([]string{program}) {
@@ -38,6 +40,10 @@ func TestUnsafeCommandPrefixKeepsOrdinaryCommandsGrantable(t *testing.T) {
 		{"node-gyp", "build"},
 		{"python3-config", "--includes"},
 		{"s3cmd", "ls"},
+		{"cat", "file"},
+		{"zstd", "-d"},
+		{"sqlite3", "db"},
+		{"yt-dlp", "url"},
 	} {
 		if unsafeCommandPrefix(prefix) {
 			t.Errorf("unsafeCommandPrefix(%q) = true, want false", prefix)
@@ -58,6 +64,10 @@ func TestNormalizeLauncherName(t *testing.T) {
 		{"python3.11.exe.", "python3"},
 		{"python3.7m", "python3"},
 		{"python3.6dm", "python3"},
+		{"python3.13t", "python3"},
+		{"python3.13td", "python3"},
+		{"zstd", "zstd"},
+		{"cat", "cat"},
 		{"cargo", "cargo"},
 		{"", ""},
 	} {
