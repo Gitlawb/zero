@@ -217,11 +217,10 @@ type pendingDocument struct {
 	text  string
 }
 
-// handleDocumentAttach loads a PDF through imageinput.LoadDocument. Text
-// extraction requires Poppler's pdftotext and is staged for every model; when
-// the active model supports vision and a rasterizer is available, rendered pages
-// are staged through the existing pending-image pipeline too. Extraction errors
-// surface as a notice and attach nothing.
+// handleDocumentAttach loads a PDF through imageinput.LoadDocument. Its text
+// layer is staged for every model; when the active model supports vision and a
+// rasterizer is available, rendered pages are staged through the existing
+// pending-image pipeline too. A load error prevents either result from staging.
 func (m model) handleDocumentAttach(path string) model {
 	doc, err := imageinput.LoadDocument(path, m.cwd, imageinput.DocumentOptions{
 		Vision: m.modelSupportsVisionTUI(),

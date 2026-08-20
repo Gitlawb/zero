@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -322,7 +321,6 @@ func writeTestPDF(t *testing.T, dir, name, text string) string {
 // pending document even on a non-vision model -- unlike a raw image, which is
 // refused. No page images are staged without a rasterizer.
 func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "Design spec body text")
 
@@ -351,7 +349,6 @@ func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 // path by a content sniff (not the extension), so its text layer attaches even on
 // a non-vision model instead of being refused as a non-image.
 func TestImageCommandAttachesExtensionlessPDFByContent(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec", "Extensionless PDF body text")
 
@@ -391,9 +388,25 @@ func TestImageCommandRejectsFakePDF(t *testing.T) {
 	}
 }
 
+func TestImageCommandRejectsMalformedPDF(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "broken.pdf"), []byte("%PDF-1.4\nbroken"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	m := newModel(context.Background(), Options{Cwd: root, ModelName: "gpt-4.1"})
+	m.input.SetValue("/image broken.pdf")
+	updated, _ := m.handleSubmit()
+	next := updated.(model)
+	if len(next.pendingDocuments) != 0 || len(next.pendingImages) != 0 {
+		t.Fatal("malformed PDF must not stage attachments")
+	}
+	if notice := lastTranscriptText(next); !strings.Contains(notice, "PDF") {
+		t.Fatalf("expected PDF extraction notice, got %q", notice)
+	}
+}
+
 // /image clear removes staged documents as well as images.
 func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "some text")
 
@@ -413,13 +426,6 @@ func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
 	}
 }
 
-func requirePopplerText(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("pdftotext"); err != nil {
-		t.Skip("pdftotext is required for PDF text extraction: ", err)
-	}
-}
-
 // The chip row shows a "[doc: …]" entry for staged documents.
 func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
@@ -436,7 +442,6 @@ func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 // On submit, the staged document text is prepended to the prompt the agent
 // receives (so the model can read it), and the pending documents are cleared.
 func TestSubmitPrependsDocumentTextThenClears(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
 

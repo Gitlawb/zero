@@ -14,18 +14,17 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/ledongthuc/pdf"
 )
 
 // Dependency posture: LoadDocument prefers Poppler's pdftotext when it is on
 // PATH and disableExternalTools is false (it handles more font encodings).
-// PDF parsing is deliberately delegated to Poppler rather than performed in
-// process: a parser must fully decode a page before this package can apply its
-// output cap, which would leave hostile compressed streams able to consume the
-// CLI's memory or CPU. Rasterizing pages to images for vision models also needs
+// The in-process fallback streams its text through a bounded reader. Rasterizing
+// pages to images for vision models needs
 // real font/graphics rendering and uses pdftoppm only when it is already on
 // PATH -- the same "external tool the user may have" posture as the LSP
-// language servers. A text-only PDF therefore requires pdftotext to be
-// available; vision input can still succeed when pdftoppm is available.
+// language servers. Absence of Poppler is never an error: text extraction
+// falls back to the in-process reader.
 
 // MaxDocumentBytes is the per-document raw-file cap (32 MiB). PDFs are routinely
 // larger than the image cap, but we still bound the file before it is read into
@@ -81,9 +80,9 @@ type DocumentOptions struct {
 	// defaultMaxRasterPages.
 	MaxPages int
 
-	// disableExternalTools suppresses Poppler even if it is installed. It exists
-	// so tests can cover the missing-extractor error deterministically; it is
-	// intentionally unexported and not part of the public surface.
+	// disableExternalTools forces the in-process path even if Poppler is installed.
+	// It exists so tests are deterministic on any host; it is intentionally
+	// unexported and not part of the public surface.
 	disableExternalTools bool
 }
 
@@ -135,10 +134,9 @@ func LooksLikeDocumentFile(path string, workspaceRoot string) bool {
 // relative), enforces the per-document size cap, and extracts its text layer.
 // With opts.Vision and an available rasterizer it also renders the first N pages
 // to ImageBlocks. The file is identified by magic bytes, not its extension, so a
-// ".pdf"-named non-PDF is rejected with a clear error. Text extraction requires
-// Poppler's pdftotext; a PDF with no text layer and no rasterization/OCR
-// available returns an explicit error rather than a silent empty success. Errors
-// are plain (callers wrap them into surface-specific notice text).
+// ".pdf"-named non-PDF is rejected with a clear error. A PDF with no text layer
+// and no rasterization/OCR available returns an explicit error rather than a
+// silent empty success. Errors are plain (callers wrap them into surface-specific notice text).
 func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Document, error) {
 	data, err := readDocumentBytes(path, workspaceRoot)
 	if err != nil {
@@ -159,22 +157,26 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		}
 	}
 
-	// Text path. Parsing stays out of process so Poppler's timeout applies to a
-	// complete extraction, including a hostile single compressed page. Page
-	// counting is independent of text extraction, using pdfinfo when available.
+	// Text path. Prefer Poppler when available, then use the bounded in-process
+	// reader. Page counting is independent of text extraction.
 	text, pages := "", 0
 	textOverflow := false
-	textExtractorRan := false
 	if useExternal {
 		if t, overflow, ok := popplerTextExtractor(data); ok {
 			text, textOverflow = t, overflow
-			textExtractorRan = true
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		t, p, overflow, terr := extractTextPureGo(data)
+		if terr != nil {
+			if len(images) == 0 {
+				return Document{}, terr
+			}
+		} else {
+			text, pages, textOverflow = t, p, overflow
 		}
 	}
 	pages = resolvePageCount(data, useExternal, pages)
-	if !textExtractorRan && len(images) == 0 {
-		return Document{}, fmt.Errorf("%s requires Poppler's pdftotext for safe PDF text extraction (install poppler-utils)", path)
-	}
 
 	text, truncated := capDocumentTextWithOverflow(text, textOverflow)
 
@@ -185,6 +187,52 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	}
 
 	return Document{Text: text, Images: images, Pages: pages, Truncated: truncated}, nil
+}
+
+// extractTextPureGo reads the fallback parser's streaming text output through a
+// bounded reader, so only MaxDocumentTextBytes plus one byte is retained.
+func extractTextPureGo(data []byte) (text string, pages int, overflow bool, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			text, pages, overflow = "", 0, false
+			err = fmt.Errorf("could not parse PDF (malformed or unsupported): %v", rec)
+		}
+	}()
+	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", 0, false, fmt.Errorf("could not parse PDF: %w", err)
+	}
+	pages = reader.NumPage()
+	plain, err := reader.GetPlainText()
+	if err != nil {
+		return "", pages, false, fmt.Errorf("could not extract PDF text: %w", err)
+	}
+	text, overflow, err = readBoundedText(plain)
+	if err != nil {
+		return "", pages, false, fmt.Errorf("could not read PDF text: %w", err)
+	}
+	return strings.TrimSpace(text), pages, overflow, nil
+}
+
+func readBoundedText(reader io.Reader) (text string, overflow bool, err error) {
+	data, err := io.ReadAll(io.LimitReader(reader, MaxDocumentTextBytes+1))
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), len(data) > MaxDocumentTextBytes, nil
+}
+
+func pdfPageCount(data []byte) (pages int) {
+	defer func() {
+		if recover() != nil {
+			pages = 0
+		}
+	}()
+	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return 0
+	}
+	return reader.NumPage()
 }
 
 // readDocumentBytes resolves path against workspaceRoot, rejects missing,
@@ -273,6 +321,9 @@ func utf8RuneStart(b byte) bool {
 func resolvePageCount(data []byte, useExternal bool, already int) int {
 	if already > 0 {
 		return already
+	}
+	if pages := pdfPageCount(data); pages > 0 {
+		return pages
 	}
 	if useExternal {
 		return popplerPageCounter(data)
@@ -370,7 +421,7 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 		}
 		_, _ = buffer.Buffer.Write(data[:remaining])
 	}
-	if len(data) > remaining {
+	if buffer.Len() > buffer.limit {
 		buffer.overflow = true
 	}
 	return len(data), nil

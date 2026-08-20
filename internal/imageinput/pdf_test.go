@@ -248,8 +248,8 @@ func TestLoadDocumentNoTextNoRaster(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a PDF with no extractable text and no raster")
 	}
-	if !strings.Contains(err.Error(), "pdftotext") {
-		t.Fatalf("error %q should explain that the safe extractor is unavailable", err.Error())
+	if !strings.Contains(err.Error(), "no extractable text") {
+		t.Fatalf("error %q should explain that no text is available", err.Error())
 	}
 }
 
@@ -296,14 +296,14 @@ func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestLoadDocumentRequiresSafeExtractor(t *testing.T) {
+func TestLoadDocumentFallsBackToPureGo(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	_, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
-	if err == nil || !strings.Contains(err.Error(), "pdftotext") {
-		t.Fatalf("LoadDocument error = %v, want safe-extractor guidance", err)
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
+	if err != nil || !strings.Contains(doc.Text, "text") {
+		t.Fatalf("LoadDocument = (%+v, %v), want pure-Go text", doc, err)
 	}
 }
 
@@ -385,6 +385,12 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	}
 	if buffer.Len() != 17 {
 		t.Fatalf("boundedBuffer retained %d bytes, want 17", buffer.Len())
+	}
+
+	buffer = newBoundedBuffer(16)
+	_, _ = buffer.Write([]byte(strings.Repeat("z", 17)))
+	if !buffer.overflow {
+		t.Fatal("boundedBuffer must report exactly limit+1 bytes as overflow")
 	}
 }
 
