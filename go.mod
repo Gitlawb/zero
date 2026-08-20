@@ -2,9 +2,11 @@ module github.com/Gitlawb/zero
 
 go 1.26.6
 
+replace charm.land/bubbletea/v2 => github.com/anandh8x/bubbletea/v2 v2.0.10-0.20260820073754-bdad7c1db558
+
 require (
 	charm.land/bubbles/v2 v2.1.1
-	charm.land/bubbletea/v2 v2.0.8
+	charm.land/bubbletea/v2 v2.0.9
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/alecthomas/chroma/v2 v2.27.0
