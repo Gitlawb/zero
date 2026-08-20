@@ -39,11 +39,14 @@ func TestBuildPermissionOptionsDefault(t *testing.T) {
 }
 
 func TestDecisionFromOutcome(t *testing.T) {
-	offered := []agent.PermissionDecisionAction{
-		agent.PermissionDecisionAllow,
-		agent.PermissionDecisionAlwaysAllow,
-		agent.PermissionDecisionDeny,
-	}
+	offered := buildPermissionOptions(agent.PermissionRequest{
+		ToolName: "bash",
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAlwaysAllow,
+			agent.PermissionDecisionDeny,
+		},
+	})
 	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeCancelled}, offered); d.Action != agent.PermissionDecisionCancel {
 		t.Errorf("cancelled -> %q, want cancel", d.Action)
 	}
