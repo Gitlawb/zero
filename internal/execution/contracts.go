@@ -173,6 +173,11 @@ type Enforcement struct {
 	Level           string `json:"level,omitempty"`
 	Degraded        bool   `json:"degraded,omitempty"`
 	DowngradeReason string `json:"downgradeReason,omitempty"`
+	// Notices are least-privilege disclosures about the enforcement actually
+	// applied to THIS command, as opposed to the diagnostic views produced by
+	// `zero sandbox policy` and `zero sandbox check`. A trade an operator only
+	// discovers by running a separate diagnostic command is not disclosed.
+	Notices []string `json:"notices,omitempty"`
 }
 
 type Outcome struct {

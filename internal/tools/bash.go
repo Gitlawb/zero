@@ -349,6 +349,13 @@ func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
 	if plan.DowngradeReason != "" {
 		meta["sandbox_downgrade_reason"] = plan.DowngradeReason
 	}
+	// Least-privilege notices for the command actually being run, on the same
+	// channel as the downgrade reason. Without this the DenyRead write-jail
+	// trade was visible only to `zero sandbox policy` and `zero sandbox check`,
+	// so an operator could approve it per command and never be told.
+	if len(plan.Notes) > 0 {
+		meta["sandbox_notices"] = strings.Join(plan.Notes, "\n")
+	}
 	meta["sandbox_requires_platform"] = strconv.FormatBool(plan.RequiresPlatformSandbox)
 	if plan.Backend.Message != "" {
 		meta["sandbox_message"] = plan.Backend.Message

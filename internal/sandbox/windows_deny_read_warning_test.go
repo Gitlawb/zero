@@ -98,3 +98,51 @@ func TestNoDenyReadWarningWhenTheHostIsNotWindows(t *testing.T) {
 		}
 	}
 }
+
+// THE EXECUTION PATH, NOT JUST THE DIAGNOSTIC ONE.
+//
+// The warning above is reachable from BackendPlan, which is what `zero sandbox
+// policy` and `zero sandbox check` render. An operator who never runs those
+// sees nothing. A real tool call builds a CommandPlan instead, and the Windows
+// runner picks the token shape from the resolved profile alone: DenyRead
+// non-empty means no WRITE_RESTRICTED, which is the shape #869 is about. So
+// approving file_system.deny_read for one command could cost the write jail
+// with nothing said.
+//
+// withSandboxExecutionMetadata is the single funnel every plan passes through,
+// including the Windows one, which is why the notice is derived there rather
+// than at each caller.
+func TestCommandPlanCarriesTheDenyReadDisclosure(t *testing.T) {
+	withWindowsHost(t)
+
+	request := SandboxExecutionRequest{
+		Backend:           windowsRestrictedTokenBackend(),
+		TargetBackend:     BackendWindowsRestrictedToken,
+		PermissionProfile: profileWithDenyRead(`C:\Users\someone\.config\creds`),
+	}
+	plan := withSandboxExecutionMetadata(CommandPlan{}, request)
+
+	if len(plan.Notes) == 0 {
+		t.Fatal("a command plan resolved with denyRead carried no notice, so the operator loses the write jail without being told")
+	}
+	notice := strings.ToLower(strings.Join(plan.Notes, " "))
+	for _, want := range []string{"denyread", "write", "#869"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("the execution-path notice does not mention %q: %q", want, notice)
+		}
+	}
+}
+
+// And it stays quiet for the ordinary profile, or every Windows command grows a
+// notice about a trade nobody made.
+func TestCommandPlanCarriesNoDisclosureWithoutDenyRead(t *testing.T) {
+	withWindowsHost(t)
+
+	plan := withSandboxExecutionMetadata(CommandPlan{}, SandboxExecutionRequest{
+		Backend:       windowsRestrictedTokenBackend(),
+		TargetBackend: BackendWindowsRestrictedToken,
+	})
+	if len(plan.Notes) != 0 {
+		t.Errorf("a plan without denyRead carried notices: %v", plan.Notes)
+	}
+}
