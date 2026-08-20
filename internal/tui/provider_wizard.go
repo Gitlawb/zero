@@ -137,7 +137,7 @@ func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (m
 	}
 	m.providerWizard.deviceUserCode = msg.userCode
 	m.providerWizard.deviceVerificationURI = msg.verifyURL
-	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth)
+	return m, providerWizardDevicePollCmd(m.userConfigPath, msg.providerID, msg.attemptID, msg.cfg, msg.auth)
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -155,11 +155,14 @@ func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
 // from the ID token and stores it on the saved token so the Codex provider can
 // inject it as a header on every request; other OAuth providers (xAI) run the
 // generic engine login which stores a refreshable token.
-func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int) tea.Cmd {
+func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int, configPath string) tea.Cmd {
 	providerID := provider.ID
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
+			if err := preflightOAuthLogin(configPath); err != nil {
+				return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, err: err}
+			}
 			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 				OpenBrowser: browser.OpenURL,
 				Timeout:     3 * time.Minute,
@@ -168,12 +171,12 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 		}
 	case providerID == "chatgpt":
 		return func() tea.Msg {
-			err := runProviderChatGPTLogin()
+			err := runProviderChatGPTLogin(configPath)
 			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: err}
 		}
 	default:
 		return func() tea.Msg {
-			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID)}
+			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(configPath, providerID)}
 		}
 	}
 }
@@ -183,7 +186,10 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 // the token's Account field) and persists the resulting token via the oauth
 // store. The runtime resolver then attaches the bearer to Codex calls and the
 // Codex provider reads the Account field for the `chatgpt-account-id` header.
-func runProviderChatGPTLogin() error {
+func runProviderChatGPTLogin(configPath string) error {
+	if err := preflightOAuthLogin(configPath); err != nil {
+		return err
+	}
 	env := buildOAuthPresetEnv()
 	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
 		Env:         env,
@@ -192,6 +198,9 @@ func runProviderChatGPTLogin() error {
 		Timeout:     3 * time.Minute,
 	})
 	if err != nil {
+		return err
+	}
+	if err := preflightOAuthLogin(configPath); err != nil {
 		return err
 	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
@@ -262,7 +271,10 @@ func buildOAuthPresetEnv() map[string]string {
 // runProviderTokenLogin runs the generic OAuth engine login for a provider that
 // has a built-in preset (e.g. xAI), storing a refreshable token under
 // provider:<name>. The runtime resolver then attaches it to model calls.
-func runProviderTokenLogin(name string) error {
+func runProviderTokenLogin(configPath string, name string) error {
+	if err := preflightOAuthLogin(configPath); err != nil {
+		return err
+	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
@@ -275,6 +287,7 @@ func runProviderTokenLogin(name string) error {
 		// into its baked-in preset (e.g. xAI's public client_id); without this the
 		// config never resolves and the browser never opens.
 		AllowPresets: true,
+		BeforeSave:   func() error { return preflightOAuthLogin(configPath) },
 	})
 	if err != nil {
 		return err
@@ -299,8 +312,11 @@ type providerWizardDeviceCodeMsg struct {
 
 // providerWizardDevicePrepareCmd runs phase 1 of the device-code login off the UI
 // goroutine and reports the code to display (or an error).
-func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
+func providerWizardDevicePrepareCmd(configPath string, name string, attemptID int) tea.Cmd {
 	return func() tea.Msg {
+		if err := preflightOAuthLogin(configPath); err != nil {
+			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
+		}
 		auth, cfg, err := oauthDevicePrepare(name)
 		if err != nil {
 			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
@@ -318,9 +334,9 @@ func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
 
 // providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
 // UI goroutine and reports completion as a regular OAuth result.
-func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+func providerWizardDevicePollCmd(configPath string, name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
 	return func() tea.Msg {
-		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
+		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(configPath, name, cfg, auth)}
 	}
 }
 
@@ -332,7 +348,7 @@ func (m model) startProviderDeviceLogin() (model, tea.Cmd) {
 		return m, nil
 	}
 	attemptID := m.providerWizard.beginOAuthAttempt(true)
-	return m, providerWizardDevicePrepareCmd(provider.ID, attemptID)
+	return m, providerWizardDevicePrepareCmd(m.userConfigPath, provider.ID, attemptID)
 }
 
 const maxProviderWizardProvidersVisible = 10
@@ -974,7 +990,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
 				provider := m.providerWizard.currentProvider()
 				attemptID := m.providerWizard.beginOAuthAttempt(false)
-				return m, providerWizardOAuthCmdFor(provider, attemptID)
+				return m, providerWizardOAuthCmdFor(provider, attemptID, m.userConfigPath)
 			}
 			return m, nil
 		case keyText(msg) != "":

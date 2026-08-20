@@ -1298,6 +1298,85 @@ func TestValidatePersistedProviderNamesRejectsImplicitOpenAICollision(t *testing
 	}
 }
 
+func TestRepairUnnamedProviderPreservesLegacyNameResolution(t *testing.T) {
+	t.Run("active provider", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{
+			ActiveProvider: "work",
+			Providers:      []ProviderProfile{{Name: "  ", Model: "legacy-model"}},
+			MaxTurns:       17,
+		}, 0o600)
+		cfg, err := RepairUnnamedProvider(path, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" || cfg.Providers[0].Model != "legacy-model" || cfg.MaxTurns != 17 {
+			t.Fatalf("repaired config = %+v", cfg)
+		}
+		if err := ValidatePersistedProviderNames(cfg); err != nil {
+			t.Fatalf("repaired config remains invalid: %v", err)
+		}
+	})
+
+	t.Run("openai fallback", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Model: "gpt-4o"}}}, 0o600)
+		cfg, err := RepairUnnamedProvider(path, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" {
+			t.Fatalf("repaired config = %+v, want openai", cfg)
+		}
+	})
+}
+
+func TestRepairUnnamedProviderRejectsAmbiguousRepairWithoutWriting(t *testing.T) {
+	for name, cfg := range map[string]FileConfig{
+		"name collision":   {Providers: []ProviderProfile{{Name: ""}, {Name: "OPENAI"}}},
+		"multiple unnamed": {Providers: []ProviderProfile{{Name: ""}, {Name: "  "}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			before := writeConfigFixture(t, path, cfg, 0o600)
+			if _, err := RepairUnnamedProvider(path, ""); err == nil {
+				t.Fatal("ambiguous repair succeeded")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("rejected repair changed config\nbefore: %s\nafter: %s", before, after)
+			}
+		})
+	}
+}
+
+func TestRepairUnnamedProviderAllowsExplicitUniqueName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: ""}, {Name: "OPENAI"}}}, 0o600)
+	cfg, err := RepairUnnamedProvider(path, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers[0].Name != "legacy" {
+		t.Fatalf("repaired name = %q, want legacy", cfg.Providers[0].Name)
+	}
+}
+
+func TestEnsureCatalogProviderValidatesBeforeExistingProfileShortcut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "xai"}, {Name: "XAI"}}}, 0o600)
+	if _, err := EnsureCatalogProvider(path, "xai"); err == nil || !strings.Contains(err.Error(), "ambiguous persisted provider names") {
+		t.Fatalf("EnsureCatalogProvider error = %v, want ambiguous config rejection", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("rejected ensure changed config: readErr=%v", err)
+	}
+}
+
 func TestResolvePersistedProviderNameBridgesIdentityToExactSpelling(t *testing.T) {
 	cases := []struct {
 		name      string

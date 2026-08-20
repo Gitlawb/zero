@@ -28,7 +28,7 @@ func ValidatePersistedProviderNames(cfg FileConfig) error {
 	for _, provider := range cfg.Providers {
 		name := strings.TrimSpace(provider.Name)
 		if name == "" {
-			return fmt.Errorf("persisted provider name cannot be empty; name the provider explicitly in config.json")
+			return fmt.Errorf("persisted provider name cannot be empty; run `zero providers repair-config` to name the legacy provider")
 		}
 		folded := credstore.NormalizeProvider(name)
 		previous, ok := seen[folded]
@@ -46,6 +46,54 @@ func ValidatePersistedProviderNames(cfg FileConfig) error {
 		seen[folded] = name
 	}
 	return nil
+}
+
+// RepairUnnamedProvider gives legacy provider rows that predate required names
+// an explicit persisted identity. Older releases resolved one unnamed row as
+// activeProvider, falling back to "openai"; preserve that choice unless the
+// user supplies a replacement. Multiple unnamed rows are left untouched because
+// selecting one would silently merge or discard profiles.
+func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	unnamed := -1
+	for index := range cfg.Providers {
+		if strings.TrimSpace(cfg.Providers[index].Name) != "" {
+			continue
+		}
+		if unnamed >= 0 {
+			return FileConfig{}, fmt.Errorf("multiple unnamed persisted providers require manual repair in config.json")
+		}
+		unnamed = index
+	}
+	if unnamed < 0 {
+		return FileConfig{}, fmt.Errorf("no unnamed persisted provider found")
+	}
+	name := strings.TrimSpace(replacement)
+	if name == "" {
+		name = strings.TrimSpace(cfg.ActiveProvider)
+	}
+	if name == "" {
+		name = "openai"
+	}
+	cfg.Providers[unnamed].Name = name
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return FileConfig{}, err
+	}
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
 }
 
 // sameProviderIdentity reports whether two persisted spellings name the same
@@ -318,6 +366,9 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 		}
 	} else if !os.IsNotExist(err) {
 		return EnsuredProvider{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return EnsuredProvider{}, err
 	}
 	for _, provider := range cfg.Providers {
 		// Which persisted row already serves this catalog entry is a provider

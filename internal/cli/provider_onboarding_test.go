@@ -43,6 +43,52 @@ func TestRunProvidersUseSetsActiveProvider(t *testing.T) {
 	}
 }
 
+func TestRunProvidersRepairConfigRecoversLegacyUnnamedProvider(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			seed := []byte(`{"activeProvider":"legacy","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"}],"maxTurns":17}`)
+			if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}}); err == nil {
+				t.Fatal("legacy unnamed config unexpectedly resolved before repair")
+			}
+			args := []string{"providers", "repair-config"}
+			if jsonOutput {
+				args = append(args, "--json")
+			}
+			code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath))
+			if code != exitSuccess {
+				t.Fatalf("repair exit = %d, stderr=%q", code, stderr.String())
+			}
+			resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("repaired config does not resolve: %v", err)
+			}
+			if resolved.ActiveProvider != "legacy" || resolved.Provider.Name != "legacy" || resolved.Provider.Model != "gpt-4o" || resolved.MaxTurns != 17 {
+				t.Fatalf("resolved repaired config = %+v", resolved)
+			}
+			if jsonOutput {
+				var payload map[string]any
+				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || payload["repairedProvider"] != "legacy" {
+					t.Fatalf("repair JSON = %q, err=%v", stdout.String(), err)
+				}
+			} else if !strings.Contains(stdout.String(), "Named legacy provider legacy") {
+				t.Fatalf("repair output = %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

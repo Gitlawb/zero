@@ -416,6 +416,47 @@ func TestRunAuthLogoutRejectsAmbiguousConfigBeforeCredentialDeletion(t *testing.
 	}
 }
 
+func TestRunAuthLoginRejectsAmbiguousConfigBeforeTokenReplacement(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider string
+		args     []string
+	}{
+		{name: "generic", provider: "xai", args: []string{"auth", "login", "xai"}},
+		{name: "chatgpt", provider: "chatgpt", args: []string{"auth", "chatgpt"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			withAuthStore(t)
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			seed := []byte(`{"providers":[{"name":"xai"},{"name":"XAI"}]}`)
+			if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := oauth.NewStore(oauth.StoreOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := oauth.Token{AccessToken: "previous-access", RefreshToken: "previous-refresh", Account: "previous-account"}
+			if err := store.Save(oauth.ProviderKey(test.provider), previous); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := runWithDeps(test.args, &stdout, &stderr, appDeps{userConfigPath: func() (string, error) { return configPath, nil }})
+			if code != exitCrash || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+				t.Fatalf("login exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			stored, ok, err := store.Load(oauth.ProviderKey(test.provider))
+			if err != nil || !ok || stored.AccessToken != previous.AccessToken || stored.RefreshToken != previous.RefreshToken || stored.Account != previous.Account {
+				t.Fatalf("rejected login changed previous token: ok=%v err=%v", ok, err)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(after, seed) {
+				t.Fatalf("rejected login changed config: readErr=%v", err)
+			}
+		})
+	}
+}
+
 func TestRunAuthLogoutRejectsConfigPathFailureBeforeCredentialDeletion(t *testing.T) {
 	withAuthStore(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")

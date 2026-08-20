@@ -53,6 +53,14 @@ func ensureLoginProviderProfile(deps appDeps, provider string) string {
 	}
 }
 
+func preflightAuthLogin(deps appDeps) error {
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return err
+	}
+	return config.PreflightUserConfig(configPath)
+}
+
 // runAuth dispatches `zero auth <command>` for provider OAuth login. It is
 // additive and independent of `zero mcp oauth` (MCP server auth), which is
 // unchanged.
@@ -180,6 +188,9 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth chatgpt takes no arguments (got %q)", args[0]))
 	}
+	if err := preflightAuthLogin(deps); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
 
 	// Build the same env map the oauth engine reads so the chatgpt preset is
 	// opted into (the preset is off by default to keep third-party OAuth
@@ -214,6 +225,9 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	// the customized Token.Account field.
 	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now})
 	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := preflightAuthLogin(deps); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	if err := store.Save(oauth.ProviderKey("chatgpt"), token); err != nil {
@@ -376,6 +390,7 @@ func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
 		// `zero auth login <preset>` (e.g. xai) should resolve the baked-in preset
 		// without the operator exporting ZERO_OAUTH_ALLOW_PRESETS first.
 		AllowPresets: true,
+		BeforeSave:   func() error { return preflightAuthLogin(deps) },
 	})
 }
 
@@ -405,6 +420,9 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return writeExecUsageError(stderr, "ChatGPT login does not support --scope (the required scopes are fixed by the Codex client registration)")
 		}
 		return runAuthChatGPT(nil, stdout, stderr, deps)
+	}
+	if err := preflightAuthLogin(deps); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	manager, err := newAuthManager(deps, stdout)
 	if err != nil {

@@ -38,6 +38,11 @@ type providerSetupPlan struct {
 	EnvVar       string `json:"envVar"`
 }
 
+type providerRepairOptions struct {
+	name string
+	json bool
+}
+
 func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseProviderUseArgs(args)
 	if err != nil {
@@ -376,6 +381,84 @@ func parseProviderNamesArgs(args []string, want int, usage string) (providerName
 	}
 	if len(options.names) != want {
 		return options, false, execUsageError{usage}
+	}
+	return options, false, nil
+}
+
+func runProvidersRepairConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseProviderRepairArgs(args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeProvidersHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	cfg, err := config.RepairUnnamedProvider(configPath, options.name)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	repaired := ""
+	for _, provider := range cfg.Providers {
+		if options.name != "" && provider.Name == strings.TrimSpace(options.name) {
+			repaired = provider.Name
+			break
+		}
+	}
+	if repaired == "" {
+		repaired = strings.TrimSpace(options.name)
+		if repaired == "" {
+			repaired = strings.TrimSpace(cfg.ActiveProvider)
+		}
+		if repaired == "" {
+			repaired = "openai"
+		}
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, map[string]any{"repairedProvider": repaired, "configPath": configPath}); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Named legacy provider %s in %s\n", repaired, configPath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func parseProviderRepairArgs(args []string) (providerRepairOptions, bool, error) {
+	options := providerRepairOptions{}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			return options, true, nil
+		case arg == "--json":
+			options.json = true
+		case arg == "--name":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.name = value
+			index = next
+		case strings.HasPrefix(arg, "--name="):
+			value, err := requiredInlineFlagValue(arg, "--name")
+			if err != nil {
+				return options, false, err
+			}
+			options.name = value
+		case strings.HasPrefix(arg, "-"):
+			return options, false, execUsageError{fmt.Sprintf("unknown flag %q", arg)}
+		default:
+			return options, false, execUsageError{fmt.Sprintf("unexpected argument %q", arg)}
+		}
 	}
 	return options, false, nil
 }
