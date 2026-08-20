@@ -1074,14 +1074,22 @@ func TestResumeRefusesARelativePersistedWorkspace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// No cwd at all: the request that used to succeed by rebasing.
-	var out LoadSessionResult
-	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: "relative-ws"}, &out); err == nil {
-		t.Error("resuming a relative persisted workspace succeeded; the session was rebound to the ACP process directory")
-	}
-	// And an unrelated workspace must not be accepted as its home either.
+	// BOTH ACTIVATING METHODS, not just one. session/load and session/resume are
+	// separate entry points that today share activatePersistedSession — so a test
+	// through either passes while the guard holds. Naming both here is what keeps
+	// that true: if resume is ever given its own path, this fails rather than
+	// silently covering half the surface it claims to.
 	elsewhere := t.TempDir()
-	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: "relative-ws", Cwd: elsewhere}, &out); err == nil {
-		t.Errorf("resuming a relative persisted workspace into %q succeeded", elsewhere)
+	var out LoadSessionResult
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		// No cwd at all: the request that used to succeed by rebasing onto
+		// whatever directory this process happens to be running in.
+		if err := h.client.Call(ctx, method, LoadSessionParams{SessionID: "relative-ws"}, &out); err == nil {
+			t.Errorf("%s of a relative persisted workspace succeeded; the session was rebound to the ACP process directory", method)
+		}
+		// And an unrelated workspace must not be accepted as its home either.
+		if err := h.client.Call(ctx, method, ResumeSessionParams{SessionID: "relative-ws", Cwd: elsewhere}, &out); err == nil {
+			t.Errorf("%s of a relative persisted workspace into %q succeeded", method, elsewhere)
+		}
 	}
 }
