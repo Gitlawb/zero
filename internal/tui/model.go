@@ -85,6 +85,7 @@ type model struct {
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
+	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
@@ -980,6 +981,7 @@ func newModel(ctx context.Context, options Options) model {
 		recapsEnabled:               options.RecapsEnabled,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
+		newTurnSessionProvider:      options.NewTurnSessionProvider,
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
@@ -5469,6 +5471,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd
 		options.Images = images
+		if m.newTurnSessionProvider != nil && m.provider != nil {
+			options.TurnSessionProvider = m.newTurnSessionProvider(m.providerProfile, m.provider)
+		}
 		if m.captureRunImages != nil {
 			m.captureRunImages(images)
 		}

@@ -25,6 +25,25 @@ func TestToolCallKeyOutputIndexZero(t *testing.T) {
 	}
 }
 
+func TestResponsesStatePreservesDistinctCallID(t *testing.T) {
+	provider := &CodexProvider{}
+	state := newResponsesState()
+	events := make(chan zeroruntime.StreamEvent, 4)
+	provider.handleOutputItemAdded(context.Background(), &responsesEvent{
+		ItemID: "item-1",
+		Item: &itemPayload{
+			Type:   "function_call",
+			ID:     "item-1",
+			CallID: "call-1",
+			Name:   "read_file",
+		},
+	}, state, events)
+	items := state.outputInputItems()
+	if len(items) != 1 || items[0].ID != "item-1" || items[0].CallID != "call-1" {
+		t.Fatalf("captured function call = %#v, want item id item-1 and call id call-1", items)
+	}
+}
+
 func TestHandleTerminalResponseNilPayload(t *testing.T) {
 	p := &CodexProvider{}
 
@@ -90,11 +109,14 @@ func TestHandleTerminalResponseFailedPayloadWithoutError(t *testing.T) {
 	// A response.completed with a payload and no error remains a clean done.
 	ok := make(chan zeroruntime.StreamEvent, 8)
 	p.handleTerminalResponse(context.Background(),
-		&responsesEvent{Type: responsesEventCompleted, Response: &responsePayload{Status: "completed"}}, &responsesState{}, ok)
+		&responsesEvent{Type: responsesEventCompleted, Response: &responsePayload{ID: "resp-1", Status: "completed"}}, &responsesState{}, ok)
 	close(ok)
 	for ev := range ok {
 		if ev.Type == zeroruntime.StreamEventError {
 			t.Error("response.completed with a non-error payload must NOT emit an error")
+		}
+		if ev.Type == zeroruntime.StreamEventDone && ev.ResponseID != "resp-1" {
+			t.Errorf("done response id = %q, want resp-1", ev.ResponseID)
 		}
 	}
 }

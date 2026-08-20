@@ -72,15 +72,19 @@ const (
 
 // responsesRequest is the wire shape POSTed to {baseURL}/responses.
 type responsesRequest struct {
-	Model           string              `json:"model"`
-	Instructions    string              `json:"instructions"`
-	Input           []inputItem         `json:"input"`
-	Stream          bool                `json:"stream"`
-	Store           bool                `json:"store"`
-	MaxOutputTokens int                 `json:"max_output_tokens,omitempty"`
-	Tools           []responsesTool     `json:"tools,omitempty"`
-	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`
-	ServiceTier     string              `json:"service_tier,omitempty"`
+	Type               string              `json:"type,omitempty"`
+	Model              string              `json:"model"`
+	Instructions       string              `json:"instructions"`
+	PreviousResponseID string              `json:"previous_response_id,omitempty"`
+	Input              []inputItem         `json:"input"`
+	Stream             bool                `json:"stream"`
+	Store              bool                `json:"store"`
+	ParallelToolCalls  bool                `json:"parallel_tool_calls"`
+	MaxOutputTokens    int                 `json:"max_output_tokens,omitempty"`
+	Tools              []responsesTool     `json:"tools,omitempty"`
+	Reasoning          *responsesReasoning `json:"reasoning,omitempty"`
+	ServiceTier        string              `json:"service_tier,omitempty"`
+	PromptCacheKey     string              `json:"prompt_cache_key,omitempty"`
 }
 
 // responsesReasoning carries the reasoning controls for the Responses API. The
@@ -187,6 +191,7 @@ type errorPayload struct {
 // response.output_item.done.
 type toolCallBuilder struct {
 	ID        string
+	CallID    string
 	Name      string
 	Arguments strings.Builder
 	started   bool
@@ -197,13 +202,46 @@ type toolCallBuilder struct {
 // event has been emitted. It is the Responses-API equivalent of the
 // chat-completions toolState in provider.go.
 type responsesState struct {
-	toolCalls map[string]*toolCallBuilder
-	usage     *usagePayload
-	done      bool
+	toolCalls  map[string]*toolCallBuilder
+	toolOrder  []string
+	text       strings.Builder
+	responseID string
+	usage      *usagePayload
+	emitted    bool
+	done       bool
 }
 
 func newResponsesState() *responsesState {
 	return &responsesState{toolCalls: map[string]*toolCallBuilder{}}
+}
+
+func (state *responsesState) outputInputItems() []inputItem {
+	items := make([]inputItem, 0, len(state.toolOrder)+1)
+	if state.text.Len() > 0 {
+		items = append(items, inputItem{
+			Type:    "message",
+			Role:    "assistant",
+			Content: []contentItem{{Type: "output_text", Text: state.text.String()}},
+		})
+	}
+	for _, key := range state.toolOrder {
+		builder := state.toolCalls[key]
+		if builder == nil || builder.ID == "" || builder.Name == "" {
+			continue
+		}
+		callID := builder.CallID
+		if callID == "" {
+			callID = builder.ID
+		}
+		items = append(items, inputItem{
+			Type:      "function_call",
+			ID:        builder.ID,
+			CallID:    callID,
+			Name:      builder.Name,
+			Arguments: builder.Arguments.String(),
+		})
+	}
+	return items
 }
 
 // buildResponsesRequest converts a runtime CompletionRequest into the
@@ -215,9 +253,11 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 		return nil, errors.New("codex provider: model is required")
 	}
 	req := &responsesRequest{
-		Model:           p.inner.model,
-		Stream:          true,
-		MaxOutputTokens: p.inner.maxTokens,
+		Model:             p.inner.model,
+		Stream:            true,
+		ParallelToolCalls: true,
+		MaxOutputTokens:   p.inner.maxTokens,
+		PromptCacheKey:    request.PromptCacheKey,
 	}
 	instructions := []string{}
 	for _, msg := range request.Messages {
@@ -500,12 +540,17 @@ func (p *CodexProvider) emitResponsesEvent(
 		// the runtime. response.incomplete is folded into a length finish at
 		// scan-end (state.done stays false so the wrapper emits the
 		// StreamEventDone with FinishReasonLength).
+		if event.Response != nil && event.Response.ID != "" {
+			state.responseID = event.Response.ID
+		}
 		return true
 	case responsesEventOutputItemAdded:
 		p.handleOutputItemAdded(ctx, &event, state, events)
 		return true
 	case responsesEventOutputTextDelta:
 		if event.Delta != "" {
+			state.emitted = true
+			state.text.WriteString(event.Delta)
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:    zeroruntime.StreamEventText,
 				Content: event.Delta,
@@ -517,6 +562,7 @@ func (p *CodexProvider) emitResponsesEvent(
 		// phase shows progress (and keeps the activity clock fresh) instead of
 		// looking like a hang. Requested via reasoning.summary="auto".
 		if event.Delta != "" {
+			state.emitted = true
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:    zeroruntime.StreamEventReasoning,
 				Content: event.Delta,
@@ -575,17 +621,27 @@ func (p *CodexProvider) handleOutputItemAdded(
 		if key == "" {
 			return
 		}
-		builder := &toolCallBuilder{
-			ID:   key,
-			Name: event.Item.Name,
+		builder, exists := state.toolCalls[key]
+		if !exists {
+			builder = &toolCallBuilder{ID: key}
+			state.toolCalls[key] = builder
+			state.toolOrder = append(state.toolOrder, key)
 		}
-		state.toolCalls[key] = builder
-		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
-			Type:       zeroruntime.StreamEventToolCallStart,
-			ToolCallID: key,
-			ToolName:   event.Item.Name,
-		})
-		builder.started = true
+		if event.Item.CallID != "" {
+			builder.CallID = event.Item.CallID
+		}
+		if event.Item.Name != "" {
+			builder.Name = event.Item.Name
+		}
+		state.emitted = true
+		if !builder.started {
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+				Type:       zeroruntime.StreamEventToolCallStart,
+				ToolCallID: key,
+				ToolName:   builder.Name,
+			})
+			builder.started = true
+		}
 	}
 }
 
@@ -612,8 +668,10 @@ func (p *CodexProvider) handleFunctionArgsDelta(
 		// response.output_item.done carries the final name.
 		builder = &toolCallBuilder{ID: key}
 		state.toolCalls[key] = builder
+		state.toolOrder = append(state.toolOrder, key)
 	}
 	builder.Arguments.WriteString(event.Delta)
+	state.emitted = true
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 		Type:              zeroruntime.StreamEventToolCallDelta,
 		ToolCallID:        key,
@@ -643,9 +701,13 @@ func (p *CodexProvider) handleOutputItemDone(
 	if !ok {
 		builder = &toolCallBuilder{ID: key}
 		state.toolCalls[key] = builder
+		state.toolOrder = append(state.toolOrder, key)
 	}
 	if event.Item.Name != "" {
 		builder.Name = event.Item.Name
+	}
+	if event.Item.CallID != "" {
+		builder.CallID = event.Item.CallID
 	}
 	if event.Item.Arguments != "" && builder.Arguments.Len() == 0 {
 		builder.Arguments.WriteString(event.Item.Arguments)
@@ -664,6 +726,7 @@ func (p *CodexProvider) handleOutputItemDone(
 		ToolName:   builder.Name,
 	})
 	builder.ended = true
+	state.emitted = true
 }
 
 // handleTerminalResponse emits the final usage + done event for a
@@ -693,6 +756,7 @@ func (p *CodexProvider) handleTerminalResponse(
 		return false
 	}
 	state.usage = event.Response.Usage
+	state.responseID = event.Response.ID
 	if event.Response.Usage != nil {
 		usage := zeroruntime.Usage{
 			InputTokens:  event.Response.Usage.InputTokens,
@@ -735,7 +799,7 @@ func (p *CodexProvider) handleTerminalResponse(
 		state.done = true
 		return false
 	}
-	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, ResponseID: event.Response.ID})
 	state.done = true
 	return false
 }
