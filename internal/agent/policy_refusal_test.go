@@ -24,12 +24,26 @@ func TestUncategorizedPolicyRefusalsAreCounted(t *testing.T) {
 		result ToolResult
 	}{
 		{
-			name:   "headless prompt refusal carries no category",
-			result: ToolResult{Status: tools.StatusError, Output: `Error: Permission required for bash: The tool is marked "prompt" and was not executed.`},
+			// Still uncategorized in the DenialReason sense: a headless run never
+			// reaches the branch that builds a typed denial. It carries the
+			// registry's pre-execution marker instead, which is what makes it
+			// classifiable without reading the message.
+			name: "headless prompt refusal carries no denial category",
+			result: ToolResult{
+				Status: tools.StatusError,
+				Output: `Error: Permission required for bash: The tool is marked "prompt" and was not executed.`,
+				Meta:   map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalPermissionRequired},
+			},
 		},
 		{
-			name:   "sandbox preflight denial loses its decision in conversion",
-			result: ToolResult{Status: tools.StatusError, Output: "Sandbox block: write outside the workspace"},
+			// The SandboxDecision is still dropped in the conversion for a
+			// non-shell tool; the marker is what survives it.
+			name: "sandbox preflight denial loses its decision in conversion",
+			result: ToolResult{
+				Status: tools.StatusError,
+				Output: "Sandbox block: write outside the workspace",
+				Meta:   map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalSandboxDenied},
+			},
 		},
 		{
 			name:   "an explicitly denied permission action",
