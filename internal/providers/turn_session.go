@@ -40,7 +40,7 @@ func chatGPTTurnSessionEnabled() bool {
 // gateways and foreign provider values always retain the default adapter.
 func OptimizedTurnSessions(profile config.ProviderProfile, provider zeroruntime.Provider, options Options) (zeroruntime.TurnSessionProvider, bool) {
 	resolved, err := resolveProfile(profile, options)
-	if err != nil || resolved.providerKind != config.ProviderKindOpenAI {
+	if err != nil {
 		return nil, false
 	}
 	if isCodexCatalog(profile, resolved) {
@@ -56,6 +56,9 @@ func OptimizedTurnSessions(profile config.ProviderProfile, provider zeroruntime.
 			return nil, false
 		}
 		return openai.NewCodexTurnSessionProvider(concrete, caps), true
+	}
+	if resolved.providerKind != config.ProviderKindOpenAI {
+		return nil, false
 	}
 	if !openaiTurnSessionEnabled() {
 		return nil, false

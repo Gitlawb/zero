@@ -114,6 +114,17 @@ func TestOptimizedTurnSessionsEnablesChatGPTResponsesByDefault(t *testing.T) {
 	}
 }
 
+func TestOptimizedTurnSessionsRecognizesCompatibleLabeledChatGPTProfile(t *testing.T) {
+	t.Setenv(chatGPTTurnSessionEnv, "")
+	profile := openaiEligibleProfile()
+	profile.Name = "chatgpt"
+	profile.CatalogID = "chatgpt"
+	profile.ProviderKind = config.ProviderKindOpenAICompatible
+	if turnSessions, ok := OptimizedTurnSessions(profile, buildChatGPTGateProvider(t, profile), Options{}); !ok || turnSessions == nil {
+		t.Fatal("ChatGPT catalog profile must use its native session regardless of the stored compatibility label")
+	}
+}
+
 func buildChatGPTGateProvider(t *testing.T, profile config.ProviderProfile) *openai.CodexProvider {
 	t.Helper()
 	provider, err := openai.NewCodexProvider(openai.CodexOptions{
