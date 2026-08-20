@@ -33,13 +33,28 @@ var (
 	// unparseableNetworkPattern is used only after the shell parser fails. At
 	// that point the command is already marked too complex, so this intentionally
 	// favors catching obvious network programs over proving exact shell syntax.
-	// The unparseable fallback must agree with the analyzer, or an obfuscated
-	// command gets flagged for network when the same command written plainly
-	// does not. The local-server programs and `python -m http.server` are
-	// therefore absent here too: they bind a port, they do not fetch. The
-	// subcommands that genuinely reach out (install, add, publish, login) stay,
-	// including for the same package managers whose dev and serve do not.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|exec|x|dlx)\b|\bgo\s+get\b|\bgit\s+clone\b|\bpython(2|3)?\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
+	//
+	// IT MUST BE A SUPERSET OF WHAT THE AST PATH FLAGS FOR NETWORK, not a mirror
+	// of the analyzer's category names. The serving forms were dropped from here
+	// on the reasoning that they bind rather than fetch, but the analyzer sets
+	// Network for every recognized LocalServer anyway, deliberately and for two
+	// reasons it documents: nothing consumes LocalServer yet, so the approval IS
+	// the protection, and `npm run dev` is matched by SCRIPT NAME, where the
+	// repository decides what `dev` and `predev` actually do and either can reach
+	// out before a port is bound.
+	//
+	// So dropping them here did not align the two paths, it split them. The POSIX
+	// parser rejects Windows shell syntax the invoked shell accepts, and the
+	// analyzer names that as a fallback case, so:
+	//
+	//	if "%OS%"=="Windows_NT" (npm run dev) else (npm start)
+	//	  -> parsed=false network=false categories=[shell unparseable_command]
+	//
+	// while every parseable spelling of the same command gets network. That is
+	// the approval gate disappearing on exactly the platform where it is the only
+	// egress control. Restored until a runner actually provides a scoped listener
+	// capability and the AST path stops setting Network for these itself.
+	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|exec|x|dlx)\b|\b(npm|pnpm|yarn|bun)\s+(run|dev|serve|start|preview)\b|\b(http-server|serve|vite|next|nuxt|astro)\b|\bpython(2|3)?\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\bpython(2|3)?\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.

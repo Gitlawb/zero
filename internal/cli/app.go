@@ -378,7 +378,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// so check for it across all of rest before rejecting stray args.
 		for _, arg := range rest {
 			if arg == "--add-dir" || strings.HasPrefix(arg, "--add-dir=") {
-				return writeAppError(stderr, "--add-dir must come before any other arguments (it may precede or follow --skip-permissions-unsafe)", 1)
+				return writeAppError(stderr, "--add-dir must come before any other arguments (it may precede or follow --full-auto)", 1)
 			}
 		}
 		// This path launches the interactive TUI, which takes no positional prompt or
@@ -387,7 +387,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// hang in the TUI with the prompt discarded. (AUDIT-L3)
 		for _, arg := range rest {
 			if strings.TrimSpace(arg) != "" {
-				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `zero exec --skip-permissions-unsafe -p \"...\"`", 1)
+				return writeAppError(stderr, "--full-auto launches the interactive TUI and takes no prompt or subcommand; for a one-shot full-auto run use `zero exec --full-auto -p \"...\"`", 1)
 			}
 		}
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeFullAuto, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
@@ -1232,7 +1232,7 @@ func specialistSummaries(paths specialist.Paths) []agent.SpecialistInfo {
 	return summaries
 }
 
-func shouldRegisterExecSpecialistTools(options execOptions) bool {
+func shouldRegisterExecSpecialistTools(options execOptions, resolved agent.PermissionMode) bool {
 	if options.useSpec {
 		return false
 	}
@@ -1244,6 +1244,14 @@ func shouldRegisterExecSpecialistTools(options execOptions) bool {
 	// ones, so a non-trivial exec can auto-delegate exploration safely (a headless
 	// write spawn still gets denied at the prompt). Default "low" stays clean — no
 	// specialist tooling or swarm runtime for trivial/CI one-shots.
+	// The RESOLVED mode decides, not the raw flags. Every spelling that reaches
+	// full-auto (`--full-auto`, `--skip-permissions-unsafe`, `--auto high`,
+	// `--permission-mode full-auto|full_auto|unsafe|high`) resolves to the same
+	// value, so a new alias cannot create an unequal capability set the way
+	// `--permission-mode full-auto` did.
+	if resolved == agent.PermissionModeUnsafe {
+		return true
+	}
 	autonomy := strings.ToLower(strings.TrimSpace(options.autonomy))
 	return options.skipPermissionsUnsafe || autonomy == "high" || autonomy == "medium"
 }
@@ -1489,13 +1497,14 @@ Flags:
                                     Override draft reasoning effort when --use-spec is set
       --plan                         Read-only planning mode: write and shell tools are hidden
       --permission-mode <mode>       Set permission mode directly (plan, spec-draft, auto, member,
-                                    ask, unsafe). Outranks --auto; prefer --plan / --auto for
+                                    ask, full-auto). Outranks --auto; prefer --plan / --auto for
                                     interactive use. Used by specialist/swarm child processes.
       --max-turns <number>           Override the maximum agent loop turns
       --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
                                     posture only (turn budget, effort, self-correction, escalation);
                                     composes with --mode (which picks the model) and explicit flags win
-      --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
+      --auto <low|medium|high>       Set exec autonomy; high is full-auto (prompt-gated tools run
+                                    without approval)
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools
       --list-tools                   List model-visible tools and exit

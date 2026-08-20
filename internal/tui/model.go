@@ -1452,6 +1452,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case providerManagerCleanupMsg:
 		return m.applyProviderManagerCleanup(msg)
 	case clipboardReadMsg:
+		// DEFERRED INPUT IS STILL INPUT, and it cancels the offer exactly as a
+		// synchronous paste does. tea.PasteMsg below clears the arm for this
+		// reason, but a right-click paste does not arrive that way: it starts
+		// pasteFromClipboardCmd, the OS clipboard read takes time, and Shift+Tab
+		// can reach the full-auto offer while it is in flight. The result then
+		// lands here, inserts text through routePaste, and left the arm alive, so
+		// an ordinary ctrl+g afterwards silently entered full-auto with the user
+		// several actions past the confirmation they were offered.
+		//
+		// Cleared before the branches rather than inside them, because a failed
+		// read and an empty-clipboard image probe are both still the completion
+		// of an input action the user started.
+		m.unsafeArmed = false
 		// Result of a right-click paste. Insert on success; surface a brief
 		// status if the clipboard couldn't be read (e.g. no clipboard utility on
 		// a remote session). An empty clipboard is a silent no-op.
@@ -1469,6 +1482,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.routePaste(msg.content)
 	case clipboardImageMsg:
+		// Same rule as clipboardReadMsg: this is the tail of a paste the user
+		// started, arriving late. Attaching an image is input.
+		m.unsafeArmed = false
 		if msg.err != nil {
 			return m.appendImageNotice("Clipboard image read failed: " + msg.err.Error()), nil
 		}
@@ -1492,6 +1508,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dictationStartedMsg:
 		return m.handleDictationStarted(msg)
 	case dictationTranscribedMsg:
+		// Transcribed speech is committed into the composer, so it is deferred
+		// input on the same rule as the clipboard deliveries above. Starting
+		// dictation is a keypress and already clears the arm; this covers the
+		// delivery that lands afterwards.
+		m.unsafeArmed = false
 		return m.handleDictationTranscribed(msg)
 	case sttPartialMsg:
 		return m.handleDictationPartial(msg), nil
