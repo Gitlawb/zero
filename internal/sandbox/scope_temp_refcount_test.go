@@ -239,6 +239,53 @@ func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 			t.Error("a narrower permanent grant died with the broader temporary root it sat under")
 		}
 	})
+
+	// THE READ MIRROR OF BOTH SHAPES ABOVE. AddRead makes two claims that the
+	// subtests so far only made for Add: the loop over extraRoots skips coverage
+	// that is a temporary WRITE, and the loop over readRoots skips coverage that
+	// is a temporary READ. Each claim is a separate branch, and neither was
+	// exercised from the read side.
+	t.Run("permanent read under a temporary write", func(t *testing.T) {
+		workspace, outside := scopeOutsideRoots(t)
+		scope, err := NewScope(workspace, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, releaseWrite, err := scope.AddTemporaryWrite(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := scope.AddRead(outside); err != nil {
+			t.Fatal(err)
+		}
+		releaseWrite()
+		if !hasReadRoot(scope, outside) {
+			t.Error("a temporary write holder's release revoked a permanent read grant")
+		}
+	})
+
+	t.Run("broad temporary read over narrow permanent read", func(t *testing.T) {
+		workspace, outside := scopeOutsideRoots(t)
+		inner := filepath.Join(outside, "inner")
+		if err := os.MkdirAll(inner, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		scope, err := NewScope(workspace, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, releaseBroad, err := scope.AddTemporaryRead(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := scope.AddRead(inner); err != nil {
+			t.Fatal(err)
+		}
+		releaseBroad()
+		if block := scope.validateRead(filepath.Join(inner, "audit-me.go")); block != nil {
+			t.Errorf("a narrower permanent read died with the broader temporary read it sat under: %v", block)
+		}
+	})
 }
 
 // ONE HOLDER'S UNDO DROPS ONE HOLDER'S REFERENCE, HOWEVER OFTEN IT IS CALLED.

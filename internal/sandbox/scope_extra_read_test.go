@@ -13,15 +13,7 @@ import (
 // path but cannot modify it. Emitting the grant as a WRITE root (--add-dir) would
 // break exactly this.
 func TestAReadGrantIsReadableButNotWritable(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home directory to place a non-temp grant under")
-	}
-	granted, err := os.MkdirTemp(home, "zero-scope-ro-")
-	if err != nil {
-		t.Fatalf("mkdir under home: %v", err)
-	}
-	defer os.RemoveAll(granted)
+	granted := homeGrantOutsideTempRoots(t, "zero-scope-ro-")
 
 	scope, err := NewScope(t.TempDir(), nil)
 	if err != nil {
@@ -50,15 +42,7 @@ func TestAReadGrantIsReadableButNotWritable(t *testing.T) {
 // NewScope seeds as write roots: a t.TempDir() grant would collapse into them and
 // prove nothing.
 func TestExtraReadRootsCarriesAReadGrantThatExtraRootsOmits(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home directory to place a non-temp grant under")
-	}
-	readGrant, err := os.MkdirTemp(home, "zero-scope-read-")
-	if err != nil {
-		t.Fatalf("mkdir under home: %v", err)
-	}
-	defer os.RemoveAll(readGrant)
+	readGrant := homeGrantOutsideTempRoots(t, "zero-scope-read-")
 
 	scope, err := NewScope(t.TempDir(), nil)
 	if err != nil {
@@ -80,4 +64,44 @@ func TestExtraReadRootsCarriesAReadGrantThatExtraRootsOmits(t *testing.T) {
 		t.Fatalf("ExtraReadRoots included the workspace root %q — a worktree child would re-open the parent tree",
 			scope.WorkspaceRoot())
 	}
+}
+
+// homeGrantOutsideTempRoots builds the fixture both tests in this file need: a
+// directory that AddRead can grant and that is NOT already a write root.
+//
+// THE ASSUMPTION WAS NEVER CHECKED. Both tests place the grant under $HOME
+// precisely because NewScope seeds /tmp and $TMPDIR as write roots, and a grant
+// that collapsed into one of those would be writable for a reason that has
+// nothing to do with the property under test — the anti-escalation assertion
+// would pass, or fail, on the fixture rather than on the code. $HOME is normally
+// well clear of them, but it is not guaranteed to be: a sandboxed or CI
+// environment that points HOME at a temp directory turns both tests into
+// something that proves nothing while still reporting PASS.
+//
+// Resolved before comparing, because the temp roots are themselves resolved and
+// on macOS /var is a symlink to /private/var — comparing the unresolved path
+// against a resolved root reports "outside" for a directory that is inside.
+func homeGrantOutsideTempRoots(t *testing.T, prefix string) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory to place a non-temp grant under")
+	}
+	granted, err := os.MkdirTemp(home, prefix)
+	if err != nil {
+		t.Fatalf("mkdir under home: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(granted) })
+
+	resolved, err := filepath.EvalSymlinks(granted)
+	if err != nil {
+		t.Fatalf("resolve %q: %v", granted, err)
+	}
+	for _, root := range defaultTempWriteRoots() {
+		if pathWithinRoot(root, resolved) {
+			t.Skipf("home directory %q lies under the default temp write root %q, so a grant there is already writable and proves nothing",
+				home, root)
+		}
+	}
+	return granted
 }
