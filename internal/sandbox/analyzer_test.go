@@ -128,9 +128,13 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "bash dump strings does not execute", script: `bash --dump-strings -c 'curl https://x.test'`, network: false},
 		{name: "shell dynamic command payload fails closed", script: `sh -c "$ZERO_TEST_SHELL_COMMAND"`, network: true},
 		{name: "nested shell dynamic command payload fails closed", script: `sh -c 'sh -c "$1"' sh 'curl https://x.test'`, network: true},
+		{name: "shell command terminator before dynamic payload fails closed", script: `PAYLOAD='curl https://x.test'; sh -c -- "$PAYLOAD"`, network: true},
+		{name: "env split shell terminator selects payload", script: `env -S 'sh -c' -- 'curl https://x.test'`, network: true},
 		{name: "PowerShell slash command", script: `powershell /Command Invoke-WebRequest https://x.test`, network: true},
 		{name: "PowerShell abbreviated command", script: `pwsh -co iwr https://x.test`, network: true},
 		{name: "PowerShell local command", script: `pwsh /Command Get-ChildItem`, network: false},
+		{name: "PowerShell backtick command name fails closed", script: "powershell -Command 'Invoke`-WebRequest https://x.test'", network: true},
+		{name: "PowerShell backtick continuation fails closed", script: "powershell -Command 'Invoke`\n-WebRequest https://x.test'", network: true},
 		{name: "PowerShell abbreviated execution policy", script: `powershell -ep RemoteSigned curl https://x.test`, network: true},
 		{name: "pwsh abbreviated execution policy before command", script: `pwsh -ep Bypass -Command curl https://x.test`, network: true},
 		{name: "Windows PowerShell bare command", script: `powershell Invoke-WebRequest https://x.test`, network: true},
@@ -165,13 +169,16 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "busybox wget applet", script: `busybox wget https://x.test`, network: true},
 		{name: "busybox shell command", script: `busybox sh -c 'curl https://x.test'`, network: true},
 		{name: "busybox echo network text", script: `busybox echo wget https://x.test`, network: false},
-		{name: "busybox has no option terminator", script: `busybox -- curl https://x.test`, network: false},
-		{name: "busybox unknown option", script: `busybox -x curl https://x.test`, network: false},
+		{name: "busybox option terminator is unresolved", script: `busybox -- curl https://x.test`, network: true},
+		{name: "busybox unknown option is unresolved", script: `busybox -x curl https://x.test`, network: true},
 		// The applet name comes from a shell expansion this scan cannot read
 		// statically; wordText silently drops it, so the AST resolver must fail
 		// closed here rather than reading the blanked token as a clean unknown.
 		{name: "busybox dynamic applet fails closed", script: `APPLET=curl; busybox "$APPLET" https://x.test`, network: true},
 		{name: "busybox literal applet stays classified on content", script: `busybox echo "not a program" https://x.test`, network: false},
+		{name: "busybox ordinary env wrapper", script: `busybox env curl https://x.test`, network: true},
+		{name: "busybox env split wrapper", script: `busybox env -S 'git push origin main'`, network: true},
+		{name: "busybox ordinary env local control", script: `busybox env true`, network: false},
 		{name: "strace curl command", script: `strace -f -o trace.log curl https://x.test`, network: true},
 		{name: "strace shell command", script: `strace sh -c 'git push origin main'`, network: true},
 		{name: "strace trace path before curl", script: `strace -P /tmp curl https://x.test`, network: true},
@@ -180,15 +187,20 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "strace long trace option", script: `strace --trace network curl https://x.test`, network: true},
 		{name: "strace tips traces curl", script: `strace --tips curl https://x.test`, network: true},
 		{name: "strace joined tips traces git", script: `strace --tips=full git push origin main`, network: true},
+		{name: "strace abbreviated tips traces curl", script: `strace --tip curl https://x.test`, network: true},
+		{name: "strace ambiguous long option is unresolved", script: `strace --ver curl https://x.test`, network: true},
 		{name: "strace clustered options", script: `strace -fqo trace.log curl https://x.test`, network: true},
 		{name: "strace output named curl", script: `strace -o curl true`, network: false},
-		{name: "strace invalid option", script: `strace --definitely-invalid curl https://x.test`, network: false},
+		{name: "strace invalid option is unresolved", script: `strace --definitely-invalid curl https://x.test`, network: true},
 		// The traced command comes from a shell expansion this scan cannot read
 		// statically; straceSourceDynamic must fail closed the same way
 		// busyboxSourceDynamic does above, rather than reading the blanked token
 		// as a clean unknown command.
 		{name: "strace dynamic child fails closed", script: `APPLET=curl; strace "$APPLET" https://x.test`, network: true},
 		{name: "strace literal child stays classified on content", script: `strace true "not a program" https://x.test`, network: false},
+		{name: "strace ordinary env wrapper", script: `strace env curl https://x.test`, network: true},
+		{name: "strace env split wrapper", script: `strace env -S 'git push origin main'`, network: true},
+		{name: "strace ordinary env local control", script: `strace env true`, network: false},
 		{name: "git local commit", script: `git commit -m "local change"`, network: false},
 		// git's value-taking global options put their value in the NEXT token, so a
 		// generic "first non-dash token" scan reads the value as the subcommand and
