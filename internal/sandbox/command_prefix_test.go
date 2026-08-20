@@ -19,7 +19,8 @@ func TestUnsafeCommandPrefixLauncherIgnoresVersionAndExtension(t *testing.T) {
 		"python3.13t", "python3.13t.exe", "python3.14t", "python3.13td",
 		// Distribution and build-channel spellings of the same interpreter.
 		"nodejs", "nodejs.exe", "node-nightly", "python3-dbg", "python3.11-dbg",
-		"python3.13t-dbg", "pwsh-preview", "bash-static", "sudoedit",
+		"python3.13t-dbg", "python3-debug", "python3.11-debug", "node-beta",
+		"pwsh-preview", "bash-static", "sudoedit",
 		// Twins of npm and npx, which the list already refuses.
 		"pnpm", "yarn", "bunx", "pnpm.cmd", "yarn.exe",
 		"perl5.36", "ruby3.2", "php8", "lua5.4", "node22.exe", "bash5",
