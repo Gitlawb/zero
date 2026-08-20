@@ -19,39 +19,53 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	}
 	// Provisions the runtime candidate roots, then builds the plan that grants
 	// them. One call because a granted-but-absent write root fails the whole apply.
-	plan, err := buildWindowsSandboxSetupACLPlan(config)
-	if err != nil {
-		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+	plan, runtimeRollback, err := buildWindowsSandboxSetupACLPlan(config)
+	// SETUP IS TRANSACTIONAL FOR THE STATE IT CREATED. Runtime roots are
+	// materialized before the network plan, the ACL apply, the network apply and
+	// the marker write, and every one of those can fail. Previously only ACL
+	// snapshots were restored, so a run that reported failure still left new
+	// persistent runtime directories behind, and it could not have cleaned them up
+	// even in principle because provisioning returned nothing about what it made.
+	//
+	// Composed once here so no later failure path can forget it. It removes only
+	// directories THIS run created, innermost first, and refuses to remove a
+	// non-empty one, so a pre-existing cache or temp tree is never touched.
+	failed := func(cause error) int {
+		if rollbackErr := runtimeRollback.run(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: %v; runtime rollback failed: %v\n", WindowsSandboxSetupName, cause, rollbackErr)
+			return 1
+		}
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+cause.Error())
 		return 1
+	}
+	if err != nil {
+		return failed(err)
 	}
 	// Always provision the mode-INDEPENDENT infrastructure: the outbound block
 	// filters scoped to the offline-marker SID. Runtime gates network per command
 	// by whether the token carries that SID, so one setup serves both modes.
 	networkPlan, err := BuildWindowsNetworkInfraPlan(config.commandConfig())
 	if err != nil {
-		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 1
+		return failed(err)
 	}
 	rollback, err := applyWindowsACLPlan(plan)
 	if err != nil {
-		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 1
+		return failed(err)
+	}
+	// From here both have to be undone, ACLs first so the directories are empty
+	// of our grants before they are removed.
+	failedAfterACL := func(cause error) int {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, cause, rollbackErr)
+			return 1
+		}
+		return failed(cause)
 	}
 	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
-		if rollbackErr := rollback(); rollbackErr != nil {
-			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
-			return 1
-		}
-		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 1
+		return failedAfterACL(err)
 	}
 	if _, err := WriteWindowsSandboxSetupMarker(config); err != nil {
-		if rollbackErr := rollback(); rollbackErr != nil {
-			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
-			return 1
-		}
-		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 1
+		return failedAfterACL(err)
 	}
 	return 0
 }

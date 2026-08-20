@@ -8,10 +8,21 @@ import (
 
 // runtimeRootTestConfig is the shape every command reaches the Windows runner
 // with: a restricted filesystem rooted at the workspace, which is what makes the
-// runtime root necessary in the first place.
+// runtime root necessary in the first place. Its derivation lands entirely
+// inside test-owned storage.
+//
+// EVERY DERIVATION INPUT IS REDIRECTED BEFORE ANY CANDIDATE IS COMPUTED, which
+// is the whole point of routing through windowsRuntimeTestRoots rather than
+// taking a bare t.TempDir(). Without it, windowsSandboxRuntimeRoots reads the
+// real user cache: tests below then create and RemoveAll a genuine
+// ~/.cache/zero/runtime/... path, deleting the developer's own runtime tree on
+// every run, and failing outright on a read-only home before they ever reach an
+// assertion. The fixture also refuses to run at all if a candidate escapes the
+// owned roots, so a later change to the derivation cannot quietly reintroduce
+// this.
 func runtimeRootTestConfig(t *testing.T) WindowsSandboxCommandConfig {
 	t.Helper()
-	workspace := t.TempDir()
+	workspace, _ := windowsRuntimeTestRoots(t)
 	return WindowsSandboxCommandConfig{
 		SandboxHome:    t.TempDir(),
 		CommandCWD:     workspace,
@@ -171,7 +182,7 @@ func TestWindowsSandboxSetupProvisionsEveryGrantedWriteRoot(t *testing.T) {
 		t.Cleanup(func() { _ = os.RemoveAll(candidate) })
 	}
 
-	if err := ensureWindowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots); err != nil {
+	if _, err := ensureWindowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots); err != nil {
 		t.Fatalf("ensureWindowsSandboxRuntimeCandidates: %v", err)
 	}
 
