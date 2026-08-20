@@ -185,12 +185,12 @@ func bannedLauncherName(name string) bool {
 	switch name {
 	case "bash", "sh", "zsh", "dash", "ash", "ksh", "csh", "tcsh", "fish", "busybox",
 		"pwsh", "powershell", "cmd", "wsl",
-		"env", "sudo", "doas", "su", "run0", "osascript",
+		"env", "sudo", "sudoedit", "doas", "su", "run0", "osascript",
 		"command", "eval", "exec", "time",
 		"find", "xargs", "timeout", "nice", "nohup", "watch", "setsid", "stdbuf", "ionice",
-		"ssh", "make", "npm", "npx",
+		"ssh", "make", "npm", "npx", "pnpm", "yarn", "bunx",
 		"python", "py", "pythonw", "pyw", "pypy", "uv", "uvx",
-		"node", "perl", "ruby", "php", "lua", "deno", "bun":
+		"node", "nodejs", "perl", "ruby", "php", "lua", "deno", "bun":
 		return true
 	default:
 		return false
@@ -222,7 +222,22 @@ func normalizeLauncherName(program string) string {
 			break
 		}
 	}
-	return trimLauncherVersion(trimLauncherABISuffix(name))
+	return trimLauncherVersion(trimLauncherABISuffix(trimLauncherBuildSuffix(name)))
+}
+
+// trimLauncherBuildSuffix drops the build-channel suffixes distributions and
+// upstreams append to an otherwise unchanged interpreter, so "python3.11-dbg",
+// "bash-static" and "pwsh-preview" are the launchers they say they are. The set
+// is closed on purpose: a general "-word" strip would also swallow
+// "node-gyp", "python3-config" and "ruby-lsp", which are ordinary tools a user
+// should still be able to approve.
+func trimLauncherBuildSuffix(name string) string {
+	for _, suffix := range []string{"-dbg", "-debug", "-static", "-nightly", "-preview", "-beta"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
+	}
+	return name
 }
 
 // trimLauncherABISuffix drops CPython's ABI flags from a versioned interpreter

@@ -17,6 +17,11 @@ func TestUnsafeCommandPrefixLauncherIgnoresVersionAndExtension(t *testing.T) {
 		"python3.7m", "python3.6dm", "pythonw3.11", "python-3.11",
 		// Free-threaded CPython (PEP 703) ships beside the GIL build.
 		"python3.13t", "python3.13t.exe", "python3.14t", "python3.13td",
+		// Distribution and build-channel spellings of the same interpreter.
+		"nodejs", "nodejs.exe", "node-nightly", "python3-dbg", "python3.11-dbg",
+		"python3.13t-dbg", "pwsh-preview", "bash-static", "sudoedit",
+		// Twins of npm and npx, which the list already refuses.
+		"pnpm", "yarn", "bunx", "pnpm.cmd", "yarn.exe",
 		"perl5.36", "ruby3.2", "php8", "lua5.4", "node22.exe", "bash5",
 	} {
 		if !unsafeCommandPrefix([]string{program}) {
@@ -44,6 +49,11 @@ func TestUnsafeCommandPrefixKeepsOrdinaryCommandsGrantable(t *testing.T) {
 		{"zstd", "-d"},
 		{"sqlite3", "db"},
 		{"yt-dlp", "url"},
+		{"perl-doc", "-h"},
+		{"php-fpm", "-t"},
+		{"ruby-lsp", "--version"},
+		{"lua-language-server", "--check"},
+		{"nodemon", "app.js"},
 	} {
 		if unsafeCommandPrefix(prefix) {
 			t.Errorf("unsafeCommandPrefix(%q) = true, want false", prefix)
@@ -66,6 +76,10 @@ func TestNormalizeLauncherName(t *testing.T) {
 		{"python3.6dm", "python3"},
 		{"python3.13t", "python3"},
 		{"python3.13td", "python3"},
+		{"python3.11-dbg", "python3"},
+		{"node-nightly", "node"},
+		{"node-gyp", "node-gyp"},
+		{"python3-config", "python3-config"},
 		{"zstd", "zstd"},
 		{"cat", "cat"},
 		{"cargo", "cargo"},
