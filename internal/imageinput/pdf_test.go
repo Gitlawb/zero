@@ -368,6 +368,11 @@ func TestCapDocumentTextRespectsCap(t *testing.T) {
 	if !strings.HasSuffix(got, documentTruncatedMarker) {
 		t.Fatal("upstream overflow should add the truncation marker")
 	}
+
+	got, truncated = capDocumentTextWithOverflow("x", true)
+	if !truncated || got != "x"+documentTruncatedMarker {
+		t.Fatalf("short overflow = (%q, %v), want text plus marker without a panic", got, truncated)
+	}
 }
 
 func TestPDFOutputReadersAreBounded(t *testing.T) {

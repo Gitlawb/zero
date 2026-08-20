@@ -254,7 +254,7 @@ func capDocumentTextWithOverflow(text string, overflow bool) (string, bool) {
 		cut = len(text)
 	}
 	// Back up to a rune boundary so we never split a multi-byte character.
-	for cut > 0 && !utf8RuneStart(text[cut]) {
+	for cut > 0 && cut < len(text) && !utf8RuneStart(text[cut]) {
 		cut--
 	}
 	return text[:cut] + documentTruncatedMarker, true

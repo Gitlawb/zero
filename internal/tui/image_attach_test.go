@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -321,6 +322,7 @@ func writeTestPDF(t *testing.T, dir, name, text string) string {
 // pending document even on a non-vision model -- unlike a raw image, which is
 // refused. No page images are staged without a rasterizer.
 func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "Design spec body text")
 
@@ -349,6 +351,7 @@ func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 // path by a content sniff (not the extension), so its text layer attaches even on
 // a non-vision model instead of being refused as a non-image.
 func TestImageCommandAttachesExtensionlessPDFByContent(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec", "Extensionless PDF body text")
 
@@ -390,6 +393,7 @@ func TestImageCommandRejectsFakePDF(t *testing.T) {
 
 // /image clear removes staged documents as well as images.
 func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "some text")
 
@@ -406,6 +410,13 @@ func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
 	next := updated.(model)
 	if len(next.pendingDocuments) != 0 {
 		t.Fatalf("clear must drop staged documents, got %d", len(next.pendingDocuments))
+	}
+}
+
+func requirePopplerText(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("pdftotext"); err != nil {
+		t.Skip("pdftotext is required for PDF text extraction: ", err)
 	}
 }
 
