@@ -215,9 +215,16 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// strip the offline group SID that another workspace's principals depend on
 	// and hand them egress under a NetworkDeny profile. networkPlan itself is left
 	// alone because it is what this home's marker fingerprints.
-	if err := applyWindowsNetworkPlanFn(
-		WindowsNetworkPlanForApply(networkPlan, resolveWindowsSandboxOfflineGroupSIDHook),
-	); err != nil {
+	planToInstall, planErr := WindowsNetworkPlanForApply(networkPlan, resolveWindowsSandboxOfflineGroupSIDHook)
+	if planErr != nil {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, planErr, rollbackErr)
+			return 1
+		}
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+planErr.Error())
+		return 1
+	}
+	if err := applyWindowsNetworkPlanFn(planToInstall); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
 			return 1

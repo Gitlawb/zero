@@ -127,24 +127,34 @@ func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNe
 // choice between stale markers and a silent hole.
 //
 // The group not existing is the ordinary opted-out machine, and it adds nothing.
-// A resolution failure is deliberately not fatal here: refusing to install any
-// filters because the group could not be read would trade a partial denial for
-// no denial at all.
-func WindowsNetworkPlanForApply(plan WindowsNetworkPlan, resolveOfflineGroupSID func() (string, error)) WindowsNetworkPlan {
+//
+// A resolution FAILURE is a different answer and is fatal, because the filters
+// are replaced wholesale. The earlier reasoning here was that refusing to
+// install would trade a partial denial for no denial at all, and that is wrong:
+// the alternative to installing is leaving the filters that are already there
+// alone. Returning a marker-only plan does not decline to add coverage, it
+// actively REMOVES coverage another workspace is relying on. An opted-out home
+// skips assertWindowsNetworkPlanCoversOfflineGroup entirely (it is gated on
+// provisioned), so this is the only thing between a transient lookup error and
+// workspace A silently regaining egress under NetworkDeny.
+//
+// "Absent" and "could not be read" have to be different answers, which is the
+// same distinction the marker/apply split above is built on.
+func WindowsNetworkPlanForApply(plan WindowsNetworkPlan, resolveOfflineGroupSID func() (string, error)) (WindowsNetworkPlan, error) {
 	if resolveOfflineGroupSID == nil {
-		return plan
+		return plan, nil
 	}
 	groupSID, err := resolveOfflineGroupSID()
 	if err != nil {
-		return plan
+		return WindowsNetworkPlan{}, fmt.Errorf("resolve the sandbox offline group before replacing the machine network filters: %w", err)
 	}
 	trimmed := strings.TrimSpace(groupSID)
 	if trimmed == "" {
-		return plan
+		return plan, nil
 	}
 	for _, existing := range plan.IdentitySIDs {
 		if strings.EqualFold(strings.TrimSpace(existing), trimmed) {
-			return plan
+			return plan, nil
 		}
 	}
 	// Copied rather than appended in place: the caller's plan is what gets
@@ -152,7 +162,7 @@ func WindowsNetworkPlanForApply(plan WindowsNetworkPlan, resolveOfflineGroupSID 
 	// recorded plan as a side effect of installing one.
 	augmented := plan
 	augmented.IdentitySIDs = append(append([]string{}, plan.IdentitySIDs...), trimmed)
-	return augmented
+	return augmented, nil
 }
 
 // WindowsNetworkPlanCoversPrincipals reports whether a plan's block filters name

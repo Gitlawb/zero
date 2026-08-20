@@ -15,7 +15,18 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 6
+// Bumped to 7 when the single principal was split into offline and online role
+// accounts. THE NAMES CHANGED, so a marker written by the previous version is
+// not evidence that this version's setup has run: it validates by comparing
+// serialized plans and hashes, and neither names an account. Left at 6, an
+// upgraded machine kept a valid marker, setup was never re-run, and the runner
+// found neither "zero-sbx-d<key>" nor "zero-sbx-n<key>" and fell back to the
+// restricted-token backend with no read confinement, silently.
+//
+// Bumping it makes that installation report as out of date, which is what sends
+// the operator back through elevated setup. Setup then provisions both roles and
+// retires the untagged predecessor (see removeWindowsSandboxPrincipalsForSetup).
+const windowsSandboxSetupMarkerSchemaVersion = 7
 
 // windowsSandboxIdentityEnv opts a machine into the principal backend while it
 // is still experimental. Provisioning is inert without it, so an existing

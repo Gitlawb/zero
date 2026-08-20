@@ -142,14 +142,30 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 		// runtime cannot disagree about which account a command runs as. Two
 		// copies drifting is what produced the wrong report this replaces.
 		role := sandbox.WindowsSandboxPrincipalRoleForNetwork(profile.Network.Mode)
+		// SETUP IS CURRENT IS NOT THE SAME AS THE PRINCIPAL IS LIVE, and this used
+		// to claim the second from the first. Marker validation compares serialized
+		// plans and hashes; it names no account. Delete the selected account or its
+		// secret, or drop the offline account out of ZeroSandboxOffline, and the
+		// marker still validates while the runtime either falls back to the weaker
+		// restricted-token path or fails outright. Doctor asserting read
+		// confinement in that state is worse than saying nothing, because it is the
+		// surface an operator checks precisely when they are unsure.
+		//
+		// Verifying liveness needs the account, a usable secret and (for offline)
+		// the group membership, all Windows-only live queries this package cannot
+		// make. So the claim is narrowed to what the marker actually proves, and
+		// the role is still named because that part IS derived rather than assumed
+		// and is what an operator debugging network behaviour needs.
 		result := check("sandbox.principal", "Sandbox principal", StatusPass,
-			fmt.Sprintf("Sandbox principal is active; commands run as the %s principal for this workspace.", role), map[string]any{
-				"backend":     string(backend.Name),
-				"platform":    goos,
-				"optIn":       true,
-				"active":      true,
-				"role":        role,
-				"networkMode": string(profile.Network.Mode),
+			fmt.Sprintf("Sandbox principal setup is current; a command in this workspace selects the %s principal. Setup state does not confirm the account is usable.", role), map[string]any{
+				"backend":  string(backend.Name),
+				"platform": goos,
+				"optIn":    true,
+				// Deliberately not "active": nothing here checked the account, the
+				// secret or the group membership.
+				"setupCurrent": true,
+				"role":         role,
+				"networkMode":  string(profile.Network.Mode),
 			})
 		return &result
 	}

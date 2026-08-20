@@ -929,10 +929,21 @@ func windowsACLPlanPaths(plan WindowsACLPlan) []string {
 //
 // Both are attempted even if the first fails, and the errors are joined, so one
 // stubborn account cannot hide residue left by the other.
+// windowsSandboxRoleLegacy is retired alongside the two live roles. A machine
+// set up before the roles were split holds one untagged "zero-sbx-<key>"
+// account, and neither role name resolves to it, so every other path on this
+// branch reports it as never provisioned. Opting out or re-running setup would
+// otherwise leave that account, its secret, its logon rights, its ACEs and its
+// ledger installed and unreferenced. Retirement is idempotent and a principal
+// that was never provisioned is not an error, so this costs a lookup on the
+// machines that never had one.
 func removeWindowsSandboxPrincipalsForSetup(config WindowsSandboxCommandConfig) error {
 	var errs []error
-	for _, role := range []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline} {
-		if err := removeWindowsSandboxPrincipalForSetup(config, role); err != nil {
+	for _, role := range []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline, windowsSandboxRoleLegacy} {
+		// Through the seam, like retireUnrecordedWindowsSandboxPrincipal, so the
+		// set of roles this retires is assertable without provisioning real
+		// accounts on the machine running the tests.
+		if err := removeWindowsSandboxPrincipalForSetupFn(config, role); err != nil {
 			errs = append(errs, fmt.Errorf("retire the %s sandbox principal: %w", role, err))
 		}
 	}

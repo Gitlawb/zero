@@ -85,16 +85,31 @@ const (
 	// windowsSandboxRoleOnline is not, so an approved network command reaches the
 	// network while still being read-confined by having its own identity.
 	windowsSandboxRoleOnline windowsSandboxRole = "online"
+	// windowsSandboxRoleLegacy names the SINGLE UNTAGGED account this branch's
+	// predecessor provisioned as "zero-sbx-<key>", before the roles were split.
+	//
+	// It is never provisioned and must never be passed to a provisioning path:
+	// it exists so the ordered retirement below can still derive that name and
+	// remove the account, its secret, its logon rights, its ACEs and its ledger.
+	// Without it an upgraded machine keeps a fully privileged principal that
+	// nothing afterwards looks for, because both roles report themselves absent.
+	windowsSandboxRoleLegacy windowsSandboxRole = "legacy"
 )
 
 // roleTag is the single character that distinguishes the two accounts for a
 // workspace. One character because the 20-character account-name limit is
 // already tight and every character spent here is a bit of workspace hash lost.
 func (role windowsSandboxRole) roleTag() string {
-	if role == windowsSandboxRoleOnline {
+	switch role {
+	case windowsSandboxRoleOnline:
 		return "n"
+	case windowsSandboxRoleLegacy:
+		// Deliberately empty: this reproduces the pre-split name exactly, which
+		// is the only way retirement can find what the predecessor installed.
+		return ""
+	default:
+		return "d"
 	}
-	return "d"
 }
 
 // Win32 status codes that mean "already there". Treated as success so
