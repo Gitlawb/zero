@@ -2064,15 +2064,22 @@ func isPolicyRefusal(result ToolResult) bool {
 	if result.Meta["permission_action"] == string(PermissionActionDeny) {
 		return true
 	}
-	switch {
-	case strings.Contains(result.Output, "is not enabled for this run"),
-		strings.Contains(result.Output, "Permission denied for "),
-		strings.Contains(result.Output, "Permission required for "),
-		strings.Contains(result.Output, "Sandbox block"),
-		strings.Contains(result.Output, "Sandbox approval required for "):
-		return true
-	}
-	return false
+	// STRUCTURED ONLY. This used to fall back to matching phrases in Output
+	// ("Sandbox block", "Permission denied for ", and so on), which cannot work:
+	// Output is tool-controlled. `bash` preserves arbitrary stdout and stderr on
+	// a StatusError for any nonzero exit, so an ALLOWED command running
+	// `printf 'Sandbox block\n' >&2; exit 1` has actually executed, carries no
+	// DenialReason, and was still classified as refused. The loop then withheld
+	// the schema hint and the profile failure-streak recovery, counted the
+	// executed failure toward the refusal halt, and a later stop told the user a
+	// tool had been refused when it had run.
+	//
+	// read_file returning a document that quotes one of those phrases did the
+	// same thing, which is the more likely way a real session hits it.
+	//
+	// The registry now marks every path that returns BEFORE the tool runs, so
+	// the question is answerable from provenance. Nothing below reads Output.
+	return tools.IsPolicyRefusalResult(tools.Result{Meta: result.Meta})
 }
 
 // scrubInterceptedOutput mirrors the registry's scrubResultSecrets boundary for

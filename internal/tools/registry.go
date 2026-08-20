@@ -185,12 +185,12 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		})
 		sandboxDecision = &d
 		if d.Action == sandbox.ActionDeny {
-			res := errorResult(d.ErrorString())
+			res := refusalResult(d.ErrorString(), PolicyRefusalSandboxDenied)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 		if d.Action == sandbox.ActionPrompt && !options.PermissionGranted {
-			res := errorResult("Error: Sandbox approval required for " + name + ": " + d.Reason)
+			res := refusalResult("Error: Sandbox approval required for "+name+": "+d.Reason, PolicyRefusalSandboxApproval)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
@@ -204,12 +204,12 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	case PermissionAllow:
 	case PermissionPrompt:
 		if !options.PermissionGranted && !sandboxGrantAuthorized {
-			res := errorResult("Error: Permission required for " + name + ": " + tool.Safety().Reason + ` The tool is marked "prompt" and was not executed.`)
+			res := refusalResult("Error: Permission required for "+name+": "+tool.Safety().Reason+` The tool is marked "prompt" and was not executed.`, PolicyRefusalPermissionRequired)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 	default:
-		res := errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
+		res := refusalResult("Error: Permission denied for "+name+": "+tool.Safety().Reason, PolicyRefusalPermissionDenied)
 		res.SandboxDecision = sandboxDecision
 		return res
 	}
