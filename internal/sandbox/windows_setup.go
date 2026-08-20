@@ -15,7 +15,13 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 4
+// Bumped to 5 when setup began recording the CONCRETE runtime root it
+// provisioned, and stamping that tree, instead of fingerprinting a plan built
+// from a root it merely derived. A marker written by the previous version has no
+// stamp, and requiring one without a bump would report every already-set-up
+// machine as broken rather than as out of date. Bumping says the true thing: the
+// setup protocol changed, run it once more.
+const windowsSandboxSetupMarkerSchemaVersion = 5
 
 type WindowsSandboxSetupArgsOptions struct {
 	SandboxHome       string
@@ -66,10 +72,29 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	if len(workspaceRoots) == 0 {
 		workspaceRoots = []string{commandCWD}
 	}
-	// Augmented here, in the caller's shell, before the args cross into the
-	// elevated helper. The profile carries no runtime yet at setup time, so this
-	// derives through sandboxRuntimeRootFor and the answer depends only on the
-	// workspace and the user cache directory, not on this process's TEMP.
+	// SELECTED, NOT DERIVED, and selected here in the operator's shell because a
+	// command runs in that same environment and will reach the same answer.
+	//
+	// This used to derive the cache-based root and fingerprint a plan naming it.
+	// A command derived the same root, failed to LEASE it, and silently relocated
+	// to the temp fallback, so its plan named a tree setup had never provisioned
+	// and the marker rejected the command with "permission roots or deny lists
+	// changed" -- which blames permissions for a runtime-root disagreement.
+	// Re-running setup could not recover, because setup chose the same unleasable
+	// root again. That is a permanent brick rather than a retry.
+	//
+	// selectSandboxRuntimeRoot is the function commands use, lease attempt and
+	// fallback included, so setup provisions the tree a command will actually
+	// select. The lease is released straight away: it is taken here only to learn
+	// which root wins, and the command acquires its own.
+	//
+	// A selection failure is not fatal here. The old derivation is still applied
+	// below, so a machine where the lease cannot be taken at all behaves exactly
+	// as it did before rather than losing the ability to run setup.
+	if selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...)); selectErr == nil {
+		lease.release()
+		options.PermissionProfile = permissionProfileWithRuntime(options.PermissionProfile, SandboxRuntime{Root: selected})
+	}
 	options.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(options.PermissionProfile, workspaceRoots)
 	profileJSON, err := json.Marshal(options.PermissionProfile)
 	if err != nil {
@@ -211,6 +236,14 @@ func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
+	// Stamped alongside the marker, because this is the one place setup records
+	// that it completed and the two have to be recorded together: a marker whose
+	// stamp is missing reports setup as current when the tree it provisioned is
+	// gone, which is the whole failure. Written FIRST so a marker never outlives
+	// its stamp if the process dies between the two.
+	if err := writeWindowsSandboxRuntimeStamp(windowsSandboxSelectedRuntimeRoot(config.PermissionProfile), marker.ACLPlanHash); err != nil {
+		return WindowsSandboxSetupMarker{}, err
+	}
 	path := WindowsSandboxSetupMarkerPath(config.SandboxHome)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return WindowsSandboxSetupMarker{}, fmt.Errorf("create windows sandbox setup marker dir: %w", err)
@@ -276,6 +309,17 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	}
 	if actual.OfflineFilterSID != expected.OfflineFilterSID {
 		return errors.New("windows sandbox setup is out of date: offline network identity changed")
+	}
+	// THE PLAN HASH IS ABOUT PATHNAMES, NOT ABOUT OBJECTS. Everything above
+	// compares what setup INTENDED with what this command wants, and both sides
+	// agree as long as the same paths are named. Whether the directory those paths
+	// resolve to is still the one setup provisioned is a different question, and
+	// nothing here was asking it: cleanupSandboxRuntimeRoots evicts inactive roots
+	// and the next run recreates the pathname with ordinary permissions, so the
+	// hashes still matched while the capability ACE was gone and a
+	// WRITE_RESTRICTED token could not write anything under it.
+	if err := validateWindowsSandboxRuntimeStamp(config.PermissionProfile, expected.ACLPlanHash); err != nil {
+		return err
 	}
 	if actual.NetworkFilters != expected.NetworkFilters {
 		return errors.New("windows sandbox setup is out of date: network enforcement plan changed")
@@ -472,16 +516,81 @@ func (rollback windowsRuntimeRootRollback) run() error {
 // The distinction between "created" and "already there" is the whole contract:
 // a pre-existing cache or temp ancestor belongs to the user and must survive a
 // failed setup, while the components this run added must not.
+// windowsSandboxRuntimeOwnedDepth is how many trailing components of a runtime
+// root Zero creates and therefore owns: "zero", "runtime", "v1", "<hash>". See
+// deterministicSandboxRuntimeRoot, which joins exactly these under the cache
+// root.
+const windowsSandboxRuntimeOwnedDepth = 4
+
+// refuseReparsedRuntimeAncestors rejects a reparse point at any component Zero
+// creates, so an elevated ACL is never written through one.
+//
+// ONLY THE COMPONENTS WE OWN. The cache root above them is the user's, and on a
+// machine with a redirected LOCALAPPDATA it is legitimately a reparse point, so
+// refusing there would break ordinary setups. Everything below it is ours, was
+// created by us, and has no business being a link.
+//
+// The check has to cover EVERY owned component, not just the deepest one that
+// exists. A junction planted at "zero" with the components below it created by
+// the attacker leaves the deepest existing component an ordinary directory, so a
+// check that looks only there passes while creation follows the junction and the
+// leaf lands in the attacker's tree. openWindowsACLTarget then opens that leaf,
+// sees no reparse point on it, and the capability ACL is written outside the
+// runtime hierarchy entirely.
+//
+// os.Lstat reports a junction as ModeIrregular rather than ModeSymlink, which is
+// why both are tested: a Windows junction needs no privilege to create, so this
+// is reachable by any local user.
+func refuseReparsedRuntimeAncestors(root string) error {
+	cleaned := filepath.Clean(root)
+	owned := make([]string, 0, windowsSandboxRuntimeOwnedDepth)
+	current := cleaned
+	for range windowsSandboxRuntimeOwnedDepth {
+		owned = append(owned, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	for _, component := range owned {
+		info, err := os.Lstat(component)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("inspect sandbox runtime component %s: %w", component, err)
+		}
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return fmt.Errorf("refusing to provision the sandbox runtime through a link at %s: a reparse point here would redirect the directory the sandbox is granted write access to", component)
+		}
+	}
+	return nil
+}
+
 func createRuntimeDirRecording(root string) ([]string, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, nil
+	}
+	// Checked BEFORE anything is created, and again by the caller after, because
+	// this alone is a check-then-use: an ancestor swapped between the two would
+	// still redirect the leaf. Pairing it with the post-check narrows the window
+	// to the creation itself rather than to the whole of setup.
+	if err := refuseReparsedRuntimeAncestors(root); err != nil {
+		return nil, err
 	}
 	// Find the deepest ancestor that already exists, then create downwards from
 	// there, so the record contains exactly the new components.
 	var missing []string
 	current := filepath.Clean(root)
 	for {
-		if info, err := os.Lstat(current); err == nil {
+		// os.Stat, which FOLLOWS links, deliberately. os.Lstat reports a junction
+		// as ModeIrregular rather than as a directory, so using it here refused a
+		// redirected LOCALAPPDATA -- an ordinary Windows configuration -- with
+		// "exists and is not a directory". Whether a link is acceptable is a
+		// different question, answered by refuseReparsedRuntimeAncestors for the
+		// components Zero actually owns.
+		if info, err := os.Stat(current); err == nil {
 			if !info.IsDir() {
 				return nil, fmt.Errorf("sandbox runtime path %s exists and is not a directory", current)
 			}
@@ -506,6 +615,13 @@ func createRuntimeDirRecording(root string) ([]string, error) {
 			return created, fmt.Errorf("create sandbox runtime root %s: %w", missing[index], err)
 		}
 		created = append(created, missing[index])
+	}
+	// Re-checked after creation. If an ancestor was swapped for a junction while
+	// we were creating, the leaf we just made is in the wrong tree, and granting
+	// it the capability ACL would put it on someone elses directory. Reported as
+	// a failure so the caller rolls back rather than proceeding.
+	if err := refuseReparsedRuntimeAncestors(root); err != nil {
+		return created, err
 	}
 	return created, nil
 }
@@ -589,4 +705,77 @@ func shortWindowsACLPlanHash(hash string) string {
 // command runner is exactly such a process: it takes the profile it is handed.
 func WindowsSandboxProfileWithRuntimeRoots(profile PermissionProfile, workspaceRoots []string) PermissionProfile {
 	return windowsSandboxProfileWithRuntime(profile, workspaceRoots)
+}
+
+// windowsSandboxRuntimeStampName marks a runtime root that ELEVATED SETUP
+// actually provisioned and applied the capability ACL to.
+const windowsSandboxRuntimeStampName = ".zero-sandbox-setup"
+
+func windowsSandboxRuntimeStampPath(root string) string {
+	return filepath.Join(root, windowsSandboxRuntimeStampName)
+}
+
+// writeWindowsSandboxRuntimeStamp records, INSIDE the runtime root, that this
+// exact tree carries the capability ACL for this exact plan.
+//
+// The marker alone cannot tell. It hashes ACL-plan ENTRIES, which are pathnames,
+// not the objects those pathnames resolve to. cleanupSandboxRuntimeRoots removes
+// inactive roots with os.RemoveAll on an age and count policy, and the next run
+// for that workspace recreates the same deterministic pathname through
+// os.MkdirAll with ordinary inherited permissions. The plan hash is unchanged,
+// so both the elevated and the unelevated marker checks reported setup as
+// current while the recreated directory carried NO capability ACE, and a
+// WRITE_RESTRICTED token could not write TMP, GOCACHE or anything else under it.
+//
+// A file inside the tree survives exactly as long as the tree does. Eviction
+// takes it, ordinary recreation does not restore it, so its absence is precisely
+// the condition "this pathname exists but is not the object setup provisioned".
+func writeWindowsSandboxRuntimeStamp(root string, planHash string) error {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return fmt.Errorf("create sandbox runtime root for the setup stamp: %w", err)
+	}
+	if err := os.WriteFile(windowsSandboxRuntimeStampPath(root), []byte(planHash), 0o600); err != nil {
+		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
+	}
+	return nil
+}
+
+// validateWindowsSandboxRuntimeStamp reports whether the runtime root this
+// command will use is the one setup provisioned.
+//
+// Absent when the profile carries no runtime root, which is the setup side
+// itself and every non-restricted profile, so this adds no requirement where
+// there is nothing to check.
+func validateWindowsSandboxRuntimeStamp(profile PermissionProfile, planHash string) error {
+	if profile.Runtime == nil {
+		return nil
+	}
+	root := strings.TrimSpace(profile.Runtime.Root)
+	if root == "" {
+		return nil
+	}
+	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("the sandbox runtime directory for this workspace was removed since setup ran, so it no longer carries the permissions the sandbox needs — run `zero sandbox setup` from an elevated (Administrator) terminal (%s)", root)
+		}
+		return fmt.Errorf("read sandbox runtime setup stamp: %w", err)
+	}
+	if strings.TrimSpace(string(recorded)) != strings.TrimSpace(planHash) {
+		return fmt.Errorf("the sandbox runtime directory for this workspace was provisioned for a different configuration — run `zero sandbox setup` from an elevated (Administrator) terminal (%s)", root)
+	}
+	return nil
+}
+
+// windowsSandboxSelectedRuntimeRoot returns the concrete runtime root a profile
+// carries, or empty when it carries none.
+func windowsSandboxSelectedRuntimeRoot(profile PermissionProfile) string {
+	if profile.Runtime == nil {
+		return ""
+	}
+	return strings.TrimSpace(profile.Runtime.Root)
 }

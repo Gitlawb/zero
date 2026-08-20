@@ -57,29 +57,37 @@ func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
 	config := runtimeRootTestConfig(t)
 	// The setup half, as BuildWindowsSandboxSetupArgs prepares it in the
 	// operator's shell before the elevated helper ever runs.
+	// Setup SELECTS, exactly as BuildWindowsSandboxSetupArgs does in the operator
+	// shell, so the tree it provisions is the tree a command will choose. This
+	// used to fingerprint a merely-derived root and then accept EITHER candidate
+	// at validation, which was compensating for a disagreement rather than
+	// removing it: whichever root the command selected, only one of them had ever
+	// been provisioned or carried the capability ACE.
+	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0])
+	if err != nil {
+		t.Fatalf("selectSandboxRuntimeRoot: %v", err)
+	}
+	lease.release()
+
 	setup := WindowsSandboxSetupConfigFromCommand(config)
-	setup.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(setup.PermissionProfile, config.WorkspaceRoots)
+	setup.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(
+		permissionProfileWithRuntime(setup.PermissionProfile, SandboxRuntime{Root: selected}),
+		config.WorkspaceRoots,
+	)
 	if _, err := WriteWindowsSandboxSetupMarker(setup); err != nil {
 		t.Fatalf("WriteWindowsSandboxSetupMarker: %v", err)
 	}
 
-	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, config.WorkspaceRoots)
-	if len(candidates) == 0 {
-		t.Fatal("windowsSandboxRuntimeCandidates returned none, so this test proves nothing")
-	}
-	for _, candidate := range candidates {
-		augmented := config
-		// The command half, in the same order the real path builds it: the engine
-		// appends the SELECTED root, then the Windows plan folds in the candidate
-		// set before serializing the profile to the runner.
-		augmented.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(
-			permissionProfileWithRuntime(config.PermissionProfile, SandboxRuntime{Root: candidate}),
-			config.WorkspaceRoots,
-		)
-		err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(augmented))
-		if err != nil {
-			t.Fatalf("ValidateWindowsSandboxSetupMarker with runtime root %s: %v", candidate, err)
-		}
+	// The command half, in the same order the real path builds it: the engine
+	// appends the SELECTED root, then the Windows plan folds in the candidate set
+	// before serializing the profile to the runner.
+	augmented := config
+	augmented.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(
+		permissionProfileWithRuntime(config.PermissionProfile, SandboxRuntime{Root: selected}),
+		config.WorkspaceRoots,
+	)
+	if err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(augmented)); err != nil {
+		t.Fatalf("ValidateWindowsSandboxSetupMarker with the selected runtime root %s: %v", selected, err)
 	}
 
 	// THE RUNNER'S TEMP IS NOT THE OPERATOR'S.
@@ -96,7 +104,7 @@ func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
 	// Augmented FIRST, standing in for the parent, whose TEMP is still real.
 	runner := config
 	runner.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(
-		permissionProfileWithRuntime(config.PermissionProfile, SandboxRuntime{Root: candidates[0]}),
+		permissionProfileWithRuntime(config.PermissionProfile, SandboxRuntime{Root: selected}),
 		config.WorkspaceRoots,
 	)
 	// Only THEN does the environment become the runner's. Anything downstream of
