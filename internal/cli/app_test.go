@@ -514,8 +514,8 @@ func TestRunNoArgsPaintsBeforeOptionalDefaultMCPIsReady(t *testing.T) {
 		newMCPStore:      func() (*mcp.PermissionStore, error) { return permissionStore, nil },
 		newMCPTokenStore: func() (*mcp.TokenStore, error) { return tokenStore, nil },
 		registerMCPTools: func(_ context.Context, registry *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
-			if _, ok := cfg.Servers["firecrawl"]; !ok || len(cfg.Servers) != 1 {
-				t.Fatalf("optional MCP config = %#v, want only firecrawl", cfg.Servers)
+			if _, ok := cfg.Servers["exa"]; !ok || len(cfg.Servers) != 1 {
+				t.Fatalf("optional MCP config = %#v, want only exa", cfg.Servers)
 			}
 			close(started)
 			<-release

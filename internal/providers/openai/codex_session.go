@@ -210,10 +210,12 @@ func (session *codexTurnSession) streamWebSocket(
 	for {
 		readCtx := ctx
 		cancel := func() {}
-		if timeout := session.provider.inner.streamIdleTimeout; timeout > 0 {
-			readCtx, cancel = context.WithTimeout(ctx, timeout)
+		idleTimeout := session.provider.inner.streamIdleTimeout
+		if idleTimeout > 0 {
+			readCtx, cancel = context.WithTimeout(ctx, idleTimeout)
 		}
 		messageType, data, err := connection.Read(readCtx)
+		readTimedOut := errors.Is(readCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 		cancel()
 		if err != nil {
 			session.disableWebSocket(connection)
@@ -224,9 +226,13 @@ func (session *codexTurnSession) streamWebSocket(
 				session.forwardHTTP(ctx, runtimeRequest, events)
 				return
 			}
+			errorMessage := err.Error()
+			if readTimedOut {
+				errorMessage = providerio.StreamTimeoutMessage(providerio.ErrStreamIdle, idleTimeout)
+			}
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:  zeroruntime.StreamEventError,
-				Error: session.provider.redact("provider stream error: " + err.Error()),
+				Error: session.provider.redact("provider stream error: " + errorMessage),
 			})
 			return
 		}
@@ -275,7 +281,10 @@ func (session *codexTurnSession) streamWebSocket(
 func (session *codexTurnSession) forwardHTTP(ctx context.Context, request zeroruntime.CompletionRequest, events chan<- zeroruntime.StreamEvent) {
 	stream, err := session.provider.StreamCompletion(ctx, request)
 	if err != nil {
-		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: err.Error()})
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: session.provider.redact(err.Error()),
+		})
 		return
 	}
 	for event := range stream {

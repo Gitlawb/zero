@@ -122,6 +122,9 @@ func TestRegistrySnapshotAndCloneStayOnOneGeneration(t *testing.T) {
 	if got := toolNames(clone.All()); !slices.Equal(got, toolNames(second.Tools)) {
 		t.Fatalf("clone changed with source registry: %v", got)
 	}
+	if clone.Snapshot().Generation != second.Generation {
+		t.Fatalf("clone generation = %d, want %d", clone.Snapshot().Generation, second.Generation)
+	}
 }
 
 func TestRegistryBatchIsAtomicForConcurrentReaders(t *testing.T) {

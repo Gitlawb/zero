@@ -3015,6 +3015,34 @@ func TestComposerBlinkResumesAfterRefocusAndIdle(t *testing.T) {
 	}
 }
 
+func TestComposerBlinkRejectsTickFromBeforeRefocus(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		terminalFocused:       true,
+		lastCharTime:          base.Add(-time.Hour),
+		composerCursorVisible: true,
+		composerBlinkSeq:      5,
+		composerBlinkTicking:  true,
+	}
+	staleSeq := m.composerBlinkSeq
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+	updated, refocusCmd := m.Update(tea.FocusMsg{})
+	m = updated.(model)
+	if refocusCmd == nil || m.composerBlinkSeq == staleSeq {
+		t.Fatal("refocus did not re-arm composer blinking with a new sequence")
+	}
+	visible := m.composerCursorVisible
+
+	updated, staleCmd := m.Update(composerBlinkMsg{seq: staleSeq})
+	m = updated.(model)
+	if staleCmd != nil || m.composerCursorVisible != visible {
+		t.Fatalf("stale tick changed composer state: cmd=%v visible=%v want=%v", staleCmd != nil, m.composerCursorVisible, visible)
+	}
+}
+
 func TestComposerBlinkTogglesWhenIdleAndFocused(t *testing.T) {
 	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
 	m := model{

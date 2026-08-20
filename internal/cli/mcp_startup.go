@@ -10,7 +10,10 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
-const optionalMCPPromptGrace = time.Second
+const (
+	optionalMCPPromptGrace = time.Second
+	optionalMCPCloseGrace  = 250 * time.Millisecond
+)
 
 // splitMCPStartupConfig keeps explicitly configured servers on the
 // prompt-critical path. Only unchanged built-in defaults may initialize after
@@ -38,8 +41,9 @@ type optionalMCPStartup struct {
 	mu      sync.Mutex
 	runtime mcpToolRuntime
 
-	closeOnce sync.Once
-	closeErr  error
+	closeOnce        sync.Once
+	runtimeCloseOnce sync.Once
+	closeErr         error
 }
 
 func startOptionalMCP(
@@ -103,17 +107,39 @@ func (startup *optionalMCPStartup) Close() error {
 	}
 	startup.closeOnce.Do(func() {
 		startup.cancel()
-		<-startup.done
+		reaped := make(chan struct{})
+		go func() {
+			defer close(reaped)
+			<-startup.done
+			startup.closeRuntime()
+		}()
+		timer := time.NewTimer(optionalMCPCloseGrace)
+		defer timer.Stop()
+		select {
+		case <-reaped:
+		case <-timer.C:
+		}
+	})
+	startup.mu.Lock()
+	defer startup.mu.Unlock()
+	return startup.closeErr
+}
+
+func (startup *optionalMCPStartup) closeRuntime() {
+	startup.runtimeCloseOnce.Do(func() {
 		startup.mu.Lock()
 		runtime := startup.runtime
 		startup.mu.Unlock()
-		if runtime != nil {
-			if err := runtime.Close(); err != nil && startup.closeErr == nil {
-				startup.closeErr = err
-			}
+		if runtime == nil {
+			return
 		}
+		err := runtime.Close()
+		startup.mu.Lock()
+		if err != nil && startup.closeErr == nil {
+			startup.closeErr = err
+		}
+		startup.mu.Unlock()
 	})
-	return startup.closeErr
 }
 
 func (startup *optionalMCPStartup) Skipped() []mcp.SkippedServer {
