@@ -3,33 +3,35 @@
   "sessionId": "local-8cd239ca-4faa-46df-a895-aba4d6a6383b",
   "model": "claude-opus-5",
   "startedAt": "2026-08-20T11:38:03.907Z",
-  "endedAt": "2026-08-20T15:39:31.378Z",
-  "durationMs": 14487454,
+  "endedAt": "2026-08-20T18:41:09.408Z",
+  "durationMs": 25385488,
   "status": "running",
   "tokens": {
-    "total": 92873,
-    "input": 206,
-    "output": 92667
+    "total": 140810,
+    "input": 332,
+    "output": 140478
   },
   "cost": {
-    "usd": 48.3655
+    "usd": 55.2747
   },
-  "toolCalls": 93,
+  "toolCalls": 152,
   "lines": {
-    "added": 16,
-    "removed": 8
+    "added": 86,
+    "removed": 2
   },
   "filesChanged": [
-    "internal/acp/agent_test.go"
+    "/Users/kratos/.claude/projects/-Users-kratos-dev-zero/memory/zero-pr-push-remotes.md",
+    "internal/measurements/measurements.go",
+    "internal/measurements/measurements_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "082a30456289ca16e3c7b41495a7053e91dc102e",
+    "headAfter": "f1efd6627bff539cb86ee91aca3ab43357a80548",
     "commitShas": [
-      "082a30456289ca16e3c7b41495a7053e91dc102e"
+      "f1efd6627bff539cb86ee91aca3ab43357a80548"
     ]
   },
-  "summary": "Both `session/load` and `session/resume` route through the same guard, but my test name promises resume and exercises load. Covering both:",
+  "summary": "Zero dependency path and 3/3 clean in isolation — a load-sensitive flake, not my change. Committing #909:",
   "originUrl": "https://getorigin.io/sessions/local-8cd239ca-4faa-46df-a895-aba4d6a6383b"
 }
