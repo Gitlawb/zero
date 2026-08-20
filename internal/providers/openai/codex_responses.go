@@ -62,6 +62,7 @@ const (
 	responsesEventReasoningDelta    = "response.reasoning_summary_text.delta"
 	responsesEventOutputTextDone    = "response.output_text.done"
 	responsesEventFunctionArgsDelta = "response.function_call_arguments.delta"
+	responsesEventCustomInputDelta  = "response.custom_tool_call_input.delta"
 	responsesEventContentPartDone   = "response.content_part.done"
 	responsesEventOutputItemDone    = "response.output_item.done"
 	responsesEventCompleted         = "response.completed"
@@ -69,6 +70,22 @@ const (
 	responsesEventError             = "response.error"
 	responsesEventIncomplete        = "response.incomplete"
 )
+
+const applyPatchLarkGrammar = `start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+%import common.LF`
 
 // responsesRequest is the wire shape POSTed to {baseURL}/responses.
 type responsesRequest struct {
@@ -109,6 +126,7 @@ type inputItem struct {
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+	Input     string `json:"input,omitempty"`
 	// function_call_output fields
 	Output any `json:"output,omitempty"`
 }
@@ -122,10 +140,11 @@ type contentItem struct {
 }
 
 type responsesTool struct {
-	Type        string         `json:"type"`
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
+	Type        string                            `json:"type"`
+	Name        string                            `json:"name"`
+	Description string                            `json:"description,omitempty"`
+	Parameters  map[string]any                    `json:"parameters,omitempty"`
+	Format      *zeroruntime.ToolDefinitionFormat `json:"format,omitempty"`
 }
 
 // responsesEvent is the decoded form of one Responses SSE data payload.
@@ -136,6 +155,7 @@ type responsesEvent struct {
 	Delta string `json:"delta,omitempty"`
 	// item payloads (response.output_item.added / done)
 	ItemID string `json:"item_id,omitempty"`
+	CallID string `json:"call_id,omitempty"`
 	// OutputIndex is a *int so a real 0 (the first output) is distinguishable from
 	// "absent" — a plain int defaulting to 0 dropped a no-item_id call's args (M1).
 	OutputIndex *int         `json:"output_index,omitempty"`
@@ -154,6 +174,7 @@ type itemPayload struct {
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+	Input     string `json:"input,omitempty"`
 	Status    string `json:"status,omitempty"`
 }
 
@@ -194,6 +215,7 @@ type toolCallBuilder struct {
 	CallID    string
 	Name      string
 	Arguments strings.Builder
+	Freeform  bool
 	started   bool
 	ended     bool
 }
@@ -233,13 +255,22 @@ func (state *responsesState) outputInputItems() []inputItem {
 		if callID == "" {
 			callID = builder.ID
 		}
-		items = append(items, inputItem{
-			Type:      "function_call",
-			ID:        builder.ID,
-			CallID:    callID,
-			Name:      builder.Name,
-			Arguments: builder.Arguments.String(),
-		})
+		itemType := "function_call"
+		if builder.Freeform {
+			itemType = "custom_tool_call"
+		}
+		item := inputItem{
+			Type:   itemType,
+			ID:     builder.ID,
+			CallID: callID,
+			Name:   builder.Name,
+		}
+		if builder.Freeform {
+			item.Input = builder.Arguments.String()
+		} else {
+			item.Arguments = builder.Arguments.String()
+		}
+		items = append(items, item)
 	}
 	return items
 }
@@ -260,6 +291,7 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 		PromptCacheKey:    request.PromptCacheKey,
 	}
 	instructions := []string{}
+	customCallIDs := map[string]string{}
 	for _, msg := range request.Messages {
 		switch msg.Role {
 		case zeroruntime.MessageRoleSystem:
@@ -274,13 +306,31 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 				return nil, err
 			}
 			req.Input = append(req.Input, items...)
+			for _, call := range msg.ToolCalls {
+				if call.Freeform && call.ID != "" {
+					callID := call.ProviderCallID
+					if callID == "" {
+						callID = call.ID
+					}
+					customCallIDs[call.ID] = callID
+				}
+			}
 		case zeroruntime.MessageRoleTool:
 			if msg.ToolCallID == "" {
 				return nil, fmt.Errorf("codex provider: tool message missing tool call id")
 			}
+			outputType := "function_call_output"
+			callID := msg.ToolCallProviderID
+			if callID == "" {
+				callID = msg.ToolCallID
+			}
+			if customID, custom := customCallIDs[msg.ToolCallID]; custom {
+				outputType = "custom_tool_call_output"
+				callID = customID
+			}
 			req.Input = append(req.Input, inputItem{
-				Type:   "function_call_output",
-				CallID: msg.ToolCallID,
+				Type:   outputType,
+				CallID: callID,
 				Output: msg.Content,
 			})
 		default:
@@ -289,12 +339,26 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 	}
 	req.Instructions = strings.Join(instructions, "\n\n")
 	for _, tool := range request.Tools {
-		req.Tools = append(req.Tools, responsesTool{
-			Type:        "function",
-			Name:        tool.Name,
-			Description: tool.Description,
-			Parameters:  tool.Parameters,
-		})
+		definition := tool
+		if definition.Name == "apply_patch" && definition.Type == "" {
+			definition.Type = zeroruntime.ToolDefinitionFreeform
+			definition.Description = "The apply_patch tool edits files from a raw structured patch. Do not wrap the patch in JSON."
+			definition.Format = &zeroruntime.ToolDefinitionFormat{Type: "grammar", Syntax: "lark", Definition: applyPatchLarkGrammar}
+		}
+		wireTool := responsesTool{
+			Type:        string(definition.Type),
+			Name:        definition.Name,
+			Description: definition.Description,
+			Parameters:  definition.Parameters,
+			Format:      definition.Format,
+		}
+		if wireTool.Type == "" {
+			wireTool.Type = string(zeroruntime.ToolDefinitionFunction)
+		}
+		if wireTool.Type == string(zeroruntime.ToolDefinitionFreeform) {
+			wireTool.Parameters = nil
+		}
+		req.Tools = append(req.Tools, wireTool)
 	}
 	// Codex / o-series reasoning models take the effort tier nested under
 	// `reasoning` on the Responses API (the chat-completions `reasoning_effort`
@@ -352,13 +416,26 @@ func (p *CodexProvider) assistantInputItems(msg zeroruntime.Message) ([]inputIte
 		if tc.Name == "" {
 			return nil, errors.New("codex provider: assistant tool call missing name")
 		}
-		items = append(items, inputItem{
-			Type:      "function_call",
-			ID:        tc.ID,
-			CallID:    tc.ID,
-			Name:      tc.Name,
-			Arguments: tc.Arguments,
-		})
+		callID := tc.ProviderCallID
+		if callID == "" {
+			callID = tc.ID
+		}
+		itemType := "function_call"
+		if tc.Freeform {
+			itemType = "custom_tool_call"
+		}
+		item := inputItem{
+			Type:   itemType,
+			ID:     tc.ID,
+			CallID: callID,
+			Name:   tc.Name,
+		}
+		if tc.Freeform {
+			item.Input = tc.Arguments
+		} else {
+			item.Arguments = tc.Arguments
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -570,7 +647,10 @@ func (p *CodexProvider) emitResponsesEvent(
 		}
 		return true
 	case responsesEventFunctionArgsDelta:
-		p.handleFunctionArgsDelta(ctx, &event, state, events)
+		p.handleToolInputDelta(ctx, &event, state, events, false)
+		return true
+	case responsesEventCustomInputDelta:
+		p.handleToolInputDelta(ctx, &event, state, events, true)
 		return true
 	case responsesEventOutputItemDone:
 		p.handleOutputItemDone(ctx, &event, state, events)
@@ -616,14 +696,14 @@ func (p *CodexProvider) handleOutputItemAdded(
 		return
 	}
 	switch event.Item.Type {
-	case "function_call":
+	case "function_call", "custom_tool_call":
 		key := p.toolCallKey(event)
 		if key == "" {
 			return
 		}
 		builder, exists := state.toolCalls[key]
 		if !exists {
-			builder = &toolCallBuilder{ID: key}
+			builder = &toolCallBuilder{ID: key, Freeform: event.Item.Type == "custom_tool_call"}
 			state.toolCalls[key] = builder
 			state.toolOrder = append(state.toolOrder, key)
 		}
@@ -633,12 +713,18 @@ func (p *CodexProvider) handleOutputItemAdded(
 		if event.Item.Name != "" {
 			builder.Name = event.Item.Name
 		}
+		builder.Freeform = builder.Freeform || event.Item.Type == "custom_tool_call"
+		if builder.Freeform && event.Item.Input != "" && builder.Arguments.Len() == 0 {
+			builder.Arguments.WriteString(event.Item.Input)
+		}
 		state.emitted = true
 		if !builder.started {
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:       zeroruntime.StreamEventToolCallStart,
-				ToolCallID: key,
-				ToolName:   builder.Name,
+				Type:               zeroruntime.StreamEventToolCallStart,
+				ToolCallID:         key,
+				ToolCallProviderID: builder.CallID,
+				ToolName:           builder.Name,
+				ToolCallFreeform:   builder.Freeform,
 			})
 			builder.started = true
 		}
@@ -649,11 +735,12 @@ func (p *CodexProvider) handleOutputItemAdded(
 // to the in-flight builder and emits StreamEventToolCallDelta. The
 // Codex backend uses either `item_id` or `output_index` to attribute
 // the delta; we honor both.
-func (p *CodexProvider) handleFunctionArgsDelta(
+func (p *CodexProvider) handleToolInputDelta(
 	ctx context.Context,
 	event *responsesEvent,
 	state *responsesState,
 	events chan<- zeroruntime.StreamEvent,
+	freeform bool,
 ) {
 	key := p.toolCallKey(event)
 	if key == "" {
@@ -666,9 +753,13 @@ func (p *CodexProvider) handleFunctionArgsDelta(
 		// an intermediate proxy). Treat the delta as the start of a new
 		// tool call with no known name yet — the eventual
 		// response.output_item.done carries the final name.
-		builder = &toolCallBuilder{ID: key}
+		builder = &toolCallBuilder{ID: key, Freeform: freeform}
 		state.toolCalls[key] = builder
 		state.toolOrder = append(state.toolOrder, key)
+	}
+	builder.Freeform = builder.Freeform || freeform
+	if event.CallID != "" && builder.CallID == "" {
+		builder.CallID = event.CallID
 	}
 	builder.Arguments.WriteString(event.Delta)
 	state.emitted = true
@@ -690,7 +781,7 @@ func (p *CodexProvider) handleOutputItemDone(
 	state *responsesState,
 	events chan<- zeroruntime.StreamEvent,
 ) {
-	if event.Item == nil || event.Item.Type != "function_call" {
+	if event.Item == nil || (event.Item.Type != "function_call" && event.Item.Type != "custom_tool_call") {
 		return
 	}
 	key := p.toolCallKey(event)
@@ -699,7 +790,7 @@ func (p *CodexProvider) handleOutputItemDone(
 	}
 	builder, ok := state.toolCalls[key]
 	if !ok {
-		builder = &toolCallBuilder{ID: key}
+		builder = &toolCallBuilder{ID: key, Freeform: event.Item.Type == "custom_tool_call"}
 		state.toolCalls[key] = builder
 		state.toolOrder = append(state.toolOrder, key)
 	}
@@ -709,14 +800,21 @@ func (p *CodexProvider) handleOutputItemDone(
 	if event.Item.CallID != "" {
 		builder.CallID = event.Item.CallID
 	}
-	if event.Item.Arguments != "" && builder.Arguments.Len() == 0 {
-		builder.Arguments.WriteString(event.Item.Arguments)
+	builder.Freeform = builder.Freeform || event.Item.Type == "custom_tool_call"
+	finalInput := event.Item.Arguments
+	if builder.Freeform {
+		finalInput = event.Item.Input
+	}
+	if finalInput != "" && builder.Arguments.Len() == 0 {
+		builder.Arguments.WriteString(finalInput)
 	}
 	if !builder.started {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
-			Type:       zeroruntime.StreamEventToolCallStart,
-			ToolCallID: key,
-			ToolName:   builder.Name,
+			Type:               zeroruntime.StreamEventToolCallStart,
+			ToolCallID:         key,
+			ToolCallProviderID: builder.CallID,
+			ToolName:           builder.Name,
+			ToolCallFreeform:   builder.Freeform,
 		})
 		builder.started = true
 	}
@@ -817,6 +915,9 @@ func (p *CodexProvider) toolCallKey(event *responsesEvent) string {
 	}
 	if event.Item != nil && event.Item.CallID != "" {
 		return event.Item.CallID
+	}
+	if event.CallID != "" {
+		return event.CallID
 	}
 	if event.OutputIndex != nil {
 		// output_index is present (a *int distinguishes a real 0 — the first output

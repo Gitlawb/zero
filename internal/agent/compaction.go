@@ -149,6 +149,11 @@ func estimateToolDefTokens(tools []zeroruntime.ToolDefinition) int {
 				total += ApproxTextTokens(string(encoded))
 			}
 		}
+		if tool.Format != nil {
+			total += ApproxTextTokens(tool.Format.Type)
+			total += ApproxTextTokens(tool.Format.Syntax)
+			total += ApproxTextTokens(tool.Format.Definition)
+		}
 		total += 4 // per-tool overhead
 	}
 	return total
