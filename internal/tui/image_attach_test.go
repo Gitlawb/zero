@@ -436,6 +436,7 @@ func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 // On submit, the staged document text is prepended to the prompt the agent
 // receives (so the model can read it), and the pending documents are cleared.
 func TestSubmitPrependsDocumentTextThenClears(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
 
