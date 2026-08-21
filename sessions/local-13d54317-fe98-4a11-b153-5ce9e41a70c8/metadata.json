@@ -3,33 +3,40 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:15:31.659Z",
-  "durationMs": 11470028,
+  "endedAt": "2026-08-21T07:57:32.872Z",
+  "durationMs": 17591239,
   "status": "running",
   "tokens": {
-    "total": 86056,
-    "input": 190,
-    "output": 85866
+    "total": 112505,
+    "input": 256,
+    "output": 112249
   },
   "cost": {
-    "usd": 19.2785
+    "usd": 28.0416
   },
-  "toolCalls": 88,
+  "toolCalls": 120,
   "lines": {
-    "added": 16,
-    "removed": 8
+    "added": 284,
+    "removed": 41
   },
   "filesChanged": [
-    "internal/acp/agent_test.go"
+    "internal/agentsessions/codex.go",
+    "internal/agentsessions/fixture_corpus_test.go",
+    "internal/agentsessions/jsonl.go",
+    "internal/agentsessions/jsonl_test.go",
+    "internal/agentsessions/translate.go",
+    "internal/cli/sessions_import.go",
+    "internal/tui/session.go",
+    "internal/tui/session_picker_tabs_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "a4bb90a71dcebd434e5379ec308897f18db0580c",
+    "headAfter": "fea5a5656ed734b4f4fb4d7f0e76ece9d0a8bef1",
     "commitShas": [
-      "a4bb90a71dcebd434e5379ec308897f18db0580c"
+      "fea5a5656ed734b4f4fb4d7f0e76ece9d0a8bef1"
     ]
   },
-  "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
+  "summary": "All four mutations caught, and `cli` is only the two known pre-existing doctor failures. Full gauntlet and push:",
   "originUrl": "https://getorigin.io/sessions/local-13d54317-fe98-4a11-b153-5ce9e41a70c8"
 }
