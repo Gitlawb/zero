@@ -66,7 +66,9 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 		executablePath = resolved
 	}
 	method := DetectInstallMethod(executablePath)
-	if method != InstallMethodNpm {
+	// Only the standalone path rewrites the binary in place, so only it needs the
+	// recovery state. npm and Homebrew hand the work to the package manager.
+	if method == InstallMethodStandalone {
 		if err := preflightRecoveryState(executablePath); err != nil {
 			return ApplyResult{}, err
 		}
@@ -76,6 +78,16 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 	}
 
 	switch method {
+	case InstallMethodHomebrew:
+		// Refused rather than performed. Running `brew upgrade` for the user would
+		// touch a package manager they own, and writing the binary directly is
+		// worse: the keg is what Homebrew's own records describe, so a self-update
+		// leaves brew reporting a version that is no longer installed, and the next
+		// `brew upgrade` or `brew reinstall` silently reverts it.
+		return ApplyResult{}, fmt.Errorf(
+			"this zero was installed with Homebrew (%s); run `brew upgrade zero` instead, so Homebrew's records match the binary on disk",
+			executablePath,
+		)
 	case InstallMethodNpm:
 		if err := applyNpmUpdate(ctx); err != nil {
 			return ApplyResult{}, err
