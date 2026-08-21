@@ -160,7 +160,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		ctx, cancel := context.WithTimeout(context.Background(), popplerOperationTimeout)
 		var work, required sync.WaitGroup
 		work.Add(2)
-		required.Add(1)
+		required.Add(2)
 		go func() {
 			defer work.Done()
 			defer required.Done()
@@ -168,6 +168,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		}()
 		go func() {
 			defer work.Done()
+			defer required.Done()
 			pages = popplerPageCounter(ctx, data)
 		}()
 		if opts.Vision {
@@ -182,8 +183,9 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 				}
 			}()
 		}
-		// Page count is informational and has no bearing on attachment content. Do
-		// not make it a second synchronous timeout after useful text/images exist.
+		// All required work shares one deadline, so preserving the page-count
+		// contract cannot extend the synchronous attachment route by another
+		// independent process timeout.
 		required.Wait()
 		cancel()
 		work.Wait()
