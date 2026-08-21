@@ -558,7 +558,7 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("ZERO_CRED_STORAGE", "file")
-			userConfigRoot := setCLIUserConfigRoot(t)
+			setCLIUserConfigRoot(t)
 			dir := t.TempDir()
 			configPath := filepath.Join(dir, "config.json")
 			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
@@ -573,7 +573,11 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 			}
 			// A directory at the lock-file path is a hermetic, cross-platform
 			// failure: Delete cannot acquire its write lock.
-			lockPath := filepath.Join(userConfigRoot, "zero", "credentials.json.lock")
+			userConfigPath, err := config.DefaultUserConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(filepath.Dir(userConfigPath), "credentials.json.lock")
 			if err := os.Remove(lockPath); err != nil {
 				t.Fatal(err)
 			}
