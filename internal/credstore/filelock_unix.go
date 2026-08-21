@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -100,7 +101,11 @@ func openCredentialLock(path string) (*os.File, error) {
 		if openErr != nil {
 			var linkStat unix.Stat_t
 			if err := unix.Fstatat(currentFD, part, &linkStat, unix.AT_SYMLINK_NOFOLLOW); err == nil && linkStat.Mode&unix.S_IFMT == unix.S_IFLNK {
-				if linkStat.Uid != 0 || currentStat.Uid != 0 || currentStat.Mode&0o022 != 0 && currentStat.Mode&unix.S_ISVTX == 0 {
+				euid := uint32(os.Geteuid())
+				trustedLinkOwner := linkStat.Uid == 0 || linkStat.Uid == euid
+				trustedParentOwner := currentStat.Uid == 0 || currentStat.Uid == euid
+				parentIsSafe := currentStat.Mode&0o022 == 0 || currentStat.Mode&unix.S_ISVTX != 0
+				if !trustedLinkOwner || !trustedParentOwner || !parentIsSafe {
 					return nil, fmt.Errorf("credstore: unsafe lock path %q contains an untrusted symlink", absolute)
 				}
 				symlinks++
@@ -153,7 +158,7 @@ func openCredentialLock(path string) (*os.File, error) {
 		index++
 	}
 
-	lockFD, err := unix.Openat(currentFD, lockName, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	lockFD, err := openCredentialLockFile(currentFD, lockName)
 	if err != nil {
 		var stat unix.Stat_t
 		if statErr := unix.Fstatat(currentFD, lockName, &stat, unix.AT_SYMLINK_NOFOLLOW); statErr == nil && stat.Mode&unix.S_IFMT == unix.S_IFLNK {
@@ -182,6 +187,22 @@ func openCredentialLock(path string) (*os.File, error) {
 	return os.NewFile(uintptr(lockFD), absolute), nil
 }
 
+func openCredentialLockFile(directoryFD int, name string) (int, error) {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		var fd int
+		fd, err = unix.Openat(directoryFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+		if !errors.Is(err, unix.ENOENT) {
+			return fd, err
+		}
+		// Darwin can transiently report ENOENT when several goroutines race to
+		// create the same O_CREAT|O_NOFOLLOW file. The open parent keeps retries
+		// bound to the directory that was already validated above.
+		time.Sleep(time.Millisecond)
+	}
+	return -1, err
+}
+
 func validateCredentialDirectory(path string, stat *unix.Stat_t, final bool) error {
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return fmt.Errorf("credstore: unsafe lock path %q is not a directory", path)
@@ -193,7 +214,7 @@ func validateCredentialDirectory(path string, stat *unix.Stat_t, final bool) err
 	if final && stat.Uid != euid {
 		return fmt.Errorf("credstore: unsafe lock path %q is not owned by the current user", path)
 	}
-	if stat.Mode&0o022 != 0 && !(stat.Uid == 0 && stat.Mode&unix.S_ISVTX != 0) {
+	if stat.Mode&0o022 != 0 && (stat.Uid != 0 || stat.Mode&unix.S_ISVTX == 0) {
 		return fmt.Errorf("credstore: unsafe permissions on lock directory %q: mode %#o", path, stat.Mode&0o7777)
 	}
 	return nil

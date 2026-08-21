@@ -44,12 +44,60 @@ func TestFileLockRejectsUnsafeParentPermissions(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	store := fileStore(t, dir)
+	store, err := New(Options{Dir: dir, Storage: "file"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if err := store.Set("openai", "secret"); err == nil || !strings.Contains(err.Error(), "unsafe permissions") {
 		t.Fatalf("Set error = %v, want unsafe permissions rejection", err)
 	}
 	if _, err := os.Stat(store.file); !os.IsNotExist(err) {
 		t.Fatalf("credential file exists after rejected parent: %v", err)
+	}
+}
+
+func TestFileLockAllowsTrustedSymlinkedDirectoryComponent(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(base, "linked")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	store, err := New(Options{Dir: linkDir, Storage: "file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openai", "secret"); err != nil {
+		t.Fatalf("trusted user-owned directory symlink was rejected: %v", err)
+	}
+}
+
+func TestFileLockRejectsHardlinkedLockFile(t *testing.T) {
+	dir := t.TempDir()
+	store := fileStore(t, dir)
+	other := filepath.Join(dir, "other")
+	if err := os.WriteFile(other, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other, store.lockPath()); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if err := store.Set("openai", "secret"); err == nil || !strings.Contains(err.Error(), "link count") {
+		t.Fatalf("Set error = %v, want hardlinked lock rejection", err)
+	}
+}
+
+func TestFileLockRejectsInsecureExistingLockFile(t *testing.T) {
+	dir := t.TempDir()
+	store := fileStore(t, dir)
+	if err := os.WriteFile(store.lockPath(), nil, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openai", "secret"); err == nil || !strings.Contains(err.Error(), "unsafe permissions") {
+		t.Fatalf("Set error = %v, want insecure lock rejection", err)
 	}
 }

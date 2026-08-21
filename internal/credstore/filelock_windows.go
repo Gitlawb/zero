@@ -103,16 +103,16 @@ func openCredentialLock(path string) (*os.File, error) {
 			_ = windows.CloseHandle(next)
 			return nil, err
 		}
+		finalDirectory := index == len(parts)-2
+		if err := validateWindowsLockSecurity(next, absolute, true, finalDirectory); err != nil {
+			_ = windows.CloseHandle(next)
+			return nil, err
+		}
 		if err := windows.CloseHandle(current); err != nil {
 			_ = windows.CloseHandle(next)
 			return nil, fmt.Errorf("credstore: close traversed lock directory: %w", err)
 		}
 		current = next
-		if index == len(parts)-2 {
-			if err := validateWindowsLockSecurity(current, absolute, true); err != nil {
-				return nil, err
-			}
-		}
 	}
 
 	lock, err := openWindowsPathComponent(current, parts[len(parts)-1], false)
@@ -132,7 +132,7 @@ func openCredentialLock(path string) (*os.File, error) {
 		_ = windows.CloseHandle(lock)
 		return nil, fmt.Errorf("credstore: unsafe lock path %q has unexpected type or link count", absolute)
 	}
-	if err := validateWindowsLockSecurity(lock, absolute, false); err != nil {
+	if err := validateWindowsLockSecurity(lock, absolute, false, true); err != nil {
 		_ = windows.CloseHandle(lock)
 		return nil, err
 	}
@@ -195,7 +195,7 @@ func rejectWindowsReparsePoint(handle windows.Handle, path string) error {
 	return nil
 }
 
-func validateWindowsLockSecurity(handle windows.Handle, path string, directory bool) error {
+func validateWindowsLockSecurity(handle windows.Handle, path string, directory, strict bool) error {
 	descriptor, err := windows.GetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
@@ -212,16 +212,6 @@ func validateWindowsLockSecurity(handle windows.Handle, path string, directory b
 	if err != nil {
 		return fmt.Errorf("credstore: inspect current user: %w", err)
 	}
-	if owner == nil || !owner.Equals(user.User.Sid) {
-		return fmt.Errorf("credstore: unsafe lock path %q is not owned by the current user", path)
-	}
-	dacl, _, err := descriptor.DACL()
-	if err != nil {
-		return fmt.Errorf("credstore: inspect access list on %q: %w", path, err)
-	}
-	if dacl == nil {
-		return fmt.Errorf("credstore: unsafe permissions on %q: no discretionary access list", path)
-	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
 		return fmt.Errorf("credstore: resolve LocalSystem SID: %w", err)
@@ -230,26 +220,28 @@ func validateWindowsLockSecurity(handle windows.Handle, path string, directory b
 	if err != nil {
 		return fmt.Errorf("credstore: resolve Administrators SID: %w", err)
 	}
-	broadPrincipals := make([]*windows.SID, 0, 5)
-	for _, sidType := range []windows.WELL_KNOWN_SID_TYPE{
-		windows.WinWorldSid,
-		windows.WinAuthenticatedUserSid,
-		windows.WinBuiltinUsersSid,
-		windows.WinBuiltinGuestsSid,
-		windows.WinAnonymousSid,
-	} {
-		sid, err := windows.CreateWellKnownSid(sidType)
-		if err != nil {
-			return fmt.Errorf("credstore: resolve broad access SID: %w", err)
-		}
-		broadPrincipals = append(broadPrincipals, sid)
+	if owner == nil || (!owner.Equals(user.User.Sid) && !owner.Equals(system) && !owner.Equals(administrators)) {
+		return fmt.Errorf("credstore: unsafe lock path %q has an untrusted owner", path)
 	}
-	dangerous := windows.ACCESS_MASK(windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE)
-	if directory {
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("credstore: inspect access list on %q: %w", path, err)
+	}
+	if dacl == nil {
+		return fmt.Errorf("credstore: unsafe permissions on %q: no discretionary access list", path)
+	}
+	dangerous := windows.ACCESS_MASK(windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE)
+	if strict {
+		dangerous |= windows.GENERIC_ALL | windows.GENERIC_WRITE
 		// FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY share the numeric values of
 		// FILE_WRITE_DATA and FILE_APPEND_DATA; FILE_DELETE_CHILD is 0x40.
 		dangerous |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.ACCESS_MASK(0x40)
-	} else {
+	} else if directory {
+		// On an ancestor, creating siblings is normal (notably in Windows temp
+		// directories). Deleting/replacing our traversed child is not.
+		dangerous |= windows.ACCESS_MASK(0x40)
+	}
+	if !directory {
 		dangerous |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
 	}
 	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
@@ -270,11 +262,7 @@ func validateWindowsLockSecurity(handle windows.Handle, path string, directory b
 		if sid.Equals(user.User.Sid) || sid.Equals(system) || sid.Equals(administrators) {
 			continue
 		}
-		for _, broad := range broadPrincipals {
-			if sid.Equals(broad) {
-				return fmt.Errorf("credstore: unsafe permissions on %q grant broad write access to %s", path, sid.String())
-			}
-		}
+		return fmt.Errorf("credstore: unsafe permissions on %q grant write access to untrusted trustee %s", path, sid.String())
 	}
 	return nil
 }
