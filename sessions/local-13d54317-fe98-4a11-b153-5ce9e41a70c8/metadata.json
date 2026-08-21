@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:58:56.311Z",
-  "durationMs": 3274681,
+  "endedAt": "2026-08-21T03:59:01.475Z",
+  "durationMs": 3279845,
   "status": "running",
   "tokens": {
     "total": 42154,
@@ -16,34 +16,19 @@
   },
   "toolCalls": 38,
   "lines": {
-    "added": 3616,
-    "removed": 0
+    "added": 325,
+    "removed": 8
   },
   "filesChanged": [
-    "internal/agentsessions/activity.go",
-    "internal/agentsessions/activity_test.go",
-    "internal/agentsessions/cache.go",
-    "internal/agentsessions/cache_test.go",
-    "internal/agentsessions/codex.go",
-    "internal/agentsessions/codex_test.go",
-    "internal/agentsessions/family1.go",
-    "internal/agentsessions/family1_test.go",
-    "internal/agentsessions/import_resume_test.go",
-    "internal/agentsessions/jsonl.go",
-    "internal/agentsessions/jsonl_test.go",
-    "internal/agentsessions/paths.go",
-    "internal/agentsessions/paths_test.go",
-    "internal/agentsessions/registry.go",
-    "internal/agentsessions/translate.go",
-    "internal/agentsessions/translate_test.go",
-    "internal/agentsessions/types.go"
+    "internal/cli/sessions.go",
+    "internal/cli/sessions_import.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "7d85377ca8b4cb3903b25f8b56887dc8645c6e27",
+    "headAfter": "b06ccc1d230714b85353cadd31a3c8a88568a1ce",
     "commitShas": [
-      "7d85377ca8b4cb3903b25f8b56887dc8645c6e27"
+      "b06ccc1d230714b85353cadd31a3c8a88568a1ce"
     ]
   },
   "summary": "The `Read` signature returns only events, so the import can't re-resolve metadata without an interface change — that's a scope call I'll surface rather than take. Starting with what Vasanth asked for. Committing the redaction fix, then rebasing:",
