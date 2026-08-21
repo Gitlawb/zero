@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 const minimalPDFTextChunkSize = 80
@@ -145,6 +144,23 @@ func TestLoadDocumentTextExtraction(t *testing.T) {
 	}
 }
 
+func TestExtractTextWithPoppler(t *testing.T) {
+	if !popplerAvailable("pdftotext") {
+		t.Skip("pdftotext is not installed")
+	}
+	const want = "Poppler extraction integration"
+	got, overflow, ok := extractTextWithPoppler(buildMinimalPDF(want))
+	if !ok {
+		t.Fatal("extractTextWithPoppler failed with pdftotext installed")
+	}
+	if overflow {
+		t.Fatal("small PDF unexpectedly overflowed the text budget")
+	}
+	if !strings.Contains(got, want) {
+		t.Fatalf("extracted text %q should contain %q", got, want)
+	}
+}
+
 // A .pdf-named file that is not actually a PDF must be rejected with a clear
 // error rather than silently treated as a document (extension is never trusted
 // over magic bytes).
@@ -234,16 +250,14 @@ func TestLoadDocumentTruncatesLongText(t *testing.T) {
 	}
 }
 
-// A PDF with no extractable text layer and no rasterization/OCR available must
-// surface the explicit "no extractable text" message, never a silent empty
-// success.
+// A PDF with no extractable text layer and no rasterization available must
+// surface an explicit error, never a silent empty success.
 func TestLoadDocumentNoTextNoRaster(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "scan.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
 		t.Fatalf("write scan: %v", err)
 	}
-	// Force the pure-Go path with no external rasterizer so the no-text branch is
-	// deterministic regardless of what is installed on the test host.
+	// Simulate a host without Poppler so the no-text branch is deterministic.
 	_, err := LoadDocument("scan.pdf", root, DocumentOptions{disableExternalTools: true})
 	if err == nil {
 		t.Fatal("expected an error for a PDF with no extractable text and no raster")
@@ -282,8 +296,8 @@ func buildEmptyTextPDF() []byte {
 	return buf.Bytes()
 }
 
-// Malformed PDF bytes that pass the header check but break the parser must be
-// turned into a clean error, never a panic that escapes the package.
+// Malformed PDF bytes that pass the header check must produce a clean error
+// when no safe extractor is available.
 func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	root := t.TempDir()
 	bad := []byte("%PDF-1.4\nthis header is valid but the body and xref are garbage\nstartxref\n9\n%%EOF\n")
@@ -296,14 +310,14 @@ func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestLoadDocumentFallsBackToPureGo(t *testing.T) {
+func TestLoadDocumentRequiresBoundedExtractor(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
-	if err != nil || !strings.Contains(doc.Text, "text") {
-		t.Fatalf("LoadDocument = (%+v, %v), want pure-Go text", doc, err)
+	_, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
+	if err == nil || !strings.Contains(err.Error(), "pdftotext") {
+		t.Fatalf("LoadDocument error = %v, want bounded-extractor guidance", err)
 	}
 }
 
@@ -410,36 +424,21 @@ func TestResolvePageCountUsesPdfinfoWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestLoadDocumentHostilePDFStaysBounded(t *testing.T) {
+func TestLoadDocumentHostilePDFDoesNotUseInProcessParser(t *testing.T) {
 	root := t.TempDir()
 	cases := map[string][]byte{
 		"cycle.pdf": []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 1 0 R /Parent 1 0 R /Kids [1 0 R] /Count 999999999 /First 1 0 R /Next 1 0 R >>\nendobj\ntrailer\n<< /Root 1 0 R /Size 999999999 >>\nstartxref\n9\n%%EOF\n"),
 		"hex.pdf":   []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\nstream\n<" + strings.Repeat("A", 4096) + "\nendstream\n%%EOF\n"),
 	}
-	done := make(chan error, 1)
-	go func() {
-		var first error
-		for name, body := range cases {
-			path := filepath.Join(root, name)
-			if err := os.WriteFile(path, body, 0o644); err != nil {
-				first = err
-				break
-			}
-			_, err := LoadDocument(name, root, DocumentOptions{disableExternalTools: true})
-			if err == nil {
-				first = fmt.Errorf("%s: expected error for hostile PDF", name)
-				break
-			}
+	for name, body := range cases {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
 		}
-		done <- first
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
+		_, err := LoadDocument(name, root, DocumentOptions{disableExternalTools: true})
+		if err == nil || !strings.Contains(err.Error(), "pdftotext") {
+			t.Fatalf("LoadDocument(%s) error = %v, want bounded-extractor guidance", name, err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("hostile PDF parsing exceeded the resource bound")
 	}
 }
 
