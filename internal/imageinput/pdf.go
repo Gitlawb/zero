@@ -428,8 +428,9 @@ func rasterizeWithPoppler(ctx context.Context, data []byte, maxPages int) ([]zer
 	// -f 1 / -l N: render only the first N pages so context can't blow up.
 	cmd := exec.CommandContext(ctx, "pdftoppm", "-png", "-r", "150", "-f", "1", "-l", fmt.Sprintf("%d", maxPages), "-", prefix)
 	cmd.Stdin = bytes.NewReader(data)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// Renderer diagnostics are not surfaced to callers; retaining hostile tool
+	// output would bypass the attachment's bounded-output contract.
+	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("pdftoppm failed: %w", err)
 	}
