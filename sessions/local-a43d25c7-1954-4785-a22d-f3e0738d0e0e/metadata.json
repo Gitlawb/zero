@@ -3,41 +3,37 @@
   "sessionId": "local-a43d25c7-1954-4785-a22d-f3e0738d0e0e",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T15:21:30.049Z",
-  "endedAt": "2026-08-21T15:48:39.276Z",
-  "durationMs": 1629213,
+  "endedAt": "2026-08-21T15:53:45.321Z",
+  "durationMs": 1935257,
   "status": "running",
   "tokens": {
-    "total": 34382,
-    "input": 72,
-    "output": 34310
+    "total": 46117,
+    "input": 94,
+    "output": 46023
   },
   "cost": {
-    "usd": 10.7869
+    "usd": 13.6261
   },
-  "toolCalls": 35,
+  "toolCalls": 46,
   "lines": {
-    "added": 59,
-    "removed": 34
+    "added": 192,
+    "removed": 44
   },
   "filesChanged": [
-    "internal/agentsessions/activity_test.go",
-    "internal/agentsessions/blocker_regression_test.go",
     "internal/agentsessions/codex.go",
-    "internal/agentsessions/codex_test.go",
     "internal/agentsessions/family1.go",
+    "internal/agentsessions/fixture_corpus_test.go",
     "internal/agentsessions/jsonl.go",
-    "internal/agentsessions/jsonl_test.go",
-    "internal/agentsessions/translate.go",
-    "internal/agentsessions/translate_test.go"
+    "internal/agentsessions/jsonl_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "be6597120d5e9023d4178a0db87eb507015a88f4",
+    "headAfter": "08aee3d581ad9ae665c7a9b2359fab7c86a295e4",
     "commitShas": [
-      "be6597120d5e9023d4178a0db87eb507015a88f4"
+      "08aee3d581ad9ae665c7a9b2359fab7c86a295e4"
     ]
   },
-  "summary": "Caught. Full gauntlet and push:",
+  "summary": "Both mutations caught now. Full gauntlet and push:",
   "originUrl": "https://getorigin.io/sessions/local-a43d25c7-1954-4785-a22d-f3e0738d0e0e"
 }
