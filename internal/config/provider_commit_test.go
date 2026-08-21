@@ -129,6 +129,40 @@ func TestCommitProviderProfileCapturesKeyAndPersistsRow(t *testing.T) {
 	}
 }
 
+func TestCommitProviderProfileReturnsCommittedResultWhenLockReleaseFails(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	oldAcquire := acquireProviderWriteLock
+	acquireProviderWriteLock = func(path string) (func() error, error) {
+		release, err := lockProviderWrite(path)
+		if err != nil {
+			return nil, err
+		}
+		return func() error {
+			if err := release(); err != nil {
+				return err
+			}
+			return errors.New("injected release failure")
+		}, nil
+	}
+	t.Cleanup(func() { acquireProviderWriteLock = oldAcquire })
+
+	result, err := CommitProviderProfile(path, ProviderCommit{
+		Profile:   ProviderProfile{Name: "work", APIKey: "sk-secret"},
+		SetActive: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "was committed") || !strings.Contains(err.Error(), "injected release failure") {
+		t.Fatalf("CommitProviderProfile error = %v, want clear post-commit release failure", err)
+	}
+	if result.Config.ActiveProvider != "work" || result.Persisted.Name != "work" || !result.Persisted.APIKeyStored {
+		t.Fatalf("committed result was discarded: %+v", result)
+	}
+	if cfg := readConfigFixture(t, path); cfg.ActiveProvider != "work" || len(cfg.Providers) != 1 {
+		t.Fatalf("published config = %+v, want committed work profile", cfg)
+	}
+}
+
 // KeepStoredKey is the path that must not touch the store at all: the profile
 // already references a credential this write is not replacing.
 func TestCommitProviderProfileKeepStoredKeyLeavesStoreUntouched(t *testing.T) {

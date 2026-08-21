@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 // ValidatePersistedProviderNames rejects empty names and user-config rows that
@@ -188,6 +189,14 @@ func SameProviderIdentity(a string, b string) bool {
 // PreflightUserConfig validates existing user config before any command makes
 // credential-store side effects.
 func PreflightUserConfig(path string) error {
+	err := preflightUserConfig(path)
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s", redaction.ErrorMessage(err, redaction.Options{}))
+}
+
+func preflightUserConfig(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("config path is required")
@@ -612,6 +621,11 @@ func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 // An ambiguous provider identity is different: it returns no candidates at all,
 // so a destructive caller cannot act on a spelling several profiles could own.
 func ProviderCredentialCandidates(path, addressedName string) (candidates []string, canonicalName string, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%s", redaction.ErrorMessage(err, redaction.Options{}))
+		}
+	}()
 	add := func(candidate string) {
 		candidate = strings.TrimSpace(candidate)
 		if candidate != "" && !slices.Contains(candidates, candidate) {
@@ -938,14 +952,12 @@ func RemoveProviderAndKey(path string, name string) (FileConfig, bool, error) {
 			}
 		}
 		} else if active := strings.TrimSpace(cfg.ActiveProvider); active != "" {
-			// Repairing a case-duplicate config can strand activeProvider on a
-			// third spelling. Re-point it when exactly one remaining row carries
-			// that identity; preserve exact, ambiguous, and unrelated references.
 			if resolved, resolveErr := resolvePersistedProviderName(cfg.Providers, active); resolveErr == nil {
 				cfg.ActiveProvider = resolved
 			}
 		}
-		if removed.APIKeyStored {
+		credentialStillOwned := CredentialKeyRetained(cfg.Providers, removed.Name)
+		if removed.APIKeyStored && !credentialStillOwned {
 			removedKey, err := op.deleteKey(removed.Name)
 			if err != nil {
 				return fmt.Errorf("delete stored key for %q: %w", removed.Name, err)

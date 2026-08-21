@@ -1346,6 +1346,7 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 	providerID := strings.TrimSpace(provider.ID)
 	var owner config.ProviderProfile
 	owners := 0
+	var nameConflictErr error
 	for _, profile := range m.savedProviders {
 		if strings.TrimSpace(profile.Name) == providerID {
 			if profile.APIKeyStored {
@@ -1355,13 +1356,16 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 		}
 		profileCatalogID := strings.TrimSpace(profile.CatalogID)
 		if profileCatalogID == "" || !config.SameProviderIdentity(profileCatalogID, providerID) {
-			if config.SameProviderIdentity(profile.Name, providerID) {
-				return "", false, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogId is %q)", strings.TrimSpace(profile.Name), providerID, profileCatalogID)
+			if config.SameProviderIdentity(profile.Name, providerID) && nameConflictErr == nil {
+				nameConflictErr = fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogId is %q)", strings.TrimSpace(profile.Name), providerID, profileCatalogID)
 			}
 			continue
 		}
 		owner = profile
 		owners++
+	}
+	if nameConflictErr != nil && owners == 0 {
+		return "", false, nameConflictErr
 	}
 	if owners > 1 {
 		return "", false, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id; manage the intended profile by its exact name", providerID, owners)
@@ -1409,17 +1413,19 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 		wizard.step = providerWizardStepCredential
 		return m, nil
 	case 2: // Remove
+		canonicalName := name
 		if strings.TrimSpace(m.userConfigPath) != "" {
 			if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
-				wizard.err = redaction.RedactString(err.Error(), redaction.Options{})
+				wizard.err = redaction.ErrorMessage(err, redaction.Options{})
 				return m, nil
 			}
-			credentialCandidates, exactName, err := config.ProviderCredentialCandidates(m.userConfigPath, name)
+			credentialCandidates, canonical, err := config.ProviderCredentialCandidates(m.userConfigPath, name)
 			if err != nil {
 				wizard.err = redaction.ErrorMessage(err, redaction.Options{})
 				return m, nil
 			}
-			if _, err := config.DeleteProviderCredentials(m.userConfigPath, credentialCandidates, exactName); err != nil {
+			canonicalName = canonical
+			if _, err := config.DeleteProviderCredentials(m.userConfigPath, credentialCandidates, canonicalName); err != nil {
 				wizard.err = "remove stored key: " + redaction.ErrorMessage(err, redaction.Options{})
 				return m, nil
 			}
@@ -1429,13 +1435,16 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		// Reconcile the live session with the disk write: savedProviders and
-		// providerProfile still carry APIKeyStored:true otherwise, so /providers
-		// and a re-entered wizard would offer keep/replace for a key that is gone
-		// until the next restart.
-		m = m.applyProviderKeyRemovalToSession(name)
+		for index := range m.savedProviders {
+			if strings.TrimSpace(m.savedProviders[index].Name) == canonicalName {
+				m.savedProviders[index].APIKeyStored = false
+			}
+		}
+		if strings.TrimSpace(m.providerProfile.Name) == canonicalName {
+			m.providerProfile.APIKeyStored = false
+		}
 		m.providerWizard = nil
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + name + ". Re-add it any time with /provider."})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + canonicalName + ". Re-add it any time with /provider."})
 		return m, nil
 	default: // Keep
 		m.providerWizard = nil

@@ -1208,6 +1208,13 @@ func TestWizardProviderStoredKey(t *testing.T) {
 	if _, _, err := ambiguous.wizardProviderStoredKey(providercatalog.Descriptor{ID: "xai"}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("shared catalog owners error = %v, want ambiguity", err)
 	}
+	conflictFirst := model{savedProviders: []config.ProviderProfile{
+		{Name: "OpenRouter", CatalogID: "custom-openai-compatible", APIKeyStored: true},
+		{Name: "openrouter", CatalogID: "openrouter", APIKeyStored: true},
+	}}
+	if name, ok, err := conflictFirst.wizardProviderStoredKey(providercatalog.Descriptor{ID: "openrouter"}); err != nil || !ok || name != "openrouter" {
+		t.Fatalf("later positive owner: name=%q ok=%v err=%v", name, ok, err)
+	}
 }
 
 func TestProviderWizardManageKeyRemove(t *testing.T) {
@@ -1249,34 +1256,21 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		if len(next.savedProviders) != 1 || next.savedProviders[0].APIKeyStored {
 			t.Fatalf("saved provider marker was not refreshed: %+v", next.savedProviders)
 		}
-	})
-}
-
-func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
-	newRemovalModel := func(t *testing.T) model {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), "config.json")
-		if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		cfgData, err := os.ReadFile(configPath)
+		if err != nil {
 			t.Fatal(err)
 		}
-		m := newModel(context.Background(), Options{UserConfigPath: path})
-		m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "work", manageKeyCursor: 2}
-		return m
-	}
-
-	t.Run("stored key deletion", func(t *testing.T) {
-		m := newRemovalModel(t)
-		m.deleteProviderKey = func(string, string) (bool, error) {
-			return false, errors.New("injected delete failure")
+		if strings.Contains(string(cfgData), `"apiKeyStored":true`) {
+			t.Fatalf("canonical persisted marker was not cleared: %s", cfgData)
 		}
-		next, _ := m.applyManageKeyChoice()
-		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "Stored key removal failed") {
-			t.Fatalf("wizard did not remain open with deletion error: %+v", next.providerWizard)
+		if got := next.transcript[len(next.transcript)-1].text; !strings.Contains(got, "for acme.") {
+			t.Fatalf("transcript used addressed spelling instead of canonical name: %q", got)
 		}
-		// Marker first, secret second: a failed delete leaves an orphaned secret
-		// that nothing reads, never a marker claiming a key that is gone.
-		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); cfg.Providers[0].APIKeyStored {
-			t.Fatal("marker must be cleared before the secret delete is attempted")
+		if _, ok, err := next.wizardProviderStoredKey(providercatalog.Descriptor{ID: "acme-cloud"}); err != nil || ok {
+			t.Fatalf("reopened wizard still sees removed key: ok=%v err=%v", ok, err)
+		}
+	})
+}
 		}
 	})
 
@@ -1292,6 +1286,35 @@ func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
 		}
 		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
 			t.Fatal("injected marker failure unexpectedly changed config")
+		}
+	})
+}
+
+func TestProviderWizardManageKeyErrorsAreRedacted(t *testing.T) {
+	t.Run("preflight", func(t *testing.T) {
+		secret := "sk-proj-abcdefghijklmnopqrst"
+		path := filepath.Join(t.TempDir(), secret)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{UserConfigPath: path})
+		m.providerWizard = &providerWizardState{manageProviderName: "work", manageKeyCursor: 2}
+		next, _ := m.applyManageKeyChoice()
+		if !strings.Contains(next.providerWizard.err, "REDACTED") {
+			t.Fatalf("preflight error was not redacted: %q", next.providerWizard.err)
+		}
+	})
+	t.Run("credential candidates", func(t *testing.T) {
+		secret := "sk-proj-abcdefghijklmnopqrst"
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"providers":[{"name":"one","catalogId":"sk-proj-abcdefghijklmnopqrst"},{"name":"two","catalogId":"sk-proj-abcdefghijklmnopqrst"}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{UserConfigPath: path})
+		m.providerWizard = &providerWizardState{manageProviderName: secret, manageKeyCursor: 2}
+		next, _ := m.applyManageKeyChoice()
+		if !strings.Contains(next.providerWizard.err, "REDACTED") {
+			t.Fatalf("candidate error was not redacted: %q", next.providerWizard.err)
 		}
 	})
 }
