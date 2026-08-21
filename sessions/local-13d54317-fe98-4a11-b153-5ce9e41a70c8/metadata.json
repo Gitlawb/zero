@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:11:44.374Z",
-  "durationMs": 11242740,
+  "endedAt": "2026-08-21T06:11:44.563Z",
+  "durationMs": 11242930,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,20 +16,27 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 122,
-    "removed": 9
+    "added": 281,
+    "removed": 52
   },
   "filesChanged": [
+    "internal/agentsessions/activity.go",
+    "internal/agentsessions/activity_test.go",
+    "internal/agentsessions/blocker_regression_test.go",
+    "internal/agentsessions/family1.go",
     "internal/agentsessions/family1_test.go",
-    "internal/tui/session.go",
-    "internal/tui/session_picker_tabs_test.go"
+    "internal/agentsessions/fixture_corpus_test.go",
+    "internal/agentsessions/testdata/claude-config/projects/-Users-example-workspace-demo/fixture-session.jsonl",
+    "internal/agentsessions/testdata/codex-home/sessions/2026/08/01/rollout-2026-08-01T10-00-00-fixture0-0000-0000-0000-000000000001.jsonl",
+    "internal/agentsessions/translate.go",
+    "internal/agentsessions/translate_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "0db68befb5d2ed5d732991fd2e9a5fd70435f2cd",
+    "headAfter": "41ac5c09b2ae31017962efefc83158e751fb1419",
     "commitShas": [
-      "0db68befb5d2ed5d732991fd2e9a5fd70435f2cd"
+      "41ac5c09b2ae31017962efefc83158e751fb1419"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
