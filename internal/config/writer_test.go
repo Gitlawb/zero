@@ -1953,3 +1953,44 @@ func TestProviderCredentialCandidates(t *testing.T) {
 		}
 	})
 }
+
+func TestRemoveProviderRetainsKeyForSurvivingCaseVariant(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+		{Name: "work", APIKeyStored: true},
+		{Name: "WORK", APIKeyStored: true},
+	}}, 0o600)
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-survives"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, removed, err := RemoveProviderAndKey(path, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed || len(cfg.Providers) != 1 || cfg.Providers[0].Name != "WORK" {
+		t.Fatalf("remove result: removed=%v cfg=%+v", removed, cfg)
+	}
+	if key, ok, err := store.Get("WORK"); err != nil || !ok || key != "sk-survives" {
+		t.Fatalf("surviving row credential = %q ok=%v err=%v", key, ok, err)
+	}
+}
+
+func TestProviderConfigErrorsRedactSecrets(t *testing.T) {
+	secret := "sk-" + "test-secret" + "1234567890"
+	path := filepath.Join(t.TempDir(), secret)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := PreflightUserConfig(path); err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("PreflightUserConfig error leaked secret: %v", err)
+	}
+	if _, _, err := ProviderCredentialCandidates(path, "work"); err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("ProviderCredentialCandidates error leaked secret: %v", err)
+	}
+}

@@ -37,20 +37,24 @@ type providerProfileOperation struct {
 }
 
 var publishProviderConfig = writeConfigFile
+var acquireProviderWriteLock = lockProviderWrite
 
 func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInput bool, mutate func(*providerProfileOperation) error) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
-	release, err := lockProviderWrite(path)
+	release, err := acquireProviderWriteLock(path)
 	if err != nil {
 		return FileConfig{}, err
 	}
 	defer func() {
 		if releaseErr := release(); releaseErr != nil {
-			result = FileConfig{}
-			err = errors.Join(err, releaseErr)
+			if err == nil {
+				err = fmt.Errorf("provider configuration was committed, but releasing its transaction lock failed: %w", releaseErr)
+			} else {
+				err = errors.Join(err, releaseErr)
+			}
 		}
 	}()
 
@@ -221,10 +225,14 @@ func CommitProviderProfile(path string, commit ProviderCommit) (ProviderCommitRe
 		}
 		return upsertProviderConfig(&op.config, persisted, commit.SetActive)
 	})
+	result := ProviderCommitResult{Config: cfg, Persisted: persisted}
 	if err != nil {
-		return ProviderCommitResult{}, err
+		if len(cfg.Providers) == 0 {
+			return ProviderCommitResult{}, err
+		}
+		return result, err
 	}
-	return ProviderCommitResult{Config: cfg, Persisted: persisted}, nil
+	return result, nil
 }
 
 var providerWriteLockTimeout = 5 * time.Second
