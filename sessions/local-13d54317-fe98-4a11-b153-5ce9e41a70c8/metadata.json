@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:11:43.147Z",
-  "durationMs": 11241421,
+  "endedAt": "2026-08-21T06:11:43.501Z",
+  "durationMs": 11241863,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,23 +16,18 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 454,
-    "removed": 6
+    "added": 21,
+    "removed": 1
   },
   "filesChanged": [
-    "internal/tui/model.go",
-    "internal/tui/model_test.go",
-    "internal/tui/picker.go",
-    "internal/tui/session.go",
-    "internal/tui/session_picker_tabs_test.go",
-    "internal/tui/view.go"
+    "internal/agentsessions/redaction_order_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "517169979f0b73f0d552849c103811e2857525c4",
+    "headAfter": "adf2cd91542ee52cb0ffe665a1af3380fb367d25",
     "commitShas": [
-      "517169979f0b73f0d552849c103811e2857525c4"
+      "adf2cd91542ee52cb0ffe665a1af3380fb367d25"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
