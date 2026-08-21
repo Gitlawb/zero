@@ -591,9 +591,8 @@ func (state *guardState) planReminder(turn int) string {
 		return planStaleReminder(state.toolCallsSincePlanUpdate)
 	}
 
-	// NOT-CALLED reminder: by the end of planReminderTurn the model should have
-	// called update_plan if it's doing a multi-step task (>=1 other tool call).
-	// One-shot for the whole run.
+	// NOT-CALLED reminder: once both the turn and tool-call thresholds are met,
+	// sustained work should have called update_plan. One-shot for the whole run.
 	if !state.notCalledReminderSent &&
 		!state.planEverCalled &&
 		turn >= planReminderTurn &&

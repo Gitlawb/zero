@@ -1123,9 +1123,10 @@ func decodeToolArguments(arguments string, v any) error {
 }
 
 func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	tool, toolFound := registry.Get(call.Name)
 	args := map[string]any{}
 	if call.Freeform {
-		if call.Name != "apply_patch" {
+		if !toolFound || !tools.IsBuiltInApplyPatch(tool) {
 			return ToolResult{
 				ToolCallID: call.ID,
 				Name:       call.Name,
@@ -1162,7 +1163,6 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			DenialReason: DenialFiltered,
 		}, nil
 	}
-	tool, toolFound := registry.Get(call.Name)
 	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
 		modeName := string(permissionMode)
 		return ToolResult{
