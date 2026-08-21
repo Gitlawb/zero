@@ -200,11 +200,18 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		text, textOverflow = textResult.text, textResult.overflow
 	}
 
+	// Decide whether any usable text exists before adding a truncation marker.
+	// Otherwise whitespace-only overflow could turn into a marker-only document
+	// that bypasses the no-text guard below.
+	hasText := strings.TrimSpace(text) != ""
+	if !hasText {
+		text, textOverflow = "", false
+	}
 	text, truncated := capDocumentTextWithOverflow(text, textOverflow)
 
 	// Scanned-PDF guard: no text layer AND no rendered pages means we have nothing
 	// the model can use. Say so explicitly instead of returning empty success.
-	if strings.TrimSpace(text) == "" && len(images) == 0 {
+	if !hasText && len(images) == 0 {
 		if textStatus == popplerTextFailed {
 			return Document{}, fmt.Errorf("%s could not extract PDF text with pdftotext", path)
 		}

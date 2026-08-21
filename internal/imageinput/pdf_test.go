@@ -371,6 +371,23 @@ func TestLoadDocumentDoesNotMisreportTextlessPDFAsMissingPoppler(t *testing.T) {
 	}
 }
 
+func TestLoadDocumentRejectsWhitespaceOnlyOverflow(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "blank.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	original := popplerTextExtractor
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: strings.Repeat(" ", MaxDocumentTextBytes), overflow: true, status: popplerTextExtracted}
+	}
+	t.Cleanup(func() { popplerTextExtractor = original })
+
+	_, err := LoadDocument("blank.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "no extractable text") {
+		t.Fatalf("LoadDocument error = %v, want textless-PDF guidance", err)
+	}
+}
+
 func TestLoadDocumentVisionUsesRenderedPagesWhenTextExtractionFails(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "scan.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
