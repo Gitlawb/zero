@@ -1515,6 +1515,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.unsafeArmed = false
 		return m.handleDictationTranscribed(msg)
 	case sttPartialMsg:
+		// A STREAMING PARTIAL IS AN INPUT TRANSITION TOO, and the note above about
+		// starting dictation being a keypress does not cover it. The offer can be
+		// armed AFTER dictation is already running: shift+tab offers full-auto,
+		// the next partial rewrites the composer, and active dictation is not a
+		// blocking modal, so an ordinary ctrl+g still confirmed. The user is
+		// several actions past the confirmation by then.
+		//
+		// Cleared at the dispatch boundary rather than inside
+		// handleDictationPartial, so a future partial-delivery path inherits the
+		// rule instead of having to remember it. The rule is not "these particular
+		// message types": an offer is valid only until the next user-visible input
+		// transition, whatever delivers it.
+		m.unsafeArmed = false
 		return m.handleDictationPartial(msg), nil
 	case sttDownloadProgressMsg:
 		return m.handleDictationDownloadProgress(msg), nil
