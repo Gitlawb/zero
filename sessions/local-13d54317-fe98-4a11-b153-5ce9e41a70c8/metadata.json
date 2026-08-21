@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:13:38.347Z",
-  "durationMs": 11356716,
+  "endedAt": "2026-08-21T06:13:42.742Z",
+  "durationMs": 11361112,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,19 +16,21 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 86,
-    "removed": 2
+    "added": 537,
+    "removed": 8
   },
   "filesChanged": [
-    "internal/measurements/measurements.go",
-    "internal/measurements/measurements_test.go"
+    "internal/sandbox/scope.go",
+    "internal/sandbox/scope_extra_read_test.go",
+    "internal/sandbox/scope_temp_refcount_test.go",
+    "internal/sandbox/scope_temporary_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "af1294a07e02366c3397b3240583760e583f6f9c",
+    "headAfter": "422f503bd49d02f2fcea55be74e30d519fcddebd",
     "commitShas": [
-      "af1294a07e02366c3397b3240583760e583f6f9c"
+      "422f503bd49d02f2fcea55be74e30d519fcddebd"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
