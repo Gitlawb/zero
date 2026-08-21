@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -1348,18 +1347,18 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 	var owner config.ProviderProfile
 	owners := 0
 	for _, profile := range m.savedProviders {
+		if strings.TrimSpace(profile.Name) == providerID {
+			if profile.APIKeyStored {
+				return profile.Name, true, nil
+			}
+			return "", false, nil
+		}
 		profileCatalogID := strings.TrimSpace(profile.CatalogID)
 		if profileCatalogID == "" || !config.SameProviderIdentity(profileCatalogID, providerID) {
 			if config.SameProviderIdentity(profile.Name, providerID) {
 				return "", false, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogId is %q)", strings.TrimSpace(profile.Name), providerID, profileCatalogID)
 			}
 			continue
-		}
-		if strings.TrimSpace(profile.Name) == providerID {
-			if profile.APIKeyStored {
-				return profile.Name, true, nil
-			}
-			return "", false, nil
 		}
 		owner = profile
 		owners++
@@ -1448,14 +1447,27 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 }
 
 func deleteProviderKey(configPath, provider string) (bool, error) {
-	if strings.TrimSpace(configPath) == "" {
-		return config.ForgetProviderKey(provider)
+	candidates := []string{provider}
+	if strings.TrimSpace(configPath) != "" {
+		resolved, _, err := config.ProviderCredentialCandidates(configPath, provider)
+		if err != nil {
+			return false, err
+		}
+		candidates = resolved
 	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	store, err := config.ProviderKeyStore()
 	if err != nil {
 		return false, err
 	}
-	return store.Delete(provider)
+	removed := false
+	for _, candidate := range candidates {
+		candidateRemoved, err := store.Delete(candidate)
+		if err != nil {
+			return false, err
+		}
+		removed = removed || candidateRemoved
+	}
+	return removed, nil
 }
 
 func providerWizardRuntimeProfile(profile config.ProviderProfile) config.ProviderProfile {

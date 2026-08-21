@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -526,10 +527,12 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	loginCalled := false
 	var stdout, stderr bytes.Buffer
 	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
 		userConfigPath: func() (string, error) { return configPath, nil },
 		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			loginCalled = true
 			return "sk-minted", nil
 		},
 	})
@@ -538,8 +541,8 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	if code == exitSuccess {
 		t.Fatalf("exit = %d, want non-zero for an unsaved login: %s", code, stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "ambiguous persisted provider names") {
-		t.Fatalf("stdout = %q, want ambiguous persisted-name rejection", stdout.String())
+	if !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("stderr = %q, want ambiguous persisted-name rejection", stderr.String())
 	}
 	after, err := os.ReadFile(configPath)
 	if err != nil {
@@ -555,9 +558,11 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	if !ok || key != "sk-working" {
 		t.Fatalf("stored key does not match (present=%v, len=%d), want the previous sk-working preserved", ok, len(key))
 	}
-	// The minted key is still handed over for manual use.
-	if !strings.Contains(stdout.String(), "sk-minted") {
-		t.Fatalf("stdout = %q, want the manual-export hint with the minted key", stdout.String())
+	if loginCalled {
+		t.Fatal("invalid config reached the browser login before preflight")
+	}
+	if strings.Contains(stdout.String(), "sk-minted") {
+		t.Fatalf("stdout exposed a key from a login that should not have run: %q", stdout.String())
 	}
 }
 
@@ -892,12 +897,13 @@ func TestRunAuthLogoutDeletesCatalogIDToken(t *testing.T) {
 // openrouter`-style catalog flows) survived `zero auth logout my-xai`.
 func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	withAuthStore(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-xai","catalogId":"xai","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	keyStore, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +987,8 @@ func TestRunAuthLogoutKeepsDistinctUnicodeCredentials(t *testing.T) {
 // in the file (demo/DEMO) must not suppress deleting every credential for the
 // unambiguous profile actually being logged out — only the final marker-write
 // should fail on that unrelated validation error.
-func TestRunAuthLogoutResolvesCandidatesDespiteUnrelatedAmbiguousConfig(t *testing.T) {
+func TestRunAuthLogoutRejectsUnrelatedAmbiguousConfigBeforeCredentialDeletion(t *testing.T) {
+	setCLIUserConfigRoot(t)
 	storePath := withAuthStore(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -996,7 +1003,7 @@ func TestRunAuthLogoutResolvesCandidatesDespiteUnrelatedAmbiguousConfig(t *testi
 	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "stored"}); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	keyStore, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1011,18 +1018,17 @@ func TestRunAuthLogoutResolvesCandidatesDespiteUnrelatedAmbiguousConfig(t *testi
 	if code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
 		t.Fatalf("exit = %d stderr = %q, want the unrelated ambiguity surfaced as a truthful marker-update failure", code, stderr.String())
 	}
-	if _, ok, err := store.Load(oauth.ProviderKey("xai")); err != nil || ok {
-		t.Fatalf("catalog-id OAuth token survived logout despite the unrelated ambiguous config: ok=%v err=%v", ok, err)
+	if _, ok, err := store.Load(oauth.ProviderKey("xai")); err != nil || !ok {
+		t.Fatalf("catalog-id OAuth token changed after rejected logout: ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := keyStore.Get("xai"); err != nil || ok {
-		t.Fatalf("catalog-id API key survived logout despite the unrelated ambiguous config: ok=%v err=%v", ok, err)
+	if _, ok, err := keyStore.Get("xai"); err != nil || !ok {
+		t.Fatalf("catalog-id API key changed after rejected logout: ok=%v err=%v", ok, err)
 	}
 }
 
-func TestRunAuthLogoutCleansCredentialsWhenConfigIsAmbiguous(t *testing.T) {
+func TestRunAuthLogoutPreservesCredentialsWhenConfigIsAmbiguous(t *testing.T) {
 	storePath := withAuthStore(t)
-	configHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configHome)
+	configHome := setCLIUserConfigRoot(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(configHome, "zero", "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
@@ -1039,7 +1045,7 @@ func TestRunAuthLogoutCleansCredentialsWhenConfigIsAmbiguous(t *testing.T) {
 	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "stored"}); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	keyStore, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1054,11 +1060,11 @@ func TestRunAuthLogoutCleansCredentialsWhenConfigIsAmbiguous(t *testing.T) {
 	if code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
 		t.Fatalf("exit = %d stderr = %q, want truthful marker-update failure", code, stderr.String())
 	}
-	if _, ok, err := store.Load(oauth.ProviderKey("demo")); err != nil || ok {
-		t.Fatalf("OAuth credential survived recovery logout: ok=%v err=%v", ok, err)
+	if _, ok, err := store.Load(oauth.ProviderKey("demo")); err != nil || !ok {
+		t.Fatalf("OAuth credential changed after rejected logout: ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := keyStore.Get("demo"); err != nil || ok {
-		t.Fatalf("API key survived recovery logout: ok=%v err=%v", ok, err)
+	if _, ok, err := keyStore.Get("demo"); err != nil || !ok {
+		t.Fatalf("API key changed after rejected logout: ok=%v err=%v", ok, err)
 	}
 	after, err := os.ReadFile(configPath)
 	if err != nil || !bytes.Equal(after, configData) {
@@ -1157,6 +1163,7 @@ func TestRunAuthRefreshRejectsEmptyCredentialCandidates(t *testing.T) {
 func TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone(t *testing.T) {
 	storePath := withAuthStore(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	configData := []byte(`{"providers":[` +
 		`{"name":"work-xai","catalogId":"xai","apiKeyStored":true},` +
@@ -1172,7 +1179,7 @@ func TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone(t *testing.T) {
 	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "shared"}); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	keyStore, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1247,6 +1254,7 @@ func TestRunAuthLogoutRejectsAmbiguousCatalogAddress(t *testing.T) {
 func TestRunAuthLogoutPrefersTheExactlyNamedProfile(t *testing.T) {
 	withAuthStore(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	configData := []byte(`{"providers":[` +
 		`{"name":"work-xai","catalogId":"xai","apiKeyStored":true},` +
@@ -1254,7 +1262,7 @@ func TestRunAuthLogoutPrefersTheExactlyNamedProfile(t *testing.T) {
 	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	keyStore, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}

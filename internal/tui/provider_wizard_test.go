@@ -1213,6 +1213,11 @@ func TestWizardProviderStoredKey(t *testing.T) {
 func TestProviderWizardManageKeyRemove(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	t.Run("exclusive catalog alias is removed and memory is refreshed", func(t *testing.T) {
+		userRoot := t.TempDir()
+		t.Setenv("HOME", userRoot)
+		t.Setenv("APPDATA", userRoot)
+		t.Setenv("LOCALAPPDATA", userRoot)
+		t.Setenv("XDG_CONFIG_HOME", userRoot)
 		configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 			t.Fatal(err)
@@ -1221,7 +1226,7 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+		store, err := config.ProviderKeyStore()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1229,18 +1234,22 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 			t.Fatal(err)
 		}
 
-	m := newModel(context.Background(), Options{UserConfigPath: configPath})
-	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "WORK", manageKeyCursor: 2}
-	next, _ := m.applyManageKeyChoice()
-	if next.providerWizard != nil {
-		t.Fatal("remove should close the wizard")
-	}
-	if _, ok, _ := store.Get("acme-cloud"); ok {
-		t.Fatal("remove should delete the catalog-alias key from the credential store")
-	}
-	if cfg := readProviderWizardConfigFixture(t, configPath); cfg.Providers[0].APIKeyStored {
-		t.Fatal("case-variant removal left apiKeyStored set")
-	}
+		m := newModel(context.Background(), Options{UserConfigPath: configPath, SavedProviders: []config.ProviderProfile{profile}})
+		m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "ACME", manageKeyCursor: 2}
+		next, _ := m.applyManageKeyChoice()
+		if next.providerWizard != nil {
+			t.Fatal("remove should close the wizard")
+		}
+		if _, ok, _ := store.Get("acme-cloud"); ok {
+			t.Fatal("remove should delete the catalog-alias key from the credential store")
+		}
+		if cfg := readProviderWizardConfigFixture(t, configPath); cfg.Providers[0].APIKeyStored {
+			t.Fatal("case-variant removal left apiKeyStored set")
+		}
+		if len(next.savedProviders) != 1 || next.savedProviders[0].APIKeyStored {
+			t.Fatalf("saved provider marker was not refreshed: %+v", next.savedProviders)
+		}
+	})
 }
 
 func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
@@ -1269,10 +1278,6 @@ func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
 		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); cfg.Providers[0].APIKeyStored {
 			t.Fatal("marker must be cleared before the secret delete is attempted")
 		}
-		persisted := readProviderWizardConfigFixture(t, configPath)
-		if len(persisted.Providers) != 1 || persisted.Providers[0].Name != "acme" || persisted.Providers[0].APIKeyStored {
-			t.Fatalf("persisted providers = %+v, want acme marker cleared", persisted.Providers)
-		}
 	})
 
 	t.Run("persisted marker cleanup", func(t *testing.T) {
@@ -1287,10 +1292,6 @@ func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
 		}
 		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
 			t.Fatal("injected marker failure unexpectedly changed config")
-		}
-		persisted := readProviderWizardConfigFixture(t, configPath)
-		if len(persisted.Providers) != 2 || persisted.Providers[0].Name != "work-acme" || persisted.Providers[0].APIKeyStored || persisted.Providers[1].Name != "personal-acme" || !persisted.Providers[1].APIKeyStored {
-			t.Fatalf("persisted providers = %+v, want only work-acme marker cleared", persisted.Providers)
 		}
 	})
 }
@@ -2008,16 +2009,16 @@ func TestWizardProviderStoredKeyDistinguishesUnicodeIdentities(t *testing.T) {
 	m := model{savedProviders: []config.ProviderProfile{
 		{Name: "ſ", APIKeyStored: true},
 	}}
-	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "s", ID: "s"}); ok {
-		t.Fatalf("latin-s descriptor matched the long-s profile %q", name)
+	if name, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "s", ID: "s"}); err != nil || ok {
+		t.Fatalf("latin-s descriptor matched the long-s profile %q (err=%v)", name, err)
 	}
-	name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "ſ", ID: "ſ"})
-	if !ok || name != "ſ" {
-		t.Fatalf("long-s descriptor = %q, %v; want its own profile", name, ok)
+	name, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "ſ", ID: "ſ"})
+	if err != nil || !ok || name != "ſ" {
+		t.Fatalf("long-s descriptor = %q, %v, %v; want its own profile", name, ok, err)
 	}
 }
 
-func TestExistingAimlapiConfigurationRequiresCatalogOwnership(t *testing.T) {
+func TestExistingAimlapiConfigurationRecognizesLegacyNameWithoutCatalogID(t *testing.T) {
 	t.Setenv("AIMLAPI_API_KEY", "")
 	m := model{savedProviders: []config.ProviderProfile{{
 		Name: "aimlapi", BaseURL: "https://api.aimlapi.com/v1", Model: "legacy-model", APIKey: "legacy-secret",

@@ -452,7 +452,7 @@ func TestOAuthCommandsRejectInvalidConfigBeforeCredentialSideEffects(t *testing.
 			t.Fatalf("setup OAuth %s did not preflight: %#v", providerID, setupMsg)
 		}
 	}
-	deviceMsg, ok := providerWizardDevicePollCmd(configPath, "xai", 8, oauth.Config{}, oauth.DeviceAuth{})().(providerWizardOAuthMsg)
+	deviceMsg, ok := providerWizardDevicePollCmd("xai", 8, oauth.Config{}, oauth.DeviceAuth{}, configPath)().(providerWizardOAuthMsg)
 	if !ok || deviceMsg.err == nil || !strings.Contains(deviceMsg.err.Error(), "ambiguous persisted provider names") {
 		t.Fatalf("device completion did not revalidate config: %#v", deviceMsg)
 	}

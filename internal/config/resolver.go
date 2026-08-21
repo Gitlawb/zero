@@ -961,6 +961,9 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 
 	if activeName == "" && len(providers) == 1 {
 		activeName = strings.TrimSpace(providers[0].Name)
+		if activeName == "" {
+			activeName = string(ProviderKindOpenAI)
+		}
 	}
 
 	// Select the active source row before normalizing anything. An exact name

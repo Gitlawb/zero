@@ -229,7 +229,7 @@ func TestProviderRemoveRejectsAmbiguousFoldedName(t *testing.T) {
 	}
 	key, ok, err := store.Get("work")
 	if err != nil || !ok || key != "sk-lower" {
-		t.Fatalf("stored key = %q ok=%v err=%v, want the credential state preserved", key, ok, err)
+		t.Fatalf("credential present=%v err=%v matched=%v, want preserved", ok, err, key == "sk-lower")
 	}
 
 	// The exact spelling still works, so a legacy config remains repairable.
@@ -241,6 +241,10 @@ func TestProviderRemoveRejectsAmbiguousFoldedName(t *testing.T) {
 	cfg := readFileConfig(t, configPath)
 	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" {
 		t.Fatalf("providers = %+v, want only the exact row removed", cfg.Providers)
+	}
+	key, ok, err = store.Get("work")
+	if err != nil || !ok || key != "sk-lower" {
+		t.Fatalf("surviving credential present=%v err=%v matched=%v, want preserved", ok, err, key == "sk-lower")
 	}
 }
 func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
