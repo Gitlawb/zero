@@ -3,35 +3,49 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:08:53.027Z",
-  "durationMs": 11071396,
+  "endedAt": "2026-08-21T06:11:39.450Z",
+  "durationMs": 11237730,
   "status": "running",
   "tokens": {
-    "total": 82822,
-    "input": 182,
-    "output": 82640
+    "total": 86056,
+    "input": 190,
+    "output": 85866
   },
   "cost": {
-    "usd": 18.4814
+    "usd": 19.2785
   },
-  "toolCalls": 85,
+  "toolCalls": 88,
   "lines": {
-    "added": 122,
-    "removed": 9
+    "added": 3616,
+    "removed": 0
   },
   "filesChanged": [
+    "internal/agentsessions/activity.go",
+    "internal/agentsessions/activity_test.go",
+    "internal/agentsessions/cache.go",
+    "internal/agentsessions/cache_test.go",
+    "internal/agentsessions/codex.go",
+    "internal/agentsessions/codex_test.go",
+    "internal/agentsessions/family1.go",
     "internal/agentsessions/family1_test.go",
-    "internal/tui/session.go",
-    "internal/tui/session_picker_tabs_test.go"
+    "internal/agentsessions/import_resume_test.go",
+    "internal/agentsessions/jsonl.go",
+    "internal/agentsessions/jsonl_test.go",
+    "internal/agentsessions/paths.go",
+    "internal/agentsessions/paths_test.go",
+    "internal/agentsessions/registry.go",
+    "internal/agentsessions/translate.go",
+    "internal/agentsessions/translate_test.go",
+    "internal/agentsessions/types.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "59bdfde87caf8fc3c5cf8a74b5c87a5f4a6e4f20",
+    "headAfter": "65c34b851e66b612dc7304b5efd265337eef3d1d",
     "commitShas": [
-      "59bdfde87caf8fc3c5cf8a74b5c87a5f4a6e4f20"
+      "65c34b851e66b612dc7304b5efd265337eef3d1d"
     ]
   },
-  "summary": "Restored and passing. Full gauntlet, then push:",
+  "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
   "originUrl": "https://getorigin.io/sessions/local-13d54317-fe98-4a11-b153-5ce9e41a70c8"
 }
