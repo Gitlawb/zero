@@ -19,6 +19,17 @@ type Scope struct {
 	workspaceRoot string
 	readRoots     []string
 	extraRoots    []string
+	// tempReads / tempWrites count how many LIVE temporary grants depend on a
+	// root, so one holder's cleanup cannot revoke another's access.
+	//
+	// Without them a temporary grant was add-then-remove with no notion of who
+	// still needed it: the second caller to ask for a root already present got a
+	// NO-OP undo, and the first caller's cleanup removed the root out from under
+	// it. Two read-only tools in the same parallel batch, both blocked on the
+	// same directory, is exactly that shape — and read-only tools are precisely
+	// the ones the batch runs concurrently.
+	tempReads  map[string]int
+	tempWrites map[string]int
 }
 
 // NewScope builds a scope for workspaceRoot plus the given extra roots. The
@@ -48,6 +59,19 @@ func (s *Scope) WorkspaceRoot() string {
 }
 
 // Roots returns the workspace root first, then the extra roots, as a copy.
+// ExtraRoots returns ONLY the roots granted beyond the workspace, as a copy.
+//
+// Roots() includes the workspace root as well, which is right for a caller
+// asking "everything this run may write". It is wrong for a caller asking "what
+// does this run hold BEYOND its workspace" — and one such caller launches child
+// agents in an isolated worktree, where handing back the parent's workspace root
+// re-opens the very tree the worktree exists to protect.
+func (s *Scope) ExtraRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.extraRoots...)
+}
+
 func (s *Scope) Roots() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -70,6 +94,27 @@ func (s *Scope) ReadRoots() []string {
 	return dedupeScopeRoots(roots)
 }
 
+// ExtraReadRoots returns every path the run may READ BEYOND its workspace — the
+// write grants AND the read-only grants, deduped, as a copy. It is ReadRoots()
+// without the workspace root.
+//
+// It exists for the same caller ExtraRoots() does: a child agent dispatched into
+// its own workspace, which the parent must be able to hand its beyond-workspace
+// access without also handing back the parent workspace root (see ExtraRoots).
+// ExtraRoots() alone is not enough for that child, because a read grant from
+// request_permissions lands in readRoots, not extraRoots — so a child given only
+// ExtraRoots() can read what the parent may WRITE beyond its workspace but not
+// what it was granted to READ, and a read-only audit of a granted path fails
+// "outside the workspace" for want of exactly this list.
+func (s *Scope) ExtraReadRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots)+len(s.readRoots))
+	roots = append(roots, s.extraRoots...)
+	roots = append(roots, s.readRoots...)
+	return dedupeScopeRoots(roots)
+}
+
 // Add grants write access under path. The path must be an existing directory;
 // it is home-expanded, made absolute, and symlink-resolved before being
 // trusted, and the filesystem root is rejected outright. Adding a path already
@@ -81,13 +126,47 @@ func (s *Scope) Add(path string) (string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// COVERED BY WHAT. extraRoots holds temporary write roots alongside
+	// permanent ones, so "something already covers this" was not the question
+	// worth asking: a permanent grant made over a path a temporary holder
+	// happened to cover recorded nothing, and vanished the moment that holder
+	// released. A session-scoped grant outliving the request that prompted it is
+	// the entire difference between Add and AddTemporaryWrite.
+	//
+	// Permanent coverage is looked for FIRST and across every root, because a
+	// path can be covered twice and the temporary cover must not decide the
+	// answer when a permanent one is also present.
 	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
-		if pathWithinRoot(existing, root) {
+		if pathWithinRoot(existing, root) && !s.temporaryWriteLocked(existing) {
 			return root, nil
 		}
 	}
+	for _, existing := range s.extraRoots {
+		// The same root, held temporarily: promote it in place. Its holders'
+		// releases become no-ops, which is what permanence means here.
+		if existing == root && s.temporaryWriteLocked(existing) {
+			delete(s.tempWrites, root)
+			return root, nil
+		}
+	}
+	// Either uncovered, or covered only by a BROADER temporary root that is
+	// going to be released. Recording the narrower root in its own right is what
+	// survives that release.
 	s.extraRoots = append(s.extraRoots, root)
 	return root, nil
+}
+
+// temporaryWriteLocked reports whether root is held by a temporary write grant
+// rather than a session-scoped one. Callers must hold the lock.
+func (s *Scope) temporaryWriteLocked(root string) bool {
+	_, temporary := s.tempWrites[root]
+	return temporary
+}
+
+// temporaryReadLocked is temporaryWriteLocked for read roots.
+func (s *Scope) temporaryReadLocked(root string) bool {
+	_, temporary := s.tempReads[root]
+	return temporary
 }
 
 // AddRead grants read-only access under path. If the path is already covered by
@@ -99,11 +178,23 @@ func (s *Scope) AddRead(path string) (string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.writeRootCoversLocked(root) {
-		return root, nil
+	// Same rule as Add: coverage that is going to be released is not coverage a
+	// permanent grant can rely on, whichever side of the read/write boundary it
+	// sits on. A permanent read covered only by a temporary WRITE root died with
+	// that root just as surely.
+	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
+		if pathWithinRoot(existing, root) && !s.temporaryWriteLocked(existing) {
+			return root, nil
+		}
 	}
 	for _, existing := range s.readRoots {
-		if pathWithinRoot(existing, root) {
+		if pathWithinRoot(existing, root) && !s.temporaryReadLocked(existing) {
+			return root, nil
+		}
+	}
+	for _, existing := range s.readRoots {
+		if existing == root && s.temporaryReadLocked(existing) {
+			delete(s.tempReads, root)
 			return root, nil
 		}
 	}
@@ -119,15 +210,48 @@ func (s *Scope) AddTemporaryRead(path string) (string, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writeRootCoversLocked(root) {
+		// Covered by a write root — which is NOT necessarily permanent.
+		// writeRootCoversLocked scans extraRoots, and AddTemporaryWrite appends
+		// TEMPORARY write roots there, so the covering grant may belong to
+		// another holder who is going to release it. Take a reference in that
+		// case, exactly as the read-covered-by-read path below does: without one
+		// the write holder's cleanup silently revokes this reader's access —
+		// the same defect this refcount exists to close, reached across the
+		// read/write boundary rather than within one side of it.
+		for existing := range s.tempWrites {
+			if pathWithinRoot(existing, root) {
+				s.tempWrites[existing]++
+				covering := existing
+				return root, oncePerHolder(func() { s.releaseTemporaryWrite(covering) }), nil
+			}
+		}
+		// Genuinely permanent — the workspace root, or a session-scoped grant.
+		// Nothing to release.
 		return root, func() {}, nil
 	}
 	for _, existing := range s.readRoots {
-		if pathWithinRoot(existing, root) {
-			return root, func() {}, nil
+		if !pathWithinRoot(existing, root) {
+			continue
 		}
+		// Already covered — but by WHAT decides whether this caller has
+		// something to release. A permanent read root outlives every grant, so
+		// the undo is genuinely nothing. A TEMPORARY one is held by another
+		// caller who will release it, and that caller must not be able to
+		// revoke this one's access: take a reference on the covering root, so
+		// it survives until the last holder is done.
+		if _, temporary := s.tempReads[existing]; temporary {
+			s.tempReads[existing]++
+			covering := existing
+			return root, oncePerHolder(func() { s.releaseTemporaryRead(covering) }), nil
+		}
+		return root, func() {}, nil
 	}
 	s.readRoots = append(s.readRoots, root)
-	return root, func() { s.removeReadRoot(root) }, nil
+	if s.tempReads == nil {
+		s.tempReads = map[string]int{}
+	}
+	s.tempReads[root] = 1
+	return root, oncePerHolder(func() { s.releaseTemporaryRead(root) }), nil
 }
 
 func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
@@ -138,10 +262,25 @@ func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writeRootCoversLocked(root) {
+		// Covered already. If a TEMPORARY write grant is what covers it, take a
+		// reference so the covering holder's cleanup cannot revoke this one —
+		// the same rule as reads, and it has to be the same rule or a write
+		// grant would keep the bug reads no longer have.
+		for existing := range s.tempWrites {
+			if pathWithinRoot(existing, root) {
+				s.tempWrites[existing]++
+				covering := existing
+				return root, oncePerHolder(func() { s.releaseTemporaryWrite(covering) }), nil
+			}
+		}
 		return root, func() {}, nil
 	}
 	s.extraRoots = append(s.extraRoots, root)
-	return root, func() { s.removeWriteRoot(root) }, nil
+	if s.tempWrites == nil {
+		s.tempWrites = map[string]int{}
+	}
+	s.tempWrites[root] = 1
+	return root, oncePerHolder(func() { s.releaseTemporaryWrite(root) }), nil
 }
 
 func (s *Scope) writeRootCoversLocked(root string) bool {
@@ -153,16 +292,69 @@ func (s *Scope) writeRootCoversLocked(root string) bool {
 	return false
 }
 
-func (s *Scope) removeReadRoot(root string) {
+// releaseTemporaryRead drops ONE holder's reference and removes the root only
+// when the last one is gone.
+//
+// The count alone cannot make this safe, and an earlier comment here claimed it
+// could — that each undo is called exactly once, and flooring at zero handled
+// the rest. Flooring stops the count going negative; it does not stop one
+// holder's second call consuming a DIFFERENT holder's reference. With two
+// readers, calling the first's undo twice took the count 2 -> 1 -> 0 and removed
+// a root the second was still using. Idempotency belongs to the closure, which
+// is the thing that knows whose reference it is, so every undo handed out is
+// wrapped in oncePerHolder.
+func (s *Scope) releaseTemporaryRead(root string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	remaining, tracked := s.tempReads[root]
+	if !tracked {
+		s.mu.Unlock()
+		return
+	}
+	remaining--
+	if remaining > 0 {
+		s.tempReads[root] = remaining
+		s.mu.Unlock()
+		return
+	}
+	// Both mutations under ONE hold. Dropping the lock between them opened a
+	// window where the root was still in readRoots but no longer in tempReads:
+	// a concurrent AddTemporaryRead landing there reads it as a PERMANENT root,
+	// hands its caller a no-op undo, and then this call strips the root — so
+	// that caller believes it holds access it has already silently lost.
+	delete(s.tempReads, root)
 	s.readRoots = removeScopeRoot(s.readRoots, root)
+	s.mu.Unlock()
 }
 
-func (s *Scope) removeWriteRoot(root string) {
+// releaseTemporaryWrite is releaseTemporaryRead for write roots. Two functions
+// rather than one generic helper because they guard different slices and the
+// generic version would take the slice by name — which is how the wrong one
+// gets passed.
+func (s *Scope) releaseTemporaryWrite(root string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	remaining, tracked := s.tempWrites[root]
+	if !tracked {
+		s.mu.Unlock()
+		return
+	}
+	remaining--
+	if remaining > 0 {
+		s.tempWrites[root] = remaining
+		s.mu.Unlock()
+		return
+	}
+	// Same single-hold rule as releaseTemporaryRead above.
+	delete(s.tempWrites, root)
 	s.extraRoots = removeScopeRoot(s.extraRoots, root)
+	s.mu.Unlock()
+}
+
+// oncePerHolder makes one holder's undo safe to call more than once. The
+// reference it drops is that holder's own, so a second call must do nothing
+// rather than reach into the shared count and take somebody else's.
+func oncePerHolder(release func()) func() {
+	var once sync.Once
+	return func() { once.Do(release) }
 }
 
 func removeScopeRoot(roots []string, root string) []string {
