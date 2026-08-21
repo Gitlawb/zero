@@ -205,3 +205,70 @@ func TestApplyPrincipalACLsRollbackRestoresTheRevokedACEs(t *testing.T) {
 		t.Errorf("rollback never restored the revoked ACEs, got %v", reverted)
 	}
 }
+
+// THE LEDGER IS PART OF THE ROLLBACK, and nothing pinned it.
+//
+// applyWindowsPrincipalACLs narrows the ledger before the whole setup
+// transaction has succeeded. If network setup or the marker write then fails,
+// rollback restores the DACLs, and the ledger has to come back with them: a
+// ledger that still records only the narrowed path set leaves the restored
+// grants unnamed, so later cleanup cannot find them.
+//
+// The neighbouring test asserts only the ORDER of the two ACL reverts and never
+// reads the ledger afterwards, so the restore could be deleted and the suite
+// would stay green.
+func TestApplyPrincipalACLsRollbackRestoresTheLedger(t *testing.T) {
+	prevApply := applyWindowsACLPlanFn
+	t.Cleanup(func() { applyWindowsACLPlanFn = prevApply })
+	applyWindowsACLPlanFn = func(WindowsACLPlan) (func() error, error) {
+		return func() error { return nil }, nil
+	}
+
+	sandboxHome := t.TempDir()
+	const username = "zero-sbx-test"
+
+	// A wider path set than the new plan will record, standing in for a previous
+	// policy's grants.
+	stale := []string{filepath.Join(t.TempDir(), "previously-granted")}
+	if err := writeWindowsPrincipalACLLedger(sandboxHome, username, stale); err != nil {
+		t.Fatalf("seed the ledger: %v", err)
+	}
+
+	workspace := t.TempDir()
+	filesystem := FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: workspace}},
+	}
+	rollback, err := applyWindowsPrincipalACLs(sandboxHome, username, "S-1-5-32-546", filesystem, filesystem.WriteRoots)
+	if err != nil {
+		t.Fatalf("applyWindowsPrincipalACLs: %v", err)
+	}
+
+	narrowed, ok := readWindowsPrincipalACLLedger(sandboxHome, username)
+	if !ok {
+		t.Fatal("no ledger after apply")
+	}
+	if slicesContainsString(narrowed, stale[0]) {
+		t.Fatalf("the ledger still names the old path after apply, so this test is not exercising the restore: %v", narrowed)
+	}
+
+	if err := rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	restored, ok := readWindowsPrincipalACLLedger(sandboxHome, username)
+	if !ok {
+		t.Fatal("no ledger after rollback")
+	}
+	if !slicesContainsString(restored, stale[0]) {
+		t.Errorf("rollback restored the DACLs but left the narrowed ledger %v; the path %q it put back is now unnamed, so cleanup cannot find it", restored, stale[0])
+	}
+}
+
+func slicesContainsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
