@@ -46,7 +46,7 @@ func (adapter codex) transcripts() []string {
 func (adapter codex) Discover(cwd string) ([]ForeignSession, error) {
 	found := []ForeignSession{}
 	for _, path := range adapter.transcripts() {
-		session, ok := indexCodexTranscript(adapter.Name(), path)
+		session, ok := indexCodexTranscript(adapter.Name(), adapter.root, path)
 		if !ok {
 			continue
 		}
@@ -143,11 +143,11 @@ func codexID(path string) string {
 	return base
 }
 
-func indexCodexTranscript(agent string, path string) (ForeignSession, bool) {
+func indexCodexTranscript(agent string, root string, path string) (ForeignSession, bool) {
 	session := ForeignSession{Agent: agent, ID: codexID(path), Path: path}
 	firstPrompt := ""
 
-	_, err := scanHead(path, defaultHeadLimit, func(line []byte) bool {
+	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte) bool {
 		var record codexRecord
 		if json.Unmarshal(line, &record) != nil {
 			return true

@@ -65,6 +65,13 @@ func stripControl(value string) string {
 			return r
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
 			return -1
+		// FORMAT CHARACTERS ARE NOT CONTROL CHARACTERS, and unicode.IsControl
+		// says so — but U+202E RIGHT-TO-LEFT OVERRIDE reorders everything after
+		// it, so a tool name or title can be made to render as something else
+		// entirely while the bytes stay innocent. Category Cf is invisible by
+		// definition; nothing in a transcript needs it.
+		case unicode.Is(unicode.Cf, r):
+			return -1
 		default:
 			return r
 		}
@@ -318,7 +325,7 @@ func omittedRecordsEvent(count int) sessions.AppendEventInput {
 		Type: sessions.EventError,
 		Payload: map[string]any{
 			"message": fmt.Sprintf("%d %s in the source transcript exceeded the import size limit and could not be read. "+
-				"The conversation below is missing that content.", count, noun),
+				"This imported conversation is missing that content.", count, noun),
 		},
 	}
 }
@@ -340,7 +347,9 @@ func DisplayField(value string) string {
 	var b strings.Builder
 	b.Grow(len(value))
 	for _, r := range value {
-		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) {
+		// Cf as well as control: see stripControl. A bidi override in a picker row
+		// reorders the rows's visible text without changing a byte of it.
+		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
 		b.WriteRune(r)

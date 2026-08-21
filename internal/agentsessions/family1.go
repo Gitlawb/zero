@@ -114,7 +114,7 @@ func discoverFamily1(
 	agent string,
 	root string,
 	cwd string,
-	index func(agent string, path string) (ForeignSession, bool),
+	index func(agent string, root string, path string) (ForeignSession, bool),
 ) ([]ForeignSession, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, nil
@@ -147,7 +147,7 @@ func discoverFamily1(
 	found := []ForeignSession{}
 	for _, dir := range dirs {
 		for _, path := range globTranscripts(filepath.Join(dir, "*"+transcriptExt)) {
-			session, ok := index(agent, path)
+			session, ok := index(agent, root, path)
 			if !ok {
 				continue
 			}
@@ -166,7 +166,7 @@ func discoverFamily1(
 // head. It returns false for anything it cannot identify as a session, which is
 // how a partially written, empty, or reshaped file drops out of discovery
 // instead of failing it.
-func indexFamily1Transcript(agent string, path string) (ForeignSession, bool) {
+func indexFamily1Transcript(agent string, root string, path string) (ForeignSession, bool) {
 	session := ForeignSession{
 		Agent: agent,
 		ID:    transcriptID(path),
@@ -174,7 +174,7 @@ func indexFamily1Transcript(agent string, path string) (ForeignSession, bool) {
 	}
 	firstPrompt := ""
 
-	_, err := scanHead(path, defaultHeadLimit, func(line []byte) bool {
+	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte) bool {
 		var record family1Record
 		if json.Unmarshal(line, &record) != nil {
 			// One malformed line is not a malformed file: transcripts are

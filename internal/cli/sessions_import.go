@@ -49,7 +49,10 @@ func runSessionsDiscover(options sessionCommandOptions, stdout io.Writer, stderr
 // command. What did work is still worth having.
 func reportDiscoveryProblems(stderr io.Writer, problems []error) int {
 	for _, problem := range problems {
-		fmt.Fprintln(stderr, "warning: "+problem.Error())
+		// AN ERROR STRING IS NOT AUTOMATICALLY SAFE. These wrap paths and ids read
+		// out of another agent's store, so the untrusted bytes arrive here wearing
+		// an error's clothing rather than a field's.
+		fmt.Fprintln(stderr, "warning: "+agentsessions.DisplayField(problem.Error()))
 	}
 	return exitSuccess
 }
@@ -179,7 +182,8 @@ func runSessionsImport(store *sessions.Store, ref string, options sessionCommand
 	env := agentsessions.OSEnv()
 	adapter, id, err := agentsessions.ParseRef(env, ref)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		// The ref is user-supplied and echoed back by ParseRef's message.
+		return writeExecUsageError(stderr, agentsessions.DisplayField(err.Error()))
 	}
 
 	result, err := agentsessions.Import(store, adapter, id, agentsessions.ReadOptions{
@@ -187,7 +191,7 @@ func runSessionsImport(store *sessions.Store, ref string, options sessionCommand
 		IncludeReasoning: options.includeReasoning,
 	})
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, agentsessions.DisplayField(err.Error()), exitCrash)
 	}
 
 	if options.json {
@@ -204,7 +208,7 @@ func runSessionsImport(store *sessions.Store, ref string, options sessionCommand
 	}
 
 	lines := []string{
-		"Imported " + result.Source.Agent + " session " + result.Source.ID,
+		"Imported " + result.Source.Agent + " session " + agentsessions.DisplayField(result.Source.ID),
 		"",
 		"  zero session: " + result.Session.SessionID,
 		"  title:        " + displayOrNone(result.Session.Title),
