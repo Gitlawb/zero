@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:11:39.450Z",
-  "durationMs": 11237730,
+  "endedAt": "2026-08-21T06:11:41.950Z",
+  "durationMs": 11240260,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,34 +16,23 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 3616,
-    "removed": 0
+    "added": 186,
+    "removed": 27
   },
   "filesChanged": [
     "internal/agentsessions/activity.go",
     "internal/agentsessions/activity_test.go",
-    "internal/agentsessions/cache.go",
-    "internal/agentsessions/cache_test.go",
-    "internal/agentsessions/codex.go",
-    "internal/agentsessions/codex_test.go",
-    "internal/agentsessions/family1.go",
-    "internal/agentsessions/family1_test.go",
-    "internal/agentsessions/import_resume_test.go",
-    "internal/agentsessions/jsonl.go",
-    "internal/agentsessions/jsonl_test.go",
-    "internal/agentsessions/paths.go",
-    "internal/agentsessions/paths_test.go",
+    "internal/agentsessions/blocker_regression_test.go",
     "internal/agentsessions/registry.go",
     "internal/agentsessions/translate.go",
-    "internal/agentsessions/translate_test.go",
-    "internal/agentsessions/types.go"
+    "internal/agentsessions/translate_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "65c34b851e66b612dc7304b5efd265337eef3d1d",
+    "headAfter": "6534ead9395a66c79bb2c1a97d4dea50c5b11436",
     "commitShas": [
-      "65c34b851e66b612dc7304b5efd265337eef3d1d"
+      "6534ead9395a66c79bb2c1a97d4dea50c5b11436"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
