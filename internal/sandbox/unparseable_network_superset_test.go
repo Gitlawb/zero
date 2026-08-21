@@ -60,3 +60,44 @@ func TestUnparseableFallbackKeepsNetworkForServingCommands(t *testing.T) {
 		})
 	}
 }
+
+// THE FALLBACK IS DERIVED FROM THE ANALYZER, NOT MAINTAINED BESIDE IT.
+//
+// The unparseable fallback is meant to be a conservative SUPERSET of everything
+// the AST path flags for network. It was maintained as a separate inventory and
+// drifted: the analyzer accepted "py" as a Python launcher, the regex listed
+// only python, python2 and python3, and a Windows batch spelling the POSIX
+// parser rejects therefore lost the approval gate that its parseable equivalent
+// receives. On Windows that gate IS the egress control.
+//
+// Driving the loop off pythonLauncherPrograms means a launcher added there
+// cannot silently weaken the fallback: this fails the moment the two disagree.
+func TestUnparseableFallbackCoversEveryPythonLauncher(t *testing.T) {
+	if len(pythonLauncherPrograms) == 0 {
+		t.Fatal("SETUP INVALID: no python launchers to check")
+	}
+	for launcher := range pythonLauncherPrograms {
+		t.Run(launcher, func(t *testing.T) {
+			parseable := launcher + " -m http.server 8000"
+			unparseable := `if "%OS%"=="Windows_NT" (` + parseable + ") else (true)"
+
+			if AnalyzeCommand(parseable).TooComplex {
+				t.Fatalf("SETUP INVALID: %q was expected to parse", parseable)
+			}
+			if !AnalyzeCommand(unparseable).TooComplex {
+				t.Fatalf("SETUP INVALID: %q was expected to defeat the parser", unparseable)
+			}
+
+			for _, script := range []string{parseable, unparseable} {
+				risk := Classify(Request{
+					ToolName:   "bash",
+					SideEffect: SideEffectShell,
+					Args:       map[string]any{"command": script},
+				})
+				if !HasRiskCategory(risk, "network") {
+					t.Errorf("%q was not classified as network, so it skips the approval its parseable form receives: %v", script, risk.Categories)
+				}
+			}
+		})
+	}
+}
