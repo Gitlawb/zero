@@ -39,7 +39,8 @@ var powerShellRemoveItemPrograms = map[string]bool{
 
 // networkPrograms are commands that perform network egress/ingress.
 var networkPrograms = map[string]bool{
-	"curl": true, "wget": true, "ssh": true, "scp": true, "sftp": true,
+	"curl": true, "wget": true, "fetch": true, "aria2c": true,
+	"ssh": true, "scp": true, "sftp": true,
 	"rsync": true, "nc": true, "ncat": true, "netcat": true, "telnet": true,
 	"ftp": true, "iwr": true, "irm": true, "invoke-webrequest": true,
 	"invoke-restmethod": true,
@@ -159,9 +160,9 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		// Resolve the real program behind wrapper prefixes (sudo, env, nice, ...)
-		// so `sudo rm -rf`, `env curl …`, and `bash -c 'vim x'` are classified on
-		// the payload, not the launcher — matching DetectInteractiveCommand.
+		if resolveASTCommandNetwork(call.Args, depth).needsNetworkGate() {
+			result.Network = true
+		}
 		prog, rest := effectiveProgram(call.Args)
 		if prog == "" {
 			return true
@@ -170,18 +171,8 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 			seen[prog] = true
 			result.Programs = append(result.Programs, prog)
 		}
-		// `sh -c <payload>` runs the payload as a fresh command; recurse into it so
-		// a program hidden behind a shell launcher is still classified.
-		if depth < maxAnalyzerDepth && shellPrograms[prog] {
-			if payload := dashCPayload(rest); payload != "" {
-				analyzeInto(payload, result, seen, depth+1)
-			}
-		}
 		if _, interactive := interactivePrograms[prog]; interactive && !replSuppressed(prog, rest) {
 			result.Interactive = true
-		}
-		if commandUsesNetwork(prog, rest) {
-			result.Network = true
 		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
@@ -189,56 +180,125 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 			(prog == "find" && hasFindDelete(rest)) {
 			result.Destructive = true
 		}
+		if shellPrograms[prog] {
+			if index, found := shellCommandPayloadIndex(prog, wordTexts(rest)); found && index < len(rest) &&
+				isLiteralWord(rest[index]) && depth < maxAnalyzerDepth {
+				analyzeInto(wordText(rest[index]), result, seen, depth+1)
+			}
+		}
 		return true
 	})
 }
 
-func commandUsesNetwork(prog string, args []*syntax.Word) bool {
-	if networkPrograms[prog] {
-		return true
+// resolveASTCommandNetwork maps shell AST words onto the same tri-state argv
+// resolver used by the unparseable fallback. Literal invocations take exactly
+// one path. For dynamic words, the literal portions still establish known
+// network programs, while executable or interpreter-source expansions remain
+// unresolved and therefore keep the network gate.
+func resolveASTCommandNetwork(words []*syntax.Word, depth int) commandResolution {
+	if depth > maxAnalyzerDepth {
+		return commandUnresolved
 	}
-	words := literalWordTexts(args)
-	if localServerPrograms[prog] {
-		return true
+	if fields, ok := literalCallFields(words); ok {
+		program, args := effectiveProgram(words)
+		switch program {
+		case "cmd", "call", "start", "%comspec%":
+			return commandNetworkResolution(cmdLauncherUsesNetwork(program, args, depth))
+		default:
+			return resolveCommandArgv(fields, depth)
+		}
+	}
+	if envSplitSourceDynamic(words) {
+		return commandUnresolved
+	}
+	program, args := effectiveProgram(words)
+	if program == "" {
+		return commandUnresolved
+	}
+	textArgs := wordTexts(args)
+	resolution := resolveCommandArgv(append([]string{program}, textArgs...), depth)
+	switch {
+	case shellPrograms[program]:
+		index, found := shellCommandPayloadIndex(program, textArgs)
+		if !found || index >= len(args) {
+			return resolution
+		}
+		if !isLiteralWord(args[index]) {
+			return commandUnresolved
+		}
+	case program == "powershell" || program == "pwsh":
+		source := fallbackPowerShellPayload(program, textArgs)
+		if source.opaque || powerShellSourceDynamic(source, args) {
+			return commandUnresolved
+		}
+	case program == "eval":
+		if _, ok := literalCallFields(args); !ok {
+			return commandUnresolved
+		}
+	case program == "cmd" || program == "call" || program == "start" || program == "%comspec%":
+		if cmdLauncherUsesNetwork(program, args, depth) {
+			return commandKnownNetwork
+		}
+	case program == "busybox" && busyboxSourceDynamic(args):
+		return commandUnresolved
+	case program == "strace" && straceSourceDynamic(args):
+		return commandUnresolved
+	}
+	return resolution
+}
+
+// literalProgramNetworkResolution classifies a program after launcher argv has
+// been resolved. Wrapper, delegated-child, and interpreter-source grammars live
+// in resolveCommandArgv so AST and fallback paths cannot select different
+// children before reaching this program-specific table.
+func literalProgramNetworkResolution(prog string, words []string) commandResolution {
+	prog = normalizeProgramToken(trimCMDEchoPrefixToken(prog))
+	normalized := make([]string, len(words))
+	for index := range words {
+		normalized[index] = strings.ToLower(strings.TrimSpace(words[index]))
+	}
+	words = normalized
+	if networkPrograms[prog] || localServerPrograms[prog] {
+		return commandKnownNetwork
 	}
 	switch prog {
 	case "python", "python2", "python3", "py":
-		return pythonModuleUsesNetwork(words)
+		return commandNetworkResolution(pythonModuleUsesNetwork(words))
 	case "npm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"x":    "exec",
-		})
+		}))
 	case "pnpm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
-		})
+		}))
 	case "yarn":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
-		})
+		}))
 	case "bun":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return commandNetworkResolution(packageManagerUsesNetwork(words, map[string]string{
 			"run": "run",
 			"x":   "exec",
-		})
+		}))
 	case "npx":
-		return npxUsesNetwork(words)
+		return commandNetworkResolution(npxUsesNetwork(words))
 	case "pip", "pip2", "pip3":
-		return firstSubcommand(words, nil) == "install"
+		return commandNetworkResolution(firstSubcommand(words, nil) == "install")
 	case "go":
-		return firstSubcommand(words, nil) == "get"
+		return commandNetworkResolution(firstSubcommand(words, nil) == "get")
 	case "git":
-		return gitUsesNetwork(words)
+		return commandNetworkResolution(gitUsesNetwork(words))
 	case "gh":
-		return ghUsesNetwork(words)
+		return commandNetworkResolution(ghUsesNetwork(words))
 	default:
-		return false
+		return commandKnownLocal
 	}
 }
 
@@ -278,8 +338,169 @@ func packageManagerOffline(words []string) bool {
 }
 
 func gitUsesNetwork(words []string) bool {
-	switch firstSubcommand(words, nil) {
-	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
+	invocation := parseGitInvocation(words)
+	if invocation.kind != gitCommandSubcommand {
+		// No subcommand at all, or a global option that makes git print locally
+		// and exit before any subcommand runs.
+		return false
+	}
+	switch invocation.subcommand {
+	// send-pack is push's plumbing counterpart — `git send-pack origin main`
+	// performs exactly the egress `git push` does, so leaving it out gave the
+	// same operation two different answers depending on which spelling was
+	// used.
+	case "clone", "fetch", "pull", "push", "ls-remote", "send-pack":
+		return true
+	case "archive":
+		// `git archive HEAD` streams a tree out of the local object store and needs
+		// no egress at all; only `--remote=<repo>` sends the request to another
+		// host. Classifying every archive as network cost a proactive network
+		// prompt on a purely local command.
+		return gitTargetsRemoteArchive(words, invocation.subcommandIndex)
+	default:
+		return false
+	}
+}
+
+// gitTargetsRemoteArchive reports whether an archive subcommand has an active
+// --remote option. Git accepts archive options after positional operands, so
+// this must keep scanning until an unconsumed `--`. Value-taking options are
+// consumed first: in `archive -o -- --remote=origin HEAD`, `-o` owns the first
+// `--` and the later remote is active; in `archive -o --remote HEAD`, --remote
+// is only the output filename.
+func gitTargetsRemoteArchive(words []string, subcommandIndex int) bool {
+	for index := subcommandIndex + 1; index < len(words); index++ {
+		word := strings.ToLower(words[index])
+		switch {
+		case word == "--":
+			return false
+		case strings.HasPrefix(word, "--remote="):
+			return true
+		case word == "--remote":
+			return index+1 < len(words)
+		case gitArchivePreliminaryOptionConsumesValue(word):
+			index++
+		}
+	}
+	return false
+}
+
+// gitArchivePreliminaryOptionConsumesValue models the first parse-options pass
+// in git archive. That pass consumes only transport/output options and retains
+// format/prefix/mtime options for a later parser, so those later options must
+// not hide an immediately following --remote.
+func gitArchivePreliminaryOptionConsumesValue(option string) bool {
+	if strings.Contains(option, "=") {
+		return false
+	}
+	switch option {
+	case "-o", "--output", "--exec":
+		return true
+	default:
+		return false
+	}
+}
+
+// gitCommandKind distinguishes the three outcomes of reading a git command
+// line, which callers must treat differently.
+type gitCommandKind int
+
+const (
+	// gitCommandNone: no subcommand was found (`git`, `git -C repo`).
+	gitCommandNone gitCommandKind = iota
+	// gitCommandTerminalGlobal: a global option that makes git print locally
+	// and exit — no subcommand runs, whatever words follow it.
+	gitCommandTerminalGlobal
+	// gitCommandSubcommand: a subcommand git will actually execute.
+	gitCommandSubcommand
+)
+
+type gitInvocation struct {
+	kind gitCommandKind
+	// subcommand is set only for gitCommandSubcommand.
+	subcommand string
+	// subcommandIndex is the position in the original argument slice.
+	subcommandIndex int
+	// terminalOption is set only for gitCommandTerminalGlobal.
+	terminalOption string
+}
+
+// gitTerminalGlobalOptions are git's global options that print something from
+// the local installation and exit. Everything after one of them is help/version
+// output text, not a command: `git -C repo --help push` prints git-push's
+// manual page without contacting a remote, so a subcommand scan that walked
+// past them would classify a purely local command as network.
+// Bare `--exec-path` belongs here for the same reason: git documents it as
+// `--exec-path[=<path>]`, so without an inline value it prints the compiled-in
+// exec path and exits. `git --exec-path /tmp push` neither reads /tmp as the
+// option's value nor runs push, so treating it as a value-taking option made a
+// local informational command request egress.
+var gitTerminalGlobalOptions = map[string]bool{
+	"-h": true, "--help": true,
+	"-v": true, "--version": true,
+	"--html-path": true, "--man-path": true, "--info-path": true,
+	"--list-cmds": true, "--exec-path": true,
+}
+
+// parseGitInvocation resolves what a git command line actually does, past git's
+// GLOBAL options. It is the single reader both classification paths use — the
+// AST path through gitUsesNetwork and the unparseable fallback through
+// matchesUnparseableGitNetwork — so the two cannot disagree about an option, as
+// they did while each carried its own skip list.
+//
+// The generic firstSubcommand cannot do this job: git's value-taking globals put
+// their value in the next token, so scanning for the first non-dash token returns
+// that value instead — `git -C repo push origin main` looked like the subcommand
+// "repo" and so classified as no-network, dropping the proactive network prompt
+// for the most common form of the command. internal/agent/command_prefix.go
+// resolves the same option set for its own prefix matching.
+func parseGitInvocation(words []string) gitInvocation {
+	for index := 0; index < len(words); index++ {
+		word := strings.ToLower(words[index])
+		if word == "" {
+			continue
+		}
+		if gitTerminalGlobalOptions[word] || strings.HasPrefix(word, "--list-cmds=") {
+			return gitInvocation{kind: gitCommandTerminalGlobal, terminalOption: word}
+		}
+		if strings.HasPrefix(word, "-") {
+			// A joined value (--git-dir=/x, -C/x) is one token and needs no skip;
+			// a separated one puts its value in the next token.
+			if GitGlobalOptionConsumesValue(word) {
+				index++
+			}
+			continue
+		}
+		if isNumericToken(word) {
+			continue
+		}
+		return gitInvocation{kind: gitCommandSubcommand, subcommand: word, subcommandIndex: index}
+	}
+	return gitInvocation{kind: gitCommandNone}
+}
+
+// GitGlobalOptionConsumesValue lists git's global options whose value is a
+// separate token. It is shared with internal/agent's command-prefix parser so
+// the two security-sensitive scans cannot drift.
+//
+// `--exec-path` is deliberately absent: its value is inline-only
+// (`--exec-path=<path>`), and the bare spelling is terminal — see
+// gitTerminalGlobalOptions.
+// GitTerminalGlobalOption reports whether a git global option makes git print
+// something from the local installation and exit, so nothing after it is a
+// subcommand. It is the exported view of gitTerminalGlobalOptions, shared with
+// internal/agent's command-prefix parser for the same reason
+// GitGlobalOptionConsumesValue is: while each scan carried its own option
+// grammar, `git --help status` was the safe prefix `git status` to one parser
+// and a terminal help invocation to the other, and every new option had to be
+// remembered in two places.
+func GitTerminalGlobalOption(option string) bool {
+	return gitTerminalGlobalOptions[strings.ToLower(strings.TrimSpace(option))]
+}
+
+func GitGlobalOptionConsumesValue(option string) bool {
+	switch strings.ToLower(option) {
+	case "-c", "--attr-source", "--config-env", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
 		return true
 	default:
 		return false
@@ -290,12 +511,280 @@ func npxUsesNetwork(_ []string) bool {
 	return true
 }
 
-func literalWordTexts(args []*syntax.Word) []string {
+func wordTexts(args []*syntax.Word) []string {
 	words := make([]string, 0, len(args))
 	for _, arg := range args {
-		words = append(words, strings.ToLower(strings.TrimSpace(wordText(arg))))
+		words = append(words, strings.TrimSpace(wordText(arg)))
 	}
 	return words
+}
+
+// powerShellSourceDynamic reports whether the words carrying a PowerShell
+// host's command source contain an expansion. wordText silently drops those,
+// so `powershell -Command "$PAYLOAD"` otherwise extracts an empty payload and
+// classifies as clean while the host runs whatever the shell expanded.
+func powerShellSourceDynamic(source powerShellPayload, args []*syntax.Word) bool {
+	if source.sourceIndex < 0 {
+		return false
+	}
+	for index := source.sourceIndex; index < len(args); index++ {
+		if !isLiteralWord(args[index]) {
+			return true
+		}
+	}
+	return false
+}
+
+// envSplitSourceDynamic reports whether an env invocation takes its
+// -S/--split-string argv from a word this scan cannot resolve statically.
+//
+// The literal reconstruction used by envSplitCommandFields is an optimization,
+// not a proof of safety: `PAYLOAD='curl https://…'; env -S "$PAYLOAD"` runs the
+// expanded argv, so an unreadable operand must classify as network-sensitive
+// rather than fall through to wrapper handling that reports no executable.
+func envSplitSourceDynamic(args []*syntax.Word) bool {
+	texts := make([]string, len(args))
+	for index, arg := range args {
+		texts[index] = wordText(arg)
+	}
+	start, ok := envArgumentStart(texts)
+	if !ok {
+		return false
+	}
+	seenSplit := false
+	for index := start; index < len(texts); index++ {
+		text := texts[index]
+		if text == "--" {
+			return false
+		}
+		if _, _, _, split := envSplitOption([]string{text}, 0); split {
+			// A joined operand (-S"$PAYLOAD") reconstructs to the option alone, so
+			// the option token itself carries the dynamic source.
+			if !isLiteralWord(args[index]) {
+				return true
+			}
+			seenSplit = true
+			continue
+		}
+		if !isLiteralWord(args[index]) {
+			if seenSplit {
+				return true
+			}
+			continue
+		}
+		if seenSplit {
+			// The -S operand is literal, but that is only proof about the SPLIT
+			// STRING, not about the invocation: GNU env appends the remaining
+			// argv to the argv the split string produced, so
+			// `env -S 'sh -c' "$PAYLOAD"` runs an argument this scan cannot
+			// read. Keep scanning; a dynamic token anywhere after the split
+			// string extends the command unknowably and fails closed. Trailing
+			// LITERAL tokens are fine — the ordinary literal path reads the
+			// whole reconstructed argv, this one included.
+			for rest := index + 1; rest < len(args); rest++ {
+				if !isLiteralWord(args[rest]) {
+					return true
+				}
+			}
+			return false
+		}
+		if strings.Contains(text, "=") && !strings.HasPrefix(text, "=") && !strings.HasPrefix(text, "-") {
+			continue
+		}
+		if strings.HasPrefix(text, "-") {
+			if wrapperConsumesValue("env", text) && index+1 < len(texts) {
+				index++
+			}
+			continue
+		}
+		// A command position was reached without a split string; ordinary wrapper
+		// resolution classifies this invocation.
+		return false
+	}
+	return false
+}
+
+// busyboxSourceDynamic reports whether a BusyBox invocation's applet-name
+// operand — the token busyboxCommandArgs treats as the delegated child
+// executable — comes from a word this scan cannot resolve statically.
+//
+// busyboxCommandArgs runs on wordTexts, which silently drops expansions:
+// `APPLET=curl; busybox "$APPLET" https://…` would otherwise resolve the
+// applet position to an empty string, which is neither a recognized BusyBox
+// flag nor the executable this scan can name, and the invocation reads as an
+// ordinary unrecognized command rather than as "unknown, assume network."
+func busyboxSourceDynamic(args []*syntax.Word) bool {
+	if len(args) == 0 {
+		return false
+	}
+	return !isLiteralWord(args[0])
+}
+
+// straceSourceDynamic is busyboxSourceDynamic's counterpart for strace: it
+// reports whether the operand straceCommandArgs would treat as the traced
+// child command comes from a word this scan cannot resolve statically.
+// straceChildIndex is shared with straceCommandArgs so this check walks
+// strace's option grammar exactly once, rather than duplicating it and
+// risking the two silently drifting apart.
+func straceSourceDynamic(args []*syntax.Word) bool {
+	index, ok := straceChildIndex(wordTexts(args))
+	if !ok || index >= len(args) {
+		return false
+	}
+	return !isLiteralWord(args[index])
+}
+
+// envArgumentStart returns the index just past an `env` program token, allowing
+// the wrapper prefixes (sudo, nice, ...) that may precede it.
+func envArgumentStart(texts []string) (int, bool) {
+	wrapper := ""
+	for index := 0; index < len(texts); index++ {
+		text := texts[index]
+		if text == "" {
+			if wrapper == "" {
+				return 0, false
+			}
+			continue
+		}
+		if strings.Contains(text, "=") && !strings.HasPrefix(text, "=") && !strings.HasPrefix(text, "-") {
+			continue
+		}
+		if strings.HasPrefix(text, "-") {
+			if wrapperConsumesValue(wrapper, text) && index+1 < len(texts) {
+				index++
+			}
+			continue
+		}
+		if isNumericToken(text) {
+			continue
+		}
+		token := normalizeProgramToken(text)
+		if token == "env" {
+			return index + 1, true
+		}
+		if wrapperPrograms[token] {
+			wrapper = token
+			continue
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+func literalCallFields(args []*syntax.Word) ([]string, bool) {
+	fields := make([]string, 0, len(args))
+	for _, arg := range args {
+		if !isLiteralWord(arg) {
+			return nil, false
+		}
+		fields = append(fields, wordText(arg))
+	}
+	return fields, true
+}
+
+func cmdLauncherUsesNetwork(program string, args []*syntax.Word, depth int) bool {
+	switch program {
+	case "cmd", "call", "start", "%comspec%":
+	default:
+		return false
+	}
+	tokens := make([]fallbackCommandToken, 0, len(args)+1)
+	tokens = append(tokens, fallbackCommandToken{value: program})
+	for _, arg := range args {
+		if !isLiteralWord(arg) {
+			return true
+		}
+		tokens = append(tokens, fallbackCommandToken{
+			value:  wordText(arg),
+			quoted: literalWordIsQuoted(arg),
+		})
+	}
+	for _, body := range cmdCommandBodyTokenInfoCandidates(tokens) {
+		if cmdBodyUsesNetwork(body, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdBodyUsesNetwork classifies one CMD payload candidate.
+//
+// A single QUOTED token is genuinely ambiguous: `cmd /c "git push origin main"`
+// is a command line, while `cmd /c "C:\Program Files\curl.exe"` is one program
+// path that happens to contain a space. CMD itself resolves that by trying the
+// path first and falling back to parsing it as a command line, so this
+// classifies it BOTH ways and fails closed if either reading reaches the
+// network. Treating it only as a program name — taking its basename — is what
+// made `git push origin main` look like an unrecognized executable.
+func cmdBodyUsesNetwork(body []fallbackCommandToken, depth int) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+		return true
+	}
+	if len(body) == 1 && body[0].quoted && strings.ContainsAny(body[0].value, " \t") {
+		return classifyInterpreterSource(body[0].value, interpreterSourceCMD, depth+1).needsNetworkGate()
+	}
+	return false
+}
+
+func literalWordIsQuoted(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	switch word.Parts[0].(type) {
+	case *syntax.SglQuoted, *syntax.DblQuoted:
+		return true
+	default:
+		return false
+	}
+}
+
+// classifyCommandText is the single entry point for interpreter SOURCE — a
+// string another program will run as a command line — as opposed to argv
+// tokens naming a program to execute. It is the difference between
+// `cmd /c "git push origin main"` meaning "run the command line git push
+// origin main" and meaning "run the program named `git push origin main`";
+// reading the second as the first is what let quoted one-liners through.
+//
+// Every launcher that carries command text routes through here: CMD /c and
+// /k, CALL, start, eval, shell -c/--command, PowerShell -Command, and the
+// fallback tokenizer's equivalents. It re-tokenizes the payload rather than
+// taking its basename, runs BOTH the AST scan and the unparseable matcher (a
+// CMD one-liner is legitimately not POSIX, so the parser failing on it is
+// expected, not proof of safety), and fails closed when the text cannot be
+// read at all.
+type interpreterSourceLanguage uint8
+
+const (
+	interpreterSourcePOSIX interpreterSourceLanguage = iota
+	interpreterSourceCMD
+	interpreterSourcePowerShell
+)
+
+// classifyInterpreterSource is the single bounded classifier for text a
+// launcher will execute. Language-specific syntax that the shared parser cannot
+// faithfully interpret is unresolved rather than silently treated as local.
+func classifyInterpreterSource(payload string, language interpreterSourceLanguage, depth int) commandResolution {
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
+		return commandKnownLocal
+	}
+	if depth > maxAnalyzerDepth {
+		return commandUnresolved
+	}
+	if language == interpreterSourcePowerShell && strings.ContainsRune(payload, '`') {
+		// Backtick escaping and line continuation change PowerShell token
+		// boundaries but have no equivalent in the POSIX/CMD readers below.
+		return commandUnresolved
+	}
+	result := AnalysisResult{}
+	analyzeInto(payload, &result, map[string]bool{}, depth)
+	if result.Network || matchesUnparseableNetworkAt(payload, depth) {
+		return commandKnownNetwork
+	}
+	return commandKnownLocal
 }
 
 func pythonModuleUsesNetwork(words []string) bool {
@@ -357,6 +846,45 @@ func firstSubcommand(words []string, aliases map[string]string) string {
 // wordText returns the literal text of a shell word, concatenating its plain and
 // quoted literal parts (so "vim", 'vim', and vim all yield "vim"). Parts that are
 // expansions ($x, $(...)) contribute nothing — the program name is taken as-is.
+// unescapeDoubleQuoted applies POSIX double-quote escape removal to the literal
+// text the parser preserves verbatim inside a double-quoted word.
+//
+// The parser keeps `\"` as two characters because escape removal is the
+// shell's job at expansion time, not the parser's. For an argv token that is
+// harmless; for the `-c` operand of a shell launcher it is not, because the
+// text IS the next command. Without this, one level of
+// `sh -c "sh -c \"curl …\""` handed the recursion the fragment `\"sh` — the
+// rest of the payload silently dropped — and the nested curl disappeared from
+// classification entirely at nesting level 3.
+//
+// Inside double quotes a backslash is special ONLY before $, `, ", \, and a
+// newline; everywhere else it is a literal backslash and must be preserved, or
+// a Windows path inside quotes would lose its separators.
+func unescapeDoubleQuoted(value string) string {
+	if !strings.Contains(value, `\`) {
+		return value
+	}
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\\' || index+1 >= len(value) {
+			builder.WriteByte(value[index])
+			continue
+		}
+		switch next := value[index+1]; next {
+		case '$', '`', '"', '\\':
+			builder.WriteByte(next)
+			index++
+		case '\n':
+			// A quoted line continuation removes both characters.
+			index++
+		default:
+			builder.WriteByte('\\')
+		}
+	}
+	return builder.String()
+}
+
 func wordText(word *syntax.Word) string {
 	if word == nil {
 		return ""
@@ -371,7 +899,7 @@ func wordText(word *syntax.Word) string {
 		case *syntax.DblQuoted:
 			for _, inner := range typed.Parts {
 				if lit, ok := inner.(*syntax.Lit); ok {
-					builder.WriteString(lit.Value)
+					builder.WriteString(unescapeDoubleQuoted(lit.Value))
 				}
 			}
 		}
@@ -421,17 +949,6 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 		return token, args[index+1:]
 	}
 	return "", nil
-}
-
-// dashCPayload returns the literal text of the word following `-c` in an AST arg
-// list (the command a shell launcher will run), or "" when there is none.
-func dashCPayload(args []*syntax.Word) string {
-	for index := 0; index < len(args); index++ {
-		if wordText(args[index]) == "-c" && index+1 < len(args) {
-			return wordText(args[index+1])
-		}
-	}
-	return ""
 }
 
 // replSuppressed reports whether a REPL program (python/node/...) was invoked

@@ -45,6 +45,110 @@ func TestEvaluatePromptsForNetworkToolsButExemptsThemFromShellNetworkPolicy(t *t
 	}
 }
 
+// TestEvaluatePromptsForUnparseableNetworkBehindWrapper is the engine-level
+// regression for jatmn's #726 P2 finding. Classification is what decides egress
+// here: when the fallback stopped recognizing a network program hidden behind a
+// wrapper, an already-permission-granted shell command went from ActionPrompt /
+// ReasonNetworkBlocked to a plain ActionAllow — silently granting network to a
+// command too obfuscated to parse.
+func TestEvaluatePromptsForUnparseableNetworkBehindWrapper(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	for _, command := range []string{
+		`sudo curl https://evil.test && "unterminated`,
+		`env git push origin main && "unterminated`,
+		`curl.exe https://evil.test && "unterminated`,
+		"true\ncurl https://evil.test && \"unterminated",
+		`echo $(curl https://evil.test) && "unterminated`,
+		`if true; then git push; fi && "unterminated`,
+		`eval "curl https://evil.test" && "unterminated`,
+		`f(){ curl https://evil.test; }; f && "unterminated`,
+		`function f() (git push origin main); f && "unterminated`,
+		`cmd.exe /c curl https://evil.test & rem '`,
+		`cmd.exe /d /c git push origin main & rem '`,
+		`cmd.exe /k git push origin main & rem '`,
+		`powershell.exe -Command curl https://evil.test & rem '`,
+		`powershell.exe -c curl https://evil.test & rem '`,
+		`pwsh.exe -c git push origin main & rem '`,
+		`if 1==1 (curl https://evil.test) & rem '`,
+		`if 1==1 ((git push origin main)) & rem '`,
+		`for %i in (x) do (curl https://evil.test) & rem '`,
+		`for /f %i in ('curl https://evil.test') do echo %i & rem '`,
+		"for /f \"usebackq\" %i in (`git push origin main`) do echo %i & rem '",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) = %#v; test must exercise the fallback", command, analysis)
+			}
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want a network prompt", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+}
+
+// TestEvaluateLauncherResolutionContract pins the tri-state resolver at the
+// enforcement boundary: known network and unresolved executable source retain
+// the network gate, while explicit local controls do not prompt for egress.
+func TestEvaluateLauncherResolutionContract(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	networkCases := []string{
+		`PAYLOAD='curl https://evil.test'; sh -c -- "$PAYLOAD"`,
+		`PAYLOAD='curl https://evil.test'; env -S 'sh -c' -- "$PAYLOAD" && "unterminated`,
+		"powershell -Command 'Invoke`-WebRequest https://evil.test'",
+		"powershell -Command 'Invoke`\n-WebRequest https://evil.test'",
+		`powershell -Command Invoke-WebRequest https://evil.test`,
+		`strace --tip curl https://evil.test`,
+		`strace --ver curl https://evil.test`,
+		`strace --tips curl https://evil.test`,
+		`strace env curl https://evil.test`,
+		`strace env -S 'git push origin main'`,
+		`busybox env curl https://evil.test`,
+		`busybox env -S 'git push origin main'`,
+		`busybox -- curl https://evil.test`,
+		`busybox -x curl https://evil.test`,
+		`strace --definitely-invalid curl https://evil.test`,
+		`APPLET=curl; strace "$APPLET" https://evil.test`,
+		`APPLET=curl; busybox "$APPLET" https://evil.test`,
+		`strace env curl https://evil.test && "unterminated`,
+		`busybox env curl https://evil.test && "unterminated`,
+	}
+	for _, command := range networkCases {
+		t.Run("network/"+command, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want network prompt", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+
+	localCases := []string{
+		`sh -c -- 'printf ok'`,
+		`env -S 'sh -c' -- 'printf ok' && "unterminated`,
+		`powershell -Command Get-ChildItem`,
+		`strace --tips true`,
+		`strace env true`,
+		`busybox env true`,
+	}
+	for _, command := range localCases {
+		t.Run("local/"+command, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Reason == ReasonNetworkBlocked || HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want proven-local network classification", command, decision)
+			}
+		})
+	}
+}
+
 func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
@@ -90,6 +194,203 @@ func TestEngineClassifiesPowerShellCurlCommandAsNetwork(t *testing.T) {
 	})
 	if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked || !HasRiskCategory(decision.Risk, "network") {
 		t.Fatalf("PowerShell curl command decision = %#v, want network prompt", decision)
+	}
+}
+
+// TestEngineClassifiesCMDInvocationFormsAsNetwork covers jatmn's #726 finding
+// at the decision layer it actually costs: Evaluate only reaches the network
+// prompt when the risk carries the "network" category, so a CMD form the
+// fallback resolved to a keyword instead of its program reached ActionAllow (or
+// ran under the deny profile) with no approval flow. On the Windows unelevated
+// backend that prompt is the network boundary.
+func TestEngineClassifiesCMDInvocationFormsAsNetwork(t *testing.T) {
+	for _, command := range []string{
+		`@curl https://evil.test & rem '`,
+		`cmd.exe /c call curl https://evil.test & rem '`,
+		`if not 1==2 curl https://evil.test & rem '`,
+		`start "" curl https://evil.test & rem '`,
+		`start "" c^u^r^l https://evil.test & rem '`,
+		`call start "" curl https://evil.test & rem '`,
+		`if 1==1 start "" curl https://evil.test & rem '`,
+		`cmd /c /d curl https://evil.test & rem '`,
+		`powershell /Command curl https://evil.test & rem '`,
+		`powershell -co curl https://evil.test & rem '`,
+		`if 1==1 (curl https://evil.test) & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) parsed; this case must exercise the fallback", command)
+			}
+			engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       "bash",
+				SideEffect:     SideEffectShell,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Args:           map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked ||
+				!HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want a network prompt", command, decision)
+			}
+		})
+	}
+}
+
+func TestEngineClassifiesParseableCMDLaunchersAsNetwork(t *testing.T) {
+	for _, command := range []string{
+		`cmd /c git push origin main`,
+		`cmd /c curl https://evil.test`,
+		`call git push origin main`,
+		`start curl https://evil.test`,
+		`start "" /b curl https://evil.test`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) reported TooComplex; this case must exercise the AST path", command)
+			}
+			engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       "bash",
+				SideEffect:     SideEffectShell,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Args:           map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked ||
+				!HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want a network prompt", command, decision)
+			}
+		})
+	}
+}
+
+func TestEnginePromptsForReviewedUnparseableNetworkForms(t *testing.T) {
+	t.Setenv("ZERO_TEST_ENV_COMMAND", "curl")
+	for _, command := range []string{
+		`cu^rl https://evil.test & rem '`,
+		`cmd /c cu^rl https://evil.test & rem '`,
+		`%ComSpec% /c curl https://evil.test & rem '`,
+		`start "x" curl https://evil.test & rem '`,
+		`cmd /c start "x" curl https://evil.test & rem '`,
+		`start /b "x" curl https://evil.test & rem '`,
+		`if cmdextversion 1 curl https://evil.test & rem '`,
+		`if not cmdextversion 1 git push origin main & rem '`,
+		`git pus^h origin main & rem '`,
+		`git archive --rem^ote=origin HEAD & rem '`,
+		`git archive HEAD --remote=origin`,
+		`git archive --format --remote=origin HEAD`,
+		`bash -lc 'curl https://evil.test' && "unterminated`,
+		`dash -ce 'git push origin main' && "unterminated`,
+		`bash +n -c 'curl https://evil.test' && "unterminated`,
+		`sh -c "$ZERO_TEST_SHELL_COMMAND"`,
+		`env -S 'curl https://evil.test' && "unterminated`,
+		`env -S 'curl\_https://evil.test' && "unterminated`,
+		`env -S '${ZERO_TEST_ENV_COMMAND} https://evil.test' && "unterminated`,
+		`env -iS 'curl https://evil.test' && "unterminated`,
+		`env -S '-S "curl https://evil.test"' && "unterminated`,
+		`env -S 'env -S "curl https://evil.test"' && "unterminated`,
+		`env -S '--argv0 harmless curl https://evil.test' && "unterminated`,
+		`env --split-string 'git push origin main' && "unterminated`,
+		`set "N=curl" & call %N% https://evil.test & rem '`,
+		`set "N=curl" & call %N:x=y% https://evil.test & rem '`,
+		`set "N=curl" & cmd /c %N% https://evil.test & rem '`,
+		`set "N=curl" & start %N% https://evil.test & rem '`,
+		`set "N=git" & call !N! push origin main & rem '`,
+		`sh -c "$PAYLOAD" & rem '`,
+		`sh -c "${PAYLOAD}" & rem '`,
+		`CMD=curl env -S '${CMD} https://evil.test'`,
+		`PAYLOAD='curl https://evil.test' env -S 'sh -c "${PAYLOAD}"'`,
+		`PAYLOAD='curl https://evil.test' env -S 'sh -c "${PAYLOAD}"' & rem '`,
+		`exec -a harmless curl https://evil.test && "unterminated`,
+		`powershell -NoProfile curl https://evil.test`,
+		`pwsh -cwa Invoke-WebRequest https://evil.test & rem '`,
+		`busybox sh -c 'curl https://evil.test' && "unterminated`,
+		`strace -P /tmp sh -c 'git push origin main' && "unterminated`,
+		`strace --trace network curl https://evil.test && "unterminated`,
+		`strace --tips curl https://evil.test && "unterminated`,
+		`strace -fqo trace.log curl https://evil.test && "unterminated`,
+		`powershell -ep RemoteSigned curl https://evil.test & rem '`,
+		// PowerShell source that exists but cannot be read statically: an
+		// undecodable encoded payload, valid encoded network source, and a
+		// Command operand supplied by an expansion.
+		`powershell -EncodedCommand curl & rem '`,
+		`powershell -EncodedCommand YwB1AHIAbAAgAGgAdAB0AHAAcwA6AC8ALwBlAHYAaQBsAC4AdABlAHMAdAA=`,
+		`pwsh -ec YwB1AHIAbAAgAGgAdAB0AHAAcwA6AC8ALwBlAHYAaQBsAC4AdABlAHMAdAA= & rem '`,
+		`PAYLOAD='curl https://evil.test'; powershell -Command "$PAYLOAD"`,
+		`PAYLOAD='curl https://evil.test'; powershell "$PAYLOAD"`,
+		// GNU env -S receives the shell-expanded value and executes its argv, so
+		// an operand this scan cannot resolve must not read as network-free.
+		`PAYLOAD='curl https://evil.test'; env -S "$PAYLOAD"`,
+		`PAYLOAD='curl https://evil.test'; env -S"$PAYLOAD"`,
+		`PAYLOAD='curl https://evil.test'; env --split-string="$PAYLOAD"`,
+		`env -S "$PAYLOAD" && "unterminated`,
+		// CMD's START continues taking switches after its optional window title.
+		`start "" /b curl https://evil.test & rem '`,
+		`start "" /wait curl https://evil.test & rem '`,
+		`start "" /d C:\ curl https://evil.test & rem '`,
+		`start "" /b git push origin main & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			decision := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}}).Evaluate(context.Background(), Request{
+				ToolName:   "bash",
+				SideEffect: SideEffectShell,
+				Args:       map[string]any{"command": command},
+				Permission: PermissionAllow,
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want prompt/network blocked", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+}
+
+// TestEngineDoesNotPromptForNonNetworkCommandForms is the negative half: text
+// that resembles a network invocation but is actually a local argument,
+// encoded payload, script name, or malformed remote option must not cost a
+// network grant.
+func TestEngineDoesNotPromptForNonNetworkCommandForms(t *testing.T) {
+	for _, command := range []string{
+		"git -C repo --help push",
+		"git -h push",
+		`git -C repo -h push & rem '`,
+		"git archive HEAD -- --remote=origin",
+		`git archive -o --remote HEAD & rem '`,
+		`git archive HEAD --remote & rem '`,
+		// A decodable encoded payload is read, not guessed at: this one is the
+		// UTF-16LE source `evil`, a local program name.
+		`powershell -e ZQB2AGkAbAA= & rem '`,
+		`pwsh -File curl & rem '`,
+		// Bare --exec-path prints the local exec path and exits; git never reaches
+		// push, and /tmp is an operand rather than the option's value.
+		`git --exec-path`,
+		`git --exec-path /tmp push`,
+		`git --exec-path /tmp push & rem '`,
+		`pwsh Invoke-WebRequest https://evil.test`,
+		`powershell -Command:Invoke-WebRequest https://evil.test`,
+		`powershell -DefinitelyInvalid Invoke-WebRequest https://evil.test`,
+		`env -S 'printf curl; git push' && "unterminated`,
+		`env -S 'printf ok' curl https://evil.test && "unterminated`,
+		`env -S '--argv0 curl printf ok' && "unterminated`,
+		`start MyTitle curl https://evil.test & rem '`,
+		`bash /dev/null -c 'curl https://evil.test' && "unterminated`,
+		`bash -- -c 'curl https://evil.test' && "unterminated`,
+		`bash -Zc 'curl https://evil.test' && "unterminated`,
+		`bash -nc 'curl https://evil.test' && "unterminated`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       "bash",
+				SideEffect:     SideEffectShell,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Args:           map[string]any{"command": command},
+			})
+			if decision.Reason == ReasonNetworkBlocked || HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want no network classification", command, decision)
+			}
+		})
 	}
 }
 
@@ -874,5 +1175,107 @@ func TestEvaluateAllowsWritesInsideDefaultTempRoot(t *testing.T) {
 	}
 	if HasRiskCategory(decision.Risk, "out_of_workspace") {
 		t.Fatalf("temp-root write risk=%v, must not be out_of_workspace", decision.Risk)
+	}
+}
+
+// TestEvaluatePromptsForParseableNetworkLaunchers is the parity matrix for the
+// PARSEABLE path.
+//
+// Every launcher covered by TestEvaluatePromptsForUnparseableNetworkBehindWrapper
+// is exercised there behind an unparseable suffix (`& rem '`, `&& "unterminated`),
+// which forces classification down the fallback. That proved the fallback and
+// hid the real exposure: production input is usually parseable, and a launcher
+// the AST path did not recurse into stayed clean no matter what the fallback
+// would have said. `cmd /c "git push origin main"` and `eval git push origin main`
+// were both caught by the fallback and both allowed here.
+//
+// So each case below must ALSO be parseable — the guard asserts it — and must
+// still reach ActionPrompt/ReasonNetworkBlocked with the shell permission
+// already granted. A new launcher belongs in both tables.
+func TestEvaluatePromptsForParseableNetworkLaunchers(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	for _, command := range []string{
+		// Quoted CMD payloads are command SOURCE, not a program name.
+		`cmd /c "git push origin main"`,
+		`cmd /c "curl https://evil.test"`,
+		`cmd /d /c "git push origin main"`,
+		`cmd /k "curl https://evil.test"`,
+		`call "git push origin main"`,
+		`call "curl https://evil.test"`,
+		// Unquoted forms, which already worked, stay working.
+		`cmd /c git push origin main`,
+		`cmd.exe /d /c curl https://evil.test`,
+		// eval runs its arguments as shell source on this path too.
+		`eval git push origin main`,
+		`eval "curl https://evil.test"`,
+		`eval curl https://evil.test`,
+		// GNU env appends trailing argv to the split string's argv, so a dynamic
+		// token after a literal -S operand extends the command unreadably.
+		`env -S 'git push origin main' "$EXTRA"`,
+		`env -S 'printf ok' $PAYLOAD`,
+		`env -S 'printf ok' "${PAYLOAD}" https://evil.test`,
+		`env -S "$PAYLOAD"`,
+		// CMD's echo-suppression prefix is not part of the program name.
+		`@curl https://evil.test`,
+		`@git push origin main`,
+		// Nested shell launchers past the level where double-quote escape
+		// removal used to hand the recursion a fragment.
+		`sh -c "sh -c \"sh -c \\\"curl https://evil.test\\\"\""`,
+		`sh -c "sh -c \"git push origin main\""`,
+		// push's plumbing counterpart performs the same egress.
+		`git send-pack origin main`,
+		`git -C repo send-pack origin main`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) is TooComplex; this table must exercise the PARSEABLE path", command)
+			}
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want a network prompt", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+}
+
+// The counterpart to the matrix above: failing closed must not mean flagging
+// every launcher. These run locally and must NOT cost a network prompt, or the
+// classifier trains users to approve egress reflexively.
+func TestEvaluateAllowsParseableLocalLaunchers(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	for _, command := range []string{
+		`cmd /c "git status"`,
+		`cmd /c "echo hello world"`,
+		// A quoted path containing a space is a program name, not a command line.
+		`cmd /c "C:\Program Files\git\bin\git.exe status"`,
+		`call "git status"`,
+		`eval echo hi`,
+		`eval git status`,
+		// Trailing LITERAL argv after a split string is fully readable.
+		`env -S 'printf ok' literal args`,
+		`env -S 'git status' --`,
+		`@echo hello`,
+		`@git status`,
+		`sh -c "sh -c \"git status\""`,
+		// Escape removal must not damage an ordinary quoted Windows path.
+		`echo "C:\Users\me\file.txt"`,
+		`git status`,
+		`git --help push`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) is TooComplex; this table must exercise the PARSEABLE path", command)
+			}
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Reason == ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) requested a network prompt for a local command", command)
+			}
+		})
 	}
 }

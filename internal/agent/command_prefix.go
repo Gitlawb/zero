@@ -395,9 +395,17 @@ func safeGitCommand(command []string) bool {
 func gitSubcommand(command []string) (int, string, bool) {
 	for index := 1; index < len(command); index++ {
 		arg := command[index]
-		if gitOptionConsumesValue(arg) {
+		if sandbox.GitGlobalOptionConsumesValue(arg) {
 			index++
 			continue
+		}
+		// A terminal global makes git print and exit, so the token after it is
+		// help text rather than a subcommand. Stopping here keeps this parser
+		// aligned with the sandbox classifier, which already stops: without it
+		// `git --help status` resolved to the read-only prefix `git status`
+		// and was auto-approved as a command it is not.
+		if sandbox.GitTerminalGlobalOption(arg) {
+			return 0, "", false
 		}
 		if gitOptionHasInlineValue(arg) || arg == "--" || strings.HasPrefix(arg, "-") {
 			continue
@@ -412,17 +420,9 @@ func gitSubcommand(command []string) (int, string, bool) {
 	return 0, "", false
 }
 
-func gitOptionConsumesValue(arg string) bool {
-	switch arg {
-	case "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
-		return true
-	default:
-		return false
-	}
-}
-
 func gitOptionHasInlineValue(arg string) bool {
-	return strings.HasPrefix(arg, "--config-env=") ||
+	return strings.HasPrefix(arg, "--attr-source=") ||
+		strings.HasPrefix(arg, "--config-env=") ||
 		strings.HasPrefix(arg, "--exec-path=") ||
 		strings.HasPrefix(arg, "--git-dir=") ||
 		strings.HasPrefix(arg, "--namespace=") ||
@@ -439,7 +439,7 @@ func gitHasUnsafeGlobalOption(args []string) bool {
 			return true
 		case arg == "-C" || strings.HasPrefix(arg, "-C"):
 			return true
-		case gitOptionConsumesValue(arg):
+		case sandbox.GitGlobalOptionConsumesValue(arg):
 			index++
 		}
 	}
