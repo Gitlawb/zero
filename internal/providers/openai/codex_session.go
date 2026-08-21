@@ -115,6 +115,7 @@ func (session *codexTurnSession) Stream(ctx context.Context, request zeroruntime
 	session.mu.Lock()
 	if session.webSocketOff || session.connection == nil {
 		session.mu.Unlock()
+		trace.FromContext(ctx).Counter(trace.CounterResponsesHTTPFallback, 1)
 		return session.provider.StreamCompletion(ctx, request)
 	}
 	connection := session.connection
@@ -123,7 +124,9 @@ func (session *codexTurnSession) Stream(ctx context.Context, request zeroruntime
 	if delta, ok := responseInputDelta(session.lastRequest, session.lastOutput, fullRequest); ok && session.lastResponseID != "" {
 		wireRequest.PreviousResponseID = session.lastResponseID
 		wireRequest.Input = delta
+		trace.FromContext(ctx).Counter(trace.CounterResponseChainReused, 1)
 	} else if session.lastRequest != nil {
+		trace.FromContext(ctx).Counter(trace.CounterResponseChainReset, 1)
 		session.lastRequest = nil
 		session.lastResponseID = ""
 		session.lastOutput = nil
@@ -279,6 +282,7 @@ func (session *codexTurnSession) streamWebSocket(
 }
 
 func (session *codexTurnSession) forwardHTTP(ctx context.Context, request zeroruntime.CompletionRequest, events chan<- zeroruntime.StreamEvent) {
+	trace.FromContext(ctx).Counter(trace.CounterResponsesHTTPFallback, 1)
 	stream, err := session.provider.StreamCompletion(ctx, request)
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{

@@ -198,7 +198,8 @@ type outputDetails struct {
 }
 
 type inputDetails struct {
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 type errorPayload struct {
@@ -861,6 +862,7 @@ func (p *CodexProvider) handleTerminalResponse(
 		}
 		if event.Response.Usage.InputTokensDetails != nil {
 			usage.CachedInputTokens = event.Response.Usage.InputTokensDetails.CachedTokens
+			usage.CacheWriteTokens = event.Response.Usage.InputTokensDetails.CacheWriteTokens
 		}
 		if event.Response.Usage.OutputTokensDetails != nil {
 			usage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens

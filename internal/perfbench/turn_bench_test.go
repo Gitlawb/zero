@@ -74,6 +74,7 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 		"t3": cannedTrace(150, 20, 1500),
 		"t4": cannedTrace(300, 10, 1000),
 	}
+	canned["t1"].Counters = append(canned["t1"].Counters, trace.Counter{Name: trace.CounterCacheWriteTokens, Value: 125})
 	cfg := TurnBenchConfig{
 		Model:      "fake-model",
 		Iterations: 1,
@@ -154,6 +155,9 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 	}
 	if result.Totals.InputTokens != 5500 {
 		t.Fatalf("inputTokens = %d, want 5500", result.Totals.InputTokens)
+	}
+	if result.Totals.CacheWriteTokens != 125 {
+		t.Fatalf("cacheWriteTokens = %d, want 125", result.Totals.CacheWriteTokens)
 	}
 	if result.Totals.OutputTokens != 2750 {
 		t.Fatalf("outputTokens = %d, want 2750", result.Totals.OutputTokens)
