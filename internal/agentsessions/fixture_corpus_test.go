@@ -128,35 +128,65 @@ func TestASessionWithNoWorkspaceIsNotIndexed(t *testing.T) {
 	}
 }
 
-// THE cwd-BEARING RECORD IS SUBJECT TO THE PER-LINE CAP, and a session whose
-// only cwd sits in a record longer than MaxLineBytes is dropped exactly like a
-// stub above — same verdict, different cause, and nothing distinguishes them in
-// the output. readBoundedLine keeps the first MaxLineBytes of an overlong record
-// and the truncated JSON then fails to parse, so the record is skipped whole.
+// A WORKSPACE IN A GENUINELY OVERLONG RECORD IS LOST, and this pins that rather
+// than claiming otherwise.
 //
-// This is not hypothetical on a real corpus. On the machine this was written on
-// the opening user record is already over the cap in 30 of 367 transcripts, and
-// 73 of the 360 indexed sessions take their cwd from a following attachment
-// record rather than from the user record that should have supplied it. Those
-// survive only because Claude Code happens to write a small attachment next. One
-// that does not would vanish, and would look like a legitimate stub.
-func TestAWorkspaceInAnOverlongRecordIsStillFound(t *testing.T) {
-	adapter := ClaudeCode(fixtureEnv(t, "CLAUDE_CONFIG_DIR", "drops"))
-	found, err := adapter.Discover("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var longcwd *ForeignSession
-	for i := range found {
-		if found[i].ID == "longcwd" {
-			longcwd = &found[i]
+// An earlier version of this test was called ...IsStillFound and used a 1 KiB
+// record against a 64 KiB cap — 64x under the boundary it was named for, so it
+// only reacted if the production constant was cut to 512, which no regression
+// would do. Worse, its name and two neighbouring comments told the next reviewer
+// the case was handled. It is not: @Vasanthdev2004 measured 1 KiB indexes,
+// 60 KiB indexes, 70 KiB does not, 200 KiB does not, and I reproduced exactly
+// that. An honestly named gap beats a test whose name says it is covered.
+//
+// THE MECHANISM. readBoundedLine keeps the first MaxLineBytes of an overlong
+// record; the truncated JSON then fails to parse and the record is skipped
+// whole. When that record is the only one carrying cwd, the session has no
+// workspace and is dropped — indistinguishable in the output from a legitimate
+// stub with no cwd at all.
+//
+// This is not hypothetical. On the machine this was written on the opening user
+// record is already over the cap in 30 of 367 transcripts; they survive only
+// because Claude Code writes a small attachment record next that also carries
+// cwd, and 73 of the 360 indexed sessions (20%) take their cwd from an
+// attachment for exactly that reason. One without that rescue disappears.
+//
+// The import path no longer has this problem — importLineLimit is 8 MiB and an
+// over-cap record is reported rather than dropped — but DISCOVERY still pays the
+// 64 KiB budget, because it is spent once per file across the whole store.
+func TestAWorkspaceOnlyInAnOverlongRecordIsLost(t *testing.T) {
+	for _, size := range []int{1 << 10, 60 << 10, 70 << 10, 200 << 10} {
+		root := t.TempDir()
+		dir := filepath.Join(root, "projects", "-w")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if longcwd == nil {
-		t.Fatalf("a session whose cwd record fits the real per-line cap was dropped. Indexed: %v", found)
-	}
-	if longcwd.Cwd != "/w" {
-		t.Errorf("longcwd indexed with Cwd %q, want /w", longcwd.Cwd)
+		record := map[string]any{
+			"type": "user", "cwd": "/w", "timestamp": "2026-01-01T00:00:01Z",
+			"message": map[string]any{"role": "user", "model": "m", "content": strings.Repeat("p", size)},
+		}
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "s.jsonl"), append(encoded, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		found, err := ClaudeCode(testEnv("", map[string]string{"CLAUDE_CONFIG_DIR": root})).Discover("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		overCap := len(encoded) > defaultHeadLimit.MaxLineBytes
+		switch {
+		case overCap && len(found) != 0:
+			t.Errorf("a %d-byte cwd record (over the %d cap) was indexed; if discovery learned to recover "+
+				"cwd from a truncated record, this test and the comments above it must be updated deliberately",
+				len(encoded), defaultHeadLimit.MaxLineBytes)
+		case !overCap && len(found) != 1:
+			t.Errorf("a %d-byte cwd record (under the %d cap) was dropped: indexed %d",
+				len(encoded), defaultHeadLimit.MaxLineBytes, len(found))
+		}
 	}
 }
 

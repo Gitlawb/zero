@@ -3,8 +3,11 @@ package agentsessions
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -74,8 +77,8 @@ func (reader *countingReader) Read(buffer []byte) (int, error) {
 // truncated line will not parse as JSON and is simply skipped by the caller,
 // which is the right outcome: a record too large to fit the head budget is a
 // giant tool result, never the small metadata record discovery is looking for.
-func scanHead(path string, limit headLimit, visit func(line []byte) bool) (int64, error) {
-	file, err := os.Open(path)
+func scanHead(root string, path string, limit headLimit, visit func(line []byte) bool) (int64, error) {
+	file, err := openContained(root, path)
 	if err != nil {
 		return 0, err
 	}
@@ -90,10 +93,46 @@ func scanHead(path string, limit headLimit, visit func(line []byte) bool) (int64
 			break
 		}
 		if err != nil {
-			break
+			// EOF IS THE ONLY CLEAN STOP. Every other read error — a truncated
+			// file, an I/O failure, a directory replaced mid-scan — was reported
+			// as a successful partial scan, so a session indexed off whatever
+			// bytes happened to arrive before the failure looked exactly like one
+			// indexed off a whole file. The caller cannot decline what it is not
+			// told about.
+			if err == io.EOF {
+				break
+			}
+			return counter.count, err
 		}
 	}
 	return counter.count, nil
+}
+
+// openContained opens path through a handle on root, so the containment checked
+// when the path was globbed still holds at the moment of the read.
+//
+// THE GAP IS BETWEEN THE CHECK AND THE OPEN. globTranscripts already refuses a
+// symlink wearing a transcript extension, but that verdict is about the state of
+// the tree at glob time; anything can replace an entry before the file is
+// actually opened, and os.Open would follow it out of the store. os.Root
+// resolves every component itself and refuses to leave, so the window closes.
+//
+// An empty root opens directly, which is what the unit tests for this file need
+// — they build a single transcript in a temp dir with no store around it.
+func openContained(root string, path string) (*os.File, error) {
+	if strings.TrimSpace(root) == "" {
+		return os.Open(path)
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("transcript %s is outside the store root %s", path, root)
+	}
+	handle, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+	return handle.Open(relative)
 }
 
 // streamLines calls visit with every line of path, without bounding the total.
@@ -145,11 +184,11 @@ func readBoundedLine(reader *bufio.Reader, keep int) ([]byte, error) {
 // indistinguishable, so the import path could not report what it had lost.
 func readBoundedLineTruncated(reader *bufio.Reader, keep int) ([]byte, bool, error) {
 	var kept []byte
-	dropped := 0
+	total := 0
 	for {
 		chunk, err := reader.ReadSlice('\n')
-		room := keep - len(kept)
-		if room > 0 {
+		total += len(chunk)
+		if room := keep - len(kept); room > 0 {
 			if room > len(chunk) {
 				room = len(chunk)
 			}
@@ -157,15 +196,28 @@ func readBoundedLineTruncated(reader *bufio.Reader, keep int) ([]byte, bool, err
 			// the next read, so this must copy.
 			kept = append(kept, chunk[:room]...)
 		}
-		if room < 0 {
-			room = 0
-		}
-		dropped += len(chunk) - room
 		if err == bufio.ErrBufferFull {
 			continue
 		}
-		return bytes.TrimRight(kept, "\r\n"), dropped > 0, err
+		// THE LINE TERMINATOR IS NOT CONTENT. Counting it made a record whose
+		// content exactly fills keep report as truncated, and a CRLF file was one
+		// byte worse — so an import emitted "could not be read" for records that
+		// had in fact been read in full, which is a false alarm in the one place
+		// this signal exists to be trusted.
+		return bytes.TrimRight(kept, "\r\n"), total-terminatorBytes(chunk) > keep, err
 	}
+}
+
+// terminatorBytes is the length of the trailing newline on a chunk, 0 when the
+// final line of a file has none.
+func terminatorBytes(chunk []byte) int {
+	if len(chunk) == 0 || chunk[len(chunk)-1] != '\n' {
+		return 0
+	}
+	if len(chunk) > 1 && chunk[len(chunk)-2] == '\r' {
+		return 2
+	}
+	return 1
 }
 
 // fileModTime is the transcript's last-write time, used as the session's

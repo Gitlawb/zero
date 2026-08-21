@@ -120,3 +120,31 @@ func TestRedactKeepsTheSurroundingText(t *testing.T) {
 		t.Errorf("two halves separated by a newline were redacted as one secret: %q", split)
 	}
 }
+
+// A FORMAT CHARACTER IS NOT A CONTROL CHARACTER, and unicode.IsControl agrees —
+// which is the problem. U+202E RIGHT-TO-LEFT OVERRIDE reorders everything after
+// it, so a title or a tool name can be made to render as something entirely
+// different while every byte stays innocent: "gnp.txt.exe" preceded by an
+// override reads as an image file. Category Cf is invisible by definition and
+// nothing in a transcript needs it.
+func TestABidiOverrideIsStrippedFromTitlesAndToolNames(t *testing.T) {
+	for _, hidden := range []string{"\u202e", "\u200b", "\u2066", "\u2069", "\ufeff"} {
+		title := "deploy " + hidden + "gnp.txt.exe"
+		if got := DisplayField(title); strings.Contains(got, hidden) {
+			t.Errorf("a format character %q survived DisplayField: %q", hidden, got)
+		}
+		toolName := "read" + hidden + "_file"
+		if got := stripControl(toolName); strings.Contains(got, hidden) {
+			t.Errorf("a format character %q survived stripControl: %q", hidden, got)
+		}
+	}
+	// The legible text still comes through — this is stripping, not deletion.
+	if got := DisplayField("deploy \u202egnp.txt.exe"); !strings.Contains(got, "gnp.txt.exe") {
+		t.Errorf("stripping the override ate the filename: %q", got)
+	}
+	// And a newline in a transcript body is still legitimate content, so
+	// stripControl must not have widened into it.
+	if got := stripControl("line one\nline two"); !strings.Contains(got, "\n") {
+		t.Errorf("stripControl removed a legitimate newline: %q", got)
+	}
+}

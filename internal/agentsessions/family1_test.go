@@ -265,9 +265,14 @@ func TestTheRealCorpusStillParses(t *testing.T) {
 	// rather than whether anything was wrong. CI has no store and skips, so the
 	// assertion never ran where a regression would land.
 	//
-	// The two shapes behind a drop — no cwd in any record, and a cwd that only
-	// appears in a record past the per-line cap — are pinned by construction in
-	// fixture_corpus_test.go, which runs everywhere.
+	// The two shapes behind a drop are pinned by construction in
+	// fixture_corpus_test.go, which runs everywhere — but they are pinned as two
+	// DIFFERENT things and the distinction matters to whoever reads this next.
+	// "No cwd in any record" is pinned as correct behaviour: such a session has
+	// no workspace to resume into. "A cwd only in a record past MaxLineBytes" is
+	// pinned as an OPEN DEFECT — the session is lost, and the test asserts that
+	// loss rather than its absence. Neither is a claim that the second case is
+	// handled.
 	if ratio := float64(len(found)) / float64(transcripts); ratio < 0.85 {
 		t.Logf("indexed %d of %d real transcripts (%.0f%%) in the live store. A low ratio here is "+
 			"worth looking at by hand: the known-legitimate exclusion is a session with no cwd in "+
