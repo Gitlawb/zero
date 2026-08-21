@@ -348,6 +348,24 @@ func TestLoadDocumentDoesNotMisreportInstalledPopplerFailure(t *testing.T) {
 	}
 }
 
+func TestLoadDocumentDoesNotMisreportTextlessPDFAsMissingPoppler(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "scan.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
+		t.Fatalf("write scan: %v", err)
+	}
+	original := popplerTextExtractor
+	popplerTextExtractor = func([]byte) popplerTextResult { return popplerTextResult{status: popplerTextExtracted} }
+	t.Cleanup(func() { popplerTextExtractor = original })
+
+	_, err := LoadDocument("scan.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "no extractable text") {
+		t.Fatalf("LoadDocument error = %v, want textless-PDF guidance", err)
+	}
+	if strings.Contains(err.Error(), "install Poppler") {
+		t.Fatalf("LoadDocument error = %q must not claim Poppler is absent", err)
+	}
+}
+
 func TestLoadDocumentVisionUsesText(t *testing.T) {
 	root := t.TempDir()
 	want := "Vision degrade to text"

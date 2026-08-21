@@ -179,7 +179,10 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		if textStatus == popplerTextFailed {
 			return Document{}, fmt.Errorf("%s could not extract PDF text with pdftotext", path)
 		}
-		return Document{}, fmt.Errorf("%s has no extractable text; install Poppler's pdftotext for bounded PDF text extraction (and pdftoppm for image-only PDFs)", path)
+		if textStatus == popplerTextUnavailable {
+			return Document{}, fmt.Errorf("%s has no extractable text; install Poppler's pdftotext for bounded PDF text extraction (and pdftoppm for image-only PDFs)", path)
+		}
+		return Document{}, fmt.Errorf("%s has no extractable text; PDF OCR is not available", path)
 	}
 	pages = resolvePageCount(data, useExternal, pages)
 
