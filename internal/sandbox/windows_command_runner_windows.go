@@ -168,9 +168,15 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 		// resolved its per-user state through paths inside a profile it cannot
 		// open. Applied here, on the principal path only, because this is the first
 		// point that knows which account the command is about to run as.
+		// The role has to be the one the token above was minted for, or the child
+		// is told it is the other account and resolves its per-user state under a
+		// profile it cannot open.
 		config.Env = windowsPrincipalIdentityEnvironment(
 			config.Env,
-			windowsSandboxUserName(windowsSandboxPrincipalKey(config)),
+			windowsSandboxUserName(
+				windowsSandboxPrincipalKey(config),
+				windowsSandboxRoleForNetwork(config.PermissionProfile.Network.Mode),
+			),
 			config.PermissionProfile.Runtime,
 		)
 		exitCode, err := runWindowsCommandAsUser(jailedToken, config)

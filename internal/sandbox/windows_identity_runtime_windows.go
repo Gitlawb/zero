@@ -55,22 +55,29 @@ func windowsSandboxWorkspaceKey(workspaceRoots []string) string {
 // machine with nothing provisioned the lookup declines anyway, which would let a
 // missing guard here pass unnoticed.
 func windowsSandboxPrincipalEligible(config WindowsSandboxCommandConfig) bool {
-	if !windowsSandboxIdentityEnabled(config.Env) {
-		return false
+	return windowsSandboxIdentityEnabled(config.Env)
+}
+
+// windowsSandboxRoleForNetwork maps a command's network mode onto the principal
+// that enforces it.
+//
+// The two roles differ only in membership of the offline group, which the block
+// filters are keyed to. That indirection exists because network denial cannot be
+// expressed on a logon token the way it is on a restricted token: the restricted
+// token carries the offline-marker SID as a restricting SID, and LogonUser has
+// no equivalent, since it builds a token from the account's real memberships.
+//
+// Defaulting anything that is not an explicit allow to the offline principal is
+// deliberate. A mode this does not recognise should lose the network, not keep
+// it.
+func windowsSandboxRoleForNetwork(mode NetworkMode) windowsSandboxRole {
+	// Delegated so this and `zero doctor` answer from one rule. Doctor reporting a
+	// different account than the runtime actually uses is the drift that made the
+	// old inactive-reason helper wrong.
+	if WindowsSandboxPrincipalRoleForNetwork(mode) == string(windowsSandboxRoleOnline) {
+		return windowsSandboxRoleOnline
 	}
-	// Network denial is enforced by WFP filters keyed to the offline-marker SID,
-	// which the restricted token carries and a principal token cannot: LogonUser
-	// mints a token for the account, not for a synthetic capability SID. Using a
-	// principal here would leave those filters matching nothing and silently drop
-	// network enforcement, which is a worse trade than the read confinement it
-	// buys. Fall back to the restricted token, which still enforces the network,
-	// until the filters are also keyed to the principal's own SID.
-	//
-	// Asked of the shared predicate rather than re-tested here, so `zero doctor`
-	// reports exactly the rule this path applies. Two copies would drift, and the
-	// failure mode of drift is doctor telling an operator reads are confined
-	// while commands quietly run on the restricted token.
-	return WindowsSandboxPrincipalInactiveReason(true, config.PermissionProfile.Network.Mode) == ""
+	return windowsSandboxRoleOffline
 }
 
 // windowsSandboxPrincipalToken returns a token for this workspace's sandbox
@@ -101,7 +108,11 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 		return 0, false, nil
 	}
 	key := windowsSandboxPrincipalKey(config)
-	identity, err := lookupWindowsSandboxPrincipalForCommand(key)
+	// The network mode picks the principal. Both are provisioned by setup; the
+	// offline one is in the group the block filters match, so choosing here is
+	// what enforces the mode.
+	role := windowsSandboxRoleForNetwork(config.PermissionProfile.Network.Mode)
+	identity, err := lookupWindowsSandboxPrincipalForCommandFn(key, role)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			// Not provisioned. On the restricted-token tier the marker check has
@@ -118,11 +129,31 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 		// operator has to see, not a reason to pretend setup never ran.
 		return 0, false, err
 	}
+	// Selecting the offline account is only half of what denies it the network.
+	// The WFP filters match the OFFLINE GROUP'S SID, so an account that has
+	// drifted out of that group — local policy, an administrator, a re-setup that
+	// could not re-add it — still logs on from a stored secret and its token no
+	// longer satisfies the filter condition. It would get full egress under a
+	// profile that asked for none. Re-check the membership the mode depends on
+	// rather than trusting the marker written when setup last succeeded.
+	if role == windowsSandboxRoleOffline {
+		member, err := windowsSandboxUserInLocalGroupFn(identity.Username, windowsSandboxOfflineGroupName)
+		if err != nil {
+			return 0, false, err
+		}
+		if !member {
+			// Fail closed toward the weaker-but-still-denied path: the restricted
+			// token carries the offline marker the same filters match, so egress
+			// stays blocked. Handing back this principal token would not.
+			warnWindowsSandboxOfflineMembershipMissing(identity.Username)
+			return 0, false, nil
+		}
+	}
 	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, identity.Username)
 	if err != nil {
 		return 0, false, err
 	}
-	password, err := readWindowsSandboxSecret(secretPath)
+	password, err := readWindowsSandboxSecretFn(secretPath)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			// The account exists but its password does not. Setup was interrupted
@@ -187,6 +218,24 @@ var warnWindowsSandboxPrincipalNotUsed = func(reason string) {
 
 var windowsSandboxPrincipalNotUsedWarnOnce sync.Once
 
+// Seamed so the dual-role setup rollback can be exercised without an elevated
+// machine. The contract under test is which principals the outer rollback is
+// willing to delete, which is a data-loss decision and the one thing here worth
+// proving rather than reasoning about.
+var (
+	provisionWindowsSandboxPrincipalForSetupFn = provisionWindowsSandboxPrincipalForSetup
+	removeWindowsSandboxPrincipalForSetupFn    = removeWindowsSandboxPrincipalForSetup
+	// The both-roles retirement setup runs when the opt-in is off. It belongs
+	// beside its single-role sibling for the reason recorded below: one seam
+	// declared in two places lets a test stub one while production uses the
+	// other.
+	removeWindowsSandboxPrincipalsForSetupFn = removeWindowsSandboxPrincipalsForSetup
+	// applyWindowsACLPlanFn lives with the other identity seams in
+	// windows_identity_windows.go — the ACL-ordering guarantee it exists for
+	// predates the dual-role split, and two declarations of the same seam would
+	// let a test stub one while production used the other.
+)
+
 // provisionWindowsSandboxPrincipalForSetup does the elevated half: create the
 // account, grant it the batch logon right, and store its password locked to the
 // invoking user. Called from `zero sandbox setup`.
@@ -194,9 +243,9 @@ var windowsSandboxPrincipalNotUsedWarnOnce sync.Once
 // The password is written BEFORE the caller applies any ACL plan, so a setup
 // that fails partway leaves a principal that can at least be logged on and
 // therefore cleaned up, rather than an account nothing holds the secret for.
-func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) (windowsSandboxIdentity, bool, error) {
+func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig, role windowsSandboxRole) (windowsSandboxIdentity, bool, error) {
 	key := windowsSandboxPrincipalKey(config)
-	identity, password, created, err := provisionWindowsSandboxIdentityFn(key)
+	identity, password, created, err := provisionWindowsSandboxIdentityFn(key, role)
 
 	// Undo whatever this run actually did, in reverse, on any failure after the
 	// account exists. Without it a failure between creating the account and
@@ -212,7 +261,7 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 	rotated := false
 	// Resolved from the account name rather than the identity, so it is known
 	// before anything can fail.
-	secretPath, secretPathErr := windowsSandboxSecretPath(config.SandboxHome, windowsSandboxUserName(key))
+	secretPath, secretPathErr := windowsSandboxSecretPath(config.SandboxHome, windowsSandboxUserName(key, role))
 	undo := func() error {
 		// Only when this run invalidated it. The secret is removed if this run
 		// created the account, or if it rotated an existing account's password,
@@ -261,7 +310,7 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 			_ = revokeWindowsSandboxLogonRightsFn(identity.SID)
 		}
 		if created {
-			_ = removeWindowsSandboxIdentity(identity.Username)
+			_ = removeWindowsSandboxIdentity(identity.Username, key)
 		}
 		return cleanupErr
 	}
@@ -310,110 +359,145 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 // naming a SID that no longer resolves, which is the orphaned-entry residue this
 // model exists to avoid.
 func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() error, error) {
-	username := windowsSandboxUserName(windowsSandboxPrincipalKey(config))
-	// Retire a principal whose grants were never recorded, BEFORE provisioning
-	// adopts it.
-	//
-	// This is the one case where the prior grant set is not empty but unknowable:
-	// an account from an earlier setup exists, and nothing on Windows can
-	// enumerate the paths whose DACL names its SID. Carrying on would revoke only
-	// what the new plan happens to name and leave the rest — the fail-open this
-	// record exists to close, reached on the single path where it cannot be ruled
-	// out.
-	//
-	// Retiring is a real fix rather than a gesture because Windows never reuses a
-	// deleted local account's RID: whatever ACEs survive name a principal that no
-	// longer exists and grant access to nobody, and the SID minted below is one
-	// no DACL on this machine can already carry. It also needs no new operator
-	// action, which matters — there is no `zero sandbox teardown` to send anyone
-	// to, so refusing here would strand the workspace instead of fixing it.
-	if _, recorded := readWindowsPrincipalACLLedger(config.SandboxHome, username); !recorded {
-		if err := retireUnrecordedWindowsSandboxPrincipal(config); err != nil {
-			return nil, err
+	key := windowsSandboxPrincipalKey(config)
+	// Both roles are provisioned regardless of the profile this setup ran with.
+	// Setup needs elevation and a command does not, so a command whose network
+	// mode differs from the one setup happened to see must still find a principal
+	// waiting; provisioning lazily would mean an unelevated command discovering it
+	// needs an account it cannot create.
+	roles := []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline}
+
+	var undo []func() error
+	rollback := func() error {
+		// Unwind in reverse, and keep going after a failure so one broken step
+		// cannot strand everything behind it. The first error is reported.
+		var firstErr error
+		for i := len(undo) - 1; i >= 0; i-- {
+			if err := undo[i](); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
-	}
-	identity, created, err := provisionWindowsSandboxPrincipalForSetup(config)
-	if err != nil {
-		return nil, err
-	}
-	// Scoped to what this run created, the same contract provisioning already
-	// applies to its own rollback.
-	//
-	// Unconditional removal here meant a transient ACL failure during a re-run of
-	// elevated setup deleted a principal that was working before the run started,
-	// taking its secret and logon rights with it. Provisioning was careful not to
-	// do that and then this undid the care one level up. A pre-existing principal
-	// is left alone: its ACEs are still reverted, since this run applied them,
-	// but the account itself is not this run's to destroy.
-	removePrincipal := func() error {
-		if !created {
-			return nil
-		}
-		return removeWindowsSandboxPrincipalForSetup(config)
+		return firstErr
 	}
 
 	filesystem := config.PermissionProfile.FileSystem
-	writeRoots := filesystem.WriteRoots
-	// The runtime tree has to be granted here, at setup, because nothing grants it
-	// later.
+	// Resolved once, before the loop: both principals need write access to the
+	// same runtime tree.
 	//
-	// permissionProfileWithRuntime appends the per-workspace runtime root to
-	// WriteRoots on every COMMAND, and redirects HOME, GOCACHE, npm_config_cache
-	// and friends into it. That root lives under the user cache, not the
-	// workspace, so the profile setup sees never contains it. On the
-	// restricted-token path that costs nothing, since the child still runs as the
-	// caller and already has rights there. A principal is a separate local account
-	// with none, so without this every npm install, go build or pip install fails
-	// on a cache write with a bare ACCESS_DENIED and nothing pointing at the
-	// sandbox as the cause.
-	if runtimeRoot, err := setupWindowsSandboxRuntimeRoot(config); err != nil {
-		_ = removePrincipal()
-		return nil, err
-	} else if runtimeRoot != "" {
-		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
-	}
-	revertACL, err := applyWindowsPrincipalACLs(config.SandboxHome, username, identity.SID.String(), filesystem, writeRoots)
+	// permissionProfileWithRuntime appends this root to WriteRoots on every
+	// COMMAND and redirects HOME, GOCACHE, npm_config_cache and friends into it,
+	// but it lives under the user cache rather than the workspace, so the profile
+	// setup sees never contains it. On the restricted-token path that costs
+	// nothing, since the child still runs as the caller. A principal is a separate
+	// local account with none of those rights, so without this every npm install,
+	// go build or pip install fails on a cache write with a bare ACCESS_DENIED and
+	// nothing pointing at the sandbox as the cause.
+	runtimeRoots, err := setupWindowsSandboxRuntimeRoot(config)
 	if err != nil {
-		_ = removePrincipal()
 		return nil, err
 	}
-	return func() error {
-		aclErr := revertACL()
-		// Remove the principal even when the ACL revert failed, so a broken
-		// rollback does not also strand an account; report the ACL error since it
-		// is the one that leaves state behind.
-		removeErr := removePrincipal()
-		if aclErr != nil {
-			return aclErr
+
+	for _, role := range roles {
+		username := windowsSandboxUserName(key, role)
+		// Retire a principal whose grants were never recorded, BEFORE provisioning
+		// adopts it.
+		//
+		// This is the one case where the prior grant set is not empty but unknowable:
+		// an account from an earlier setup exists, and nothing on Windows can
+		// enumerate the paths whose DACL names its SID. Carrying on would revoke only
+		// what the new plan happens to name and leave the rest — the fail-open the
+		// record exists to close, reached on the single path where it cannot be ruled
+		// out.
+		//
+		// Retiring is a real fix rather than a gesture because Windows never reuses a
+		// deleted local account's RID: whatever ACEs survive name a principal that no
+		// longer exists and grant access to nobody, and the SID minted below is one
+		// no DACL on this machine can already carry. It also needs no new operator
+		// action, which matters — there is no `zero sandbox teardown` to send anyone
+		// to, so refusing here would strand the workspace instead of fixing it.
+		//
+		// Per role, like everything else in this loop: the two principals are
+		// separate accounts with separate records, and one having lost its record
+		// says nothing about the other.
+		if _, recorded := readWindowsPrincipalACLLedger(config.SandboxHome, username); !recorded {
+			if err := retireUnrecordedWindowsSandboxPrincipal(config, role); err != nil {
+				_ = rollback()
+				return nil, err
+			}
 		}
-		return removeErr
-	}, nil
+		identity, created, err := provisionWindowsSandboxPrincipalForSetupFn(config, role)
+		if err != nil {
+			_ = rollback()
+			return nil, err
+		}
+		// Only for a principal this run created.
+		//
+		// Appending unconditionally meant that if the offline role adopted an
+		// account that already existed and the online role, or any later step,
+		// then failed, the outer rollback deleted a principal that was working
+		// before setup started. Dual-role provisioning makes that likely rather
+		// than unlucky: the first role usually succeeds, so there is almost
+		// always something for a later failure to destroy. This mirrors the
+		// contract provisioning already applies to its own inner rollback.
+		if created {
+			undo = append(undo, func() error { return removeWindowsSandboxPrincipalForSetupFn(config, role) })
+		}
+
+		// Both principals get the same filesystem access. They differ only in
+		// network reach, so granting the offline one less would make an approved
+		// network command see a different filesystem than an ordinary one.
+		writeRoots := filesystem.WriteRoots
+		for _, root := range runtimeRoots {
+			writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: root})
+		}
+		// Revokes this trustee's existing ACEs on the paths the plan touches AND
+		// on the paths this role's record names, before applying it, so a re-run
+		// after narrowing a root does not leave the wider grant behind. Per role:
+		// the two principals are separate trustees with separate records, and
+		// revoking one must not disturb the other.
+		revertACL, err := applyWindowsPrincipalACLs(config.SandboxHome, username, identity.SID.String(), filesystem, writeRoots)
+		if err != nil {
+			_ = rollback()
+			return nil, err
+		}
+		// ACEs are reverted before the account they name is deleted, because
+		// removing the account first leaves ACEs naming a SID that no longer
+		// resolves, which is the orphaned residue this model exists to avoid.
+		// Appending after the removal closure puts it earlier in the reverse
+		// unwind, which is what gets that ordering.
+		undo = append(undo, revertACL)
+	}
+	return rollback, nil
 }
 
-// retireUnrecordedWindowsSandboxPrincipal removes this workspace's principal
-// when one exists, and does nothing when one does not.
+// retireUnrecordedWindowsSandboxPrincipal removes this role's principal when one
+// exists, and does nothing when one does not.
 //
 // The absent case is the ordinary one and is not a problem: with no account
 // there is nothing that could be holding an ACE, so a missing record is simply
 // a machine where setup has not run yet.
-func retireUnrecordedWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) error {
-	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxPrincipalKey(config))
+//
+// Scoped to one role. The other role is a separate account holding its own ACEs
+// under its own record, so retiring both because one lost its record would
+// destroy a principal there is nothing wrong with.
+func retireUnrecordedWindowsSandboxPrincipal(config WindowsSandboxCommandConfig, role windowsSandboxRole) error {
+	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxPrincipalKey(config), role)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			return nil
 		}
 		return err
 	}
-	return removeWindowsSandboxPrincipalForSetupFn(config)
+	return removeWindowsSandboxPrincipalForSetupFn(config, role)
 }
 
-// removeWindowsSandboxPrincipalForSetup retires a workspace's principal in the
+// removeWindowsSandboxPrincipalForSetup retires one role's principal in the
 // order that leaves nothing behind: secret, then ACEs, then LSA logon rights,
 // then the account itself. Everything keyed to the SID has to go while the SID
 // still resolves.
-func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) error {
+func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig, role windowsSandboxRole) error {
 	key := windowsSandboxPrincipalKey(config)
-	username := windowsSandboxUserName(key)
+	username := windowsSandboxUserName(key, role)
 	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, username)
 	if err != nil {
 		return err
@@ -442,12 +526,14 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	// which is the same orphaned residue the trustee-keyed ACE revocation exists
 	// to avoid. A principal that was never provisioned has no SID to resolve and
 	// nothing to revoke, so that case is not an error.
-	if identity, err := lookupWindowsSandboxIdentity(windowsSandboxPrincipalKey(config)); err == nil {
+	if identity, err := lookupWindowsSandboxIdentity(key, role); err == nil {
 		// ACEs first, for the same reason: once the account is gone its SID stops
 		// resolving and every ACE naming it becomes an orphaned raw-SID entry on
 		// the user's own tree, which is precisely the residue the capability-SID
 		// model left behind and this one exists to avoid. Revocation is by
-		// trustee, so it clears grants written by older versions too.
+		// trustee, so it clears grants written by older versions too, and it is
+		// scoped to THIS role's principal — the other role is a separate trustee
+		// whose ACEs must survive one role being retired.
 		//
 		// Failing to revoke is not fatal. A path the user has since deleted or
 		// renamed cannot be cleaned, and refusing to remove the account over it
@@ -464,7 +550,11 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 		// sat on was deleted moments later: residue nothing could find again.
 		// Remembered below rather than returned here, so removing the account
 		// still happens and the principal is not stranded.
-		paths, pathsErr := windowsPrincipalRevocationPaths(config, identity.SID.String())
+		//
+		// The revocation is per ROLE: each workspace has two principals and they
+		// are separate trustees, so the ledger has to be asked for this one's
+		// paths rather than the workspace's.
+		paths, pathsErr := windowsPrincipalRevocationPaths(config, identity.SID.String(), role)
 		if pathsErr != nil {
 			revokeErr = fmt.Errorf("resolve the paths holding ACEs for sandbox principal %s: %w", username, pathsErr)
 		} else if _, err := revokeWindowsPrincipalACEs(identity.SID.String(), paths); err != nil {
@@ -476,11 +566,23 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	} else if !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 		return err
 	}
-	if err := removeWindowsSandboxIdentity(username); err != nil {
-		return err
+	// A foreign account under our derived name is left in place deliberately, and
+	// that is the goal state for teardown: no principal of ours exists under it.
+	// Surfacing it as a teardown failure would make setup rollback report an
+	// error for having correctly declined to delete somebody else's account.
+	if err := removeWindowsSandboxIdentity(username, key); err != nil {
+		if !errors.Is(err, errWindowsSandboxForeignAccountRetained) {
+			return err
+		}
+		// The record is KEPT in that case. It names paths this role's principal
+		// was granted, and a foreign account holding the name is not evidence
+		// those grants are gone — dropping the record would leave them
+		// unrevokable, which is the whole failure it exists to prevent. A record
+		// with no principal is revoked harmlessly by the next setup.
+		return nil
 	}
-	// Last, and only once the account is actually gone, so a failure anywhere
-	// above leaves the record describing a principal that still exists.
+	// Otherwise last, and only once the account is actually gone, so a failure
+	// anywhere above leaves the record describing a principal that still exists.
 	//
 	// It describes grants for a SID that no longer resolves, and leaving it would
 	// have the next setup revoke those paths on behalf of a freshly minted SID
@@ -513,42 +615,44 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 //
 // An empty return means there is no runtime root to grant (no workspace root
 // configured), which is not an error: the caller simply grants nothing extra.
-func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, error) {
-	workspaceRoot := ""
-	for _, candidate := range config.WorkspaceRoots {
-		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
-			workspaceRoot = canonicalSandboxWorkspaceRoot(trimmed)
-			break
-		}
-	}
-	if workspaceRoot == "" {
-		return "", nil
-	}
-	cacheRoot, err := sandboxUserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache directory for sandbox runtime: %w", err)
-	}
-	// Same canonicalization as the workspace root above: sandboxRuntimeRootFor
-	// compares them, so they have to be the same spelling of the same path.
-	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
-	if cacheRoot == "" || cacheRoot == "." {
-		return "", errors.New("user cache directory is unavailable for sandbox runtime")
-	}
-	return sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) ([]string, error) {
+	// EVERY candidate, not just the cache-derived one.
+	//
+	// This used to take the deterministic cache-derived root alone and return
+	// nothing when the cache sat inside the workspace, on the reasoning that the
+	// other branch minted a random per-process directory through os.MkdirTemp and
+	// so had no name both sides could agree on. That reasoning is now stale:
+	// fallbackSandboxRuntimeRoot derives its path by hashing the workspace and
+	// creates nothing, so every process reaches the same answer.
+	//
+	// Leaving it stale had a cost. Commands still SELECT the fallback in that
+	// layout, and prepareSandboxRuntime redirects TMP, GOCACHE and the package
+	// caches into it, while setup granted neither principal an ACE on it. A
+	// principal command in a supported layout then failed ordinary cache writes
+	// with a bare ACCESS_DENIED and nothing naming the sandbox as the cause.
+	//
+	// So this now answers with the same candidate set the capability plan already
+	// grants, and for the same reason: setup covers both so a command lands on a
+	// provisioned tree whichever one it picks.
+	return windowsSandboxRuntimeCandidates(config.WorkspaceRoots), nil
 }
 
 // setupWindowsSandboxRuntimeRoot resolves the runtime root AND creates it.
 // Teardown wants the name without the side effect, so the derivation lives in
 // windowsSandboxRuntimeRootPath above and this only adds the mkdir.
-func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string, error) {
-	root, err := windowsSandboxRuntimeRootPath(config)
-	if err != nil || root == "" {
-		return "", err
+func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) ([]string, error) {
+	roots, err := windowsSandboxRuntimeRootPath(config)
+	if err != nil {
+		return nil, err
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return "", fmt.Errorf("create sandbox runtime root: %w", err)
+	// Every candidate is created, because setup grants an ACE on every candidate
+	// and applyWindowsACLPlan fails the whole run on a target that does not exist.
+	for _, root := range roots {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return nil, fmt.Errorf("create sandbox runtime root: %w", err)
+		}
 	}
-	return root, nil
+	return roots, nil
 }
 
 // revokeWindowsPrincipalACEs drops every ACE naming principalSID on paths and
@@ -707,12 +811,14 @@ func applyWindowsPrincipalACLs(sandboxHome string, username string, principalSID
 func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principalSID string) ([]string, error) {
 	filesystem := config.PermissionProfile.FileSystem
 	writeRoots := filesystem.WriteRoots
-	runtimeRoot, err := windowsSandboxRuntimeRootPath(config)
+	runtimeRoots, err := windowsSandboxRuntimeRootPath(config)
 	if err != nil {
 		return nil, err
 	}
-	if runtimeRoot != "" {
-		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
+	// Every candidate, matching what setup granted: teardown that revoked only
+	// one would leave principal ACEs on the tree commands actually used.
+	for _, root := range runtimeRoots {
+		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: root})
 	}
 	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
 		PrincipalSID: principalSID,
@@ -735,13 +841,15 @@ func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principal
 // plan, so retiring the principal revoked every ACE except the one that was
 // widening the sandbox — and then deleted the account, leaving that ACE naming a
 // SID nothing could resolve to clean it up later.
-func windowsPrincipalRevocationPaths(config WindowsSandboxCommandConfig, principalSID string) ([]string, error) {
+func windowsPrincipalRevocationPaths(config WindowsSandboxCommandConfig, principalSID string, role windowsSandboxRole) ([]string, error) {
 	current, err := windowsPrincipalTeardownPaths(config, principalSID)
 	if err != nil {
 		return nil, err
 	}
+	// This role's record, not the workspace's: the other role is a separate
+	// trustee whose recorded paths are none of this revocation's business.
 	recorded, _ := readWindowsPrincipalACLLedger(
-		config.SandboxHome, windowsSandboxUserName(windowsSandboxPrincipalKey(config)))
+		config.SandboxHome, windowsSandboxUserName(windowsSandboxPrincipalKey(config), role))
 	return unionWindowsPrincipalACLPaths(recorded, current), nil
 }
 
@@ -753,14 +861,44 @@ var (
 	writeWindowsSandboxSecretFn       = writeWindowsSandboxSecret
 )
 
-// Seams for the two elevated calls the unrecorded-principal retirement depends
-// on, so the decision to retire is observable in a test without a provisioned
-// machine — on which the lookup declines for its own reasons and would report
-// success whether or not the guard existed.
-var (
-	lookupWindowsSandboxIdentityFn          = lookupWindowsSandboxIdentity
-	removeWindowsSandboxPrincipalForSetupFn = removeWindowsSandboxPrincipalForSetup
-)
+// warnWindowsSandboxOfflineMembershipMissing reports the one drift that would
+// otherwise silently hand a no-network profile full egress.
+//
+// Separate from the missing-secret warning because the remedy differs and
+// because this one is a containment failure rather than a setup gap: the
+// account is fine, its group membership is not. Once per process, for the same
+// reason as its sibling — this sits on the command path.
+var warnWindowsSandboxOfflineMembershipMissing = func(username string) {
+	windowsSandboxOfflineMembershipWarnOnce.Do(func() {
+		fmt.Fprintf(os.Stderr,
+			"[zero] sandbox principal %q is no longer a member of %q, which is the group the network "+
+				"block filters match. Falling back to the restricted-token sandbox, which still denies "+
+				"the network but does not confine reads. "+
+				"Re-run `zero sandbox setup` from an elevated terminal to restore it.\n",
+			username, windowsSandboxOfflineGroupName)
+	})
+}
+
+var windowsSandboxOfflineMembershipWarnOnce sync.Once
+
+// Seam for the principal lookup, so the command path's mode-enforcement checks
+// are reachable in tests without a provisioned machine.
+var lookupWindowsSandboxPrincipalForCommandFn = lookupWindowsSandboxPrincipalForCommand
+
+// Seam for the secret read on the command path, so the mode-enforcement gates
+// ahead of it can be exercised without a provisioned secret on disk.
+var readWindowsSandboxSecretFn = readWindowsSandboxSecret
+
+// Seam for the lookup the unrecorded-principal retirement decides on, so that
+// decision is observable in a test without a provisioned machine — on which the
+// lookup declines for its own reasons and would report success whether or not
+// the guard existed.
+//
+// The retirement's other elevated call, removeWindowsSandboxPrincipalForSetup,
+// is seamed with the dual-role rollback seams above rather than here, for the
+// reason recorded there: two declarations of one seam let a test stub one while
+// production uses the other.
+var lookupWindowsSandboxIdentityFn = lookupWindowsSandboxIdentity
 
 // windowsACLPlanPaths returns each distinct path a plan touches, in plan order.
 //
@@ -777,6 +915,39 @@ func windowsACLPlanPaths(plan WindowsACLPlan) []string {
 		paths = append(paths, entry.Path)
 	}
 	return paths
+}
+
+// removeWindowsSandboxPrincipalsForSetup retires BOTH of a workspace's
+// principals.
+//
+// Each workspace has an offline and an online account, and they are separate
+// trustees with their own secret, logon rights, ACEs and ledger entries.
+// Retiring one and calling it done is what the opt-out path is there to
+// prevent: the marker would flip to opted-out while the other account and
+// everything it owns stayed on the machine, invisible, because nothing
+// afterwards looks for a principal it believes was never provisioned.
+//
+// Both are attempted even if the first fails, and the errors are joined, so one
+// stubborn account cannot hide residue left by the other.
+// windowsSandboxRoleLegacy is retired alongside the two live roles. A machine
+// set up before the roles were split holds one untagged "zero-sbx-<key>"
+// account, and neither role name resolves to it, so every other path on this
+// branch reports it as never provisioned. Opting out or re-running setup would
+// otherwise leave that account, its secret, its logon rights, its ACEs and its
+// ledger installed and unreferenced. Retirement is idempotent and a principal
+// that was never provisioned is not an error, so this costs a lookup on the
+// machines that never had one.
+func removeWindowsSandboxPrincipalsForSetup(config WindowsSandboxCommandConfig) error {
+	var errs []error
+	for _, role := range []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline, windowsSandboxRoleLegacy} {
+		// Through the seam, like retireUnrecordedWindowsSandboxPrincipal, so the
+		// set of roles this retires is assertable without provisioning real
+		// accounts on the machine running the tests.
+		if err := removeWindowsSandboxPrincipalForSetupFn(config, role); err != nil {
+			errs = append(errs, fmt.Errorf("retire the %s sandbox principal: %w", role, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // windowsCurrentUserSID returns the SID of the user this process runs as, or

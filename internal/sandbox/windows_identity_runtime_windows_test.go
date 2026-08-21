@@ -206,10 +206,10 @@ func TestWindowsSandboxWorkspaceKeyIsStableAndDistinct(t *testing.T) {
 // filters matching nothing, so the principal backend must stand down whenever
 // the network is denied rather than silently trading network enforcement for
 // read confinement.
-// The eligibility predicate is asserted rather than the token lookup, because on
-// a machine with no principal provisioned the lookup declines for its own reasons
-// and would report success here whether or not the guard existed.
-func TestPrincipalBackendDefersToRestrictedTokenWhenNetworkDenied(t *testing.T) {
+// The backend now runs under both network modes, so the opt-in is the only thing
+// eligibility turns on. The mode selects which principal is used, not whether one
+// is used at all.
+func TestPrincipalBackendEligibilityTurnsOnlyOnTheOptIn(t *testing.T) {
 	eligible := func(mode NetworkMode, optIn string) bool {
 		config := WindowsSandboxCommandConfig{
 			SandboxHome:    t.TempDir(),
@@ -220,16 +220,34 @@ func TestPrincipalBackendDefersToRestrictedTokenWhenNetworkDenied(t *testing.T) 
 		return windowsSandboxPrincipalEligible(config)
 	}
 
-	if eligible(NetworkDeny, "1") {
-		t.Fatal("principal backend eligible with the network denied; the WFP filters key on the offline-marker SID, which a logon token does not carry, so egress would be unenforced")
+	for _, mode := range []NetworkMode{NetworkDeny, NetworkAllow} {
+		if !eligible(mode, "1") {
+			t.Fatalf("principal backend refused with network %q; the mode should choose a principal, not disable the backend", mode)
+		}
+		if eligible(mode, "0") {
+			t.Fatalf("principal backend eligible without the opt-in for network %q", mode)
+		}
 	}
-	// The guard must be specific to denial, not a blanket disable that would make
-	// the whole backend dead code.
-	if !eligible(NetworkAllow, "1") {
-		t.Fatal("principal backend refused with the network allowed; the guard is over-broad and disables the backend entirely")
+}
+
+// The network mode is enforced by WHICH principal runs, because the offline one
+// is a member of the group the block filters match. Picking the wrong role is
+// therefore a silent loss of network enforcement, so the mapping is asserted
+// directly rather than inferred from a token that only exists on a provisioned
+// machine.
+func TestPrincipalRoleFollowsNetworkMode(t *testing.T) {
+	if got := windowsSandboxRoleForNetwork(NetworkDeny); got != windowsSandboxRoleOffline {
+		t.Fatalf("deny selected %q, want the offline principal; the online one is not in the blocked group and would have the network", got)
 	}
-	if eligible(NetworkAllow, "0") {
-		t.Fatal("principal backend eligible without the opt-in")
+	if got := windowsSandboxRoleForNetwork(NetworkAllow); got != windowsSandboxRoleOnline {
+		t.Fatalf("allow selected %q, want the online principal", got)
+	}
+	// Fail closed. An unrecognised mode must lose the network rather than keep it,
+	// so anything that is not an explicit allow maps to the offline principal.
+	for _, mode := range []NetworkMode{NetworkMode(""), NetworkMode("bogus"), NetworkMode("ALLOW")} {
+		if got := windowsSandboxRoleForNetwork(mode); got != windowsSandboxRoleOffline {
+			t.Fatalf("unrecognised mode %q selected %q, want the offline principal so an unknown mode fails closed", mode, got)
+		}
 	}
 }
 
