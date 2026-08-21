@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:13:19.667Z",
-  "durationMs": 11338036,
+  "endedAt": "2026-08-21T06:13:26.143Z",
+  "durationMs": 11344512,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,8 +16,8 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 138,
-    "removed": 2
+    "added": 107,
+    "removed": 3
   },
   "filesChanged": [
     "internal/measurements/measurements.go",
@@ -26,9 +26,9 @@
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "428caefe30e8d0cbfedbad8af5903578924e59da",
+    "headAfter": "dd8a063b409b13942c957439f021b7964e34479f",
     "commitShas": [
-      "428caefe30e8d0cbfedbad8af5903578924e59da"
+      "dd8a063b409b13942c957439f021b7964e34479f"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
