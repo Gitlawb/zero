@@ -149,7 +149,7 @@ func TestStreamLinesReadsEverything(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	if err := streamLines(path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
+	if err := streamLines("", path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != 300 {
@@ -165,7 +165,7 @@ func TestStreamLinesToleratesAMissingTrailingNewline(t *testing.T) {
 	writeFile(t, path, `{"type":"a"}`+"\n"+`{"type":"b"}`)
 
 	seen := 0
-	if err := streamLines(path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
+	if err := streamLines("", path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != 2 {
@@ -187,7 +187,7 @@ func TestARecordThatExactlyFillsTheCapIsNotTruncated(t *testing.T) {
 				t.Fatal(err)
 			}
 			var truncated bool
-			if err := streamLines(path, keep, func(_ []byte, wasTruncated bool) bool {
+			if err := streamLines("", path, keep, func(_ []byte, wasTruncated bool) bool {
 				truncated = truncated || wasTruncated
 				return true
 			}); err != nil {
@@ -226,5 +226,25 @@ func TestScanHeadRefusesAPathOutsideTheRoot(t *testing.T) {
 	}
 	if _, err := scanHead(root, outside, defaultHeadLimit, func([]byte) bool { return true }); err == nil {
 		t.Errorf("scanHead read %q from outside the store root %q", outside, root)
+	}
+}
+
+// THE IMPORT READ IS CONTAINED TOO, and it matters more here than in the index.
+// scanHead only builds a picker row; this path reads a transcript's actual
+// content and writes it into the user's own Zero session, so a symlink swapped
+// in after the glob would copy whatever it points at into their store.
+func TestStreamLinesRefusesAPathOutsideTheRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"type":"user"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	err := streamLines(root, outside, 1<<20, func([]byte, bool) bool { seen++; return true })
+	if err == nil {
+		t.Errorf("streamLines read %q from outside the store root %q", outside, root)
+	}
+	if seen != 0 {
+		t.Errorf("streamLines handed the caller %d lines from outside the root", seen)
 	}
 }

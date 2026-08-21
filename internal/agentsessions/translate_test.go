@@ -100,7 +100,7 @@ func TestAClaudeTranscriptBecomesZeroEvents(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Found it."}]}}`,
 	)
 
-	all, err := translateFamily1(path, ReadOptions{})
+	all, err := translateFamily1("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestACallAndItsResultSharePairingID(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Bash","input":{"cmd":"ls"}}]}}`,
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"a.go"}]}}`,
 	)
-	events, err := translateFamily1(path, ReadOptions{})
+	events, err := translateFamily1("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,10 +191,10 @@ func TestReasoningIsKeptWhenAskedFor(t *testing.T) {
 	path := writeTranscript(t,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"weighing options"}]}}`,
 	)
-	if events, _ := translateFamily1(path, ReadOptions{}); len(events) != 0 {
+	if events, _ := translateFamily1("", path, ReadOptions{}); len(events) != 0 {
 		t.Errorf("got %d events by default, want reasoning dropped", len(events))
 	}
-	events, _ := translateFamily1(path, ReadOptions{IncludeReasoning: true})
+	events, _ := translateFamily1("", path, ReadOptions{IncludeReasoning: true})
 	if len(events) != 1 || !strings.Contains(str(t, events[0], "content"), "weighing options") {
 		t.Errorf("IncludeReasoning did not keep the reasoning block: %+v", events)
 	}
@@ -211,7 +211,7 @@ func TestSecretsInAForeignTranscriptAreRedacted(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"cmd":"export K=`+leaked+`"}}]}}`,
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"echoed `+leaked+`"}]}}`,
 	)
-	events, err := translateFamily1(path, ReadOptions{})
+	events, err := translateFamily1("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestATruncatedTranscriptStillImportsWhatCameBefore(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"second"}]}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"tor`, // torn
 	)
-	events, err := translateFamily1(path, ReadOptions{})
+	events, err := translateFamily1("", path, ReadOptions{})
 	if err != nil {
 		t.Fatalf("a torn final line must not fail the import: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestCappingKeepsTheTailAndSaysSo(t *testing.T) {
 	}
 	path := writeTranscript(t, lines...)
 
-	events, err := translateFamily1(path, ReadOptions{MaxEvents: 10})
+	events, err := translateFamily1("", path, ReadOptions{MaxEvents: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestNoCapKeepsEverything(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		lines = append(lines, `{"type":"user","message":{"role":"user","content":"turn `+itoa(i)+`"}}`)
 	}
-	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{})
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestReadRejectsAnUnknownSession(t *testing.T) {
 
 func mustTranslate(t *testing.T, path string) []sessions.AppendEventInput {
 	t.Helper()
-	events, err := translateFamily1(path, ReadOptions{})
+	events, err := translateFamily1("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
