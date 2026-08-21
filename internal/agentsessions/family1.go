@@ -48,7 +48,7 @@ func (adapter family1) Read(id string, options ReadOptions) ([]sessions.AppendEv
 	if err != nil {
 		return nil, err
 	}
-	return translateFamily1(path, options)
+	return translateFamily1(adapter.root, path, options)
 }
 
 // ClaudeCode reads Claude Code's transcripts.

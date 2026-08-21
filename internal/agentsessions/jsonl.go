@@ -141,8 +141,13 @@ func openContained(root string, path string) (*os.File, error) {
 // lie. Individual lines are still capped: a record larger than maxLineBytes is
 // truncated rather than buffered whole, so one 200 MB tool result cannot
 // exhaust memory.
-func streamLines(path string, maxLineBytes int, visit func(line []byte, truncated bool) bool) error {
-	file, err := os.Open(path)
+func streamLines(root string, path string, maxLineBytes int, visit func(line []byte, truncated bool) bool) error {
+	// CONTAINED FOR THE SAME REASON scanHead IS, and with more at stake. This is
+	// the path that reads a transcript's actual CONTENT and writes it into a Zero
+	// session, so a swapped symlink here does not merely mislead an index — it
+	// copies whatever it points at into the user's own store. Hardening the index
+	// and leaving this open would have fixed the instance and not the class.
+	file, err := openContained(root, path)
 	if err != nil {
 		return err
 	}

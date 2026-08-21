@@ -63,7 +63,7 @@ func (adapter codex) Read(id string, options ReadOptions) ([]sessions.AppendEven
 	wanted := strings.TrimSpace(id)
 	for _, path := range adapter.transcripts() {
 		if codexID(path) == wanted {
-			return translateCodex(path, options)
+			return translateCodex(adapter.root, path, options)
 		}
 	}
 	return nil, errors.New("agentsessions: no such session: " + id)
@@ -187,13 +187,13 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 	return session, true
 }
 
-func translateCodex(path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
+func translateCodex(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
 	events := []sessions.AppendEventInput{}
 	toolNames := map[string]string{}
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
-	err := streamLines(path, importLineLimit, func(line []byte, truncated bool) bool {
+	err := streamLines(root, path, importLineLimit, func(line []byte, truncated bool) bool {
 		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
 		// Skipping it silently produced a transcript that looked complete: a
 		// question, no answer, then the follow-up. The marker is the honest
