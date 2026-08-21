@@ -26,7 +26,7 @@ func TestLookupPrincipalForCommandRefusesAnAccountThatBecamePrivileged(t *testin
 		return true, nil
 	}
 
-	_, err = lookupWindowsSandboxPrincipalForCommand("workspace-key")
+	_, err = lookupWindowsSandboxPrincipalForCommand("workspace-key", windowsSandboxRoleOnline)
 	if !errors.Is(err, errWindowsSandboxPrivilegedAccount) {
 		t.Fatalf("err = %v, want errWindowsSandboxPrivilegedAccount", err)
 	}
@@ -49,7 +49,7 @@ func TestLookupPrincipalForCommandAcceptsAnUnprivilegedAccount(t *testing.T) {
 	restoreLookupSeams(t, sid)
 	windowsSandboxUserIsPrivilegedFn = func(string) (bool, error) { return false, nil }
 
-	identity, err := lookupWindowsSandboxPrincipalForCommand("workspace-key")
+	identity, err := lookupWindowsSandboxPrincipalForCommand("workspace-key", windowsSandboxRoleOnline)
 	if err != nil {
 		t.Fatalf("lookupWindowsSandboxPrincipalForCommand: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestLookupIdentityItselfDoesNotConsultPrivilege(t *testing.T) {
 		return true, nil
 	}
 
-	if _, err := lookupWindowsSandboxIdentity("workspace-key"); err != nil {
+	if _, err := lookupWindowsSandboxIdentity("workspace-key", windowsSandboxRoleOnline); err != nil {
 		t.Fatalf("lookupWindowsSandboxIdentity: %v", err)
 	}
 }

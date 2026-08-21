@@ -97,14 +97,6 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
-	// Always provision the mode-INDEPENDENT infrastructure: the outbound block
-	// filters scoped to the offline-marker SID. Runtime gates network per command
-	// by whether the token carries that SID, so one setup serves both modes.
-	networkPlan, err := BuildWindowsNetworkInfraPlan(config.commandConfig())
-	if err != nil {
-		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 1
-	}
 	rollback, err := applyWindowsACLPlanFn(plan)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
@@ -136,7 +128,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 			}
 			return aclErr
 		}
-	} else if err := removeWindowsSandboxPrincipalForSetupFn(config.commandConfig()); err != nil {
+	} else if err := removeWindowsSandboxPrincipalsForSetupFn(config.commandConfig()); err != nil {
 		// Opting out has to actually retire the principal, because that is what
 		// we tell people it does. ValidateWindowsSandboxSetupMarker sends an
 		// operator here in as many words: re-run setup from an elevated terminal
@@ -183,7 +175,56 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintf(stderr, "%s: opted out; the sandbox principal was retired, but some of its residue could not be removed: %v\n",
 			WindowsSandboxSetupName, err)
 	}
-	if err := applyWindowsNetworkPlanFn(networkPlan); err != nil {
+	// Built AFTER any principal provisioning, not before. The block filters are
+	// keyed to the offline group as well as the offline-marker SID, and that group
+	// is created as part of provisioning: planning first would install filters
+	// that name only the marker, leaving every offline principal with an open
+	// network while looking correctly set up.
+	//
+	// Mode-INDEPENDENT by design. Which identity a command runs under is what
+	// selects allow or deny, so one setup serves both modes.
+	networkPlan, err := BuildWindowsNetworkInfraPlan(config.commandConfig())
+	if err != nil {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
+			return 1
+		}
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
+	// Refuse to install filters that would not cover the principals just
+	// provisioned. The ordering above is what makes them cover it, and nothing at
+	// this call site shows that, so assert it rather than trusting it to survive
+	// a later refactor. Installing anyway would leave a machine reporting a
+	// successful setup while every offline principal had an open network.
+	// Gated on the SAME opt-in that decides whether principals were provisioned
+	// at all (line 36). The offline group is created inside provisioning, so on
+	// an opt-out machine it legitimately does not exist, and asserting there
+	// would refuse a setup that has nothing to get wrong.
+	if err := assertWindowsNetworkPlanCoversOfflineGroup(networkPlan, resolveWindowsSandboxOfflineGroupSIDHook,
+		windowsSandboxIdentityEnabled(config.commandConfig().Env)); err != nil {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
+			return 1
+		}
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
+	// Install the machine's plan, not this home's. The filters are global and are
+	// replaced wholesale on every setup, so an opted-out run here would otherwise
+	// strip the offline group SID that another workspace's principals depend on
+	// and hand them egress under a NetworkDeny profile. networkPlan itself is left
+	// alone because it is what this home's marker fingerprints.
+	planToInstall, planErr := WindowsNetworkPlanForApply(networkPlan, resolveWindowsSandboxOfflineGroupSIDHook)
+	if planErr != nil {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, planErr, rollbackErr)
+			return 1
+		}
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+planErr.Error())
+		return 1
+	}
+	if err := applyWindowsNetworkPlanFn(planToInstall); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
 			return 1
@@ -210,9 +251,21 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 // is treated as still installed. The consumer uses this to decide whether an
 // opted-out marker would be a lie, and the expensive mistake there is claiming a
 // principal is gone when nobody actually checked.
+// A workspace now has TWO principals, and either one still installed makes the
+// answer yes. Checking a single role would let an opted-out marker claim the
+// workspace is clean while the other account is still on the machine, which is
+// the exact lie this guard exists to prevent.
 func windowsSandboxPrincipalIsInstalled(config WindowsSandboxCommandConfig) bool {
-	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxPrincipalKey(config))
-	return !errors.Is(err, errWindowsSandboxIdentityUnavailable)
+	// BOTH roles, because dual-role setup provisions two accounts and retiring
+	// one while the other survives is exactly the half-done teardown an
+	// opted-out marker must not claim to have completed.
+	key := windowsSandboxPrincipalKey(config)
+	for _, role := range []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline} {
+		if _, err := lookupWindowsSandboxIdentityFn(key, role); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+			return true
+		}
+	}
+	return false
 }
 
 // assertWindowsSetupRunsAsCaller refuses to provision a sandbox principal when

@@ -58,7 +58,7 @@ func TestSetupRuntimeRootMatchesTheCommandPathForADifferentlyCasedRoot(t *testin
 	if err != nil {
 		t.Fatalf("sandboxRuntimeRootFor(command): %v", err)
 	}
-	if fromSetup != fromCommand {
+	if !grantedRuntimeRootsCover(fromSetup, fromCommand) {
 		t.Errorf("setup grants a runtime tree commands never use:\n  setup:   %s\n  command: %s", fromSetup, fromCommand)
 	}
 }
@@ -118,7 +118,7 @@ func TestSetupAndPrepareRuntimeAgreeOnANonCanonicalRoot(t *testing.T) {
 	if release != nil {
 		defer release()
 	}
-	if filepath.Clean(granted) != filepath.Clean(state.Root) {
+	if !grantedRuntimeRootsCover(granted, state.Root) {
 		t.Errorf("setup granted %q but commands write to %q", granted, state.Root)
 	}
 }
@@ -202,16 +202,79 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 		t.Errorf("temp directory gained %d entries; naming the paths must not create one", after-before)
 	}
 
-	// And the setup resolver, which is allowed to create, still does.
-	created, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
+	// Setup's resolver must agree with teardown's, and create nothing either.
+	//
+	// This assertion has now been inverted twice, so the history is worth keeping.
+	// It first required setup to fall back to a usable tree. That was then wrong,
+	// because the fallback was os.MkdirTemp memoized only in-process: setup would
+	// grant an ACE on temp root A, the next command would derive root B and fail
+	// ACCESS_DENIED, and teardown would clean a third. So it was changed to demand
+	// setup report NOTHING here.
+	//
+	// That is what is wrong now. fallbackSandboxRuntimeRoot derives its path by
+	// hashing the workspace and creates nothing, so every process reaches the same
+	// answer. Commands in this exact layout therefore DO select it and redirect
+	// TMP, GOCACHE and the package caches into it, while setup granting nothing
+	// left both principals without an ACE on the one tree those writes land in.
+	// Reporting none is no longer the safe answer; it is the ACCESS_DENIED.
+	beforeSetup := tempDirEntryCount(t)
+	setupRoots, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
 		WorkspaceRoots: []string{workspace},
 		CommandCWD:     workspace,
 	})
 	if err != nil {
 		t.Fatalf("windowsSandboxRuntimeRootPath: %v", err)
 	}
-	if created == "" {
-		t.Error("setup's resolver should still fall back to a usable tree")
+	if len(setupRoots) == 0 {
+		t.Error("setup named no runtime root for a workspace whose cache-derived root is unusable; commands still select the stable fallback and would write there with no ACE")
+	}
+	// And it must be the tree a command actually picks, not merely some tree.
+	commandState, release, err := prepareSandboxRuntime(workspace)
+	if err != nil {
+		t.Fatalf("prepareSandboxRuntime: %v", err)
+	}
+	if release != nil {
+		defer release()
+	}
+	if !grantedRuntimeRootsCover(setupRoots, commandState.Root) {
+		t.Errorf("setup granted %q but commands write to %q", setupRoots, commandState.Root)
+	}
+	if after := tempDirEntryCount(t); after != beforeSetup {
+		t.Errorf("setup's resolver created %d temp entries; it must create nothing", after-beforeSetup)
+	}
+}
+
+// Setup and teardown must derive the SAME root in the ordinary case, since one
+// grants the ACE the other revokes. This is the case the fix above must not
+// break: reporting "no root" is only correct when the root is underivable.
+func TestSetupAndTeardownDeriveTheSameRuntimeRoot(t *testing.T) {
+	workspace := t.TempDir()
+	cacheRoot := t.TempDir() // outside the workspace, so the derivation is usable
+	previous := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = previous })
+
+	setupRoot, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
+		WorkspaceRoots: []string{workspace},
+		CommandCWD:     workspace,
+	})
+	if err != nil {
+		t.Fatalf("windowsSandboxRuntimeRootPath: %v", err)
+	}
+	if len(setupRoot) == 0 {
+		t.Fatal("setup named no runtime root for a derivable workspace")
+	}
+	teardownRoot, ok := deterministicSandboxRuntimeRoot(
+		canonicalSandboxWorkspaceRoot(workspace), canonicalSandboxWorkspaceRoot(cacheRoot))
+	if !ok {
+		t.Fatal("precondition: the deterministic root should be usable here")
+	}
+	// The cache-derived root is the one a command picks in this layout, so it has
+	// to be among what setup granted. Setup covering the fallback as well is the
+	// point rather than a discrepancy: whichever the command lands on is
+	// provisioned.
+	if !grantedRuntimeRootsCover(setupRoot, teardownRoot) {
+		t.Errorf("setup grants on %q but teardown revokes %q", setupRoot, teardownRoot)
 	}
 }
 

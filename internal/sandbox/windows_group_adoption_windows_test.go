@@ -8,48 +8,62 @@ import (
 	"testing"
 )
 
-// A NAME IS NOT PROOF OF PROVENANCE.
+// A NAME IS NOT PROOF OF PROVENANCE, for the USERS group specifically.
 //
-// "Already exists" was treated as plain success, so any local group that
-// happened to be called ZeroSandboxUsers was adopted: its members, and every
-// grant already keyed to it, silently became part of the sandbox's identity.
-// An unprivileged user cannot create a local group, but an administrator, an
-// installer or an earlier tool can, and the sandbox would then inherit it.
+// ensureWindowsLocalGroup covers both managed groups, and the sibling test in
+// windows_offline_group_ownership_windows_test.go pins the offline one. This
+// pins ZeroSandboxUsers, which is the group anandh8x reported: it holds every
+// sandbox principal, so adopting a same-named group created by an installer or
+// by policy would hand the principal whatever that group already grants.
 //
-// Tested through the extracted decision rather than the syscall, so it needs no
-// Administrator and leaves no group behind on the machine running the suite.
-func TestAdoptingAForeignGroupOfOurNameIsRefused(t *testing.T) {
+// Driven through the seams so it needs no Administrator and leaves no real local
+// group on the machine running the suite.
+func TestAdoptingAForeignUsersGroupIsRefused(t *testing.T) {
 	for _, status := range []uintptr{nerrGroupExists, errorAliasExists} {
-		err := resolveWindowsSandboxGroupAdd(status, func() (bool, error) { return false, nil })
+		prevAdd, prevOwned := addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn
+		t.Cleanup(func() { addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn = prevAdd, prevOwned })
+
+		addWindowsLocalGroupFn = func(string, string) (uintptr, error) { return status, nil }
+		windowsLocalGroupOwnedByZeroFn = func(string, string) (bool, error) { return false, nil }
+
+		err := ensureWindowsSandboxGroup()
 		if err == nil {
-			t.Fatalf("status %d adopted a group Zero did not create, handing the sandbox whatever it already grants", status)
+			t.Fatalf("status %d adopted a group Zero did not create, so the principal inherits whatever it already grants", status)
 		}
 		if !strings.Contains(err.Error(), windowsSandboxGroupName) {
-			t.Errorf("the refusal must name the group that is in the way, got %q", err)
+			t.Errorf("the refusal must name the group in the way, got %q", err)
 		}
 	}
 }
 
-// Our own group is still adopted, or re-running setup would fail on the group
-// it created a moment ago and provisioning would never converge.
-func TestAdoptingOurOwnGroupStillSucceeds(t *testing.T) {
-	for _, status := range []uintptr{nerrGroupExists, errorAliasExists} {
-		if err := resolveWindowsSandboxGroupAdd(status, func() (bool, error) { return true, nil }); err != nil {
-			t.Errorf("status %d refused a group carrying Zero's own comment: %v", status, err)
+// Our own group is still adopted, or re-running setup would fail on the group it
+// created a moment ago and provisioning would never converge.
+func TestAdoptingOurOwnUsersGroupSucceeds(t *testing.T) {
+	prevAdd, prevOwned := addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn
+	t.Cleanup(func() { addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn = prevAdd, prevOwned })
+
+	addWindowsLocalGroupFn = func(string, string) (uintptr, error) { return nerrGroupExists, nil }
+	windowsLocalGroupOwnedByZeroFn = func(name, comment string) (bool, error) {
+		if name != windowsSandboxGroupName || comment != windowsSandboxGroupComment {
+			t.Errorf("ownership probed for %q/%q, want the users group", name, comment)
 		}
+		return true, nil
+	}
+	if err := ensureWindowsSandboxGroup(); err != nil {
+		t.Errorf("refused a group carrying Zero's own comment: %v", err)
 	}
 }
 
-// A freshly created group is ours by construction, so no ownership probe should
-// run at all. Without this the check could be satisfied by an implementation
-// that interrogates the group it just made, which would be a wasted syscall and
-// a needless failure mode.
-func TestCreatingTheGroupDoesNotProbeOwnership(t *testing.T) {
+// A freshly created group is ours by construction, so no ownership probe runs.
+func TestCreatingTheUsersGroupDoesNotProbeOwnership(t *testing.T) {
+	prevAdd, prevOwned := addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn
+	t.Cleanup(func() { addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn = prevAdd, prevOwned })
+
 	probed := false
-	if err := resolveWindowsSandboxGroupAdd(nerrSuccess, func() (bool, error) {
-		probed = true
-		return false, nil
-	}); err != nil {
+	addWindowsLocalGroupFn = func(string, string) (uintptr, error) { return nerrSuccess, nil }
+	windowsLocalGroupOwnedByZeroFn = func(string, string) (bool, error) { probed = true; return false, nil }
+
+	if err := ensureWindowsSandboxGroup(); err != nil {
 		t.Fatalf("a successful create was rejected: %v", err)
 	}
 	if probed {
@@ -57,19 +71,16 @@ func TestCreatingTheGroupDoesNotProbeOwnership(t *testing.T) {
 	}
 }
 
-// A failed ownership probe must not be read as "not ours" and must not be read
-// as "ours" either. Neither guess is safe, so the error surfaces.
-func TestAnUnreadableGroupIsNotGuessedEitherWay(t *testing.T) {
-	sentinel := errors.New("NetLocalGroupGetInfo: status 5")
-	err := resolveWindowsSandboxGroupAdd(nerrGroupExists, func() (bool, error) { return false, sentinel })
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("a failed ownership probe was swallowed, got %v", err)
-	}
-}
+// A failed ownership probe is not read as "ours" and not as "not ours" either.
+func TestAnUnreadableUsersGroupIsNotGuessedEitherWay(t *testing.T) {
+	prevAdd, prevOwned := addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn
+	t.Cleanup(func() { addWindowsLocalGroupFn, windowsLocalGroupOwnedByZeroFn = prevAdd, prevOwned })
 
-// A real API failure is still a failure; the new branch must not mask it.
-func TestARealGroupAddFailureStillFails(t *testing.T) {
-	if err := resolveWindowsSandboxGroupAdd(errorAccessDenied32, func() (bool, error) { return true, nil }); err == nil {
-		t.Fatal("access denied was reported as success")
+	sentinel := errors.New("NetLocalGroupGetInfo: status 5")
+	addWindowsLocalGroupFn = func(string, string) (uintptr, error) { return nerrGroupExists, nil }
+	windowsLocalGroupOwnedByZeroFn = func(string, string) (bool, error) { return false, sentinel }
+
+	if err := ensureWindowsSandboxGroup(); !errors.Is(err, sentinel) {
+		t.Fatalf("a failed ownership probe was swallowed, got %v", err)
 	}
 }
