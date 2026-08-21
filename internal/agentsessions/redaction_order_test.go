@@ -95,8 +95,28 @@ func TestRedactKeepsTheSurroundingText(t *testing.T) {
 	}
 	// A newline separates rather than rejoins, so the halves must NOT become the
 	// secret, and the newline itself is legitimate transcript content.
-	split := redact("before sk-ant-api03-\n" + strings.Repeat("A", 24) + " after")
+	//
+	// THE COMMENT ABOVE WAS THE ONLY THING ASSERTING THE FIRST HALF OF THAT. The
+	// newline check alone passes just as well if the matcher spans the newline
+	// and redacts both halves as one secret — the separator would survive inside
+	// a "[REDACTED]" that ate the text around it. Both halves are named here, and
+	// so is the absence of any redaction at all, because the failure this guards
+	// against is over-redaction: a credential cannot contain a raw newline, so
+	// treating a newline-split pair as one destroys legitimate transcript content
+	// while protecting nothing. It is also what stops stripControl being widened
+	// to strip newlines, which would make the NUL case above pass for the wrong
+	// reason.
+	halves := []string{"sk-ant-api03-", strings.Repeat("A", 24)}
+	split := redact("before " + halves[0] + "\n" + halves[1] + " after")
 	if !strings.Contains(split, "\n") {
 		t.Errorf("a newline was stripped from transcript text: %q", split)
+	}
+	for _, half := range halves {
+		if !strings.Contains(split, half) {
+			t.Errorf("a newline-separated half %q was consumed as part of a secret, leaving %q", half, split)
+		}
+	}
+	if strings.Contains(split, "[REDACTED]") {
+		t.Errorf("two halves separated by a newline were redacted as one secret: %q", split)
 	}
 }
