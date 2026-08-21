@@ -1726,8 +1726,8 @@ func TestResolvePersistedProviderIdentityPrefersNames(t *testing.T) {
 		writeConfigFixture(t, variants, FileConfig{
 			Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}},
 		}, 0o600)
-		if _, _, err := ResolvePersistedProviderIdentity(variants, "wOrK"); err == nil {
-			t.Fatal("resolve succeeded for a name matching two case-variant rows, want an ambiguity error")
+		if _, match, err := ResolvePersistedProviderIdentity(variants, "wOrK"); err == nil || match != PersistedIdentityAmbiguous {
+			t.Fatalf("match = %v err = %v, want a distinct ambiguity result", match, err)
 		}
 		// An exact spelling still addresses one row, so a legacy config with such
 		// a pair stays repairable.
@@ -1762,8 +1762,8 @@ func TestResolvePersistedProviderIdentityPrefersNames(t *testing.T) {
 				{Name: "personal-xai", CatalogID: "xai"},
 			},
 		}, 0o600)
-		if _, match, err := ResolvePersistedProviderIdentity(shared, "xai"); err != nil || match != PersistedIdentityNone {
-			t.Fatalf("match = %v err = %v, want no guess at a shared catalog id", match, err)
+		if _, match, err := ResolvePersistedProviderIdentity(shared, "xai"); err == nil || match != PersistedIdentityAmbiguous {
+			t.Fatalf("match = %v err = %v, want distinct ambiguity for a shared catalog id", match, err)
 		}
 	})
 }
