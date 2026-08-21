@@ -850,7 +850,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		})
 		if registerErr != nil {
 			closeMCPRuntime(stderr, runtime)
-			return writeAppError(stderr, registerErr.Error(), 1)
+			return writeAppError(stderr, redaction.ErrorMessage(registerErr, redaction.Options{}), 1)
 		}
 		mcpRuntime = runtime
 	}

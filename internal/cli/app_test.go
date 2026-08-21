@@ -17,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
@@ -627,6 +628,7 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
 	runtimeClosed := false
+	secret := "sk-proj-" + strings.Repeat("a", 23) + "0"
 
 	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
@@ -653,7 +655,7 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 			return closeFunc(func() error {
 				runtimeClosed = true
 				return nil
-			}), errors.New("register mcp tools failed")
+			}), fmt.Errorf("register mcp tools failed: %s", secret)
 		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
 			t.Fatal("TUI should not launch after MCP registration fails")
@@ -666,6 +668,12 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "register mcp tools failed") {
 		t.Fatalf("stderr missing registration error: %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Fatalf("stderr leaked MCP registration secret: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), redaction.RedactedSecret) {
+		t.Fatalf("stderr missing redaction marker: %s", stderr.String())
 	}
 	if !runtimeClosed {
 		t.Fatal("partial MCP runtime was not closed after registration error")
