@@ -96,6 +96,24 @@ const (
 	windowsSandboxRoleLegacy windowsSandboxRole = "legacy"
 )
 
+// TWO INVENTORIES, because they are two different questions and answering one
+// with the other is a bug in both directions.
+//
+// windowsSandboxLiveRoles are the roles setup PROVISIONS. Legacy must never
+// appear here: it names the single untagged pre-split account, and provisioning
+// it would create that account fresh on every setup of an already-upgraded
+// machine.
+//
+// windowsSandboxRetirableRoles are every role that may EXIST on a machine, which
+// is the live pair plus legacy. Teardown and the is-it-still-installed check
+// both belong to this one. Asking the live list instead let an opted-out marker
+// report a workspace clean while the legacy account was still on the box, which
+// is precisely the lie that check exists to prevent.
+var (
+	windowsSandboxLiveRoles      = []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline}
+	windowsSandboxRetirableRoles = append(append([]windowsSandboxRole{}, windowsSandboxLiveRoles...), windowsSandboxRoleLegacy)
+)
+
 // roleTag is the single character that distinguishes the two accounts for a
 // workspace. One character because the 20-character account-name limit is
 // already tight and every character spent here is a bit of workspace hash lost.
