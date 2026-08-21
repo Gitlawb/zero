@@ -304,10 +304,6 @@ func (s *Store) write(data map[string]string) error {
 // rename and would carry the lock away with the old inode.
 func (s *Store) lockPath() string { return s.file + ".lock" }
 
-// filepathDir is filepath.Dir, named locally so the two platform lock files can
-// share it without either importing path/filepath for one call.
-func filepathDir(path string) string { return filepath.Dir(path) }
-
 func normalizeProvider(provider string) string {
 	return NormalizeProvider(provider)
 }
