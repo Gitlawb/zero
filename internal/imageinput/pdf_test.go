@@ -680,3 +680,15 @@ func TestIsProbablyDocumentPath(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentOptionsMaxPagesIsHardCapped(t *testing.T) {
+	if got := (DocumentOptions{}).maxPages(); got != defaultMaxRasterPages {
+		t.Fatalf("default max pages = %d, want %d", got, defaultMaxRasterPages)
+	}
+	if got := (DocumentOptions{MaxPages: 3}).maxPages(); got != 3 {
+		t.Fatalf("requested max pages = %d, want 3", got)
+	}
+	if got := (DocumentOptions{MaxPages: defaultMaxRasterPages + 1}).maxPages(); got != defaultMaxRasterPages {
+		t.Fatalf("oversized max pages = %d, want hard cap %d", got, defaultMaxRasterPages)
+	}
+}

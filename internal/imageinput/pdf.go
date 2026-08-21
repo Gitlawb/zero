@@ -342,7 +342,7 @@ var (
 )
 
 func (o DocumentOptions) maxPages() int {
-	if o.MaxPages > 0 {
+	if o.MaxPages > 0 && o.MaxPages < defaultMaxRasterPages {
 		return o.MaxPages
 	}
 	return defaultMaxRasterPages
