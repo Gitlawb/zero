@@ -161,7 +161,7 @@ func noteEvent(summary string) sessions.AppendEventInput {
 // kept, and everything that belongs to the other model's private machinery is
 // dropped. Zero's own resume renders these events to a text digest anyway
 // (sessions.FormatExecPrompt), so perfect structural fidelity would buy nothing.
-func translateFamily1(path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
+func translateFamily1(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
 	events := []sessions.AppendEventInput{}
 	// A tool result names only the id of the call it answers, so the call's name
 	// has to be carried forward. Every family-1 agent writes the tool_use before
@@ -170,7 +170,7 @@ func translateFamily1(path string, options ReadOptions) ([]sessions.AppendEventI
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
-	err := streamLines(path, importLineLimit, func(line []byte, truncated bool) bool {
+	err := streamLines(root, path, importLineLimit, func(line []byte, truncated bool) bool {
 		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
 		// Skipping it silently produced a transcript that looked complete: a
 		// question, no answer, then the follow-up. The marker is the honest

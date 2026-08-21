@@ -24,7 +24,7 @@ func TestImportedControlBytesAreStripped(t *testing.T) {
 	}
 	path := writeTranscript(t, string(line))
 
-	events, err := translateFamily1(path, ReadOptions{})
+	events, err := translateFamily1("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

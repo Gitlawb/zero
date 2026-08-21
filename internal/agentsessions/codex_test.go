@@ -75,7 +75,7 @@ func TestCodexHarnessChatterIsNotTheConversation(t *testing.T) {
 		t.Errorf("Title = %q, want the first real human turn", found[0].Title)
 	}
 
-	events, err := translateCodex(path, ReadOptions{})
+	events, err := translateCodex("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestCodexToolCallsPairUpAcrossBothCallShapes(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_2","input":"ls -la"}}`,
 		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":"[{\"type\":\"input_text\",\"text\":\"a.go\"}]"}}`,
 	)
-	all, err := translateCodex(path, ReadOptions{})
+	all, err := translateCodex("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

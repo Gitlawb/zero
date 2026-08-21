@@ -49,7 +49,7 @@ func TestTheSummaryNamesFilesCommandsAndSearches(t *testing.T) {
 	lines = append(lines, claudeToolLines("t3", "Bash", `{"command":"go test ./..."}`, "PASS", false)...)
 	lines = append(lines, claudeToolLines("t4", "Grep", `{"pattern":"handleResume"}`, "3 hits", false)...)
 
-	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestAFailedCallDoesNotClaimItReadTheFile(t *testing.T) {
 		"File does not exist.", true)...)
 	lines = append(lines, claudeToolLines("t2", "Read", `{"file_path":"/w/parser.go"}`, "package main", false)...)
 
-	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestEverySummaryEventSurvivesTheDigestIntact(t *testing.T) {
 			`{"file_path":"/w/a/very/long/directory/name/that/eats/budget/file`+itoa(i)+`.go"}`,
 			"ok", false)...)
 	}
-	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestTheSummaryReachesTheModel(t *testing.T) {
 }
 
 func TestASessionWithNoToolCallsGetsNoSummary(t *testing.T) {
-	events, err := translateFamily1(writeTranscript(t,
+	events, err := translateFamily1("", writeTranscript(t,
 		`{"type":"user","cwd":"/w","message":{"role":"user","content":"hello"}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`,
 	), ReadOptions{Cwd: "/w"})
@@ -189,7 +189,7 @@ func TestAnUnknownToolSchemaDegradesToACount(t *testing.T) {
 	lines = append(lines, claudeToolLines("t1", "MysteryTool", `{"wibble":"/w/secret.go","flim":3}`, "ok", false)...)
 	lines = append(lines, claudeToolLines("t2", "MysteryTool", `{"wibble":"/w/other.go"}`, "ok", false)...)
 
-	events, _ := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, _ := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	summary := joinedSummary(t, events)
 
 	if !strings.Contains(summary, "MysteryTool x2") {
@@ -207,7 +207,7 @@ func TestRepeatedWorkIsNotListedRepeatedly(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		lines = append(lines, claudeToolLines("t"+itoa(i), "Read", `{"file_path":"/w/same.go"}`, "ok", false)...)
 	}
-	events, _ := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, _ := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	summary := joinedSummary(t, events)
 
 	if count := strings.Count(summary, "same.go"); count != 1 {
@@ -227,7 +227,7 @@ func TestSecretsInToolArgumentsAreRedacted(t *testing.T) {
 	lines := []string{`{"type":"user","cwd":"/w","message":{"role":"user","content":"go"}}`}
 	lines = append(lines, claudeToolLines("t1", "Bash", `{"command":"export K=`+leaked+`"}`, "ok", false)...)
 
-	events, _ := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, _ := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	encoded, err := json.Marshal(events)
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +242,7 @@ func TestPathsOutsideTheWorkspaceKeepTheirAbsoluteForm(t *testing.T) {
 	lines = append(lines, claudeToolLines("t1", "Read", `{"file_path":"/w/inside.go"}`, "ok", false)...)
 	lines = append(lines, claudeToolLines("t2", "Read", `{"file_path":"/elsewhere/outside.go"}`, "ok", false)...)
 
-	events, _ := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, _ := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	summary := joinedSummary(t, events)
 
 	if !strings.Contains(summary, "inside.go") || strings.Contains(summary, "/w/inside.go") {
@@ -258,7 +258,7 @@ func TestSummaryEventsComeLastSoTheySitNearestTheNewRequest(t *testing.T) {
 	lines := []string{`{"type":"user","cwd":"/w","message":{"role":"user","content":"go"}}`}
 	lines = append(lines, claudeToolLines("t1", "Read", `{"file_path":"/w/a.go"}`, "ok", false)...)
 
-	events, _ := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, _ := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	if len(events) < 2 {
 		t.Fatal("expected conversation events plus a summary")
 	}
@@ -281,7 +281,7 @@ func TestASuccessfulWriteSurvivesALaterFailedEditOfTheSamePath(t *testing.T) {
 	lines = append(lines, claudeToolLines("t1", "Write", `{"file_path":"/w/config.yaml"}`, "wrote 40 lines", false)...)
 	lines = append(lines, claudeToolLines("t2", "Edit", `{"file_path":"/w/config.yaml"}`, "string not found", true)...)
 
-	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestAnInterruptedWriteWithNoResultDoesNotClaimTheFile(t *testing.T) {
 	// The tool_use with no matching tool_result — the transcript ends here.
 	lines = append(lines, claudeToolLines("t1", "Write", `{"file_path":"/w/config.yaml"}`, "", false)[0])
 
-	events, err := translateFamily1(writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	if err != nil {
 		t.Fatal(err)
 	}
