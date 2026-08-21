@@ -35,7 +35,7 @@ func TestScanHeadReadsFarLessThanTheWholeFile(t *testing.T) {
 		t.Fatalf("fixture is only %d bytes; it must dwarf the head budget to prove anything", fileSize)
 	}
 
-	read, err := scanHead("", path, defaultHeadLimit, func([]byte) bool { return true })
+	read, err := scanHead("", path, defaultHeadLimit, func([]byte, bool) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestScanHeadStopsWhenTheVisitorIsDone(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	read, err := scanHead("", path, defaultHeadLimit, func([]byte) bool {
+	read, err := scanHead("", path, defaultHeadLimit, func([]byte, bool) bool {
 		seen++
 		return seen < 2
 	})
@@ -124,7 +124,7 @@ func TestScanHeadHonoursItsLineBudget(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	if _, err := scanHead("", path, defaultHeadLimit, func([]byte) bool { seen++; return true }); err != nil {
+	if _, err := scanHead("", path, defaultHeadLimit, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != defaultHeadLimit.MaxLines {
@@ -135,7 +135,7 @@ func TestScanHeadHonoursItsLineBudget(t *testing.T) {
 func TestScanHeadOnAMissingFileIsAnError(t *testing.T) {
 	// Unlike globbing, an unreadable file that discovery has already decided
 	// exists is worth reporting to the caller, which drops that one entry.
-	if _, err := scanHead("", filepath.Join(t.TempDir(), "absent.jsonl"), defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+	if _, err := scanHead("", filepath.Join(t.TempDir(), "absent.jsonl"), defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Error("scanHead on a missing file returned no error")
 	}
 }
@@ -205,11 +205,11 @@ func TestARecordThatExactlyFillsTheCapIsNotTruncated(t *testing.T) {
 // I/O failure was indistinguishable from one indexed off a whole file.
 func TestScanHeadReportsAReadFailure(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := scanHead("", filepath.Join(dir, "gone.jsonl"), defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+	if _, err := scanHead("", filepath.Join(dir, "gone.jsonl"), defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Error("scanning a missing transcript reported success")
 	}
 	// A directory opens but cannot be read as a file: a read error that is not EOF.
-	if _, err := scanHead("", dir, defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+	if _, err := scanHead("", dir, defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Error("scanning a directory reported success; a non-EOF read error was swallowed")
 	}
 }
@@ -224,7 +224,7 @@ func TestScanHeadRefusesAPathOutsideTheRoot(t *testing.T) {
 	if err := os.WriteFile(outside, []byte(`{"type":"user","cwd":"/w"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scanHead(root, outside, defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+	if _, err := scanHead(root, outside, defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Errorf("scanHead read %q from outside the store root %q", outside, root)
 	}
 }
