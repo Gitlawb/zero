@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:41:59.226Z",
-  "durationMs": 2257595,
+  "endedAt": "2026-08-21T03:42:05.668Z",
+  "durationMs": 2264038,
   "status": "running",
   "tokens": {
     "total": 35232,
@@ -16,19 +16,23 @@
   },
   "toolCalls": 31,
   "lines": {
-    "added": 325,
-    "removed": 8
+    "added": 454,
+    "removed": 6
   },
   "filesChanged": [
-    "internal/cli/sessions.go",
-    "internal/cli/sessions_import.go"
+    "internal/tui/model.go",
+    "internal/tui/model_test.go",
+    "internal/tui/picker.go",
+    "internal/tui/session.go",
+    "internal/tui/session_picker_tabs_test.go",
+    "internal/tui/view.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "739917ad91be54744e7117fa7147eeb1e4ede235",
+    "headAfter": "ca07b76eb1e4dac798135c55233008b1c1e185b0",
     "commitShas": [
-      "739917ad91be54744e7117fa7147eeb1e4ede235"
+      "ca07b76eb1e4dac798135c55233008b1c1e185b0"
     ]
   },
   "summary": "All three diagnostic agents are running. Progress so far on #878:\n\n**Done — CodeRabbit's finding.** The test's comment claimed \"the halves must NOT become the secret\" but only asserted the newline survived. That passes just as well if the matcher spans the newline and redacts both halves as one — the separator would survive *inside* a `[REDACTED]` that ate the text around it. Now asserts both halves by name plus the absence of any redaction. Mutation-checked by removing the `\\t`/`\\n` exemption f...",
