@@ -237,7 +237,7 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	}
 	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "darwin" &&
 		protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentials) {
-		return SandboxExecutionRequest{}, errors.New("macOS sandbox cannot protect the remote token file from hard-link aliases in a shell-writable root; use ZERO_DAEMON_REMOTE_TOKEN, place the file on a separate filesystem, or remove shell write access")
+		return SandboxExecutionRequest{}, errors.New("macOS Seatbelt denies the remote token pathname, not its inode, so hard-link aliases defeat it: an existing alias is reachable without any write access and a shell-writable root sharing the token's filesystem can create one; use ZERO_DAEMON_REMOTE_TOKEN, remove aliases of the token file, or place it outside every shell-writable root")
 	}
 	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "linux" {
 		if credential, ok := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentials); ok {
@@ -303,6 +303,19 @@ func policyHasExplicitDeny(policy Policy) bool {
 	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
 }
 
+// protectedCredentialLinkableIntoWritableMacOSRoot reports a mandatory token
+// whose bearer bytes a sandboxed shell could reach through a second directory
+// entry, in either of two classes:
+//
+//   - An EXISTING alias: Seatbelt denies the selected pathname, not the inode,
+//     so any other name for the same file defeats the denial without waiting
+//     for shell write access. pathHardLinkCount above one proves one exists
+//     somewhere the planner cannot enumerate.
+//   - A FUTURE alias: a writable root that contains the token or shares its
+//     filesystem lets the shell create the link itself.
+//
+// This mirrors protectedCredentialLinkableIntoLinuxShellRoot, which applies the
+// same existing-link check before its root loop.
 func protectedCredentialLinkableIntoWritableMacOSRoot(profile PermissionProfile, protected []string) bool {
 	if len(protected) == 0 {
 		return false
@@ -324,6 +337,9 @@ func protectedCredentialLinkableIntoWritableMacOSRoot(profile PermissionProfile,
 		credential = filepath.Clean(credential)
 		if credential == "." || credential == "" {
 			continue
+		}
+		if count, ok := pathHardLinkCount(credential); ok && count > 1 {
+			return true
 		}
 		for _, root := range writeRoots {
 			if pathWithinMacOSRoot(root, credential) || pathsShareFilesystem(root, credential) {

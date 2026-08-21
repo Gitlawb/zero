@@ -89,7 +89,12 @@ func selectedDaemonRemoteTokenFile() string {
 //  3. Tool arguments are compared as EXACT bytes, because that is what the tool
 //     opens (aliasedStringArg does not trim). requestPaths gates on the exact
 //     argument; see the comment there for the read_file bypass that trimming
-//     produced.
+//     produced. This coexists with the case fold below: exact bytes govern
+//     WHICH argument strings enter the gate (no whitespace coercion), while the
+//     fold governs only the final lexical containment comparison inside
+//     pathUnderProtectedRoot. One normalizes nothing before matching; the other
+//     folds exactly one dimension, on platforms where a case-variant spelling
+//     opens the same file.
 //  4. Protection is NOT re-includable. AllowRead, a permission grant, and a
 //     session profile all leave it in place, on every platform.
 //

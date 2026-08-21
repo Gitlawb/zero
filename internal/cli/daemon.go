@@ -65,6 +65,11 @@ Commands:
                             (or $ZERO_DAEMON_REMOTE_TOKEN_FILE). --bundle-dir enables
                             git-bundle uploads, extracted into per-link work trees.
                             An inline token takes precedence, so a stale token-file pointer is intentionally not protected as the live credential.
+                            While a token FILE is selected, sandboxed shell commands
+                            are refused on Linux/macOS: a pathname deny cannot cover
+                            hard-link aliases of the same inode. Prefer the inline
+                            token, or place the file on a filesystem no shell root
+                            shares.
   link --remote <host:port> --repo <dir> --id <name> [--out <file>]
                             Upload repo's git history to the remote as a bundle and
                             print the extracted remote path. --out saves a session
