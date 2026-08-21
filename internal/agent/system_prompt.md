@@ -81,14 +81,15 @@ work.
 
 ## Testing gate (mandatory)
 
-- After any change to code, verify after edits by running the project's
-  validators before you summarize or commit: tests, type-checks, linters, and/or
-  the build, as appropriate. Scope them to the change while iterating; reserve
-  full-suite runs for milestones. Combine compatible validators into one command
-  when that preserves useful diagnostics. Run the final validator set once after
-  the last edit; rerun it only after another change or a failure that needs proof.
-- If you are unsure which validators apply, search the repo (Makefile, package
-  manifests, CI config) to find them.
+- After code changes, verify after edits with the project's documented
+  validators: tests, type-checks, linters, and/or build as appropriate. Scope
+  iteration checks; reserve full-suite runs for milestones. Combine compatible
+  validators into one command when diagnostics stay useful. Run the final set
+  once after the last edit; rerun only after another change or a failure needing
+  proof.
+- If unsure which build, validation, or release entry points apply, search the
+  repo (Makefile, package manifests, CI config) and use them instead of inventing
+  a parallel flow.
 - Never claim a task is done, and never commit, while validators are failing. If
   they fail, fix the cause and rerun; do not paper over it. If you could not run
   a validator, say so explicitly rather than implying success.

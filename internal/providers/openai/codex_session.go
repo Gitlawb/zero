@@ -244,7 +244,8 @@ func (session *codexTurnSession) streamWebSocket(
 		}
 
 		var responseEvent responsesEvent
-		if err := json.Unmarshal(data, &responseEvent); err == nil {
+		decodeErr := json.Unmarshal(data, &responseEvent)
+		if decodeErr == nil {
 			if (responseEvent.Code == previousResponseNotFoundCode || responseEvent.Code == webSocketConnectionLimitCode) &&
 				!state.emitted {
 				session.disableWebSocket(connection)
@@ -252,7 +253,7 @@ func (session *codexTurnSession) streamWebSocket(
 				return
 			}
 			if responseEvent.Type == responsesEventIncomplete {
-				session.disableWebSocket(connection)
+				session.resetResponseChain(connection)
 				providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 					Type:         zeroruntime.StreamEventDone,
 					FinishReason: zeroruntime.FinishReasonLength,
@@ -261,7 +262,12 @@ func (session *codexTurnSession) streamWebSocket(
 			}
 		}
 
-		keepReading := session.provider.emitResponsesEvent(ctx, string(data), state, events)
+		keepReading := false
+		if decodeErr == nil {
+			keepReading = session.provider.emitParsedResponsesEvent(ctx, &responseEvent, state, events)
+		} else {
+			keepReading = session.provider.emitResponsesEvent(ctx, string(data), state, events)
+		}
 		if keepReading {
 			continue
 		}
@@ -279,6 +285,17 @@ func (session *codexTurnSession) streamWebSocket(
 		}
 		return
 	}
+}
+
+func (session *codexTurnSession) resetResponseChain(connection *websocket.Conn) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.connection != connection {
+		return
+	}
+	session.lastRequest = nil
+	session.lastResponseID = ""
+	session.lastOutput = nil
 }
 
 func (session *codexTurnSession) forwardHTTP(ctx context.Context, request zeroruntime.CompletionRequest, events chan<- zeroruntime.StreamEvent) {
