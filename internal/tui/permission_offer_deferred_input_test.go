@@ -84,3 +84,39 @@ var errTestClipboard = errTestClipboardRead{}
 type errTestClipboardRead struct{}
 
 func (errTestClipboardRead) Error() string { return "no clipboard utility" }
+
+// A STREAMING PARTIAL IS AN INPUT TRANSITION, and it is the one that was missed.
+//
+// The final transcript cancels the offer, but a partial did not. The offer can be
+// armed AFTER dictation is already running: shift+tab offers full-auto, the next
+// partial rewrites the composer, and active dictation is not a blocking modal, so
+// an ordinary ctrl+g still confirmed with the user several actions past the
+// confirmation they were shown.
+//
+// This drives a genuinely ACTIVE session rather than a stray message, so the
+// partial really does reach applyStreamingText and change the input. A test that
+// only proved the flag flips could pass on a session-mismatch early return.
+func TestStreamingDictationPartialCancelsTheFullAutoOffer(t *testing.T) {
+	m := armFullAutoOffer(t)
+
+	// A valid, live streaming session: matching id and a phase the handler acts on.
+	m.dictation.sessionID = 7
+	m.dictation.phase = dictRecording
+	before := m.composerValue()
+
+	updated, _ := m.Update(sttPartialMsg{sessionID: 7, text: "transcribed words"})
+	m = updated.(model)
+
+	if m.composerValue() == before {
+		t.Fatalf("SETUP INVALID: the partial did not reach the composer, so this proves nothing (composer still %q)", before)
+	}
+	if m.unsafeArmed {
+		t.Errorf("the offer survived a streaming partial, so an unrelated ctrl+g can still enter full-auto")
+	}
+
+	updated, _ = m.Update(testKeyCtrl('g'))
+	m = updated.(model)
+	if m.permissionMode == agent.PermissionModeFullAuto {
+		t.Errorf("full-auto entered after a streaming dictation partial, with no fresh offer")
+	}
+}

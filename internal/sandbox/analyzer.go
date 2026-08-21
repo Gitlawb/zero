@@ -54,6 +54,20 @@ var networkPrograms = map[string]bool{
 	"invoke-restmethod": true,
 }
 
+// pythonLauncherPrograms is every spelling of the Python launcher the analyzer
+// accepts. It is a named list rather than a repeated switch case because the
+// unparseable fallback in risk.go has to be a superset of it, and the two were
+// maintained separately: "py" was accepted here and missing there, so a Windows
+// batch spelling the POSIX parser rejects lost the network gate that its
+// parseable equivalent receives. TestUnparseableFallbackCoversEveryPythonLauncher
+// now derives from this, so a new alias cannot weaken enforcement silently.
+var pythonLauncherPrograms = map[string]bool{
+	"python":  true,
+	"python2": true,
+	"python3": true,
+	"py":      true,
+}
+
 var localServerPrograms = map[string]bool{
 	"http-server": true,
 	"serve":       true,
@@ -233,9 +247,10 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 	// localServerPrograms deliberately does NOT land here. Binding a port is not
 	// egress, and counting it as such is what made `python -m http.server` ask
 	// for network approval to serve files out of the workspace.
-	switch prog {
-	case "python", "python2", "python3", "py":
+	if pythonLauncherPrograms[prog] {
 		return pythonModuleUsesNetwork(words)
+	}
+	switch prog {
 	case "npm":
 		return packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
@@ -360,9 +375,10 @@ func commandRunsLocalServer(prog string, args []*syntax.Word) bool {
 	if localServerPrograms[prog] {
 		return frameworkSubcommandRunsLocalServer(prog, words)
 	}
-	switch prog {
-	case "python", "python2", "python3", "py":
+	if pythonLauncherPrograms[prog] {
 		return pythonModuleRunsLocalServer(words)
+	}
+	switch prog {
 	case "npm", "pnpm", "yarn", "bun":
 		return packageManagerRunsLocalServer(words)
 	}
