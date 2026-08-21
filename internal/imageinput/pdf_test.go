@@ -329,7 +329,7 @@ func TestLoadDocumentRequiresBoundedExtractor(t *testing.T) {
 	}
 	_, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
 	if err == nil || !strings.Contains(err.Error(), "pdftotext") {
-		t.Fatalf("LoadDocument error = %v, want bounded-extractor guidance", err)
+		t.Fatalf("LoadDocument error = %v, want extractor guidance", err)
 	}
 }
 
@@ -585,7 +585,7 @@ func TestLoadDocumentDoesNotWaitForInformationalPageCount(t *testing.T) {
 	}
 }
 
-func TestLoadDocumentDoesNotWaitForOptionalRasterWhenTextSucceeds(t *testing.T) {
+func TestLoadDocumentVisionRetainsRasterWhenTextSucceeds(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "fast.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
 		t.Fatalf("write PDF: %v", err)
@@ -599,24 +599,19 @@ func TestLoadDocumentDoesNotWaitForOptionalRasterWhenTextSucceeds(t *testing.T) 
 		<-ctx.Done()
 		return 0
 	}
-	popplerRasterizer = func(ctx context.Context, _ []byte, _ int) ([]zeroruntime.ImageBlock, error) {
-		<-ctx.Done()
-		return nil, ctx.Err()
+	popplerRasterizer = func(context.Context, []byte, int) ([]zeroruntime.ImageBlock, error) {
+		return []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("png")}}, nil
 	}
 	t.Cleanup(func() {
 		popplerTextExtractor, popplerPageCounter, popplerRasterizer, popplerOperationTimeout = originalText, originalPages, originalRaster, originalTimeout
 	})
 
-	started := time.Now()
 	doc, err := LoadDocument("fast.pdf", root, DocumentOptions{Vision: true})
 	if err != nil {
 		t.Fatalf("LoadDocument: %v", err)
 	}
-	if doc.Text != "text" || len(doc.Images) != 0 {
-		t.Fatalf("Document = %#v, want text without waiting for raster", doc)
-	}
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-		t.Fatalf("LoadDocument took %s; optional raster must not delay text", elapsed)
+	if doc.Text != "text" || len(doc.Images) != 1 {
+		t.Fatalf("Document = %#v, want text and rendered page", doc)
 	}
 }
 
@@ -633,7 +628,7 @@ func TestLoadDocumentHostilePDFDoesNotUseInProcessParser(t *testing.T) {
 		}
 		_, err := LoadDocument(name, root, DocumentOptions{disableExternalTools: true})
 		if err == nil || !strings.Contains(err.Error(), "pdftotext") {
-			t.Fatalf("LoadDocument(%s) error = %v, want bounded-extractor guidance", name, err)
+			t.Fatalf("LoadDocument(%s) error = %v, want extractor guidance", name, err)
 		}
 	}
 }

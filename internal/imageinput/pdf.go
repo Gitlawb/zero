@@ -20,9 +20,9 @@ import (
 // Dependency posture: PDF text extraction uses Poppler's pdftotext when it is
 // on PATH and disableExternalTools is false. We intentionally do not retain an
 // in-process parser fallback: the previously used parser materialized all
-// decompressed page text before exposing a reader, so a later output cap could
-// not bound its CPU or memory use. Rasterizing pages to images for vision models
-// needs
+// decompressed page text in Zero's own process before exposing a reader. Poppler
+// runs in a separately cancellable process with a capped captured output and a
+// fixed deadline. Rasterizing pages to images for vision models needs
 // real font/graphics rendering and uses pdftoppm only when it is already on
 // PATH -- the same "external tool the user may have" posture as the LSP
 // language servers. When Poppler is unavailable, text extraction fails clearly
@@ -62,6 +62,11 @@ const maxRasterDimension = 1536
 // wedged or pathological document cannot multiply the synchronous CLI/TUI wait
 // across rasterization, text extraction, and page counting.
 const popplerTimeout = 30 * time.Second
+
+// rasterTimeout bounds optional page rendering independently. It lets a vision
+// attachment retain useful diagrams/layout without letting rendering outlive the
+// user-facing extraction deadline or multiply it serially.
+const rasterTimeout = 10 * time.Second
 
 // pdfMagic is the leading signature of every PDF stream. Detection keys on these
 // bytes, never on the file extension alone.
@@ -183,21 +188,19 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 			go func() {
 				defer work.Done()
 				defer close(done)
+				rasterCtx, rasterCancel := context.WithTimeout(context.Background(), rasterTimeout)
+				defer rasterCancel()
 				// Rendering is optional: text remains usable if it fails or times out.
-				if rendered, rerr := popplerRasterizer(ctx, data, opts.maxPages()); rerr == nil {
+				if rendered, rerr := popplerRasterizer(rasterCtx, data, opts.maxPages()); rerr == nil {
 					images = rendered
 				}
 			}()
 		}
 		<-textDone
-		// Page count and page rendering are informational when text succeeded.
-		// Do not turn a usable attachment into a second timeout because either
-		// optional process is slow or wedged. If text is unusable, a vision model
-		// waits for its rendered pages because they are then the only attachment.
-		if textResult.status != popplerTextExtracted || strings.TrimSpace(textResult.text) == "" {
-			if rasterDone != nil {
-				<-rasterDone
-			}
+		// Page count is informational. Rendering is optional but, when requested,
+		// contributes usable vision input and has its own shorter deadline.
+		if rasterDone != nil {
+			<-rasterDone
 		}
 		cancel()
 		work.Wait()
@@ -228,7 +231,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 			return Document{}, fmt.Errorf("%s could not extract PDF text with pdftotext", path)
 		}
 		if textStatus == popplerTextUnavailable {
-			return Document{}, fmt.Errorf("%s has no extractable text; install Poppler's pdftotext for bounded PDF text extraction (and pdftoppm for image-only PDFs)", path)
+			return Document{}, fmt.Errorf("%s has no extractable text; install Poppler's pdftotext for PDF text extraction (and pdftoppm for image-only PDFs)", path)
 		}
 		return Document{}, fmt.Errorf("%s has no extractable text; PDF OCR is not available", path)
 	}
