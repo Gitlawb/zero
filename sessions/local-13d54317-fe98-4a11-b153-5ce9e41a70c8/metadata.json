@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:59:14.653Z",
-  "durationMs": 3293021,
+  "endedAt": "2026-08-21T03:59:20.552Z",
+  "durationMs": 3298921,
   "status": "running",
   "tokens": {
     "total": 42345,
@@ -16,27 +16,19 @@
   },
   "toolCalls": 39,
   "lines": {
-    "added": 281,
-    "removed": 52
+    "added": 116,
+    "removed": 1
   },
   "filesChanged": [
-    "internal/agentsessions/activity.go",
-    "internal/agentsessions/activity_test.go",
-    "internal/agentsessions/blocker_regression_test.go",
-    "internal/agentsessions/family1.go",
-    "internal/agentsessions/family1_test.go",
-    "internal/agentsessions/fixture_corpus_test.go",
-    "internal/agentsessions/testdata/claude-config/projects/-Users-example-workspace-demo/fixture-session.jsonl",
-    "internal/agentsessions/testdata/codex-home/sessions/2026/08/01/rollout-2026-08-01T10-00-00-fixture0-0000-0000-0000-000000000001.jsonl",
-    "internal/agentsessions/translate.go",
-    "internal/agentsessions/translate_test.go"
+    "internal/agentsessions/redaction_order_test.go",
+    "internal/agentsessions/translate.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "6aea9832fde8f26ea49d52b71b95a06c54dd9b1a",
+    "headAfter": "5423ae0f94ae744d2355ec8ef3a5304c1ae6a917",
     "commitShas": [
-      "6aea9832fde8f26ea49d52b71b95a06c54dd9b1a"
+      "5423ae0f94ae744d2355ec8ef3a5304c1ae6a917"
     ]
   },
   "summary": "Rebased cleanly onto current main and builds. Now the fixtures — writing the ones the verifiers confirmed have teeth:",
