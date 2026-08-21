@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"net/url"
 	"regexp"
 	"sort"
@@ -149,42 +150,66 @@ func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets 
 		}
 	}
 	options := redaction.Options{ExtraSecretValues: secrets}
-	// BOUND THE RAW INPUT AT INGRESS, before redaction and before normalization.
-	//
-	// The cap used to live only in sanitizeTerminalReason, at the very end. So the
-	// whole server-controlled string was redacted, then walked rune by rune by
-	// stripTerminalRejoiners into a fresh builder and a fresh []rune, then redacted
-	// again, and only then cut to 16 KiB for a panel that shows at most 400 runes.
-	// A remote MCP putting a large tool name in a conflict error, or a stdio child
-	// returning large captured stderr, made every open and every refresh of /mcp
-	// pay for all of it.
-	//
-	// The bound keeps a LOOKAHEAD MARGIN past the cap, sized to the longest secret
-	// being matched. Slicing at exactly the cap would let a configured credential
-	// that straddles the cut lose its tail, and the surviving prefix would then
-	// match nothing and print: a bound that creates the leak it is supposed to be
-	// unrelated to. With the margin, any secret that begins before the cap is
-	// wholly inside the retained text and is matched in full.
-	return redaction.RedactString(stripTerminalRejoiners(boundMCPRawFailure(redaction.ErrorMessage(err, options), secrets)), options)
+	// BOUNDED AT THE RAW INGRESS, which is inside ErrorMessage rather than around
+	// it. See boundMCPFailureError: wrapping the outside of that call left the
+	// full server-controlled value going through every redaction pass first, so
+	// the work scaled with the attacker's input instead of with the cap.
+	return redaction.RedactString(stripTerminalRejoiners(redaction.ErrorMessage(boundMCPFailureError(err), options)), options)
 }
 
-// boundMCPRawFailure truncates a server-authored failure to a bounded prefix,
-// rune-safely, keeping enough lookahead that any secret starting inside the
-// bound is still complete.
-func boundMCPRawFailure(message string, secrets []string) string {
-	longest := 0
-	for _, secret := range secrets {
-		if len(secret) > longest {
-			longest = len(secret)
-		}
+// maxMCPSecretMatchWindow is the FIXED overlap kept past the display cap so a
+// configured credential straddling the cut is still matched whole.
+//
+// Fixed, deliberately. The previous version sized it to the longest secret,
+// which made the real budget "the cap plus whatever the largest configured value
+// happens to be". Configured values and the stored token enumeration have no
+// size limit, so a two-megabyte credential raised the retained error to 65546
+// bytes against a nominal cap of 16384. A bound the other side can widen is not
+// a bound.
+//
+// A credential longer than this window can still straddle the cut and leave a
+// prefix. That is a stated limit rather than an oversight: four kilobytes is far
+// past any real bearer token, and the alternative is the unbounded margin this
+// replaces.
+const maxMCPSecretMatchWindow = 4 << 10
+
+// boundMCPFailureError caps the RAW, server-controlled error before redaction or
+// terminal normalization touches it.
+//
+// The bound used to sit outside redaction.ErrorMessage, which is the innermost
+// call, so the whole value went through the exact-value replacements and the
+// regular-expression passes first and only the leftovers were trimmed. Measured
+// on the unfixed path, the work scaled with the input rather than with the cap:
+//
+//	input 1 KiB   ->    1ms,    0.2 MB allocated
+//	input 1 MiB   ->  248ms,     36 MB allocated
+//	input 8 MiB   ->  2.21s,    286 MB allocated   (rendered panel: 400 runes)
+//
+// A remote MCP chooses that input by putting an oversized tool name into a
+// conflict error, and every open or refresh of /mcp paid for it again.
+//
+// A short error is returned untouched, so ErrorMessage keeps its handling of nil
+// and wrapped errors for the overwhelmingly common case. Only an oversized one
+// is flattened, and flattening an eight-megabyte error is the entire point.
+func boundMCPFailureError(err error) error {
+	if err == nil {
+		return nil
 	}
-	limit := maxMCPReasonRawLen + longest
+	limit := maxMCPReasonRawLen + maxMCPSecretMatchWindow
+	message := err.Error()
+	if len(message) <= limit {
+		return err
+	}
+	return errors.New(boundMCPRawText(message, limit))
+}
+
+// boundMCPRawText truncates rune-safely, so nothing downstream sees a
+// replacement character this function produced.
+func boundMCPRawText(message string, limit int) string {
 	if len(message) <= limit {
 		return message
 	}
 	message = message[:limit]
-	// The cut lands on an arbitrary byte. Drop the rune it split so nothing
-	// downstream sees a replacement character this function produced.
 	for len(message) > 0 {
 		decoded, width := utf8.DecodeLastRuneInString(message)
 		if decoded != utf8.RuneError || width > 1 {
@@ -742,7 +767,18 @@ func mcpURLSecretValues(rawURL string) []string {
 	if err != nil || parsed == nil {
 		return nil
 	}
-	values := make([]string, 0, 4)
+	// BOTH REPRESENTATIONS, decoded and raw. url.Parse and url.ParseQuery hand
+	// back DECODED values, but the network client starts from the configured URL
+	// string, so an MCP can echo the escaped spelling back in its failure body.
+	// Exact-value redaction then knows "opaque-workspace-token-9f3c2b7ae1d8" and
+	// the body contains "opaque%2Dworkspace%2Dtoken%2D9f3c2b7ae1d8", which matches
+	// nothing and prints. %2D decodes to a hyphen, so the credential is fully
+	// recoverable from what was displayed and persisted.
+	//
+	// The generic patterns do not catch it either, because the parameter name is
+	// the operator's to choose. Collecting both forms fixes the boundary rather
+	// than guessing at more names.
+	values := make([]string, 0, 8)
 	if parsed.User != nil {
 		if password, ok := parsed.User.Password(); ok {
 			values = append(values, password)
@@ -750,6 +786,25 @@ func mcpURLSecretValues(rawURL string) []string {
 		// The username too: a token-as-username is a real shape, and the floor
 		// discards an ordinary short login.
 		values = append(values, parsed.User.Username())
+		// The escaped spelling, taken from the ORIGINAL string rather than from
+		// parsed.User.String(). Go re-escapes canonically there and leaves
+		// unreserved characters alone, so a configured "%2D" comes back as "-" and
+		// the raw form the server echoes would still match nothing.
+		if rawUserinfo := rawURLUserinfo(trimmed); rawUserinfo != "" {
+			values = append(values, rawUserinfo)
+			if rawUser, rawPassword, found := strings.Cut(rawUserinfo, ":"); found {
+				values = append(values, rawUser, rawPassword)
+			}
+		}
+	}
+	// Raw query values, taken from RawQuery before any decoding.
+	for _, pair := range strings.Split(parsed.RawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		if _, rawValue, found := strings.Cut(pair, "="); found {
+			values = append(values, rawValue)
+		}
 	}
 	query, err := url.ParseQuery(parsed.RawQuery)
 	if err != nil {
@@ -936,4 +991,31 @@ func sensitiveMCPArgValues(args []string) []string {
 		}
 	}
 	return values
+}
+
+// rawURLUserinfo returns the userinfo section exactly as it was configured,
+// before any decoding or canonical re-escaping.
+//
+// parsed.User.String() is not a substitute: it re-escapes by Go rules and leaves
+// unreserved characters alone, so a configured "%2D" comes back as "-". The
+// server echoes what it was given, so the raw spelling is the one that has to be
+// matched.
+func rawURLUserinfo(rawURL string) string {
+	authority := rawURL
+	if _, rest, found := strings.Cut(authority, "//"); found {
+		authority = rest
+	}
+	// The userinfo ends at the first "@", and any "/" before it means there is
+	// none at all.
+	if slash := strings.IndexByte(authority, '/'); slash >= 0 {
+		if at := strings.IndexByte(authority, '@'); at < 0 || at > slash {
+			return ""
+		}
+		authority = authority[:slash]
+	}
+	at := strings.LastIndexByte(authority, '@')
+	if at < 0 {
+		return ""
+	}
+	return authority[:at]
 }
