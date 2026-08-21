@@ -842,16 +842,17 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	criticalMCPConfig, optionalMCPConfig := splitMCPStartupConfig(mcpConfig)
 	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
 	if len(criticalMCPConfig.Servers) > 0 {
-		mcpRuntime, err = deps.registerMCPTools(context.Background(), registry, criticalMCPConfig, mcp.RegisterOptions{
+		runtime, registerErr := deps.registerMCPTools(context.Background(), registry, criticalMCPConfig, mcp.RegisterOptions{
 			PermissionStore: mcpPermissionStore,
 			Autonomy:        mcp.AutonomyLow,
 			Execution:       executionRunner,
 			WorkspaceRoot:   workspaceRoot,
 		})
-	}
-	if err != nil {
-		closeMCPRuntime(stderr, mcpRuntime)
-		return writeAppError(stderr, err.Error(), 1)
+		if registerErr != nil {
+			closeMCPRuntime(stderr, runtime)
+			return writeAppError(stderr, registerErr.Error(), 1)
+		}
+		mcpRuntime = runtime
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
 	// A server that could not be reached or validated is skipped, not fatal (one

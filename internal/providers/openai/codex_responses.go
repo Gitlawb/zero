@@ -596,6 +596,18 @@ func (p *CodexProvider) emitResponsesEvent(
 		state.done = true
 		return false
 	}
+	return p.emitParsedResponsesEvent(ctx, &event, state, events)
+}
+
+// emitParsedResponsesEvent converts one already-decoded Responses event into
+// zero or more runtime events. WebSocket sessions use this path to avoid
+// decoding each frame twice; the SSE path retains emitResponsesEvent above.
+func (p *CodexProvider) emitParsedResponsesEvent(
+	ctx context.Context,
+	event *responsesEvent,
+	state *responsesState,
+	events chan<- zeroruntime.StreamEvent,
+) bool {
 	if event.Type == "" {
 		// A payload that parses as JSON but carries no `type` field is a
 		// malformed Responses event — the type is the discriminator that
@@ -622,7 +634,7 @@ func (p *CodexProvider) emitResponsesEvent(
 		}
 		return true
 	case responsesEventOutputItemAdded:
-		p.handleOutputItemAdded(ctx, &event, state, events)
+		p.handleOutputItemAdded(ctx, event, state, events)
 		return true
 	case responsesEventOutputTextDelta:
 		if event.Delta != "" {
@@ -647,16 +659,16 @@ func (p *CodexProvider) emitResponsesEvent(
 		}
 		return true
 	case responsesEventFunctionArgsDelta:
-		p.handleToolInputDelta(ctx, &event, state, events, false)
+		p.handleToolInputDelta(ctx, event, state, events, false)
 		return true
 	case responsesEventCustomInputDelta:
-		p.handleToolInputDelta(ctx, &event, state, events, true)
+		p.handleToolInputDelta(ctx, event, state, events, true)
 		return true
 	case responsesEventOutputItemDone:
-		p.handleOutputItemDone(ctx, &event, state, events)
+		p.handleOutputItemDone(ctx, event, state, events)
 		return true
 	case responsesEventCompleted, responsesEventFailed:
-		return p.handleTerminalResponse(ctx, &event, state, events)
+		return p.handleTerminalResponse(ctx, event, state, events)
 	case responsesEventError:
 		message := event.Message
 		if event.Code != "" {

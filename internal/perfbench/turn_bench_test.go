@@ -348,6 +348,7 @@ func TestUncachedInputTokensClampsInconsistentTotals(t *testing.T) {
 		{name: "cached exceeds input", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 120}, want: 0},
 		{name: "write exceeds remainder", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 20, CacheWriteTokens: 90}, want: 0},
 		{name: "overflowing inconsistent counters", totals: TurnBenchTotals{CachedInputTokens: 1<<63 - 1, CacheWriteTokens: 1<<63 - 1}, want: 0},
+		{name: "overflowing counters with input", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 1<<63 - 1, CacheWriteTokens: 1<<63 - 1}, want: 0},
 		{name: "negative cache counters ignored", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: -20, CacheWriteTokens: -10}, want: 100},
 	}
 	for _, test := range tests {

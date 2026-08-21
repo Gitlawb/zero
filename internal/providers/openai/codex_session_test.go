@@ -262,6 +262,68 @@ func TestCodexTurnSessionFallsBackWhenSocketClosesBeforeOutput(t *testing.T) {
 	}
 }
 
+func TestCodexTurnSessionKeepsWebSocketAfterIncompleteResponse(t *testing.T) {
+	var mu sync.Mutex
+	webSocketRequests := 0
+	httpRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
+			connection, err := websocket.Accept(writer, request, nil)
+			if err != nil {
+				return
+			}
+			defer connection.CloseNow()
+			for index := 0; index < 2; index++ {
+				if _, _, err := connection.Read(request.Context()); err != nil {
+					return
+				}
+				mu.Lock()
+				webSocketRequests++
+				mu.Unlock()
+				if index == 0 {
+					writeWebSocketEvents(request.Context(), connection,
+						`{"type":"response.incomplete","response":{"id":"resp-1","status":"incomplete"}}`,
+					)
+					continue
+				}
+				writeWebSocketEvents(request.Context(), connection,
+					`{"type":"response.output_text.delta","delta":"websocket"}`,
+					`{"type":"response.completed","response":{"id":"resp-2","status":"completed"}}`,
+				)
+			}
+			return
+		}
+
+		mu.Lock()
+		httpRequests++
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fallback\"}\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-http\",\"status\":\"completed\"}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := newCodexSessionTestProvider(t, server)
+	session := openCodexSession(t, provider)
+	defer session.Close()
+	request := zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "Continue."}},
+	}
+	first := collectCodexSessionEvents(t, session, request)
+	if len(first) != 1 || first[0].Type != zeroruntime.StreamEventDone || first[0].FinishReason != zeroruntime.FinishReasonLength {
+		t.Fatalf("incomplete response events = %#v, want length completion", first)
+	}
+	second := collectCodexSessionEvents(t, session, request)
+	if got := joinedText(second); got != "websocket" {
+		t.Fatalf("second turn text = %q, want websocket; events=%#v", got, second)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if webSocketRequests != 2 || httpRequests != 0 {
+		t.Fatalf("requests = websocket:%d http:%d, want 2/0", webSocketRequests, httpRequests)
+	}
+}
+
 func TestCodexTurnSessionDoesNotReplayAfterVisibleOutput(t *testing.T) {
 	var mu sync.Mutex
 	httpRequests := 0

@@ -50,6 +50,7 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 		"skip update_plan for bounded changes in one component",
 		"do not read the same file first with read_minified_file and then again with read_file",
 		"combine compatible validators into one command",
+		"instead of inventing a parallel flow",
 		"do not reread files solely to confirm",
 		"once the required behavior passes validation, stop",
 		"do not make extra tool calls solely to discover line numbers",
