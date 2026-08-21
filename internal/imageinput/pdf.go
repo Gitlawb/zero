@@ -66,7 +66,7 @@ const popplerTimeout = 30 * time.Second
 // rasterTimeout bounds optional page rendering independently. It lets a vision
 // attachment retain useful diagrams/layout without letting rendering outlive the
 // user-facing extraction deadline or multiply it serially.
-const rasterTimeout = 10 * time.Second
+var rasterOperationTimeout = 10 * time.Second
 
 // pdfMagic is the leading signature of every PDF stream. Detection keys on these
 // bytes, never on the file extension alone.
@@ -188,7 +188,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 			go func() {
 				defer work.Done()
 				defer close(done)
-				rasterCtx, rasterCancel := context.WithTimeout(context.Background(), rasterTimeout)
+				rasterCtx, rasterCancel := context.WithTimeout(ctx, rasterOperationTimeout)
 				defer rasterCancel()
 				// Rendering is optional: text remains usable if it fails or times out.
 				if rendered, rerr := popplerRasterizer(rasterCtx, data, opts.maxPages()); rerr == nil {
@@ -383,10 +383,10 @@ func extractTextWithPoppler(ctx context.Context, data []byte) popplerTextResult 
 }
 
 func pdfPageCountWithPoppler(ctx context.Context, data []byte) int {
-	if !popplerAvailable("pdfinfo") {
+	if !popplerLookup("pdfinfo") {
 		return 0
 	}
-	cmd := exec.CommandContext(ctx, "pdfinfo", "-")
+	cmd := popplerCommandWithContext(ctx, "pdfinfo", "-")
 	cmd.Stdin = bytes.NewReader(data)
 	var out boundedBuffer
 	out.limit = maxPDFInfoOutputBytes

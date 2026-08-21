@@ -154,7 +154,9 @@ func TestExtractTextWithPoppler(t *testing.T) {
 	originalLookup, originalCommand := popplerLookup, popplerCommandWithContext
 	popplerLookup = func(name string) bool { return name == "pdftotext" }
 	popplerCommandWithContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, os.Args[0], "-test.run=TestPDFCommandHelper", "--")
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestPDFCommandHelper")
+		cmd.Env = append(os.Environ(), "ZERO_PDF_HELPER_MODE=fail")
+		return cmd
 	}
 	t.Cleanup(func() {
 		popplerLookup, popplerCommandWithContext = originalLookup, originalCommand
@@ -167,10 +169,29 @@ func TestExtractTextWithPoppler(t *testing.T) {
 }
 
 func TestPDFCommandHelper(t *testing.T) {
-	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "--" {
-		return
+	switch os.Getenv("ZERO_PDF_HELPER_MODE") {
+	case "fail":
+		os.Exit(1)
+	case "flood":
+		_, _ = os.Stdout.WriteString(strings.Repeat("x", MaxDocumentTextBytes+1024))
+		os.Exit(0)
 	}
-	os.Exit(1)
+}
+
+func TestExtractTextWithPopplerCancelsOnOverflow(t *testing.T) {
+	originalLookup, originalCommand := popplerLookup, popplerCommandWithContext
+	popplerLookup = func(name string) bool { return name == "pdftotext" }
+	popplerCommandWithContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestPDFCommandHelper")
+		cmd.Env = append(os.Environ(), "ZERO_PDF_HELPER_MODE=flood")
+		return cmd
+	}
+	t.Cleanup(func() { popplerLookup, popplerCommandWithContext = originalLookup, originalCommand })
+
+	result := extractTextWithPoppler(t.Context(), buildMinimalPDF("ignored"))
+	if result.status != popplerTextExtracted || !result.overflow {
+		t.Fatalf("result = %#v, want extracted overflow", result)
+	}
 }
 
 // A .pdf-named file that is not actually a PDF must be rejected with a clear
@@ -512,6 +533,16 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	if !buffer.overflow || !overflowed || buffer.Len() != 17 {
 		t.Fatalf("io.Copy bypassed bound: overflow=%v len=%d", buffer.overflow, buffer.Len())
 	}
+
+	buffer = newBoundedBuffer(16)
+	calls := 0
+	buffer.onOverflow = func() { calls++ }
+	for range 4 {
+		_, _ = buffer.Write([]byte(strings.Repeat("m", 8)))
+	}
+	if !buffer.overflow || calls != 1 || buffer.Len() != 17 {
+		t.Fatalf("incremental writes: overflow=%v calls=%d len=%d", buffer.overflow, calls, buffer.Len())
+	}
 }
 
 func TestLoadDocumentUsesOnePopplerDeadline(t *testing.T) {
@@ -614,6 +645,38 @@ func TestLoadDocumentVisionRetainsRasterWhenTextSucceeds(t *testing.T) {
 	}
 	if doc.Text != "text" || len(doc.Images) != 1 {
 		t.Fatalf("Document = %#v, want text and rendered page", doc)
+	}
+}
+
+func TestLoadDocumentVisionRasterDeadline(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "slow.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalRaster, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerRasterizer, rasterOperationTimeout
+	rasterOperationTimeout = 50 * time.Millisecond
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: "text", status: popplerTextExtracted}
+	}
+	popplerPageCounter = func(context.Context, []byte) int { return 1 }
+	popplerRasterizer = func(ctx context.Context, _ []byte, _ int) ([]zeroruntime.ImageBlock, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerRasterizer, rasterOperationTimeout = originalText, originalPages, originalRaster, originalTimeout
+	})
+
+	started := time.Now()
+	doc, err := LoadDocument("slow.pdf", root, DocumentOptions{Vision: true})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "text" || len(doc.Images) != 0 {
+		t.Fatalf("Document = %#v, want text after raster deadline", doc)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("LoadDocument took %s; raster deadline was not enforced", elapsed)
 	}
 }
 

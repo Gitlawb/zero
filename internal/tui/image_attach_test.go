@@ -334,7 +334,7 @@ func requirePopplerText(t *testing.T, path string) {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		t.Skip("pdftotext cannot process this fixture on this host")
+		t.Fatalf("pdftotext cannot process the production PDF command/fixture: %v", err)
 	}
 }
 
