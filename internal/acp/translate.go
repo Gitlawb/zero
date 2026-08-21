@@ -17,6 +17,14 @@ func agentMessageChunk(delta string) ContentChunk {
 	return ContentChunk{SessionUpdate: UpdateAgentMessageChunk, Content: TextBlock(delta)}
 }
 
+func replayMessageChunk(role, messageID, text string) ContentChunk {
+	update := UpdateAgentMessageChunk
+	if role == "user" {
+		update = UpdateUserMessageChunk
+	}
+	return ContentChunk{SessionUpdate: update, MessageID: messageID, Content: TextBlock(text)}
+}
+
 func agentThoughtChunk(delta string) ContentChunk {
 	return ContentChunk{SessionUpdate: UpdateAgentThoughtChunk, Content: TextBlock(delta)}
 }

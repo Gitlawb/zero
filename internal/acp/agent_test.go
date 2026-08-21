@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -67,9 +70,10 @@ func testDeps(t *testing.T) Deps {
 // clientHarness wires a client Conn to an Agent over in-memory pipes and collects
 // session/update text chunks.
 type clientHarness struct {
-	client  *Conn
-	updates chan string
-	stop    func()
+	client        *Conn
+	updates       chan string
+	notifications chan ContentChunk
+	stop          func()
 }
 
 func newHarness(t *testing.T, deps Deps) *clientHarness {
@@ -80,18 +84,16 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 	client := NewConn(br, bw)
 	a := NewAgent(agentConn, deps)
 
-	h := &clientHarness{client: client, updates: make(chan string, 128)}
+	h := &clientHarness{client: client, updates: make(chan string, 128), notifications: make(chan ContentChunk, 128)}
 	client.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
 		var probe struct {
-			Update struct {
-				SessionUpdate string `json:"sessionUpdate"`
-				Content       struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"update"`
+			Update ContentChunk `json:"update"`
 		}
 		if json.Unmarshal(params, &probe) != nil {
 			return
+		}
+		if probe.Update.SessionUpdate == UpdateAgentMessageChunk || probe.Update.SessionUpdate == UpdateUserMessageChunk {
+			h.notifications <- probe.Update
 		}
 		if probe.Update.SessionUpdate == UpdateAgentMessageChunk {
 			h.updates <- probe.Update.Content.Text
@@ -124,7 +126,8 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	if initRes.ProtocolVersion != ProtocolVersion {
 		t.Fatalf("protocol version = %d", initRes.ProtocolVersion)
 	}
-	if !initRes.AgentCapabilities.LoadSession || !initRes.AgentCapabilities.PromptCapabilities.Image {
+	if !initRes.AgentCapabilities.LoadSession || !initRes.AgentCapabilities.PromptCapabilities.Image ||
+		initRes.AgentCapabilities.SessionCapabilities == nil || initRes.AgentCapabilities.SessionCapabilities.List == nil || initRes.AgentCapabilities.SessionCapabilities.Resume == nil {
 		t.Fatalf("unexpected capabilities: %+v", initRes.AgentCapabilities)
 	}
 
@@ -161,6 +164,170 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	// The streamed agent_message_chunk(s) should carry the assistant text.
 	if got := drainText(t, h.updates); !strings.Contains(got, "Hello from ZERO") {
 		t.Fatalf("streamed text = %q, want it to contain the assistant message", got)
+	}
+}
+
+func TestACPListsOnlyResumableSessionMetadata(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) { return filepath.Clean(cwd), nil }
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	for _, input := range []sessions.CreateInput{
+		{SessionID: "desktop-a", Title: "First", Cwd: workspaceA, ModelID: "model-a"},
+		{SessionID: "desktop-b", Title: "Second", Cwd: workspaceB, ModelID: "model-b"},
+		{SessionID: "child-run", SessionKind: sessions.SessionKindChild, Title: "Internal child", Cwd: workspaceA},
+	} {
+		if _, err := deps.Store.Create(input); err != nil {
+			t.Fatalf("create %s: %v", input.SessionID, err)
+		}
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var all ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &all); err != nil {
+		t.Fatalf("session/list: %v", err)
+	}
+	if len(all.Sessions) != 2 {
+		t.Fatalf("all sessions = %+v, want two resumable sessions", all.Sessions)
+	}
+	byID := make(map[string]SessionInfo, len(all.Sessions))
+	for _, item := range all.Sessions {
+		byID[item.SessionID] = item
+	}
+	if _, found := byID["child-run"]; found {
+		t.Fatal("agent-owned child session leaked into the desktop session picker")
+	}
+	if got := byID["desktop-a"]; got.Title != "First" || got.Cwd != workspaceA || got.Meta == nil || got.Meta.ModelID != "model-a" || got.Meta.CreatedAt == "" || got.UpdatedAt == "" {
+		t.Fatalf("desktop-a summary = %+v", got)
+	}
+
+	var filtered ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: workspaceB}, &filtered); err != nil {
+		t.Fatalf("filtered session/list: %v", err)
+	}
+	if len(filtered.Sessions) != 1 || filtered.Sessions[0].SessionID != "desktop-b" {
+		t.Fatalf("filtered sessions = %+v, want only desktop-b", filtered.Sessions)
+	}
+
+	var equivalent ListSessionsResult
+	equivalentPath := workspaceB + string(os.PathSeparator) + "."
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: equivalentPath}, &equivalent); err != nil {
+		t.Fatalf("equivalent-path session/list: %v", err)
+	}
+	if len(equivalent.Sessions) != 1 || equivalent.Sessions[0].SessionID != "desktop-b" {
+		t.Fatalf("equivalent-path sessions = %+v, want only desktop-b", equivalent.Sessions)
+	}
+
+	err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cursor: "not-issued"}, &ListSessionsResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+		t.Fatalf("invalid cursor error = %v, want invalid params", err)
+	}
+}
+
+func TestACPLoadReplaysHistoryAndResumeDoesNot(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "replay-session", Title: "Replay", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "first user"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "first answer"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "second user"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	loader := newHarness(t, deps)
+	var loaded LoadSessionResult
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	wantKinds := []string{UpdateUserMessageChunk, UpdateAgentMessageChunk, UpdateUserMessageChunk}
+	wantText := []string{"first user", "first answer", "second user"}
+	seenIDs := map[string]bool{}
+	firstLoadIDs := make([]string, 0, len(wantKinds))
+	for i := range wantKinds {
+		select {
+		case update := <-loader.notifications:
+			if update.SessionUpdate != wantKinds[i] || update.Content.Text != wantText[i] {
+				t.Fatalf("history update %d = %+v", i, update)
+			}
+			if update.MessageID == "" || seenIDs[update.MessageID] {
+				t.Fatalf("history update %d has missing/duplicate message id %q", i, update.MessageID)
+			}
+			seenIDs[update.MessageID] = true
+			firstLoadIDs = append(firstLoadIDs, update.MessageID)
+		case <-ctx.Done():
+			t.Fatalf("history update %d was not replayed", i)
+		}
+	}
+	loader.stop()
+	secondLoader := newHarness(t, deps)
+	if err := secondLoader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("second session/load: %v", err)
+	}
+	for i, wantID := range firstLoadIDs {
+		select {
+		case update := <-secondLoader.notifications:
+			if update.MessageID != wantID {
+				t.Fatalf("second load message id %d = %q, want stable %q", i, update.MessageID, wantID)
+			}
+		case <-ctx.Done():
+			t.Fatalf("second load history update %d was not replayed", i)
+		}
+	}
+	secondLoader.stop()
+
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	select {
+	case update := <-resumer.notifications:
+		t.Fatalf("session/resume replayed history: %+v", update)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestACPLoadAndResumeStayBoundToThePersistedWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "workspace-bound", Cwd: workspaceA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		err := h.client.Call(ctx, method, LoadSessionParams{SessionID: created.SessionID, Cwd: workspaceB, McpServers: []McpServer{}}, &LoadSessionResult{})
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || !strings.Contains(rpcErr.Message, "persisted workspace") {
+			t.Fatalf("%s with mismatched cwd error = %v, want persisted-workspace invalid params", method, err)
+		}
+	}
+
+	missing, err := deps.Store.Create(sessions.CreateInput{SessionID: "workspace-missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: missing.SessionID, Cwd: workspaceA, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || !strings.Contains(rpcErr.Message, "no persisted workspace") {
+		t.Fatalf("resume with missing persisted cwd error = %v, want invalid params", err)
 	}
 }
 
@@ -596,6 +763,333 @@ func drainTextUntil(t *testing.T, ch <-chan string, done func(string) bool) stri
 			}
 		case <-deadline:
 			return b.String()
+		}
+	}
+}
+
+// normalisingResolver reproduces what ResolveWorkspaceRoot actually does — abs,
+// Clean, and a stat that the path exists — WITHOUT resolving symlinks or folding
+// case, which is the behaviour that makes two spellings of one directory produce
+// two different roots.
+//
+// The package's own testDeps resolver is the identity function. Under it the
+// workspace guard degenerates to "are these two strings different", fed two
+// unrelated temp directories, so it can only ever answer yes: the rejection
+// direction is pinned and the acceptance direction is asserted nowhere.
+func normalisingResolver(t *testing.T) func(string) (string, error) {
+	t.Helper()
+	return func(cwd string) (string, error) {
+		absolute, err := filepath.Abs(cwd)
+		if err != nil {
+			return "", err
+		}
+		absolute = filepath.Clean(absolute)
+		info, err := os.Stat(absolute)
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", errors.New("workspace is not a directory")
+		}
+		return absolute, nil
+	}
+}
+
+// ONE DIRECTORY UNDER TWO SPELLINGS IS ONE WORKSPACE.
+//
+// A session persisted from the TUI has to stay resumable from an editor holding
+// a different spelling of the same project folder — the two processes most
+// likely to disagree about spelling, and the case this feature exists for. It
+// failed closed, so it blocked legitimate resumes rather than admitting foreign
+// ones, but session/list filtered by the other spelling returned nothing, which
+// makes it an invisible failure rather than a reported one.
+func TestACPResumesAcrossTwoSpellingsOfOneWorkspace(t *testing.T) {
+	real := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	directoryAlias(t, real, alias)
+	// The premise: the resolver really does produce two different strings.
+	resolve := normalisingResolver(t)
+	realRoot, err := resolve(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot, err := resolve(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realRoot == aliasRoot {
+		t.Skipf("this filesystem folds the alias away (%q == %q); the guard cannot be exercised", realRoot, aliasRoot)
+	}
+
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = resolve
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "aliased-workspace", Cwd: real})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// ACCEPTANCE: resume and load under the OTHER spelling must both work.
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		var result LoadSessionResult
+		if err := h.client.Call(ctx, method, LoadSessionParams{SessionID: created.SessionID, Cwd: alias, McpServers: []McpServer{}}, &result); err != nil {
+			t.Errorf("%s under an alias of the persisted workspace failed: %v", method, err)
+		}
+	}
+
+	// And session/list filtered by the alias must still find it.
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: alias}, &listed); err != nil {
+		t.Fatalf("session/list: %v", err)
+	}
+	found := false
+	for _, item := range listed.Sessions {
+		if item.SessionID == created.SessionID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("session/list filtered by an alias of its own workspace returned %d sessions without it", len(listed.Sessions))
+	}
+
+	// REJECTION still holds: a genuinely different directory is refused.
+	other := t.TempDir()
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: other, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+		t.Errorf("resume from an unrelated workspace = %v, want invalid params", err)
+	}
+}
+
+// THE WIRE KEYS ARE AN EXTERNAL CONTRACT, not internal names.
+//
+// Nothing pinned them, so renaming a Go field — or dropping an omitempty —
+// would break every client and leave the suite green. These are the keys this
+// feature adds to the protocol; a change here is a change to what editors
+// consume.
+func TestSessionWireKeysAreStable(t *testing.T) {
+	marshalled := func(v any) map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	has := func(where string, got map[string]any, want ...string) {
+		t.Helper()
+		for _, key := range want {
+			if _, ok := got[key]; !ok {
+				t.Errorf("%s is missing the wire key %q; got %v", where, key, keysOf(got))
+			}
+		}
+	}
+
+	has("SessionInfo", marshalled(SessionInfo{
+		SessionID: "s1", Cwd: "/w", Title: "t", UpdatedAt: "now",
+		Meta: &SessionInfoMeta{ModelID: "m", CreatedAt: "then"},
+	}), "sessionId", "cwd", "title", "updatedAt", "_meta")
+
+	has("SessionInfoMeta", marshalled(SessionInfoMeta{ModelID: "m", CreatedAt: "then"}),
+		"modelId", "createdAt")
+
+	has("ListSessionsResult", marshalled(ListSessionsResult{
+		Sessions: []SessionInfo{}, NextCursor: "c",
+	}), "sessions", "nextCursor")
+
+	has("ListSessionsParams", marshalled(ListSessionsParams{Cwd: "/w", Cursor: "c"}),
+		"cwd", "cursor")
+
+	// sessionCapabilities is omitempty, so it must appear when SET — a client
+	// discovers list/resume support through it.
+	has("AgentCapabilities", marshalled(AgentCapabilities{
+		LoadSession:         true,
+		SessionCapabilities: &SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}},
+	}), "loadSession", "promptCapabilities", "sessionCapabilities")
+
+	capabilities := marshalled(SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}})
+	has("SessionCapabilities", capabilities, "list", "resume")
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// directoryAlias makes `alias` a second name for `target`.
+//
+// A JUNCTION ON WINDOWS, not a symlink. os.Symlink needs a privilege an ordinary
+// Windows session does not hold, so a test built on it SKIPS there — and Windows
+// is where junctions exist and where this bug came from. The guard would have
+// been verified only on the two platforms that never had the problem. mklink /J
+// needs no privilege, which is also how the defect was found.
+func directoryAlias(t *testing.T, target, alias string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", alias, target).CombinedOutput(); err != nil {
+			t.Skipf("cannot create a junction: %v %s", err, out)
+		}
+		return
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("cannot create a directory alias here: %v", err)
+	}
+}
+
+// A SESSION WITH NO PERSISTED WORKSPACE IS NOT RESUMABLE, SO IT IS NOT LISTED.
+//
+// activatePersistedSession refuses a session whose Cwd is empty, but the listing
+// advertised it anyway — offering the client a menu entry that only fails when
+// taken. Both halves are asserted together, because the listing is only correct
+// relative to what resume will accept.
+func TestSessionListOmitsSessionsWithoutAWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	usable, err := deps.Store.Create(sessions.CreateInput{SessionID: "has-cwd", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "no-cwd"}); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &listed); err != nil {
+		t.Fatal(err)
+	}
+	sawUsable := false
+	for _, item := range listed.Sessions {
+		if item.SessionID == "no-cwd" {
+			t.Errorf("session/list advertised a session with no persisted workspace")
+		}
+		if item.SessionID == usable.SessionID {
+			sawUsable = true
+		}
+	}
+	if !sawUsable {
+		t.Errorf("session/list dropped a usable session while filtering; got %d", len(listed.Sessions))
+	}
+
+	// The other half of the contract: resuming the omitted one really does fail,
+	// which is why omitting it is right rather than merely tidy.
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: "no-cwd", Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || !strings.Contains(rpcErr.Message, "persisted workspace") {
+		t.Errorf("resume of a workspace-less session = %v, want a persisted-workspace error", err)
+	}
+}
+
+// EVERY LISTED SESSION IS ONE THE CLIENT CAN ACTUALLY TAKE.
+//
+// Resolving the persisted workspace only when a cwd filter was supplied left two
+// shapes on the menu that resume then refuses: a session whose workspace has
+// since been deleted, and a legacy entry holding a relative path — reported as
+// cwd "." although ACP requires SessionInfo.cwd to be absolute.
+func TestSessionListResolvesEveryWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = normalisingResolver(t)
+
+	gone := t.TempDir()
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "gone-ws", Cwd: gone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "relative-ws", Cwd: "."}); err != nil {
+		t.Fatal(err)
+	}
+	live := t.TempDir()
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "live-ws", Cwd: live}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &listed); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]string{}
+	for _, item := range listed.Sessions {
+		seen[item.SessionID] = item.Cwd
+	}
+	if _, listedGone := seen["gone-ws"]; listedGone {
+		t.Error("a session whose workspace no longer exists was advertised; resume would refuse it")
+	}
+	if _, listedLive := seen["live-ws"]; !listedLive {
+		t.Error("a usable session was dropped while filtering unusable ones")
+	}
+	// THE RELATIVE ENTRY IS DROPPED. An earlier revision of this test asserted the
+	// opposite — that "." be normalised and kept — which reads as the generous
+	// choice but resolves the stored path against whatever directory this ACP
+	// server was started in. That does not recover the session's workspace; it
+	// invents one, and then advertises the invention as fact, so a conversation
+	// created for one project becomes resumable against another project's files,
+	// configuration and tools. The original base is not knowable from the
+	// metadata, so no entry is the only honest answer.
+	if invented, listedRelative := seen["relative-ws"]; listedRelative {
+		t.Errorf("a relative persisted workspace was listed as %q, rebased onto the current process directory", invented)
+	}
+	// EVERY reported cwd is absolute, which is the contract clients rely on.
+	for id, cwd := range seen {
+		if !filepath.IsAbs(cwd) {
+			t.Errorf("session %s was listed with a relative cwd %q; ACP requires an absolute path", id, cwd)
+		}
+	}
+}
+
+func TestResumeRefusesARelativePersistedWorkspace(t *testing.T) {
+	// OMITTING THE ENTRY FROM THE LISTING IS NOT THE WHOLE FIX. A client can ask
+	// to resume any id it already knows, and session/resume falls back to the
+	// persisted cwd when the request carries none — so a stored "." was resolved
+	// against this process's directory and the session bound to it, with no error
+	// returned at all. Both doors need the same lock.
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = normalisingResolver(t)
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "relative-ws", Cwd: "."}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// BOTH ACTIVATING METHODS, not just one. session/load and session/resume are
+	// separate entry points that today share activatePersistedSession — so a test
+	// through either passes while the guard holds. Naming both here is what keeps
+	// that true: if resume is ever given its own path, this fails rather than
+	// silently covering half the surface it claims to.
+	elsewhere := t.TempDir()
+	var out LoadSessionResult
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		// No cwd at all: the request that used to succeed by rebasing onto
+		// whatever directory this process happens to be running in.
+		if err := h.client.Call(ctx, method, LoadSessionParams{SessionID: "relative-ws"}, &out); err == nil {
+			t.Errorf("%s of a relative persisted workspace succeeded; the session was rebound to the ACP process directory", method)
+		}
+		// And an unrelated workspace must not be accepted as its home either.
+		if err := h.client.Call(ctx, method, ResumeSessionParams{SessionID: "relative-ws", Cwd: elsewhere}, &out); err == nil {
+			t.Errorf("%s of a relative persisted workspace into %q succeeded", method, elsewhere)
 		}
 	}
 }
