@@ -275,6 +275,20 @@ func CommitCatalogProviderLogin(path, catalogID string, persist func() error) er
 	return err
 }
 
+// CatalogProviderLoginCommit builds the shared OAuth token persistence boundary
+// used by the CLI and TUI. The provider config remains locked from ownership
+// validation through token persistence.
+func CatalogProviderLoginCommit[T any](configPath, provider string, persist func(string, T) error) func(string, T) error {
+	if strings.TrimSpace(configPath) == "" || strings.TrimSpace(provider) == "" || persist == nil {
+		return nil
+	}
+	return func(key string, value T) error {
+		return CommitCatalogProviderLogin(configPath, provider, func() error {
+			return persist(key, value)
+		})
+	}
+}
+
 // providerOwnsCatalog is the positive ownership test for catalog login and
 // persistence. A matching display/name spelling is not ownership: custom
 // profiles may legitimately use names such as "OpenRouter" while pointing at a

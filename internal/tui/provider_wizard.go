@@ -211,7 +211,7 @@ func runProviderChatGPTLogin(configPath string) error {
 	}
 	manager, err := oauth.NewManager(oauth.ManagerOptions{
 		Store:       store,
-		CommitToken: tuiOAuthTokenCommit(store, path, "chatgpt"),
+		CommitToken: config.CatalogProviderLoginCommit(path, "chatgpt", store.Save),
 	})
 	if err != nil {
 		return err
@@ -303,7 +303,7 @@ func runProviderTokenLogin(name string, configPath string) error {
 		// into its baked-in preset (e.g. xAI's public client_id); without this the
 		// config never resolves and the browser never opens.
 		AllowPresets: true,
-		CommitToken:  tuiOAuthTokenCommit(store, path, name),
+		CommitToken:  config.CatalogProviderLoginCommit(path, name, store.Save),
 	})
 	if err != nil {
 		return err

@@ -80,7 +80,7 @@ func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, c
 		Store:        store,
 		HTTPClient:   &http.Client{Timeout: 60 * time.Second},
 		AllowPresets: true, // preset config is needed to poll/exchange the device token
-		CommitToken:  tuiOAuthTokenCommit(store, path, name),
+		CommitToken:  config.CatalogProviderLoginCommit(path, name, store.Save),
 	})
 	if err != nil {
 		return err
@@ -89,17 +89,6 @@ func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, c
 	defer cancel()
 	_, err = manager.CompleteDeviceLogin(ctx, name, cfg, auth)
 	return err
-}
-
-func tuiOAuthTokenCommit(store *oauth.Store, configPath, provider string) func(string, oauth.Token) error {
-	if strings.TrimSpace(configPath) == "" || strings.TrimSpace(provider) == "" {
-		return nil
-	}
-	return func(key string, token oauth.Token) error {
-		return config.CommitCatalogProviderLogin(configPath, provider, func() error {
-			return store.Save(key, token)
-		})
-	}
 }
 
 // oauthStoredToken returns a fresh access token for a provider that was logged in

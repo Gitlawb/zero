@@ -286,7 +286,7 @@ func lockProviderWrite(configPath string) (func() error, error) {
 			return nil, fmt.Errorf("acquire provider config/key transaction lock: %w", err)
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("provider config/key transaction is busy; retry the operation")
+			return nil, fmt.Errorf("provider config/key transaction is busy; retry the operation, or remove %s if no other Zero process is running", lockPath)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
