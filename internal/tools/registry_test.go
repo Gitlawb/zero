@@ -247,7 +247,7 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 	}, RunOptions{
 		PermissionGranted: true,
 		Sandbox:           engine,
-		PermissionMode:    string(sandbox.PermissionUnsafe),
+		PermissionMode:    string(sandbox.PermissionFullAuto),
 		Autonomy:          "high",
 	})
 
@@ -277,7 +277,7 @@ func TestRegistrySandboxGatesPathAliasKeys(t *testing.T) {
 		}, RunOptions{
 			PermissionGranted: true,
 			Sandbox:           engine,
-			PermissionMode:    string(sandbox.PermissionUnsafe),
+			PermissionMode:    string(sandbox.PermissionFullAuto),
 			Autonomy:          "high",
 		})
 

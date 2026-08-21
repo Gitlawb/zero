@@ -15,6 +15,15 @@ type AnalysisResult struct {
 	Interactive bool
 	Destructive bool
 	Network     bool
+	// LocalServer is set when a command BINDS a local port rather than reaching
+	// out: `python -m http.server`, `vite`, `next dev` and friends.
+	//
+	// Kept distinct from Network instead of folded into it. Listening and
+	// fetching are different acts with different consequences, and treating a
+	// dev server as egress made ordinary local work prompt for network approval
+	// it never needed. The information is preserved rather than dropped, so a
+	// caller that does care about inbound can still see it.
+	LocalServer bool
 	// TooComplex is set when the script cannot be parsed (obfuscated or invalid),
 	// so a caller can treat it as higher-risk instead of trusting a clean result.
 	TooComplex bool
@@ -43,6 +52,20 @@ var networkPrograms = map[string]bool{
 	"rsync": true, "nc": true, "ncat": true, "netcat": true, "telnet": true,
 	"ftp": true, "iwr": true, "irm": true, "invoke-webrequest": true,
 	"invoke-restmethod": true,
+}
+
+// pythonLauncherPrograms is every spelling of the Python launcher the analyzer
+// accepts. It is a named list rather than a repeated switch case because the
+// unparseable fallback in risk.go has to be a superset of it, and the two were
+// maintained separately: "py" was accepted here and missing there, so a Windows
+// batch spelling the POSIX parser rejects lost the network gate that its
+// parseable equivalent receives. TestUnparseableFallbackCoversEveryPythonLauncher
+// now derives from this, so a new alias cannot weaken enforcement silently.
+var pythonLauncherPrograms = map[string]bool{
+	"python":  true,
+	"python2": true,
+	"python3": true,
+	"py":      true,
 }
 
 var localServerPrograms = map[string]bool{
@@ -183,6 +206,29 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if commandUsesNetwork(prog, rest) {
 			result.Network = true
 		}
+		if commandRunsLocalServer(prog, rest) {
+			result.LocalServer = true
+			// LocalServer is ADDITIVE, not a replacement for Network, and that is
+			// the whole of this line.
+			//
+			// Nothing consumes LocalServer yet: no policy or runner code reads it,
+			// so classifying a serving command as local-only did not grant it a
+			// scoped host listener, it only removed the network approval it used to
+			// get. The command then ran under the default deny profile, which on
+			// Linux is a network namespace and on macOS is (deny network*), so
+			// `python -m http.server` and `vite` started without a prompt and could
+			// not serve a preview to the operator's browser.
+			//
+			// It is also unsound for the package managers. `npm run dev` is matched
+			// by SCRIPT NAME, and the repository decides what `dev` and `predev`
+			// actually do; either can curl before anything binds a port. On Windows
+			// the approval gate IS the network protection, so inferring "no egress"
+			// from a name there lets that egress run unprompted.
+			//
+			// The classification is kept, because a scoped host-listener path will
+			// want it, and the approval path is kept until that path exists.
+			result.Network = true
+		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
 			(powerShellRemoveItemPrograms[prog] && hasPowerShellRecursiveForce(rest)) ||
@@ -198,12 +244,13 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 		return true
 	}
 	words := literalWordTexts(args)
-	if localServerPrograms[prog] {
-		return true
+	// localServerPrograms deliberately does NOT land here. Binding a port is not
+	// egress, and counting it as such is what made `python -m http.server` ask
+	// for network approval to serve files out of the workspace.
+	if pythonLauncherPrograms[prog] {
+		return pythonModuleUsesNetwork(words)
 	}
 	switch prog {
-	case "python", "python2", "python3", "py":
-		return pythonModuleUsesNetwork(words)
 	case "npm":
 		return packageManagerUsesNetwork(words, map[string]string{
 			"run":  "run",
@@ -253,11 +300,11 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 		"update", "upgrade", "search", "view", "info", "show", "dist-tag",
 		"deprecate", "owner", "org", "team", "token", "profile", "access":
 		return true
-	case "start", "serve", "dev", "preview":
-		return true
-	case "run":
-		second := secondSubcommand(words)
-		return second == "start" || second == "serve" || second == "dev" || second == "preview"
+	// start / serve / dev / preview are handled by packageManagerRunsLocalServer
+	// instead. They start a dev server, which binds rather than fetches, and
+	// `npm run dev` is the single most common command an agent is asked to run
+	// while building something. Classifying it as egress made every one of them
+	// stop for a network approval that protected nothing.
 	case "exec":
 		// Package-manager exec commands may resolve and download a missing
 		// package before launching it. An explicit offline flag keeps this path
@@ -303,11 +350,93 @@ func pythonModuleUsesNetwork(words []string) bool {
 		if words[index] != "-m" || index+1 >= len(words) {
 			continue
 		}
-		module := words[index+1]
-		if module == "http.server" {
+		// http.server is handled by pythonModuleRunsLocalServer instead: it
+		// listens, it does not fetch. pip install genuinely reaches out.
+		if words[index+1] == "pip" && firstSubcommand(words[index+2:], nil) == "install" {
 			return true
 		}
-		if module == "pip" && firstSubcommand(words[index+2:], nil) == "install" {
+	}
+	return false
+}
+
+// commandRunsLocalServer reports a command that binds a local port.
+//
+// Separate from commandUsesNetwork on purpose. A dev server is the single most
+// common thing an agent is asked to start while building something, and making
+// it indistinguishable from `curl` meant every one of them stopped for a
+// network approval that protected nobody.
+//
+// Honest about the edges: some of these do touch the network incidentally, and
+// `npm run dev` may install first. What is claimed here is narrow, that BINDING
+// is not EGRESS, not that dev tooling is inert. Anything that actually fetches
+// still matches commandUsesNetwork through its own program or subcommand.
+func commandRunsLocalServer(prog string, args []*syntax.Word) bool {
+	words := literalWordTexts(args)
+	if localServerPrograms[prog] {
+		return frameworkSubcommandRunsLocalServer(prog, words)
+	}
+	if pythonLauncherPrograms[prog] {
+		return pythonModuleRunsLocalServer(words)
+	}
+	switch prog {
+	case "npm", "pnpm", "yarn", "bun":
+		return packageManagerRunsLocalServer(words)
+	}
+	return false
+}
+
+// frameworkSubcommandRunsLocalServer decides whether a framework CLI is being
+// asked to SERVE or merely to compile.
+//
+// The program name alone is not enough. `next build`, `vite build`, `nuxt
+// generate` and `astro check` bind nothing, and classifying them as servers
+// makes the flag mean "some dev tool ran", which is not what a reader of it
+// would assume.
+//
+// Dedicated servers stay unconditional: running http-server or serve IS the
+// server. vite is also a server when bare, since bare `vite` starts the dev
+// server, whereas the multi-command frameworks print help when bare and so need
+// an explicit serving subcommand.
+func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
+	switch prog {
+	case "http-server", "serve":
+		return true
+	}
+	switch firstSubcommand(words, nil) {
+	case "dev", "start", "serve", "preview":
+		return true
+	case "build", "optimize", "generate", "check", "lint", "export":
+		return false
+	}
+	// No recognized subcommand: either a bare invocation, or firstSubcommand
+	// landed on an option VALUE, since it skips flags but not what they consume
+	// (`vite --host 127.0.0.1` yields "127.0.0.1"). Both mean "no subcommand was
+	// given", so fall back to what the program does when run bare: vite starts
+	// its dev server, while the multi-command frameworks print help.
+	return prog == "vite"
+}
+
+// packageManagerRunsLocalServer covers `npm run dev` and its siblings across the
+// package managers, both as a direct subcommand and behind `run`.
+func packageManagerRunsLocalServer(words []string) bool {
+	switch firstSubcommand(words, nil) {
+	case "start", "serve", "dev", "preview":
+		return true
+	case "run":
+		switch secondSubcommand(words) {
+		case "start", "serve", "dev", "preview":
+			return true
+		}
+	}
+	return false
+}
+
+func pythonModuleRunsLocalServer(words []string) bool {
+	for index := 0; index < len(words); index++ {
+		if words[index] != "-m" || index+1 >= len(words) {
+			continue
+		}
+		if words[index+1] == "http.server" {
 			return true
 		}
 	}
