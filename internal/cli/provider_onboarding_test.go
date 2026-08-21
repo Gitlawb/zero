@@ -89,6 +89,29 @@ func TestRunProvidersRepairConfigRecoversLegacyUnnamedProvider(t *testing.T) {
 	}
 }
 
+func TestProviderRepairCommandsCanResolveIndependentLegacyNameProblems(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{
+		{Name: ""}, {Name: "work"}, {Name: "WORK"},
+	}})
+	deps := providerSetupDeps(configPath)
+	if code := runWithDeps([]string{"providers", "repair-config", "--name", "legacy"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("repair-config exit=%d stderr=%q", code, stderr.String())
+	}
+	if err := config.ValidatePersistedProviderNames(readFileConfig(t, configPath)); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("first repair should leave only the independent duplicate issue, got %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove exit=%d stderr=%q", code, stderr.String())
+	}
+	if err := config.ValidatePersistedProviderNames(readFileConfig(t, configPath)); err != nil {
+		t.Fatalf("final config remains invalid: %v", err)
+	}
+}
+
 func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

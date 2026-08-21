@@ -1186,16 +1186,43 @@ func TestRemoveProviderRejectsNonExactCaseDuplicateTarget(t *testing.T) {
 	}
 }
 
-func TestRemoveProviderRejectsRepairThatRemainsAmbiguous(t *testing.T) {
+func TestRemoveProviderPublishesRepairThatReducesRemainingAmbiguity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
-	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}, {Name: "Work"}}}, 0o600)
-	_, err := RemoveProvider(path, "Work")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}, {Name: "Work"}}}, 0o600)
+	cfg, err := RemoveProvider(path, "Work")
+	if err != nil {
+		t.Fatalf("strictly reducing repair failed: %v", err)
+	}
+	if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "work" || cfg.Providers[1].Name != "WORK" {
+		t.Fatalf("repaired config = %+v", cfg)
+	}
+}
+
+func TestRemoveProviderPublishesRepairWhileUnnamedProblemRemains(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: ""}, {Name: "work"}, {Name: "WORK"}}}, 0o600)
+	cfg, err := RemoveProvider(path, "WORK")
+	if err != nil {
+		t.Fatalf("exact duplicate repair failed while an unnamed row remained: %v", err)
+	}
+	if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "" || cfg.Providers[1].Name != "work" {
+		t.Fatalf("repaired config = %+v", cfg)
+	}
+	if err := ValidatePersistedProviderNames(cfg); err == nil || !strings.Contains(err.Error(), "cannot be empty") {
+		t.Fatalf("repair should leave only the independent unnamed-row problem, got %v", err)
+	}
+}
+
+func TestRepairUnnamedProviderRejectsRepairThatIntroducesDuplicate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: ""}, {Name: "work"}}}, 0o600)
+	_, err := RepairUnnamedProvider(path, "WORK")
 	if err == nil || !strings.Contains(err.Error(), "ambiguous persisted provider names") {
-		t.Fatalf("error = %v, want resulting-config validation error", err)
+		t.Fatalf("error = %v, want newly introduced duplicate rejection", err)
 	}
 	after, readErr := os.ReadFile(path)
 	if readErr != nil || !bytes.Equal(after, before) {
-		t.Fatalf("invalid repair rewrote config: readErr=%v", readErr)
+		t.Fatalf("rejected repair rewrote config: readErr=%v", readErr)
 	}
 }
 

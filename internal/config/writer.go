@@ -48,6 +48,54 @@ func ValidatePersistedProviderNames(cfg FileConfig) error {
 	return nil
 }
 
+// persistedProviderNameProblems returns independently repairable persisted-name
+// problems. Keys are stable identities so a repair can prove it reduced an
+// existing problem without introducing or worsening another one.
+func persistedProviderNameProblems(cfg FileConfig) map[string]int {
+	problems := map[string]int{}
+	seen := map[string]int{}
+	for _, provider := range cfg.Providers {
+		name := strings.TrimSpace(provider.Name)
+		if name == "" {
+			problems["unnamed"]++
+			continue
+		}
+		seen[credstore.NormalizeProvider(name)]++
+	}
+	for identity, count := range seen {
+		if count > 1 {
+			problems["duplicate:"+identity] = count - 1
+		}
+	}
+	return problems
+}
+
+func writeProviderNameRepair(path string, before FileConfig, after FileConfig) error {
+	oldProblems := persistedProviderNameProblems(before)
+	if len(oldProblems) == 0 {
+		return writeConfigFile(path, after)
+	}
+	newProblems := persistedProviderNameProblems(after)
+	oldTotal, newTotal := 0, 0
+	for _, count := range oldProblems {
+		oldTotal += count
+	}
+	for problem, count := range newProblems {
+		newTotal += count
+		if count > oldProblems[problem] {
+			return ValidatePersistedProviderNames(after)
+		}
+	}
+	if newTotal >= oldTotal {
+		return ValidatePersistedProviderNames(after)
+	}
+	data, err := json.MarshalIndent(after, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config JSON: %w", err)
+	}
+	return writeConfigData(path, data)
+}
+
 // RepairUnnamedProvider gives legacy provider rows that predate required names
 // an explicit persisted identity. Older releases resolved one unnamed row as
 // activeProvider, falling back to "openai"; preserve that choice unless the
@@ -87,10 +135,11 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) 
 		name = "openai"
 	}
 	cfg.Providers[unnamed].Name = name
-	if err := ValidatePersistedProviderNames(cfg); err != nil {
-		return FileConfig{}, err
+	var before FileConfig
+	if err := json.Unmarshal(data, &before); err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
-	if err := writeConfigFile(path, cfg); err != nil {
+	if err := writeProviderNameRepair(path, before, cfg); err != nil {
 		return FileConfig{}, err
 	}
 	return cfg, nil
@@ -515,6 +564,8 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
+	before := cfg
+	before.Providers = append([]ProviderProfile(nil), cfg.Providers...)
 
 	// Persisted provider identity is exact. Resolution may fold names from
 	// runtime sources, but config mutations must target the requested row. This
@@ -561,7 +612,7 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 			cfg.ActiveProvider = resolved
 		}
 	}
-	if err := writeConfigFile(path, cfg); err != nil {
+	if err := writeProviderNameRepair(path, before, cfg); err != nil {
 		return FileConfig{}, err
 	}
 	return cfg, nil
