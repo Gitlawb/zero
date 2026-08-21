@@ -1,8 +1,13 @@
 package agentsessions
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sessions"
 )
 
 // The TestTheReal*CorpusStillParses tests pin the on-disk FORMAT, but only on a
@@ -194,4 +199,98 @@ func TestARolloutWithALateTurnContextIndexesWithoutAModel(t *testing.T) {
 	if len(events) == 0 {
 		t.Error("the late-turn_context rollout imported no events")
 	}
+}
+
+// AN ORDINARY LONG MESSAGE IS NOT AN EDGE CASE, and it was being deleted from
+// the imported conversation without a word. Both translators passed the
+// DISCOVERY per-line cap (64 KiB) to streamLines — a budget that exists because
+// the index pays it once per file across the whole store — so a single assistant
+// reply over 64 KiB was truncated into invalid JSON, skipped, and Read returned
+// nil error.
+//
+// The result was worse than incomplete: the restored transcript read as a
+// question, no answer, then the user's follow-up. Both the user and the model
+// continuing the session would see a conversation that looks whole.
+func TestAnOrdinaryLongMessageSurvivesImport(t *testing.T) {
+	adapter, _ := longMessageStore(t, 65*1024)
+	events, err := adapter.Read("s", ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("a %d KiB assistant reply was dropped from the import: got %d events, want 3", 65, len(events))
+	}
+	if got := payloadText(t, events[1]); len(got) < 60*1024 {
+		t.Errorf("the long reply was imported truncated: %d bytes", len(got))
+	}
+}
+
+// PAST THE IMPORT CAP TOO, THE LOSS IS NAMED. The cap is still a cap — a
+// transcript cannot be allowed to exhaust memory — but a record that exceeds it
+// produces a marker rather than a hole, so the gap is visible to whoever reads
+// the session next.
+func TestARecordPastTheImportCapIsReportedNotDropped(t *testing.T) {
+	adapter, _ := longMessageStore(t, 9<<20)
+	events, err := adapter.Read("s", ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported bool
+	for _, event := range events {
+		if event.Type == sessions.EventError && strings.Contains(payloadText(t, event), "could not be read") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("a record past the import cap vanished silently; events=%d", len(events))
+	}
+}
+
+func longMessageStore(t *testing.T, size int) (Adapter, string) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "projects", "-w")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("x", size)
+	records := []any{
+		map[string]any{"type": "user", "cwd": "/w", "timestamp": "2026-01-01T00:00:00Z",
+			"message": map[string]any{"role": "user", "model": "m", "content": "short question"}},
+		map[string]any{"type": "assistant", "cwd": "/w", "timestamp": "2026-01-01T00:00:01Z",
+			"message": map[string]any{"role": "assistant", "content": body}},
+		map[string]any{"type": "user", "cwd": "/w", "timestamp": "2026-01-01T00:00:02Z",
+			"message": map[string]any{"role": "user", "content": "follow up"}},
+	}
+	file, err := os.Create(filepath.Join(dir, "s.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write(append(encoded, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return ClaudeCode(testEnv("", map[string]string{"CLAUDE_CONFIG_DIR": root})), root
+}
+
+func payloadText(t *testing.T, event sessions.AppendEventInput) string {
+	t.Helper()
+	payload, ok := event.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected payload shape %T", event.Payload)
+	}
+	for _, key := range []string{"content", "message"} {
+		if value, ok := payload[key].(string); ok {
+			return value
+		}
+	}
+	return ""
 }

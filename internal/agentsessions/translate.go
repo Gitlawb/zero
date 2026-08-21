@@ -2,8 +2,10 @@ package agentsessions
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -160,7 +162,16 @@ func translateFamily1(path string, options ReadOptions) ([]sessions.AppendEventI
 	toolNames := map[string]string{}
 	activity := newActivityLog(options.Cwd)
 
-	err := streamLines(path, defaultHeadLimit.MaxLineBytes, func(line []byte) bool {
+	omitted := 0
+	err := streamLines(path, importLineLimit, func(line []byte, truncated bool) bool {
+		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
+		// Skipping it silently produced a transcript that looked complete: a
+		// question, no answer, then the follow-up. The marker is the honest
+		// answer — the bytes are gone either way, but the reader can see it.
+		if truncated {
+			omitted++
+			return true
+		}
 		var record family1Record
 		if json.Unmarshal(line, &record) != nil || record.Message == nil {
 			// Torn or unrecognised lines are skipped, not fatal: transcripts are
@@ -218,6 +229,12 @@ func translateFamily1(path string, options ReadOptions) ([]sessions.AppendEventI
 	})
 	if err != nil {
 		return nil, err
+	}
+	// SAID OUT LOUD. A resumed conversation that quietly lost a record reads as
+	// complete to both the user and the model continuing it — the failure this
+	// makes visible is a question with no answer followed by a follow-up.
+	if omitted > 0 {
+		events = append(events, omittedRecordsEvent(omitted))
 	}
 
 	events = append(events, activity.summaryEvents()...)
@@ -283,4 +300,50 @@ func plural(count int, noun string) string {
 		return "1 " + noun
 	}
 	return itoaEvents(count) + " " + noun + "s"
+}
+
+// omittedRecordsEvent names what an import could not carry across.
+//
+// It is an EventError rather than a message because it is not part of the
+// conversation and must not read as one: a model continuing this session should
+// see a note about the transcript, not a turn somebody took. The count is the
+// honest limit of what can be said — the bytes were never parsed, so their role,
+// author and content are all unknown.
+func omittedRecordsEvent(count int) sessions.AppendEventInput {
+	noun := "record"
+	if count != 1 {
+		noun = "records"
+	}
+	return sessions.AppendEventInput{
+		Type: sessions.EventError,
+		Payload: map[string]any{
+			"message": fmt.Sprintf("%d %s in the source transcript exceeded the import size limit and could not be read. "+
+				"The conversation below is missing that content.", count, noun),
+		},
+	}
+}
+
+// DisplayField makes one foreign metadata value safe to draw in a terminal.
+//
+// TWO SEPARATE HAZARDS, IN THIS ORDER. The value is a field another product
+// wrote into its own file: it can carry terminal escapes that repaint the rows
+// around it, and it can carry something shaped like a credential — a title is
+// often the user's first prompt, which is where a pasted key ends up.
+//
+// Controls are stripped FIRST so a secret cannot be split by an escape byte and
+// slip past the shape match, then redaction runs on the reassembled text. That
+// ordering is the same one redaction_order_test.go pins for the transcript path;
+// the display path needed it too. Newlines go as well, unlike the transcript
+// helper, because a metadata field is drawn as one row and a newline in it moves
+// the rest of the line somewhere the caller did not intend.
+func DisplayField(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return redaction.RedactString(strings.TrimSpace(b.String()), redaction.Options{})
 }

@@ -192,7 +192,16 @@ func translateCodex(path string, options ReadOptions) ([]sessions.AppendEventInp
 	toolNames := map[string]string{}
 	activity := newActivityLog(options.Cwd)
 
-	err := streamLines(path, defaultHeadLimit.MaxLineBytes, func(line []byte) bool {
+	omitted := 0
+	err := streamLines(path, importLineLimit, func(line []byte, truncated bool) bool {
+		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
+		// Skipping it silently produced a transcript that looked complete: a
+		// question, no answer, then the follow-up. The marker is the honest
+		// answer — the bytes are gone either way, but the reader can see it.
+		if truncated {
+			omitted++
+			return true
+		}
 		var record codexRecord
 		if json.Unmarshal(line, &record) != nil || record.Type != "response_item" {
 			return true
@@ -244,6 +253,12 @@ func translateCodex(path string, options ReadOptions) ([]sessions.AppendEventInp
 	})
 	if err != nil {
 		return nil, err
+	}
+	// SAID OUT LOUD. A resumed conversation that quietly lost a record reads as
+	// complete to both the user and the model continuing it — the failure this
+	// makes visible is a question with no answer followed by a follow-up.
+	if omitted > 0 {
+		events = append(events, omittedRecordsEvent(omitted))
 	}
 	events = append(events, activity.summaryEvents()...)
 	return capEvents(events, options.MaxEvents), nil

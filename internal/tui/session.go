@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/agentsessions"
@@ -518,7 +517,12 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 		if imported[ref] {
 			continue
 		}
-		label := displayValue(sanitizePickerLabel(session.Title), "untitled")
+		// Sanitized AND redacted: stripping controls stops the row being repainted,
+		// but a title is often the user's first prompt and can carry a pasted key.
+		// agentsessions.DisplayField does both, in the order the redaction tests
+		// pin — controls first, so a secret split by an escape byte is reassembled
+		// before the shape match runs.
+		label := displayValue(agentsessions.DisplayField(session.Title), "untitled")
 		if when := relativeAge(session.UpdatedAt.Format(time.RFC3339), now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
@@ -531,31 +535,6 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 		})
 	}
 	return items
-}
-
-// sanitizePickerLabel makes another product's title safe to draw as a row.
-//
-// A foreign title is bytes from a file this program did not write. registry.go
-// already strips them on IMPORT, and its comment names this row as the reason —
-// but the picker lists a session before anything is imported, reading the title
-// straight out of the other agent's transcript, so that was the one path the
-// stripping did not cover. An escape here repaints the rows above it, a carriage
-// return hides the rest of the label behind whatever follows, and a NUL can
-// truncate the row at the terminal.
-//
-// Control bytes are dropped rather than replaced, and the printable text is
-// kept: a title that is merely unusual should still be readable and selectable,
-// because the row is how the user recognises their own work.
-func sanitizePickerLabel(value string) string {
-	var b strings.Builder
-	b.Grow(len(value))
-	for _, r := range value {
-		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
 }
 
 // sessionAgentName is the agent a session came from, for the picker's tab strip.
@@ -631,13 +610,13 @@ func (m model) sessionPickerDetail(meta sessions.Metadata) string {
 func (m model) foreignSessionPickerDetail(session agentsessions.ForeignSession) string {
 	parts := make([]string, 0, 3)
 	if project := displayPath(m.cwd, session.Cwd); project != "" {
-		parts = append(parts, project)
+		parts = append(parts, agentsessions.DisplayField(project))
 	}
 	if modelID := strings.TrimSpace(session.ModelID); modelID != "" {
-		parts = append(parts, modelID)
+		parts = append(parts, agentsessions.DisplayField(modelID))
 	}
 	if branch := strings.TrimSpace(session.GitBranch); branch != "" {
-		parts = append(parts, branch)
+		parts = append(parts, agentsessions.DisplayField(branch))
 	}
 	return sanitizeCardField(strings.Join(parts, " · "))
 }
