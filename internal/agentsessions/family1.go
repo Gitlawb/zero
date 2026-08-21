@@ -174,9 +174,32 @@ func indexFamily1Transcript(agent string, root string, path string) (ForeignSess
 	}
 	firstPrompt := ""
 
-	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte) bool {
+	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte, truncated bool) bool {
 		var record family1Record
 		if json.Unmarshal(line, &record) != nil {
+			// A RECORD TOO LONG TO PARSE STILL CARRIES ITS METADATA AT THE FRONT.
+			// Skipping it whole is right for the body — the cap exists so a giant
+			// tool result is not held in memory — but cwd, the git branch and the
+			// timestamp sit before it, and dropping them with the body cost the
+			// entire session: with no workspace to bind to, discovery dropped a
+			// transcript the user can see on disk, and it looked exactly like a
+			// legitimate stub.
+			//
+			// Only for a TRUNCATED line. A genuinely malformed one is skipped as
+			// before: transcripts are appended live and the last line is routinely
+			// half-written, and guessing at fields there would invent them.
+			if truncated {
+				recovered := topLevelStrings(line, "cwd", "gitBranch", "timestamp")
+				if session.Cwd == "" {
+					session.Cwd = recovered["cwd"]
+				}
+				if session.GitBranch == "" {
+					session.GitBranch = recovered["gitBranch"]
+				}
+				if session.StartedAt.IsZero() {
+					session.StartedAt = parseTimestamp(recovered["timestamp"])
+				}
+			}
 			// One malformed line is not a malformed file: transcripts are
 			// appended live and the last line is routinely half-written.
 			return true

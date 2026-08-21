@@ -128,33 +128,30 @@ func TestASessionWithNoWorkspaceIsNotIndexed(t *testing.T) {
 	}
 }
 
-// A WORKSPACE IN A GENUINELY OVERLONG RECORD IS LOST, and this pins that rather
-// than claiming otherwise.
+// A WORKSPACE SURVIVES AN OVERLONG RECORD, at every size.
 //
-// An earlier version of this test was called ...IsStillFound and used a 1 KiB
-// record against a 64 KiB cap — 64x under the boundary it was named for, so it
-// only reacted if the production constant was cut to 512, which no regression
-// would do. Worse, its name and two neighbouring comments told the next reviewer
-// the case was handled. It is not: @Vasanthdev2004 measured 1 KiB indexes,
-// 60 KiB indexes, 70 KiB does not, 200 KiB does not, and I reproduced exactly
-// that. An honestly named gap beats a test whose name says it is covered.
+// This test has been wrong twice and the history is worth keeping. It first
+// asserted the workspace "is still found" using a 1 KiB record against a 64 KiB
+// cap — 64x under the boundary it was named for, so it only reacted if the
+// production constant was cut to 512. @Vasanthdev2004 measured what actually
+// happened (1 KiB indexes, 60 KiB indexes, 70 KiB does not, 200 KiB does not)
+// and it was the opposite of the name.
 //
-// THE MECHANISM. readBoundedLine keeps the first MaxLineBytes of an overlong
-// record; the truncated JSON then fails to parse and the record is skipped
-// whole. When that record is the only one carrying cwd, the session has no
-// workspace and is dropped — indistinguishable in the output from a legitimate
-// stub with no cwd at all.
+// It was then renamed to pin the loss honestly. CodeRabbit's answer to that was
+// the better one: recover the metadata instead of documenting its absence.
 //
-// This is not hypothetical. On the machine this was written on the opening user
-// record is already over the cap in 30 of 367 transcripts; they survive only
-// because Claude Code writes a small attachment record next that also carries
-// cwd, and 73 of the 360 indexed sessions (20%) take their cwd from an
-// attachment for exactly that reason. One without that rescue disappears.
+// THE MECHANISM. A record over MaxLineBytes still arrives as a prefix, and the
+// fields discovery needs — cwd, the branch, the timestamp — sit at the FRONT of
+// the object, before the message body that made it oversized. topLevelStrings
+// reads them off the prefix with a token stream that stops cleanly at the cut,
+// so what it recovers was genuinely complete and genuinely top-level. The body
+// is still discarded, which is the whole point of the cap.
 //
-// The import path no longer has this problem — importLineLimit is 8 MiB and an
-// over-cap record is reported rather than dropped — but DISCOVERY still pays the
-// 64 KiB budget, because it is spent once per file across the whole store.
-func TestAWorkspaceOnlyInAnOverlongRecordIsLost(t *testing.T) {
+// This mattered on the real corpus: the opening user record is already over the
+// cap in 30 of 367 transcripts here, and 73 of the 360 indexed sessions (20%)
+// were taking their cwd from a following attachment record purely by luck. One
+// without that rescue disappeared.
+func TestAWorkspaceInAnOverlongRecordIsRecovered(t *testing.T) {
 	for _, size := range []int{1 << 10, 60 << 10, 70 << 10, 200 << 10} {
 		root := t.TempDir()
 		dir := filepath.Join(root, "projects", "-w")
@@ -162,7 +159,7 @@ func TestAWorkspaceOnlyInAnOverlongRecordIsLost(t *testing.T) {
 			t.Fatal(err)
 		}
 		record := map[string]any{
-			"type": "user", "cwd": "/w", "timestamp": "2026-01-01T00:00:01Z",
+			"type": "user", "cwd": "/w", "gitBranch": "main", "timestamp": "2026-01-01T00:00:01Z",
 			"message": map[string]any{"role": "user", "model": "m", "content": strings.Repeat("p", size)},
 		}
 		encoded, err := json.Marshal(record)
@@ -177,16 +174,48 @@ func TestAWorkspaceOnlyInAnOverlongRecordIsLost(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		overCap := len(encoded) > defaultHeadLimit.MaxLineBytes
-		switch {
-		case overCap && len(found) != 0:
-			t.Errorf("a %d-byte cwd record (over the %d cap) was indexed; if discovery learned to recover "+
-				"cwd from a truncated record, this test and the comments above it must be updated deliberately",
-				len(encoded), defaultHeadLimit.MaxLineBytes)
-		case !overCap && len(found) != 1:
-			t.Errorf("a %d-byte cwd record (under the %d cap) was dropped: indexed %d",
+		if len(found) != 1 {
+			t.Fatalf("a %d-byte record (cap %d) yielded %d sessions; the workspace was not recovered",
 				len(encoded), defaultHeadLimit.MaxLineBytes, len(found))
 		}
+		if found[0].Cwd != "/w" {
+			t.Errorf("a %d-byte record indexed with Cwd %q, want /w", len(encoded), found[0].Cwd)
+		}
+		if found[0].GitBranch != "main" {
+			t.Errorf("a %d-byte record lost its branch: %q", len(encoded), found[0].GitBranch)
+		}
+	}
+}
+
+// AND A GENUINELY MALFORMED LINE IS STILL SKIPPED. The recovery above applies
+// only to a record the cap cut short. A half-written final line — which every
+// live-appended transcript has — must not have fields guessed out of it, or the
+// index would invent a workspace from whatever bytes happened to land.
+func TestAHalfWrittenRecordIsNotMinedForMetadata(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "projects", "-w")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// THE TORN LINE COMES FIRST, so its cwd would win if it were mined. With the
+	// valid record first, session.Cwd is already set and the "only fill what is
+	// empty" guard hides the difference — an earlier version of this test made
+	// exactly that mistake and passed against a mutation that mined every
+	// unparsable line.
+	torn := `{"type":"user","cwd":"/somewhere-else","messa`
+	good := `{"type":"user","cwd":"/w","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","model":"m","content":"hi"}}`
+	if err := os.WriteFile(filepath.Join(dir, "s.jsonl"), []byte(torn+"\n"+good+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	found, err := ClaudeCode(testEnv("", map[string]string{"CLAUDE_CONFIG_DIR": root})).Discover("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected the session to index from its valid record, got %d", len(found))
+	}
+	if found[0].Cwd != "/w" {
+		t.Errorf("the torn line's cwd was used: %q", found[0].Cwd)
 	}
 }
 

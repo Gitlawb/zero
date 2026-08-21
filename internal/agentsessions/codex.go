@@ -147,7 +147,7 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 	session := ForeignSession{Agent: agent, ID: codexID(path), Path: path}
 	firstPrompt := ""
 
-	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte) bool {
+	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte, _ bool) bool {
 		var record codexRecord
 		if json.Unmarshal(line, &record) != nil {
 			return true

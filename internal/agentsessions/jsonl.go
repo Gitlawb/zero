@@ -3,6 +3,7 @@ package agentsessions
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -77,7 +78,7 @@ func (reader *countingReader) Read(buffer []byte) (int, error) {
 // truncated line will not parse as JSON and is simply skipped by the caller,
 // which is the right outcome: a record too large to fit the head budget is a
 // giant tool result, never the small metadata record discovery is looking for.
-func scanHead(root string, path string, limit headLimit, visit func(line []byte) bool) (int64, error) {
+func scanHead(root string, path string, limit headLimit, visit func(line []byte, truncated bool) bool) (int64, error) {
 	file, err := openContained(root, path)
 	if err != nil {
 		return 0, err
@@ -88,8 +89,8 @@ func scanHead(root string, path string, limit headLimit, visit func(line []byte)
 	reader := bufio.NewReaderSize(counter, 64<<10)
 
 	for line := 0; line < limit.MaxLines; line++ {
-		content, err := readBoundedLine(reader, limit.MaxLineBytes)
-		if len(content) > 0 && !visit(content) {
+		content, truncated, err := readBoundedLineTruncated(reader, limit.MaxLineBytes)
+		if (len(content) > 0 || truncated) && !visit(content, truncated) {
 			break
 		}
 		if err != nil {
@@ -235,4 +236,99 @@ func fileModTime(path string) time.Time {
 		return time.Time{}
 	}
 	return info.ModTime()
+}
+
+// topLevelStrings pulls named top-level string fields out of a JSON object that
+// may be TRUNCATED, returning whatever appeared before the cut.
+//
+// WHY THIS EXISTS. A record longer than the per-line cap comes back as a prefix,
+// fails json.Unmarshal, and is skipped whole. That is the right call for the
+// record's content — the point of the cap is not to hold a giant tool result in
+// memory — but the small metadata fields sit at the FRONT of the object, and
+// throwing them away with the body cost the whole session: when the only
+// cwd-bearing record was oversized, discovery had no workspace to bind to and
+// dropped a transcript the user could see on disk.
+//
+// A token stream rather than a regex, because a regex over truncated JSON cannot
+// tell a top-level "cwd" from one nested inside a message body or an escaped
+// string that merely looks like a key. json.Decoder stops cleanly at the cut, so
+// anything recovered here was genuinely complete and genuinely top-level, and
+// anything after it is simply absent.
+func topLevelStrings(prefix []byte, wanted ...string) map[string]string {
+	found := map[string]string{}
+	if len(wanted) == 0 {
+		return found
+	}
+	want := map[string]bool{}
+	for _, name := range wanted {
+		want[name] = true
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(prefix))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return found
+	}
+	for len(found) < len(want) {
+		keyToken, err := decoder.Token()
+		if err != nil || keyToken == json.Delim('}') {
+			return found
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return found
+		}
+		if !want[key] {
+			if skipValue(decoder) != nil {
+				return found
+			}
+			continue
+		}
+		valueToken, err := decoder.Token()
+		if err != nil {
+			return found
+		}
+		if value, ok := valueToken.(string); ok {
+			found[key] = value
+			continue
+		}
+		// A non-string value under a wanted key: step over whatever it opened.
+		if delim, ok := valueToken.(json.Delim); ok && (delim == '{' || delim == '[') {
+			if skipRest(decoder, 1) != nil {
+				return found
+			}
+		}
+	}
+	return found
+}
+
+// skipValue consumes exactly one value, descending through nested objects and
+// arrays so the next token read is the following key.
+func skipValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := token.(json.Delim); ok && (delim == '{' || delim == '[') {
+		return skipRest(decoder, 1)
+	}
+	return nil
+}
+
+func skipRest(decoder *json.Decoder, depth int) error {
+	for depth > 0 {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if delim, ok := token.(json.Delim); ok {
+			switch delim {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+	return nil
 }
