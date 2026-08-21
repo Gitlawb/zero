@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:59:07.112Z",
-  "durationMs": 3285480,
+  "endedAt": "2026-08-21T03:59:11.160Z",
+  "durationMs": 3289528,
   "status": "running",
   "tokens": {
     "total": 42154,
@@ -16,23 +16,23 @@
   },
   "toolCalls": 38,
   "lines": {
-    "added": 454,
-    "removed": 6
+    "added": 186,
+    "removed": 27
   },
   "filesChanged": [
-    "internal/tui/model.go",
-    "internal/tui/model_test.go",
-    "internal/tui/picker.go",
-    "internal/tui/session.go",
-    "internal/tui/session_picker_tabs_test.go",
-    "internal/tui/view.go"
+    "internal/agentsessions/activity.go",
+    "internal/agentsessions/activity_test.go",
+    "internal/agentsessions/blocker_regression_test.go",
+    "internal/agentsessions/registry.go",
+    "internal/agentsessions/translate.go",
+    "internal/agentsessions/translate_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "09a1a05509ea7ede1755e5e05feb073925f9cc48",
+    "headAfter": "095533bb1ea4e0efb632d4e190970ebf419dab8f",
     "commitShas": [
-      "09a1a05509ea7ede1755e5e05feb073925f9cc48"
+      "095533bb1ea4e0efb632d4e190970ebf419dab8f"
     ]
   },
   "summary": "The `Read` signature returns only events, so the import can't re-resolve metadata without an interface change — that's a scope call I'll surface rather than take. Starting with what Vasanth asked for. Committing the redaction fix, then rebasing:",
