@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:12:16.249Z",
-  "durationMs": 11274612,
+  "endedAt": "2026-08-21T06:12:21.986Z",
+  "durationMs": 11280354,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,18 +16,19 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 37,
-    "removed": 12
+    "added": 95,
+    "removed": 6
   },
   "filesChanged": [
-    "internal/memory/escape_test.go"
+    "internal/memory/escape_test.go",
+    "internal/memory/memory.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "24ae8cf80346a7f231fcfaa19af64a1d958c6f52",
+    "headAfter": "0defa873341d18ba72742506082bd133a52d2e85",
     "commitShas": [
-      "24ae8cf80346a7f231fcfaa19af64a1d958c6f52"
+      "0defa873341d18ba72742506082bd133a52d2e85"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
