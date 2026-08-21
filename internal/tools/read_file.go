@@ -31,7 +31,7 @@ func NewScopedReadFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readFileTool{
 		baseTool: baseTool{
 			name:        "read_file",
-			description: "Read exact file text with line numbers. Use for comments, formatting, or edits; prefer read_minified_file for initial code understanding. Use offset and limit for a line range.",
+			description: "Read exact file text with line numbers. Use directly for small files likely to be edited, or when comments, formatting, or line numbers matter. Prefer read_minified_file only for exploratory understanding of large or unfamiliar code. Use offset and limit for a line range.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
