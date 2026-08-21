@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:59:20.552Z",
-  "durationMs": 3298921,
+  "endedAt": "2026-08-21T03:59:22.900Z",
+  "durationMs": 3301265,
   "status": "running",
   "tokens": {
     "total": 42345,
@@ -16,19 +16,18 @@
   },
   "toolCalls": 39,
   "lines": {
-    "added": 116,
+    "added": 21,
     "removed": 1
   },
   "filesChanged": [
-    "internal/agentsessions/redaction_order_test.go",
-    "internal/agentsessions/translate.go"
+    "internal/agentsessions/redaction_order_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "5423ae0f94ae744d2355ec8ef3a5304c1ae6a917",
+    "headAfter": "899dfa9e72f6404175bb31792d677b6b8e4920b6",
     "commitShas": [
-      "5423ae0f94ae744d2355ec8ef3a5304c1ae6a917"
+      "899dfa9e72f6404175bb31792d677b6b8e4920b6"
     ]
   },
   "summary": "Rebased cleanly onto current main and builds. Now the fixtures — writing the ones the verifiers confirmed have teeth:",
