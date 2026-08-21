@@ -1,0 +1,358 @@
+package agentsessions
+
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"unicode"
+
+	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+// The payload field names below are a CONTRACT with the TUI, not a convention.
+// internal/tui/session.go's transcriptRowsFromSessionEvents reads exactly these
+// keys ("role", "content", "name", "toolCallId", "arguments", "status",
+// "output"); a misspelling renders an empty row and reports no error anywhere.
+// Every event this package produces is built by one of the four constructors
+// here so there is a single place for those names to be right.
+//
+// These constructors are also the redaction chokepoint (repo invariant #6).
+// Imported text is untrusted input (invariant #8) — a foreign transcript can
+// contain a key the other agent echoed into its own log — and routing every
+// event through here means no future caller can add an unredacted path without
+// deleting a call they can see.
+
+// redact runs secret redaction AND control-stripping on imported text. Every
+// field a foreign transcript supplies routes through here — the content-bearing
+// ones and the structural ones (role, name, toolCallId) alike — because a
+// malicious transcript can hide a credential in any of them and Zero then
+// persists and renders it. This is the redaction chokepoint (invariant #6): no
+// imported byte reaches a picker row or transcript line as a secret or as a live
+// control sequence.
+// THE ORDER IS THE WHOLE GUARANTEE. Strip first, then match.
+//
+// RedactString matches secrets by SHAPE, and stripControl deletes a control byte
+// without leaving a gap, so it is also a REASSEMBLER. Running it second meant a
+// transcript could split a credential with a NUL, an ESC or any C1 byte, sail
+// past the shape patterns because neither half looks like a key, and then have
+// the halves rejoined on the way out. Every shape leaked that way: sk-ant-,
+// ghp_, AKIA. Normalizing first means the patterns see the text the reader will
+// see, which is the only text worth matching against.
+//
+// Same defect as #835, where an MCP failure reason was redacted before the
+// terminal sanitizer rejoined its halves. Any normalizer that removes bytes
+// without leaving a gap has to run BEFORE whatever matches on them.
+func redact(value string) string {
+	if value == "" {
+		return ""
+	}
+	return redaction.RedactString(stripControl(value), redaction.Options{})
+}
+
+// stripControl removes terminal control bytes from imported text. A foreign
+// transcript is untrusted input (invariant #8): an ESC or NUL a title or
+// message carries repaints or corrupts the terminal once it lands in a picker
+// row or a transcript line — the class shipped in #835 (a forged row) and #876
+// (a NUL that panicked the TUI). Tab and newline are kept because a transcript
+// legitimately carries them; every other C0 byte, DEL, and C1 byte is dropped.
+func stripControl(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t' || r == '\n':
+			return r
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			return -1
+		// FORMAT CHARACTERS ARE NOT CONTROL CHARACTERS, and unicode.IsControl
+		// says so — but U+202E RIGHT-TO-LEFT OVERRIDE reorders everything after
+		// it, so a tool name or title can be made to render as something else
+		// entirely while the bytes stay innocent. Category Cf is invisible by
+		// definition; nothing in a transcript needs it.
+		case unicode.Is(unicode.Cf, r):
+			return -1
+		default:
+			return r
+		}
+	}, value)
+}
+
+func messageEvent(role string, content string) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventMessage,
+		Payload: map[string]any{
+			"role":    redact(role),
+			"content": redact(content),
+		},
+	}
+}
+
+func toolCallEvent(name string, callID string, arguments string) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventToolCall,
+		Payload: map[string]any{
+			"name": redact(name),
+			// The foreign agent's own call id is reused verbatim so a call and
+			// its result pair up: the TUI keys them together on this string
+			// (effectiveToolRowID), and inventing new ids would split every pair.
+			// redact is deterministic, so both sides transform the id identically
+			// and the pairing survives.
+			"toolCallId": redact(callID),
+			"arguments":  redact(arguments),
+		},
+	}
+}
+
+func toolResultEvent(name string, callID string, status tools.Status, output string) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventToolResult,
+		Payload: map[string]any{
+			"name":       redact(name),
+			"toolCallId": redact(callID),
+			"status":     string(status),
+			"output":     redact(output),
+		},
+	}
+}
+
+// noteEventSummaryKey marks a message as a Zero-generated activity summary
+// rather than a translated foreign-transcript turn. The TUI and the resume
+// digest read only "role" and "content", so this key is invisible to render and
+// to the model; it exists so a consumer that wants the imported transcript alone
+// can tell the two apart. NoteEventIsSummary reads it.
+const noteEventSummaryKey = "importedActivitySummary"
+
+// NoteEventIsSummary reports whether an event is a Zero-generated activity
+// summary message (see noteEvent) rather than a translated transcript turn. It
+// takes any so callers can pass an AppendEventInput.Payload directly.
+func NoteEventIsSummary(payload any) bool {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	flag, _ := m[noteEventSummaryKey].(bool)
+	return flag
+}
+
+// noteEvent carries an imported-session activity summary as an assistant
+// message. NOT EventCompaction: that type has a second contract on the replay
+// side. RehydrateEvents restructures the transcript around the last
+// EventCompaction, and an activity summary with no CompactionPayload bookkeeping
+// (no CompactableEvents, CompactedThroughSequence 0) makes rehydration hoist
+// this note to the FRONT of the transcript. EventMessage still passes
+// promptContextEvents — the resume digest — without that restructuring. The
+// summary marker keeps it distinguishable from a real assistant turn.
+func noteEvent(summary string) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventMessage,
+		Payload: map[string]any{
+			"role":              "assistant",
+			"content":           redact(summary),
+			noteEventSummaryKey: true,
+		},
+	}
+}
+
+// translateFamily1 converts a family-1 transcript into Zero events.
+//
+// The mapping is deliberately lossy in one direction only: everything that
+// affects what a reader (human or model) needs in order to continue the work is
+// kept, and everything that belongs to the other model's private machinery is
+// dropped. Zero's own resume renders these events to a text digest anyway
+// (sessions.FormatExecPrompt), so perfect structural fidelity would buy nothing.
+func translateFamily1(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
+	events := []sessions.AppendEventInput{}
+	// A tool result names only the id of the call it answers, so the call's name
+	// has to be carried forward. Every family-1 agent writes the tool_use before
+	// the matching tool_result, so this is populated by the time it is read.
+	toolNames := map[string]string{}
+	activity := newActivityLog(options.Cwd)
+
+	omitted := 0
+	err := streamLines(root, path, importLineLimit, func(line []byte, truncated bool) bool {
+		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
+		// Skipping it silently produced a transcript that looked complete: a
+		// question, no answer, then the follow-up. The marker is the honest
+		// answer — the bytes are gone either way, but the reader can see it.
+		if truncated {
+			omitted++
+			return true
+		}
+		var record family1Record
+		if json.Unmarshal(line, &record) != nil || record.Message == nil {
+			// Torn or unrecognised lines are skipped, not fatal: transcripts are
+			// appended live and the final line is routinely half-written.
+			return true
+		}
+
+		// Content is either a bare string (a plain user prompt) or an array of
+		// typed blocks.
+		var text string
+		if json.Unmarshal(record.Message.Content, &text) == nil {
+			if strings.TrimSpace(text) != "" {
+				events = append(events, messageEvent(roleFor(record), text))
+			}
+			return true
+		}
+
+		var blocks []family1Block
+		if json.Unmarshal(record.Message.Content, &blocks) != nil {
+			return true
+		}
+		for _, block := range blocks {
+			switch block.Type {
+			case "text":
+				if strings.TrimSpace(block.Text) != "" {
+					events = append(events, messageEvent(roleFor(record), block.Text))
+				}
+			case "thinking":
+				// The other model's reasoning. Dropped by default: it is private
+				// to that provider, frequently larger than the visible
+				// conversation, and a different model continuing this work will
+				// not be picking up that chain of thought.
+				if options.IncludeReasoning && strings.TrimSpace(block.Thinking) != "" {
+					events = append(events, messageEvent("reasoning", block.Thinking))
+				}
+			case "tool_use":
+				toolNames[block.ID] = block.Name
+				activity.observeCall(block.ID, block.Name, string(block.Input))
+				events = append(events, toolCallEvent(block.Name, block.ID, string(block.Input)))
+			case "tool_result":
+				name := toolNames[block.ToolUseID]
+				if name == "" {
+					name = "unknown"
+				}
+				status := tools.StatusOK
+				if block.IsError {
+					status = tools.StatusError
+				}
+				output := family1ResultText(block.Content)
+				activity.observeResult(block.ToolUseID, name, status, output)
+				events = append(events, toolResultEvent(name, block.ToolUseID, status, output))
+			}
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	// SAID OUT LOUD. A resumed conversation that quietly lost a record reads as
+	// complete to both the user and the model continuing it — the failure this
+	// makes visible is a question with no answer followed by a follow-up.
+	if omitted > 0 {
+		events = append(events, omittedRecordsEvent(omitted))
+	}
+
+	events = append(events, activity.summaryEvents()...)
+	return capEvents(events, options.MaxEvents), nil
+}
+
+// roleFor maps a record to the role the TUI understands. Anything that is not
+// user or assistant renders as a system row, which is the right home for the
+// agent's own bookkeeping records.
+func roleFor(record family1Record) string {
+	if record.Message != nil && strings.TrimSpace(record.Message.Role) != "" {
+		return strings.ToLower(record.Message.Role)
+	}
+	return strings.ToLower(record.Type)
+}
+
+// family1ResultText flattens a tool result's content, which may be a bare string
+// or an array of blocks.
+func family1ResultText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	if flattened := family1Text(raw); flattened != "" {
+		return flattened
+	}
+	// Structured content with no text blocks (an image result, say). Keeping the
+	// raw JSON is better than an empty row: the reader at least learns that the
+	// call returned something and what shape it was.
+	return string(raw)
+}
+
+// capEvents keeps the LAST max events, because the tail is what a resume needs
+// — the most recent exchanges describe where the work actually stopped.
+//
+// The drop is announced rather than silent. A truncated import that looks
+// complete is how someone concludes the other agent never did the work.
+func capEvents(events []sessions.AppendEventInput, max int) []sessions.AppendEventInput {
+	if max <= 0 || len(events) <= max {
+		return events
+	}
+	// The note itself occupies one of the max slots, so one more original event
+	// (the oldest of the tail) is dropped to make room for it. The reported
+	// count must include that event: len(events)-max alone understates the loss
+	// by one, and a truncation that reads as smaller than it was is how someone
+	// concludes the other agent did less than it did.
+	shown := events[len(events)-max+1:]
+	dropped := len(events) - len(shown)
+	out := make([]sessions.AppendEventInput, 0, max)
+	out = append(out, noteEvent(plural(dropped, "earlier event")+
+		" from this session were not imported; the most recent "+
+		itoaEvents(len(shown))+" are shown."))
+	return append(out, shown...)
+}
+
+func itoaEvents(value int) string { return strconv.Itoa(value) }
+
+func plural(count int, noun string) string {
+	if count == 1 {
+		return "1 " + noun
+	}
+	return itoaEvents(count) + " " + noun + "s"
+}
+
+// omittedRecordsEvent names what an import could not carry across.
+//
+// It is an EventError rather than a message because it is not part of the
+// conversation and must not read as one: a model continuing this session should
+// see a note about the transcript, not a turn somebody took. The count is the
+// honest limit of what can be said — the bytes were never parsed, so their role,
+// author and content are all unknown.
+func omittedRecordsEvent(count int) sessions.AppendEventInput {
+	noun := "record"
+	if count != 1 {
+		noun = "records"
+	}
+	return sessions.AppendEventInput{
+		Type: sessions.EventError,
+		Payload: map[string]any{
+			"message": fmt.Sprintf("%d %s in the source transcript exceeded the import size limit and could not be read. "+
+				"This imported conversation is missing that content.", count, noun),
+		},
+	}
+}
+
+// DisplayField makes one foreign metadata value safe to draw in a terminal.
+//
+// TWO SEPARATE HAZARDS, IN THIS ORDER. The value is a field another product
+// wrote into its own file: it can carry terminal escapes that repaint the rows
+// around it, and it can carry something shaped like a credential — a title is
+// often the user's first prompt, which is where a pasted key ends up.
+//
+// Controls are stripped FIRST so a secret cannot be split by an escape byte and
+// slip past the shape match, then redaction runs on the reassembled text. That
+// ordering is the same one redaction_order_test.go pins for the transcript path;
+// the display path needed it too. Newlines go as well, unlike the transcript
+// helper, because a metadata field is drawn as one row and a newline in it moves
+// the rest of the line somewhere the caller did not intend.
+func DisplayField(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		// Cf as well as control: see stripControl. A bidi override in a picker row
+		// reorders the rows's visible text without changing a byte of it.
+		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return redaction.RedactString(strings.TrimSpace(b.String()), redaction.Options{})
+}

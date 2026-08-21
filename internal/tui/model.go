@@ -1959,6 +1959,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
 			}
+			// A tabbed picker (currently /resume) claims Tab to cycle its agent
+			// strip. Checked before the suggestion path below, which already
+			// requires picker == nil, so nothing else changes behaviour.
+			if m.picker != nil && m.picker.hasTabs() {
+				m.picker.cycleTab(1)
+				return m, nil
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
