@@ -207,3 +207,49 @@ func pickerLabels(items []pickerItem) []string {
 	}
 	return out
 }
+
+// A FOREIGN TITLE IS ANOTHER PRODUCT'S BYTES, and this row is where they land.
+// registry.go already strips control bytes when a foreign session is IMPORTED,
+// with a comment naming the picker row as the injection vector (#835/#876) — but
+// the picker shows the title BEFORE any import, straight from the other agent's
+// file, so the vector the comment describes was the one path left open. A cursor
+// or colour escape here rewrites the row above it, and a carriage return hides
+// the rest of the label.
+func TestAForeignTitleCannotCarryTerminalEscapes(t *testing.T) {
+	hostile := "safe\x1b[2Kmoved\rhidden\x07\x00 end"
+	got := sanitizePickerLabel(hostile)
+	for _, banned := range []string{"\x1b", "\r", "\x07", "\x00"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("a control byte %q survived into a picker label: %q", banned, got)
+		}
+	}
+	// The legible text has to come through, or the fix is just deletion.
+	for _, want := range []string{"safe", "moved", "hidden", "end"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("sanitizing the label ate %q, leaving %q", want, got)
+		}
+	}
+}
+
+// THE USER THIS FEATURE IS FOR HAS NO ZERO SESSIONS YET. Someone who has just
+// installed Zero and wants to continue work another agent started has an empty
+// local history by definition — and newSessionPicker returned nil on that,
+// before foreign discovery ran at all. The import path was reachable only after
+// the user had already done by hand the thing it exists to save them.
+func TestThePickerOffersForeignSessionsWithNoLocalHistory(t *testing.T) {
+	foreign := []pickerItem{{Label: "port the parser", Value: "claude-code:abc", Meta: "claude-code", Tab: "claude-code"}}
+	picker := pickerFromParts(nil, foreign)
+	if picker == nil {
+		t.Fatal("an empty local history hid every discovered foreign session; the import path is unreachable for a new user")
+	}
+	if len(picker.items) != 1 || picker.items[0].Value != "claude-code:abc" {
+		t.Errorf("the foreign session did not reach the picker: %+v", picker.items)
+	}
+}
+
+// And the genuinely empty case still falls back to the text path.
+func TestThePickerIsNilWhenNothingIsResumableAtAll(t *testing.T) {
+	if picker := pickerFromParts(nil, nil); picker != nil {
+		t.Errorf("a picker was built with no local and no foreign sessions: %+v", picker.items)
+	}
+}

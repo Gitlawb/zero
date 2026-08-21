@@ -3,6 +3,7 @@ package agentsessions
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -239,8 +240,20 @@ func TestTheRealCorpusStillParses(t *testing.T) {
 	// change that silently blanks one of these is the failure mode worth
 	// catching.
 	for _, session := range found {
-		if session.ID == "" || session.Cwd == "" || session.Title == "" {
-			t.Errorf("incomplete index entry: %+v", session)
+		// NAMED, NOT DUMPED. This walks the developer's REAL store, so %+v here
+		// printed their own session titles, working directories and file paths
+		// into the test output — and into any CI log or pasted failure report
+		// that carried it. The field that is empty is the whole diagnostic; the
+		// value that is missing is by definition not the interesting part.
+		var missing []string
+		for name, value := range map[string]string{"ID": session.ID, "Cwd": session.Cwd, "Title": session.Title} {
+			if value == "" {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			t.Errorf("a live-store index entry is missing %v — every one of these is a field the CLI prints", missing)
 			break
 		}
 	}
@@ -304,9 +317,21 @@ func TestASymlinkedSlugDirectoryIsNotListedThenRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The invariant: anything Discover lists, Read must be able to import. The
-	// old fast path listed "sneaky" by globbing through the symlink while Read
-	// refused it.
+	// CONTAINMENT FIRST, agreement second. Checking only that Discover and Read
+	// AGREE passes in two opposite worlds: the one where both correctly refuse a
+	// path reached through a symlink, and the one where both happily follow it
+	// out of the store. Agreement is the weaker half of the property and it was
+	// the only half asserted.
+	for _, session := range found {
+		if session.ID == "sneaky" {
+			t.Errorf("Discover followed a symlink out of the store and listed %q from %s", session.ID, elsewhere)
+		}
+	}
+	if _, err := adapter.Read("sneaky", ReadOptions{}); err == nil {
+		t.Errorf("Read followed a symlink out of the store and imported %s", elsewhere)
+	}
+	// AND THEN agreement, which is what the original fast path broke: it listed
+	// "sneaky" by globbing through the symlink while Read refused it.
 	for _, session := range found {
 		if _, err := adapter.Read(session.ID, ReadOptions{}); err != nil {
 			t.Errorf("Discover listed %q but Read refuses it: %v — list-then-refuse", session.ID, err)
