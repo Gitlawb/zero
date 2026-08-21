@@ -452,7 +452,6 @@
         "#912's fronted-clause order is unfixed and, I believe, not separable by position — it needs something that knows whether the named tool does the objective or bookkeeping"
       ],
       "verify": [
-        "I have to correct what I told you yesterday.** I reported Vasanth had approved #909 and #912. Those approvals now show as **DISMISSED** — they were on `db58dbf6` and `f575c873`, the exact heads I then force-pushed over with his other fixes. GitHub auto-dismissed them",
         "He could not reproduce the panic I reported, and wrote it off — but it does reproduce on his exact head.** His attempt used a plain multi-hunk patch; the defect needs `*** End of File` on a second hunk whose removed lines overlap the first hunk's span, which makes `searchStart` ignore the previous chunk's position. Re-confirmed just now on `662daf3e`: `slice bounds out of range [8:7]`, no `recove…",
         "Worth a maintainer's eye: **#908 is merge-ready with two approvals and one deliberately-declined test suggestion.** The decision to decline is mine and reversible — it's documented on the PR rather than left implicit, so it can be overruled without archaeology",
         "Scope is unchanged and remains the one open question** — 110 files, +5514/−2216, still **no linked issue and no `issue-approved` label**. 82 of those files are `internal/tui`. Under `CONTRIBUTING.md` that's closeable on process before code quality enters it. That's a maintainer call, not a code judgment, and it's the only thing I'd still flag",
@@ -463,15 +462,16 @@
         "The data says my CodeRabbit triggers aren't working at all.** Its last review predates the current head on *every* PR — including #897, pushed 15 hours ago, where it hasn't reviewed since the 16th:",
         "Worth knowing when you look at that table: **all six are `mergeState=BLOCKED`**, including the three fully approved ones — a stale bot changes-requested blocks merge exactly like a human one. So \"3 PRs done, 3 to go\" is the human picture, but zero are actually mergeable right now",
         "`@coderabbitai full review` produced nothing across five days and six PRs. Plain `@coderabbitai review` works.** That's the command I should have been using from the start — #897 and #914 both answered within minutes of switching. Every \"the bot won't respond\" conclusion I reported before that was really me using the wrong trigger",
-        "The two that matter differently are **#908 and #911** — only 2 and 1 bot reviews ever, both from 15–16 August, and neither branch has been pushed since. Those aren't \"one behind\"; the bot simply hasn't come back in five days despite repeated triggers. That fits the pattern that it re-reviews on push, not on request"
+        "The two that matter differently are **#908 and #911** — only 2 and 1 bot reviews ever, both from 15–16 August, and neither branch has been pushed since. Those aren't \"one behind\"; the bot simply hasn't come back in five days despite repeated triggers. That fits the pattern that it re-reviews on push, not on request",
+        "I was wrong that this would cost the approvals.** I told you it would dismiss both, based on having watched approvals get dismissed on #909 and #912 earlier. It didn't happen here — both still show APPROVED on the new heads. The difference is probably that these commits are empty, so the tree is byte-identical to what was approved; the earlier dismissals were on pushes that changed code. Worth kn…"
       ]
     },
     "tokensUsed": 0,
     "costUsd": 0,
     "durationMs": 0,
-    "linesAdded": 86,
-    "linesRemoved": 2,
+    "linesAdded": 109,
+    "linesRemoved": 20,
     "originUrl": "https://getorigin.io/sessions/local-8cd239ca-4faa-46df-a895-aba4d6a6383b",
-    "timestamp": "2026-08-20T18:40:59.765Z"
+    "timestamp": "2026-08-20T18:50:00.383Z"
   }
 }
