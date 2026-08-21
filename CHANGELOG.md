@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.8.0](https://github.com/Gitlawb/zero/compare/v0.7.0...v0.8.0) (2026-08-21)
+
+
+### Features
+
+* **security:** path-jail primitive, credential-store locking, worktree git hardening ([#891](https://github.com/Gitlawb/zero/issues/891)) ([060d38c](https://github.com/Gitlawb/zero/commit/060d38ce716feb7c5b6657b082cd35cb8dda3d75))
+* **update:** recognise Homebrew installs and add mise, go install docs ([#910](https://github.com/Gitlawb/zero/issues/910)) ([01c3498](https://github.com/Gitlawb/zero/commit/01c3498205e69d26e5f929225f9455b276444f39))
+* use Exa as default search provider ([#926](https://github.com/Gitlawb/zero/issues/926)) ([1ec7219](https://github.com/Gitlawb/zero/commit/1ec7219aee7b2840481ab0905f131644e27d2a4e))
+* **zerogit:** auto-create a conventional branch before push/pr on default branch ([#671](https://github.com/Gitlawb/zero/issues/671)) ([d065467](https://github.com/Gitlawb/zero/commit/d065467cd3ec3ed91c5dc60554c36fc4b4d6de4c))
+
+
+### Bug Fixes
+
+* **acp:** three defects a desktop ACP client hits ([#915](https://github.com/Gitlawb/zero/issues/915)) ([a78c6c3](https://github.com/Gitlawb/zero/commit/a78c6c357e1d21146d7cd2e8030a754e06f7f1f5))
+* bump Go to 1.26.6 for stdlib vulnerability fixes ([#903](https://github.com/Gitlawb/zero/issues/903)) ([dc15e82](https://github.com/Gitlawb/zero/commit/dc15e822987d8d7de467c62c375518f435b74d8c))
+* **daemon:** clean up child after startup timeout ([#774](https://github.com/Gitlawb/zero/issues/774)) ([9c29209](https://github.com/Gitlawb/zero/commit/9c292092a26c9092fd873d072b0af1b0d9d39ef0))
+* **dictation:** redact API keys from streaming transcriber errors ([#852](https://github.com/Gitlawb/zero/issues/852)) ([64a783b](https://github.com/Gitlawb/zero/commit/64a783b08caa2c7b21f188033b9ed84a14e00e84))
+* **modelregistry:** expose reasoning effort for DeepSeek V4 models ([#931](https://github.com/Gitlawb/zero/issues/931)) ([90dcfd1](https://github.com/Gitlawb/zero/commit/90dcfd127e8a6d9902ec9f4e72f6d03fef1a0fc6))
+* **providers:** discover ChatGPT capabilities ([#890](https://github.com/Gitlawb/zero/issues/890)) ([2d2450e](https://github.com/Gitlawb/zero/commit/2d2450e9a744349f0d01b1d4e9ba29c24ba5650d))
+* **sandbox:** normalize launcher names before the command-prefix denylist ([#934](https://github.com/Gitlawb/zero/issues/934)) ([6edf9a8](https://github.com/Gitlawb/zero/commit/6edf9a8b78dc030dc44598919db1c7fa9d4f809a))
+
 ## [0.7.0](https://github.com/Gitlawb/zero/compare/v0.6.0...v0.7.0) (2026-08-10)
 
 
