@@ -3,44 +3,35 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T04:07:53.242Z",
-  "durationMs": 3811609,
+  "endedAt": "2026-08-21T06:08:53.027Z",
+  "durationMs": 11071396,
   "status": "running",
   "tokens": {
-    "total": 58801,
-    "input": 120,
-    "output": 58681
+    "total": 82822,
+    "input": 182,
+    "output": 82640
   },
   "cost": {
-    "usd": 10.9768
+    "usd": 18.4814
   },
-  "toolCalls": 56,
+  "toolCalls": 85,
   "lines": {
-    "added": 230,
-    "removed": 12
+    "added": 122,
+    "removed": 9
   },
   "filesChanged": [
-    "internal/agentsessions/codex_test.go",
     "internal/agentsessions/family1_test.go",
-    "internal/agentsessions/fixture_corpus_test.go",
-    "internal/agentsessions/testdata/claude-config/projects/-Users-example-workspace-demo/fixture-session.jsonl",
-    "internal/agentsessions/testdata/claude/projects/-Users-example-workspace-demo/fixture-session.jsonl",
-    "internal/agentsessions/testdata/codex-home/sessions/2026/08/01/rollout-2026-08-01T10-00-00-fixture0-0000-0000-0000-000000000001.jsonl",
-    "internal/agentsessions/testdata/codex-late/sessions/y/m/d/rollout-00000000-0000-4000-8000-000000000002.jsonl",
-    "internal/agentsessions/testdata/codex/sessions/2026/08/01/rollout-00000000-0000-4000-8000-000000000001.jsonl",
-    "internal/agentsessions/testdata/drops/projects/-w/bridge.jsonl",
-    "internal/agentsessions/testdata/drops/projects/-w/good.jsonl",
-    "internal/agentsessions/testdata/drops/projects/-w/longcwd.jsonl",
-    "internal/agentsessions/testdata/drops/projects/-w/preamble.jsonl"
+    "internal/tui/session.go",
+    "internal/tui/session_picker_tabs_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "ad57dd3c73169f9659253df023232ee254d03076",
+    "headAfter": "59bdfde87caf8fc3c5cf8a74b5c87a5f4a6e4f20",
     "commitShas": [
-      "ad57dd3c73169f9659253df023232ee254d03076"
+      "59bdfde87caf8fc3c5cf8a74b5c87a5f4a6e4f20"
     ]
   },
-  "summary": "Exact differential: same store, Vasanth's verbatim failures before, passing with diagnosis after. Cleaning up and committing:",
+  "summary": "Restored and passing. Full gauntlet, then push:",
   "originUrl": "https://getorigin.io/sessions/local-13d54317-fe98-4a11-b153-5ce9e41a70c8"
 }
