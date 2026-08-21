@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -429,9 +428,7 @@ func PersistedProviderIdentity(path, identity string) (string, bool, error) {
 type PersistedIdentityMatch uint8
 
 const (
-	// PersistedIdentityNone means no row owns the identity, or a catalog id was
-	// given that more than one row claims (an ambiguous request this package
-	// refuses to guess at).
+	// PersistedIdentityNone means no row owns the identity.
 	PersistedIdentityNone PersistedIdentityMatch = iota
 	// PersistedIdentityName means a row's own name matched, exactly or as a
 	// case variant.
@@ -439,9 +436,10 @@ const (
 	// PersistedIdentityCatalog means the identity matched only the catalog id of
 	// exactly one row.
 	PersistedIdentityCatalog
+	// PersistedIdentityAmbiguous means multiple rows own the folded name or
+	// catalog id. No caller may select a row or credential from this result.
+	PersistedIdentityAmbiguous
 )
-
-var errAmbiguousPersistedProviderIdentity = errors.New("ambiguous persisted provider identity")
 
 // ResolvePersistedProviderIdentity finds the persisted user-config row that
 // owns identity and reports how it was addressed.
@@ -501,10 +499,13 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 		return *foldedName, PersistedIdentityName, nil
 	}
 	if foldedMatches > 1 {
-		return ProviderProfile{}, PersistedIdentityNone, fmt.Errorf("%w: ambiguous provider name %q matches multiple persisted rows that differ only by case; use the exact spelling from config.json", errAmbiguousPersistedProviderIdentity, identity)
+		return ProviderProfile{}, PersistedIdentityAmbiguous, fmt.Errorf("ambiguous provider name %q matches multiple persisted rows that differ only by case; use the exact spelling from config.json", identity)
 	}
 	if catalogMatches == 1 {
 		return *catalogRow, PersistedIdentityCatalog, nil
+	}
+	if catalogMatches > 1 {
+		return ProviderProfile{}, PersistedIdentityAmbiguous, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id", identity, catalogMatches)
 	}
 	return ProviderProfile{}, PersistedIdentityNone, nil
 }
@@ -562,25 +563,12 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 	add(canonicalName)
 	row, match, err := ResolvePersistedProviderIdentity(path, addressedName)
 	if err != nil {
-		if errors.Is(err, errAmbiguousPersistedProviderIdentity) {
+		if match == PersistedIdentityAmbiguous {
 			return nil, canonicalName, err
 		}
 		return candidates, canonicalName, err
 	}
 	if match == PersistedIdentityNone {
-		providers, err := persistedProviders(path)
-		if err != nil {
-			return candidates, canonicalName, err
-		}
-		catalogMatches := 0
-		for _, provider := range providers {
-			if sameProviderIdentity(provider.CatalogID, addressedName) {
-				catalogMatches++
-			}
-		}
-		if catalogMatches > 1 {
-			return nil, canonicalName, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id", addressedName, catalogMatches)
-		}
 		return candidates, canonicalName, nil
 	}
 	canonicalName = strings.TrimSpace(row.Name)

@@ -1135,12 +1135,15 @@ func TestRunAuthRefreshRejectsEmptyCredentialCandidates(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"providers":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var stdout, stderr bytes.Buffer
-	code := runWithDeps([]string{"auth", "refresh", "   "}, &stdout, &stderr, appDeps{
-		userConfigPath: func() (string, error) { return configPath, nil },
-	})
-	if code != exitCrash || !strings.Contains(stderr.String(), "no credential candidates") {
-		t.Fatalf("exit = %d stderr = %q, want empty-candidate error", code, stderr.String())
+	for _, extra := range [][]string{nil, {"--watch"}} {
+		args := append([]string{"auth", "refresh", "   "}, extra...)
+		var stdout, stderr bytes.Buffer
+		code := runWithDeps(args, &stdout, &stderr, appDeps{
+			userConfigPath: func() (string, error) { return configPath, nil },
+		})
+		if code != exitCrash || stdout.Len() != 0 || !strings.Contains(stderr.String(), "no credential candidates") {
+			t.Fatalf("args = %q exit = %d stdout = %q stderr = %q, want explicit empty-candidate app error", args, code, stdout.String(), stderr.String())
+		}
 	}
 }
 
