@@ -141,6 +141,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterInputTokens, int64(usage.InputTokens))
 			options.Trace.Counter(trace.CounterCachedInputTokens, int64(usage.CachedInputTokens))
+			options.Trace.Counter(trace.CounterCacheWriteTokens, int64(usage.CacheWriteTokens))
 			options.Trace.Counter(trace.CounterOutputTokens, int64(usage.OutputTokens))
 		}
 	}

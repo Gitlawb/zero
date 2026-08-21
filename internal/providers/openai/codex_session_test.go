@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -74,6 +75,9 @@ func TestCodexTurnSessionChainsOnlyAppendOnlyRequests(t *testing.T) {
 	provider.inner.streamIdleTimeout = 0
 	session := openCodexSession(t, provider)
 	defer session.Close()
+	recorder := trace.NewRecorder("session-1", "run-1", "test")
+	recorder.Start()
+	streamContext := trace.WithContext(t.Context(), recorder)
 
 	base := zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{
@@ -93,7 +97,7 @@ func TestCodexTurnSessionChainsOnlyAppendOnlyRequests(t *testing.T) {
 		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{{ID: "call-1", Name: "read_file", Arguments: "{}"}}},
 		zeroruntime.Message{Role: zeroruntime.MessageRoleTool, ToolCallID: "call-1", Content: "contents"},
 	)
-	secondEvents := collectCodexSessionEvents(t, session, second)
+	secondEvents := collectCodexSessionEventsContext(t, streamContext, session, second)
 	if got := joinedText(secondEvents); got != "done" {
 		t.Fatalf("second stream text = %q, want done", got)
 	}
@@ -104,7 +108,14 @@ func TestCodexTurnSessionChainsOnlyAppendOnlyRequests(t *testing.T) {
 		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "done"},
 		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "Continue."},
 	)
-	collectCodexSessionEvents(t, session, third)
+	collectCodexSessionEventsContext(t, streamContext, session, third)
+	finishedTrace := recorder.Finish()
+	if got := finishedTrace.Counter(trace.CounterResponseChainReused); got != 1 {
+		t.Fatalf("response-chain reuse count = %d, want 1", got)
+	}
+	if got := finishedTrace.Counter(trace.CounterResponseChainReset); got != 1 {
+		t.Fatalf("response-chain reset count = %d, want 1", got)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -233,7 +244,9 @@ func TestCodexTurnSessionFallsBackWhenSocketClosesBeforeOutput(t *testing.T) {
 	provider := newCodexSessionTestProvider(t, server)
 	session := openCodexSession(t, provider)
 	defer session.Close()
-	events := collectCodexSessionEvents(t, session, zeroruntime.CompletionRequest{
+	recorder := trace.NewRecorder("session-fallback", "run-fallback", "test")
+	recorder.Start()
+	events := collectCodexSessionEventsContext(t, trace.WithContext(t.Context(), recorder), session, zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "Hello"}},
 	})
 	if got := joinedText(events); got != "recovered" {
@@ -243,6 +256,9 @@ func TestCodexTurnSessionFallsBackWhenSocketClosesBeforeOutput(t *testing.T) {
 	defer mu.Unlock()
 	if httpRequests != 1 {
 		t.Fatalf("HTTP fallback requests = %d, want 1", httpRequests)
+	}
+	if got := recorder.Finish().Counter(trace.CounterResponsesHTTPFallback); got != 1 {
+		t.Fatalf("responses HTTP fallback counter = %d, want 1", got)
 	}
 }
 
@@ -418,7 +434,12 @@ func openCodexSession(t *testing.T, provider *CodexProvider) zeroruntime.TurnSes
 
 func collectCodexSessionEvents(t *testing.T, session zeroruntime.TurnSession, request zeroruntime.CompletionRequest) []zeroruntime.StreamEvent {
 	t.Helper()
-	stream, err := session.Stream(t.Context(), request)
+	return collectCodexSessionEventsContext(t, t.Context(), session, request)
+}
+
+func collectCodexSessionEventsContext(t *testing.T, ctx context.Context, session zeroruntime.TurnSession, request zeroruntime.CompletionRequest) []zeroruntime.StreamEvent {
+	t.Helper()
+	stream, err := session.Stream(ctx, request)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
