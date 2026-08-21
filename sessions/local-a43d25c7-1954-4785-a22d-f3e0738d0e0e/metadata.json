@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "sessionId": "local-a43d25c7-1954-4785-a22d-f3e0738d0e0e",
+  "model": "claude-opus-5",
+  "startedAt": "2026-08-21T15:21:30.049Z",
+  "endedAt": "2026-08-21T15:33:08.642Z",
+  "durationMs": 698578,
+  "status": "running",
+  "tokens": {
+    "total": 26997,
+    "input": 54,
+    "output": 26943
+  },
+  "cost": {
+    "usd": 8.5843
+  },
+  "toolCalls": 27,
+  "lines": {
+    "added": 246,
+    "removed": 61
+  },
+  "filesChanged": [
+    "internal/agentsessions/codex.go",
+    "internal/agentsessions/family1.go",
+    "internal/agentsessions/family1_test.go",
+    "internal/agentsessions/fixture_corpus_test.go",
+    "internal/agentsessions/jsonl.go",
+    "internal/agentsessions/jsonl_test.go",
+    "internal/agentsessions/redaction_order_test.go",
+    "internal/agentsessions/translate.go",
+    "internal/cli/sessions_import.go"
+  ],
+  "git": {
+    "branch": "HEAD",
+    "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
+    "headAfter": "bfdfdb4a6b75fc36ceeff45102a3bebcbbb4acf6",
+    "commitShas": [
+      "bfdfdb4a6b75fc36ceeff45102a3bebcbbb4acf6"
+    ]
+  },
+  "summary": "All four caught now. Full gauntlet and push:",
+  "originUrl": "https://getorigin.io/sessions/local-a43d25c7-1954-4785-a22d-f3e0738d0e0e"
+}
