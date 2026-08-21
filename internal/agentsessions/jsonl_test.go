@@ -1,6 +1,7 @@
 package agentsessions
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestScanHeadReadsFarLessThanTheWholeFile(t *testing.T) {
 		t.Fatalf("fixture is only %d bytes; it must dwarf the head budget to prove anything", fileSize)
 	}
 
-	read, err := scanHead(path, defaultHeadLimit, func([]byte) bool { return true })
+	read, err := scanHead("", path, defaultHeadLimit, func([]byte) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestScanHeadReadsFarLessThanTheWholeFile(t *testing.T) {
 	}
 
 	// And the point of the budget: the metadata is still found.
-	session, ok := indexFamily1Transcript("claude-code", path)
+	session, ok := indexFamily1Transcript("claude-code", "", path)
 	if !ok || session.Cwd != "/Users/someone/proj" {
 		t.Fatalf("indexing a large transcript failed: ok=%v session=%+v", ok, session)
 	}
@@ -65,7 +66,7 @@ func TestAnOversizedFirstRecordDoesNotStarveTheScan(t *testing.T) {
 		`{"type":"user","cwd":"/Users/someone/proj","sessionId":"fat-head","message":{"role":"user","content":"still here"}}`,
 	}, "\n")+"\n")
 
-	session, ok := indexFamily1Transcript("claude-code", path)
+	session, ok := indexFamily1Transcript("claude-code", "", path)
 	if !ok {
 		t.Fatal("a session whose first record is huge was dropped from discovery")
 	}
@@ -84,7 +85,7 @@ func TestALineTooLongToKeepIsSkippedNotFatal(t *testing.T) {
 		`{"type":"user","cwd":"/Users/someone/proj","sessionId":"long-line","message":{"role":"user","content":"after the wall"}}`,
 	}, "\n")+"\n")
 
-	session, ok := indexFamily1Transcript("claude-code", path)
+	session, ok := indexFamily1Transcript("claude-code", "", path)
 	if !ok || session.Cwd != "/Users/someone/proj" {
 		t.Fatalf("a record past an over-long line was not read: ok=%v session=%+v", ok, session)
 	}
@@ -99,7 +100,7 @@ func TestScanHeadStopsWhenTheVisitorIsDone(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	read, err := scanHead(path, defaultHeadLimit, func([]byte) bool {
+	read, err := scanHead("", path, defaultHeadLimit, func([]byte) bool {
 		seen++
 		return seen < 2
 	})
@@ -123,7 +124,7 @@ func TestScanHeadHonoursItsLineBudget(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	if _, err := scanHead(path, defaultHeadLimit, func([]byte) bool { seen++; return true }); err != nil {
+	if _, err := scanHead("", path, defaultHeadLimit, func([]byte) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != defaultHeadLimit.MaxLines {
@@ -134,7 +135,7 @@ func TestScanHeadHonoursItsLineBudget(t *testing.T) {
 func TestScanHeadOnAMissingFileIsAnError(t *testing.T) {
 	// Unlike globbing, an unreadable file that discovery has already decided
 	// exists is worth reporting to the caller, which drops that one entry.
-	if _, err := scanHead(filepath.Join(t.TempDir(), "absent.jsonl"), defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+	if _, err := scanHead("", filepath.Join(t.TempDir(), "absent.jsonl"), defaultHeadLimit, func([]byte) bool { return true }); err == nil {
 		t.Error("scanHead on a missing file returned no error")
 	}
 }
@@ -169,5 +170,61 @@ func TestStreamLinesToleratesAMissingTrailingNewline(t *testing.T) {
 	}
 	if seen != 2 {
 		t.Errorf("visited %d lines, want 2 — the unterminated final record must not be lost", seen)
+	}
+}
+
+// THE LINE TERMINATOR IS NOT CONTENT. A record whose content exactly fills the
+// per-line cap has been read in full, and reporting it truncated made the import
+// path emit "could not be read" for records it had in fact read — a false alarm
+// in the one signal that exists to be trusted. CRLF made it one byte worse,
+// since both bytes were counted.
+func TestARecordThatExactlyFillsTheCapIsNotTruncated(t *testing.T) {
+	const keep = 64
+	for _, eol := range []string{"\n", "\r\n"} {
+		for _, size := range []int{keep - 1, keep, keep + 1} {
+			path := filepath.Join(t.TempDir(), "x.jsonl")
+			if err := os.WriteFile(path, append([]byte(strings.Repeat("a", size)), []byte(eol)...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var truncated bool
+			if err := streamLines(path, keep, func(_ []byte, wasTruncated bool) bool {
+				truncated = truncated || wasTruncated
+				return true
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if want := size > keep; truncated != want {
+				t.Errorf("content=%d cap=%d eol=%q reported truncated=%v, want %v", size, keep, eol, truncated, want)
+			}
+		}
+	}
+}
+
+// EOF IS THE ONLY CLEAN STOP. Any other read error used to end the scan and
+// return success, so a session indexed off however many bytes arrived before an
+// I/O failure was indistinguishable from one indexed off a whole file.
+func TestScanHeadReportsAReadFailure(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := scanHead("", filepath.Join(dir, "gone.jsonl"), defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+		t.Error("scanning a missing transcript reported success")
+	}
+	// A directory opens but cannot be read as a file: a read error that is not EOF.
+	if _, err := scanHead("", dir, defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+		t.Error("scanning a directory reported success; a non-EOF read error was swallowed")
+	}
+}
+
+// CONTAINMENT HOLDS AT OPEN TIME, not merely at glob time. globTranscripts
+// refuses a symlink wearing a transcript extension, but that verdict describes
+// the tree when it was taken — anything can replace the entry before the open,
+// and os.Open would follow it out of the store.
+func TestScanHeadRefusesAPathOutsideTheRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"type":"user","cwd":"/w"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanHead(root, outside, defaultHeadLimit, func([]byte) bool { return true }); err == nil {
+		t.Errorf("scanHead read %q from outside the store root %q", outside, root)
 	}
 }
