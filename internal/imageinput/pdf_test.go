@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const minimalPDFTextChunkSize = 80
@@ -156,7 +157,7 @@ func TestExtractTextWithPoppler(t *testing.T) {
 		popplerLookup, popplerCommandWithContext = originalLookup, originalCommand
 	})
 
-	result := extractTextWithPoppler(buildMinimalPDF("ignored by helper"))
+	result := extractTextWithPoppler(t.Context(), buildMinimalPDF("ignored by helper"))
 	if result.status != popplerTextFailed {
 		t.Fatalf("status = %d, want execution failure", result.status)
 	}
@@ -336,7 +337,7 @@ func TestLoadDocumentDoesNotMisreportInstalledPopplerFailure(t *testing.T) {
 		t.Fatalf("write pdf: %v", err)
 	}
 	original := popplerTextExtractor
-	popplerTextExtractor = func([]byte) popplerTextResult { return popplerTextResult{status: popplerTextFailed} }
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult { return popplerTextResult{status: popplerTextFailed} }
 	t.Cleanup(func() { popplerTextExtractor = original })
 
 	_, err := LoadDocument("bad.pdf", root, DocumentOptions{})
@@ -354,7 +355,9 @@ func TestLoadDocumentDoesNotMisreportTextlessPDFAsMissingPoppler(t *testing.T) {
 		t.Fatalf("write scan: %v", err)
 	}
 	original := popplerTextExtractor
-	popplerTextExtractor = func([]byte) popplerTextResult { return popplerTextResult{status: popplerTextExtracted} }
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{status: popplerTextExtracted}
+	}
 	t.Cleanup(func() { popplerTextExtractor = original })
 
 	_, err := LoadDocument("scan.pdf", root, DocumentOptions{})
@@ -386,10 +389,10 @@ func TestLoadDocumentVisionUsesText(t *testing.T) {
 func stubPDFTools(t *testing.T, text string, overflow bool, pages int) {
 	t.Helper()
 	originalTextExtractor, originalPageCounter := popplerTextExtractor, popplerPageCounter
-	popplerTextExtractor = func([]byte) popplerTextResult {
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
 		return popplerTextResult{text: text, overflow: overflow, status: popplerTextExtracted}
 	}
-	popplerPageCounter = func([]byte) int { return pages }
+	popplerPageCounter = func(context.Context, []byte) int { return pages }
 	t.Cleanup(func() {
 		popplerTextExtractor, popplerPageCounter = originalTextExtractor, originalPageCounter
 	})
@@ -455,19 +458,45 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	}
 }
 
-func TestResolvePageCountUsesPdfinfoWhenAvailable(t *testing.T) {
-	original := popplerPageCounter
-	popplerPageCounter = func([]byte) int { return 7 }
-	t.Cleanup(func() { popplerPageCounter = original })
+func TestLoadDocumentUsesOnePopplerDeadline(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "slow.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerOperationTimeout
+	popplerOperationTimeout = 50 * time.Millisecond
+	textStarted, pagesStarted := make(chan struct{}), make(chan struct{})
+	popplerTextExtractor = func(ctx context.Context, _ []byte) popplerTextResult {
+		close(textStarted)
+		<-ctx.Done()
+		return popplerTextResult{status: popplerTextFailed}
+	}
+	popplerPageCounter = func(ctx context.Context, _ []byte) int {
+		close(pagesStarted)
+		<-ctx.Done()
+		return 0
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerOperationTimeout = originalText, originalPages, originalTimeout
+	})
 
-	if got := resolvePageCount(nil, true, 0); got != 7 {
-		t.Fatalf("pdfinfo count = %d, want 7", got)
+	started := time.Now()
+	_, err := LoadDocument("slow.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "could not extract PDF text") {
+		t.Fatalf("LoadDocument error = %v, want timed-out extraction failure", err)
 	}
-	if got := resolvePageCount(nil, false, 0); got != 0 {
-		t.Fatalf("external tools disabled: Pages = %d, want 0", got)
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("LoadDocument took %s; independent Poppler operations must share one deadline", elapsed)
 	}
-	if got := resolvePageCount(nil, true, 3); got != 3 {
-		t.Fatalf("already-known count: Pages = %d, want 3", got)
+	select {
+	case <-textStarted:
+	default:
+		t.Fatal("text extraction did not start")
+	}
+	select {
+	case <-pagesStarted:
+	default:
+		t.Fatal("page counting did not start")
 	}
 }
 
