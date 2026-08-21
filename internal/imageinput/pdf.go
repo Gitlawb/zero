@@ -162,20 +162,26 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	// decompression and text aggregation.
 	text, pages := "", 0
 	textOverflow := false
+	textStatus := popplerTextUnavailable
 	if useExternal {
-		if t, overflow, ok := popplerTextExtractor(data); ok {
-			text, textOverflow = t, overflow
+		result := popplerTextExtractor(data)
+		textStatus = result.status
+		if result.status == popplerTextExtracted {
+			text, textOverflow = result.text, result.overflow
 		}
 	}
-	pages = resolvePageCount(data, useExternal, pages)
 
 	text, truncated := capDocumentTextWithOverflow(text, textOverflow)
 
 	// Scanned-PDF guard: no text layer AND no rendered pages means we have nothing
 	// the model can use. Say so explicitly instead of returning empty success.
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
+		if textStatus == popplerTextFailed {
+			return Document{}, fmt.Errorf("%s could not extract PDF text with pdftotext", path)
+		}
 		return Document{}, fmt.Errorf("%s has no extractable text; install Poppler's pdftotext for bounded PDF text extraction (and pdftoppm for image-only PDFs)", path)
 	}
+	pages = resolvePageCount(data, useExternal, pages)
 
 	return Document{Text: text, Images: images, Pages: pages, Truncated: truncated}, nil
 }
@@ -273,9 +279,25 @@ func resolvePageCount(data []byte, useExternal bool, already int) int {
 	return 0
 }
 
+type popplerTextStatus uint8
+
+const (
+	popplerTextUnavailable popplerTextStatus = iota
+	popplerTextFailed
+	popplerTextExtracted
+)
+
+type popplerTextResult struct {
+	text     string
+	overflow bool
+	status   popplerTextStatus
+}
+
 var (
-	popplerTextExtractor = extractTextWithPoppler
-	popplerPageCounter   = pdfPageCountWithPoppler
+	popplerTextExtractor      = extractTextWithPoppler
+	popplerPageCounter        = pdfPageCountWithPoppler
+	popplerLookup             = popplerAvailable
+	popplerCommandWithContext = exec.CommandContext
 )
 
 func (o DocumentOptions) maxPages() int {
@@ -293,27 +315,27 @@ func popplerAvailable(name string) bool {
 	return err == nil
 }
 
-// extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout) when
-// pdftotext is on PATH. The bool is false when the tool is absent or failed;
-// callers then return a clear error unless rasterized pages are available.
-func extractTextWithPoppler(data []byte) (text string, overflow bool, ok bool) {
-	if !popplerAvailable("pdftotext") {
-		return "", false, false
+// extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout). It
+// keeps executable discovery distinct from execution failure so callers can
+// provide accurate, non-sensitive remediation without exposing tool stderr.
+func extractTextWithPoppler(data []byte) popplerTextResult {
+	if !popplerLookup("pdftotext") {
+		return popplerTextResult{status: popplerTextUnavailable}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
 	defer cancel()
 
 	// "-layout" keeps the visual column layout; the trailing "- -" reads the PDF
 	// from stdin and writes UTF-8 text to stdout.
-	cmd := exec.CommandContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
+	cmd := popplerCommandWithContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
 	cmd.Stdin = bytes.NewReader(data)
 	stdout := newBoundedBuffer(MaxDocumentTextBytes)
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		return "", false, false
+		return popplerTextResult{status: popplerTextFailed}
 	}
-	return strings.TrimSpace(stdout.String()), stdout.overflow, true
+	return popplerTextResult{text: strings.TrimSpace(stdout.String()), overflow: stdout.overflow, status: popplerTextExtracted}
 }
 
 func pdfPageCountWithPoppler(data []byte) int {

@@ -211,7 +211,7 @@ Common slash commands:
 |---|---|
 | `/model`, `/provider` | switch the active model/provider |
 | `/spec`, `/plan` | draft and review a plan before building |
-| `/image` | attach an image for vision-capable models |
+| `/image` | attach an image for vision-capable models, or PDF text with Poppler's `pdftotext` installed |
 | `/resume`, `/rewind` | continue or roll back local sessions |
 | `/new` | start a fresh session in place (previous session stays on disk) |
 | `/btw [question]` | ask in an isolated fork without adding the side conversation to the main session |
@@ -220,6 +220,10 @@ Common slash commands:
 | `/permissions`, `/tools` | inspect available tools and policy |
 | `/add-dir` | allow an extra write directory for this session |
 | `/theme`, `/doctor`, `/config` | adjust appearance and inspect setup |
+
+PDF text attachments use Poppler's `pdftotext` executable. Install Poppler with
+your platform's package manager and ensure `pdftotext` is on `PATH`; optional
+PDF page images for vision models also require Poppler's `pdftoppm`.
 
 ### Headless `exec`
 

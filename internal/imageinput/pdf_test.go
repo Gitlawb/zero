@@ -2,8 +2,10 @@ package imageinput
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -145,20 +147,26 @@ func TestLoadDocumentTextExtraction(t *testing.T) {
 }
 
 func TestExtractTextWithPoppler(t *testing.T) {
-	if !popplerAvailable("pdftotext") {
-		t.Skip("pdftotext is not installed")
+	originalLookup, originalCommand := popplerLookup, popplerCommandWithContext
+	popplerLookup = func(name string) bool { return name == "pdftotext" }
+	popplerCommandWithContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, os.Args[0], "-test.run=TestPDFCommandHelper", "--")
 	}
-	const want = "Poppler extraction integration"
-	got, overflow, ok := extractTextWithPoppler(buildMinimalPDF(want))
-	if !ok {
-		t.Fatal("extractTextWithPoppler failed with pdftotext installed")
+	t.Cleanup(func() {
+		popplerLookup, popplerCommandWithContext = originalLookup, originalCommand
+	})
+
+	result := extractTextWithPoppler(buildMinimalPDF("ignored by helper"))
+	if result.status != popplerTextFailed {
+		t.Fatalf("status = %d, want execution failure", result.status)
 	}
-	if overflow {
-		t.Fatal("small PDF unexpectedly overflowed the text budget")
+}
+
+func TestPDFCommandHelper(t *testing.T) {
+	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "--" {
+		return
 	}
-	if !strings.Contains(got, want) {
-		t.Fatalf("extracted text %q should contain %q", got, want)
-	}
+	os.Exit(1)
 }
 
 // A .pdf-named file that is not actually a PDF must be rejected with a clear
@@ -321,6 +329,25 @@ func TestLoadDocumentRequiresBoundedExtractor(t *testing.T) {
 	}
 }
 
+func TestLoadDocumentDoesNotMisreportInstalledPopplerFailure(t *testing.T) {
+	root := t.TempDir()
+	bad := []byte("%PDF-1.4\nthis header is valid but the body and xref are garbage\nstartxref\n9\n%%EOF\n")
+	if err := os.WriteFile(filepath.Join(root, "bad.pdf"), bad, 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	original := popplerTextExtractor
+	popplerTextExtractor = func([]byte) popplerTextResult { return popplerTextResult{status: popplerTextFailed} }
+	t.Cleanup(func() { popplerTextExtractor = original })
+
+	_, err := LoadDocument("bad.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "could not extract PDF text") {
+		t.Fatalf("LoadDocument error = %v, want extraction failure", err)
+	}
+	if strings.Contains(err.Error(), "install Poppler") {
+		t.Fatalf("LoadDocument error = %q must not claim Poppler is absent", err)
+	}
+}
+
 func TestLoadDocumentVisionUsesText(t *testing.T) {
 	root := t.TempDir()
 	want := "Vision degrade to text"
@@ -341,7 +368,9 @@ func TestLoadDocumentVisionUsesText(t *testing.T) {
 func stubPDFTools(t *testing.T, text string, overflow bool, pages int) {
 	t.Helper()
 	originalTextExtractor, originalPageCounter := popplerTextExtractor, popplerPageCounter
-	popplerTextExtractor = func([]byte) (string, bool, bool) { return text, overflow, true }
+	popplerTextExtractor = func([]byte) popplerTextResult {
+		return popplerTextResult{text: text, overflow: overflow, status: popplerTextExtracted}
+	}
 	popplerPageCounter = func([]byte) int { return pages }
 	t.Cleanup(func() {
 		popplerTextExtractor, popplerPageCounter = originalTextExtractor, originalPageCounter

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -318,10 +319,22 @@ func writeTestPDF(t *testing.T, dir, name, text string) string {
 	return path
 }
 
-func requirePopplerText(t *testing.T) {
+func requirePopplerText(t *testing.T, path string) {
 	t.Helper()
-	if _, err := exec.LookPath("pdftotext"); err != nil {
+	executable, err := exec.LookPath("pdftotext")
+	if err != nil {
 		t.Skip("pdftotext is not installed")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read PDF fixture: %v", err)
+	}
+	cmd := exec.Command(executable, "-layout", "-enc", "UTF-8", "-", "-")
+	cmd.Stdin = bytes.NewReader(data)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		t.Skip("pdftotext cannot process this fixture on this host")
 	}
 }
 
@@ -329,9 +342,9 @@ func requirePopplerText(t *testing.T) {
 // pending document even on a non-vision model -- unlike a raw image, which is
 // refused. No page images are staged without a rasterizer.
 func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec.pdf", "Design spec body text")
+	path := writeTestPDF(t, root, "spec.pdf", "Design spec body text")
+	requirePopplerText(t, path)
 
 	m := newModel(context.Background(), Options{Cwd: root, ModelName: "totally-unknown-custom"})
 	m.input.SetValue("/image spec.pdf")
@@ -358,9 +371,9 @@ func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 // path by a content sniff (not the extension), so its text layer attaches even on
 // a non-vision model instead of being refused as a non-image.
 func TestImageCommandAttachesExtensionlessPDFByContent(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec", "Extensionless PDF body text")
+	path := writeTestPDF(t, root, "spec", "Extensionless PDF body text")
+	requirePopplerText(t, path)
 
 	m := newModel(context.Background(), Options{Cwd: root, ModelName: "totally-unknown-custom"})
 	m.input.SetValue("/image spec")
@@ -434,9 +447,9 @@ func TestImageCommandExplainsWhenBoundedPDFExtractorIsUnavailable(t *testing.T) 
 
 // /image clear removes staged documents as well as images.
 func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec.pdf", "some text")
+	path := writeTestPDF(t, root, "spec.pdf", "some text")
+	requirePopplerText(t, path)
 
 	m := newModel(context.Background(), Options{Cwd: root, ModelName: "gpt-4.1"})
 	m.input.SetValue("/image spec.pdf")
@@ -470,9 +483,9 @@ func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 // On submit, the staged document text is prepended to the prompt the agent
 // receives (so the model can read it), and the pending documents are cleared.
 func TestSubmitPrependsDocumentTextThenClears(t *testing.T) {
-	requirePopplerText(t)
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
+	path := writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
+	requirePopplerText(t, path)
 
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "ok"},
