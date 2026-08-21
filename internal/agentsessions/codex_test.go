@@ -178,12 +178,25 @@ func TestTheRealCodexCorpusStillParses(t *testing.T) {
 	if len(found) == 0 {
 		t.Fatal("no Codex sessions indexed from a non-empty store")
 	}
-	// Both of these were zero before the fixes above; a regression takes them
-	// back to zero rather than to some slightly-lower number.
+	// REPORTED, NOT ASSERTED. What these counts measure is the shape of the store
+	// on the machine running them, which is not a property of this package: the
+	// same code reported "44 of 44 rollouts, 43 with a model" on one machine and
+	// "2 of 2, 0 with a model" on a reviewer's. Failing on the second is a red
+	// build for the contributor and a green one for CI, which is backwards — CI
+	// has no store and skips, so the assertion never ran where a regression would
+	// actually land.
+	//
+	// The shapes behind both numbers are pinned by construction in
+	// fixture_corpus_test.go, which runs everywhere and cannot skip. What this
+	// test is still good for is noticing a shape the fixtures do not cover, so it
+	// prints its counts and leaves the judgement to the reader.
 	if titled == 0 {
-		t.Error("no session got a real title — the context-injection filter has stopped working")
+		t.Logf("no session in the live store got a real title; if that is unexpected here, "+
+			"the context-injection filter may have drifted (%d rollouts)", total)
 	}
 	if modelled == 0 {
-		t.Error("no session got a model — turn_context is being discarded again")
+		t.Logf("no session in the live store carries a model: every rollout here has its "+
+			"turn_context outside the head budget. TestARolloutWithALateTurnContextIndexesWithoutAModel "+
+			"pins that shape deterministically (%d rollouts)", total)
 	}
 }
