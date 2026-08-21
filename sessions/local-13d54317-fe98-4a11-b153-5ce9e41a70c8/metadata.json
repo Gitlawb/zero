@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:59:01.475Z",
-  "durationMs": 3279845,
+  "endedAt": "2026-08-21T03:59:07.112Z",
+  "durationMs": 3285480,
   "status": "running",
   "tokens": {
     "total": 42154,
@@ -16,19 +16,23 @@
   },
   "toolCalls": 38,
   "lines": {
-    "added": 325,
-    "removed": 8
+    "added": 454,
+    "removed": 6
   },
   "filesChanged": [
-    "internal/cli/sessions.go",
-    "internal/cli/sessions_import.go"
+    "internal/tui/model.go",
+    "internal/tui/model_test.go",
+    "internal/tui/picker.go",
+    "internal/tui/session.go",
+    "internal/tui/session_picker_tabs_test.go",
+    "internal/tui/view.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "b06ccc1d230714b85353cadd31a3c8a88568a1ce",
+    "headAfter": "09a1a05509ea7ede1755e5e05feb073925f9cc48",
     "commitShas": [
-      "b06ccc1d230714b85353cadd31a3c8a88568a1ce"
+      "09a1a05509ea7ede1755e5e05feb073925f9cc48"
     ]
   },
   "summary": "The `Read` signature returns only events, so the import can't re-resolve metadata without an interface change — that's a scope call I'll surface rather than take. Starting with what Vasanth asked for. Committing the redaction fix, then rebasing:",
