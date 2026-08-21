@@ -282,7 +282,7 @@ func TestWindowsSandboxSetupMarkerRejectsPrincipalOptInMismatch(t *testing.T) {
 			name:       "setup provisioned a principal, command opts out",
 			setupOptIn: true,
 			commandEnv: map[string]string{windowsSandboxIdentityEnv: "0"},
-			wantError:  "setup provisioned a sandbox principal",
+			wantError:  "setup provisioned sandbox principals",
 		},
 	}
 	for _, testCase := range testCases {

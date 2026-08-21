@@ -412,11 +412,19 @@ func windowsPrincipalPlanFingerprint(config WindowsSandboxSetupConfig) (string, 
 		return "", nil
 	}
 	filesystem := config.commandConfig().PermissionProfile.FileSystem
+	// EVERY FIELD apply and teardown pass, or the fingerprint describes a
+	// different plan than the one that gets applied. This omitted DenyWrite while
+	// both buildWindowsPrincipalACLPlan call sites in windows_identity_runtime_windows.go
+	// passed it, so a change to the policy's deny-write paths moved the applied
+	// plan and left this hash where it was. The capability ACLPlanHash happens to
+	// cover the same paths today, which is what kept it from being a live hole
+	// and also what would have kept it invisible.
 	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
 		PrincipalSID: windowsPrincipalFingerprintSID,
 		WriteRoots:   filesystem.WriteRoots,
 		ReadRoots:    filesystem.ReadRoots,
 		DenyRead:     filesystem.DenyRead,
+		DenyWrite:    filesystem.DenyWrite,
 	})
 	if err != nil {
 		return "", fmt.Errorf("fingerprint windows principal ACL plan: %w", err)
@@ -504,8 +512,11 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 				"re-run `zero sandbox setup` from an elevated (Administrator) terminal with %s=1, or unset it to use the restricted-token sandbox",
 				windowsSandboxIdentityEnv, windowsSandboxIdentityEnv)
 		}
-		return fmt.Errorf("windows sandbox setup is out of date: setup provisioned a sandbox principal, but %s is not set for this command — "+
-			"set %s=1, or re-run `zero sandbox setup` from an elevated (Administrator) terminal without it to retire the principal",
+		// "principals", plural: a workspace gets an offline and an online account,
+		// and the opt-out path retires the legacy one alongside them. The singular
+		// described the pre-split world and understated what the re-run does.
+		return fmt.Errorf("windows sandbox setup is out of date: setup provisioned sandbox principals, but %s is not set for this command — "+
+			"set %s=1, or re-run `zero sandbox setup` from an elevated (Administrator) terminal without it to retire them",
 			windowsSandboxIdentityEnv, windowsSandboxIdentityEnv)
 	}
 	if actual.ACLPlanHash != expected.ACLPlanHash || actual.ACLPlanEntries != expected.ACLPlanEntries {

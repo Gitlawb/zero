@@ -365,7 +365,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 	// mode differs from the one setup happened to see must still find a principal
 	// waiting; provisioning lazily would mean an unelevated command discovering it
 	// needs an account it cannot create.
-	roles := []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline}
+	roles := windowsSandboxLiveRoles
 
 	var undo []func() error
 	rollback := func() error {
@@ -939,7 +939,7 @@ func windowsACLPlanPaths(plan WindowsACLPlan) []string {
 // machines that never had one.
 func removeWindowsSandboxPrincipalsForSetup(config WindowsSandboxCommandConfig) error {
 	var errs []error
-	for _, role := range []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline, windowsSandboxRoleLegacy} {
+	for _, role := range windowsSandboxRetirableRoles {
 		// Through the seam, like retireUnrecordedWindowsSandboxPrincipal, so the
 		// set of roles this retires is assertable without provisioning real
 		// accounts on the machine running the tests.
