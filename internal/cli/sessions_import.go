@@ -140,16 +140,22 @@ func formatDiscoveredSessions(found []agentsessions.ForeignSession, cwd string) 
 		if !session.UpdatedAt.IsZero() {
 			age = describeAge(session.UpdatedAt, time.Now())
 		}
-		header := session.Agent + ":" + session.ID
+		// EVERY FIELD HERE IS ANOTHER PRODUCT'S BYTES. The id, title, branch and
+		// model all come out of a file this program did not write, and they were
+		// printed straight to the terminal: an escape repaints the listing, and a
+		// title is frequently the user's first prompt, which is exactly where a
+		// pasted credential ends up. The --json path is structurally escaped and
+		// redacted already; this is the human-readable one.
+		header := session.Agent + ":" + agentsessions.DisplayField(session.ID)
 		lines = append(lines, header)
-		detail := "    " + session.Title
+		detail := "    " + agentsessions.DisplayField(session.Title)
 		lines = append(lines, detail)
 		meta := []string{}
 		if session.GitBranch != "" {
-			meta = append(meta, "branch "+session.GitBranch)
+			meta = append(meta, "branch "+agentsessions.DisplayField(session.GitBranch))
 		}
 		if session.ModelID != "" {
-			meta = append(meta, session.ModelID)
+			meta = append(meta, agentsessions.DisplayField(session.ModelID))
 		}
 		if age != "" {
 			meta = append(meta, age)

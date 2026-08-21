@@ -148,7 +148,7 @@ func TestStreamLinesReadsEverything(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	if err := streamLines(path, 64<<10, func([]byte) bool { seen++; return true }); err != nil {
+	if err := streamLines(path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != 300 {
@@ -164,7 +164,7 @@ func TestStreamLinesToleratesAMissingTrailingNewline(t *testing.T) {
 	writeFile(t, path, `{"type":"a"}`+"\n"+`{"type":"b"}`)
 
 	seen := 0
-	if err := streamLines(path, 64<<10, func([]byte) bool { seen++; return true }); err != nil {
+	if err := streamLines(path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != 2 {

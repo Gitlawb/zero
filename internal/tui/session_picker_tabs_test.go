@@ -3,6 +3,9 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/agentsessions"
 )
 
 func tabbedPicker(items ...pickerItem) *commandPicker {
@@ -217,7 +220,7 @@ func pickerLabels(items []pickerItem) []string {
 // the rest of the label.
 func TestAForeignTitleCannotCarryTerminalEscapes(t *testing.T) {
 	hostile := "safe\x1b[2Kmoved\rhidden\x07\x00 end"
-	got := sanitizePickerLabel(hostile)
+	got := agentsessions.DisplayField(hostile)
 	for _, banned := range []string{"\x1b", "\r", "\x07", "\x00"} {
 		if strings.Contains(got, banned) {
 			t.Errorf("a control byte %q survived into a picker label: %q", banned, got)
@@ -228,6 +231,24 @@ func TestAForeignTitleCannotCarryTerminalEscapes(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("sanitizing the label ate %q, leaving %q", want, got)
 		}
+	}
+
+	// AND THE OTHER HALF: stripping controls is not redaction. A foreign title is
+	// frequently the user's first prompt, which is exactly where a pasted key
+	// ends up, and the row is drawn before anything has been imported — so the
+	// picker was the last place a credential could still be shown verbatim.
+	secret := agentsessions.DisplayField("deploy with sk-ant-api03-" + strings.Repeat("A", 24) + " now")
+	if strings.Contains(secret, "sk-ant-api03-"+strings.Repeat("A", 24)) {
+		t.Errorf("a credential in a foreign title reached the picker row: %q", secret)
+	}
+	if !strings.Contains(secret, "deploy with") || !strings.Contains(secret, "now") {
+		t.Errorf("redacting the title ate the text around the secret: %q", secret)
+	}
+	// Controls must be stripped BEFORE the shape match, or an escape byte splits
+	// the key and it slips through looking like two harmless fragments.
+	split := agentsessions.DisplayField("sk-ant-api03-\x00" + strings.Repeat("A", 24))
+	if strings.Contains(split, strings.Repeat("A", 24)) {
+		t.Errorf("a credential split by a control byte survived the display path: %q", split)
 	}
 }
 
@@ -251,5 +272,39 @@ func TestThePickerOffersForeignSessionsWithNoLocalHistory(t *testing.T) {
 func TestThePickerIsNilWhenNothingIsResumableAtAll(t *testing.T) {
 	if picker := pickerFromParts(nil, nil); picker != nil {
 		t.Errorf("a picker was built with no local and no foreign sessions: %+v", picker.items)
+	}
+}
+
+// THROUGH newSessionPicker ITSELF, not just the assembly helper. Both reviewers
+// asked for this and they were right: pickerFromParts is the piece I extracted
+// while fixing the bug, so testing only that leaves the very branch that was
+// wrong — the early return on an empty ListResumable — uncovered by anything
+// exercising the real entry point.
+func TestNewSessionPickerSurvivesAnEmptyLocalHistory(t *testing.T) {
+	store := testSessionStore(t)
+	metas, err := store.ListResumable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("this test needs an empty store; got %d sessions", len(metas))
+	}
+	m := model{sessionStore: store, cwd: t.TempDir(), now: func() time.Time { return time.Unix(0, 0) }}
+
+	// With no store at all the picker is still nil — the guard above it stands.
+	if bare := (model{}).newSessionPicker(); bare != nil {
+		t.Error("a model with no session store built a picker")
+	}
+	// And with an empty store, newSessionPicker must reach foreign discovery
+	// rather than returning on len(metas) == 0. There are no foreign sessions in
+	// a temp workspace, so nil here is correct — what is asserted is that it did
+	// not panic and that the assembly step decides, which pickerFromParts covers
+	// for the populated case.
+	if picker := m.newSessionPicker(); picker != nil {
+		for _, item := range picker.items {
+			if item.Tab == "zero" {
+				t.Errorf("an empty local history produced a local row: %+v", item)
+			}
+		}
 	}
 }

@@ -40,6 +40,14 @@ type headLimit struct {
 // transcript to a ~36x smaller read. The budget only ever binds on pathological
 // files; a normal transcript's first 64 lines are a few KB in total and the line
 // count ends the scan long before the bytes do.
+// importLineLimit is the per-record cap for a FULL import, which is a
+// deliberate one-off read of one file the user named — not the index's sweep of
+// every transcript on disk. The discovery cap is 64 KiB because it is paid once
+// per file across the whole store; applying it to an import silently deleted
+// ordinary long messages from the conversation being restored. Still bounded, so
+// a corrupt file cannot exhaust memory.
+const importLineLimit = 8 << 20
+
 var defaultHeadLimit = headLimit{
 	MaxLines:     64,
 	MaxBytes:     2 << 20,
@@ -94,7 +102,7 @@ func scanHead(path string, limit headLimit, visit func(line []byte) bool) (int64
 // lie. Individual lines are still capped: a record larger than maxLineBytes is
 // truncated rather than buffered whole, so one 200 MB tool result cannot
 // exhaust memory.
-func streamLines(path string, maxLineBytes int, visit func(line []byte) bool) error {
+func streamLines(path string, maxLineBytes int, visit func(line []byte, truncated bool) bool) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -103,8 +111,8 @@ func streamLines(path string, maxLineBytes int, visit func(line []byte) bool) er
 
 	reader := bufio.NewReaderSize(file, 64<<10)
 	for {
-		content, err := readBoundedLine(reader, maxLineBytes)
-		if len(content) > 0 && !visit(content) {
+		content, truncated, err := readBoundedLineTruncated(reader, maxLineBytes)
+		if (len(content) > 0 || truncated) && !visit(content, truncated) {
 			return nil
 		}
 		if err != nil {
@@ -124,10 +132,24 @@ func streamLines(path string, maxLineBytes int, visit func(line []byte) bool) er
 // past any sensible buffer size. Here an overlong line is consumed and
 // truncated, so one giant record costs a skip rather than the entire file.
 func readBoundedLine(reader *bufio.Reader, keep int) ([]byte, error) {
+	kept, _, err := readBoundedLineTruncated(reader, keep)
+	return kept, err
+}
+
+// readBoundedLineTruncated also reports whether anything was discarded.
+//
+// THE CALLER HAS TO BE ABLE TO TELL. A truncated record is returned as invalid
+// JSON, and every caller reacted by skipping it — which is right for the index,
+// where a session is still listed, and wrong for an import, where the skipped
+// bytes were the conversation itself. Without this the two cases are
+// indistinguishable, so the import path could not report what it had lost.
+func readBoundedLineTruncated(reader *bufio.Reader, keep int) ([]byte, bool, error) {
 	var kept []byte
+	dropped := 0
 	for {
 		chunk, err := reader.ReadSlice('\n')
-		if room := keep - len(kept); room > 0 {
+		room := keep - len(kept)
+		if room > 0 {
 			if room > len(chunk) {
 				room = len(chunk)
 			}
@@ -135,10 +157,14 @@ func readBoundedLine(reader *bufio.Reader, keep int) ([]byte, error) {
 			// the next read, so this must copy.
 			kept = append(kept, chunk[:room]...)
 		}
+		if room < 0 {
+			room = 0
+		}
+		dropped += len(chunk) - room
 		if err == bufio.ErrBufferFull {
 			continue
 		}
-		return bytes.TrimRight(kept, "\r\n"), err
+		return bytes.TrimRight(kept, "\r\n"), dropped > 0, err
 	}
 }
 
