@@ -385,7 +385,34 @@ func (client *Client) readLoop() {
 			client.failAll(err)
 			return
 		}
+		// Explicit type validation: distinguish requests/notifications (have
+		// method) from responses (no method, has id). Only responses may be
+		// delivered to pending callers. Server-initiated requests must never be
+		// misdelivered as a response even when the id collides with a pending
+		// client request (Z-052).
+		if message.Method != "" {
+			if message.ID != nil {
+				// Server-initiated request: route to request handler and
+				// reply with method-not-found so the server does not hang.
+				// The client does not currently handle inbound requests, so
+				// every method is unknown. Log for diagnostics.
+				_, _ = fmt.Fprintf(os.Stderr, "[mcp] server request %q (id %v) not handled: replying method not found\n", message.Method, message.ID)
+				client.mu.Lock()
+				_ = client.writer.write(rpcMessage{
+					JSONRPC: "2.0",
+					ID:      message.ID,
+					Error:   &rpcError{Code: -32601, Message: "method not found: " + message.Method},
+				})
+				client.mu.Unlock()
+			}
+			// Notifications (no id) and handled server requests are not
+			// responses — do not dispatch.
+			continue
+		}
 		if message.ID == nil {
+			// No id and no method: invalid or stray message. Ignore but log
+			// for diagnostics to help trace protocol mismatches.
+			_, _ = fmt.Fprintf(os.Stderr, "[mcp] ignoring unexpected message without id (method %q)\n", message.Method)
 			continue
 		}
 		id, ok := rpcMessageID(message.ID)

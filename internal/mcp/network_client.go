@@ -539,6 +539,12 @@ func (client *remoteSSEClient) deliverEventMessage(value string) error {
 	if err := decoder.Decode(&message); err != nil {
 		return fmt.Errorf("decode MCP SSE stream message: %w", err)
 	}
+	// Explicit type validation: only messages without a method are responses.
+	// Server-initiated requests (method set) must not be misdelivered to a
+	// pending caller even when the id collides (Z-052).
+	if message.Method != "" {
+		return nil
+	}
 	key := rpcResponseKey(message.ID)
 	if key == "" {
 		return nil
