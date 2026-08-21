@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:14:01.164Z",
-  "durationMs": 11379534,
+  "endedAt": "2026-08-21T06:14:07.642Z",
+  "durationMs": 11386008,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,20 +16,20 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 109,
-    "removed": 20
+    "added": 362,
+    "removed": 2
   },
   "filesChanged": [
-    "internal/sandbox/scope_extra_read_test.go",
-    "internal/sandbox/scope_temp_refcount_test.go",
-    "internal/sandbox/scope_temporary_test.go"
+    "internal/agent/guardrails.go",
+    "internal/agent/guardrails_false_admission_test.go",
+    "internal/agent/guardrails_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "23298d59df41c3e27af3722fe0ef9d2cac324775",
+    "headAfter": "2e153695aa9ae017cc9ad54a4a021845654faa04",
     "commitShas": [
-      "23298d59df41c3e27af3722fe0ef9d2cac324775"
+      "2e153695aa9ae017cc9ad54a4a021845654faa04"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
