@@ -1517,20 +1517,21 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// the agent loop and the MCP server pass through), so result.Output is
 	// already redacted here and result.Redacted reflects whether it changed.
 	return ToolResult{
-		Risk:            executedRisk,
-		ToolCallID:      call.ID,
-		Name:            call.Name,
-		Status:          result.Status,
-		Output:          result.ModelOutput(),
-		Truncated:       result.Truncated,
-		Meta:            result.Meta,
-		Images:          result.Images,
-		Redacted:        result.Redacted,
-		ChangedFiles:    result.ChangedFiles,
-		ChangeSummaries: result.ChangeSummaries,
-		Display:         result.HumanDisplay(),
-		Outcome:         result.Outcome,
-		LoadedTools:     loadedToolsFromResult(result.Meta),
+		Risk:               executedRisk,
+		ToolCallID:         call.ID,
+		Name:               call.Name,
+		Status:             result.Status,
+		Output:             result.ModelOutput(),
+		Truncated:          result.Truncated,
+		Meta:               result.Meta,
+		EnforcementNotices: append([]string(nil), result.EnforcementNotices...),
+		Images:             result.Images,
+		Redacted:           result.Redacted,
+		ChangedFiles:       result.ChangedFiles,
+		ChangeSummaries:    result.ChangeSummaries,
+		Display:            result.HumanDisplay(),
+		Outcome:            result.Outcome,
+		LoadedTools:        loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
 		// the Run turn loop performs the actual provider switch. Empty for every
@@ -2145,17 +2146,18 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Cwd:               options.Cwd,
 		})
 		return ToolResult{
-			ToolCallID:      call.ID,
-			Name:            call.Name,
-			Status:          result.Status,
-			Output:          result.ModelOutput(),
-			Truncated:       result.Truncated,
-			Meta:            result.Meta,
-			Redacted:        result.Redacted,
-			ChangedFiles:    result.ChangedFiles,
-			ChangeSummaries: result.ChangeSummaries,
-			Display:         result.HumanDisplay(),
-			Outcome:         result.Outcome,
+			ToolCallID:         call.ID,
+			Name:               call.Name,
+			Status:             result.Status,
+			Output:             result.ModelOutput(),
+			Truncated:          result.Truncated,
+			Meta:               result.Meta,
+			EnforcementNotices: append([]string(nil), result.EnforcementNotices...),
+			Redacted:           result.Redacted,
+			ChangedFiles:       result.ChangedFiles,
+			ChangeSummaries:    result.ChangeSummaries,
+			Display:            result.HumanDisplay(),
+			Outcome:            result.Outcome,
 		}
 	}
 	return ToolResult{

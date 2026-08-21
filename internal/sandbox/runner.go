@@ -131,15 +131,10 @@ func (engine *Engine) PrepareExecution(ctx context.Context, request execution.Re
 		return execution.PreparedCommand{}, err
 	}
 	return execution.PreparedCommand{
-		Command: command,
-		Enforcement: execution.Enforcement{
-			Backend:         string(plan.TargetBackend),
-			Level:           string(plan.EnforcementLevel),
-			Degraded:        plan.EnforcementLevel == EnforcementDegraded,
-			DowngradeReason: plan.DowngradeReason,
-		},
-		Report:  plan.ExecutionReport,
-		Cleanup: plan.Cleanup,
+		Command:     command,
+		Enforcement: EnforcementFor(plan),
+		Report:      plan.ExecutionReport,
+		Cleanup:     plan.Cleanup,
 	}, nil
 }
 
@@ -331,7 +326,16 @@ func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequ
 	// Derived here rather than at each caller because this is the single funnel
 	// every plan passes through, including the Windows one, so no execution
 	// caller can be added that quietly misses it.
-	plan.Notes = append(plan.Notes, windowsDenyReadWarnings(request.Backend, request.PermissionProfile)...)
+	// KEYED ON WHAT WILL ACTUALLY RUN, not on configuration. The predicate used to
+	// ask only about the host, the backend and DenyRead, so a disabled sandbox or a
+	// re-entrant command, both of which take the direct unwrapped plan while still
+	// carrying the Windows backend and profile, were told the write jail had been
+	// traded away. Neither claim was true there: no restricted token is created and
+	// the deny-read rule is not enforced either, so the notice described a trade
+	// nobody had made.
+	if windowsRestrictedTokenWillRun(request) {
+		plan.Notes = append(plan.Notes, windowsDenyReadWarnings(request.Backend, request.PermissionProfile)...)
+	}
 	return plan
 }
 
@@ -1198,4 +1202,51 @@ func isDynamicSensitiveEnvKey(key string) bool {
 	return strings.HasPrefix(key, prefix) &&
 		strings.HasSuffix(key, suffix) &&
 		len(key) > len(prefix)+len(suffix)
+}
+
+// EnforcementFor projects a CommandPlan onto the platform-neutral enforcement
+// contract.
+//
+// ONE PROJECTION, because there were two and they drifted. PrepareExecution
+// built execution.Enforcement by hand for the generic adapter that hooks,
+// plugins and MCP processes go through, and exec_command built the same struct
+// by hand for the tool path. When Notices was added it reached only the tool
+// path, so the contract was true for one wrapper and false for the wrapper other
+// execution consumers depend on. A hand-maintained projection duplicated across
+// two adapters cannot be kept honest by review; a shared one cannot be missed.
+//
+// The notice slice is copied rather than aliased so a consumer cannot mutate the
+// plan through it.
+func EnforcementFor(plan CommandPlan) execution.Enforcement {
+	return execution.Enforcement{
+		Backend:         string(plan.TargetBackend),
+		Level:           string(plan.EnforcementLevel),
+		Degraded:        plan.EnforcementLevel == EnforcementDegraded,
+		DowngradeReason: plan.DowngradeReason,
+		Notices:         append([]string(nil), plan.Notes...),
+	}
+}
+
+// windowsRestrictedTokenWillRun reports whether this plan will actually be
+// wrapped in a Windows restricted token.
+//
+// The disclosure is about a token shape, so it has to follow the token rather
+// than the configuration that would have produced one. buildPlatformCommandPlan
+// takes the direct, unwrapped path for a disabled or degraded enforcement level,
+// for BackendNone, for a command that does not require a platform sandbox, and
+// for one already wrapped by an outer sandbox. None of those creates a token,
+// and none of them enforces deny-read.
+func windowsRestrictedTokenWillRun(request SandboxExecutionRequest) bool {
+	if request.CommandWrapped || !request.RequiresPlatformSandbox {
+		return false
+	}
+	if request.EnforcementLevel == EnforcementDisabled || request.EnforcementLevel == EnforcementDegraded {
+		return false
+	}
+	switch request.TargetBackend {
+	case BackendWindowsRestrictedToken, BackendWindowsElevated:
+		return true
+	default:
+		return false
+	}
 }
