@@ -149,6 +149,15 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 		filepath.Join(runtimeState.Data, "go-mod"),
 		filepath.Join(runtimeState.Data, "cargo"),
 	}
+	// BEFORE ANYTHING IS CREATED. os.MkdirAll returns nil when Stat says the path
+	// is already a directory, and Stat follows links, so a link planted at an
+	// owned component is silently accepted and the whole tree is built inside
+	// whatever it points at. Chmod and Chtimes below follow it too, and the root
+	// then becomes a write root the backend binds read-write with TMPDIR and the
+	// build caches pointed inside it.
+	if err := refuseAliasedRuntimeComponents(runtimeState.Root); err != nil {
+		return SandboxRuntime{}, nil, err
+	}
 	for _, directory := range directories {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return SandboxRuntime{}, nil, fmt.Errorf("create sandbox runtime directory %s: %w", directory, err)
@@ -156,6 +165,12 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 		if err := os.Chmod(directory, 0o700); err != nil {
 			return SandboxRuntime{}, nil, fmt.Errorf("secure sandbox runtime directory %s: %w", directory, err)
 		}
+	}
+	// AND AGAIN AFTER, because the check above is a check-then-use on its own: a
+	// component swapped during creation would still redirect the tree. Pairing the
+	// two narrows the window to the creation itself.
+	if err := refuseAliasedRuntimeComponents(runtimeState.Root); err != nil {
+		return SandboxRuntime{}, nil, err
 	}
 	now := sandboxRuntimeNow()
 	if err := os.Chtimes(runtimeState.Root, now, now); err != nil {
@@ -167,6 +182,12 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 }
 
 func prepareSandboxRuntimeLease(root string) (*sandboxRuntimeLease, error) {
+	// Before the parent is created, because MkdirAll walks and creates through
+	// whatever the owned components resolve to and the lease file is opened
+	// without O_NOFOLLOW.
+	if err := refuseAliasedRuntimeComponents(root); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create sandbox runtime parent: %w", err)
 	}
@@ -269,8 +290,15 @@ func fallbackSandboxRuntimeRoot(workspaceRoot string) (string, error) {
 	if tempRoot == "" || tempRoot == "." {
 		return "", errors.New("temp directory is unavailable")
 	}
-	digest := sha256.Sum256([]byte(workspaceRoot))
-	root := filepath.Join(tempRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
+	// SCOPED TO THIS USER, unlike the cache-derived root, because this one lives
+	// in shared temp. On Linux os.TempDir() is the world-writable /tmp whenever
+	// TMPDIR is unset, and a digest of the workspace path alone is the same string
+	// for every user on the host: two accounts working on the same path would name
+	// one directory and the first one there would own it. The uid is not a secret
+	// and is not doing secrecy work; it removes the collision, and
+	// refuseAliasedRuntimeComponents handles somebody having got there first.
+	digest := sha256.Sum256([]byte(workspaceRoot + "\x00" + sandboxRuntimeUserScope()))
+	root := filepath.Join(append(append([]string{tempRoot}, windowsSandboxRuntimeOwnedNames...), hex.EncodeToString(digest[:8]))...)
 	if runtimeRootWithinWorkspace(workspaceRoot, root) {
 		// Both candidates land inside the workspace, so there is nowhere left to
 		// put a runtime tree the workspace's own policy does not govern. Refused
@@ -465,6 +493,13 @@ func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool) (string,
 	lease, err := prepareSandboxRuntimeLease(root)
 	if err == nil {
 		return root, lease, nil
+	}
+	// AN ALIASED COMPONENT IS NOT A REASON TO RELOCATE. Falling back here would
+	// leave the link in place, report nothing, and move to the next predictable
+	// name, which the same attacker can take as well. Relocating is for a root
+	// that is merely unusable.
+	if errors.Is(err, errRuntimeComponentAliased) {
+		return "", nil, err
 	}
 	// The preferred root could not be leased. Relocating is right, and it is what
 	// commands already did; the defect was that setup never learned about it.

@@ -89,7 +89,10 @@ func TestTheRootedTraversalRefusesAJunctionAtEveryOwnedComponent(t *testing.T) {
 				_ = windows.CloseHandle(handle)
 				t.Fatalf("the traversal followed a junction at an owned component and would have applied the elevated ACL inside %s", target)
 			}
-			if !strings.Contains(err.Error(), "link") {
+			// A distinctive phrase, not the word "link": t.TempDir() names its
+			// directory after the test, so a subtest name can put the word the
+			// assertion looks for into every path in the error.
+			if !strings.Contains(err.Error(), "redirects the directory") {
 				t.Errorf("the refusal does not name the reason: %v", err)
 			}
 			_ = base

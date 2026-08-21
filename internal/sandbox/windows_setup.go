@@ -861,6 +861,23 @@ func WindowsSandboxProfileWithRuntimeRoots(profile PermissionProfile, workspaceR
 	return windowsSandboxProfileWithRuntime(profile, workspaceRoots)
 }
 
+// PermissionProfileWithRuntimeRoot names the CONCRETE runtime root on a profile,
+// which is what makes the stamp check run.
+//
+// validateWindowsSandboxRuntimeStamp returns nil when profile.Runtime is nil,
+// and that is the correct answer for the setup side and for every unrestricted
+// profile. It was the wrong answer for doctor: doctor built its profile with
+// PermissionProfileFromPolicy, which never sets Runtime, so the one check that
+// can tell an evicted runtime tree from a healthy one was skipped and `zero
+// doctor` reported a healthy sandbox on exactly the machine state the stamp was
+// added to detect.
+func PermissionProfileWithRuntimeRoot(profile PermissionProfile, root string) PermissionProfile {
+	if strings.TrimSpace(root) == "" {
+		return profile
+	}
+	return permissionProfileWithRuntime(profile, SandboxRuntime{Root: root})
+}
+
 // windowsSandboxRuntimeStampName marks a runtime root that ELEVATED SETUP
 // actually provisioned and applied the capability ACL to.
 const windowsSandboxRuntimeStampName = ".zero-sandbox-setup"
