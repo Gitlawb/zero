@@ -53,7 +53,11 @@ func sandboxRuntimeRootFor(workspaceRoot string, cacheRoot string) (string, erro
 // to distinguish the cache-derived root from the temp-derived one.
 func deterministicSandboxRuntimeRoot(workspaceRoot string, cacheRoot string) (string, bool) {
 	digest := sha256.Sum256([]byte(workspaceRoot))
-	root := filepath.Join(cacheRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
+	// The same inventory the rooted traversal recognizes a runtime root by. See
+	// windowsSandboxRuntimeOwnedNames: two spellings of this list is how a real
+	// runtime root stops being recognized as owned, and that failure opens by
+	// name instead of by handle.
+	root := filepath.Join(append(append([]string{cacheRoot}, windowsSandboxRuntimeOwnedNames...), hex.EncodeToString(digest[:8]))...)
 	return root, !runtimeRootWithinWorkspace(workspaceRoot, root)
 }
 
@@ -116,7 +120,7 @@ func runtimeRootWithinWorkspace(workspaceRoot string, root string) bool {
 
 func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
 	// One selection function, shared with setup. See selectSandboxRuntimeRoot.
-	root, lease, err := selectSandboxRuntimeRoot(workspaceRoot)
+	root, lease, err := selectSandboxRuntimeRoot(workspaceRoot, true)
 	if err != nil {
 		return SandboxRuntime{}, nil, err
 	}
@@ -386,7 +390,41 @@ func canonicalSandboxWorkspaceRoot(root string) string {
 //
 // Extracted from prepareSandboxRuntime so both sides run this one function. The
 // caller must release the returned lease.
-func selectSandboxRuntimeRoot(workspaceRoot string) (string, *sandboxRuntimeLease, error) {
+// pinnedSandboxRuntimeRoot returns the root a previous setup recorded, when
+// that root is one this workspace could actually select.
+//
+// The candidate check is what keeps this honest. One sandbox home serves
+// whichever workspace ran setup last, so a recorded root can belong to a
+// different workspace entirely; pinning to that would point this command's
+// runtime at another workspace's tree. A recorded root is only honoured when it
+// matches one of the two roots THIS workspace derives, which is also the only
+// pair the selections could ever have disagreed about.
+func pinnedSandboxRuntimeRoot(preferred, fallback string) string {
+	// No GOOS gate. The marker only exists where setup wrote one, so this is
+	// already Windows-only in practice, and keeping the code path platform-neutral
+	// means the setup-to-command contract is exercised on every CI runner instead
+	// of only the Windows one.
+	home, err := ResolveWindowsSandboxHome(nil)
+	if err != nil {
+		return ""
+	}
+	recorded := WindowsSandboxRecordedRuntimeRoot(home)
+	if recorded == "" {
+		return ""
+	}
+	for _, candidate := range []string{preferred, fallback} {
+		if candidate != "" && sameWindowsRuntimeRootPath(recorded, candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// selectSandboxRuntimeRoot picks the root for a command. honorRecorded is true
+// on the command side and false during setup: setup is making the choice, so it
+// must not consult a record it is about to overwrite, or a single unlucky
+// relocation to the temp fallback would pin every future setup to temp.
+func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool) (string, *sandboxRuntimeLease, error) {
 	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
 	if workspaceRoot == "" || workspaceRoot == "." {
 		return "", nil, errors.New("sandbox runtime requires a workspace root")
@@ -402,6 +440,27 @@ func selectSandboxRuntimeRoot(workspaceRoot string) (string, *sandboxRuntimeLeas
 	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
 	if err != nil {
 		return "", nil, err
+	}
+	// CONSUME SETUP'S CHOICE, do not re-make it. Everything below is a fresh
+	// selection whose answer depends on whether a lease can be taken right now,
+	// and a command reaching a different answer than setup did is the outage this
+	// contract exists to prevent: the tree the command names was never
+	// provisioned, so its ACL plan hash cannot match and no amount of re-running
+	// setup fixes it.
+	if honorRecorded {
+		fallbackRoot, _ := fallbackSandboxRuntimeRoot(workspaceRoot)
+		if pinned := pinnedSandboxRuntimeRoot(root, fallbackRoot); pinned != "" {
+			lease, leaseErr := prepareSandboxRuntimeLease(pinned)
+			if leaseErr != nil {
+				// NOT relocated. Relocating is what produced the permanent brick:
+				// the other root has no capability ACL, so the command would be
+				// rejected anyway, with a message about permissions. Failing here
+				// says the true thing and points at the action that fixes it.
+				return "", nil, fmt.Errorf("sandbox runtime root %s was provisioned by setup but cannot be used now (%w); "+
+					"re-run `zero sandbox setup` from an elevated (Administrator) terminal", pinned, leaseErr)
+			}
+			return pinned, lease, nil
+		}
 	}
 	lease, err := prepareSandboxRuntimeLease(root)
 	if err == nil {

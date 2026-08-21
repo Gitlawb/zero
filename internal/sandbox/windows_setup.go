@@ -9,19 +9,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
+// Bumped to 6 when the SELECTED RUNTIME ROOT itself became part of the marker,
+// so a command consumes setup's choice instead of re-deriving one. A marker
+// written by the previous version records no root, and honouring it would pin
+// commands to whatever this build happens to select first.
+//
 // Bumped to 5 when setup began recording the CONCRETE runtime root it
 // provisioned, and stamping that tree, instead of fingerprinting a plan built
 // from a root it merely derived. A marker written by the previous version has no
 // stamp, and requiring one without a bump would report every already-set-up
 // machine as broken rather than as out of date. Bumping says the true thing: the
 // setup protocol changed, run it once more.
-const windowsSandboxSetupMarkerSchemaVersion = 5
+const windowsSandboxSetupMarkerSchemaVersion = 6
 
 type WindowsSandboxSetupArgsOptions struct {
 	SandboxHome       string
@@ -49,6 +55,22 @@ type WindowsSandboxSetupMarker struct {
 	NetworkInfraHash string `json:"networkInfraHash"`
 	OfflineFilterSID string `json:"offlineFilterSid"`
 	NetworkFilters   int    `json:"networkFilters"`
+	// RuntimeRoot is the runtime tree setup ACTUALLY PROVISIONED, recorded rather
+	// than re-derived.
+	//
+	// Selection consults a lease, and a lease is a fact about one moment. Setup
+	// took the lease only to learn which root won and released it immediately, so
+	// a command ran the same selector later and was free to reach a different
+	// answer: setup relocating to the temp fallback while the cache root was
+	// briefly unavailable, then a command taking the cache root once it freed up.
+	// Two selections, two roots, and a marker that can never validate again --
+	// re-running setup does not help, because setup is equally free to pick the
+	// other one.
+	//
+	// Recording the choice removes the disagreement instead of trying to make two
+	// independent selections agree. See pinnedSandboxRuntimeRoot for the consuming
+	// side.
+	RuntimeRoot string `json:"runtimeRoot,omitempty"`
 }
 
 func WindowsSandboxSetupMarkerPath(sandboxHome string) string {
@@ -91,7 +113,7 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	// A selection failure is not fatal here. The old derivation is still applied
 	// below, so a machine where the lease cannot be taken at all behaves exactly
 	// as it did before rather than losing the ability to run setup.
-	if selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...)); selectErr == nil {
+	if selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...), false); selectErr == nil {
 		lease.release()
 		options.PermissionProfile = permissionProfileWithRuntime(options.PermissionProfile, SandboxRuntime{Root: selected})
 	}
@@ -228,6 +250,7 @@ func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 		NetworkInfraHash: infraHash,
 		OfflineFilterSID: offlineSID,
 		NetworkFilters:   len(infraPlan.Filters),
+		RuntimeRoot:      windowsSandboxSelectedRuntimeRoot(config.PermissionProfile),
 	}, nil
 }
 
@@ -324,7 +347,59 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	if actual.NetworkFilters != expected.NetworkFilters {
 		return errors.New("windows sandbox setup is out of date: network enforcement plan changed")
 	}
+	// Named explicitly, and last, because the checks above cannot tell this case
+	// apart from a policy edit. A runtime-root disagreement used to surface as
+	// "permission roots or deny lists changed", which sends the operator looking
+	// at permissions for a problem that is nothing to do with them.
+	//
+	// With the root recorded this should not be reachable, since the command
+	// consumes what setup wrote. It stays as the assertion that the contract held.
+	if recorded := strings.TrimSpace(actual.RuntimeRoot); recorded != "" {
+		if selected := strings.TrimSpace(expected.RuntimeRoot); selected != "" && !sameWindowsRuntimeRootPath(recorded, selected) {
+			return fmt.Errorf("windows sandbox setup is out of date: setup provisioned runtime root %s, this command selected %s -- run `zero sandbox setup` from an elevated (Administrator) terminal", recorded, selected)
+		}
+	}
 	return nil
+}
+
+// sameWindowsRuntimeRootPath compares two runtime roots the way the filesystem
+// does on this platform. Windows paths are case-insensitive, and the recorded
+// root and the selected root can differ only in spelling.
+func sameWindowsRuntimeRootPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+// WindowsSandboxRecordedRuntimeRoot returns the runtime root a previous setup
+// provisioned, or "" when there is no usable marker.
+//
+// Deliberately silent on every failure. A missing, unreadable or malformed
+// marker means there is nothing to honour, and the caller's job is to select
+// normally rather than to report on marker health -- validation does that, with
+// a much better message than a selector could produce.
+func WindowsSandboxRecordedRuntimeRoot(sandboxHome string) string {
+	sandboxHome = strings.TrimSpace(sandboxHome)
+	if sandboxHome == "" {
+		return ""
+	}
+	bytes, err := os.ReadFile(WindowsSandboxSetupMarkerPath(sandboxHome))
+	if err != nil {
+		return ""
+	}
+	var marker WindowsSandboxSetupMarker
+	if err := json.Unmarshal(bytes, &marker); err != nil {
+		return ""
+	}
+	// A root recorded by an older schema describes a tree provisioned under
+	// different rules, so it is not a root this build may pin to.
+	if marker.SchemaVersion != windowsSandboxSetupMarkerSchemaVersion {
+		return ""
+	}
+	return strings.TrimSpace(marker.RuntimeRoot)
 }
 
 func WindowsACLPlanHash(plan WindowsACLPlan) (string, error) {
@@ -492,6 +567,59 @@ func windowsSandboxProfileWithRuntime(profile PermissionProfile, workspaceRoots 
 type windowsRuntimeRootRollback struct {
 	// created is in creation order, outermost first, so undo walks it backwards.
 	created []string
+	// stamp is the runtime stamp's state before this run touched it.
+	//
+	// The stamp is the one artifact setup writes INSIDE the runtime root, and it
+	// is written before the marker. A marker write that failed therefore left a
+	// root this run had created holding a file this run had written, and the
+	// rollback below refuses a non-empty directory on purpose, so the failed setup
+	// kept its own residue forever. Owning the stamp is what makes the root empty
+	// again and the whole transaction complete.
+	stamp windowsSandboxStampSnapshot
+}
+
+// windowsSandboxStampSnapshot records the runtime stamp as it was before setup
+// overwrote it, so a failed run restores rather than deletes.
+//
+// Restoring matters where a previous setup had succeeded. Deleting the stamp
+// would leave that machine's still-valid marker pointing at a tree with no
+// stamp, which reads as "the runtime directory was removed since setup ran" --
+// a healthy machine reporting itself broken because an unrelated later setup
+// failed.
+type windowsSandboxStampSnapshot struct {
+	path    string
+	prior   []byte
+	existed bool
+}
+
+func snapshotWindowsSandboxRuntimeStamp(root string) windowsSandboxStampSnapshot {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return windowsSandboxStampSnapshot{}
+	}
+	path := windowsSandboxRuntimeStampPath(root)
+	prior, err := os.ReadFile(path)
+	if err != nil {
+		// Absent, or unreadable and therefore not something to put back.
+		return windowsSandboxStampSnapshot{path: path}
+	}
+	return windowsSandboxStampSnapshot{path: path, prior: prior, existed: true}
+}
+
+func (snapshot windowsSandboxStampSnapshot) restore() error {
+	if snapshot.path == "" {
+		return nil
+	}
+	if !snapshot.existed {
+		if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove sandbox runtime setup stamp written by this run: %w", err)
+		}
+		return nil
+	}
+	if err := os.WriteFile(snapshot.path, snapshot.prior, 0o600); err != nil {
+		return fmt.Errorf("restore the previous sandbox runtime setup stamp: %w", err)
+	}
+	return nil
 }
 
 // run removes what was created, innermost first.
@@ -502,6 +630,12 @@ type windowsRuntimeRootRollback struct {
 // answer: the error is reported and the residue stays findable.
 func (rollback windowsRuntimeRootRollback) run() error {
 	var errs []error
+	// The stamp first, so a root this run created is empty again by the time the
+	// directory walk reaches it. EVERY compensation still runs if this one fails:
+	// one broken undo must not strand the rest.
+	if err := rollback.stamp.restore(); err != nil {
+		errs = append(errs, err)
+	}
 	for index := len(rollback.created) - 1; index >= 0; index-- {
 		path := rollback.created[index]
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -511,16 +645,36 @@ func (rollback windowsRuntimeRootRollback) run() error {
 	return errors.Join(errs...)
 }
 
+// runWindowsSandboxSetupCompensations undoes a failed setup COMPLETELY, and
+// reports everything that went wrong doing it.
+//
+// One function because the old code had two failure closures that composed by
+// calling each other, and the outer one returned as soon as the ACL rollback
+// reported an error. The runtime rollback then never ran, so the failure most
+// likely to leave a machine in a strange state was the one failure that skipped
+// half the cleanup. Every compensation runs here, unconditionally, and the
+// errors are joined rather than raced.
+//
+// aclRollback is nil before the ACL plan has been applied, which is the only
+// difference between the two failure points.
+func runWindowsSandboxSetupCompensations(cause error, aclRollback func() error, runtimeRollback windowsRuntimeRootRollback) error {
+	errs := []error{cause}
+	if aclRollback != nil {
+		if err := aclRollback(); err != nil {
+			errs = append(errs, fmt.Errorf("acl rollback failed: %w", err))
+		}
+	}
+	if err := runtimeRollback.run(); err != nil {
+		errs = append(errs, fmt.Errorf("runtime rollback failed: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
 // createRuntimeDirRecording is MkdirAll that reports which components it made.
 //
 // The distinction between "created" and "already there" is the whole contract:
 // a pre-existing cache or temp ancestor belongs to the user and must survive a
 // failed setup, while the components this run added must not.
-// windowsSandboxRuntimeOwnedDepth is how many trailing components of a runtime
-// root Zero creates and therefore owns: "zero", "runtime", "v1", "<hash>". See
-// deterministicSandboxRuntimeRoot, which joins exactly these under the cache
-// root.
-const windowsSandboxRuntimeOwnedDepth = 4
 
 // refuseReparsedRuntimeAncestors rejects a reparse point at any component Zero
 // creates, so an elevated ACL is never written through one.
@@ -737,6 +891,17 @@ func writeWindowsSandboxRuntimeStamp(root string, planHash string) error {
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fmt.Errorf("create sandbox runtime root for the setup stamp: %w", err)
+	}
+	// Written through the rooted traversal where one is available, so the stamp
+	// lands in the object the ACL was applied to rather than in whatever the
+	// pathname resolves to by now. MkdirAll above and a pathname write left a
+	// second unbound interval: a tree replaced after the ACL apply could be
+	// recreated and stamped with no capability grant on it at all, and validation
+	// still passed because it only compares the stamp contents.
+	if err := writeRuntimeStampThroughHandle(root, planHash); err == nil {
+		return nil
+	} else if !errors.Is(err, errRuntimeTailNotOwned) && !errors.Is(err, errNoRootedStampWriter) {
+		return err
 	}
 	if err := os.WriteFile(windowsSandboxRuntimeStampPath(root), []byte(planHash), 0o600); err != nil {
 		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
