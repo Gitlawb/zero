@@ -3,38 +3,42 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:59:11.160Z",
-  "durationMs": 3289528,
+  "endedAt": "2026-08-21T03:59:14.653Z",
+  "durationMs": 3293021,
   "status": "running",
   "tokens": {
-    "total": 42154,
-    "input": 84,
-    "output": 42070
+    "total": 42345,
+    "input": 86,
+    "output": 42259
   },
   "cost": {
-    "usd": 7.7402
+    "usd": 7.9054
   },
-  "toolCalls": 38,
+  "toolCalls": 39,
   "lines": {
-    "added": 186,
-    "removed": 27
+    "added": 281,
+    "removed": 52
   },
   "filesChanged": [
     "internal/agentsessions/activity.go",
     "internal/agentsessions/activity_test.go",
     "internal/agentsessions/blocker_regression_test.go",
-    "internal/agentsessions/registry.go",
+    "internal/agentsessions/family1.go",
+    "internal/agentsessions/family1_test.go",
+    "internal/agentsessions/fixture_corpus_test.go",
+    "internal/agentsessions/testdata/claude-config/projects/-Users-example-workspace-demo/fixture-session.jsonl",
+    "internal/agentsessions/testdata/codex-home/sessions/2026/08/01/rollout-2026-08-01T10-00-00-fixture0-0000-0000-0000-000000000001.jsonl",
     "internal/agentsessions/translate.go",
     "internal/agentsessions/translate_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "095533bb1ea4e0efb632d4e190970ebf419dab8f",
+    "headAfter": "6aea9832fde8f26ea49d52b71b95a06c54dd9b1a",
     "commitShas": [
-      "095533bb1ea4e0efb632d4e190970ebf419dab8f"
+      "6aea9832fde8f26ea49d52b71b95a06c54dd9b1a"
     ]
   },
-  "summary": "The `Read` signature returns only events, so the import can't re-resolve metadata without an interface change — that's a scope call I'll surface rather than take. Starting with what Vasanth asked for. Committing the redaction fix, then rebasing:",
+  "summary": "Rebased cleanly onto current main and builds. Now the fixtures — writing the ones the verifiers confirmed have teeth:",
   "originUrl": "https://getorigin.io/sessions/local-13d54317-fe98-4a11-b153-5ce9e41a70c8"
 }
