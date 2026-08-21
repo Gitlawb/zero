@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -36,12 +37,11 @@ type specialistAccountingInput struct {
 func (executor Executor) recordSpecialistStart(input specialistAccountingInput) {
 	payload := baseSpecialistPayload(input)
 	_, _ = appendSpecialistSessionEvent(executor.SessionStore, input.ParentSessionID, sessions.EventSpecialistStart, payload)
+	executor.dispatchLifecycleHook("specialistStart", input, payload)
 }
 
 func (executor Executor) recordSpecialistStop(input specialistAccountingInput, summary StreamResult, status string, exitCode int, runErr error, usageRolledUp bool) {
 	store := accountingStore(executor.SessionStore)
-	accountingMu.Lock()
-	defer accountingMu.Unlock()
 	payload := baseSpecialistPayload(input)
 	if summary.RunID != "" {
 		payload["runId"] = summary.RunID
@@ -55,9 +55,30 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	if len(summary.Errors) > 0 {
 		payload["errors"] = append([]string(nil), summary.Errors...)
 	}
-	// Atomic check+append under the session lock so a concurrent stop path cannot
-	// also pass the existence check and write a duplicate stop event.
+	// Hold accountingMu only for the deduped append so a slow lifecycle hook cannot
+	// stall concurrent specialist stop/usage accounting.
+	accountingMu.Lock()
 	_, _ = appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
+	accountingMu.Unlock()
+	// Dispatch is claimed on this LifecycleHooks bridge, not on session append.
+	// Swarm members may have an empty parent session (append never succeeds) and
+	// TaskOutput may race Task.onExit; hooks must still fire exactly once when a
+	// hook-carrying executor observes the stop.
+	if executor.LifecycleHooks.claimStopDispatch(input.ChildSessionID, summary.RunID) {
+		executor.dispatchLifecycleHook("specialistStop", input, payload)
+	}
+}
+
+func (executor Executor) dispatchLifecycleHook(event string, input specialistAccountingInput, payload map[string]any) {
+	if executor.LifecycleHooks == nil || executor.LifecycleHooks.Dispatch == nil {
+		return
+	}
+	hookPayload := make(map[string]any, len(payload)+1)
+	for key, value := range payload {
+		hookPayload[key] = value
+	}
+	hookPayload["event"] = event
+	executor.LifecycleHooks.Dispatch(context.Background(), event, strings.TrimSpace(input.SpecialistName), hookPayload)
 }
 
 func (executor Executor) rollUpSpecialistUsage(input specialistAccountingInput, summary StreamResult) bool {
