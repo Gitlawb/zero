@@ -939,6 +939,9 @@ func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int, 
 	if deferThreshold <= 0 {
 		return
 	}
+	if _, registered := registry.Get(tools.ToolSearchToolName); registered {
+		return
+	}
 	if deferredEligibleCount(registry, permissionMode, enabledTools, disabledTools) < deferThreshold {
 		return
 	}

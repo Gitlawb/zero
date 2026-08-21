@@ -29,7 +29,10 @@ func TestMain(m *testing.M) {
 }
 
 func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
-	prompt := strings.ToLower(buildSystemPrompt(Options{}))
+	prompt := strings.Join(strings.Fields(strings.ToLower(buildSystemPrompt(Options{}))), " ")
+	if strings.Contains(prompt, "clickable file paths") {
+		t.Fatalf("system prompt must not claim inline-code file paths are clickable: %s", prompt)
+	}
 
 	for _, want := range []string{
 		"read-before-edit",
@@ -44,6 +47,13 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 		"do not recognize",
 		"scaled to the work",
 		"comment density",
+		"skip update_plan for bounded changes in one component",
+		"do not read the same file first with read_minified_file and then again with read_file",
+		"combine compatible validators into one command",
+		"instead of inventing a parallel flow",
+		"do not reread files solely to confirm",
+		"once the required behavior passes validation, stop",
+		"do not make extra tool calls solely to discover line numbers",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected core system prompt to include %q, got:\n%s", want, buildSystemPrompt(Options{}))

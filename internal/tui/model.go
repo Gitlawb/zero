@@ -85,10 +85,12 @@ type model struct {
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
+	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	registry                    *tools.Registry
+	awaitToolReadiness          func(context.Context)
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
@@ -233,17 +235,20 @@ type model struct {
 	leaderHelpOverlay bool
 	// leaderPending is true after Ctrl+X until a second key, Esc, or timeout
 	// resolves the chord (see leader.go). leaderSeq invalidates a stale tick.
-	leaderPending         bool
-	leaderSeq             int
-	transcriptBodyHeights *transcriptBodyHeightCache
-	input                 textinput.Model
-	composer              composerState
-	composerActive        bool
-	composerCursorVisible bool
-	composerPastePreviews []composerPastePreview
-	composerSelection     composerSelectionState
-	dictation             dictationController
-	sttKeyPrompt          *sttKeyPromptState
+	leaderPending          bool
+	leaderSeq              int
+	transcriptBodyHeights  *transcriptBodyHeightCache
+	input                  textinput.Model
+	composer               composerState
+	composerActive         bool
+	composerCursorVisible  bool
+	composerBlinkSeq       int
+	composerBlinkIdleTicks int
+	composerBlinkTicking   bool
+	composerPastePreviews  []composerPastePreview
+	composerSelection      composerSelectionState
+	dictation              dictationController
+	sttKeyPrompt           *sttKeyPromptState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -491,10 +496,11 @@ type model struct {
 	// transientNotice is a single, replaceable confirmation shown above the
 	// composer. Unlike copyStatus it is shared by lightweight slash commands
 	// and is never persisted into the transcript.
-	transientNotice    transientNotice
-	transientNoticeSeq int
-	exitConfirmActive  bool
-	exitConfirmSeq     int
+	transientNotice         transientNotice
+	transientNoticeSeq      int
+	transientNoticeTimerSeq int
+	exitConfirmActive       bool
+	exitConfirmSeq          int
 	// cancelConfirmActive/cancelConfirmSeq mirror exitConfirmActive/exitConfirmSeq
 	// (same seq-gated tea.Tick pattern) but guard a DIFFERENT action: Esc
 	// cancelling a running turn. The two are deliberately separate state (not a
@@ -927,6 +933,13 @@ func newModel(ctx context.Context, options Options) model {
 	// terminal bracketed paste (Paste: true) is the single paste path.
 	input.KeyMap.Paste.SetEnabled(false)
 	input.Focus()
+	// The main composer paints its own cursor through composerCursorVisible.
+	// Keep the embedded textinput cursor static so the shared textinput.Blink
+	// message cannot start a second, invisible 530ms tick chain. Setup inputs
+	// still use the normal Bubbles cursor and continue blinking independently.
+	inputStyles := input.Styles()
+	inputStyles.Cursor.Blink = false
+	input.SetStyles(inputStyles)
 
 	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	runSpinner.Spinner.FPS = activeAnimationFrameInterval
@@ -951,6 +964,8 @@ func newModel(ctx context.Context, options Options) model {
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
+		composerBlinkSeq:            1,
+		composerBlinkTicking:        true,
 		terminalFocused:             true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
@@ -966,10 +981,12 @@ func newModel(ctx context.Context, options Options) model {
 		recapsEnabled:               options.RecapsEnabled,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
+		newTurnSessionProvider:      options.NewTurnSessionProvider,
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
 		registry:                    registry,
+		awaitToolReadiness:          options.AwaitToolReadiness,
 		sessionStore:                sessionStore,
 		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
@@ -1090,6 +1107,11 @@ const (
 // composerCursorBlinkInterval is the on/off period of the composer text cursor.
 const composerCursorBlinkInterval = 530 * time.Millisecond
 
+// composerBlinkIdleTicksBeforeSettle bounds the software cursor animation.
+// Once the terminal is focused but otherwise idle, the cursor finishes a short
+// blink sequence and settles visible instead of waking the TUI forever.
+const composerBlinkIdleTicksBeforeSettle = 4
+
 // composerTypingIdleThreshold is how long a typing pause must last before the
 // cursor resumes blinking; comfortably above normal inter-keystroke gaps
 // (~150-300ms) so it won't flicker mid-sentence.
@@ -1098,16 +1120,27 @@ const composerTypingIdleThreshold = 500 * time.Millisecond
 // composerBlinkMsg toggles the composer cursor's visibility each tick. The custom
 // composer render draws its own cursor (not textinput's), so it drives its own
 // blink rather than relying on textinput.Blink.
-type composerBlinkMsg struct{}
+type composerBlinkMsg struct{ seq int }
 
-func composerBlinkCmd() tea.Cmd {
+func composerBlinkCmd(seq int) tea.Cmd {
 	return tea.Tick(composerCursorBlinkInterval, func(time.Time) tea.Msg {
-		return composerBlinkMsg{}
+		return composerBlinkMsg{seq: seq}
 	})
 }
 
+func (m model) armComposerBlink() (model, tea.Cmd) {
+	m.composerCursorVisible = true
+	m.composerBlinkIdleTicks = 0
+	if m.composerBlinkTicking {
+		return m, nil
+	}
+	m.composerBlinkTicking = true
+	m.composerBlinkSeq++
+	return m, composerBlinkCmd(m.composerBlinkSeq)
+}
+
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd()}
+	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd(m.composerBlinkSeq)}
 	if m.petAnimation != nil && !m.reducedMotion {
 		cmds = append(cmds, petTickCmd(m.petTickSeq, m.petFrameDelay()))
 	}
@@ -1290,7 +1323,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
-	return nm, batchCommands(cmd, mouseCmd, flushCmd, recapActivityCmd)
+	var composerCmd tea.Cmd
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.FocusMsg:
+		if nm.terminalFocused {
+			nm, composerCmd = nm.armComposerBlink()
+		}
+	}
+	nm, noticeCmd := nm.ensureTransientNoticeTimer()
+	return nm, batchCommands(cmd, mouseCmd, flushCmd, recapActivityCmd, composerCmd, noticeCmd)
 }
 
 func batchCommands(cmds ...tea.Cmd) tea.Cmd {
@@ -1353,16 +1394,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case composerBlinkMsg:
-		m = m.expireTransientNotice()
+		if !m.composerBlinkTicking || msg.seq != m.composerBlinkSeq {
+			return m, nil
+		}
 		switch {
 		case !m.terminalFocused:
-			m.composerCursorVisible = false // hidden while unfocused
+			m.composerCursorVisible = false
+			m.composerBlinkTicking = false
+			return m, nil
 		case m.now().Sub(m.lastCharTime) < composerTypingIdleThreshold:
-			m.composerCursorVisible = true // solid while actively typing
+			m.composerCursorVisible = true
+			m.composerBlinkIdleTicks = 0
 		default:
-			m.composerCursorVisible = !m.composerCursorVisible // idle + focused: blink as before
+			m.composerBlinkIdleTicks++
+			if m.composerBlinkIdleTicks >= composerBlinkIdleTicksBeforeSettle {
+				m.composerCursorVisible = true
+				m.composerBlinkTicking = false
+				return m, nil
+			}
+			m.composerCursorVisible = !m.composerCursorVisible
 		}
-		return m, composerBlinkCmd()
+		return m, composerBlinkCmd(m.composerBlinkSeq)
 	case tea.BackgroundColorMsg:
 		// A background reading changes only the contrast direction used for named
 		// palettes. It never repaints the terminal canvas.
@@ -2189,6 +2241,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.terminalFocused = false
 		m.composerCursorVisible = false
+		m.composerBlinkTicking = false
+		m.composerBlinkSeq++
 		if m.notifier != nil {
 			m.notifier.SetFocused(false)
 		}
@@ -5372,6 +5426,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
 		var specReview *pendingSpecReviewPrompt
+		if m.awaitToolReadiness != nil {
+			m.awaitToolReadiness(runCtx)
+		}
 		options := m.agentOptions
 		options.Registry = cloneToolRegistry(m.registry)
 		goalAwareRun := !runOptions.specDraft && m.activeLoopID == "" &&
@@ -5414,6 +5471,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd
 		options.Images = images
+		if m.newTurnSessionProvider != nil && m.provider != nil {
+			options.TurnSessionProvider = m.newTurnSessionProvider(m.providerProfile, m.provider)
+		}
 		if m.captureRunImages != nil {
 			m.captureRunImages(images)
 		}

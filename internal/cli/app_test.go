@@ -17,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
@@ -486,6 +487,68 @@ func TestRunNoArgsLaunchesTUIWithMCPState(t *testing.T) {
 	}
 }
 
+func TestRunNoArgsPaintsBeforeOptionalDefaultMCPIsReady(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	permissionStore, err := mcp.NewPermissionStore(mcp.StoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json")})
+	if err != nil {
+		t.Fatalf("NewPermissionStore() error = %v", err)
+	}
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd:          func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) { return userConfigPath, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: config.DefaultMCPServers()}, nil
+		},
+		newMCPStore:      func() (*mcp.PermissionStore, error) { return permissionStore, nil },
+		newMCPTokenStore: func() (*mcp.TokenStore, error) { return tokenStore, nil },
+		registerMCPTools: func(_ context.Context, registry *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			if _, ok := cfg.Servers["exa"]; !ok || len(cfg.Servers) != 1 {
+				t.Fatalf("optional MCP config = %#v, want only exa", cfg.Servers)
+			}
+			close(started)
+			<-release
+			registry.Register(cliFakeMCPRegistryTool{})
+			return noopMCPRuntime{}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("optional MCP initialization did not start")
+			}
+			if options.AwaitToolReadiness == nil {
+				t.Fatal("TUI did not receive optional tool readiness barrier")
+			}
+			if _, ok := options.Registry.Get("mcp_docs_lookup"); ok {
+				t.Fatal("optional MCP tool was published before registration completed")
+			}
+			close(release)
+			options.AwaitToolReadiness(ctx)
+			if _, ok := options.Registry.Get("mcp_docs_lookup"); !ok {
+				t.Fatal("optional MCP tool was not visible after readiness completed")
+			}
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+}
+
 func TestTUIMCPCommandUsesLastGoodConfigOnRefreshError(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -565,6 +628,7 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
 	runtimeClosed := false
+	secret := "sk-proj-" + strings.Repeat("a", 23) + "0"
 
 	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
@@ -591,7 +655,7 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 			return closeFunc(func() error {
 				runtimeClosed = true
 				return nil
-			}), errors.New("register mcp tools failed")
+			}), fmt.Errorf("register mcp tools failed: %s", secret)
 		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
 			t.Fatal("TUI should not launch after MCP registration fails")
@@ -604,6 +668,12 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "register mcp tools failed") {
 		t.Fatalf("stderr missing registration error: %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Fatalf("stderr leaked MCP registration secret: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), redaction.RedactedSecret) {
+		t.Fatalf("stderr missing redaction marker: %s", stderr.String())
 	}
 	if !runtimeClosed {
 		t.Fatal("partial MCP runtime was not closed after registration error")

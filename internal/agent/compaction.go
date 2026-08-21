@@ -144,10 +144,16 @@ func estimateToolDefTokens(tools []zeroruntime.ToolDefinition) int {
 	for _, tool := range tools {
 		total += ApproxTextTokens(tool.Name)
 		total += ApproxTextTokens(tool.Description)
+		total += ApproxTextTokens(string(tool.Type))
 		if len(tool.Parameters) > 0 {
 			if encoded, err := json.Marshal(tool.Parameters); err == nil {
 				total += ApproxTextTokens(string(encoded))
 			}
+		}
+		if tool.Format != nil {
+			total += ApproxTextTokens(tool.Format.Type)
+			total += ApproxTextTokens(tool.Format.Syntax)
+			total += ApproxTextTokens(tool.Format.Definition)
 		}
 		total += 4 // per-tool overhead
 	}
