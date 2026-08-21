@@ -11,21 +11,22 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
-	"github.com/ledongthuc/pdf"
 )
 
-// Dependency posture (see stage 12): the DEFAULT build extracts a PDF's text
-// layer in pure Go via github.com/ledongthuc/pdf (BSD-licensed, no CGO, no
-// transitive deps), so ZERO stays a single static cross-compilable binary with
-// no runtime dependencies. Rasterizing pages to images for vision models needs
-// real font/graphics rendering, which no maintained pure-Go library does well;
-// that path is OPTIONAL and uses the poppler tools (pdftotext / pdftoppm) only
-// when they are already on PATH -- the same "external tool the user may have"
-// posture as the LSP language servers. When poppler is absent, extraction
-// silently degrades to the pure-Go text layer; absence is never an error.
+// Dependency posture: PDF text extraction uses Poppler's pdftotext when it is
+// on PATH and disableExternalTools is false. We intentionally do not retain an
+// in-process parser fallback: the previously used parser materialized all
+// decompressed page text in Zero's own process before exposing a reader. Poppler
+// runs in a separately cancellable process with a capped captured output and a
+// fixed deadline. Rasterizing pages to images for vision models needs
+// real font/graphics rendering and uses pdftoppm only when it is already on
+// PATH -- the same "external tool the user may have" posture as the LSP
+// language servers. When Poppler is unavailable, text extraction fails clearly
+// instead of processing an untrusted document without enforceable limits.
 
 // MaxDocumentBytes is the per-document raw-file cap (32 MiB). PDFs are routinely
 // larger than the image cap, but we still bound the file before it is read into
@@ -38,6 +39,11 @@ const MaxDocumentBytes = 32 << 20
 // usable instead of refused outright.
 const MaxDocumentTextBytes = 256 << 10
 
+// maxPDFInfoOutputBytes bounds the small metadata response consumed from
+// pdfinfo. It is intentionally separate from the text cap because page-count
+// output is not exposed to the model.
+const maxPDFInfoOutputBytes = 64 << 10
+
 // documentTruncatedMarker is appended to capped text so the agent (and the user)
 // can tell extraction was cut short rather than the document simply ending.
 const documentTruncatedMarker = "\n\n[... document text truncated at the size limit ...]"
@@ -47,17 +53,28 @@ const documentTruncatedMarker = "\n\n[... document text truncated at the size li
 // DocumentOptions.MaxPages.
 const defaultMaxRasterPages = 10
 
-// popplerTimeout bounds each external poppler invocation so a wedged or
-// pathological binary cannot hang the CLI/TUI.
+// maxRasterDimension caps both dimensions passed to pdftoppm. The resulting
+// bitmap is below the per-image byte cap even before PNG compression, preventing
+// a tiny PDF with an enormous media box from filling temporary storage.
+const maxRasterDimension = 1536
+
+// popplerTimeout bounds the whole Poppler phase of one PDF attachment so a
+// wedged or pathological document cannot multiply the synchronous CLI/TUI wait
+// across rasterization, text extraction, and page counting.
 const popplerTimeout = 30 * time.Second
+
+// rasterTimeout bounds optional page rendering independently. It lets a vision
+// attachment retain useful diagrams/layout without letting rendering outlive the
+// user-facing extraction deadline or multiply it serially.
+var rasterOperationTimeout = 10 * time.Second
 
 // pdfMagic is the leading signature of every PDF stream. Detection keys on these
 // bytes, never on the file extension alone.
 var pdfMagic = []byte("%PDF-")
 
-// Document is the result of ingesting a PDF: the extracted text layer (always
-// populated when a text layer exists) plus, on the optional vision path, one
-// ImageBlock per rendered page. Pages is the page count the parser reported;
+// Document is the result of ingesting a PDF: its extracted text layer when the
+// bounded extractor succeeds plus, on the optional vision path, one ImageBlock
+// per rendered page. Pages is best-effort external metadata and may be zero;
 // Truncated is set when Text was capped at MaxDocumentTextBytes.
 type Document struct {
 	Text      string
@@ -76,9 +93,8 @@ type DocumentOptions struct {
 	// defaultMaxRasterPages.
 	MaxPages int
 
-	// disableExternalTools forces the pure-Go path even if poppler is installed.
-	// It exists so tests are deterministic on any host; it is intentionally
-	// unexported and not part of the public surface.
+	// disableExternalTools simulates an unavailable Poppler installation for
+	// deterministic tests. It is intentionally unexported and not public API.
 	disableExternalTools bool
 }
 
@@ -131,9 +147,8 @@ func LooksLikeDocumentFile(path string, workspaceRoot string) bool {
 // With opts.Vision and an available rasterizer it also renders the first N pages
 // to ImageBlocks. The file is identified by magic bytes, not its extension, so a
 // ".pdf"-named non-PDF is rejected with a clear error. A PDF with no text layer
-// and no rasterization/OCR available returns an explicit "no extractable text"
-// error rather than a silent empty success. Errors are plain (callers wrap them
-// into surface-specific notice text).
+// and no rasterization/OCR available returns an explicit error rather than a
+// silent empty success. Errors are plain (callers wrap them into surface-specific notice text).
 func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Document, error) {
 	data, err := readDocumentBytes(path, workspaceRoot)
 	if err != nil {
@@ -145,49 +160,81 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 
 	useExternal := !opts.disableExternalTools
 
-	// Vision path (optional): render pages to images via poppler when available.
-	// Failures here are non-fatal -- we still return the text layer below.
+	// Start the independent Poppler operations under one deadline. LoadDocument
+	// runs on the synchronous /image path; running these serially would let one
+	// hostile PDF spend a separate timeout in each process.
 	var images []zeroruntime.ImageBlock
-	if opts.Vision && useExternal {
-		if rendered, rerr := rasterizeWithPoppler(data, opts.maxPages()); rerr == nil {
-			images = rendered
-		}
-	}
-
-	// Text path. Prefer poppler's pdftotext when present (it handles more font
-	// encodings); otherwise use the pure-Go extractor. Either way, absence of the
-	// external tool is not an error.
-	text, pages := "", 0
+	textResult := popplerTextResult{status: popplerTextUnavailable}
+	pages := 0
 	if useExternal {
-		if t, ok := extractTextWithPoppler(data); ok {
-			text = t
-			// pdftotext does not report a page count, so derive it from the pure-Go
-			// reader (cheap structural read, no text extraction) to keep
-			// Document.Pages correct regardless of which text path wins.
-			pages = pdfPageCount(data)
+		ctx, cancel := context.WithTimeout(context.Background(), popplerOperationTimeout)
+		var work sync.WaitGroup
+		textDone := make(chan struct{})
+		var rasterDone <-chan struct{}
+		work.Add(2)
+		go func() {
+			defer work.Done()
+			defer close(textDone)
+			textResult = popplerTextExtractor(ctx, data)
+		}()
+		go func() {
+			defer work.Done()
+			pages = popplerPageCounter(ctx, data)
+		}()
+		if opts.Vision {
+			done := make(chan struct{})
+			rasterDone = done
+			work.Add(1)
+			go func() {
+				defer work.Done()
+				defer close(done)
+				rasterCtx, rasterCancel := context.WithTimeout(ctx, rasterOperationTimeout)
+				defer rasterCancel()
+				// Rendering is optional: text remains usable if it fails or times out.
+				if rendered, rerr := popplerRasterizer(rasterCtx, data, opts.maxPages()); rerr == nil {
+					images = rendered
+				}
+			}()
 		}
-	}
-	if strings.TrimSpace(text) == "" {
-		t, p, terr := extractTextPureGo(data)
-		if terr != nil {
-			// Only surface the pure-Go error when we have nothing else (no poppler
-			// text and no rasterized pages) to offer.
-			if len(images) == 0 {
-				return Document{}, terr
-			}
-		} else {
-			text, pages = t, p
+		<-textDone
+		// Page count is informational. Rendering is optional but, when requested,
+		// contributes usable vision input and has its own shorter deadline.
+		if rasterDone != nil {
+			<-rasterDone
 		}
+		cancel()
+		work.Wait()
 	}
 
-	text, truncated := capDocumentText(text)
+	// Text path. Poppler output is retained through a bounded writer. There is no
+	// in-process fallback because its parser cannot enforce this boundary before
+	// decompression and text aggregation.
+	text, textOverflow := "", false
+	textStatus := textResult.status
+	if textStatus == popplerTextExtracted {
+		text, textOverflow = textResult.text, textResult.overflow
+	}
+
+	// Decide whether any usable text exists before adding a truncation marker.
+	// Otherwise whitespace-only overflow could turn into a marker-only document
+	// that bypasses the no-text guard below.
+	hasText := strings.TrimSpace(text) != ""
+	if !hasText {
+		text, textOverflow = "", false
+	}
+	text, truncated := capDocumentTextWithOverflow(text, textOverflow)
 
 	// Scanned-PDF guard: no text layer AND no rendered pages means we have nothing
 	// the model can use. Say so explicitly instead of returning empty success.
-	if strings.TrimSpace(text) == "" && len(images) == 0 {
-		return Document{}, fmt.Errorf("%s has no extractable text; OCR is not available (install poppler's pdftotext/pdftoppm for image-only PDFs)", path)
+	if !hasText && len(images) == 0 {
+		if textStatus == popplerTextFailed {
+			return Document{}, fmt.Errorf("%s could not extract PDF text with pdftotext", path)
+		}
+		if textStatus == popplerTextUnavailable {
+			return Document{}, fmt.Errorf("%s has no extractable text; install Poppler's pdftotext for PDF text extraction (and pdftoppm for image-only PDFs)", path)
+		}
+		return Document{}, fmt.Errorf("%s has no extractable text; PDF OCR is not available", path)
 	}
-
 	return Document{Text: text, Images: images, Pages: pages, Truncated: truncated}, nil
 }
 
@@ -232,59 +279,19 @@ func readDocumentBytes(path string, workspaceRoot string) ([]byte, error) {
 	return data, nil
 }
 
-// extractTextPureGo extracts the full text layer with the pure-Go parser. The
-// ledongthuc/pdf parser panics (not errors) on some malformed structures, so the
-// whole call is wrapped in a recover: a bad PDF becomes a clean error, never a
-// crash that escapes the package. It returns the joined text and the page count.
-func extractTextPureGo(data []byte) (text string, pages int, err error) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			text, pages = "", 0
-			err = fmt.Errorf("could not parse PDF (malformed or unsupported): %v", rec)
-		}
-	}()
-
-	reader, rerr := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
-	if rerr != nil {
-		return "", 0, fmt.Errorf("could not parse PDF: %w", rerr)
-	}
-	pages = reader.NumPage()
-
-	var buf strings.Builder
-	plain, perr := reader.GetPlainText()
-	if perr != nil {
-		return "", pages, fmt.Errorf("could not extract PDF text: %w", perr)
-	}
-	if _, cerr := io.Copy(&buf, plain); cerr != nil {
-		return "", pages, fmt.Errorf("could not read PDF text: %w", cerr)
-	}
-	return strings.TrimSpace(buf.String()), pages, nil
-}
-
-// pdfPageCount returns the page count via the pure-Go reader without extracting
-// any text. It backs Document.Pages on the poppler text path (pdftotext does not
-// report a count). Like extractTextPureGo it recovers from the parser's panics on
-// malformed input and reports 0 rather than crashing -- the page count is
-// informational, so an unreadable structure simply yields 0.
-func pdfPageCount(data []byte) (pages int) {
-	defer func() {
-		if recover() != nil {
-			pages = 0
-		}
-	}()
-	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return 0
-	}
-	return reader.NumPage()
-}
-
 // capDocumentText truncates text to MaxDocumentTextBytes on a UTF-8 rune
 // boundary and appends documentTruncatedMarker when it had to cut. The second
 // return reports whether truncation happened. The marker is counted against the
 // cap so the returned string never exceeds MaxDocumentTextBytes.
 func capDocumentText(text string) (string, bool) {
-	if len(text) <= MaxDocumentTextBytes {
+	return capDocumentTextWithOverflow(text, false)
+}
+
+// capDocumentTextWithOverflow applies the model text cap and preserves a
+// truncation signal from a bounded upstream reader. That signal is necessary
+// when trimming whitespace makes the retained string appear to fit the cap.
+func capDocumentTextWithOverflow(text string, overflow bool) (string, bool) {
+	if !overflow && len(text) <= MaxDocumentTextBytes {
 		return text, false
 	}
 	// Reserve room for the marker so the final payload (text + marker) stays at or
@@ -294,8 +301,11 @@ func capDocumentText(text string) (string, bool) {
 	if cut < 0 {
 		cut = 0
 	}
+	if cut > len(text) {
+		cut = len(text)
+	}
 	// Back up to a rune boundary so we never split a multi-byte character.
-	for cut > 0 && !utf8RuneStart(text[cut]) {
+	for cut > 0 && cut < len(text) && !utf8RuneStart(text[cut]) {
 		cut--
 	}
 	return text[:cut] + documentTruncatedMarker, true
@@ -308,8 +318,31 @@ func utf8RuneStart(b byte) bool {
 	return b&0xC0 != 0x80
 }
 
+type popplerTextStatus uint8
+
+const (
+	popplerTextUnavailable popplerTextStatus = iota
+	popplerTextFailed
+	popplerTextExtracted
+)
+
+type popplerTextResult struct {
+	text     string
+	overflow bool
+	status   popplerTextStatus
+}
+
+var (
+	popplerTextExtractor      = extractTextWithPoppler
+	popplerPageCounter        = pdfPageCountWithPoppler
+	popplerRasterizer         = rasterizeWithPoppler
+	popplerLookup             = popplerAvailable
+	popplerCommandWithContext = exec.CommandContext
+	popplerOperationTimeout   = popplerTimeout
+)
+
 func (o DocumentOptions) maxPages() int {
-	if o.MaxPages > 0 {
+	if o.MaxPages > 0 && o.MaxPages < defaultMaxRasterPages {
 		return o.MaxPages
 	}
 	return defaultMaxRasterPages
@@ -323,35 +356,99 @@ func popplerAvailable(name string) bool {
 	return err == nil
 }
 
-// extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout) when
-// pdftotext is on PATH. The bool is false when the tool is absent or failed, so
-// the caller can fall back to the pure-Go extractor. Absence is never an error.
-func extractTextWithPoppler(data []byte) (string, bool) {
-	if !popplerAvailable("pdftotext") {
-		return "", false
+// extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout). It
+// keeps executable discovery distinct from execution failure so callers can
+// provide accurate, non-sensitive remediation without exposing tool stderr.
+func extractTextWithPoppler(ctx context.Context, data []byte) popplerTextResult {
+	if !popplerLookup("pdftotext") {
+		return popplerTextResult{status: popplerTextUnavailable}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
 	// "-layout" keeps the visual column layout; the trailing "- -" reads the PDF
 	// from stdin and writes UTF-8 text to stdout.
-	cmd := exec.CommandContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
+	cmd := popplerCommandWithContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
 	cmd.Stdin = bytes.NewReader(data)
-	var stdout, stderr bytes.Buffer
+	stdout := newBoundedBuffer(MaxDocumentTextBytes)
+	stdout.onOverflow = cancel
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		return "", false
+		if stdout.overflow {
+			return popplerTextResult{text: strings.TrimSpace(stdout.String()), overflow: true, status: popplerTextExtracted}
+		}
+		return popplerTextResult{status: popplerTextFailed}
 	}
-	return strings.TrimSpace(stdout.String()), true
+	return popplerTextResult{text: strings.TrimSpace(stdout.String()), overflow: stdout.overflow, status: popplerTextExtracted}
 }
+
+func pdfPageCountWithPoppler(ctx context.Context, data []byte) int {
+	if !popplerLookup("pdfinfo") {
+		return 0
+	}
+	cmd := popplerCommandWithContext(ctx, "pdfinfo", "-")
+	cmd.Stdin = bytes.NewReader(data)
+	var out boundedBuffer
+	out.limit = maxPDFInfoOutputBytes
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil || out.overflow {
+		return 0
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "Pages:"); ok {
+			var pages int
+			if _, err := fmt.Sscan(value, &pages); err == nil {
+				return pages
+			}
+		}
+	}
+	return 0
+}
+
+// boundedBuffer retains at most limit+1 bytes while accepting the complete
+// write. The extra byte distinguishes exact-limit output from overflow without
+// allowing a subprocess or parser to grow memory without bound.
+type boundedBuffer struct {
+	buffer     bytes.Buffer
+	limit      int
+	overflow   bool
+	onOverflow func()
+}
+
+func newBoundedBuffer(limit int) boundedBuffer {
+	return boundedBuffer{limit: limit}
+}
+
+func (buffer *boundedBuffer) Write(data []byte) (int, error) {
+	remaining := buffer.limit + 1 - buffer.buffer.Len()
+	if remaining > 0 {
+		if remaining > len(data) {
+			remaining = len(data)
+		}
+		_, _ = buffer.buffer.Write(data[:remaining])
+	}
+	if buffer.buffer.Len() > buffer.limit {
+		if !buffer.overflow {
+			buffer.overflow = true
+			if buffer.onOverflow != nil {
+				buffer.onOverflow()
+			}
+		}
+	}
+	return len(data), nil
+}
+
+func (buffer *boundedBuffer) Len() int { return buffer.buffer.Len() }
+
+func (buffer *boundedBuffer) String() string { return buffer.buffer.String() }
 
 // rasterizeWithPoppler renders the first maxPages pages to PNG via pdftoppm and
 // returns them as normalized ImageBlocks (reusing the image allow-list, sniff,
 // and per-image cap). It returns an error when pdftoppm is absent or rendering
 // produced nothing; the caller treats that as "no rasterization available" and
 // keeps the text layer.
-func rasterizeWithPoppler(data []byte, maxPages int) ([]zeroruntime.ImageBlock, error) {
+func rasterizeWithPoppler(ctx context.Context, data []byte, maxPages int) ([]zeroruntime.ImageBlock, error) {
 	if !popplerAvailable("pdftoppm") {
 		return nil, fmt.Errorf("pdftoppm not available")
 	}
@@ -365,16 +462,14 @@ func rasterizeWithPoppler(data []byte, maxPages int) ([]zeroruntime.ImageBlock, 
 	}
 	defer os.RemoveAll(dir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
-	defer cancel()
-
 	prefix := filepath.Join(dir, "page")
-	// -png: PNG output; -r 150: 150 DPI (legible without huge files);
-	// -f 1 / -l N: render only the first N pages so context can't blow up.
-	cmd := exec.CommandContext(ctx, "pdftoppm", "-png", "-r", "150", "-f", "1", "-l", fmt.Sprintf("%d", maxPages), "-", prefix)
+	// -png: PNG output; -r 150: legible default resolution; -scale-to limits
+	// each output bitmap's largest dimension; -f 1 / -l N limits page count.
+	cmd := exec.CommandContext(ctx, "pdftoppm", "-png", "-r", "150", "-scale-to", fmt.Sprintf("%d", maxRasterDimension), "-f", "1", "-l", fmt.Sprintf("%d", maxPages), "-", prefix)
 	cmd.Stdin = bytes.NewReader(data)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// Renderer diagnostics are not surfaced to callers; retaining hostile tool
+	// output would bypass the attachment's bounded-output contract.
+	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("pdftoppm failed: %w", err)
 	}

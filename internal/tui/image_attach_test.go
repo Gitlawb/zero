@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -317,12 +319,36 @@ func writeTestPDF(t *testing.T, dir, name, text string) string {
 	return path
 }
 
+func requirePopplerText(t *testing.T, path string) {
+	t.Helper()
+	executable, err := exec.LookPath("pdftotext")
+	if err != nil {
+		t.Skip("pdftotext is not installed")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read PDF fixture: %v", err)
+	}
+	cmd := exec.Command(executable, "-layout", "-enc", "UTF-8", "-", "-")
+	cmd.Stdin = bytes.NewReader(data)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		// This is an optional host integration. Some supported Poppler builds
+		// reject this deliberately minimal test fixture even though the loader's
+		// command shape is correct; imageinput's helper-process tests cover that
+		// production path without depending on a host parser build.
+		t.Skipf("pdftotext cannot process this fixture on this host: %v", err)
+	}
+}
+
 // A PDF carries a text layer every model can read, so /image <file.pdf> stages a
 // pending document even on a non-vision model -- unlike a raw image, which is
 // refused. No page images are staged without a rasterizer.
 func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec.pdf", "Design spec body text")
+	path := writeTestPDF(t, root, "spec.pdf", "Design spec body text")
+	requirePopplerText(t, path)
 
 	m := newModel(context.Background(), Options{Cwd: root, ModelName: "totally-unknown-custom"})
 	m.input.SetValue("/image spec.pdf")
@@ -350,7 +376,8 @@ func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 // a non-vision model instead of being refused as a non-image.
 func TestImageCommandAttachesExtensionlessPDFByContent(t *testing.T) {
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec", "Extensionless PDF body text")
+	path := writeTestPDF(t, root, "spec", "Extensionless PDF body text")
+	requirePopplerText(t, path)
 
 	m := newModel(context.Background(), Options{Cwd: root, ModelName: "totally-unknown-custom"})
 	m.input.SetValue("/image spec")
@@ -388,10 +415,45 @@ func TestImageCommandRejectsFakePDF(t *testing.T) {
 	}
 }
 
+func TestImageCommandRejectsMalformedPDF(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "broken.pdf"), []byte("%PDF-1.4\nbroken"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	m := newModel(context.Background(), Options{Cwd: root, ModelName: "gpt-4.1"})
+	m.input.SetValue("/image broken.pdf")
+	updated, _ := m.handleSubmit()
+	next := updated.(model)
+	if len(next.pendingDocuments) != 0 || len(next.pendingImages) != 0 {
+		t.Fatal("malformed PDF must not stage attachments")
+	}
+	if notice := lastTranscriptText(next); !strings.Contains(notice, "PDF") {
+		t.Fatalf("expected PDF extraction notice, got %q", notice)
+	}
+}
+
+func TestImageCommandExplainsWhenBoundedPDFExtractorIsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	writeTestPDF(t, root, "spec.pdf", "text")
+	t.Setenv("PATH", "")
+
+	m := newModel(context.Background(), Options{Cwd: root, ModelName: "gpt-4.1"})
+	m.input.SetValue("/image spec.pdf")
+	updated, _ := m.handleSubmit()
+	next := updated.(model)
+	if len(next.pendingDocuments) != 0 || len(next.pendingImages) != 0 {
+		t.Fatal("an unavailable bounded extractor must not stage a document")
+	}
+	if notice := lastTranscriptText(next); !strings.Contains(notice, "pdftotext") {
+		t.Fatalf("expected installation guidance, got %q", notice)
+	}
+}
+
 // /image clear removes staged documents as well as images.
 func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec.pdf", "some text")
+	path := writeTestPDF(t, root, "spec.pdf", "some text")
+	requirePopplerText(t, path)
 
 	m := newModel(context.Background(), Options{Cwd: root, ModelName: "gpt-4.1"})
 	m.input.SetValue("/image spec.pdf")
@@ -426,7 +488,8 @@ func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 // receives (so the model can read it), and the pending documents are cleared.
 func TestSubmitPrependsDocumentTextThenClears(t *testing.T) {
 	root := t.TempDir()
-	writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
+	path := writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
+	requirePopplerText(t, path)
 
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "ok"},

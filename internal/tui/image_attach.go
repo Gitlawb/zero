@@ -163,8 +163,9 @@ func (m model) attachClipboardImage(data []byte, mediaType string) model {
 }
 
 // handleImageCommand processes "/image <path>" and "/image clear". A bare
-// "/image" prints usage. PDFs are routed to the document path (text layer always
-// attaches; pages rasterize to images only for vision models with a rasterizer).
+// "/image" prints usage. PDFs are routed to the document path (their text layer
+// attaches when pdftotext can extract it; pages rasterize to images only for
+// vision models with a rasterizer).
 // Image files attach only to vision models. Attachment failures (missing file,
 // unsupported type, oversize) surface as an inline notice and attach nothing.
 func (m model) handleImageCommand(arg string) model {
@@ -217,12 +218,10 @@ type pendingDocument struct {
 	text  string
 }
 
-// handleDocumentAttach loads a PDF through imageinput.LoadDocument. The text
+// handleDocumentAttach loads a PDF through imageinput.LoadDocument. Its text
 // layer is staged for every model; when the active model supports vision and a
-// rasterizer is available, the rendered pages are staged through the existing
-// pending-image pipeline too. A scanned PDF with no text (and no rasterizer)
-// surfaces LoadDocument's explicit "no extractable text" notice and attaches
-// nothing.
+// rasterizer is available, rendered pages are staged through the existing
+// pending-image pipeline too. A load error prevents either result from staging.
 func (m model) handleDocumentAttach(path string) model {
 	doc, err := imageinput.LoadDocument(path, m.cwd, imageinput.DocumentOptions{
 		Vision: m.modelSupportsVisionTUI(),

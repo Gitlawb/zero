@@ -2,21 +2,25 @@ package imageinput
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const minimalPDFTextChunkSize = 80
 
 // buildMinimalPDF assembles a tiny, single-page PDF whose content stream draws
-// the given text. It computes a real cross-reference table and trailer so a
-// pure-Go PDF parser (ledongthuc/pdf) accepts it. Generating the fixture in-test
-// keeps the repo free of opaque binary blobs while still exercising the real
-// text-extraction path on real PDF bytes.
+// the given text. It computes a real cross-reference table and trailer, keeping
+// the repo free of opaque binary blobs for PDF routing tests.
 func buildMinimalPDF(text string) []byte {
 	var buf bytes.Buffer
 	offsets := make([]int, 0, 8)
@@ -129,6 +133,7 @@ func TestLoadDocumentTextExtraction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
+	stubPDFTools(t, want, false, 1)
 
 	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{})
 	if err != nil {
@@ -142,6 +147,50 @@ func TestLoadDocumentTextExtraction(t *testing.T) {
 	}
 	if doc.Pages != 1 {
 		t.Fatalf("Pages = %d, want 1", doc.Pages)
+	}
+}
+
+func TestExtractTextWithPoppler(t *testing.T) {
+	originalLookup, originalCommand := popplerLookup, popplerCommandWithContext
+	popplerLookup = func(name string) bool { return name == "pdftotext" }
+	popplerCommandWithContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestPDFCommandHelper")
+		cmd.Env = append(os.Environ(), "ZERO_PDF_HELPER_MODE=fail")
+		return cmd
+	}
+	t.Cleanup(func() {
+		popplerLookup, popplerCommandWithContext = originalLookup, originalCommand
+	})
+
+	result := extractTextWithPoppler(t.Context(), buildMinimalPDF("ignored by helper"))
+	if result.status != popplerTextFailed {
+		t.Fatalf("status = %d, want execution failure", result.status)
+	}
+}
+
+func TestPDFCommandHelper(t *testing.T) {
+	switch os.Getenv("ZERO_PDF_HELPER_MODE") {
+	case "fail":
+		os.Exit(1)
+	case "flood":
+		_, _ = os.Stdout.WriteString(strings.Repeat("x", MaxDocumentTextBytes+1024))
+		os.Exit(0)
+	}
+}
+
+func TestExtractTextWithPopplerCancelsOnOverflow(t *testing.T) {
+	originalLookup, originalCommand := popplerLookup, popplerCommandWithContext
+	popplerLookup = func(name string) bool { return name == "pdftotext" }
+	popplerCommandWithContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestPDFCommandHelper")
+		cmd.Env = append(os.Environ(), "ZERO_PDF_HELPER_MODE=flood")
+		return cmd
+	}
+	t.Cleanup(func() { popplerLookup, popplerCommandWithContext = originalLookup, originalCommand })
+
+	result := extractTextWithPoppler(t.Context(), buildMinimalPDF("ignored"))
+	if result.status != popplerTextExtracted || !result.overflow {
+		t.Fatalf("result = %#v, want extracted overflow", result)
 	}
 }
 
@@ -218,6 +267,7 @@ func TestLoadDocumentTruncatesLongText(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "long.pdf"), buildMinimalPDF(body.String()), 0o644); err != nil {
 		t.Fatalf("write long: %v", err)
 	}
+	stubPDFTools(t, body.String(), true, 1)
 	doc, err := LoadDocument("long.pdf", root, DocumentOptions{})
 	if err != nil {
 		t.Fatalf("LoadDocument: %v", err)
@@ -233,25 +283,20 @@ func TestLoadDocumentTruncatesLongText(t *testing.T) {
 	}
 }
 
-// A PDF with no extractable text layer and no rasterization/OCR available must
-// surface the explicit "no extractable text" message, never a silent empty
-// success.
+// A PDF with no extractable text layer and no rasterization available must
+// surface an explicit error, never a silent empty success.
 func TestLoadDocumentNoTextNoRaster(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "scan.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
 		t.Fatalf("write scan: %v", err)
 	}
-	// Force the pure-Go path with no external rasterizer so the no-text branch is
-	// deterministic regardless of what is installed on the test host.
+	// Simulate a host without Poppler so the no-text branch is deterministic.
 	_, err := LoadDocument("scan.pdf", root, DocumentOptions{disableExternalTools: true})
 	if err == nil {
 		t.Fatal("expected an error for a PDF with no extractable text and no raster")
 	}
 	if !strings.Contains(err.Error(), "no extractable text") {
-		t.Fatalf("error %q should explain there is no extractable text", err.Error())
-	}
-	if !strings.Contains(err.Error(), "OCR") {
-		t.Fatalf("error %q should mention OCR is unavailable", err.Error())
+		t.Fatalf("error %q should explain that no text is available", err.Error())
 	}
 }
 
@@ -284,8 +329,8 @@ func buildEmptyTextPDF() []byte {
 	return buf.Bytes()
 }
 
-// Malformed PDF bytes that pass the header check but break the parser must be
-// turned into a clean error, never a panic that escapes the package.
+// Malformed PDF bytes that pass the header check must produce a clean error
+// when no safe extractor is available.
 func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	root := t.TempDir()
 	bad := []byte("%PDF-1.4\nthis header is valid but the body and xref are garbage\nstartxref\n9\n%%EOF\n")
@@ -298,41 +343,126 @@ func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	}
 }
 
-// When the external poppler tools are absent (or disabled), extraction falls
-// back to the pure-Go text path and still succeeds; absence is never an error.
-func TestLoadDocumentFallsBackToPureGo(t *testing.T) {
+func TestLoadDocumentRequiresBoundedExtractor(t *testing.T) {
 	root := t.TempDir()
-	want := "Pure Go fallback text"
-	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
-	if err != nil {
-		t.Fatalf("LoadDocument (pure-Go): %v", err)
-	}
-	if !strings.Contains(doc.Text, want) {
-		t.Fatalf("pure-Go text %q should contain %q", doc.Text, want)
+	_, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
+	if err == nil || !strings.Contains(err.Error(), "pdftotext") {
+		t.Fatalf("LoadDocument error = %v, want extractor guidance", err)
 	}
 }
 
-// Vision-mode extraction without an available rasterizer must not error: it
-// degrades to the text layer (a vision model can still read the text block).
-func TestLoadDocumentVisionWithoutRasterizerUsesText(t *testing.T) {
+func TestLoadDocumentDoesNotMisreportInstalledPopplerFailure(t *testing.T) {
+	root := t.TempDir()
+	bad := []byte("%PDF-1.4\nthis header is valid but the body and xref are garbage\nstartxref\n9\n%%EOF\n")
+	if err := os.WriteFile(filepath.Join(root, "bad.pdf"), bad, 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	original := popplerTextExtractor
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult { return popplerTextResult{status: popplerTextFailed} }
+	t.Cleanup(func() { popplerTextExtractor = original })
+
+	_, err := LoadDocument("bad.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "could not extract PDF text") {
+		t.Fatalf("LoadDocument error = %v, want extraction failure", err)
+	}
+	if strings.Contains(err.Error(), "install Poppler") {
+		t.Fatalf("LoadDocument error = %q must not claim Poppler is absent", err)
+	}
+}
+
+func TestLoadDocumentDoesNotMisreportTextlessPDFAsMissingPoppler(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "scan.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
+		t.Fatalf("write scan: %v", err)
+	}
+	original := popplerTextExtractor
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{status: popplerTextExtracted}
+	}
+	t.Cleanup(func() { popplerTextExtractor = original })
+
+	_, err := LoadDocument("scan.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "no extractable text") {
+		t.Fatalf("LoadDocument error = %v, want textless-PDF guidance", err)
+	}
+	if strings.Contains(err.Error(), "install Poppler") {
+		t.Fatalf("LoadDocument error = %q must not claim Poppler is absent", err)
+	}
+}
+
+func TestLoadDocumentRejectsWhitespaceOnlyOverflow(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "blank.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	original := popplerTextExtractor
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: strings.Repeat(" ", MaxDocumentTextBytes), overflow: true, status: popplerTextExtracted}
+	}
+	t.Cleanup(func() { popplerTextExtractor = original })
+
+	_, err := LoadDocument("blank.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "no extractable text") {
+		t.Fatalf("LoadDocument error = %v, want textless-PDF guidance", err)
+	}
+}
+
+func TestLoadDocumentVisionUsesRenderedPagesWhenTextExtractionFails(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "scan.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
+		t.Fatalf("write scan: %v", err)
+	}
+	originalText, originalPages, originalRaster := popplerTextExtractor, popplerPageCounter, popplerRasterizer
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{status: popplerTextUnavailable}
+	}
+	popplerPageCounter = func(context.Context, []byte) int { return 1 }
+	popplerRasterizer = func(context.Context, []byte, int) ([]zeroruntime.ImageBlock, error) {
+		return []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("png")}}, nil
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerRasterizer = originalText, originalPages, originalRaster
+	})
+
+	doc, err := LoadDocument("scan.pdf", root, DocumentOptions{Vision: true})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "" || len(doc.Images) != 1 || doc.Pages != 1 {
+		t.Fatalf("Document = %#v, want rendered page with no text", doc)
+	}
+}
+
+func TestLoadDocumentVisionUsesText(t *testing.T) {
 	root := t.TempDir()
 	want := "Vision degrade to text"
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true, disableExternalTools: true})
+	stubPDFTools(t, want, false, 1)
+
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true})
 	if err != nil {
-		t.Fatalf("LoadDocument (vision, no raster): %v", err)
-	}
-	if len(doc.Images) != 0 {
-		t.Fatalf("no rasterizer available, expected 0 images, got %d", len(doc.Images))
+		t.Fatalf("LoadDocument: %v", err)
 	}
 	if !strings.Contains(doc.Text, want) {
-		t.Fatalf("vision-without-raster should keep text, got %q", doc.Text)
+		t.Fatalf("vision input should keep text, got %q", doc.Text)
 	}
+}
+
+func stubPDFTools(t *testing.T, text string, overflow bool, pages int) {
+	t.Helper()
+	originalTextExtractor, originalPageCounter := popplerTextExtractor, popplerPageCounter
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: text, overflow: overflow, status: popplerTextExtracted}
+	}
+	popplerPageCounter = func(context.Context, []byte) int { return pages }
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter = originalTextExtractor, originalPageCounter
+	})
 }
 
 // capDocumentText must keep the final payload (text + marker) at or under the
@@ -361,17 +491,210 @@ func TestCapDocumentTextRespectsCap(t *testing.T) {
 	if got != under {
 		t.Fatal("at-cap text must be returned unchanged")
 	}
+
+	got, truncated = capDocumentTextWithOverflow(under, true)
+	if !truncated {
+		t.Fatal("upstream overflow must preserve truncation after whitespace trimming")
+	}
+	if !strings.HasSuffix(got, documentTruncatedMarker) {
+		t.Fatal("upstream overflow should add the truncation marker")
+	}
+
+	got, truncated = capDocumentTextWithOverflow("x", true)
+	if !truncated || got != "x"+documentTruncatedMarker {
+		t.Fatalf("short overflow = (%q, %v), want text plus marker without a panic", got, truncated)
+	}
 }
 
-// pdfPageCount must report the real page count from PDF bytes (this is what
-// backs Document.Pages on the poppler text path, where pdftotext gives no count)
-// and must return 0 -- not panic -- on garbage.
-func TestPDFPageCount(t *testing.T) {
-	if got := pdfPageCount(buildMinimalPDF("one page")); got != 1 {
-		t.Fatalf("pdfPageCount = %d, want 1", got)
+func TestPDFOutputReadersAreBounded(t *testing.T) {
+	buffer := newBoundedBuffer(16)
+	if _, err := buffer.Write([]byte(strings.Repeat("y", 1024))); err != nil {
+		t.Fatalf("boundedBuffer.Write: %v", err)
 	}
-	if got := pdfPageCount([]byte("not a pdf at all")); got != 0 {
-		t.Fatalf("pdfPageCount on garbage = %d, want 0", got)
+	if !buffer.overflow {
+		t.Fatal("boundedBuffer should report overflow")
+	}
+	if buffer.Len() != 17 {
+		t.Fatalf("boundedBuffer retained %d bytes, want 17", buffer.Len())
+	}
+
+	buffer = newBoundedBuffer(16)
+	_, _ = buffer.Write([]byte(strings.Repeat("z", 17)))
+	if !buffer.overflow {
+		t.Fatal("boundedBuffer must report exactly limit+1 bytes as overflow")
+	}
+
+	buffer = newBoundedBuffer(16)
+	overflowed := false
+	buffer.onOverflow = func() { overflowed = true }
+	if _, err := io.Copy(&buffer, strings.NewReader(strings.Repeat("q", 1024))); err != nil {
+		t.Fatalf("io.Copy into boundedBuffer: %v", err)
+	}
+	if !buffer.overflow || !overflowed || buffer.Len() != 17 {
+		t.Fatalf("io.Copy bypassed bound: overflow=%v len=%d", buffer.overflow, buffer.Len())
+	}
+
+	buffer = newBoundedBuffer(16)
+	calls := 0
+	buffer.onOverflow = func() { calls++ }
+	for range 4 {
+		_, _ = buffer.Write([]byte(strings.Repeat("m", 8)))
+	}
+	if !buffer.overflow || calls != 1 || buffer.Len() != 17 {
+		t.Fatalf("incremental writes: overflow=%v calls=%d len=%d", buffer.overflow, calls, buffer.Len())
+	}
+}
+
+func TestLoadDocumentUsesOnePopplerDeadline(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "slow.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerOperationTimeout
+	popplerOperationTimeout = 50 * time.Millisecond
+	textStarted, pagesStarted := make(chan struct{}), make(chan struct{})
+	popplerTextExtractor = func(ctx context.Context, _ []byte) popplerTextResult {
+		close(textStarted)
+		<-ctx.Done()
+		return popplerTextResult{status: popplerTextFailed}
+	}
+	popplerPageCounter = func(ctx context.Context, _ []byte) int {
+		close(pagesStarted)
+		<-ctx.Done()
+		return 0
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerOperationTimeout = originalText, originalPages, originalTimeout
+	})
+
+	started := time.Now()
+	_, err := LoadDocument("slow.pdf", root, DocumentOptions{})
+	if err == nil || !strings.Contains(err.Error(), "could not extract PDF text") {
+		t.Fatalf("LoadDocument error = %v, want timed-out extraction failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("LoadDocument took %s; independent Poppler operations must share one deadline", elapsed)
+	}
+	select {
+	case <-textStarted:
+	default:
+		t.Fatal("text extraction did not start")
+	}
+	select {
+	case <-pagesStarted:
+	default:
+		t.Fatal("page counting did not start")
+	}
+}
+
+func TestLoadDocumentDoesNotWaitForInformationalPageCount(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "fast.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerOperationTimeout
+	popplerOperationTimeout = time.Second
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: "text", status: popplerTextExtracted}
+	}
+	popplerPageCounter = func(ctx context.Context, _ []byte) int {
+		<-ctx.Done()
+		return 0
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerOperationTimeout = originalText, originalPages, originalTimeout
+	})
+
+	started := time.Now()
+	doc, err := LoadDocument("fast.pdf", root, DocumentOptions{})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "text" || doc.Pages != 0 {
+		t.Fatalf("Document = %#v, want attached text with no delayed page count", doc)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("LoadDocument took %s; informational page count must not delay attachment", elapsed)
+	}
+}
+
+func TestLoadDocumentVisionRetainsRasterWhenTextSucceeds(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "fast.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalRaster, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerRasterizer, popplerOperationTimeout
+	popplerOperationTimeout = time.Second
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: "text", status: popplerTextExtracted}
+	}
+	popplerPageCounter = func(ctx context.Context, _ []byte) int {
+		<-ctx.Done()
+		return 0
+	}
+	popplerRasterizer = func(context.Context, []byte, int) ([]zeroruntime.ImageBlock, error) {
+		return []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("png")}}, nil
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerRasterizer, popplerOperationTimeout = originalText, originalPages, originalRaster, originalTimeout
+	})
+
+	doc, err := LoadDocument("fast.pdf", root, DocumentOptions{Vision: true})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "text" || len(doc.Images) != 1 {
+		t.Fatalf("Document = %#v, want text and rendered page", doc)
+	}
+}
+
+func TestLoadDocumentVisionRasterDeadline(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "slow.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalRaster, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerRasterizer, rasterOperationTimeout
+	rasterOperationTimeout = 50 * time.Millisecond
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: "text", status: popplerTextExtracted}
+	}
+	popplerPageCounter = func(context.Context, []byte) int { return 1 }
+	popplerRasterizer = func(ctx context.Context, _ []byte, _ int) ([]zeroruntime.ImageBlock, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerRasterizer, rasterOperationTimeout = originalText, originalPages, originalRaster, originalTimeout
+	})
+
+	started := time.Now()
+	doc, err := LoadDocument("slow.pdf", root, DocumentOptions{Vision: true})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "text" || len(doc.Images) != 0 {
+		t.Fatalf("Document = %#v, want text after raster deadline", doc)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("LoadDocument took %s; raster deadline was not enforced", elapsed)
+	}
+}
+
+func TestLoadDocumentHostilePDFDoesNotUseInProcessParser(t *testing.T) {
+	root := t.TempDir()
+	cases := map[string][]byte{
+		"cycle.pdf": []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 1 0 R /Parent 1 0 R /Kids [1 0 R] /Count 999999999 /First 1 0 R /Next 1 0 R >>\nendobj\ntrailer\n<< /Root 1 0 R /Size 999999999 >>\nstartxref\n9\n%%EOF\n"),
+		"hex.pdf":   []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\nstream\n<" + strings.Repeat("A", 4096) + "\nendstream\n%%EOF\n"),
+	}
+	for name, body := range cases {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		_, err := LoadDocument(name, root, DocumentOptions{disableExternalTools: true})
+		if err == nil || !strings.Contains(err.Error(), "pdftotext") {
+			t.Fatalf("LoadDocument(%s) error = %v, want extractor guidance", name, err)
+		}
 	}
 }
 
@@ -420,5 +743,17 @@ func TestIsProbablyDocumentPath(t *testing.T) {
 		if got := IsProbablyDocumentPath(path); got != want {
 			t.Fatalf("IsProbablyDocumentPath(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+func TestDocumentOptionsMaxPagesIsHardCapped(t *testing.T) {
+	if got := (DocumentOptions{}).maxPages(); got != defaultMaxRasterPages {
+		t.Fatalf("default max pages = %d, want %d", got, defaultMaxRasterPages)
+	}
+	if got := (DocumentOptions{MaxPages: 3}).maxPages(); got != 3 {
+		t.Fatalf("requested max pages = %d, want 3", got)
+	}
+	if got := (DocumentOptions{MaxPages: defaultMaxRasterPages + 1}).maxPages(); got != defaultMaxRasterPages {
+		t.Fatalf("oversized max pages = %d, want hard cap %d", got, defaultMaxRasterPages)
 	}
 }
