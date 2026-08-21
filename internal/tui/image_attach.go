@@ -163,8 +163,9 @@ func (m model) attachClipboardImage(data []byte, mediaType string) model {
 }
 
 // handleImageCommand processes "/image <path>" and "/image clear". A bare
-// "/image" prints usage. PDFs are routed to the document path (text layer always
-// attaches; pages rasterize to images only for vision models with a rasterizer).
+// "/image" prints usage. PDFs are routed to the document path (their text layer
+// attaches when pdftotext can extract it; pages rasterize to images only for
+// vision models with a rasterizer).
 // Image files attach only to vision models. Attachment failures (missing file,
 // unsupported type, oversize) surface as an inline notice and attach nothing.
 func (m model) handleImageCommand(arg string) model {
