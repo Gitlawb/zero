@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -500,6 +501,14 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	_, _ = buffer.Write([]byte(strings.Repeat("z", 17)))
 	if !buffer.overflow {
 		t.Fatal("boundedBuffer must report exactly limit+1 bytes as overflow")
+	}
+
+	buffer = newBoundedBuffer(16)
+	if _, err := io.Copy(&buffer, strings.NewReader(strings.Repeat("q", 1024))); err != nil {
+		t.Fatalf("io.Copy into boundedBuffer: %v", err)
+	}
+	if !buffer.overflow || buffer.Len() != 17 {
+		t.Fatalf("io.Copy bypassed bound: overflow=%v len=%d", buffer.overflow, buffer.Len())
 	}
 }
 

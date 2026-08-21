@@ -53,6 +53,11 @@ const documentTruncatedMarker = "\n\n[... document text truncated at the size li
 // DocumentOptions.MaxPages.
 const defaultMaxRasterPages = 10
 
+// maxRasterDimension caps both dimensions passed to pdftoppm. The resulting
+// bitmap is below the per-image byte cap even before PNG compression, preventing
+// a tiny PDF with an enormous media box from filling temporary storage.
+const maxRasterDimension = 1536
+
 // popplerTimeout bounds the whole Poppler phase of one PDF attachment so a
 // wedged or pathological document cannot multiply the synchronous CLI/TUI wait
 // across rasterization, text extraction, and page counting.
@@ -387,7 +392,7 @@ func pdfPageCountWithPoppler(ctx context.Context, data []byte) int {
 // write. The extra byte distinguishes exact-limit output from overflow without
 // allowing a subprocess or parser to grow memory without bound.
 type boundedBuffer struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	limit    int
 	overflow bool
 }
@@ -397,18 +402,22 @@ func newBoundedBuffer(limit int) boundedBuffer {
 }
 
 func (buffer *boundedBuffer) Write(data []byte) (int, error) {
-	remaining := buffer.limit + 1 - buffer.Len()
+	remaining := buffer.limit + 1 - buffer.buffer.Len()
 	if remaining > 0 {
 		if remaining > len(data) {
 			remaining = len(data)
 		}
-		_, _ = buffer.Buffer.Write(data[:remaining])
+		_, _ = buffer.buffer.Write(data[:remaining])
 	}
-	if buffer.Len() > buffer.limit {
+	if buffer.buffer.Len() > buffer.limit {
 		buffer.overflow = true
 	}
 	return len(data), nil
 }
+
+func (buffer *boundedBuffer) Len() int { return buffer.buffer.Len() }
+
+func (buffer *boundedBuffer) String() string { return buffer.buffer.String() }
 
 // rasterizeWithPoppler renders the first maxPages pages to PNG via pdftoppm and
 // returns them as normalized ImageBlocks (reusing the image allow-list, sniff,
@@ -430,9 +439,9 @@ func rasterizeWithPoppler(ctx context.Context, data []byte, maxPages int) ([]zer
 	defer os.RemoveAll(dir)
 
 	prefix := filepath.Join(dir, "page")
-	// -png: PNG output; -r 150: 150 DPI (legible without huge files);
-	// -f 1 / -l N: render only the first N pages so context can't blow up.
-	cmd := exec.CommandContext(ctx, "pdftoppm", "-png", "-r", "150", "-f", "1", "-l", fmt.Sprintf("%d", maxPages), "-", prefix)
+	// -png: PNG output; -r 150: legible default resolution; -scale-to limits
+	// each output bitmap's largest dimension; -f 1 / -l N limits page count.
+	cmd := exec.CommandContext(ctx, "pdftoppm", "-png", "-r", "150", "-scale-to", fmt.Sprintf("%d", maxRasterDimension), "-f", "1", "-l", fmt.Sprintf("%d", maxPages), "-", prefix)
 	cmd.Stdin = bytes.NewReader(data)
 	// Renderer diagnostics are not surfaced to callers; retaining hostile tool
 	// output would bypass the attachment's bounded-output contract.
