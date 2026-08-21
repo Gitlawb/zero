@@ -797,9 +797,14 @@ var (
 	resetWindowsSandboxUserPasswordFn     = resetWindowsSandboxUserPassword
 	windowsSandboxUserIsManagedFn         = windowsSandboxUserIsManaged
 	windowsSandboxUserHasLegacyCommentFn  = windowsSandboxUserHasLegacyComment
-	windowsSandboxUserIsPrivilegedFn      = windowsSandboxUserIsPrivileged
-	grantWindowsSandboxLogonRightsFn      = grantWindowsSandboxLogonRights
-	revokeWindowsSandboxLogonRightsFn     = revokeWindowsSandboxLogonRights
+	// Seamed so the upgrade CALL SITE can be observed. The legacy-comment probe
+	// was already seamed and the upgrade itself was not, so nothing could tell
+	// whether it ran: deleting the call left the whole suite green, which is
+	// exactly how a fix gets silently reverted by a later change.
+	upgradeWindowsSandboxUserCommentFn = upgradeWindowsSandboxUserComment
+	windowsSandboxUserIsPrivilegedFn   = windowsSandboxUserIsPrivileged
+	grantWindowsSandboxLogonRightsFn   = grantWindowsSandboxLogonRights
+	revokeWindowsSandboxLogonRightsFn  = revokeWindowsSandboxLogonRights
 	// applyWindowsACLPlanFn is a seam so a test can pin the ORDER of setup's ACL
 	// work. The revocation only prevents a stale grant if it runs before the plan
 	// that re-adds the current one; a test that exercised the revoke helper on its
@@ -873,7 +878,7 @@ func provisionWindowsSandboxIdentity(workspaceKey string, role windowsSandboxRol
 		// for bookkeeping. Reported rather than swallowed so a run that keeps
 		// re-adopting the same legacy account is visible.
 		if legacy, err := windowsSandboxUserHasLegacyCommentFn(username); err == nil && legacy {
-			if err := upgradeWindowsSandboxUserComment(username, workspaceKey); err != nil {
+			if err := upgradeWindowsSandboxUserCommentFn(username, workspaceKey); err != nil {
 				fmt.Fprintf(os.Stderr, "%s: could not stamp the workspace key onto sandbox principal %s: %v\n",
 					WindowsSandboxSetupName, username, err)
 			}

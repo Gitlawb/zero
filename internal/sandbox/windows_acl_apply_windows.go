@@ -66,10 +66,29 @@ func (materialization windowsACLMaterialization) createdAnything() bool {
 	return false
 }
 
+// windowsACLRestoreHook observes restore order. Nil in production; the ordering
+// it exposes is load-bearing and was previously pinned by nothing at all,
+// despite a comment claiming otherwise.
+var windowsACLRestoreHook func(path string)
+
 type windowsACLSnapshot struct {
 	Path       string
 	Descriptor *windows.SECURITY_DESCRIPTOR
 	Created    windowsACLMaterialization
+	// TargetID is the object the DACL was read from, so the restore can prove it
+	// is writing back to that same object rather than to whatever the pathname
+	// resolves to at rollback time.
+	//
+	// A no-follow re-open catches a REPARSE POINT swapped in since apply, and
+	// that is what the restore relied on. It cannot catch the other
+	// substitution: rename the target aside and put an ordinary directory of the
+	// same name in its place. Nothing about that decoy is a reparse point, so the
+	// re-open succeeds and the old DACL is written onto the attacker's object
+	// while the real one keeps the aborted setup's ACEs.
+	//
+	// Volume serial plus file index is the same identity the materialization
+	// unwind already anchors on. See reopenWindowsACLDirectoryAsIdentity.
+	TargetID windowsFileIdentity
 }
 
 func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
@@ -240,8 +259,14 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 	// The handle has served its purpose (read+write bound to one object) and is
 	// closed now — rollback re-opens no-follow rather than holding a handle for
 	// the whole sandbox lifetime, since one caller discards the rollback closure.
+	// Captured BEFORE the handle closes, because that handle is the only thing
+	// that names the object rather than the path.
+	targetID, err := windowsIdentityOfHandle(handle)
+	if err != nil {
+		return fail(fmt.Errorf("read windows ACL target identity for %s: %w", path, err))
+	}
 	_ = windows.CloseHandle(handle)
-	return windowsACLSnapshot{Path: path, Descriptor: descriptor, Created: created}, true, nil
+	return windowsACLSnapshot{Path: path, Descriptor: descriptor, Created: created, TargetID: targetID}, true, nil
 }
 
 // openWindowsACLTarget opens path for reading and rewriting its DACL without
@@ -420,15 +445,35 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 			errs = append(errs, fmt.Errorf("read rollback windows DACL for %s: %w", snapshot.Path, err))
 			continue
 		}
-		// Re-open no-follow rather than restoring by pathname: the restore must
-		// land on the real object, not a reparse point swapped in since apply. The
-		// residual window is small because the target is ACL-restricted by now, but
-		// a handle keeps the restore honest. On a materialized-target rollback we
-		// remove it above, so only the restore-existing path opens here.
+		// Re-open no-follow AND prove it is the same object. The no-follow open
+		// alone only rules out a reparse point swapped in since apply; a target
+		// renamed aside and replaced by an ordinary directory of the same name
+		// passes it, and the old DACL would land on the decoy while the real
+		// object kept the aborted setup's ACEs. See windowsACLSnapshot.TargetID.
 		handle, _, err := openWindowsACLTarget(snapshot.Path)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
 			continue
+		}
+		if !snapshot.TargetID.empty() {
+			got, identityErr := windowsIdentityOfHandle(handle)
+			if identityErr != nil {
+				_ = windows.CloseHandle(handle)
+				errs = append(errs, fmt.Errorf("read rollback identity for %s: %w", snapshot.Path, identityErr))
+				continue
+			}
+			if got != snapshot.TargetID {
+				// REFUSED, not forced through. Leaving the real object with the
+				// aborted setup's ACEs is the safe direction: the caller is failing
+				// anyway, and writing a stale DACL onto an object setup never
+				// touched is the one outcome rollback must not produce.
+				_ = windows.CloseHandle(handle)
+				errs = append(errs, fmt.Errorf("refusing to restore windows ACL for %s: it is no longer the object setup applied to", snapshot.Path))
+				continue
+			}
+		}
+		if windowsACLRestoreHook != nil {
+			windowsACLRestoreHook(snapshot.Path)
 		}
 		if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
 			errs = append(errs, fmt.Errorf("rollback windows ACL for %s: %w", snapshot.Path, err))
