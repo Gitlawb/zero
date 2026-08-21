@@ -25,13 +25,13 @@ import (
 func TestSetupAndCommandSelectTheSameRuntimeRoot(t *testing.T) {
 	config := runtimeRootTestConfig(t)
 
-	setupRoot, setupLease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0])
+	setupRoot, setupLease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true)
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot (setup side): %v", err)
 	}
 	setupLease.release()
 
-	commandRoot, commandLease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0])
+	commandRoot, commandLease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true)
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot (command side): %v", err)
 	}
@@ -54,7 +54,7 @@ func TestSetupAndCommandSelectTheSameRuntimeRoot(t *testing.T) {
 func TestAnEvictedRuntimeRootInvalidatesTheMarker(t *testing.T) {
 	config := runtimeRootTestConfig(t)
 
-	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0])
+	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true)
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot: %v", err)
 	}

@@ -1,0 +1,69 @@
+package sandbox
+
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+)
+
+// windowsSandboxRuntimeOwnedNames are the fixed components Zero joins under the
+// cache or temp root, above the per-workspace digest.
+//
+// ONE INVENTORY. deterministicSandboxRuntimeRoot builds a root from these and
+// the traversal below recognizes one by them, and the two have to stay the same
+// list or the traversal silently stops treating a real runtime root as owned:
+// it would fall back to opening by name, which is exactly the unprotected path
+// this file exists to replace. A wrong answer here fails open, so the two uses
+// read from the same place.
+var windowsSandboxRuntimeOwnedNames = []string{"zero", "runtime", "v1"}
+
+// windowsSandboxRuntimeOwnedDepth is how many trailing components of a runtime
+// root Zero creates and therefore owns: the fixed names plus the digest.
+var windowsSandboxRuntimeOwnedDepth = len(windowsSandboxRuntimeOwnedNames) + 1
+
+// windowsSandboxRuntimeOwnedTail splits a runtime root into the ancestor that
+// belongs to the user and the components Zero created.
+//
+// The base is deliberately not our business. On a machine with a redirected
+// LOCALAPPDATA it is legitimately a reparse point, and refusing there would
+// break ordinary setups. Everything below it was created by us and has no
+// business being a link.
+//
+// ok is false when the path does not have the shape a runtime root has, which
+// means the caller must not treat it as owned.
+func windowsSandboxRuntimeOwnedTail(root string) (string, []string, bool) {
+	cleaned := filepath.Clean(strings.TrimSpace(root))
+	if cleaned == "" || cleaned == "." {
+		return "", nil, false
+	}
+	components := make([]string, 0, windowsSandboxRuntimeOwnedDepth)
+	current := cleaned
+	for range windowsSandboxRuntimeOwnedDepth {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil, false
+		}
+		components = append(components, filepath.Base(current))
+		current = parent
+	}
+	// components came off the tail, deepest first.
+	for index, name := range windowsSandboxRuntimeOwnedNames {
+		if !strings.EqualFold(components[len(components)-1-index], name) {
+			return "", nil, false
+		}
+	}
+	ordered := make([]string, 0, len(components))
+	for index := len(components) - 1; index >= 0; index-- {
+		ordered = append(ordered, components[index])
+	}
+	return current, ordered, true
+}
+
+// errRuntimeTailNotOwned reports a path the rooted traversal will not handle.
+// Callers must fail rather than quietly opening it by name.
+var errRuntimeTailNotOwned = errors.New("path is not a sandbox runtime root")
+
+func runtimeTailNotOwned(root string) error {
+	return fmt.Errorf("%w: %s", errRuntimeTailNotOwned, root)
+}

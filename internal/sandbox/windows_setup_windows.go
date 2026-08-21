@@ -31,11 +31,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// directories THIS run created, innermost first, and refuses to remove a
 	// non-empty one, so a pre-existing cache or temp tree is never touched.
 	failed := func(cause error) int {
-		if rollbackErr := runtimeRollback.run(); rollbackErr != nil {
-			fmt.Fprintf(stderr, "%s: %v; runtime rollback failed: %v\n", WindowsSandboxSetupName, cause, rollbackErr)
-			return 1
-		}
-		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+cause.Error())
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+runWindowsSandboxSetupCompensations(cause, nil, runtimeRollback).Error())
 		return 1
 	}
 	if err != nil {
@@ -53,13 +49,13 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		return failed(err)
 	}
 	// From here both have to be undone, ACLs first so the directories are empty
-	// of our grants before they are removed.
+	// of our grants before they are removed. This used to return as soon as the
+	// ACL rollback reported an error, so the runtime rollback never ran and a
+	// failed setup kept the persistent directories it had just created; one undo
+	// failing is the moment the others matter most.
 	failedAfterACL := func(cause error) int {
-		if rollbackErr := rollback(); rollbackErr != nil {
-			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, cause, rollbackErr)
-			return 1
-		}
-		return failed(cause)
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+runWindowsSandboxSetupCompensations(cause, rollback, runtimeRollback).Error())
+		return 1
 	}
 	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
 		return failedAfterACL(err)
@@ -69,6 +65,13 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// the ACL and network plans have applied, so the stamp still means "this tree
 	// carries these permissions" and every caller that records a marker records
 	// the stamp with it.
+	//
+	// It also lands INSIDE the runtime root, before the marker file is renamed
+	// into place, so from here on that root holds an artifact this run wrote.
+	// Handing it to the rollback record is what lets a late failure leave nothing
+	// behind: without it the root is non-empty, the directory removal refuses it
+	// by design, and the residue is permanent.
+	runtimeRollback.stamp = snapshotWindowsSandboxRuntimeStamp(windowsSandboxSelectedRuntimeRoot(config.PermissionProfile))
 	if _, err := WriteWindowsSandboxSetupMarker(config); err != nil {
 		return failedAfterACL(err)
 	}

@@ -151,6 +151,24 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 // is exactly the redirection this guard exists to prevent. A missing target is
 // surfaced as os.ErrNotExist so the caller's materialize path still fires.
 func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
+	// A RUNTIME ROOT IS OPENED BY HANDLE, NOT BY NAME.
+	//
+	// FILE_FLAG_OPEN_REPARSE_POINT below protects only the FINAL component; every
+	// ancestor in the pathname is resolved normally. The runtime tail is the one
+	// part of the tree Zero creates and therefore the one part an unprivileged
+	// local user can predict and pre-empt, and junctions need no privilege, so a
+	// swap at an owned ancestor between the last check and this open redirects the
+	// elevated capability ACL into a directory of their choosing.
+	//
+	// Everything else here is the user's own tree, where an ancestor reparse point
+	// is ordinary configuration and following it is correct.
+	if _, _, owned := windowsSandboxRuntimeOwnedTail(path); owned {
+		handle, err := openWindowsRuntimeTailDirectory(path, windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_TRAVERSE)
+		if err != nil {
+			return 0, false, err
+		}
+		return handle, true, nil
+	}
 	utf16Path, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, false, fmt.Errorf("encode windows ACL target %s: %w", path, err)
