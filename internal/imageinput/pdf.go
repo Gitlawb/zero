@@ -14,18 +14,17 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/ledongthuc/pdf"
 )
 
-// Dependency posture: PDF text extraction uses Poppler's pdftotext when it is
-// on PATH and disableExternalTools is false. We intentionally do not retain an
-// in-process parser fallback: the previously used parser materialized all
-// decompressed page text before exposing a reader, so a later output cap could
-// not bound its CPU or memory use. Rasterizing pages to images for vision models
-// needs
-// real font/graphics rendering and uses pdftoppm only when it is already on
-// PATH -- the same "external tool the user may have" posture as the LSP
-// language servers. When Poppler is unavailable, text extraction fails clearly
-// instead of processing an untrusted document without enforceable limits.
+// Dependency posture: PDF text extraction prefers Poppler's pdftotext when it
+// is on PATH and disableExternalTools is false. If Poppler is unavailable or
+// cannot process a document, the in-process fallback streams its text through a
+// strict output bound. Rasterizing pages to images for vision models needs real
+// font/graphics rendering and uses pdftoppm only when it is already on PATH --
+// the same "external tool the user may have" posture as the LSP language
+// servers. Poppler is therefore an optional quality improvement, never a
+// prerequisite for attaching an ordinary text PDF.
 
 // MaxDocumentBytes is the per-document raw-file cap (32 MiB). PDFs are routinely
 // larger than the image cap, but we still bound the file before it is read into
@@ -81,8 +80,8 @@ type DocumentOptions struct {
 	// defaultMaxRasterPages.
 	MaxPages int
 
-	// disableExternalTools simulates an unavailable Poppler installation for
-	// deterministic tests. It is intentionally unexported and not public API.
+	// disableExternalTools forces the bounded in-process path even if Poppler is
+	// installed. It is intentionally unexported and not public API.
 	disableExternalTools bool
 }
 
@@ -157,14 +156,31 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		}
 	}
 
-	// Text path. Poppler output is retained through a bounded writer. There is no
-	// in-process fallback because its parser cannot enforce this boundary before
-	// decompression and text aggregation.
+	// Text path. Prefer Poppler's bounded output, then fall back to the bounded
+	// in-process reader. The fallback is essential for standalone installs and
+	// platform-specific Poppler command failures.
 	text, pages := "", 0
 	textOverflow := false
+	popplerFailed := false
 	if useExternal {
-		if t, overflow, ok := popplerTextExtractor(data); ok {
-			text, textOverflow = t, overflow
+		result := popplerTextExtractor(data)
+		if result.status == popplerTextExtracted {
+			text, textOverflow = result.text, result.overflow
+		} else if result.status == popplerTextFailed {
+			popplerFailed = true
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		t, p, overflow, textErr := extractTextPureGo(data)
+		if textErr != nil {
+			if len(images) == 0 {
+				if popplerFailed {
+					return Document{}, fmt.Errorf("%s could not extract PDF text", path)
+				}
+				return Document{}, textErr
+			}
+		} else {
+			text, pages, textOverflow = t, p, overflow
 		}
 	}
 	pages = resolvePageCount(data, useExternal, pages)
@@ -178,6 +194,40 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	}
 
 	return Document{Text: text, Images: images, Pages: pages, Truncated: truncated}, nil
+}
+
+// extractTextPureGo reads the fallback parser's text reader through a hard cap,
+// retaining at most MaxDocumentTextBytes plus one byte. The parser can panic on
+// malformed input, so keep the recovery boundary around the entire operation.
+func extractTextPureGo(data []byte) (text string, pages int, overflow bool, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			text, pages, overflow = "", 0, false
+			err = fmt.Errorf("could not parse PDF (malformed or unsupported): %v", rec)
+		}
+	}()
+	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", 0, false, fmt.Errorf("could not parse PDF: %w", err)
+	}
+	pages = reader.NumPage()
+	plain, err := reader.GetPlainText()
+	if err != nil {
+		return "", pages, false, fmt.Errorf("could not extract PDF text: %w", err)
+	}
+	text, overflow, err = readBoundedText(plain)
+	if err != nil {
+		return "", pages, false, fmt.Errorf("could not read PDF text: %w", err)
+	}
+	return strings.TrimSpace(text), pages, overflow, nil
+}
+
+func readBoundedText(reader io.Reader) (text string, overflow bool, err error) {
+	data, err := io.ReadAll(io.LimitReader(reader, MaxDocumentTextBytes+1))
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), len(data) > MaxDocumentTextBytes, nil
 }
 
 // readDocumentBytes resolves path against workspaceRoot, rejects missing,
@@ -273,6 +323,20 @@ func resolvePageCount(data []byte, useExternal bool, already int) int {
 	return 0
 }
 
+type popplerTextStatus uint8
+
+const (
+	popplerTextUnavailable popplerTextStatus = iota
+	popplerTextFailed
+	popplerTextExtracted
+)
+
+type popplerTextResult struct {
+	text     string
+	overflow bool
+	status   popplerTextStatus
+}
+
 var (
 	popplerTextExtractor = extractTextWithPoppler
 	popplerPageCounter   = pdfPageCountWithPoppler
@@ -293,12 +357,12 @@ func popplerAvailable(name string) bool {
 	return err == nil
 }
 
-// extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout) when
-// pdftotext is on PATH. The bool is false when the tool is absent or failed;
-// callers then return a clear error unless rasterized pages are available.
-func extractTextWithPoppler(data []byte) (text string, overflow bool, ok bool) {
+// extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout). It
+// distinguishes an unavailable executable from an execution failure so callers
+// can preserve the right user-facing error after the bounded fallback is tried.
+func extractTextWithPoppler(data []byte) popplerTextResult {
 	if !popplerAvailable("pdftotext") {
-		return "", false, false
+		return popplerTextResult{status: popplerTextUnavailable}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
 	defer cancel()
@@ -311,9 +375,9 @@ func extractTextWithPoppler(data []byte) (text string, overflow bool, ok bool) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		return "", false, false
+		return popplerTextResult{status: popplerTextFailed}
 	}
-	return strings.TrimSpace(stdout.String()), stdout.overflow, true
+	return popplerTextResult{text: strings.TrimSpace(stdout.String()), overflow: stdout.overflow, status: popplerTextExtracted}
 }
 
 func pdfPageCountWithPoppler(data []byte) int {
