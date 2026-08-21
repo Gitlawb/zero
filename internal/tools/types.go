@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -52,6 +53,11 @@ const (
 	SandboxDenialKindMeta    = "sandbox_denial_kind"
 	SandboxDenialReasonMeta  = "sandbox_denial_reason"
 	SandboxDenialKeywordMeta = "sandbox_denial_keyword"
+	// sandboxNoticesMeta transports the plan notices from addSandboxMeta to
+	// finalizeToolOutcome, which promotes them onto Result.EnforcementNotices.
+	// Kept as metadata as well, because integrations reading the result JSON have
+	// no other way to see them.
+	sandboxNoticesMeta = "sandbox_notices"
 )
 
 const (
@@ -113,6 +119,16 @@ type Result struct {
 	// emits them as a following user message, which is also the only shape that
 	// keeps one tool result per tool call.
 	Images []zeroruntime.ImageBlock `json:"-"`
+	// EnforcementNotices are least-privilege disclosures about the enforcement
+	// actually applied to this command, and they are USER AND MODEL VISIBLE.
+	//
+	// A separate field rather than text baked into Output, so one canonical
+	// result carries it and every surface reads it through the accessors below.
+	// The first attempt put this in Meta alongside the sandbox metadata, which
+	// looked like the established channel and is not one: nothing in production
+	// reads those keys, ModelOutput and HumanDisplay never consult Meta, and the
+	// durable history drops it. The disclosure reached nobody.
+	EnforcementNotices []string `json:"enforcementNotices,omitempty"`
 	// Redacted is set when secret scrubbing altered Output before it left the
 	// tool-execution boundary.
 	Redacted bool
@@ -178,19 +194,44 @@ type OutcomeDiagnostics struct {
 // ModelOutput returns the finalized provider-facing text, falling back to the
 // legacy field for direct Tool.Run callers that have not crossed the registry.
 func (result Result) ModelOutput() string {
+	base := result.Output
 	if result.Outcome.finalized {
-		return result.Outcome.ModelView
+		base = result.Outcome.ModelView
 	}
-	return result.Output
+	return WithEnforcementNotices(base, result.EnforcementNotices)
 }
 
 // HumanDisplay returns the finalized presentation, falling back to the legacy
 // display for direct Tool.Run callers.
 func (result Result) HumanDisplay() Display {
+	display := result.Display
 	if result.Outcome.finalized {
-		return result.Outcome.HumanView
+		display = result.Outcome.HumanView
 	}
-	return result.Display
+	display.Summary = WithEnforcementNotices(display.Summary, result.EnforcementNotices)
+	return display
+}
+
+// WithEnforcementNotices puts the enforcement disclosure IN FRONT of the text.
+//
+// PREPENDED, not appended, because the output budget trims from the end: a
+// notice at the tail is the first thing a long result loses, and a disclosure
+// that survives only on short outputs is not a disclosure. It is also why this
+// lives on the accessors rather than at the call sites that build results.
+// The previous version wrote it into Result.Meta, and neither ModelOutput nor
+// HumanDisplay nor the durable history reads Meta, so it reached nobody at all.
+func WithEnforcementNotices(text string, notices []string) string {
+	if len(notices) == 0 {
+		return text
+	}
+	joined := strings.TrimSpace(strings.Join(notices, "\n"))
+	if joined == "" {
+		return text
+	}
+	if strings.TrimSpace(text) == "" {
+		return joined
+	}
+	return joined + "\n\n" + text
 }
 
 // Display carries a short, structured summary of a tool result for the TUI/stream.

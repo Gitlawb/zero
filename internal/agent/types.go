@@ -79,6 +79,10 @@ type ToolResult struct {
 	// The full result may be recoverable through Meta["spill_path"].
 	Truncated bool
 	Meta      map[string]string
+	// EnforcementNotices mirrors tools.Result.EnforcementNotices so the
+	// disclosure survives the conversion into the agent-facing result and
+	// reaches the model, the transcript and the interactive display.
+	EnforcementNotices []string
 	// Images the tool produced, delivered to the model as a following user
 	// message rather than on this result. See tools.Result.Images.
 	Images       []zeroruntime.ImageBlock
@@ -113,18 +117,21 @@ type ToolResult struct {
 // compatibility with synthetic and restored results created before outcomes
 // were finalized.
 func (result ToolResult) ModelOutput() string {
+	base := result.Output
 	if result.Outcome.Finalized() {
-		return result.Outcome.ModelView
+		base = result.Outcome.ModelView
 	}
-	return result.Output
+	return tools.WithEnforcementNotices(base, result.EnforcementNotices)
 }
 
 // HumanDisplay returns the presentation intended for interactive surfaces.
 func (result ToolResult) HumanDisplay() tools.Display {
+	display := result.Display
 	if result.Outcome.Finalized() {
-		return result.Outcome.HumanView
+		display = result.Outcome.HumanView
 	}
-	return result.Display
+	display.Summary = tools.WithEnforcementNotices(display.Summary, result.EnforcementNotices)
+	return display
 }
 
 // DenialCategory classifies why a tool call was blocked before it executed.

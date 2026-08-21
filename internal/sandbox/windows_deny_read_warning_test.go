@@ -115,12 +115,9 @@ func TestNoDenyReadWarningWhenTheHostIsNotWindows(t *testing.T) {
 func TestCommandPlanCarriesTheDenyReadDisclosure(t *testing.T) {
 	withWindowsHost(t)
 
-	request := SandboxExecutionRequest{
-		Backend:           windowsRestrictedTokenBackend(),
-		TargetBackend:     BackendWindowsRestrictedToken,
-		PermissionProfile: profileWithDenyRead(`C:\Users\someone\.config\creds`),
-	}
-	plan := withSandboxExecutionMetadata(CommandPlan{}, request)
+	// A request that will actually produce a restricted token. The notice follows
+	// the token, so a fixture that only names the backend is not enough.
+	plan := withSandboxExecutionMetadata(CommandPlan{}, wrappedWindowsRequest())
 
 	if len(plan.Notes) == 0 {
 		t.Fatal("a command plan resolved with denyRead carried no notice, so the operator loses the write jail without being told")
@@ -144,5 +141,49 @@ func TestCommandPlanCarriesNoDisclosureWithoutDenyRead(t *testing.T) {
 	})
 	if len(plan.Notes) != 0 {
 		t.Errorf("a plan without denyRead carried notices: %v", plan.Notes)
+	}
+}
+
+// wrappedWindowsRequest is the shape buildPlatformCommandPlan actually wraps in
+// a restricted token: a platform sandbox is required, enforcement is native, the
+// target is the Windows restricted-token backend, and nothing outside has
+// wrapped the command already.
+func wrappedWindowsRequest() SandboxExecutionRequest {
+	return SandboxExecutionRequest{
+		Backend:                 windowsRestrictedTokenBackend(),
+		TargetBackend:           BackendWindowsRestrictedToken,
+		PermissionProfile:       profileWithDenyRead(`C:\Users\someone\.config\creds`),
+		RequiresPlatformSandbox: true,
+		EnforcementLevel:        EnforcementNative,
+	}
+}
+
+// THE NOTICE DESCRIBES A TOKEN, SO IT MUST FOLLOW THE TOKEN.
+//
+// Each case below carries the Windows backend and a DenyRead profile, and each
+// takes the direct unwrapped plan rather than the restricted-token one. No token
+// is created and the deny-read rule is not enforced, so claiming the write jail
+// was traded away is false in both halves.
+func TestNoDisclosureWhenNoRestrictedTokenIsCreated(t *testing.T) {
+	withWindowsHost(t)
+
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*SandboxExecutionRequest)
+	}{
+		{name: "sandboxing disabled", mutate: func(r *SandboxExecutionRequest) { r.EnforcementLevel = EnforcementDisabled }},
+		{name: "degraded to no native isolation", mutate: func(r *SandboxExecutionRequest) { r.EnforcementLevel = EnforcementDegraded }},
+		{name: "already wrapped by an outer sandbox", mutate: func(r *SandboxExecutionRequest) { r.CommandWrapped = true }},
+		{name: "command needs no platform sandbox", mutate: func(r *SandboxExecutionRequest) { r.RequiresPlatformSandbox = false }},
+		{name: "no target backend", mutate: func(r *SandboxExecutionRequest) { r.TargetBackend = BackendNone }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := wrappedWindowsRequest()
+			testCase.mutate(&request)
+			plan := withSandboxExecutionMetadata(CommandPlan{}, request)
+			if len(plan.Notes) != 0 {
+				t.Errorf("claimed the write jail was traded away where no restricted token runs: %v", plan.Notes)
+			}
+		})
 	}
 }
