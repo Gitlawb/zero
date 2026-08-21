@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:11:43.501Z",
-  "durationMs": 11241863,
+  "endedAt": "2026-08-21T06:11:43.348Z",
+  "durationMs": 11241708,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,18 +16,29 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 21,
-    "removed": 1
+    "added": 230,
+    "removed": 12
   },
   "filesChanged": [
-    "internal/agentsessions/redaction_order_test.go"
+    "internal/agentsessions/codex_test.go",
+    "internal/agentsessions/family1_test.go",
+    "internal/agentsessions/fixture_corpus_test.go",
+    "internal/agentsessions/testdata/claude-config/projects/-Users-example-workspace-demo/fixture-session.jsonl",
+    "internal/agentsessions/testdata/claude/projects/-Users-example-workspace-demo/fixture-session.jsonl",
+    "internal/agentsessions/testdata/codex-home/sessions/2026/08/01/rollout-2026-08-01T10-00-00-fixture0-0000-0000-0000-000000000001.jsonl",
+    "internal/agentsessions/testdata/codex-late/sessions/y/m/d/rollout-00000000-0000-4000-8000-000000000002.jsonl",
+    "internal/agentsessions/testdata/codex/sessions/2026/08/01/rollout-00000000-0000-4000-8000-000000000001.jsonl",
+    "internal/agentsessions/testdata/drops/projects/-w/bridge.jsonl",
+    "internal/agentsessions/testdata/drops/projects/-w/good.jsonl",
+    "internal/agentsessions/testdata/drops/projects/-w/longcwd.jsonl",
+    "internal/agentsessions/testdata/drops/projects/-w/preamble.jsonl"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "adf2cd91542ee52cb0ffe665a1af3380fb367d25",
+    "headAfter": "60de35e64b00a709871ee54e270e9b1f733826f3",
     "commitShas": [
-      "adf2cd91542ee52cb0ffe665a1af3380fb367d25"
+      "60de35e64b00a709871ee54e270e9b1f733826f3"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
