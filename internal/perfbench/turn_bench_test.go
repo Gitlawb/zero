@@ -338,6 +338,34 @@ func TestFormatTurnBenchSummaryNamesTopSources(t *testing.T) {
 	}
 }
 
+func TestUncachedInputTokensClampsInconsistentTotals(t *testing.T) {
+	tests := []struct {
+		name   string
+		totals TurnBenchTotals
+		want   int64
+	}{
+		{name: "normal", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 30, CacheWriteTokens: 20}, want: 50},
+		{name: "cached exceeds input", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 120}, want: 0},
+		{name: "write exceeds remainder", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 20, CacheWriteTokens: 90}, want: 0},
+		{name: "overflowing inconsistent counters", totals: TurnBenchTotals{CachedInputTokens: 1<<63 - 1, CacheWriteTokens: 1<<63 - 1}, want: 0},
+		{name: "negative cache counters ignored", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: -20, CacheWriteTokens: -10}, want: 100},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := uncachedInputTokens(test.totals); got != test.want {
+				t.Fatalf("uncachedInputTokens(%+v) = %d, want %d", test.totals, got, test.want)
+			}
+		})
+	}
+	summary := FormatTurnBenchSummary(TurnBenchResult{Totals: TurnBenchTotals{
+		CachedInputTokens: 1<<63 - 1,
+		CacheWriteTokens:  1<<63 - 1,
+	}})
+	if !strings.Contains(summary, "uncached 0") {
+		t.Fatalf("summary did not clamp inconsistent cache totals:\n%s", summary)
+	}
+}
+
 func TestLoadBaselineManifest(t *testing.T) {
 	path := filepath.Join("manifests", "baseline.json")
 	set, err := LoadTaskSet(path)

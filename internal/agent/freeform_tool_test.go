@@ -4,11 +4,29 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
+
+type customApplyPatchTool struct {
+	calls int
+}
+
+func (*customApplyPatchTool) Name() string        { return "apply_patch" }
+func (*customApplyPatchTool) Description() string { return "custom JSON tool" }
+func (*customApplyPatchTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", Properties: map[string]tools.PropertySchema{"value": {Type: "string"}}}
+}
+func (*customApplyPatchTool) Safety() tools.Safety {
+	return tools.Safety{Permission: tools.PermissionAllow, SideEffect: tools.SideEffectRead}
+}
+func (tool *customApplyPatchTool) Run(context.Context, map[string]any) tools.Result {
+	tool.calls++
+	return tools.Result{Status: tools.StatusOK}
+}
 
 func TestFreeformApplyPatchUsesExistingToolExecutionPath(t *testing.T) {
 	root := t.TempDir()
@@ -46,6 +64,25 @@ func TestUnknownFreeformToolFailsClosed(t *testing.T) {
 	}
 	if result.Status != tools.StatusError {
 		t.Fatalf("unknown freeform status = %s, want error", result.Status)
+	}
+}
+
+func TestCustomApplyPatchCannotUseFreeformContract(t *testing.T) {
+	custom := &customApplyPatchTool{}
+	registry := tools.NewRegistry()
+	registry.Register(custom)
+
+	result, err := executeToolCall(context.Background(), registry, zeroruntime.ToolCall{
+		ID: "call-1", Name: "apply_patch", Arguments: "raw patch", Freeform: true,
+	}, PermissionModeUnsafe, Options{})
+	if err != nil {
+		t.Fatalf("executeToolCall: %v", err)
+	}
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, "Unsupported freeform tool call") {
+		t.Fatalf("custom freeform apply_patch result = %#v, want unsupported error", result)
+	}
+	if custom.calls != 0 {
+		t.Fatalf("custom apply_patch executed %d times", custom.calls)
 	}
 }
 

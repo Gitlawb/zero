@@ -30,6 +30,9 @@ func TestMain(m *testing.M) {
 
 func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 	prompt := strings.Join(strings.Fields(strings.ToLower(buildSystemPrompt(Options{}))), " ")
+	if strings.Contains(prompt, "clickable file paths") {
+		t.Fatalf("system prompt must not claim inline-code file paths are clickable: %s", prompt)
+	}
 
 	for _, want := range []string{
 		"read-before-edit",

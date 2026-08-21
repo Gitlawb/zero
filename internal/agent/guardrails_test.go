@@ -257,12 +257,16 @@ func TestRunDoesNotCountDroppedToolCallTurnsAsEmpty(t *testing.T) {
 }
 
 func TestRunInjectsPlanNotCalledReminderForMultiStepTask(t *testing.T) {
+	const expectedThreshold = 7
+	if planReminderToolThreshold != expectedThreshold {
+		t.Fatalf("plan reminder tool threshold = %d, want %d", planReminderToolThreshold, expectedThreshold)
+	}
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
-	provider := &mockProvider{turns: append(repeatedReadTurns(planReminderToolThreshold), textTurn("done"))}
+	provider := &mockProvider{turns: append(repeatedReadTurns(expectedThreshold), textTurn("done"))}
 
 	result, err := Run(context.Background(), "go", provider, Options{
 		Registry: registry,
@@ -281,12 +285,13 @@ func TestRunInjectsPlanNotCalledReminderForMultiStepTask(t *testing.T) {
 }
 
 func TestRunDoesNotInjectPlanReminderForBoundedToolSequence(t *testing.T) {
+	const expectedThreshold = 7
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
-	provider := &mockProvider{turns: append(repeatedReadTurns(planReminderToolThreshold-1), textTurn("done"))}
+	provider := &mockProvider{turns: append(repeatedReadTurns(expectedThreshold-1), textTurn("done"))}
 	result, err := Run(context.Background(), "go", provider, Options{Registry: registry, MaxTurns: 12})
 	if err != nil {
 		t.Fatal(err)

@@ -535,7 +535,7 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 	}
 	lines = append(lines, fmt.Sprintf("totals: in=%d (cache-read %d, cache-write %d, uncached %d) out=%d | requests=%d tools=%d retries=%d reconnects=%d compactions=%d",
 		result.Totals.InputTokens, result.Totals.CachedInputTokens, result.Totals.CacheWriteTokens,
-		maxInt64(0, result.Totals.InputTokens-result.Totals.CachedInputTokens-result.Totals.CacheWriteTokens), result.Totals.OutputTokens,
+		uncachedInputTokens(result.Totals), result.Totals.OutputTokens,
 		result.Totals.ModelRequests, result.Totals.ToolCalls, result.Totals.Retries,
 		result.Totals.Reconnects, result.Totals.Compactions))
 	for _, class := range sortedClasses(result.PerClass) {
@@ -548,11 +548,21 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 	return strings.Join(lines, "\n")
 }
 
-func maxInt64(left, right int64) int64 {
-	if left > right {
-		return left
+func uncachedInputTokens(totals TurnBenchTotals) int64 {
+	remaining := totals.InputTokens
+	if remaining <= 0 {
+		return 0
 	}
-	return right
+	for _, cached := range []int64{totals.CachedInputTokens, totals.CacheWriteTokens} {
+		if cached <= 0 {
+			continue
+		}
+		if cached >= remaining {
+			return 0
+		}
+		remaining -= cached
+	}
+	return remaining
 }
 
 // classTier returns the oracle tier label a class was classified into, so the
