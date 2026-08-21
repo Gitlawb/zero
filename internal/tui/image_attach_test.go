@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -317,10 +318,18 @@ func writeTestPDF(t *testing.T, dir, name, text string) string {
 	return path
 }
 
+func requirePopplerText(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("pdftotext"); err != nil {
+		t.Skip("pdftotext is not installed")
+	}
+}
+
 // A PDF carries a text layer every model can read, so /image <file.pdf> stages a
 // pending document even on a non-vision model -- unlike a raw image, which is
 // refused. No page images are staged without a rasterizer.
 func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "Design spec body text")
 
@@ -349,6 +358,7 @@ func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 // path by a content sniff (not the extension), so its text layer attaches even on
 // a non-vision model instead of being refused as a non-image.
 func TestImageCommandAttachesExtensionlessPDFByContent(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec", "Extensionless PDF body text")
 
@@ -405,7 +415,7 @@ func TestImageCommandRejectsMalformedPDF(t *testing.T) {
 	}
 }
 
-func TestImageCommandFallsBackWhenPopplerIsUnavailable(t *testing.T) {
+func TestImageCommandExplainsWhenBoundedPDFExtractorIsUnavailable(t *testing.T) {
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "text")
 	t.Setenv("PATH", "")
@@ -414,16 +424,17 @@ func TestImageCommandFallsBackWhenPopplerIsUnavailable(t *testing.T) {
 	m.input.SetValue("/image spec.pdf")
 	updated, _ := m.handleSubmit()
 	next := updated.(model)
-	if len(next.pendingDocuments) != 1 || len(next.pendingImages) != 0 {
-		t.Fatalf("missing Poppler should stage the bounded fallback document, got %d documents and %d images", len(next.pendingDocuments), len(next.pendingImages))
+	if len(next.pendingDocuments) != 0 || len(next.pendingImages) != 0 {
+		t.Fatal("an unavailable bounded extractor must not stage a document")
 	}
-	if !strings.Contains(next.pendingDocuments[0].text, "text") {
-		t.Fatalf("fallback document text = %q, want fixture text", next.pendingDocuments[0].text)
+	if notice := lastTranscriptText(next); !strings.Contains(notice, "pdftotext") {
+		t.Fatalf("expected installation guidance, got %q", notice)
 	}
 }
 
 // /image clear removes staged documents as well as images.
 func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "some text")
 
@@ -459,6 +470,7 @@ func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 // On submit, the staged document text is prepended to the prompt the agent
 // receives (so the model can read it), and the pending documents are cleared.
 func TestSubmitPrependsDocumentTextThenClears(t *testing.T) {
+	requirePopplerText(t)
 	root := t.TempDir()
 	writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
 

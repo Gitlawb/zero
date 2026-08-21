@@ -2,9 +2,7 @@ package imageinput
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -151,18 +149,15 @@ func TestExtractTextWithPoppler(t *testing.T) {
 		t.Skip("pdftotext is not installed")
 	}
 	const want = "Poppler extraction integration"
-	result := extractTextWithPoppler(buildMinimalPDF(want))
-	if result.status == popplerTextFailed {
-		t.Skip("pdftotext cannot process this fixture on this host; LoadDocument uses the bounded fallback")
+	got, overflow, ok := extractTextWithPoppler(buildMinimalPDF(want))
+	if !ok {
+		t.Fatal("extractTextWithPoppler failed with pdftotext installed")
 	}
-	if result.status != popplerTextExtracted {
-		t.Fatalf("extractTextWithPoppler status = %d, want extracted", result.status)
-	}
-	if result.overflow {
+	if overflow {
 		t.Fatal("small PDF unexpectedly overflowed the text budget")
 	}
-	if !strings.Contains(result.text, want) {
-		t.Fatalf("extracted text %q should contain %q", result.text, want)
+	if !strings.Contains(got, want) {
+		t.Fatalf("extracted text %q should contain %q", got, want)
 	}
 }
 
@@ -315,48 +310,14 @@ func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestLoadDocumentFallsBackToBoundedPureGo(t *testing.T) {
+func TestLoadDocumentRequiresBoundedExtractor(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
-	if err != nil || !strings.Contains(doc.Text, "text") {
-		t.Fatalf("LoadDocument = (%+v, %v), want bounded fallback text", doc, err)
-	}
-}
-
-func TestLoadDocumentFallsBackAfterPopplerFailure(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("fallback text"), 0o644); err != nil {
-		t.Fatalf("write pdf: %v", err)
-	}
-	stubPopplerTextExtractor(t, func([]byte) popplerTextResult {
-		return popplerTextResult{status: popplerTextFailed}
-	})
-
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{})
-	if err != nil || !strings.Contains(doc.Text, "fallback text") {
-		t.Fatalf("LoadDocument = (%+v, %v), want fallback text after Poppler failure", doc, err)
-	}
-}
-
-func TestLoadDocumentDoesNotMisreportPopplerFailure(t *testing.T) {
-	root := t.TempDir()
-	bad := []byte("%PDF-1.4\nthis header is valid but the body and xref are garbage\nstartxref\n9\n%%EOF\n")
-	if err := os.WriteFile(filepath.Join(root, "bad.pdf"), bad, 0o644); err != nil {
-		t.Fatalf("write pdf: %v", err)
-	}
-	stubPopplerTextExtractor(t, func([]byte) popplerTextResult {
-		return popplerTextResult{status: popplerTextFailed}
-	})
-
-	_, err := LoadDocument("bad.pdf", root, DocumentOptions{})
-	if err == nil || !strings.Contains(err.Error(), "could not extract PDF text") {
-		t.Fatalf("LoadDocument error = %v, want extraction failure", err)
-	}
-	if strings.Contains(err.Error(), "install Poppler") {
-		t.Fatalf("LoadDocument error = %q, must not claim Poppler is absent", err)
+	_, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
+	if err == nil || !strings.Contains(err.Error(), "pdftotext") {
+		t.Fatalf("LoadDocument error = %v, want bounded-extractor guidance", err)
 	}
 }
 
@@ -380,20 +341,11 @@ func TestLoadDocumentVisionUsesText(t *testing.T) {
 func stubPDFTools(t *testing.T, text string, overflow bool, pages int) {
 	t.Helper()
 	originalTextExtractor, originalPageCounter := popplerTextExtractor, popplerPageCounter
-	popplerTextExtractor = func([]byte) popplerTextResult {
-		return popplerTextResult{text: text, overflow: overflow, status: popplerTextExtracted}
-	}
+	popplerTextExtractor = func([]byte) (string, bool, bool) { return text, overflow, true }
 	popplerPageCounter = func([]byte) int { return pages }
 	t.Cleanup(func() {
 		popplerTextExtractor, popplerPageCounter = originalTextExtractor, originalPageCounter
 	})
-}
-
-func stubPopplerTextExtractor(t *testing.T, extractor func([]byte) popplerTextResult) {
-	t.Helper()
-	original := popplerTextExtractor
-	popplerTextExtractor = extractor
-	t.Cleanup(func() { popplerTextExtractor = original })
 }
 
 // capDocumentText must keep the final payload (text + marker) at or under the
@@ -454,24 +406,7 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	if !buffer.overflow {
 		t.Fatal("boundedBuffer must report exactly limit+1 bytes as overflow")
 	}
-
-	text, overflow, err := readBoundedText(strings.NewReader(strings.Repeat("x", MaxDocumentTextBytes+1)))
-	if err != nil || !overflow || len(text) != MaxDocumentTextBytes+1 {
-		t.Fatalf("readBoundedText = (%d bytes, %v, %v), want bounded overflow", len(text), overflow, err)
-	}
-
-	sentinel := errors.New("sentinel read failure")
-	_, _, err = readBoundedText(errorReader{err: sentinel})
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("readBoundedText error = %v, want sentinel", err)
-	}
 }
-
-type errorReader struct{ err error }
-
-func (reader errorReader) Read([]byte) (int, error) { return 0, reader.err }
-
-var _ io.Reader = errorReader{}
 
 func TestResolvePageCountUsesPdfinfoWhenAvailable(t *testing.T) {
 	original := popplerPageCounter
@@ -489,7 +424,7 @@ func TestResolvePageCountUsesPdfinfoWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestLoadDocumentHostilePDFFallbackReturnsCleanError(t *testing.T) {
+func TestLoadDocumentHostilePDFDoesNotUseInProcessParser(t *testing.T) {
 	root := t.TempDir()
 	cases := map[string][]byte{
 		"cycle.pdf": []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 1 0 R /Parent 1 0 R /Kids [1 0 R] /Count 999999999 /First 1 0 R /Next 1 0 R >>\nendobj\ntrailer\n<< /Root 1 0 R /Size 999999999 >>\nstartxref\n9\n%%EOF\n"),
@@ -501,8 +436,8 @@ func TestLoadDocumentHostilePDFFallbackReturnsCleanError(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 		_, err := LoadDocument(name, root, DocumentOptions{disableExternalTools: true})
-		if err == nil {
-			t.Fatalf("LoadDocument(%s) error = nil, want clean fallback error", name)
+		if err == nil || !strings.Contains(err.Error(), "pdftotext") {
+			t.Fatalf("LoadDocument(%s) error = %v, want bounded-extractor guidance", name, err)
 		}
 	}
 }
