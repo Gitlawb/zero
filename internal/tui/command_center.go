@@ -718,6 +718,9 @@ func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
 			return profile, true
 		}
 	}
+	if strings.TrimSpace(m.providerProfile.Name) == name {
+		return m.providerProfile, true
+	}
 	for _, profile := range m.savedProviders {
 		if credstore.NormalizeProvider(profile.Name) == normalized {
 			return profile, true

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -17,6 +18,8 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
@@ -30,6 +33,29 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errWriteFailed
+}
+
+func TestChatGPTLoginDependencyDefaultsAndPreservesInjection(t *testing.T) {
+	wantDefault := reflect.ValueOf(provideroauth.ChatGPTLogin).Pointer()
+	if got := defaultAppDeps().chatGPTLogin; got == nil || reflect.ValueOf(got).Pointer() != wantDefault {
+		t.Fatal("defaultAppDeps().chatGPTLogin is not provideroauth.ChatGPTLogin")
+	}
+	if got := fillAppDeps(appDeps{}).chatGPTLogin; got == nil || reflect.ValueOf(got).Pointer() != wantDefault {
+		t.Fatal("fillAppDeps(appDeps{}).chatGPTLogin is not provideroauth.ChatGPTLogin")
+	}
+
+	called := false
+	injected := func(context.Context, provideroauth.ChatGPTOptions) (oauth.Token, error) {
+		called = true
+		return oauth.Token{}, nil
+	}
+	deps := fillAppDeps(appDeps{chatGPTLogin: injected})
+	if _, err := deps.chatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{}); err != nil {
+		t.Fatalf("injected chatGPTLogin returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("fillAppDeps replaced the injected chatGPTLogin")
+	}
 }
 
 func TestRunPrintsVersion(t *testing.T) {
