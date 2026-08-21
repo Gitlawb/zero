@@ -545,6 +545,37 @@ func TestLoadDocumentUsesOnePopplerDeadline(t *testing.T) {
 	}
 }
 
+func TestLoadDocumentDoesNotWaitForInformationalPageCount(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "fast.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerOperationTimeout
+	popplerOperationTimeout = time.Second
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: "text", status: popplerTextExtracted}
+	}
+	popplerPageCounter = func(ctx context.Context, _ []byte) int {
+		<-ctx.Done()
+		return 0
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerOperationTimeout = originalText, originalPages, originalTimeout
+	})
+
+	started := time.Now()
+	doc, err := LoadDocument("fast.pdf", root, DocumentOptions{})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "text" || doc.Pages != 0 {
+		t.Fatalf("Document = %#v, want attached text with no delayed page count", doc)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("LoadDocument took %s; informational page count must not delay attachment", elapsed)
+	}
+}
+
 func TestLoadDocumentHostilePDFDoesNotUseInProcessParser(t *testing.T) {
 	root := t.TempDir()
 	cases := map[string][]byte{

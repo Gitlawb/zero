@@ -64,8 +64,8 @@ var pdfMagic = []byte("%PDF-")
 
 // Document is the result of ingesting a PDF: its extracted text layer when the
 // bounded extractor succeeds plus, on the optional vision path, one ImageBlock
-// per rendered page. Pages is the page count the extractor reported; Truncated
-// is set when Text was capped at MaxDocumentTextBytes.
+// per rendered page. Pages is best-effort external metadata and may be zero;
+// Truncated is set when Text was capped at MaxDocumentTextBytes.
 type Document struct {
 	Text      string
 	Images    []zeroruntime.ImageBlock
@@ -160,7 +160,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		ctx, cancel := context.WithTimeout(context.Background(), popplerOperationTimeout)
 		var work, required sync.WaitGroup
 		work.Add(2)
-		required.Add(2)
+		required.Add(1)
 		go func() {
 			defer work.Done()
 			defer required.Done()
@@ -168,7 +168,6 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		}()
 		go func() {
 			defer work.Done()
-			defer required.Done()
 			pages = popplerPageCounter(ctx, data)
 		}()
 		if opts.Vision {
@@ -183,9 +182,8 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 				}
 			}()
 		}
-		// All required work shares one deadline, so preserving the page-count
-		// contract cannot extend the synchronous attachment route by another
-		// independent process timeout.
+		// Page count is informational. Do not turn a successful attachment into a
+		// second timeout because pdfinfo is slow or wedged.
 		required.Wait()
 		cancel()
 		work.Wait()
