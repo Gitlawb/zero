@@ -20,8 +20,27 @@ func TestOversizedFailureIsBoundedBeforeRedactionAndNormalization(t *testing.T) 
 	huge := strings.Repeat("A", 8*1024*1024)
 
 	got := redactMCPFailureReason(errors.New("tool name conflict: "+huge), raw, nil)
-	if len(got) > maxMCPReasonRawLen+1024 {
-		t.Errorf("the failure reason is %d bytes; the pipeline is still carrying the whole server-controlled value", len(got))
+	if budget := maxMCPReasonRawLen + maxMCPSecretMatchWindow; len(got) > budget {
+		t.Errorf("the failure reason is %d bytes against a budget of %d; the pipeline is still carrying the whole server-controlled value", len(got), budget)
+	}
+}
+
+// AND THE BUDGET IS FIXED, not a function of what the other side configured.
+//
+// The first version kept a lookahead margin sized to the LONGEST SECRET, which
+// made the real limit "the cap plus whatever the largest configured value
+// happens to be". Configured values and the stored token enumeration have no
+// size limit, so a two-megabyte credential raised the retained error to 65546
+// bytes against a nominal cap of 16384. A bound the other side can widen is not
+// a bound.
+func TestAnOversizedSecretCannotWidenTheFailureBudget(t *testing.T) {
+	huge := strings.Repeat("s", 2*1024*1024)
+	raw := config.MCPServerConfig{URL: "https://host.invalid/mcp?workspace=" + huge}
+
+	got := redactMCPFailureReason(errors.New("conflict: "+strings.Repeat("B", 64*1024)), raw, nil)
+	budget := maxMCPReasonRawLen + maxMCPSecretMatchWindow
+	if len(got) > budget {
+		t.Errorf("a %d-byte configured secret widened the retained error to %d bytes against a fixed budget of %d", len(huge), len(got), budget)
 	}
 }
 
