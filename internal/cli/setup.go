@@ -122,7 +122,13 @@ func verifySetupProvider(deps appDeps, profile config.ProviderProfile) (setupVer
 		if err != nil {
 			return setupVerification{Ran: true, Summary: "stored api key unavailable"}, err
 		}
-		profile = config.ApplyStoredAPIKey(profile, store)
+		key, ok, err := store.Get(strings.TrimSpace(profile.Name))
+		if err != nil {
+			return setupVerification{Ran: true, Summary: "stored api key unavailable"}, fmt.Errorf("load stored API key: %w", err)
+		}
+		if ok && strings.TrimSpace(key) != "" {
+			profile.APIKey = key
+		}
 	}
 	// Distinguish "no key configured" from "key rejected": probing a remote provider
 	// with no credential yields a generic "the provider rejected the API key", which

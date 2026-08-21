@@ -226,7 +226,7 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	manager, err := oauth.NewManager(oauth.ManagerOptions{
 		Store:       store,
 		Now:         deps.now,
-		CommitToken: catalogOAuthTokenCommit(store, configPath, provider),
+		CommitToken: config.CatalogProviderLoginCommit(configPath, provider, store.Save),
 	})
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -391,19 +391,8 @@ func newAuthManager(deps appDeps, out io.Writer, configPath, provider string) (*
 		// `zero auth login <preset>` (e.g. xai) should resolve the baked-in preset
 		// without the operator exporting ZERO_OAUTH_ALLOW_PRESETS first.
 		AllowPresets: true,
-		CommitToken:  catalogOAuthTokenCommit(store, configPath, provider),
+		CommitToken:  config.CatalogProviderLoginCommit(configPath, provider, store.Save),
 	})
-}
-
-func catalogOAuthTokenCommit(store *oauth.Store, configPath, provider string) func(string, oauth.Token) error {
-	if strings.TrimSpace(configPath) == "" || strings.TrimSpace(provider) == "" {
-		return nil
-	}
-	return func(key string, token oauth.Token) error {
-		return config.CommitCatalogProviderLogin(configPath, provider, func() error {
-			return store.Save(key, token)
-		})
-	}
 }
 
 func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {

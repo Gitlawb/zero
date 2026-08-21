@@ -440,3 +440,30 @@ func TestVerifySetupProviderLoadsSanitizedStoredKey(t *testing.T) {
 		t.Fatalf("probe API key = %q, want credential-store value", probed.APIKey)
 	}
 }
+
+func TestVerifySetupProviderReportsStoredKeyReadFailure(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	probed := false
+	verification, err := verifySetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		probeProviderHealth: func(context.Context, providerhealth.Options) providerhealth.Result {
+			probed = true
+			return providerhealth.Result{}
+		},
+	}, config.ProviderProfile{Name: "openai", APIKeyStored: true})
+	if err == nil || !strings.Contains(err.Error(), "load stored API key") {
+		t.Fatalf("verifySetupProvider() error = %v, want stored-key read failure", err)
+	}
+	if verification.Summary != "stored api key unavailable" {
+		t.Fatalf("summary = %q, want stored api key unavailable", verification.Summary)
+	}
+	if probed {
+		t.Fatal("probe ran without a readable stored credential")
+	}
+}

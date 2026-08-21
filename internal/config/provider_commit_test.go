@@ -354,6 +354,9 @@ func TestCommitProviderProfileReportsRollbackFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory write permissions are not represented by Unix mode bits")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory mode bits, so rollback cannot be made to fail")
+	}
 	dir := t.TempDir()
 	t.Setenv("ZERO_CRED_STORAGE", "file")
 	path := filepath.Join(dir, "config.json")
@@ -386,6 +389,9 @@ func TestProviderWritePermissionErrorIsNotReportedAsContention(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows reports delete-pending lock contention as access denied")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory mode bits, so lock creation cannot be made to fail")
+	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
@@ -402,6 +408,7 @@ func TestProviderWritePermissionErrorIsNotReportedAsContention(t *testing.T) {
 }
 
 func TestCommitCatalogProviderLoginHoldsLockThroughPersistence(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	writeConfigFixture(t, path, FileConfig{
