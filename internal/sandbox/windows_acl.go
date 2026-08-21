@@ -2,9 +2,60 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
+
+// isWindowsVolumeRoot reports whether a cleaned path is the top of a volume,
+// with nothing above it: `C:\`, a bare separator, or a UNC share root.
+//
+// Detected structurally rather than by pattern matching drive letters, because
+// filepath.Dir of a root is that same root and of anything else is strictly
+// shorter. That holds for drive-qualified paths, for the separator alone, and
+// for UNC roots, on either build host.
+func isWindowsVolumeRoot(path string) bool {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || cleaned == "." {
+		return false
+	}
+	return filepath.Dir(cleaned) == cleaned
+}
+
+// validateWindowsACLComponent rejects anything that is not a single path
+// component.
+//
+// This is load-bearing in two places, which is why it lives in the portable file
+// rather than beside either of them.
+//
+// At apply time NtCreateFile happily resolves a RELATIVE name containing
+// separators, and it resolves it the ordinary way, so an intermediate junction
+// inside that name is followed and the object lands outside the pinned parent.
+// A name with a separator reopens exactly the hole the parent handle exists to
+// close.
+//
+// At plan time the same shape escapes the write root: a name is joined onto the
+// root to place a deny ACE, so ".." or a separator puts that ACE on a directory
+// outside the workspace entirely.
+//
+// The separators are checked explicitly rather than via filepath.Base, because
+// these are Windows paths whatever the build host is, and on Linux
+// filepath.Base leaves a backslash-joined name untouched and would wave it
+// through. A colon is rejected too: it names an alternate data stream or a
+// drive, neither of which is a child.
+func validateWindowsACLComponent(name string) error {
+	switch {
+	case name == "":
+		return errors.New("windows ACL path component is empty")
+	case name == "." || name == "..":
+		return fmt.Errorf("windows ACL path component %q is a relative reference, not a child", name)
+	case strings.ContainsAny(name, `\/`):
+		return fmt.Errorf("windows ACL path component %q contains a separator, so it would resolve through intermediate directories instead of staying a child", name)
+	case strings.Contains(name, ":"):
+		return fmt.Errorf("windows ACL path component %q contains a colon, which names a stream or a drive rather than a child", name)
+	}
+	return nil
+}
 
 type WindowsACLAction string
 
@@ -12,6 +63,16 @@ const (
 	WindowsACLAllowWrite WindowsACLAction = "allow-write"
 	WindowsACLDenyRead   WindowsACLAction = "deny-read"
 	WindowsACLDenyWrite  WindowsACLAction = "deny-write"
+	// WindowsACLDenyDelete denies removing or renaming the object it names,
+	// WITHOUT denying writes to it or inside it, and without inheriting.
+	//
+	// It exists for .git. The write-denied carveouts live on .git/config and
+	// .git/hooks as objects, so replacing the .git directory discards them: the
+	// recreated config and hooks inherit the workspace allow with no deny, which
+	// restores credential.helper and core.hooksPath. .git cannot simply join
+	// sandboxFullyProtectedMetadataNames, because DenyWrite's mask includes
+	// FILE_GENERIC_WRITE and git must write index, objects and refs.
+	WindowsACLDenyDelete WindowsACLAction = "deny-delete"
 )
 
 type WindowsACLEntry struct {
@@ -19,6 +80,11 @@ type WindowsACLEntry struct {
 	Path        string           `json:"path"`
 	Capability  string           `json:"capability"`
 	Materialize bool             `json:"materialize,omitempty"`
+	// MaterializeFile makes Materialize create an empty FILE instead of a
+	// directory. Only meaningful with Materialize. .git/config is the case that
+	// forces the distinction: created as a directory it does not merely carry
+	// the wrong ACL, it makes `git init` fail outright.
+	MaterializeFile bool `json:"materializeFile,omitempty"`
 }
 
 type WindowsACLPlan struct {
@@ -45,6 +111,31 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 				Action:     WindowsACLDenyWrite,
 				Path:       path,
 				Capability: capability.SID,
+			})
+		}
+	}
+	// Read roots, granted to the read-capability SID.
+	//
+	// A profile carrying DenyRead runs the command on a strict token rather than a
+	// WRITE_RESTRICTED one, and the strict token applies the restricted-SID check
+	// to reads. Read roots reached that check granted only to the principal's own
+	// account SID, which the write jail keeps out of the restricting set on
+	// purpose, so every read failed it — including opening the executable. The
+	// principal plan still grants the account SID; this is the other half of the
+	// same grant, so the allow-list and the restriction now come from one place.
+	readSID, err := windowsReadAllowCapabilitySID(config)
+	if err != nil {
+		return WindowsACLPlan{}, err
+	}
+	if readSID != "" {
+		for _, path := range config.PermissionProfile.FileSystem.ReadRoots {
+			if path = strings.TrimSpace(path); path == "" {
+				continue
+			}
+			entries = append(entries, WindowsACLEntry{
+				Action:     WindowsACLAllowRead,
+				Path:       path,
+				Capability: readSID,
 			})
 		}
 	}
@@ -140,17 +231,32 @@ func windowsWriteCapabilitySIDs(capabilities []windowsWriteRootCapability) []str
 }
 
 func windowsReadDenyCapabilitySIDs(config WindowsSandboxCommandConfig, writeSIDs []string) ([]string, error) {
-	if len(writeSIDs) > 0 {
-		return writeSIDs, nil
-	}
 	if len(config.PermissionProfile.FileSystem.DenyRead) == 0 {
 		return nil, nil
 	}
-	caps, err := LoadOrCreateWindowsCapabilitySIDs(config.SandboxHome)
+	// The read-capability SID must be denied here as well as granted above. It
+	// holds read on the read roots, and those start at the filesystem root, so a
+	// carveout sitting inside one of them would stay readable through that grant
+	// and the deny list would quietly stop meaning anything.
+	// Every SID the token can carry has to be denied, not just the newest one.
+	// With no write roots the token's only capability is ReadOnly, so dropping it
+	// here would leave the deny naming a SID the command never holds.
+	denySIDs := append([]string{}, writeSIDs...)
+	if len(denySIDs) == 0 {
+		caps, err := LoadOrCreateWindowsCapabilitySIDs(config.SandboxHome)
+		if err != nil {
+			return nil, err
+		}
+		denySIDs = append(denySIDs, caps.ReadOnly)
+	}
+	readSID, err := windowsReadAllowCapabilitySID(config)
 	if err != nil {
 		return nil, err
 	}
-	return []string{caps.ReadOnly}, nil
+	if readSID != "" {
+		denySIDs = append(denySIDs, readSID)
+	}
+	return denySIDs, nil
 }
 
 func planWindowsDenyReadPaths(paths []string) []string {
@@ -192,4 +298,20 @@ func dedupeWindowsACLEntries(entries []WindowsACLEntry) []WindowsACLEntry {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// windowsReadAllowCapabilitySID returns the read-capability SID when this profile
+// will run on a strict token, and "" otherwise.
+//
+// Gated on DenyRead because that is exactly what selects the strict token in the
+// runner: with no DenyRead the token stays WRITE_RESTRICTED, reads skip the
+// restricted-SID check entirely, and granting read on roots as broad as the
+// filesystem root would add ACEs that buy nothing. Derived purely from the
+// profile, so the setup half and the command half reach the same answer without
+// consulting anything ambient.
+func windowsReadAllowCapabilitySID(config WindowsSandboxCommandConfig) (string, error) {
+	if len(config.PermissionProfile.FileSystem.DenyRead) == 0 {
+		return "", nil
+	}
+	return WindowsReadAllowSID(config.SandboxHome)
 }

@@ -96,15 +96,104 @@ var protectedMetadataNames = []string{".git", ".zero", ".agents"}
 // gitMetadataWriteCarveouts below.
 var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
+// sandboxRenameProtectedMetadataName is the metadata directory that cannot be
+// fully write-protected but must still not be REPLACEABLE.
+//
+// It is deliberately not in the list above. That list denies write, and git has
+// to write index, objects and refs. But the carveouts guarding it are attached
+// to .git/config and .git/hooks as objects, so a principal that renames .git and
+// recreates it gets fresh paths inheriting the workspace allow with no denies,
+// which restores credential.helper and core.hooksPath. The Windows ACL plan
+// therefore denies DELETE on this directory alone, uninherited.
+const sandboxRenameProtectedMetadataName = ".git"
+
 // gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
 // under the OS-level sandbox even though the rest of .git is writable to git
 // subprocesses. Nonexistent paths are harmless no-ops in every backend's
 // enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
 func gitMetadataWriteCarveouts(root string) []string {
-	return []string{
-		filepath.Join(root, ".git", "hooks"),
-		filepath.Join(root, ".git", "config"),
+	specs := gitMetadataWriteCarveoutSpecs(root)
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		out = append(out, spec.Path)
 	}
+	return out
+}
+
+// gitMetadataCarveout is a write-denied .git path together with the shape git
+// expects it to have. The shape matters to exactly one backend: the Windows ACL
+// plan creates a missing carveout so the deny ACE is in place before git first
+// runs, and creating .git/config as a directory makes `git init` fail outright.
+// Every other backend only ever names the path, so it can ignore IsFile.
+type gitMetadataCarveout struct {
+	Path   string
+	IsFile bool
+}
+
+// gitMetadataWriteCarveoutSpecs is the single source of truth for the carveout
+// set. gitMetadataWriteCarveouts derives its list from this so a path can never
+// be added in one place and have its shape forgotten in the other.
+func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
+	gitPath := filepath.Join(root, ".git")
+	// A LINKED WORKTREE OR SUBMODULE HAS .git AS A FILE, NOT A DIRECTORY.
+	//
+	// It holds a `gitdir:` pointer to the real control directory, which lives
+	// outside this write root. Naming .git/config and .git/hooks there asks the
+	// Windows plan to materialize them by descending through .git as a directory,
+	// which cannot open a child beneath a regular file, so opted-in elevated setup
+	// aborts and the sandbox is unusable in any worktree. Zero's own development
+	// worktrees are exactly this shape.
+	//
+	// Deny the pointer file itself instead. It is the right protection rather than
+	// a lesser one: a principal that can rewrite `gitdir:` repoints the whole
+	// repository at a control directory it chooses, which subsumes editing config
+	// or dropping a hook. The real control directory is outside the write root, so
+	// the principal has no inherited access to it and needs no carveout there.
+	//
+	// Stat, not a lexical guess. Whether .git is a file is a property of the
+	// checkout, and the two layouts want different ACEs. A missing .git (git has
+	// not run yet) keeps the directory-shaped carveouts, which is what makes them
+	// materialize before git first runs.
+	if info, err := os.Lstat(gitPath); err == nil && !info.IsDir() {
+		return []gitMetadataCarveout{{Path: gitPath, IsFile: true}}
+	}
+	return []gitMetadataCarveout{
+		{Path: filepath.Join(root, ".git", "hooks")},
+		{Path: filepath.Join(root, ".git", "config"), IsFile: true},
+	}
+}
+
+// gitMetadataCarveoutSuffixBase is a sentinel root used only to recover the
+// trailing segments of the carveout specs. It is never touched on disk.
+const gitMetadataCarveoutSuffixBase = string(filepath.Separator) + "zero-carveout-base"
+
+// gitMetadataCarveoutIsFile reports whether path names a carveout git expects
+// to be a file.
+//
+// It matches on the trailing segments rather than on a whole reconstructed
+// path. The subpaths reaching the ACL plan are already normalized — resolved
+// through EvalSymlinks where that succeeds — while a rebuilt spec path cannot
+// be, because .git/config does not exist yet at setup and resolution falls back
+// to a plain Clean. On a host where two spellings of the same path differ (an
+// 8.3 short name, different casing) a whole-path equality check silently misses
+// and the carveout is created as a directory again, which is the original bug
+// reintroduced quietly. The suffix cannot drift from the spec list because it
+// is derived from it.
+func gitMetadataCarveoutIsFile(path string) bool {
+	candidate := strings.ToLower(filepath.Clean(strings.TrimSpace(path)))
+	if candidate == "" {
+		return false
+	}
+	for _, spec := range gitMetadataWriteCarveoutSpecs(gitMetadataCarveoutSuffixBase) {
+		if !spec.IsFile {
+			continue
+		}
+		suffix := strings.ToLower(strings.TrimPrefix(spec.Path, gitMetadataCarveoutSuffixBase))
+		if suffix != "" && strings.HasSuffix(candidate, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
