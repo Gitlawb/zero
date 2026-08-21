@@ -256,11 +256,12 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 // workspace is clean while the other account is still on the machine, which is
 // the exact lie this guard exists to prevent.
 func windowsSandboxPrincipalIsInstalled(config WindowsSandboxCommandConfig) bool {
-	// BOTH roles, because dual-role setup provisions two accounts and retiring
-	// one while the other survives is exactly the half-done teardown an
-	// opted-out marker must not claim to have completed.
+	// EVERY RETIRABLE ROLE, not just the live pair. Teardown retires legacy too,
+	// so an upgraded machine still holding the untagged pre-split account would
+	// otherwise be reported clean here while that account was still installed,
+	// and the opted-out marker would be exactly the lie this guard prevents.
 	key := windowsSandboxPrincipalKey(config)
-	for _, role := range []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline} {
+	for _, role := range windowsSandboxRetirableRoles {
 		if _, err := lookupWindowsSandboxIdentityFn(key, role); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			return true
 		}
