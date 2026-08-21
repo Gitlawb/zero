@@ -155,6 +155,8 @@ func TestRunAuthOpenRouterRejectsArgs(t *testing.T) {
 }
 
 func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	var stdout, stderr bytes.Buffer
 
@@ -179,7 +181,7 @@ func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
 	if profile.Name != "openrouter" || profile.CatalogID != "openrouter" || !profile.APIKeyStored || profile.APIKey != "" || profile.APIKeyEnv != "" {
 		t.Fatalf("provider not stored-key sanitized: %#v", profile)
 	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	store, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,13 +508,14 @@ func TestRunAuthLogoutRejectsConfigPathFailureBeforeCredentialDeletion(t *testin
 // rather than deleting the shared entry.
 func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStoreAt(dir)
+	store, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,13 +563,14 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 // previously left apiKeyStored:true with no secret behind it.
 func TestRunAuthLogoutClearsMarkerForCaseVariantSpelling(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	withAuthStore(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStoreAt(dir)
+	store, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}

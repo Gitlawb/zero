@@ -479,14 +479,12 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
 	// failures rather than reporting success while a credential remains.
 	// Marker first, then the secret: the reverse order leaves apiKeyStored:true
-	// with nothing behind it if the config write fails. Both halves address the
-	// store BESIDE the config being edited (where setup/rename captured the key),
-	// so a non-default config path cannot clear a marker here while the secret
-	// stays in the default-path store.
+	// with nothing behind it if the config write fails. Provider credentials are
+	// user-scoped, so deletion uses the same default user store as runtime lookup.
 	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, provider); clearErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 	}
-	keyRemoved, keyErr := removeStoredProviderKeyAt(configPath, provider)
+	keyRemoved, keyErr := config.ForgetProviderKey(provider)
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}

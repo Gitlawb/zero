@@ -66,10 +66,9 @@ func SecureProviderProfile(profile ProviderProfile, configPath string) ProviderP
 	return secured
 }
 
-// PublishProviderCredential captures key into the credential store beside path
-// and publishes the matching APIKeyStored marker for exactName as ONE
-// operation, so a rejected publication cannot leave the user worse off than
-// before the call.
+// PublishProviderCredential captures key into the user-scoped credential store
+// and publishes the matching APIKeyStored marker for exactName as ONE operation,
+// so a rejected publication cannot leave the user worse off than before the call.
 //
 // Hand-rolled Set-then-Mark sequences got this wrong in both directions: they
 // wrote the secret before any validation could reject the config, and their
@@ -95,7 +94,7 @@ func PublishProviderCredential(path string, exactName string, key string) error 
 	if err := PreflightUserConfig(path); err != nil {
 		return err
 	}
-	store, err := ProviderKeyStoreAt(filepath.Dir(path))
+	store, err := ProviderKeyStore()
 	if err != nil {
 		return err
 	}

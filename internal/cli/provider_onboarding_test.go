@@ -505,18 +505,18 @@ func writeProviderOnboardingConfig(t *testing.T, path string, cfg config.FileCon
 	}
 }
 
-// TestRunProvidersRemoveDeletesKeyBesideConfig: the stored key must be deleted
-// from the credential store CO-LOCATED with the config being edited (where
-// SecureProviderProfile captured it), not the default-path store.
-func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
+// Runtime provider credentials are user-scoped even when tests inject a
+// non-default config path.
+func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	seed := `{"activeProvider":"gw","providers":[{"name":"gw","provider_kind":"openai-compatible","baseURL":"https://gw.example.com/v1","apiKeyStored":true,"model":"m1"},{"name":"other","provider_kind":"openai-compatible","baseURL":"https://o.example.com/v1","model":"m2"}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	store, err := config.ProviderKeyStoreAt(dir)
+	store, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
 		t.Fatalf("active must hand off, got %q", payload.ActiveProvider)
 	}
 	if _, ok, _ := store.Get("gw"); ok {
-		t.Fatalf("stored key must be deleted from the store beside the config")
+		t.Fatalf("stored key must be deleted from the user-scoped store")
 	}
 }
 
@@ -558,12 +558,13 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("ZERO_CRED_STORAGE", "file")
+			userConfigRoot := setCLIUserConfigRoot(t)
 			dir := t.TempDir()
 			configPath := filepath.Join(dir, "config.json")
 			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			store, err := config.ProviderKeyStoreAt(dir)
+			store, err := config.ProviderKeyStore()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -572,7 +573,7 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 			}
 			// A directory at the lock-file path is a hermetic, cross-platform
 			// failure: Delete cannot acquire its write lock.
-			lockPath := filepath.Join(dir, "credentials.json.lock")
+			lockPath := filepath.Join(userConfigRoot, "zero", "credentials.json.lock")
 			if err := os.Remove(lockPath); err != nil {
 				t.Fatal(err)
 			}
@@ -617,13 +618,14 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 
 func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	seed := []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
 	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStoreAt(dir)
+	store, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}

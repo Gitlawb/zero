@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -510,14 +509,13 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	// Delete the key from the store BESIDE the config being edited — the same
-	// store setup/rename write to — not the default-path store, so a
-	// non-default config path cannot leave the encrypted key behind. A surviving
-	// case variant that still claims the credential keeps it (see
-	// config.CredentialKeyRetained); a survivor that never claimed it does not.
+	// Provider credentials are user-scoped, so delete from the same default user
+	// store runtime lookup uses. A surviving case variant that still claims the
+	// credential keeps it (see config.CredentialKeyRetained); a survivor that
+	// never claimed it does not.
 	keyRemoved, keyErr := false, error(nil)
 	if !config.CredentialKeyRetained(cfg.Providers, name) {
-		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, name)
+		keyRemoved, keyErr = config.ForgetProviderKey(name)
 	}
 	if options.json {
 		payload := map[string]any{
@@ -561,17 +559,6 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 	}
 	return exitSuccess
-}
-
-// removeStoredProviderKeyAt deletes a provider's API key from the credential
-// store co-located with configPath (the store SecureProviderProfile captured
-// it into and RenameProvider migrates within).
-func removeStoredProviderKeyAt(configPath string, provider string) (bool, error) {
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
-		return false, err
-	}
-	return store.Delete(provider)
 }
 
 // runProvidersRename renames a saved provider profile, migrating its stored

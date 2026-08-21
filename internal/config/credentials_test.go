@@ -5,9 +5,24 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func setCredentialTestUserConfigRoot(t *testing.T) {
+	t.Helper()
+
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", root)
+	case "darwin":
+		t.Setenv("XDG_CONFIG_HOME", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+}
 
 type fakeKeyGetter struct {
 	keys map[string]string
@@ -377,6 +392,7 @@ func TestClearProviderKeyStoredCaseVariantsPreservesDistinctUnicodeIdentity(t *t
 // call had created the entry.
 func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCredentialTestUserConfigRoot(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	// Legacy duplicate rows: the write-time validator rejects this config, so
@@ -385,7 +401,7 @@ func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testi
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := ProviderKeyStoreAt(dir)
+	store, err := ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,6 +433,7 @@ func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testi
 // publication must not leave an orphaned secret behind either.
 func TestPublishProviderCredentialDeletesEntryItCreatedWhenMarkerRejected(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCredentialTestUserConfigRoot(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work"},{"name":"WORK"}]}`), 0o600); err != nil {
@@ -425,7 +442,7 @@ func TestPublishProviderCredentialDeletesEntryItCreatedWhenMarkerRejected(t *tes
 	if err := PublishProviderCredential(path, "work", "sk-new"); err == nil {
 		t.Fatal("publication must be rejected for an ambiguous persisted config")
 	}
-	store, err := ProviderKeyStoreAt(dir)
+	store, err := ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,6 +455,7 @@ func TestPublishProviderCredentialDeletesEntryItCreatedWhenMarkerRejected(t *tes
 
 func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCredentialTestUserConfigRoot(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"openrouter","apiKeyEnv":"OPENROUTER_API_KEY"}]}`), 0o600); err != nil {
@@ -446,7 +464,7 @@ func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
 	if err := PublishProviderCredential(path, "openrouter", "sk-new"); err != nil {
 		t.Fatal(err)
 	}
-	store, err := ProviderKeyStoreAt(dir)
+	store, err := ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
