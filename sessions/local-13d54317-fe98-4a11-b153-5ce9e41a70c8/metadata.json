@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T06:11:41.950Z",
-  "durationMs": 11240260,
+  "endedAt": "2026-08-21T06:11:42.349Z",
+  "durationMs": 11240663,
   "status": "running",
   "tokens": {
     "total": 86056,
@@ -16,23 +16,19 @@
   },
   "toolCalls": 88,
   "lines": {
-    "added": 186,
-    "removed": 27
+    "added": 325,
+    "removed": 8
   },
   "filesChanged": [
-    "internal/agentsessions/activity.go",
-    "internal/agentsessions/activity_test.go",
-    "internal/agentsessions/blocker_regression_test.go",
-    "internal/agentsessions/registry.go",
-    "internal/agentsessions/translate.go",
-    "internal/agentsessions/translate_test.go"
+    "internal/cli/sessions.go",
+    "internal/cli/sessions_import.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "6534ead9395a66c79bb2c1a97d4dea50c5b11436",
+    "headAfter": "de77a51ef2e74ea9ad5926e53c3a951e5b1ba7d8",
     "commitShas": [
-      "6534ead9395a66c79bb2c1a97d4dea50c5b11436"
+      "de77a51ef2e74ea9ad5926e53c3a951e5b1ba7d8"
     ]
   },
   "summary": "All six clean and on their PR heads. Rebasing each and checking for conflicts before anything is pushed:",
