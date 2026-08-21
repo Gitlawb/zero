@@ -717,7 +717,7 @@ func shellCommandPayloadIndex(program string, args []string) (int, bool) {
 		case "bash":
 			valueOptions += "O"
 		case "dash", "sh":
-			validOptions = "abCefnuvxIimspc"
+			validOptions = "abCefnuvxIimslpc"
 		default:
 			// ksh/zsh share the common invocation flags used here, including -l.
 			validOptions = "abefhkmnptuvxBCilrsc"
