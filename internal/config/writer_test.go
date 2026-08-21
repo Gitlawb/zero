@@ -1842,6 +1842,18 @@ func TestProviderCredentialCandidates(t *testing.T) {
 		}
 	})
 
+	t.Run("returns no candidates for duplicate exact names", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+			{Name: "work"},
+			{Name: "work"},
+		}}, 0o600)
+		candidates, canonical, err := ProviderCredentialCandidates(path, "work")
+		if err == nil || len(candidates) != 0 || canonical != "work" {
+			t.Fatalf("candidates = %q canonical = %q err = %v, want no candidates and an exact-name ambiguity error", candidates, canonical, err)
+		}
+	})
+
 	t.Run("retains the requested candidate on a config read failure", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
 		if err := os.WriteFile(path, []byte(`{"providers":`), 0o600); err != nil {

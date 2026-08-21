@@ -518,6 +518,8 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 	if err != nil {
 		return ProviderProfile{}, PersistedIdentityNone, err
 	}
+	var exactName *ProviderProfile
+	exactMatches := 0
 	var foldedName *ProviderProfile
 	foldedMatches := 0
 	var catalogRow *ProviderProfile
@@ -526,9 +528,12 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 		row := providers[index]
 		name := strings.TrimSpace(row.Name)
 		if name == identity {
-			return row, PersistedIdentityName, nil
-		}
-		if sameProviderIdentity(name, identity) {
+			exactMatches++
+			if exactName == nil {
+				match := row
+				exactName = &match
+			}
+		} else if sameProviderIdentity(name, identity) {
 			foldedMatches++
 			if foldedName == nil {
 				match := row
@@ -542,6 +547,12 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 				catalogRow = &match
 			}
 		}
+	}
+	if exactMatches == 1 {
+		return *exactName, PersistedIdentityName, nil
+	}
+	if exactMatches > 1 {
+		return ProviderProfile{}, PersistedIdentityAmbiguous, fmt.Errorf("ambiguous provider name %q matches multiple persisted rows with the same name; remove one duplicate from config.json", identity)
 	}
 	if foldedMatches == 1 {
 		return *foldedName, PersistedIdentityName, nil
