@@ -504,10 +504,12 @@ func TestPDFOutputReadersAreBounded(t *testing.T) {
 	}
 
 	buffer = newBoundedBuffer(16)
+	overflowed := false
+	buffer.onOverflow = func() { overflowed = true }
 	if _, err := io.Copy(&buffer, strings.NewReader(strings.Repeat("q", 1024))); err != nil {
 		t.Fatalf("io.Copy into boundedBuffer: %v", err)
 	}
-	if !buffer.overflow || buffer.Len() != 17 {
+	if !buffer.overflow || !overflowed || buffer.Len() != 17 {
 		t.Fatalf("io.Copy bypassed bound: overflow=%v len=%d", buffer.overflow, buffer.Len())
 	}
 }

@@ -363,14 +363,20 @@ func extractTextWithPoppler(ctx context.Context, data []byte) popplerTextResult 
 	if !popplerLookup("pdftotext") {
 		return popplerTextResult{status: popplerTextUnavailable}
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	// "-layout" keeps the visual column layout; the trailing "- -" reads the PDF
 	// from stdin and writes UTF-8 text to stdout.
 	cmd := popplerCommandWithContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
 	cmd.Stdin = bytes.NewReader(data)
 	stdout := newBoundedBuffer(MaxDocumentTextBytes)
+	stdout.onOverflow = cancel
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
+		if stdout.overflow {
+			return popplerTextResult{text: strings.TrimSpace(stdout.String()), overflow: true, status: popplerTextExtracted}
+		}
 		return popplerTextResult{status: popplerTextFailed}
 	}
 	return popplerTextResult{text: strings.TrimSpace(stdout.String()), overflow: stdout.overflow, status: popplerTextExtracted}
@@ -404,9 +410,10 @@ func pdfPageCountWithPoppler(ctx context.Context, data []byte) int {
 // write. The extra byte distinguishes exact-limit output from overflow without
 // allowing a subprocess or parser to grow memory without bound.
 type boundedBuffer struct {
-	buffer   bytes.Buffer
-	limit    int
-	overflow bool
+	buffer     bytes.Buffer
+	limit      int
+	overflow   bool
+	onOverflow func()
 }
 
 func newBoundedBuffer(limit int) boundedBuffer {
@@ -422,7 +429,12 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 		_, _ = buffer.buffer.Write(data[:remaining])
 	}
 	if buffer.buffer.Len() > buffer.limit {
-		buffer.overflow = true
+		if !buffer.overflow {
+			buffer.overflow = true
+			if buffer.onOverflow != nil {
+				buffer.onOverflow()
+			}
+		}
 	}
 	return len(data), nil
 }
