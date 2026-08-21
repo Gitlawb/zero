@@ -172,7 +172,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/image",
 		usage:       "/image <path> | clear",
 		group:       commandGroupSession,
-		description: "Attach a local image (vision models) or PDF text layer (requires Poppler's pdftotext) to the next message. /image clear removes pending attachments.",
+		description: "Attach a local image (vision models) or PDF text layer (requires Poppler's pdftotext); vision models can use PDF page images via pdftoppm. /image clear removes pending attachments.",
 		kind:        commandImage,
 	},
 	{

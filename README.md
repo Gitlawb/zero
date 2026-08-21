@@ -223,7 +223,9 @@ Common slash commands:
 
 PDF text attachments use Poppler's `pdftotext` executable. Install Poppler with
 your platform's package manager and ensure `pdftotext` is on `PATH`; optional
-PDF page images for vision models also require Poppler's `pdftoppm`.
+PDF page images for vision models also require Poppler's `pdftoppm`. A vision
+model can still receive those rendered page images when a PDF has no usable text
+layer or `pdftotext` cannot extract one.
 
 ### Headless `exec`
 

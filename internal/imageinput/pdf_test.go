@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const minimalPDFTextChunkSize = 80
@@ -366,6 +368,32 @@ func TestLoadDocumentDoesNotMisreportTextlessPDFAsMissingPoppler(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "install Poppler") {
 		t.Fatalf("LoadDocument error = %q must not claim Poppler is absent", err)
+	}
+}
+
+func TestLoadDocumentVisionUsesRenderedPagesWhenTextExtractionFails(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "scan.pdf"), buildEmptyTextPDF(), 0o644); err != nil {
+		t.Fatalf("write scan: %v", err)
+	}
+	originalText, originalPages, originalRaster := popplerTextExtractor, popplerPageCounter, popplerRasterizer
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{status: popplerTextUnavailable}
+	}
+	popplerPageCounter = func(context.Context, []byte) int { return 1 }
+	popplerRasterizer = func(context.Context, []byte, int) ([]zeroruntime.ImageBlock, error) {
+		return []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("png")}}, nil
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerRasterizer = originalText, originalPages, originalRaster
+	})
+
+	doc, err := LoadDocument("scan.pdf", root, DocumentOptions{Vision: true})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "" || len(doc.Images) != 1 || doc.Pages != 1 {
+		t.Fatalf("Document = %#v, want rendered page with no text", doc)
 	}
 }
 

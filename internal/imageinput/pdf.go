@@ -178,7 +178,7 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 				defer work.Done()
 				defer required.Done()
 				// Rendering is optional: text remains usable if it fails or times out.
-				if rendered, rerr := rasterizeWithPoppler(ctx, data, opts.maxPages()); rerr == nil {
+				if rendered, rerr := popplerRasterizer(ctx, data, opts.maxPages()); rerr == nil {
 					images = rendered
 				}
 			}()
@@ -313,6 +313,7 @@ type popplerTextResult struct {
 var (
 	popplerTextExtractor      = extractTextWithPoppler
 	popplerPageCounter        = pdfPageCountWithPoppler
+	popplerRasterizer         = rasterizeWithPoppler
 	popplerLookup             = popplerAvailable
 	popplerCommandWithContext = exec.CommandContext
 	popplerOperationTimeout   = popplerTimeout
