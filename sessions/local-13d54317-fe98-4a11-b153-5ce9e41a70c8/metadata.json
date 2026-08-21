@@ -3,8 +3,8 @@
   "sessionId": "local-13d54317-fe98-4a11-b153-5ce9e41a70c8",
   "model": "claude-opus-5",
   "startedAt": "2026-08-21T03:04:21.620Z",
-  "endedAt": "2026-08-21T03:42:06.656Z",
-  "durationMs": 2265022,
+  "endedAt": "2026-08-21T03:42:11.435Z",
+  "durationMs": 2269805,
   "status": "running",
   "tokens": {
     "total": 35232,
@@ -16,23 +16,27 @@
   },
   "toolCalls": 31,
   "lines": {
-    "added": 186,
-    "removed": 27
+    "added": 281,
+    "removed": 52
   },
   "filesChanged": [
     "internal/agentsessions/activity.go",
     "internal/agentsessions/activity_test.go",
     "internal/agentsessions/blocker_regression_test.go",
-    "internal/agentsessions/registry.go",
+    "internal/agentsessions/family1.go",
+    "internal/agentsessions/family1_test.go",
+    "internal/agentsessions/fixture_corpus_test.go",
+    "internal/agentsessions/testdata/claude-config/projects/-Users-example-workspace-demo/fixture-session.jsonl",
+    "internal/agentsessions/testdata/codex-home/sessions/2026/08/01/rollout-2026-08-01T10-00-00-fixture0-0000-0000-0000-000000000001.jsonl",
     "internal/agentsessions/translate.go",
     "internal/agentsessions/translate_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "6519af891dd752407dc1e129cbbe73195f385c84",
+    "headAfter": "53ce22b4bf6af28b2edd69dc91a904511e845f62",
     "commitShas": [
-      "6519af891dd752407dc1e129cbbe73195f385c84"
+      "53ce22b4bf6af28b2edd69dc91a904511e845f62"
     ]
   },
   "summary": "All three diagnostic agents are running. Progress so far on #878:\n\n**Done — CodeRabbit's finding.** The test's comment claimed \"the halves must NOT become the secret\" but only asserted the newline survived. That passes just as well if the matcher spans the newline and redacts both halves as one — the separator would survive *inside* a `[REDACTED]` that ate the text around it. Now asserts both halves by name plus the absence of any redaction. Mutation-checked by removing the `\\t`/`\\n` exemption f...",
