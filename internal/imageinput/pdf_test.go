@@ -585,6 +585,41 @@ func TestLoadDocumentDoesNotWaitForInformationalPageCount(t *testing.T) {
 	}
 }
 
+func TestLoadDocumentDoesNotWaitForOptionalRasterWhenTextSucceeds(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "fast.pdf"), buildMinimalPDF("text"), 0o644); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	originalText, originalPages, originalRaster, originalTimeout := popplerTextExtractor, popplerPageCounter, popplerRasterizer, popplerOperationTimeout
+	popplerOperationTimeout = time.Second
+	popplerTextExtractor = func(context.Context, []byte) popplerTextResult {
+		return popplerTextResult{text: "text", status: popplerTextExtracted}
+	}
+	popplerPageCounter = func(ctx context.Context, _ []byte) int {
+		<-ctx.Done()
+		return 0
+	}
+	popplerRasterizer = func(ctx context.Context, _ []byte, _ int) ([]zeroruntime.ImageBlock, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() {
+		popplerTextExtractor, popplerPageCounter, popplerRasterizer, popplerOperationTimeout = originalText, originalPages, originalRaster, originalTimeout
+	})
+
+	started := time.Now()
+	doc, err := LoadDocument("fast.pdf", root, DocumentOptions{Vision: true})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Text != "text" || len(doc.Images) != 0 {
+		t.Fatalf("Document = %#v, want text without waiting for raster", doc)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("LoadDocument took %s; optional raster must not delay text", elapsed)
+	}
+}
+
 func TestLoadDocumentHostilePDFDoesNotUseInProcessParser(t *testing.T) {
 	root := t.TempDir()
 	cases := map[string][]byte{

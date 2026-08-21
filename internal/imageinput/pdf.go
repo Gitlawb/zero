@@ -163,12 +163,13 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	pages := 0
 	if useExternal {
 		ctx, cancel := context.WithTimeout(context.Background(), popplerOperationTimeout)
-		var work, required sync.WaitGroup
+		var work sync.WaitGroup
+		textDone := make(chan struct{})
+		var rasterDone <-chan struct{}
 		work.Add(2)
-		required.Add(1)
 		go func() {
 			defer work.Done()
-			defer required.Done()
+			defer close(textDone)
 			textResult = popplerTextExtractor(ctx, data)
 		}()
 		go func() {
@@ -176,20 +177,28 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 			pages = popplerPageCounter(ctx, data)
 		}()
 		if opts.Vision {
+			done := make(chan struct{})
+			rasterDone = done
 			work.Add(1)
-			required.Add(1)
 			go func() {
 				defer work.Done()
-				defer required.Done()
+				defer close(done)
 				// Rendering is optional: text remains usable if it fails or times out.
 				if rendered, rerr := popplerRasterizer(ctx, data, opts.maxPages()); rerr == nil {
 					images = rendered
 				}
 			}()
 		}
-		// Page count is informational. Do not turn a successful attachment into a
-		// second timeout because pdfinfo is slow or wedged.
-		required.Wait()
+		<-textDone
+		// Page count and page rendering are informational when text succeeded.
+		// Do not turn a usable attachment into a second timeout because either
+		// optional process is slow or wedged. If text is unusable, a vision model
+		// waits for its rendered pages because they are then the only attachment.
+		if textResult.status != popplerTextExtracted || strings.TrimSpace(textResult.text) == "" {
+			if rasterDone != nil {
+				<-rasterDone
+			}
+		}
 		cancel()
 		work.Wait()
 	}
