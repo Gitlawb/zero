@@ -45,6 +45,13 @@ type commandResult struct {
 	Stderr   string
 	Err      error // set when the command could not be executed (not a non-zero exit)
 	TimedOut bool  // the hook started but its deadline/cancellation fired before it returned
+	// Notices carries the enforcement disclosures the execution runner attached.
+	//
+	// Same reason as the plugin path: the generic execution contract is not
+	// transport-only. Enforcement.Notices says what the sandbox actually did, and
+	// a projection that keeps only stdout, stderr and an exit code drops it, so a
+	// hook ran under a weakened token with nothing said about it.
+	Notices []string
 }
 
 // commandRunner executes one hook command. It is injectable so the dispatch
@@ -139,6 +146,7 @@ func executionCommandRunner(runner *execution.Runner) commandRunner {
 			Stderr:   stderr,
 			Err:      commandErr,
 			TimedOut: result.Outcome.Kind == execution.OutcomeTimedOut,
+			Notices:  append([]string(nil), result.Outcome.Enforcement.Notices...),
 		}
 	}
 }
@@ -244,10 +252,25 @@ func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 // hookMessage returns the output worth surfacing from a hook run: stdout when
 // present, else stderr. Empty when the hook produced no output.
 func hookMessage(result commandResult) string {
-	if trimmed := strings.TrimSpace(result.Stdout); trimmed != "" {
-		return trimmed
+	message := strings.TrimSpace(result.Stdout)
+	if message == "" {
+		message = strings.TrimSpace(result.Stderr)
 	}
-	return strings.TrimSpace(result.Stderr)
+	// PREPENDED, and present even when the hook itself said nothing. A hook that
+	// runs silently under a weakened token is exactly the case where the only
+	// thing worth surfacing IS the disclosure.
+	return withHookEnforcementNotices(message, result.Notices)
+}
+
+func withHookEnforcementNotices(message string, notices []string) string {
+	joined := strings.TrimSpace(strings.Join(notices, "\n"))
+	if joined == "" {
+		return message
+	}
+	if strings.TrimSpace(message) == "" {
+		return joined
+	}
+	return joined + "\n\n" + message
 }
 
 func blockReason(result commandResult) string {

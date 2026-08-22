@@ -56,6 +56,15 @@ type commandOutput struct {
 	Stderr   string
 	ExitCode int
 	Err      error
+	// Notices carries the enforcement disclosures the execution runner attached
+	// to this command.
+	//
+	// The generic contract is not transport-only. Enforcement.Notices says what
+	// the sandbox actually did, and on Windows that includes trading the write
+	// jail away for a deny-read profile. A projection that copies stdout, stderr
+	// and an exit code drops it, so a plugin tool ran under the weakened token
+	// and said nothing about it.
+	Notices []string
 }
 
 // toolRunner executes a resolved plugin tool command. It is injectable so
@@ -558,17 +567,19 @@ func (tool pluginTool) invoke(ctx context.Context, args map[string]any, cwd stri
 	formatted := formatPluginToolOutput(output)
 	if output.ExitCode != 0 {
 		return tools.Result{
-			Status:  tools.StatusError,
-			Output:  formatted,
-			Meta:    meta,
-			Display: tools.Display{Summary: tool.name + " failed", Kind: "plugin"},
+			Status:             tools.StatusError,
+			Output:             formatted,
+			Meta:               meta,
+			EnforcementNotices: output.Notices,
+			Display:            tools.Display{Summary: tool.name + " failed", Kind: "plugin"},
 		}
 	}
 	return tools.Result{
-		Status:  tools.StatusOK,
-		Output:  formatted,
-		Meta:    meta,
-		Display: tools.Display{Summary: tool.name, Kind: "plugin"},
+		Status:             tools.StatusOK,
+		Output:             formatted,
+		Meta:               meta,
+		EnforcementNotices: output.Notices,
+		Display:            tools.Display{Summary: tool.name, Kind: "plugin"},
 	}
 }
 
@@ -719,7 +730,12 @@ func execPluginCommandWithExecution(ctx context.Context, runner *execution.Runne
 	if result.Outcome.Exit != nil {
 		exitCode = result.Outcome.Exit.Code
 	}
-	output := commandOutput{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: exitCode}
+	output := commandOutput{
+		Stdout:   result.Stdout,
+		Stderr:   result.Stderr,
+		ExitCode: exitCode,
+		Notices:  append([]string(nil), result.Outcome.Enforcement.Notices...),
+	}
 	switch result.Outcome.Kind {
 	case execution.OutcomeSandboxSetupFailure, execution.OutcomeExecutableNotFound, execution.OutcomeTimedOut, execution.OutcomeCancelled:
 		output.Err = result.Err

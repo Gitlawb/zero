@@ -115,9 +115,12 @@ func TestNoDenyReadWarningWhenTheHostIsNotWindows(t *testing.T) {
 func TestCommandPlanCarriesTheDenyReadDisclosure(t *testing.T) {
 	withWindowsHost(t)
 
-	// A request that will actually produce a restricted token. The notice follows
-	// the token, so a fixture that only names the backend is not enough.
-	plan := withSandboxExecutionMetadata(CommandPlan{}, wrappedWindowsRequest())
+	// A WRAPPED plan, because the notice follows the token and plan.Wrapped is
+	// what says a token gets built. This passed CommandPlan{} and relied on the
+	// request's CommandWrapped field, which meant the opposite of what it was read
+	// as, so the assertion held while production disclosed nothing. See
+	// windowsRestrictedTokenWillRun.
+	plan := withSandboxExecutionMetadata(CommandPlan{Wrapped: true}, wrappedWindowsRequest())
 
 	if len(plan.Notes) == 0 {
 		t.Fatal("a command plan resolved with denyRead carried no notice, so the operator loses the write jail without being told")
@@ -135,9 +138,11 @@ func TestCommandPlanCarriesTheDenyReadDisclosure(t *testing.T) {
 func TestCommandPlanCarriesNoDisclosureWithoutDenyRead(t *testing.T) {
 	withWindowsHost(t)
 
-	plan := withSandboxExecutionMetadata(CommandPlan{}, SandboxExecutionRequest{
-		Backend:       windowsRestrictedTokenBackend(),
-		TargetBackend: BackendWindowsRestrictedToken,
+	plan := withSandboxExecutionMetadata(CommandPlan{Wrapped: true}, SandboxExecutionRequest{
+		Backend:                 windowsRestrictedTokenBackend(),
+		TargetBackend:           BackendWindowsRestrictedToken,
+		RequiresPlatformSandbox: true,
+		EnforcementLevel:        EnforcementNative,
 	})
 	if len(plan.Notes) != 0 {
 		t.Errorf("a plan without denyRead carried notices: %v", plan.Notes)
@@ -145,9 +150,13 @@ func TestCommandPlanCarriesNoDisclosureWithoutDenyRead(t *testing.T) {
 }
 
 // wrappedWindowsRequest is the shape buildPlatformCommandPlan actually wraps in
-// a restricted token: a platform sandbox is required, enforcement is native, the
-// target is the Windows restricted-token backend, and nothing outside has
-// wrapped the command already.
+// a restricted token: a platform sandbox is required, enforcement is native, and
+// the target is the Windows restricted-token backend.
+//
+// It says nothing about CommandWrapped on purpose. That field is TRUE for these
+// requests, because it means "this plan will be wrapped" rather than "something
+// already wrapped it", and reading it the other way is what made the disclosure
+// fire on nothing.
 func wrappedWindowsRequest() SandboxExecutionRequest {
 	return SandboxExecutionRequest{
 		Backend:                 windowsRestrictedTokenBackend(),
@@ -167,20 +176,29 @@ func wrappedWindowsRequest() SandboxExecutionRequest {
 func TestNoDisclosureWhenNoRestrictedTokenIsCreated(t *testing.T) {
 	withWindowsHost(t)
 
+	// The direct plan is the case that made the old predicate look necessary: it
+	// carries the Windows backend and the same DenyRead profile, and builds no
+	// token at all.
+	t.Run("the plan is the direct unwrapped one", func(t *testing.T) {
+		plan := withSandboxExecutionMetadata(CommandPlan{Wrapped: false}, wrappedWindowsRequest())
+		if len(plan.Notes) != 0 {
+			t.Errorf("an unwrapped plan claimed the write jail was traded away: %v", plan.Notes)
+		}
+	})
+
 	for _, testCase := range []struct {
 		name   string
 		mutate func(*SandboxExecutionRequest)
 	}{
 		{name: "sandboxing disabled", mutate: func(r *SandboxExecutionRequest) { r.EnforcementLevel = EnforcementDisabled }},
 		{name: "degraded to no native isolation", mutate: func(r *SandboxExecutionRequest) { r.EnforcementLevel = EnforcementDegraded }},
-		{name: "already wrapped by an outer sandbox", mutate: func(r *SandboxExecutionRequest) { r.CommandWrapped = true }},
 		{name: "command needs no platform sandbox", mutate: func(r *SandboxExecutionRequest) { r.RequiresPlatformSandbox = false }},
 		{name: "no target backend", mutate: func(r *SandboxExecutionRequest) { r.TargetBackend = BackendNone }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := wrappedWindowsRequest()
 			testCase.mutate(&request)
-			plan := withSandboxExecutionMetadata(CommandPlan{}, request)
+			plan := withSandboxExecutionMetadata(CommandPlan{Wrapped: true}, request)
 			if len(plan.Notes) != 0 {
 				t.Errorf("claimed the write jail was traded away where no restricted token runs: %v", plan.Notes)
 			}
