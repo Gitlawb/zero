@@ -87,3 +87,51 @@ func TestPlansThatBuildNoTokenStaySilent(t *testing.T) {
 		})
 	}
 }
+
+// THE PROJECTION ITSELF, driven from a real plan.
+//
+// Everything else about notices in this PR is asserted by handing a constructor
+// a Notices slice and checking it comes out the other side. That proves the
+// consumers and not the producer: deleting the one line in EnforcementFor that
+// puts plan.Notes into Enforcement.Notices left every notice test in the repo
+// green, and that line is the whole reason hooks, plugins and MCP see anything.
+//
+// This starts from a plan the manager built, not a literal, so the chain
+// profile -> plan.Notes -> Enforcement.Notices is covered end to end.
+func TestEnforcementForCarriesThePlanNoticesToTheGenericContract(t *testing.T) {
+	withWindowsHost(t)
+	denyRead := []string{`C:\Users\someone\.config\creds`}
+
+	plan := windowsDisclosurePlan(t, ModeEnforce, denyRead, SandboxPreferenceAuto)
+	if !plan.Wrapped {
+		t.Skipf("this environment did not produce a wrapped Windows plan (%s)", plan.EnforcementLevel)
+	}
+	if len(plan.Notes) == 0 {
+		t.Fatal("SETUP INVALID: the plan carries no notes, so the projection has nothing to carry")
+	}
+
+	enforcement := EnforcementFor(plan)
+	if len(enforcement.Notices) != len(plan.Notes) {
+		t.Fatalf("EnforcementFor produced %d notices from %d plan notes; hooks, plugins and MCP read this field and would see nothing",
+			len(enforcement.Notices), len(plan.Notes))
+	}
+	for index, note := range plan.Notes {
+		if enforcement.Notices[index] != note {
+			t.Errorf("notice %d = %q, want %q", index, enforcement.Notices[index], note)
+		}
+	}
+}
+
+// And a plan with nothing to disclose projects nothing, or the assertion above
+// would be satisfied by a field that is never empty.
+func TestEnforcementForCarriesNoNoticesFromASilentPlan(t *testing.T) {
+	withWindowsHost(t)
+
+	plan := windowsDisclosurePlan(t, ModeEnforce, nil, SandboxPreferenceAuto)
+	if len(plan.Notes) != 0 {
+		t.Fatalf("SETUP INVALID: a plan with no denyRead carries notes: %v", plan.Notes)
+	}
+	if notices := EnforcementFor(plan).Notices; len(notices) != 0 {
+		t.Errorf("a silent plan projected notices: %v", notices)
+	}
+}
