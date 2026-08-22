@@ -1557,7 +1557,39 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// the Run turn loop performs the actual provider switch. Empty for every
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
+		// ONE REFUSAL IDENTITY, derived here so classification and streak
+		// accounting cannot disagree.
+		//
+		// The registry marks its pre-execution refusals in metadata, and
+		// isPolicyRefusal read that marker while observeToolResult keyed on
+		// DenialReason, which those paths leave empty. The guard therefore fell
+		// back to errorSignature(output), and two refusals of the same category
+		// with different wording looked like two different failures. A model
+		// alternating capture_artifact's browser_screenshot and browser_pdf against
+		// a disabled driver is refused identically each time, and never tripped the
+		// six-call refusal halt: only the generic twelve-error fallback stopped it,
+		// reporting varied errors rather than a repeated refusal.
+		DenialReason: denialCategoryForResult(result),
 	}, nil
+}
+
+// denialCategoryForResult gives every pre-execution refusal a stable category,
+// whether it was built as a typed denial or only marked in metadata.
+//
+// The mapping lives here, at the one boundary tools.Result becomes ToolResult,
+// rather than at each producer. A marker without a category is the shape that
+// caused this: it classified as a refusal and keyed as an error signature.
+func denialCategoryForResult(result tools.Result) DenialCategory {
+	switch result.Meta[tools.PolicyRefusalMeta] {
+	case tools.PolicyRefusalToolNotEnabled:
+		return DenialFiltered
+	case tools.PolicyRefusalPermissionDenied, tools.PolicyRefusalPermissionRequired:
+		return DenialPermissionDenied
+	case tools.PolicyRefusalSandboxDenied, tools.PolicyRefusalSandboxApproval:
+		return DenialSandboxBlock
+	default:
+		return DenialNone
+	}
 }
 
 const sandboxNamespaceLimitedReason = "sandbox output is limited to the sandbox PID namespace; host/global state requires approval"
@@ -1885,6 +1917,10 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 		Display:         display,
 		LoadedTools:     loadedToolsFromResult(meta),
 		RequestedModel:  meta["escalate_to_model"],
+		// The SAME identity the executed path derives. This is the route a
+		// RejectBeforePermission refusal takes, so leaving it empty here is what
+		// made the marker classify as a refusal and key as an error signature.
+		DenialReason: denialCategoryForResult(tools.Result{Meta: meta}),
 	}
 }
 
