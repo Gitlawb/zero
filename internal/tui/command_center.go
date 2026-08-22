@@ -449,7 +449,12 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if err != nil {
 		return m, "Model\n" + err.Error()
 	}
-	persisted, persistErr := m.persistSelectedModel(nextProfile)
+	persisted, persistedName, persistErr := m.persistSelectedModel(nextProfile)
+	if persisted {
+		// Same reconciliation switchProviderModel does: the manager and picker
+		// read models from savedProviders, not from the live profile.
+		m.savedProviders = syncSavedProviderModel(m.savedProviders, persistedName, nextProfile.Model)
+	}
 
 	m.providerProfile = nextProfile
 	m.provider = nextProvider
@@ -580,9 +585,32 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	)
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(target.Name)
+	persistNote := ""
 	if strings.TrimSpace(m.userConfigPath) != "" {
-		_, _ = config.SetActiveProvider(m.userConfigPath, target.Name)
-		_, _ = config.SetProviderModel(m.userConfigPath, target.Name, target.Model)
+		// SetActiveProvider accepts any spelling of the credential identity and
+		// returns the config with the persisted row's OWN spelling in
+		// ActiveProvider. SetProviderModel matches rows exactly, so persist with
+		// that resolved name — passing the session's spelling silently wrote
+		// nothing whenever the two differed (session "openai", row "OpenAI").
+		//
+		// Env-derived providers have no row to update, so they are skipped
+		// silently; a failure to write a row that DOES exist is surfaced rather
+		// than swallowed, since the session and config.json then disagree.
+		persisted, err := config.ProviderPersisted(m.userConfigPath, target.Name)
+		switch {
+		case err != nil:
+			persistNote = "\nNote: the switch applies to this session, but config.json could not be read: " + redaction.RedactString(err.Error(), redaction.Options{})
+		case persisted:
+			if cfg, err := config.SetActiveProvider(m.userConfigPath, target.Name); err != nil {
+				persistNote = "\nNote: the switch applies to this session, but config.json was not updated: " + redaction.RedactString(err.Error(), redaction.Options{})
+			} else if _, err := config.SetProviderModel(m.userConfigPath, cfg.ActiveProvider, target.Model); err != nil {
+				persistNote = "\nNote: the active provider was saved, but its model was not: " + redaction.RedactString(err.Error(), redaction.Options{})
+			} else {
+				// Reconcile the in-memory list the manager and picker read from,
+				// or those surfaces keep showing the previous model until restart.
+				m.savedProviders = syncSavedProviderModel(m.savedProviders, cfg.ActiveProvider, target.Model)
+			}
+		}
 	}
 	// Warm discovery for the provider we just switched to, same as Init() does
 	// for the provider active at launch — otherwise the context-usage gauge has
@@ -597,6 +625,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 		}
 	}
 	status := fmt.Sprintf("Model\nSwitched to %s · %s", target.Name, target.Model)
+	status += persistNote
 	if warn := m.visionDropWarning(); warn != "" {
 		status += "\n" + warn
 	}
@@ -674,44 +703,60 @@ func oauthLoginName(profile config.ProviderProfile) (string, bool) {
 	return strings.TrimPrefix(key, oauth.KeyPrefixProvider), true
 }
 
+// savedProviderByName resolves a provider spelling to its saved profile using
+// the credential store's own normalization rather than strings.EqualFold. The
+// two disagree: EqualFold folds "s" and Unicode long-s "ſ" together, while the
+// store keeps separate entries for them, so EqualFold could hand back a
+// different provider's profile and reach its secret.
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
-	name = strings.TrimSpace(name)
+	normalized := credstore.NormalizeProvider(name)
 	for _, profile := range m.savedProviders {
-		if strings.EqualFold(strings.TrimSpace(profile.Name), name) {
+		if credstore.NormalizeProvider(profile.Name) == normalized {
 			return profile, true
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(m.providerProfile.Name), name) {
+	if credstore.NormalizeProvider(m.providerProfile.Name) == normalized {
 		return m.providerProfile, true
 	}
 	return config.ProviderProfile{}, false
 }
 
-func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error) {
+// persistSelectedModel writes profile's model to its config.json row and
+// returns the EXACT row spelling it wrote to, so the caller can mirror the same
+// change into savedProviders with syncSavedProviderModel rather than re-deriving
+// the row from the session's spelling.
+func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, string, error) {
 	path := strings.TrimSpace(m.userConfigPath)
 	if path == "" {
-		return false, nil
+		return false, "", nil
 	}
 	name := strings.TrimSpace(profile.Name)
 	if name == "" {
-		return false, nil
+		return false, "", nil
 	}
 	model := strings.TrimSpace(profile.Model)
 	if model == "" {
-		return false, nil
+		return false, "", nil
 	}
 	persisted, err := config.ProviderPersisted(path, name)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if !persisted {
 		// Env-derived providers have no config.json row to update.
-		return false, nil
+		return false, "", nil
 	}
-	if _, err := config.SetProviderModel(path, name, model); err != nil {
-		return false, err
+	// ProviderPersisted matches credential identity; SetProviderModel matches
+	// the row exactly. Resolve the session's spelling to the row's own before
+	// writing, or a case difference makes this a silent no-op.
+	exactName, err := config.ResolvePersistedProviderName(path, name)
+	if err != nil {
+		return false, "", err
 	}
-	return true, nil
+	if _, err := config.SetProviderModel(path, exactName, model); err != nil {
+		return false, "", err
+	}
+	return true, exactName, nil
 }
 
 type modelSwitchTarget struct {

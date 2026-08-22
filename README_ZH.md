@@ -99,6 +99,12 @@ zero models list
 zero doctor
 ```
 
+如果升级后的 `config.json` 中有一个旧版未命名的提供商配置，请运行
+`zero providers repair-config` 进行修复。该命令会保留已保存的
+`activeProvider` 名称（未设置时回退到 `openai`），也可以通过
+`--name <名称>` 显式指定新名称。对于多个未命名的配置行，Zero 不会猜测，
+请直接在 `config.json` 中修复。
+
 对于 API 提供商，在设置之前设置匹配的环境变量或在向导中输入密钥：
 
 ```bash
@@ -208,7 +214,7 @@ zero exec             一次性或脚本化智能体运行
 zero setup            首次运行提供商设置
 zero auth             支持提供商的 OAuth/登录辅助
 zero models           模型注册表和能力
-zero providers        提供商配置和检测
+zero providers        提供商配置、修复和检测
 zero doctor           设置、密钥和连接检查
 zero context          上下文预算报告
 zero repo-map         确定性仓库映射
