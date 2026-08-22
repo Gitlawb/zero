@@ -273,7 +273,18 @@ func withHookEnforcementNotices(message string, notices []string) string {
 	return joined + "\n\n" + message
 }
 
+// blockReason explains a veto, and carries the enforcement disclosure with it.
+//
+// THE BLOCKING BRANCH IS THE ONE A USER ALWAYS SEES. hookMessage composes the
+// notices into DispatchOutcome.Messages, but a vetoing beforeTool hook builds
+// Reason separately and returns immediately, so a hook that blocked an action
+// while running without write confinement reported only the veto. Both fields
+// reach a person, so both have to carry it.
 func blockReason(result commandResult) string {
+	return withHookEnforcementNotices(blockCause(result), result.Notices)
+}
+
+func blockCause(result commandResult) string {
 	if result.TimedOut {
 		if trimmed := strings.TrimSpace(result.Stderr); trimmed != "" {
 			return "hook timed out: " + trimmed
