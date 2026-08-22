@@ -191,7 +191,7 @@ func openCredentialLockFile(directoryFD int, name string) (int, error) {
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
 		var fd int
-		fd, err = unix.Openat(directoryFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+		fd, err = credentialLockOpenat(directoryFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 		if !errors.Is(err, unix.ENOENT) {
 			return fd, err
 		}
@@ -202,6 +202,8 @@ func openCredentialLockFile(directoryFD int, name string) (int, error) {
 	}
 	return -1, err
 }
+
+var credentialLockOpenat = unix.Openat
 
 func validateCredentialDirectory(path string, stat *unix.Stat_t, final bool) error {
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
