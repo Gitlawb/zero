@@ -81,6 +81,9 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if command == "rename" {
 		return runProvidersRename(args, stdout, stderr, deps)
 	}
+	if command == "repair-config" {
+		return runProvidersRepairConfig(args, stdout, stderr, deps)
+	}
 	if command == "setup" {
 		return runProvidersSetup(args, stdout, stderr, deps)
 	}
@@ -497,6 +500,7 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers use <name> [flags]
   zero providers remove <name> [flags]
   zero providers rename <old> <new> [flags]
+  zero providers repair-config [flags]
   zero providers setup <catalog-id> [flags]
   zero providers detect [flags]
   zero providers models [name] [flags]
@@ -527,6 +531,9 @@ Setup flags:
       --base-url <url>          Planned base URL override
       --api-key-env <name>      Planned API key environment variable
       --set-active              Include --set-active in the add command
+
+Repair-config flags:
+      --name <name>             Explicit name for the legacy unnamed provider
   -h, --help                    Show this help
 `)
 	return err

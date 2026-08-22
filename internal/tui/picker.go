@@ -282,7 +282,7 @@ func (m model) modelPickerProviders() []config.ProviderProfile {
 // active provider prefers its live-discovered models when available.
 func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, activeProvider, activeModel string) []pickerItem {
 	providerName := strings.TrimSpace(profile.Name)
-	isActive := providerName != "" && strings.EqualFold(providerName, activeProvider)
+	isActive := providerName != "" && config.SameProviderIdentity(providerName, activeProvider)
 	descriptor, hasDescriptor := m.descriptorForProfile(profile)
 	group := modelPickerProviderGroup(profile, descriptor, hasDescriptor)
 

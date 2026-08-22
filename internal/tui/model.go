@@ -21,6 +21,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/errhint"
 	"github.com/Gitlawb/zero/internal/lsp"
@@ -88,6 +89,8 @@ type model struct {
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
+	deleteProviderKey           func(configPath, provider string) (bool, error)
+	clearProviderKeyStored      func(configPath, provider string) (bool, error)
 	registry                    *tools.Registry
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
@@ -969,6 +972,8 @@ func newModel(ctx context.Context, options Options) model {
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
+		deleteProviderKey:           deleteProviderKey,
+		clearProviderKeyStored:      config.ClearProviderKeyStoredCaseVariants,
 		registry:                    registry,
 		sessionStore:                sessionStore,
 		peerService:                 options.PeerService,
@@ -4410,7 +4415,7 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		text := ""
 		owner := strings.TrimSpace(item.OwnerProvider)
 		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
+		if owner != "" && credstore.NormalizeProvider(owner) != credstore.NormalizeProvider(m.providerName) && ownerIsSavedProvider {
 			// A model from another saved provider: switch provider + model together.
 			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
 		} else {
