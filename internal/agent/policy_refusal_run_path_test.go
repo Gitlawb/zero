@@ -56,9 +56,15 @@ func (tool *headlessPromptTool) Run(context.Context, map[string]any) tools.Resul
 	return tools.Result{Status: tools.StatusOK, Output: "should never run"}
 }
 
-// A headless prompt refusal carries no category, so the guard keys on its text,
-// which the registry holds constant. That is the same-signature streak, and it
-// must halt at its bound rather than repeat to MaxTurns.
+// A headless prompt refusal must halt at the same-signature bound rather than
+// repeat to MaxTurns.
+//
+// It used to key on the refusal TEXT, which the registry happens to hold
+// constant here, and the stop then described a repeated failure. The registry
+// marks this path, so the category is now derived at the ToolResult boundary and
+// the streak keys on that instead. The bound is unchanged; the wording is more
+// honest, because a headless prompt refusal is a refusal and not a tool that
+// keeps failing.
 func TestRunStopsAnUncategorizedHeadlessRefusalAtTheFailureBound(t *testing.T) {
 	tool := &headlessPromptTool{}
 	registry := tools.NewRegistry()
@@ -97,9 +103,9 @@ func TestRunStopsAnUncategorizedHeadlessRefusalAtTheFailureBound(t *testing.T) {
 	if tool.ran != 0 {
 		t.Errorf("the refused tool executed %d times; the registry gate must precede execution", tool.ran)
 	}
-	// Uncategorized, so the stop answer describes a repeated failure rather than
-	// a refusal. That wording is the honest report of what the loop can see.
-	want := toolFailureStopAnswer("bash", toolFailureStopAt, false, false)
+	// Categorized now, so the stop answer says refused. Previously the loop could
+	// not tell and reported a repeated failure.
+	want := toolFailureStopAnswer("bash", toolFailureStopAt, false, true)
 	if result.FinalAnswer != want {
 		t.Errorf("final answer =\n  %q\nwant\n  %q", result.FinalAnswer, want)
 	}
