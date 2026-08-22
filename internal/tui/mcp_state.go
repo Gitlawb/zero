@@ -154,7 +154,64 @@ func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets 
 	// it. See boundMCPFailureError: wrapping the outside of that call left the
 	// full server-controlled value going through every redaction pass first, so
 	// the work scaled with the attacker's input instead of with the cap.
-	return redaction.RedactString(stripTerminalRejoiners(redaction.ErrorMessage(boundMCPFailureError(err), options)), options)
+	bounded, truncated := boundMCPFailureError(err)
+	rendered := redaction.RedactString(stripTerminalRejoiners(redaction.ErrorMessage(bounded, options)), options)
+	// AND THE CUT ITSELF CAN MANUFACTURE A LEAK. Everything above matches whole
+	// values, so a credential the bound sliced in half matches nothing and its
+	// surviving prefix is ordinary text. The fixed overlap makes that need a
+	// secret longer than the window, and nothing caps a configured header, URL,
+	// environment or stored token value, so "longer than the window" is a
+	// configuration away rather than impossible. A server can also spend the raw
+	// budget on control sequences that later vanish, putting the start of the
+	// credential right at the cut.
+	//
+	// Only the TAIL can be a partial, because only the final cut splits anything,
+	// so this looks at the tail alone and drops any run that is a prefix of a
+	// configured secret. It costs one comparison per secret against a bounded
+	// window and does not care how long the secret is, which is the property the
+	// overlap could not give.
+	if truncated {
+		rendered = dropTrailingSecretPrefix(rendered, secrets)
+	}
+	return rendered
+}
+
+// dropTrailingSecretPrefix removes a trailing run that is the beginning of a
+// configured secret.
+//
+// Applied to the FINAL text, after both redaction passes and after the terminal
+// rejoiners are gone, because that is the string a reader sees and the only one
+// whose tail is the real tail.
+func dropTrailingSecretPrefix(rendered string, secrets []string) string {
+	window := len(rendered)
+	if window > maxMCPSecretMatchWindow {
+		window = maxMCPSecretMatchWindow
+	}
+	cut := len(rendered)
+	for _, secret := range secrets {
+		if len(secret) < shortestMCPSecret {
+			continue
+		}
+		// The longest prefix of this secret that the text ends with. Walk down from
+		// the window rather than up, so the largest leak is found first.
+		for size := window; size >= shortestMCPSecret; size-- {
+			if size > len(secret) {
+				continue
+			}
+			start := len(rendered) - size
+			if start < 0 || start >= cut {
+				continue
+			}
+			if rendered[start:] == secret[:size] {
+				cut = start
+				break
+			}
+		}
+	}
+	if cut == len(rendered) {
+		return rendered
+	}
+	return strings.TrimRight(rendered[:cut], " 	")
 }
 
 // maxMCPSecretMatchWindow is the FIXED overlap kept past the display cap so a
@@ -191,16 +248,16 @@ const maxMCPSecretMatchWindow = 4 << 10
 // A short error is returned untouched, so ErrorMessage keeps its handling of nil
 // and wrapped errors for the overwhelmingly common case. Only an oversized one
 // is flattened, and flattening an eight-megabyte error is the entire point.
-func boundMCPFailureError(err error) error {
+func boundMCPFailureError(err error) (error, bool) {
 	if err == nil {
-		return nil
+		return nil, false
 	}
 	limit := maxMCPReasonRawLen + maxMCPSecretMatchWindow
 	message := err.Error()
 	if len(message) <= limit {
-		return err
+		return err, false
 	}
-	return errors.New(boundMCPRawText(message, limit))
+	return errors.New(boundMCPRawText(message, limit)), true
 }
 
 // boundMCPRawText truncates rune-safely, so nothing downstream sees a
@@ -488,6 +545,12 @@ func redactMCPDisplayURL(raw string) string {
 	if parsed.User != nil {
 		parsed.User = nil
 	}
+	if path := parsed.EscapedPath(); path != "" {
+		// The Target row renders alongside the Error, so a path credential shown
+		// here defeats redacting it there.
+		parsed.RawPath = redactMCPDisplayPath(path)
+		parsed.Path, _ = url.PathUnescape(parsed.RawPath)
+	}
 	if parsed.RawQuery != "" {
 		parsed.RawQuery = redactMCPDisplayRawQuery(parsed.RawQuery)
 	}
@@ -499,6 +562,33 @@ func redactMCPDisplayURL(raw string) string {
 		return fallbackRedactMCPDisplayURL(raw)
 	}
 	return strings.ReplaceAll(out, "%5BREDACTED%5D", mcpDisplayRedacted)
+}
+
+// opaqueURLPathSegments returns the path segments long enough to be a credential
+// rather than a route.
+func opaqueURLPathSegments(escapedPath string) []string {
+	segments := strings.Split(escapedPath, "/")
+	out := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		if len(segment) < shortestMCPSecret {
+			continue
+		}
+		out = append(out, segment)
+	}
+	return out
+}
+
+// redactMCPDisplayPath replaces opaque segments and keeps the route shape, so
+// the operator can still tell which endpoint failed.
+func redactMCPDisplayPath(escapedPath string) string {
+	segments := strings.Split(escapedPath, "/")
+	for index, segment := range segments {
+		if len(segment) < shortestMCPSecret {
+			continue
+		}
+		segments[index] = mcpDisplayRedacted
+	}
+	return strings.Join(segments, "/")
 }
 
 func redactMCPDisplayRawQuery(rawQuery string) string {
@@ -779,6 +869,24 @@ func mcpURLSecretValues(rawURL string) []string {
 	// the operator's to choose. Collecting both forms fixes the boundary rather
 	// than guessing at more names.
 	values := make([]string, 0, 8)
+	// PATH SEGMENTS ARE CREDENTIAL MATERIAL TOO.
+	//
+	// Query values and userinfo were treated as secret-bearing and the path as an
+	// identifier, and the configuration contract accepts an arbitrary HTTP or SSE
+	// path. Opaque path-segment credentials are an ordinary endpoint convention,
+	// and this needs no crafted response body to leak: a failing http.Client.Do
+	// returns a *url.Error carrying the request URL, which the failed-server path
+	// wraps and renders.
+	//
+	// Only opaque-looking segments, by the same length floor the rest of this file
+	// uses. A route like "/mcp" or "/v1/sse" is structure, and redacting it would
+	// eat the diagnostic without protecting anything.
+	for _, segment := range opaqueURLPathSegments(parsed.EscapedPath()) {
+		values = append(values, segment)
+		if decoded, err := url.PathUnescape(segment); err == nil && decoded != segment {
+			values = append(values, decoded)
+		}
+	}
 	if parsed.User != nil {
 		if password, ok := parsed.User.Password(); ok {
 			values = append(values, password)
@@ -840,12 +948,39 @@ func mcpURLSecretValues(rawURL string) []string {
 //
 // A value with no separator yields itself and nothing else, so the common case
 // costs one entry, as before.
+// maxMCPCredentialCandidates and maxMCPCredentialInput bound what one configured
+// value can expand into.
+//
+// This walked every suffix after every space or colon and kept them all, so a
+// delimiter-heavy value produced O(n) candidates and RedactString then ran a
+// replacement pass for each. The expansion happened on the CONFIG side, outside
+// the raw-error bound, so opening or refreshing /mcp for that server burned CPU
+// and memory however short the server's error was.
+//
+// The tails exist for one narrow reason: a value configured as "Bearer <token>"
+// has to yield <token> as well, because the server may echo only the credential.
+// Two or three splits cover every such convention. Beyond that the suffixes stop
+// being plausible credentials and start being work.
+const (
+	maxMCPCredentialCandidates = 8
+	maxMCPCredentialInput      = 8 << 10
+)
+
 func credentialCandidates(value string) []string {
 	candidates := make([]string, 0, 3)
 	remainder := strings.TrimSpace(value)
+	if len(remainder) > maxMCPCredentialInput {
+		// Bounded before the walk, not after. A value this long is still redacted
+		// whole, because the untruncated original is added by the caller; what is
+		// dropped is only the suffix enumeration, which is what costs.
+		return []string{remainder}
+	}
 	for {
 		if len(remainder) >= shortestMCPSecret {
 			candidates = append(candidates, remainder)
+		}
+		if len(candidates) >= maxMCPCredentialCandidates {
+			return candidates
 		}
 		index := strings.IndexAny(remainder, " :")
 		if index < 0 {
