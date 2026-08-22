@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -420,6 +421,51 @@ func TestPersistOAuthLoginProviderWritesKeylessProfileWithoutStealingActive(t *t
 	persistOAuthLoginProvider("", "chatgpt")
 }
 
+func TestOAuthCommandsRejectInvalidConfigBeforeCredentialSideEffects(t *testing.T) {
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "oauth.json"))
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := []byte(`{"providers":[{"name":"xai"},{"name":"XAI"}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := oauth.Token{AccessToken: "previous-access", RefreshToken: "previous-refresh"}
+	if err := store.Save(oauth.ProviderKey("xai"), previous); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, providerID := range []string{"openrouter", "chatgpt", "xai"} {
+		descriptor, ok := providercatalog.Get(providerID)
+		if !ok {
+			t.Fatalf("missing catalog provider %q", providerID)
+		}
+		msg, ok := providerWizardOAuthCmdFor(descriptor, 7, configPath)().(providerWizardOAuthMsg)
+		if !ok || msg.err == nil || !strings.Contains(msg.err.Error(), "ambiguous persisted provider names") {
+			t.Fatalf("wizard OAuth %s did not preflight: %#v", providerID, msg)
+		}
+		setupMsg, ok := setupOAuthCmd(descriptor, configPath)().(setupOAuthMsg)
+		if !ok || setupMsg.err == nil || !strings.Contains(setupMsg.err.Error(), "ambiguous persisted provider names") {
+			t.Fatalf("setup OAuth %s did not preflight: %#v", providerID, setupMsg)
+		}
+	}
+	deviceMsg, ok := providerWizardDevicePollCmd("xai", 8, oauth.Config{}, oauth.DeviceAuth{}, configPath)().(providerWizardOAuthMsg)
+	if !ok || deviceMsg.err == nil || !strings.Contains(deviceMsg.err.Error(), "ambiguous persisted provider names") {
+		t.Fatalf("device completion did not revalidate config: %#v", deviceMsg)
+	}
+	stored, ok, err := store.Load(oauth.ProviderKey("xai"))
+	if err != nil || !ok || stored.AccessToken != previous.AccessToken || stored.RefreshToken != previous.RefreshToken {
+		t.Fatalf("rejected TUI login changed previous token: ok=%v err=%v", ok, err)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || string(after) != string(seed) {
+		t.Fatalf("rejected TUI login changed config: readErr=%v", err)
+	}
+}
+
 func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
 	saved := []config.ProviderProfile{{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible}}
 
@@ -447,5 +493,29 @@ func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
 	// Unknown catalog id: no-op.
 	if got := appendOAuthLoginProfile(nil, "no-such-provider"); got != nil {
 		t.Fatalf("unknown provider must not append, got %+v", got)
+	}
+}
+
+func TestProviderWizardDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"demo"},{"name":"DEMO"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg := providerWizardDevicePrepareCmd("xai", 42, configPath)().(providerWizardDeviceCodeMsg)
+	if msg.err == nil || !strings.Contains(msg.err.Error(), "differ only by case") {
+		t.Fatalf("device-code preparation error = %v, want provider identity validation", msg.err)
+	}
+	if msg.attemptID != 42 {
+		t.Fatalf("attemptID = %d, want 42", msg.attemptID)
+	}
+}
+
+func TestOAuthPreflightRequiresPositiveCatalogOwnership(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"OpenRouter","catalogId":"custom-openai-compatible"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightOAuthProviderConfig(path, "openrouter"); err == nil || !strings.Contains(err.Error(), "does not prove ownership") {
+		t.Fatalf("preflight error = %v, want ownership rejection", err)
 	}
 }

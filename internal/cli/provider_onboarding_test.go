@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,6 +44,238 @@ func TestRunProvidersUseSetsActiveProvider(t *testing.T) {
 	}
 }
 
+func TestRunProvidersRepairConfigRecoversLegacyUnnamedProvider(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			seed := []byte(`{"activeProvider":"legacy","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"}],"maxTurns":17}`)
+			if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}}); err == nil {
+				t.Fatal("legacy unnamed config unexpectedly resolved before repair")
+			}
+			args := []string{"providers", "repair-config"}
+			if jsonOutput {
+				args = append(args, "--json")
+			}
+			code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath))
+			if code != exitSuccess {
+				t.Fatalf("repair exit = %d, stderr=%q", code, stderr.String())
+			}
+			resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("repaired config does not resolve: %v", err)
+			}
+			if resolved.ActiveProvider != "legacy" || resolved.Provider.Name != "legacy" || resolved.Provider.Model != "gpt-4o" || resolved.MaxTurns != 17 {
+				t.Fatalf("resolved repaired config = %+v", resolved)
+			}
+			if jsonOutput {
+				var payload map[string]any
+				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || payload["repairedProvider"] != "legacy" {
+					t.Fatalf("repair JSON = %q, err=%v", stdout.String(), err)
+				}
+			} else if !strings.Contains(stdout.String(), "Named legacy provider legacy") {
+				t.Fatalf("repair output = %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunProvidersRepairConfigMigratesLegacyActiveReference(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := []byte(`{"activeProvider":"legacy","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"other","provider_kind":"openai","model":"gpt-4.1"}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code := runWithDeps(
+		[]string{"providers", "repair-config", "--name", "work"},
+		&stdout,
+		&stderr,
+		providerSetupDeps(configPath),
+	)
+	if code != exitSuccess {
+		t.Fatalf("repair exit = %d, stderr=%q", code, stderr.String())
+	}
+	resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("fresh Resolve after repair: %v", err)
+	}
+	if resolved.ActiveProvider != "work" || resolved.Provider.Name != "work" {
+		t.Fatalf("resolved active provider = %q profile = %q, want work", resolved.ActiveProvider, resolved.Provider.Name)
+	}
+}
+
+func TestProviderRepairCommandsCanResolveIndependentLegacyNameProblems(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{
+		{Name: ""}, {Name: "work"}, {Name: "WORK"},
+	}})
+	deps := providerSetupDeps(configPath)
+	if code := runWithDeps([]string{"providers", "repair-config", "--name", "legacy"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("repair-config exit=%d stderr=%q", code, stderr.String())
+	}
+	if err := config.ValidatePersistedProviderNames(readFileConfig(t, configPath)); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("first repair should leave only the independent duplicate issue, got %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove exit=%d stderr=%q", code, stderr.String())
+	}
+	if err := config.ValidatePersistedProviderNames(readFileConfig(t, configPath)); err != nil {
+		t.Fatalf("final config remains invalid: %v", err)
+	}
+}
+
+func TestProviderMutationsResolvePersistedIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		address string
+	}{
+		{name: "use case variant", command: "use", address: "WORK"},
+		{name: "use catalog id", command: "use", address: "acme"},
+		{name: "remove case variant", command: "remove", address: "WORK"},
+		{name: "remove catalog id", command: "remove", address: "acme"},
+		{name: "rename case variant", command: "rename", address: "WORK"},
+		{name: "rename catalog id", command: "rename", address: "acme"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+				ActiveProvider: "other",
+				Providers: []config.ProviderProfile{
+					{Name: "work", CatalogID: "acme", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "m1"},
+					{Name: "other", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://other.example/v1", Model: "m2"},
+				},
+			})
+			args := []string{"providers", test.command, test.address}
+			if test.command == "rename" {
+				args = append(args, "renamed")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+				t.Fatalf("exit = %d stderr = %q", code, stderr.String())
+			}
+			cfg := readFileConfig(t, configPath)
+			switch test.command {
+			case "use":
+				if cfg.ActiveProvider != "work" {
+					t.Fatalf("activeProvider = %q, want canonical work", cfg.ActiveProvider)
+				}
+			case "remove":
+				if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "other" {
+					t.Fatalf("providers = %+v, want work removed", cfg.Providers)
+				}
+			case "rename":
+				if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "renamed" {
+					t.Fatalf("providers = %+v, want work renamed", cfg.Providers)
+				}
+			}
+		})
+	}
+}
+
+// A legacy config can hold rows that differ only by case. Addressing such a pair
+// by a third spelling identifies no single row, so a mutation must fail instead
+// of picking the one that happens to come first and deleting its credential.
+func TestProviderRemoveRejectsAmbiguousFoldedName(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "m1", APIKeyStored: true},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://upper.example/v1", Model: "m2", APIKeyStored: true},
+		},
+	})
+	configBefore, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-lower"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "remove", "wOrK"}, &stdout, &stderr, providerSetupDeps(configPath)); code == exitSuccess {
+		t.Fatalf("providers remove wOrK succeeded, want an ambiguity failure; stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "ambiguous provider name") {
+		t.Fatalf("stderr = %q, want an ambiguous-provider-name error", stderr.String())
+	}
+
+	configAfter, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(configAfter, configBefore) {
+		t.Fatalf("config changed after rejected removal: err=%v\nbefore=%s\nafter=%s", err, configBefore, configAfter)
+	}
+	key, ok, err := store.Get("work")
+	if err != nil || !ok || key != "sk-lower" {
+		t.Fatalf("credential present=%v err=%v matched=%v, want preserved", ok, err, key == "sk-lower")
+	}
+
+	// The exact spelling still works, so a legacy config remains repairable.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		t.Fatalf("exact-name removal exit = %d stderr = %q", code, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" {
+		t.Fatalf("providers = %+v, want only the exact row removed", cfg.Providers)
+	}
+	key, ok, err = store.Get("work")
+	if err != nil || !ok || key != "sk-lower" {
+		t.Fatalf("surviving credential present=%v err=%v matched=%v, want preserved", ok, err, key == "sk-lower")
+	}
+}
+func TestProviderMutationsRejectAmbiguousCatalogID(t *testing.T) {
+	for _, command := range []string{"use", "remove", "rename"} {
+		t.Run(command, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			expected := config.FileConfig{
+				ActiveProvider: "other",
+				Providers: []config.ProviderProfile{
+					{Name: "work", CatalogID: "acme", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "m1"},
+					{Name: "personal", CatalogID: "acme", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://personal.example/v1", Model: "m2"},
+					{Name: "other", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://other.example/v1", Model: "m3"},
+				},
+			}
+			writeProviderOnboardingConfig(t, configPath, expected)
+			args := []string{"providers", command, "acme"}
+			if command == "rename" {
+				args = append(args, "renamed")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath)); code == exitSuccess {
+				t.Fatalf("ambiguous catalog id mutated a profile; stdout = %q", stdout.String())
+			}
+			cfg := readFileConfig(t, configPath)
+			if !reflect.DeepEqual(cfg, expected) {
+				t.Fatalf("config mutated on an ambiguous address:\ngot  %+v\nwant %+v", cfg, expected)
+			}
+		})
+	}
+}
 func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -92,6 +325,7 @@ func providersUseOverrideConfig(t *testing.T) string {
 // different provider the saved selection is NOT effective, so the command must
 // warn instead of reporting a silent success (issue #721).
 func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
 	var stdout, stderr bytes.Buffer
 	configPath := providersUseOverrideConfig(t)
 	deps := providerSetupDeps(configPath)
@@ -120,6 +354,7 @@ func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
 }
 
 func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
 	var stdout, stderr bytes.Buffer
 	deps := providerSetupDeps(providersUseOverrideConfig(t))
 	deps.getenv = func(key string) string {
@@ -133,15 +368,155 @@ func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
 		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 	}
 	var payload struct {
-		ActiveProvider    string `json:"activeProvider"`
-		EffectiveProvider string `json:"effectiveProvider"`
-		OverriddenByEnv   string `json:"overriddenByEnv"`
+		ActiveProvider      string `json:"activeProvider"`
+		EffectiveProvider   string `json:"effectiveProvider"`
+		OverriddenByEnv     string `json:"overriddenByEnv"`
+		EnvProvider         string `json:"envProvider"`
+		EnvProviderResolves bool   `json:"envProviderResolves"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
 	}
-	if payload.ActiveProvider != "fast" || payload.EffectiveProvider != "work" || payload.OverriddenByEnv != config.ActiveProviderEnv {
+	if payload.ActiveProvider != "fast" || payload.EffectiveProvider != "work" || payload.OverriddenByEnv != config.ActiveProviderEnv || payload.EnvProvider != "work" || !payload.EnvProviderResolves {
 		t.Fatalf("JSON must flag the env override, got %#v", payload)
+	}
+}
+
+func TestRunProvidersUseExplainsUnresolvableOverride(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "removed")
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["envProvider"] != "removed" || payload["envProviderResolves"] != false {
+		t.Fatalf("payload = %#v, want an unresolved override", payload)
+	}
+	if _, ok := payload["effectiveProvider"]; ok {
+		t.Fatalf("unresolvable override reported effective: %#v", payload)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no provider named removed can be resolved") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunProvidersUseDefersOverrideWithProviderCommand(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = func(key string) string {
+		if key == providerCommandEnv {
+			return "must-not-run"
+		}
+		return os.Getenv(key)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["envProviderResolution"] != "deferred" || payload["envProviderResolves"] != nil {
+		t.Fatalf("payload = %#v, want deferred resolution", payload)
+	}
+	if _, ok := payload["effectiveProvider"]; ok {
+		t.Fatalf("deferred override reported effective: %#v", payload)
+	}
+}
+
+func TestRunProvidersUseReportsUnrelatedConfigError(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	configPath := providersUseOverrideConfig(t)
+	workspace := t.TempDir()
+	projectPath := filepath.Join(workspace, ".zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(`{"tools":{"deferThreshold":-1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := providerSetupDeps(configPath)
+	deps.getwd = func() (string, error) { return workspace, nil }
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "configuration is invalid") || !strings.Contains(stderr.String(), "deferThreshold") {
+		t.Fatalf("stderr = %q, want the actual config error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "no provider named work") {
+		t.Fatalf("unrelated config error blamed on the override: %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("json exit = %d, stderr = %q", code, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["envProviderResolution"] != "config-error" || payload["envProviderResolves"] != nil {
+		t.Fatalf("payload = %#v, want config-error with null resolution", payload)
+	}
+	if message, _ := payload["envProviderResolutionError"].(string); !strings.Contains(message, "deferThreshold") {
+		t.Fatalf("payload = %#v, want the unrelated configuration failure", payload)
+	}
+}
+
+func TestRunProvidersUseCaseVariantOverrideDoesNotHideProjectProvider(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "WORK")
+	configPath := providersUseOverrideConfig(t)
+	workspace := t.TempDir()
+	projectPath := filepath.Join(workspace, ".zero", "config.json")
+	writeProviderOnboardingConfig(t, projectPath, config.FileConfig{Providers: []config.ProviderProfile{{
+		Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL: "https://project.example/v1", Model: "project-model",
+	}}})
+	deps := providerSetupDeps(configPath)
+	deps.getwd = func() (string, error) { return workspace, nil }
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "work"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "WORK stays the active provider") {
+		t.Fatalf("project provider override was hidden: %q", stderr.String())
+	}
+}
+
+func TestRunProvidersUseCaseVariantOverrideSelectsSameUserProvider(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "FAST")
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = os.Getenv
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("case variant resolving to the selected user row warned: %q", stderr.String())
 	}
 }
 
@@ -189,6 +564,7 @@ func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
 }
 
 func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -212,6 +588,7 @@ func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
 }
 
 func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -237,6 +614,7 @@ func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -253,6 +631,7 @@ func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -436,18 +815,18 @@ func writeProviderOnboardingConfig(t *testing.T, path string, cfg config.FileCon
 	}
 }
 
-// TestRunProvidersRemoveDeletesKeyBesideConfig: the stored key must be deleted
-// from the credential store CO-LOCATED with the config being edited (where
-// SecureProviderProfile captured it), not the default-path store.
-func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
+// Runtime provider credentials are user-scoped even when tests inject a
+// non-default config path.
+func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	seed := `{"activeProvider":"gw","providers":[{"name":"gw","provider_kind":"openai-compatible","baseURL":"https://gw.example.com/v1","apiKeyStored":true,"model":"m1"},{"name":"other","provider_kind":"openai-compatible","baseURL":"https://o.example.com/v1","model":"m2"}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	store, err := config.ProviderKeyStoreAt(dir)
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -464,19 +843,181 @@ func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
 	var payload struct {
 		Removed        string `json:"removed"`
 		KeyRemoved     bool   `json:"keyRemoved"`
-		KeyError       string `json:"keyError"`
 		ActiveProvider string `json:"activeProvider"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
 	}
-	if payload.Removed != "gw" || !payload.KeyRemoved || payload.KeyError != "" {
+	if payload.Removed != "gw" || !payload.KeyRemoved {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	// Credential cleanup is no longer reported as a field beside a success exit
+	// code: a cleanup failure fails the command. Asserting the key is ABSENT
+	// pins that contract, where asserting an empty "keyError" string would pass
+	// merely because the field is gone.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
+		t.Fatalf("decode JSON fields: %v", err)
+	}
+	if _, ok := fields["keyError"]; ok {
+		t.Fatalf("removal payload still reports keyError: %s", stdout.String())
 	}
 	if payload.ActiveProvider != "other" {
 		t.Fatalf("active must hand off, got %q", payload.ActiveProvider)
 	}
 	if _, ok, _ := store.Get("gw"); ok {
-		t.Fatalf("stored key must be deleted from the store beside the config")
+		t.Fatalf("stored key must be deleted from the user-scoped store")
 	}
+}
+
+func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("ZERO_CRED_STORAGE", "file")
+			setCLIUserConfigRoot(t)
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Set("gw", "sk-secret"); err != nil {
+				t.Fatal(err)
+			}
+			// A directory at the lock-file path is a hermetic, cross-platform
+			// failure: Delete cannot acquire its write lock.
+			lockPath := filepath.Join(filepath.Dir(configPath), "credentials.json.lock")
+			if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(lockPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"providers", "remove", "gw"}
+			if jsonOutput {
+				args = append(args, "--json")
+			}
+			var stdout, stderr bytes.Buffer
+			code := runWithDeps(args, &stdout, &stderr, appDeps{
+				userConfigPath: func() (string, error) { return configPath, nil },
+			})
+			if code != exitCrash {
+				t.Fatalf("exit = %d, want transactional cleanup failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "delete stored key") {
+				t.Fatalf("stderr = %q, want transactional key-deletion failure", stderr.String())
+			}
+
+			if err := os.Remove(lockPath); err != nil {
+				t.Fatal(err)
+			}
+			if key, ok, getErr := store.Get("gw"); getErr != nil || !ok || key != "sk-secret" {
+				t.Fatalf("failed cleanup changed key: present=%v len=%d err=%v", ok, len(key), getErr)
+			}
+		})
+	}
+}
+
+func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	seed := []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"providers", "remove", "WORK", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove failed: code=%d stderr=%s", code, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" || !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("survivor = %+v, want credentialed work row", cfg.Providers)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("shared key = %q,%v,%v; want sk-shared,true,nil", key, ok, getErr)
+	}
+	var payload struct {
+		KeyRemoved bool `json:"keyRemoved"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.KeyRemoved {
+		t.Fatal("remove reported deleting a credential still owned by the survivor")
+	}
+}
+
+func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testing.T) {
+	t.Run("case variant selects persisted spelling", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+			ActiveProvider: "fast",
+			Providers: []config.ProviderProfile{
+				{Name: "OpenAI", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+				{Name: "fast", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+			},
+		})
+		var stdout, stderr bytes.Buffer
+		if code := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+			t.Fatalf("use failed: code=%d stderr=%s", code, stderr.String())
+		}
+		if active := readFileConfig(t, configPath).ActiveProvider; active != "OpenAI" {
+			t.Fatalf("active provider = %q, want persisted spelling OpenAI", active)
+		}
+	})
+
+	t.Run("environment provider accepts case variant", func(t *testing.T) {
+		t.Setenv(config.ActiveProviderEnv, "")
+		t.Setenv("OPENAI_API_KEY", "sk-env")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+		var stdout, stderr bytes.Buffer
+		if code := runWithDeps([]string{"providers", "use", "OpenAI"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+			t.Fatalf("environment use failed: code=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	t.Run("long s is not plain s", func(t *testing.T) {
+		t.Setenv(config.ActiveProviderEnv, "")
+		t.Setenv("OPENAI_API_KEY", "")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+			ActiveProvider: "s",
+			Providers:      []config.ProviderProfile{{Name: "s", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}},
+		})
+		before, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := runWithDeps([]string{"providers", "use", "ſ"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitCrash {
+			t.Fatalf("use exit = %d, want crash for distinct identity; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		}
+		after, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Fatal("distinct Unicode identity request rewrote config")
+		}
+	})
 }
