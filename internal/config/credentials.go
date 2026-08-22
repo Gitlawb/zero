@@ -204,27 +204,59 @@ func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
 // every marker sharing markerProvider's credential identity in one transaction.
 func DeleteProviderCredentials(path string, candidates []string, markerProvider string) (bool, error) {
 	removed := false
-	markerIdentity := credstore.NormalizeProvider(markerProvider)
 	_, err := runProviderProfileOperation(path, true, true, func(op *providerProfileOperation) error {
-		for _, candidate := range candidates {
-			candidateRemoved, err := op.deleteKey(candidate)
-			if err != nil {
-				return fmt.Errorf("delete stored key for %q: %w", candidate, err)
-			}
-			removed = removed || candidateRemoved
+		var err error
+		removed, err = op.deleteProviderCredentials(candidates, markerProvider)
+		if err != nil {
+			return err
 		}
-		if op.exists && ValidatePersistedProviderNames(op.config) == nil {
-			for index := range op.config.Providers {
-				if credstore.NormalizeProvider(op.config.Providers[index].Name) == markerIdentity {
-					op.config.Providers[index].APIKeyStored = false
-				}
-			}
-		} else {
+		if !op.exists || ValidatePersistedProviderNames(op.config) != nil {
 			op.publish = false
 		}
 		return nil
 	})
 	return removed, err
+}
+
+// DeleteResolvedProviderCredentials resolves one persisted provider identity,
+// deletes every exclusively owned credential candidate, and clears its stored
+// marker under the provider config/key transaction lock.
+func DeleteResolvedProviderCredentials(path, addressedName string) (removed bool, canonicalName string, err error) {
+	_, err = runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		_, match, resolveErr := resolvePersistedProviderIdentity(op.config.Providers, addressedName)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if match == PersistedIdentityNone {
+			return fmt.Errorf("provider %q not found", strings.TrimSpace(addressedName))
+		}
+		candidates, canonical, resolveErr := providerCredentialCandidates(op.config.Providers, addressedName)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		canonicalName = canonical
+		removed, resolveErr = op.deleteProviderCredentials(candidates, canonicalName)
+		return resolveErr
+	})
+	return removed, canonicalName, err
+}
+
+func (op *providerProfileOperation) deleteProviderCredentials(candidates []string, markerProvider string) (bool, error) {
+	removed := false
+	for _, candidate := range candidates {
+		candidateRemoved, err := op.deleteKey(candidate)
+		if err != nil {
+			return false, fmt.Errorf("delete stored key for %q: %w", candidate, err)
+		}
+		removed = removed || candidateRemoved
+	}
+	markerIdentity := credstore.NormalizeProvider(markerProvider)
+	for index := range op.config.Providers {
+		if credstore.NormalizeProvider(op.config.Providers[index].Name) == markerIdentity {
+			op.config.Providers[index].APIKeyStored = false
+		}
+	}
+	return removed, nil
 }
 
 // MigratePlaintextProviderKeys moves any inline plaintext API key in the config at

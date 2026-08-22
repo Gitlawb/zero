@@ -1439,20 +1439,12 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 	case 2: // Remove
 		canonicalName := name
 		if strings.TrimSpace(m.userConfigPath) != "" {
-			if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
-				wizard.err = redaction.ErrorMessage(err, redaction.Options{})
-				return m, nil
-			}
-			credentialCandidates, canonical, err := config.ProviderCredentialCandidates(m.userConfigPath, name)
+			_, canonical, err := config.DeleteResolvedProviderCredentials(m.userConfigPath, name)
 			if err != nil {
-				wizard.err = redaction.ErrorMessage(err, redaction.Options{})
-				return m, nil
-			}
-			canonicalName = canonical
-			if _, err := config.DeleteProviderCredentials(m.userConfigPath, credentialCandidates, canonicalName); err != nil {
 				wizard.err = "remove stored key: " + redaction.ErrorMessage(err, redaction.Options{})
 				return m, nil
 			}
+			canonicalName = canonical
 		} else {
 			if _, err := config.ForgetProviderKey(name); err != nil {
 				wizard.err = "remove stored key: " + redaction.ErrorMessage(err, redaction.Options{})
