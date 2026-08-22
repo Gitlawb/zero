@@ -333,7 +333,7 @@ func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequ
 	// traded away. Neither claim was true there: no restricted token is created and
 	// the deny-read rule is not enforced either, so the notice described a trade
 	// nobody had made.
-	if windowsRestrictedTokenWillRun(request) {
+	if windowsRestrictedTokenWillRun(plan, request) {
 		plan.Notes = append(plan.Notes, windowsDenyReadWarnings(request.Backend, request.PermissionProfile)...)
 	}
 	return plan
@@ -1236,8 +1236,22 @@ func EnforcementFor(plan CommandPlan) execution.Enforcement {
 // for BackendNone, for a command that does not require a platform sandbox, and
 // for one already wrapped by an outer sandbox. None of those creates a token,
 // and none of them enforces deny-read.
-func windowsRestrictedTokenWillRun(request SandboxExecutionRequest) bool {
-	if request.CommandWrapped || !request.RequiresPlatformSandbox {
+func windowsRestrictedTokenWillRun(plan CommandPlan, request SandboxExecutionRequest) bool {
+	// KEYED ON THE PRODUCED PLAN, not on the request that asked for one.
+	//
+	// This read request.CommandWrapped as "something already wrapped this, so we
+	// are re-entrant", and that is the opposite of what the field means.
+	// BuildExecutionRequest sets it TRUE for exactly the native and unelevated
+	// requests that buildPlatformCommandPlan then routes to
+	// windowsRestrictedTokenCommandPlan. So the disclosure was suppressed on every
+	// plan that actually creates the token, and fired on none of them. The test
+	// passed only because its hand-built request left the field false, which is
+	// the shape no real execution has.
+	//
+	// plan.Wrapped is the resulting execution state and cannot be read backwards:
+	// directCommandPlan sets it false, the restricted-token plan sets it true, and
+	// both arrive here through the same funnel.
+	if !plan.Wrapped || !request.RequiresPlatformSandbox {
 		return false
 	}
 	if request.EnforcementLevel == EnforcementDisabled || request.EnforcementLevel == EnforcementDegraded {
