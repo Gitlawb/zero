@@ -36,6 +36,20 @@ type providerProfileOperation struct {
 var publishProviderConfig = writeConfigFile
 var acquireProviderWriteLock = lockProviderWrite
 
+// runProviderProfileOperation runs mutate under the provider write lock and
+// publishes the result atomically, rolling back credential changes when the
+// publish fails.
+//
+// allowInvalidInput decides whether a legacy config that fails
+// ValidatePersistedProviderNames may be operated on at all, and the split is
+// deliberate: operations that REMOVE or REPAIR state pass true, because
+// refusing to delete a row from a config the user cannot otherwise fix is a
+// deadlock -- the row cannot be removed because the config is invalid, and the
+// config stays invalid because the row cannot be removed. Operations that ADD
+// or publish state pass false, so a new profile or credential is never written
+// into a config whose persisted names are already ambiguous. When it is true
+// the publish also goes through writeProviderNameRepair, which rewrites only
+// the fields this operation changed instead of restating the whole file.
 func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInput bool, mutate func(*providerProfileOperation) error) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
