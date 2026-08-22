@@ -254,6 +254,14 @@ func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	}, nil
 }
 
+// WriteWindowsSandboxSetupMarker builds the marker, stamps the runtime tree and
+// records the marker file.
+//
+// The elevated setup path does NOT use this. It splits the two, because the
+// stamp has to ride along with the capability ACE through one handle rather than
+// re-open the runtime root by name afterwards. See windowsACLStampRequest. This
+// entry point remains for callers that record a marker without applying an ACL
+// plan, where there is no handle to ride.
 func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSandboxSetupMarker, error) {
 	marker, err := BuildWindowsSandboxSetupMarker(config)
 	if err != nil {
@@ -267,33 +275,42 @@ func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if err := writeWindowsSandboxRuntimeStamp(windowsSandboxSelectedRuntimeRoot(config.PermissionProfile), marker.ACLPlanHash); err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
+	if err := writeWindowsSandboxSetupMarkerFile(config, marker); err != nil {
+		return WindowsSandboxSetupMarker{}, err
+	}
+	return marker, nil
+}
+
+// writeWindowsSandboxSetupMarkerFile records an already-built marker and touches
+// nothing else. It never names the runtime tree.
+func writeWindowsSandboxSetupMarkerFile(config WindowsSandboxSetupConfig, marker WindowsSandboxSetupMarker) error {
 	path := WindowsSandboxSetupMarkerPath(config.SandboxHome)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return WindowsSandboxSetupMarker{}, fmt.Errorf("create windows sandbox setup marker dir: %w", err)
+		return fmt.Errorf("create windows sandbox setup marker dir: %w", err)
 	}
 	bytes, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
-		return WindowsSandboxSetupMarker{}, fmt.Errorf("marshal windows sandbox setup marker: %w", err)
+		return fmt.Errorf("marshal windows sandbox setup marker: %w", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".windows-setup-*.tmp")
 	if err != nil {
-		return WindowsSandboxSetupMarker{}, fmt.Errorf("create windows sandbox setup marker temp file: %w", err)
+		return fmt.Errorf("create windows sandbox setup marker temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 	if _, err := tmp.Write(bytes); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
-		return WindowsSandboxSetupMarker{}, fmt.Errorf("write windows sandbox setup marker temp file: %w", err)
+		return fmt.Errorf("write windows sandbox setup marker temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return WindowsSandboxSetupMarker{}, fmt.Errorf("close windows sandbox setup marker temp file: %w", err)
+		return fmt.Errorf("close windows sandbox setup marker temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
-		return WindowsSandboxSetupMarker{}, fmt.Errorf("replace windows sandbox setup marker: %w", err)
+		return fmt.Errorf("replace windows sandbox setup marker: %w", err)
 	}
-	return marker, nil
+	return nil
 }
 
 func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {

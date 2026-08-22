@@ -5,6 +5,7 @@ package sandbox
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
@@ -44,7 +45,26 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	if err != nil {
 		return failed(err)
 	}
-	rollback, err := applyWindowsACLPlan(plan)
+	// THE STAMP RIDES WITH THE ACE. Computed before the apply so the apply can
+	// write it through the very handle it grants the capability on, which is the
+	// only way the two are provably about one object. Writing it afterwards by
+	// pathname left a window in which the predictable root could be replaced by an
+	// ordinary directory that then collected a valid-looking stamp while carrying
+	// no ACE at all.
+	marker, err := BuildWindowsSandboxSetupMarker(config)
+	if err != nil {
+		return failed(err)
+	}
+	var stamp *windowsACLStampRequest
+	if root := windowsSandboxSelectedRuntimeRoot(config.PermissionProfile); strings.TrimSpace(root) != "" {
+		stamp = &windowsACLStampRequest{Root: root, PlanHash: marker.ACLPlanHash}
+		// Snapshotted BEFORE the apply, because the apply is now what writes the
+		// stamp. Taking it afterwards would record this run's own stamp as the
+		// state to restore, so a failed setup would put its own artifact back
+		// rather than what it found.
+		runtimeRollback.stamp = snapshotWindowsSandboxRuntimeStamp(root)
+	}
+	rollback, err := applyWindowsACLPlanWithStamp(plan, stamp)
 	if err != nil {
 		return failed(err)
 	}
@@ -60,19 +80,11 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
 		return failedAfterACL(err)
 	}
-	// The runtime stamp is written by WriteWindowsSandboxSetupMarker below, which
-	// is the one place setup records that it completed. It is reached only after
-	// the ACL and network plans have applied, so the stamp still means "this tree
-	// carries these permissions" and every caller that records a marker records
-	// the stamp with it.
-	//
-	// It also lands INSIDE the runtime root, before the marker file is renamed
-	// into place, so from here on that root holds an artifact this run wrote.
-	// Handing it to the rollback record is what lets a late failure leave nothing
-	// behind: without it the root is non-empty, the directory removal refuses it
-	// by design, and the residue is permanent.
-	runtimeRollback.stamp = snapshotWindowsSandboxRuntimeStamp(windowsSandboxSelectedRuntimeRoot(config.PermissionProfile))
-	if _, err := WriteWindowsSandboxSetupMarker(config); err != nil {
+	// The stamp is already on disk, written through the handle the capability ACE
+	// was applied on, so this records the marker only and never names the runtime
+	// tree again. The rollback already owns that stamp, snapshotted above, so a
+	// failure here still leaves the root removable.
+	if err := writeWindowsSandboxSetupMarkerFile(config, marker); err != nil {
 		return failedAfterACL(err)
 	}
 	return 0
