@@ -531,6 +531,8 @@ func resolvePersistedProviderIdentity(providers []ProviderProfile, identity stri
 	if identity == "" {
 		return ProviderProfile{}, PersistedIdentityNone, nil
 	}
+	var exactName *ProviderProfile
+	exactMatches := 0
 	var foldedName *ProviderProfile
 	foldedMatches := 0
 	var catalogRow *ProviderProfile
@@ -685,7 +687,7 @@ func PreflightProviderWrite(path, name string) error {
 	if err := PreflightUserConfig(path); err != nil {
 		return err
 	}
-	providers, err := persistedProviders(path)
+	cfg, err := loadConfigFile(path)
 	if err != nil {
 		return err
 	}
@@ -694,7 +696,7 @@ func PreflightProviderWrite(path, name string) error {
 
 func validateProviderWrite(cfg FileConfig, name string) error {
 	name = strings.TrimSpace(name)
-	for _, provider := range providers {
+	for _, provider := range cfg.Providers {
 		existing := strings.TrimSpace(provider.Name)
 		if sameProviderIdentity(existing, name) && existing != name {
 			return fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", name, existing)
@@ -882,13 +884,12 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 	}
 
 	return runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
-		for _, provider := range op.config.Providers {
-			if strings.TrimSpace(provider.Name) == name {
-				op.config.ActiveProvider = provider.Name
-				return nil
-			}
+		exactName, err := resolvePersistedProviderName(op.config.Providers, name)
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("provider %q not found", name)
+		op.config.ActiveProvider = exactName
+		return nil
 	})
 }
 
@@ -973,7 +974,6 @@ func RemoveProviderAndKey(path string, name string) (FileConfig, bool, error) {
 			if len(cfg.Providers) > 0 {
 				cfg.ActiveProvider = cfg.Providers[0].Name
 			}
-		}
 		} else if active := strings.TrimSpace(cfg.ActiveProvider); active != "" {
 			if resolved, resolveErr := resolvePersistedProviderName(cfg.Providers, active); resolveErr == nil {
 				cfg.ActiveProvider = resolved

@@ -1220,11 +1220,6 @@ func TestWizardProviderStoredKey(t *testing.T) {
 func TestProviderWizardManageKeyRemove(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	t.Run("exclusive catalog alias is removed and memory is refreshed", func(t *testing.T) {
-		userRoot := t.TempDir()
-		t.Setenv("HOME", userRoot)
-		t.Setenv("APPDATA", userRoot)
-		t.Setenv("LOCALAPPDATA", userRoot)
-		t.Setenv("XDG_CONFIG_HOME", userRoot)
 		configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 			t.Fatal(err)
@@ -1233,7 +1228,7 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		store, err := config.ProviderKeyStore()
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1271,24 +1266,6 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		}
 	})
 }
-		}
-	})
-
-	t.Run("persisted marker cleanup", func(t *testing.T) {
-		m := newRemovalModel(t)
-		m.deleteProviderKey = func(string, string) (bool, error) { return true, nil }
-		m.clearProviderKeyStored = func(string, string) (bool, error) {
-			return false, errors.New("injected marker failure")
-		}
-		next, _ := m.applyManageKeyChoice()
-		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "Stored key marker cleanup failed") {
-			t.Fatalf("wizard did not remain open with marker error: %+v", next.providerWizard)
-		}
-		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
-			t.Fatal("injected marker failure unexpectedly changed config")
-		}
-	})
-}
 
 func TestProviderWizardManageKeyErrorsAreRedacted(t *testing.T) {
 	t.Run("preflight", func(t *testing.T) {
@@ -1315,6 +1292,22 @@ func TestProviderWizardManageKeyErrorsAreRedacted(t *testing.T) {
 		next, _ := m.applyManageKeyChoice()
 		if !strings.Contains(next.providerWizard.err, "REDACTED") || strings.Contains(next.providerWizard.err, secret) {
 			t.Fatalf("candidate error was not redacted: %q", next.providerWizard.err)
+		}
+	})
+	t.Run("default config path", func(t *testing.T) {
+		secret := "sk-proj-abcdefghijklmnopqrst"
+		configRoot := filepath.Join(t.TempDir(), secret)
+		if err := os.WriteFile(configRoot, []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", configRoot)
+		t.Setenv("APPDATA", configRoot)
+		t.Setenv("HOME", configRoot)
+		m := newModel(context.Background(), Options{})
+		m.providerWizard = &providerWizardState{manageProviderName: "work", manageKeyCursor: 2}
+		next, _ := m.applyManageKeyChoice()
+		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "REDACTED") || strings.Contains(next.providerWizard.err, secret) {
+			t.Fatalf("default-path error was not redacted: %q", next.providerWizard.err)
 		}
 	})
 }

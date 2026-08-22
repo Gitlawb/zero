@@ -32,10 +32,6 @@ type Manager struct {
 	now      func() time.Time
 	buffer   time.Duration
 	out      io.Writer
-	// beforeSave revalidates caller-owned state immediately before a completed
-	// login replaces a token. Interactive OAuth can take minutes, so validating
-	// only before it starts leaves a race where config becomes invalid mid-flow.
-	beforeSave func() error
 	// openBrowser is invoked with the authorization URL for loopback logins.
 	// Tests inject a function that drives the loopback redirect.
 	openBrowser func(authURL string) error

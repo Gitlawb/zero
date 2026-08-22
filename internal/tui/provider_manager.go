@@ -377,21 +377,17 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 			return m, nil
 		}
 		activeAfter = cfg.ActiveProvider
-		notes = []string{"Deleted " + name + "."}
 		if keyRemoved {
-			notes = append(notes, "Deleted its stored API key.")
+			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
+		} else if row.profile.APIKeyStored {
+			notes = []string{"Deleted " + name + ". Kept its stored API key because another saved provider still uses that credential."}
+		} else {
+			notes = []string{"Deleted " + name + "."}
 		}
 		resolvedProfile := row.profile
 		resolvedProfile.Name = exactName
 		resolvedProfile.APIKeyStored = false
 		cleanup = providerManagerCleanupCmd(m.userConfigPath, resolvedProfile, false)
-	} else {
-		// Env-derived providers have no persisted profile or credential to
-		// delete. Keep this path session-only.
-		notes = []string{
-			"Removed " + name + " from this session.",
-			"It wasn't saved in config.json (likely set via an environment variable) — unset it to stop Zero from detecting it automatically.",
-		}
 	}
 
 	// Decide whether the deleted row is the one this session runs on BEFORE the
@@ -520,7 +516,7 @@ func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile
 	return func() tea.Msg {
 		notes := []string{}
 		var storeErr error
-		if deleteStoredKey && profile.APIKeyStored {
+		if deleteStoredKey {
 			_, storeErr = config.DeleteProviderCredentials(configPath, []string{name}, name)
 		}
 		if storeErr != nil {
@@ -771,9 +767,7 @@ func providerEditRestartNote(liveName string, editedName string, providers []con
 // reloadProviderManagerRows) and renders each row's model from that list, as do
 // the picker's saved-provider model sections. A switch that updates the live
 // client and config.json but not this list leaves those surfaces showing the
-// previous model until the TUI restarts and re-resolves providers from config
-// — the same "disk says X, session says Y" drift the wizard's key removal
-// fixed with applyProviderKeyRemovalToSession.
+// previous model until the TUI restarts and re-resolves providers from config.
 //
 // exactName must be the PERSISTED row's spelling — the one SetProviderModel was
 // handed, not the session's — because savedProviders carries row spellings.

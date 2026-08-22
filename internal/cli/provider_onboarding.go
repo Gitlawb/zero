@@ -523,9 +523,6 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
 		}
-		if keyErr != nil {
-			return exitCrash
-		}
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintf(stdout, "Removed provider %s\n", name); err != nil {

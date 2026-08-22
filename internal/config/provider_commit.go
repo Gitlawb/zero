@@ -45,10 +45,15 @@ func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInp
 	if err != nil {
 		return FileConfig{}, err
 	}
+	published := false
 	defer func() {
 		if releaseErr := release(); releaseErr != nil {
 			if err == nil {
-				err = fmt.Errorf("provider configuration was committed, but releasing its transaction lock failed: %w", releaseErr)
+				if published {
+					err = fmt.Errorf("provider configuration was committed, but releasing its transaction lock failed: %w", releaseErr)
+				} else {
+					err = fmt.Errorf("releasing the provider config/key transaction lock failed: %w", releaseErr)
+				}
 			} else {
 				err = errors.Join(err, releaseErr)
 			}
@@ -67,6 +72,8 @@ func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInp
 	} else if !os.IsNotExist(readErr) {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, readErr)
 	}
+	before := cfg
+	before.Providers = append([]ProviderProfile(nil), cfg.Providers...)
 	if !allowInvalidInput {
 		if err := ValidatePersistedProviderNames(cfg); err != nil {
 			return FileConfig{}, err
@@ -77,9 +84,16 @@ func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInp
 		return FileConfig{}, errors.Join(err, op.rollbackCredentials())
 	}
 	if op.publish {
-		if err := publishProviderConfig(path, op.config); err != nil {
-			return FileConfig{}, errors.Join(err, op.rollbackCredentials())
+		var publishErr error
+		if allowInvalidInput {
+			publishErr = writeProviderNameRepair(path, before, op.config)
+		} else {
+			publishErr = publishProviderConfig(path, op.config)
 		}
+		if publishErr != nil {
+			return FileConfig{}, errors.Join(publishErr, op.rollbackCredentials())
+		}
+		published = true
 	}
 	return op.config, nil
 }

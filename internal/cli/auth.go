@@ -54,14 +54,6 @@ func ensureLoginProviderProfile(deps appDeps, provider string) string {
 	}
 }
 
-func preflightAuthLogin(deps appDeps) error {
-	configPath, err := deps.userConfigPath()
-	if err != nil {
-		return err
-	}
-	return config.PreflightUserConfig(configPath)
-}
-
 // runAuth dispatches `zero auth <command>` for provider OAuth login. It is
 // additive and independent of `zero mcp oauth` (MCP server auth), which is
 // unchanged.
@@ -518,7 +510,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
-	
+
 	removed = removed || keyRemoved
 	if parsed.json {
 		payload := struct {

@@ -1376,27 +1376,6 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 	return "", false, nil
 }
 
-// applyProviderKeyRemovalToSession mirrors a stored-key removal into the live
-// session: every in-memory profile that shares the removed credential identity
-// drops its APIKeyStored marker, matching what
-// ClearProviderKeyStoredCaseVariants just wrote to disk.
-func (m model) applyProviderKeyRemovalToSession(name string) model {
-	// Copy before mutating: model is passed by value, but the slice header is
-	// shared, so an in-place write would reach every other copy of the model.
-	updated := make([]config.ProviderProfile, len(m.savedProviders))
-	copy(updated, m.savedProviders)
-	for index := range updated {
-		if config.SameProviderIdentity(updated[index].Name, name) {
-			updated[index].APIKeyStored = false
-		}
-	}
-	m.savedProviders = updated
-	if config.SameProviderIdentity(m.providerProfile.Name, name) {
-		m.providerProfile.APIKeyStored = false
-	}
-	return m
-}
-
 // applyManageKeyChoice acts on the keep/replace/remove selection. Keep closes the
 // wizard (nothing changes); Replace routes to credential entry (overwrites on save);
 // Remove deletes the stored key and its marker.
@@ -1427,11 +1406,14 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		for index := range m.savedProviders {
-			if strings.TrimSpace(m.savedProviders[index].Name) == canonicalName {
-				m.savedProviders[index].APIKeyStored = false
+		updated := make([]config.ProviderProfile, len(m.savedProviders))
+		copy(updated, m.savedProviders)
+		for index := range updated {
+			if strings.TrimSpace(updated[index].Name) == canonicalName {
+				updated[index].APIKeyStored = false
 			}
 		}
+		m.savedProviders = updated
 		if strings.TrimSpace(m.providerProfile.Name) == canonicalName {
 			m.providerProfile.APIKeyStored = false
 		}
@@ -1446,27 +1428,11 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 }
 
 func deleteProviderKey(configPath, provider string) (bool, error) {
-	candidates := []string{provider}
 	if strings.TrimSpace(configPath) != "" {
-		resolved, _, err := config.ProviderCredentialCandidates(configPath, provider)
-		if err != nil {
-			return false, err
-		}
-		candidates = resolved
+		removed, _, err := config.DeleteResolvedProviderCredentials(configPath, provider)
+		return removed, err
 	}
-	store, err := config.ProviderKeyStore()
-	if err != nil {
-		return false, err
-	}
-	removed := false
-	for _, candidate := range candidates {
-		candidateRemoved, err := store.Delete(candidate)
-		if err != nil {
-			return false, err
-		}
-		removed = removed || candidateRemoved
-	}
-	return removed, nil
+	return config.ForgetProviderKey(provider)
 }
 
 func providerWizardRuntimeProfile(profile config.ProviderProfile) config.ProviderProfile {

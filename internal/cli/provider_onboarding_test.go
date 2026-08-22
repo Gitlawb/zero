@@ -422,6 +422,7 @@ func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
 }
 
 func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -445,6 +446,7 @@ func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
 }
 
 func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -470,6 +472,7 @@ func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -486,6 +489,7 @@ func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -680,7 +684,7 @@ func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -728,7 +732,7 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			store, err := config.ProviderKeyStore()
+			store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -737,12 +741,8 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 			}
 			// A directory at the lock-file path is a hermetic, cross-platform
 			// failure: Delete cannot acquire its write lock.
-			userConfigPath, err := config.DefaultUserConfigPath()
-			if err != nil {
-				t.Fatal(err)
-			}
-			lockPath := filepath.Join(filepath.Dir(userConfigPath), "credentials.json.lock")
-			if err := os.Remove(lockPath); err != nil {
+			lockPath := filepath.Join(filepath.Dir(configPath), "credentials.json.lock")
+			if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
 			if err := os.Mkdir(lockPath, 0o700); err != nil {
@@ -758,20 +758,10 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 				userConfigPath: func() (string, error) { return configPath, nil },
 			})
 			if code != exitCrash {
-				t.Fatalf("exit = %d, want cleanup failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				t.Fatalf("exit = %d, want transactional cleanup failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
-			if jsonOutput {
-				var payload struct {
-					KeyError string `json:"keyError"`
-				}
-				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-					t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
-				}
-				if payload.KeyError == "" {
-					t.Fatal("JSON cleanup failure omitted keyError")
-				}
-			} else if !strings.Contains(stderr.String(), "could not be deleted") {
-				t.Fatalf("stderr = %q, want cleanup warning", stderr.String())
+			if !strings.Contains(stderr.String(), "delete stored key") {
+				t.Fatalf("stderr = %q, want transactional key-deletion failure", stderr.String())
 			}
 
 			if err := os.Remove(lockPath); err != nil {
@@ -793,7 +783,7 @@ func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testin
 	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,6 +834,7 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 	})
 
 	t.Run("environment provider accepts case variant", func(t *testing.T) {
+		t.Setenv(config.ActiveProviderEnv, "")
 		t.Setenv("OPENAI_API_KEY", "sk-env")
 		configPath := filepath.Join(t.TempDir(), "config.json")
 		writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
@@ -854,6 +845,8 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 	})
 
 	t.Run("long s is not plain s", func(t *testing.T) {
+		t.Setenv(config.ActiveProviderEnv, "")
+		t.Setenv("OPENAI_API_KEY", "")
 		configPath := filepath.Join(t.TempDir(), "config.json")
 		writeProviderOnboardingConfig(t, configPath, config.FileConfig{
 			ActiveProvider: "s",
