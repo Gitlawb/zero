@@ -84,6 +84,34 @@ jobs:
       - name: Smoke binary
         run: go run ./cmd/zero-release smoke
 
+  race:
+    name: Race Detector
+    runs-on: ubuntu-latest
+    # A race the detector newly reports can present as a deadlock rather than a
+    # failure, and the default job timeout is six hours. This job is expected to
+    # be the longest in the workflow, so the ceiling is generous but finite.
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Invoke the Makefile target rather than repeating its flags. `make test`
+      # is already `go test ./... -race -count=1`, so running it here is what
+      # stops the project's declared test command and what CI actually runs
+      # from drifting apart again. The race detector needs cgo, which the
+      # hosted ubuntu runner supplies without an extra setup step.
+      - name: Test with the race detector
+        run: make test
+
   performance:
     name: Performance Smoke
     runs-on: ubuntu-latest
