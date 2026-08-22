@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -68,5 +69,67 @@ func TestAPluginToolWithoutANoticeIsUnchanged(t *testing.T) {
 	}
 	if result.Status != tools.StatusOK {
 		t.Errorf("status = %v, want ok", result.Status)
+	}
+}
+
+// A TIMEOUT OR CANCELLATION STILL RAN THE CHILD.
+//
+// invoke's error branch rebuilt a result from status, output and metadata alone,
+// so a plugin that timed out under the non-WRITE_RESTRICTED token reported only
+// the timeout. The process had already launched without write confinement;
+// whether the disclosure survives must not depend on how it ended.
+func TestAPluginToolCarriesTheNoticeWhenItTimesOutOrIsCancelled(t *testing.T) {
+	const notice = "denyRead is configured, so the write jail is not confining writes"
+
+	for _, testCase := range []struct {
+		name string
+		err  error
+	}{
+		{"timed out", context.DeadlineExceeded},
+		{"cancelled", context.Canceled},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tool := pluginTool{
+				name: "demo",
+				run: func(context.Context, pluginCommand) commandOutput {
+					return commandOutput{ExitCode: -1, Err: testCase.err, Notices: []string{notice}}
+				},
+			}
+			result := tool.invoke(context.Background(), map[string]any{}, t.TempDir())
+
+			model := result.ModelOutput()
+			if !strings.Contains(model, notice) {
+				t.Errorf("the model-facing output lost the notice:\n%s", model)
+			}
+			if strings.Count(model, notice) != 1 {
+				t.Errorf("the notice appears %d times, want once:\n%s", strings.Count(model, notice), model)
+			}
+			if summary := result.HumanDisplay().Summary; !strings.Contains(summary, notice) {
+				t.Errorf("the human summary lost the notice: %q", summary)
+			}
+		})
+	}
+}
+
+// But a child that never launched must stay silent, or the notice describes a
+// trade nobody made. This is the distinction the launched-or-not check exists
+// for, and without it the assertion above would be satisfied by pasting the
+// notice onto every error.
+func TestAPluginThatNeverLaunchedCarriesNoNotice(t *testing.T) {
+	for _, kind := range []execution.OutcomeKind{
+		execution.OutcomeSandboxSetupFailure,
+		execution.OutcomeExecutableNotFound,
+	} {
+		if pluginChildLaunched(kind) {
+			t.Errorf("%v is treated as a launched child; a notice there would describe a process that never started", kind)
+		}
+	}
+	for _, kind := range []execution.OutcomeKind{
+		execution.OutcomeTimedOut,
+		execution.OutcomeCancelled,
+	} {
+		if !pluginChildLaunched(kind) {
+			t.Errorf("%v is treated as never launched, so its disclosure would be dropped", kind)
+		}
 	}
 }
