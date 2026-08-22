@@ -89,42 +89,31 @@ func PublishProviderCredential(path string, exactName string, key string) error 
 	if exactName == "" {
 		return fmt.Errorf("provider name is required")
 	}
-	if strings.TrimSpace(key) == "" {
+	key = strings.TrimSpace(key)
+	if key == "" {
 		return fmt.Errorf("api key is required")
 	}
-	if err := PreflightUserConfig(path); err != nil {
-		return err
-	}
-	store, err := ProviderKeyStore()
-	if err != nil {
-		return err
-	}
-	previous, hadPrevious, err := store.Get(exactName)
-	if err != nil {
-		return err
-	}
-	if err := store.Set(exactName, key); err != nil {
-		return err
-	}
-	if err := MarkProviderAPIKeyStored(path, exactName); err != nil {
-		// Put the store back exactly as it was: restore a prior key rather than
-		// deleting it, and only delete when this call created the entry.
-		var rollbackErr error
-		if hadPrevious {
-			rollbackErr = store.Set(exactName, previous)
-		} else {
-			_, rollbackErr = store.Delete(exactName)
+	_, err := runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		index := -1
+		for candidate := range op.config.Providers {
+			if strings.TrimSpace(op.config.Providers[candidate].Name) == exactName {
+				index = candidate
+				break
+			}
 		}
-		if rollbackErr != nil {
-			// A failed rollback is the state the caller most needs to hear
-			// about: the store now holds a key the config does not describe.
-			// Never let it be reported as a plain publication failure. The key
-			// value itself stays out of the message.
-			return fmt.Errorf("%w (credential store rollback also failed: %v)", err, rollbackErr)
+		if index < 0 {
+			return fmt.Errorf("provider %q not found", exactName)
 		}
-		return err
-	}
-	return nil
+		if err := op.setKey(exactName, key); err != nil {
+			return fmt.Errorf("store API key for %q: %w", exactName, err)
+		}
+		profile := &op.config.Providers[index]
+		profile.APIKey = ""
+		profile.APIKeyEnv = ""
+		profile.APIKeyStored = true
+		return nil
+	})
+	return err
 }
 
 // ForgetProviderKey removes a provider's stored API key from the credential store,

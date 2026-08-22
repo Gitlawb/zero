@@ -66,7 +66,7 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 			return m, nil
 		}
 		if name, ok, err := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); err != nil {
-			m.providerWizard.err = err.Error()
+			m.providerWizard.err = redaction.ErrorMessage(err, redaction.Options{})
 			return m, nil
 		} else if ok {
 			// Generic/custom providers (custom-openai-compatible etc.) all share

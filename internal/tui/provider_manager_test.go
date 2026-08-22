@@ -323,12 +323,10 @@ func TestProviderManagerEditKeyPersistsStoredMarker(t *testing.T) {
 	if backup.APIKey != "" {
 		t.Fatalf("cleartext key must never land in config.json: %+v", backup)
 	}
-	// The env reference is deliberately preserved as an explicit override: the
-	// resolver fills APIKey from a SET env var first, and the stored key applies
-	// only when the env var is absent — locked in here so a future merge change
-	// can't silently flip the precedence.
-	if backup.APIKeyEnv != "BACKUP_API_KEY" {
-		t.Fatalf("APIKeyEnv must survive a key edit as an explicit override, got %q", backup.APIKeyEnv)
+	// A freshly stored key becomes authoritative. Keeping the old env reference
+	// would let a stale environment value overwrite it during Resolve.
+	if backup.APIKeyEnv != "" {
+		t.Fatalf("APIKeyEnv must be cleared after a key edit, got %q", backup.APIKeyEnv)
 	}
 	store, err := config.ProviderKeyStoreAt(filepath.Dir(next.userConfigPath))
 	if err != nil {

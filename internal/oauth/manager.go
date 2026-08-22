@@ -364,7 +364,7 @@ func (m *Manager) refreshAndSave(ctx context.Context, key string, cfg Config, cu
 	if err != nil {
 		return "", err
 	}
-	if err := m.store.Save(key, refreshed); err != nil {
+	if err := m.commitToken(key, refreshed); err != nil {
 		return "", err
 	}
 	return refreshed.AccessToken, nil

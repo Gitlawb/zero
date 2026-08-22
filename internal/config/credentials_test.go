@@ -425,7 +425,7 @@ func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testi
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := ProviderKeyStore()
+	store, err := ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestPublishProviderCredentialDeletesEntryItCreatedWhenMarkerRejected(t *tes
 	if err := PublishProviderCredential(path, "work", "sk-new"); err == nil {
 		t.Fatal("publication must be rejected for an ambiguous persisted config")
 	}
-	store, err := ProviderKeyStore()
+	store, err := ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
 	if err := PublishProviderCredential(path, "openrouter", "sk-new"); err != nil {
 		t.Fatal(err)
 	}
-	store, err := ProviderKeyStore()
+	store, err := ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,5 +506,47 @@ func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
 	}
 	if !cfg.Providers[0].APIKeyStored || strings.TrimSpace(cfg.Providers[0].APIKeyEnv) != "" {
 		t.Fatalf("marker not published: apiKeyStored=%v apiKeyEnv=%q", cfg.Providers[0].APIKeyStored, cfg.Providers[0].APIKeyEnv)
+	}
+}
+
+func TestPublishProviderCredentialRollbackDoesNotResurrectConcurrentDeletion(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-previous"); err != nil {
+		t.Fatal(err)
+	}
+
+	originalPublish := publishProviderConfig
+	publishing := make(chan struct{})
+	continuePublish := make(chan struct{})
+	publishProviderConfig = func(string, FileConfig) error {
+		close(publishing)
+		<-continuePublish
+		return errors.New("injected publication failure")
+	}
+	t.Cleanup(func() { publishProviderConfig = originalPublish })
+
+	done := make(chan error, 1)
+	go func() {
+		done <- PublishProviderCredential(path, "work", "sk-new")
+	}()
+	<-publishing
+	if _, err := store.Delete("work"); err != nil {
+		t.Fatal(err)
+	}
+	close(continuePublish)
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "injected publication failure") {
+		t.Fatalf("PublishProviderCredential error = %v, want publication failure", err)
+	}
+	if _, ok, err := store.Get("work"); err != nil || ok {
+		t.Fatalf("rollback resurrected concurrently deleted key: ok=%v err=%v", ok, err)
 	}
 }

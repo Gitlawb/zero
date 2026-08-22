@@ -701,14 +701,24 @@ func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 	var payload struct {
 		Removed        string `json:"removed"`
 		KeyRemoved     bool   `json:"keyRemoved"`
-		KeyError       string `json:"keyError"`
 		ActiveProvider string `json:"activeProvider"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
 	}
-	if payload.Removed != "gw" || !payload.KeyRemoved || payload.KeyError != "" {
+	if payload.Removed != "gw" || !payload.KeyRemoved {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	// Credential cleanup is no longer reported as a field beside a success exit
+	// code: a cleanup failure fails the command. Asserting the key is ABSENT
+	// pins that contract, where asserting an empty "keyError" string would pass
+	// merely because the field is gone.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
+		t.Fatalf("decode JSON fields: %v", err)
+	}
+	if _, ok := fields["keyError"]; ok {
+		t.Fatalf("removal payload still reports keyError: %s", stdout.String())
 	}
 	if payload.ActiveProvider != "other" {
 		t.Fatalf("active must hand off, got %q", payload.ActiveProvider)

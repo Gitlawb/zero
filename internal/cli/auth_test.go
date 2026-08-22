@@ -506,10 +506,14 @@ func TestRunAuthLogoutRejectsConfigPathFailureBeforeCredentialDeletion(t *testin
 	}
 }
 
-// A legacy duplicate-row config cannot be published, and the rejection must not
-// cost the user the OpenRouter key they were already working with: the capture
-// is validated first, and a rejected publication restores the previous secret
-// rather than deleting the shared entry.
+// A legacy duplicate-row config is rejected by preflight, BEFORE the browser
+// login runs, so the user is not sent through a PKCE round trip whose result
+// cannot be stored. Nothing is published here and no rollback occurs -- the
+// assertion is that the key the user was already working with is untouched and
+// no minted key reaches stdout. The publication-rollback path itself is pinned
+// where it lives, in TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected
+// and TestPublishProviderCredentialRollbackDoesNotResurrectConcurrentDeletion
+// (internal/config).
 func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
@@ -942,6 +946,7 @@ func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 // runs — so the folded-name adoption itself is pinned where it is reachable, in
 // TestPersistedProviderIdentityRulesMatchTheCredentialStore (internal/config).
 func TestRunAuthLogoutKeepsDistinctUnicodeCredentials(t *testing.T) {
+	setCLIUserConfigRoot(t)
 	const longS = "ſ"
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	storePath := withAuthStore(t)
@@ -1211,6 +1216,7 @@ func TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone(t *testing.T) {
 }
 
 func TestRunAuthLogoutRejectsAmbiguousCatalogAddress(t *testing.T) {
+	setCLIUserConfigRoot(t)
 	storePath := withAuthStore(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "config.json")
