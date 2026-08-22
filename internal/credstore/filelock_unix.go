@@ -34,9 +34,28 @@ func (s *Store) acquireFileLock(exclusive bool) (func() error, error) {
 	if exclusive {
 		how = unix.LOCK_EX
 	}
-	if err := unix.Flock(int(file.Fd()), how); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("credstore: lock: %w", err)
+	// LOCK_NB plus a deadline rather than a blocking flock: a blocking wait has
+	// no way to report contention, and the sibling provider-write lock in
+	// internal/config fails a busy transaction rather than hanging on it. See
+	// credentialLockTimeout.
+	deadline := time.Now().Add(credentialLockTimeout)
+	for {
+		err := unix.Flock(int(file.Fd()), how|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) {
+			_ = file.Close()
+			return nil, fmt.Errorf("credstore: lock: %w", err)
+		}
+		if time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, credentialLockBusyError(file.Name())
+		}
+		time.Sleep(credentialLockRetryInterval)
 	}
 	return func() error {
 		// Close alone drops the flock, so the explicit unlock is belt-and-braces —
