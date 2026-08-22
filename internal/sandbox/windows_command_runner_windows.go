@@ -89,6 +89,11 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	return exitCode
 }
 
+// applyWindowsUnelevatedACLPlanFn is a seam. The failure branch below builds
+// the guidance an operator acts on, and that text is only correct by
+// inspection until something drives the branch and reads it back.
+var applyWindowsUnelevatedACLPlanFn = applyWindowsACLPlan
+
 // ensureWindowsUnelevatedSetup applies the workspace ACL plan from the current
 // (non-elevated) process so the write-restricted token has somewhere its
 // capability SIDs are granted. DACL edits on user-owned workspace and temp
@@ -111,9 +116,16 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	if marker.contains(applied) {
 		return nil
 	}
-	if _, err := applyWindowsACLPlan(plan); err != nil {
+	if _, err := applyWindowsUnelevatedACLPlanFn(plan); err != nil {
+		// Both remedies below are real. An earlier version offered `--sandbox
+		// forbid`, which is not: SandboxPreferenceForbid is an internal engine
+		// state with no flag behind it, so following that advice produced an
+		// unknown option and left the reader stuck on a failure they had just been
+		// told how to clear. A recovery instruction that does not work is worse
+		// than none, because it costs the reader the time to discover that.
 		return fmt.Errorf("apply unelevated workspace ACLs: %w — the workspace may be on a filesystem the current user does not own; "+
-			"run `zero sandbox setup` from an elevated (Administrator) terminal, or re-run with `--sandbox forbid` to skip OS sandboxing", err)
+			"run `zero sandbox setup` from an elevated (Administrator) terminal, "+
+			`or turn the sandbox off in your user config with "sandbox": {"enabled": false}`, err)
 	}
 	return recordWindowsUnelevatedAppliedPlan(config.SandboxHome, applied)
 }

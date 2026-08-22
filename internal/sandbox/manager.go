@@ -327,7 +327,53 @@ func (request SandboxExecutionRequest) BackendPlan(policy Policy) BackendPlan {
 		RequiresPlatformSandbox: request.RequiresPlatformSandbox,
 		Capabilities:            request.Backend.Capabilities(policy),
 		Restrictions:            request.Backend.restrictions(policy),
-		Warnings:                request.Backend.Warnings(),
+		Warnings:                append(request.Backend.Warnings(), windowsDenyReadWarnings(request.Backend, request.PermissionProfile)...),
+	}
+}
+
+// denyReadWarningHostGOOS is the host this process runs on, as far as the
+// DenyRead warning is concerned. A var so a test can drive both sides.
+var denyReadWarningHostGOOS = runtime.GOOS
+
+// windowsDenyReadWarnings reports that configuring DenyRead on Windows costs the
+// restricted token's write jail.
+//
+// A profile with DenyRead paths selects the token shape WITHOUT WRITE_RESTRICTED
+// (the runner sets writeRestricted false exactly when DenyRead is non-empty),
+// because the restricted-SID check has to cover reads for read-deny to mean
+// anything. That shape must keep the World SID on its restricted-SID list or the
+// token cannot open cmd.exe at all, and every principal carries the World SID, so
+// the write half of the jail passes for free on any Everyone-writable path.
+//
+// The trade is deliberate and documented in the token code, but it was invisible:
+// nothing told the person who set DenyRead that they had given up the write jail
+// to get it. Zero never populates DenyRead on Windows itself, so this only
+// reaches users who configured it. Tracked as #869; when that closes, this
+// warning goes with it.
+func windowsDenyReadWarnings(backend Backend, profile PermissionProfile) []string {
+	// The HOST has to be Windows, not merely the target backend.
+	//
+	// This describes a token the Windows command runner will build, and that
+	// runner only ever runs on Windows. A Windows-targeted plan built anywhere
+	// else is a cross-platform planning exercise, and its DenyRead does not come
+	// from a Windows user at all: credentialDenyReadPaths returns empty ON
+	// Windows and populates itself from the host everywhere else, so a plan built
+	// on Linux carries that machine's credential paths and would draw a warning
+	// about a token nothing will build.
+	//
+	// Indirected through a var so both sides stay testable from any host, the
+	// same reason windowsSandboxInitialized is one.
+	if denyReadWarningHostGOOS != "windows" {
+		return nil
+	}
+	if backend.Name != BackendWindowsRestrictedToken || !backend.NativeIsolation {
+		return nil
+	}
+	if len(normalizeProfilePaths(profile.FileSystem.DenyRead)) == 0 {
+		return nil
+	}
+	return []string{
+		"denyRead is configured, so the Windows sandbox uses the token shape without WRITE_RESTRICTED: reads are denied as requested, but writes outside the workspace are not confined by the token (#869)",
 	}
 }
 

@@ -235,12 +235,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 }
 
 func executionEnforcement(plan zeroSandbox.CommandPlan) execution.Enforcement {
-	return execution.Enforcement{
-		Backend:         string(plan.TargetBackend),
-		Level:           string(plan.EnforcementLevel),
-		Degraded:        plan.EnforcementLevel == zeroSandbox.EnforcementDegraded,
-		DowngradeReason: plan.DowngradeReason,
-	}
+	return zeroSandbox.EnforcementFor(plan)
 }
 
 type writeStdinTool struct {
