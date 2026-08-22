@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -12,13 +13,40 @@ const (
 	WindowsACLAllowWrite WindowsACLAction = "allow-write"
 	WindowsACLDenyRead   WindowsACLAction = "deny-read"
 	WindowsACLDenyWrite  WindowsACLAction = "deny-write"
+	// WindowsACLRevokeCapability removes any existing ACE (allow or deny) for
+	// Capability at Path, without itself granting or denying anything (applied
+	// via SetEntriesInAclW's SET_ACCESS mode with a zero mask, not
+	// REVOKE_ACCESS — see windowsACLAccess for why). It is consumed by
+	// applyWindowsACLPlan for migration cleanup and tests; no current
+	// plan-generation path emits this action, preserving legacy-process confinement.
+	WindowsACLRevokeCapability WindowsACLAction = "revoke-capability"
 )
 
 type WindowsACLEntry struct {
-	Action      WindowsACLAction `json:"action"`
-	Path        string           `json:"path"`
-	Capability  string           `json:"capability"`
-	Materialize bool             `json:"materialize,omitempty"`
+	Action     WindowsACLAction `json:"action"`
+	Path       string           `json:"path"`
+	Capability string           `json:"capability"`
+	// NoInherit forces the applied ACE to carry no inheritance flags, even
+	// when the target is a directory. Without it, applyWindowsACLPlan makes
+	// every directory ACE inheritable (SUB_CONTAINERS_AND_OBJECTS_INHERIT),
+	// and SetNamedSecurityInfo automatically propagates any inheritable ACE
+	// down onto the target's EXISTING descendants (not just new ones it
+	// creates going forward) — see the shared-deny-path entries below for
+	// why that is unsafe on broad system roots.
+	NoInherit   bool `json:"noInherit,omitempty"`
+	Materialize bool `json:"materialize,omitempty"`
+	// ScanDescendants marks a shared-root DenyWrite entry whose EXISTING
+	// writable descendants must ALSO be denied, one direct (non-inheriting)
+	// deny per writable descendant, at apply time. This flag and its associated
+	// walker are consumed by applyWindowsACLPlan and tests; no current
+	// plan-generation path sets this flag since broad shared-root DenyWrite ACEs
+	// and SID broadening are no longer planned.
+	ScanDescendants bool `json:"-"`
+	// RevokeDescendants marks a WindowsACLRevokeCapability entry as needing
+	// stale-deny cleanup applied recursively to existing descendants, not just
+	// the root path itself. This flag is consumed by applyWindowsACLPlan for
+	// migration cleanup and tests; no current plan-generation path sets this flag.
+	RevokeDescendants bool `json:"-"`
 }
 
 type WindowsACLPlan struct {
@@ -76,6 +104,7 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 			})
 		}
 	}
+
 	return WindowsACLPlan{Entries: dedupeWindowsACLEntries(entries)}, nil
 }
 
@@ -184,7 +213,11 @@ func dedupeWindowsACLEntries(entries []WindowsACLEntry) []WindowsACLEntry {
 		if entry.Action == "" || strings.TrimSpace(entry.Path) == "" || strings.TrimSpace(entry.Capability) == "" {
 			continue
 		}
-		key := string(entry.Action) + "\x00" + windowsCapabilityPathKey(entry.Path) + "\x00" + strings.ToLower(entry.Capability)
+		// NoInherit is part of the identity: a direct-only deny and an
+		// inheritable one on the same path/SID are different ACL shapes, and
+		// collapsing them could silently promote a deliberately non-inherited
+		// shared-path deny into an inheritable one (or vice versa).
+		key := string(entry.Action) + "\x00" + windowsCapabilityPathKey(entry.Path) + "\x00" + strings.ToLower(entry.Capability) + "\x00" + fmt.Sprintf("%t", entry.NoInherit)
 		if _, ok := seen[key]; ok {
 			continue
 		}
