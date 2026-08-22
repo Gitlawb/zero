@@ -127,6 +127,20 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) 
 	if unnamed < 0 {
 		return FileConfig{}, fmt.Errorf("no unnamed persisted provider found")
 	}
+	activeName := strings.TrimSpace(cfg.ActiveProvider)
+	activeMatchesNamedRow := false
+	if activeName != "" {
+		for index := range cfg.Providers {
+			rowName := strings.TrimSpace(cfg.Providers[index].Name)
+			if rowName == "" {
+				continue
+			}
+			if rowName == activeName || sameProviderIdentity(rowName, activeName) {
+				activeMatchesNamedRow = true
+				break
+			}
+		}
+	}
 	name := strings.TrimSpace(replacement)
 	if name == "" {
 		name = strings.TrimSpace(cfg.ActiveProvider)
@@ -135,6 +149,13 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) 
 		name = "openai"
 	}
 	cfg.Providers[unnamed].Name = name
+	// A nonempty active name that matched no named row was the legacy selector
+	// for this sole unnamed row. Repair the reference in the same atomic write;
+	// otherwise an explicit --name can report success but leave Resolve unable to
+	// find the active provider.
+	if activeName != "" && !activeMatchesNamedRow {
+		cfg.ActiveProvider = name
+	}
 	var before FileConfig
 	if err := json.Unmarshal(data, &before); err != nil {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)

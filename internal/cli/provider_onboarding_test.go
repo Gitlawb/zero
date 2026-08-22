@@ -89,6 +89,35 @@ func TestRunProvidersRepairConfigRecoversLegacyUnnamedProvider(t *testing.T) {
 	}
 }
 
+func TestRunProvidersRepairConfigMigratesLegacyActiveReference(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := []byte(`{"activeProvider":"legacy","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"other","provider_kind":"openai","model":"gpt-4.1"}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code := runWithDeps(
+		[]string{"providers", "repair-config", "--name", "work"},
+		&stdout,
+		&stderr,
+		providerSetupDeps(configPath),
+	)
+	if code != exitSuccess {
+		t.Fatalf("repair exit = %d, stderr=%q", code, stderr.String())
+	}
+	resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("fresh Resolve after repair: %v", err)
+	}
+	if resolved.ActiveProvider != "work" || resolved.Provider.Name != "work" {
+		t.Fatalf("resolved active provider = %q profile = %q, want work", resolved.ActiveProvider, resolved.Provider.Name)
+	}
+}
+
 func TestProviderRepairCommandsCanResolveIndependentLegacyNameProblems(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")

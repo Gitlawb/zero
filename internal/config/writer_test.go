@@ -1345,6 +1345,31 @@ func TestRepairUnnamedProviderPreservesLegacyNameResolution(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit name migrates legacy active reference", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{
+			ActiveProvider: "legacy",
+			Providers: []ProviderProfile{
+				{Name: "", ProviderKind: ProviderKindOpenAI, Model: "gpt-4o"},
+				{Name: "other", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			},
+		}, 0o600)
+		cfg, err := RepairUnnamedProvider(path, "work")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ActiveProvider != "work" {
+			t.Fatalf("active provider = %q, want repaired name work", cfg.ActiveProvider)
+		}
+		resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+		if err != nil {
+			t.Fatalf("Resolve after repair: %v", err)
+		}
+		if resolved.ActiveProvider != "work" || resolved.Provider.Name != "work" {
+			t.Fatalf("resolved active provider = %q profile = %q, want work", resolved.ActiveProvider, resolved.Provider.Name)
+		}
+	})
+
 	t.Run("openai fallback", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
 		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Model: "gpt-4o"}}}, 0o600)
