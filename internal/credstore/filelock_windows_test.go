@@ -205,9 +205,12 @@ func TestFileLockRejectsWriteAccessForBuiltinGroup(t *testing.T) {
 }
 
 // THE REGRESSION. Real profile and temp directories carry inherited allow-ACEs
-// for machine-local accounts and capability SIDs that Windows put there. Failing
-// closed on those made every credential operation on such a machine impossible;
-// they are now reported and allowed.
+// that Windows or a local tool put there: capability SIDs, machine-local
+// accounts, and admin-created local groups (one review machine carried
+// "CodexSandboxUsers" on both its profile and temp directories). Failing closed
+// on those made every credential operation on such a machine impossible; they
+// are now reported and allowed. Only the universal principals still fail
+// closed — see TestFileLockRejectsWriteAccessForBuiltinGroup.
 func TestFileLockWarnsButProceedsForUnrecognisedAccountTrustee(t *testing.T) {
 	const foreign = "S-1-5-21-1111111111-2222222222-3333333333-1234"
 	warnings := captureLockTrusteeWarnings(t, foreign)
@@ -264,7 +267,9 @@ func TestBroadLockTrusteeClassification(t *testing.T) {
 		"S-1-5-21-1-2-3-513", // Domain Users
 	}
 	narrow := []string{
-		"S-1-5-21-1-2-3-1004",      // a local account
+		// A local account or an admin-created local group; the two are not
+		// distinguishable by SID shape, and both are warned rather than refused.
+		"S-1-5-21-1-2-3-1004",
 		"S-1-15-3-1024-1065365936", // a capability
 		"S-1-5-80-3139157870-2983391045-3678747466-658725712-1809340420", // a service account
 	}

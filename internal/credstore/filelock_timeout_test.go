@@ -27,6 +27,7 @@ func TestFileLockReportsBusyInsteadOfBlockingForever(t *testing.T) {
 		}
 	}()
 
+	started := time.Now()
 	done := make(chan error, 1)
 	go func() {
 		contender, err := store.acquireFileLock(true)
@@ -36,15 +37,21 @@ func TestFileLockReportsBusyInsteadOfBlockingForever(t *testing.T) {
 		done <- err
 	}()
 
+	// The bound is generous against a loaded CI box but far below anything that
+	// would pass while still ignoring credentialLockTimeout.
+	const bound = time.Second
 	select {
 	case err := <-done:
+		if elapsed := time.Since(started); elapsed > bound {
+			t.Fatalf("contending acquireFileLock took %s, want it bounded by credentialLockTimeout", elapsed)
+		}
 		if err == nil || !strings.Contains(err.Error(), "credential store is busy") {
 			t.Fatalf("contending acquireFileLock = %v, want a busy error", err)
 		}
 		if !strings.Contains(err.Error(), store.lockPath()) {
 			t.Fatalf("busy error %v does not name the lock file %q", err, store.lockPath())
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("contending acquireFileLock never returned")
+	case <-time.After(bound):
+		t.Fatal("contending acquireFileLock did not return within the bound")
 	}
 }
