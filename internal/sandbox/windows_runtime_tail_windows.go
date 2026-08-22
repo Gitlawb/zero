@@ -143,6 +143,47 @@ func openWindowsChildNoFollow(parent windows.Handle, name string, access uint32,
 // stamped without ever carrying the capability grant, and marker validation
 // still passed because it only reads the stamp's contents. The restricted
 // process then got a marker-valid runtime path with no grant on it.
+// writeWindowsRuntimeStampToDirectoryHandle writes the stamp into an ALREADY
+// OPEN directory, naming nothing. The caller holds the handle the capability ACE
+// was applied through, so the stamp cannot land anywhere else.
+func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHash string) error {
+	objectName, err := windows.NewNTUnicodeString(windowsSandboxRuntimeStampName)
+	if err != nil {
+		return fmt.Errorf("encode sandbox runtime setup stamp name: %w", err)
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		RootDirectory: directory,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE,
+	}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+
+	var handle windows.Handle
+	var iosb windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(
+		&handle,
+		windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+		&attributes,
+		&iosb,
+		nil,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_SHARE_READ,
+		windows.FILE_OVERWRITE_IF,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+		0,
+		0,
+	)
+	if err != nil {
+		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
+	}
+	file := os.NewFile(uintptr(handle), windowsSandboxRuntimeStampName)
+	defer file.Close()
+	if _, err := file.WriteString(planHash); err != nil {
+		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
+	}
+	return nil
+}
+
 func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
 	directory, err := openWindowsRuntimeTailDirectory(root, windows.FILE_TRAVERSE|windowsFileAddFile|windows.SYNCHRONIZE)
 	if err != nil {

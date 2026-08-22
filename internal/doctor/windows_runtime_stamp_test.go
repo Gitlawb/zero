@@ -28,6 +28,27 @@ import (
 // one side and not the other, so the plan hashes diverge and validation fails
 // before the stamp is ever consulted -- which would make this test fail without
 // the fix for a reason that has nothing to do with the stamp.
+// redirectUserCache points os.UserCacheDir at test-owned storage.
+//
+// WITHOUT THIS THE TEST WRITES INTO THE DEVELOPER'S REAL CACHE. The runtime
+// candidate is derived from the process's actual user cache directory, so the
+// test was creating, recursively removing, recreating and then cleanup-removing
+// a directory under the real %LocalAppData%zerountime (or ~/.cache/zero on
+// Unix). The workspace digest made a collision with a live runtime tree
+// unlikely rather than impossible, and "unlikely" is not the standard for a
+// test that calls RemoveAll.
+//
+// All three variables, because os.UserCacheDir reads a different one per
+// platform: %LocalAppData% on Windows, $XDG_CACHE_HOME or $HOME on Unix, and
+// $HOME on macOS.
+func redirectUserCache(t *testing.T) {
+	t.Helper()
+	cache := t.TempDir()
+	t.Setenv("LOCALAPPDATA", cache)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("HOME", cache)
+}
+
 func doctorRuntimeCandidate(t *testing.T, workspace string) string {
 	t.Helper()
 	bare := doctorProfile(t, workspace)
@@ -75,8 +96,14 @@ func TestDoctorReportsAnEvictedRuntimeTree(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", home)
+	redirectUserCache(t)
 
 	runtimeRoot := doctorRuntimeCandidate(t, workspace)
+	// Belt and braces: if the redirection above ever stops working, fail loudly
+	// rather than quietly operating on the developer's real cache.
+	if !strings.HasPrefix(runtimeRoot, os.TempDir()) && !strings.Contains(runtimeRoot, t.Name()) {
+		t.Fatalf("the runtime candidate %q is outside test-owned storage; this test creates and removes that path", runtimeRoot)
+	}
 	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
 		t.Fatalf("create the runtime root: %v", err)
 	}
