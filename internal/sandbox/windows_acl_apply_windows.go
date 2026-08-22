@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -28,6 +29,7 @@ type windowsACLSnapshot struct {
 
 func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
 	groups := groupWindowsACLPlanByPath(plan)
+	writeRoots := windowsPlanAllowWriteRoots(plan)
 	snapshots := make([]windowsACLSnapshot, 0, len(groups))
 	for _, group := range groups {
 		snapshot, applied, err := applyWindowsACLPathGroup(group)
@@ -41,10 +43,148 @@ func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
 		if applied {
 			snapshots = append(snapshots, snapshot)
 		}
+		// A shared-root deny only protects the root object itself; its existing
+		// writable descendants each need their own direct deny (see
+		// windows_acl_descendants_windows.go). Only scan once the root deny
+		// actually applied (applied == true means the root exists).
+		if denySID, ok := windowsGroupScanDescendantsSID(group); ok && applied {
+			descendantSnapshots, err := applyWindowsSharedDescendantDenies(group.Path, denySID, writeRoots)
+			snapshots = append(snapshots, descendantSnapshots...)
+			if err != nil {
+				rollbackErr := rollbackWindowsACLSnapshots(snapshots)
+				if rollbackErr != nil {
+					return nil, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+				}
+				return nil, err
+			}
+		}
+		// A write root's stale-deny revoke only clears the root path itself;
+		// clear the same stale deny from its existing descendants too, or a
+		// stray direct deny an earlier run left there keeps winning over this
+		// root's new inheritable Allow (see windows_acl.go's RevokeDescendants
+		// doc and jatmn's review). Best-effort: leaving a stale deny in place
+		// only over-restricts an explicitly configured write root, it never
+		// widens access, so this never fails the whole plan apply.
+		if denySID, ok := windowsGroupRevokeDescendantsSID(group); ok && applied {
+			snapshots = append(snapshots, windowsRevokeStaleDescendantDenies(group.Path, denySID)...)
+		}
 	}
 	return func() error {
 		return rollbackWindowsACLSnapshots(snapshots)
 	}, nil
+}
+
+// windowsPlanAllowWriteRoots collects the plan's allow-write root paths so the
+// descendant scan can exclude a configured write root (and anything under it):
+// a write root that happens to live under one of the shared roots must never be
+// jailed by a compensating deny.
+func windowsPlanAllowWriteRoots(plan WindowsACLPlan) []string {
+	var roots []string
+	for _, entry := range plan.Entries {
+		if entry.Action == WindowsACLAllowWrite {
+			if path := strings.TrimSpace(entry.Path); path != "" {
+				roots = append(roots, path)
+			}
+		}
+	}
+	return roots
+}
+
+// windowsGroupScanDescendantsSID returns the deny SID of a group's shared-root
+// DenyWrite entry when that entry requests descendant scanning.
+func windowsGroupScanDescendantsSID(group windowsACLPathGroup) (string, bool) {
+	for _, entry := range group.Entries {
+		if entry.Action == WindowsACLDenyWrite && entry.ScanDescendants && strings.TrimSpace(entry.Capability) != "" {
+			return entry.Capability, true
+		}
+	}
+	return "", false
+}
+
+// windowsGroupRevokeDescendantsSID returns the capability SID of a group's
+// write-root stale-deny revoke entry when that entry requests clearing the
+// same stale deny from the root's existing descendants too (see
+// RevokeDescendants).
+func windowsGroupRevokeDescendantsSID(group windowsACLPathGroup) (string, bool) {
+	for _, entry := range group.Entries {
+		if entry.Action == WindowsACLRevokeCapability && entry.RevokeDescendants && strings.TrimSpace(entry.Capability) != "" {
+			return entry.Capability, true
+		}
+	}
+	return "", false
+}
+
+// windowsRevokeStaleDescendantDenies walks a newly-promoted write root's
+// existing descendants and clears any direct DenyWrite ACE they carry for
+// denySID — left over from when an earlier `zero sandbox setup` run found
+// this same subtree writable by Users/Authenticated Users and applied the
+// shared-root compensating deny (windows_acl_descendants_windows.go) before
+// the caller configured this path as an allowed write root. That stale,
+// non-inheriting deny on a descendant still wins over the root's own new,
+// inheritable Allow under Windows' deny-before-allow ACE evaluation, so the
+// root would otherwise remain partly unwritable — see jatmn's review.
+//
+// This is deliberately best-effort, not fail-closed like the writable-
+// descendant scan: leaving a stray stale deny in place only over-restricts an
+// explicitly configured write root (a functionality bug), it never widens
+// access, so an unreadable descendant or a reparse point here is skipped
+// rather than aborting the whole plan apply. Bounded by the same depth/entry
+// caps as the writable-descendant scan so a pathological or cyclic tree
+// cannot make this run unboundedly long.
+func windowsRevokeStaleDescendantDenies(root, denySID string) []windowsACLSnapshot {
+	type node struct {
+		path  string
+		depth int
+	}
+	var snapshots []windowsACLSnapshot
+	visited := 0
+	queue := []node{{path: root, depth: 0}}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		entries, err := os.ReadDir(current.path)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			child := filepath.Join(current.path, entry.Name())
+			// Unlike the writable-descendant scan, this cleanup pass does not
+			// need to follow reparse points transparently: skipping one just
+			// means a stray deny under it might survive, which is the same
+			// safe-but-inconvenient outcome as any other skip here.
+			if windowsPathIsReparsePoint(child) {
+				continue
+			}
+			if visited >= windowsDescendantScanMaxDirs {
+				return snapshots
+			}
+			visited++
+			// Revoking a SID with no matching ACE is a safe no-op. A pre-check
+			// keyed on complete write-deny coverage would also skip a partial
+			// stale deny that still blocks writes on a promoted write root.
+			snapshot, applied, err := applyWindowsACLPathGroup(windowsACLPathGroup{
+				Path: child,
+				Entries: []WindowsACLEntry{{
+					Action:     WindowsACLRevokeCapability,
+					Path:       child,
+					Capability: denySID,
+					NoInherit:  true,
+				}},
+			})
+			if err == nil && applied {
+				snapshots = append(snapshots, snapshot)
+			}
+			if !entry.IsDir() {
+				continue
+			}
+			depth := current.depth + 1
+			if depth >= windowsDescendantScanMaxDepth {
+				continue
+			}
+			queue = append(queue, node{path: child, depth: depth})
+		}
+	}
+	return snapshots
 }
 
 func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {
@@ -123,7 +263,7 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 	if err != nil {
 		return fail(fmt.Errorf("read windows DACL for %s: %w", path, err))
 	}
-	accessEntries, err := windowsExplicitAccessEntries(group.Entries, isDir)
+	accessEntries, err := windowsExplicitAccessEntries(group.Entries, isDir, oldDACL)
 	if err != nil {
 		return fail(err)
 	}
@@ -191,20 +331,45 @@ func windowsACLGroupRequiresExistingTarget(group windowsACLPathGroup) bool {
 	return false
 }
 
-func windowsExplicitAccessEntries(entries []WindowsACLEntry, isDir bool) ([]windows.EXPLICIT_ACCESS, error) {
+func windowsExplicitAccessEntries(entries []WindowsACLEntry, isDir bool, oldDACL *windows.ACL) ([]windows.EXPLICIT_ACCESS, error) {
 	out := make([]windows.EXPLICIT_ACCESS, 0, len(entries))
-	inheritance := uint32(0)
-	if isDir {
-		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
-	}
 	for _, entry := range entries {
 		sid, err := windows.StringToSid(entry.Capability)
 		if err != nil {
 			return nil, fmt.Errorf("parse windows capability SID %q: %w", entry.Capability, err)
 		}
+		if entry.Action == WindowsACLRevokeCapability {
+			// Migration cleanup for hosts that ran experimental SID-broadening
+			// builds: strip the synthetic full DenyWrite ACE for this SID, but
+			// re-emit any co-resident DenyRead ACEs for the same stable SID so
+			// a concurrent profile's read boundary is not deleted (jatmn P1).
+			// SET_ACCESS with a zero mask clears every ACE for the trustee
+			// (REVOKE_ACCESS leaves DENY ACEs untouched empirically); the
+			// preserved read-deny entries that follow restore DenyRead only.
+			out = append(out, windows.EXPLICIT_ACCESS{
+				AccessPermissions: 0,
+				AccessMode:        windows.SET_ACCESS,
+				Inheritance:       0,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_GROUP,
+					TrusteeValue: windows.TrusteeValueFromSID(sid),
+				},
+			})
+			preserved, err := windowsPreservedReadDenyAccessEntries(oldDACL, sid, isDir)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, preserved...)
+			continue
+		}
 		accessMode, permissions, err := windowsACLAccess(entry.Action)
 		if err != nil {
 			return nil, err
+		}
+		inheritance := uint32(0)
+		if isDir && !entry.NoInherit {
+			inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
 		}
 		out = append(out, windows.EXPLICIT_ACCESS{
 			AccessPermissions: permissions,
@@ -220,6 +385,77 @@ func windowsExplicitAccessEntries(entries []WindowsACLEntry, isDir bool) ([]wind
 	return out, nil
 }
 
+// windowsPreservedReadDenyAccessEntries returns DENY_ACCESS EXPLICIT_ACCESS
+// entries that re-apply any non-write-related DENY ACEs for wantSID from
+// oldDACL. Write-related DENY ACEs (the experimental shared/descendant
+// DenyWrite shape) are intentionally omitted so migration revoke can drop
+// them without also clearing a live DenyRead for the same SID.
+func windowsPreservedReadDenyAccessEntries(oldDACL *windows.ACL, wantSID *windows.SID, isDir bool) ([]windows.EXPLICIT_ACCESS, error) {
+	if oldDACL == nil || wantSID == nil {
+		return nil, nil
+	}
+	var out []windows.EXPLICIT_ACCESS
+	for index := uint16(0); index < oldDACL.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(oldDACL, uint32(index), &ace); err != nil {
+			return nil, fmt.Errorf("read ACE %d while preserving read deny: %w", index, err)
+		}
+		if ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE && ace.Header.AceType != windowsAccessDeniedObjectAceType {
+			continue
+		}
+		sid, ok := windowsAceSID(ace)
+		if !ok || !sid.Equals(wantSID) {
+			continue
+		}
+		if windowsIsExperimentalWriteDenyMask(ace.Mask) {
+			continue
+		}
+		// Preserve non-write DENY ACEs (typically DenyRead for the stable
+		// sandbox-home ReadOnly SID), keeping their original inheritance
+		// scope rather than promoting every variant to container+object or
+		// dropping inherit-only ACEs that SET_ACCESS zero-mask already cleared.
+		inheritance := uint32(0)
+		if isDir {
+			inheritance = uint32(ace.Header.AceFlags) & (windows.OBJECT_INHERIT_ACE |
+				windows.CONTAINER_INHERIT_ACE |
+				windows.NO_PROPAGATE_INHERIT_ACE |
+				windows.INHERIT_ONLY_ACE)
+		}
+		out = append(out, windows.EXPLICIT_ACCESS{
+			AccessPermissions: ace.Mask,
+			AccessMode:        windows.DENY_ACCESS,
+			Inheritance:       inheritance,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(wantSID),
+			},
+		})
+	}
+	return out, nil
+}
+
+// windowsIsExperimentalWriteDenyMask reports whether mask is a synthetic
+// DenyWrite (or partial write deny) from earlier broadening builds — the only
+// ACEs migration revoke may drop for the stable ReadOnly SID. Pure DenyRead
+// masks share some STANDARD_RIGHTS bits with FILE_GENERIC_WRITE, so this keys
+// off content-write / delete / DAC bits that DenyRead never carries.
+func windowsIsExperimentalWriteDenyMask(mask windows.ACCESS_MASK) bool {
+	_, writeMask, err := windowsACLAccess(WindowsACLDenyWrite)
+	if err != nil {
+		return false
+	}
+	if mask&writeMask == writeMask {
+		return true
+	}
+	// Content-write / ownership bits unique to write denies (not in DenyRead's
+	// FILE_GENERIC_READ|FILE_GENERIC_EXECUTE mask alone).
+	const writeContent = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
+		windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES |
+		windowsFileDeleteChild | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER
+	return mask&writeContent != 0
+}
+
 func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACCESS_MASK, error) {
 	switch action {
 	case WindowsACLAllowWrite:
@@ -227,7 +463,10 @@ func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACC
 	case WindowsACLDenyRead:
 		return windows.DENY_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE, nil
 	case WindowsACLDenyWrite:
-		return windows.DENY_ACCESS, windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER, nil
+		return windows.DENY_ACCESS, (windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER) &^ windows.SYNCHRONIZE, nil
+	case WindowsACLRevokeCapability:
+		// Handled specially in windowsExplicitAccessEntries (preserve DenyRead).
+		return windows.SET_ACCESS, 0, nil
 	default:
 		return 0, 0, fmt.Errorf("unsupported windows ACL action %q", action)
 	}

@@ -73,6 +73,28 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("sandboxed write marker = %q, %v; want ok", bytes, err)
 	}
 
+	// SID broadening is disabled, so the restricted-SID list never includes
+	// Users/Authenticated Users. The write grant those groups hold on
+	// C:\Users\Public must not be reachable through the restricted-SID check.
+	// Pin that a write there fails: an independent shared-writable directory
+	// outside every workspace write root.
+	publicDir := os.Getenv("PUBLIC")
+	if publicDir == "" {
+		t.Log("PUBLIC is not set; skipping C:\\Users\\Public write-jail probe")
+	} else {
+		publicMarker := filepath.Join(publicDir, "zero-elevated-write-denied.txt")
+		_ = os.Remove(publicMarker)
+		runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+			"cmd.exe", "/d", "/s", "/c", "echo leaked>" + publicMarker,
+		}, 1)
+		if _, err := os.Stat(publicMarker); err == nil {
+			_ = os.Remove(publicMarker)
+			t.Fatalf("Windows sandbox allowed a write to the shared C:\\Users\\Public directory")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat public marker: %v", err)
+		}
+	}
+
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen loopback for Windows network smoke: %v", err)
@@ -156,12 +178,14 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 	}
 
 	sandboxHome := filepath.Join(root, ".zero-sandbox")
+	// Success path: restricted FS write-jail with no DenyRead. Non-empty DenyRead
+	// is unsupported on both restricted-token tiers under the narrow SID set
+	// (PR #640); the rejection probe below covers that separately.
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:                 FileSystemRestricted,
 			ReadRoots:            []string{root},
 			WriteRoots:           []WritableRoot{{Root: root, ProtectedMetadataNames: []string{".git", ".zero", ".agents"}}},
-			DenyRead:             []string{privateDir},
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
 		},
@@ -190,10 +214,18 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("expected the unelevated setup marker to be recorded: %v", err)
 	}
 
-	// DenyRead check: reading from the privateDir must be blocked (exit code 1)
-	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+	// DenyRead is unsupported on both restricted-token tiers under the narrow
+	// SID set (PR #640): the runner must reject before launch rather than
+	// attempting a fully restricted token that cannot load system tools.
+	denyReadConfig := config
+	denyReadConfig.PermissionProfile.FileSystem.DenyRead = []string{privateDir}
+	runWindowsRealSmokeCommandExpectError(t, runnerExe, denyReadConfig, []string{
 		"cmd.exe", "/d", "/s", "/c", "type " + secretFile,
-	}, 1)
+	}, "DenyRead", "not supported")
+	// The secret must remain readable from the host; the sandbox never ran.
+	if data, err := os.ReadFile(secretFile); err != nil || string(data) != "super-secret" {
+		t.Fatalf("host secret file after rejected DenyRead launch: %q, %v", data, err)
+	}
 
 	outsideMarker := filepath.Join(outside, "unelevated-write-denied.txt")
 	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
@@ -203,6 +235,24 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("unelevated sandbox allowed a write outside every granted root")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat outside marker: %v", err)
+	}
+
+	// Verify write to C:\ProgramData is blocked
+	programData := os.Getenv("ProgramData")
+	if programData != "" {
+		programDataMarker := filepath.Join(programData, "zero-unelevated-write-denied.txt")
+		_ = os.Remove(programDataMarker)
+
+		runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+			"cmd.exe", "/d", "/s", "/c", "echo leaked>" + programDataMarker,
+		}, 1)
+
+		if _, err := os.Stat(programDataMarker); err == nil {
+			_ = os.Remove(programDataMarker)
+			t.Fatalf("unelevated sandbox allowed a write to ProgramData shared directory")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat ProgramData marker: %v", err)
+		}
 	}
 }
 
@@ -384,6 +434,31 @@ func runWindowsRealSmokeCommand(t *testing.T, runnerExe string, base WindowsSand
 	}
 	if wantCode != 0 {
 		t.Fatalf("Windows sandbox command exit code = 0, want %d\n%s", wantCode, output)
+	}
+}
+
+// runWindowsRealSmokeCommandExpectError runs the command runner and requires a
+// non-zero exit whose combined output contains each want substring (used for
+// explicit unsupported-mode rejections rather than sandboxed command failures).
+func runWindowsRealSmokeCommandExpectError(t *testing.T, runnerExe string, base WindowsSandboxCommandArgsOptions, command []string, wantSubstr ...string) {
+	t.Helper()
+	base.Command = command
+	args, err := BuildWindowsSandboxCommandArgs(base)
+	if err != nil {
+		t.Fatalf("BuildWindowsSandboxCommandArgs: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, runnerExe, args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Windows sandbox command exit code = 0, want error containing %v\n%s", wantSubstr, output)
+	}
+	text := string(output)
+	for _, want := range wantSubstr {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Windows sandbox command error missing %q: %v\n%s", want, err, output)
+		}
 	}
 }
 
