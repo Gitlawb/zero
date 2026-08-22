@@ -119,6 +119,47 @@ func TestProtectedCredentialPathsResolveLikeTheDaemonReader(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("startup source survives symlink retarget until restart", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink creation needs elevation on Windows")
+		}
+		oldTarget := filepath.Join(base, "old-token")
+		newTarget := filepath.Join(base, "new-token")
+		for _, path := range []string{oldTarget, newTarget} {
+			if err := os.WriteFile(path, []byte("secret\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		link := filepath.Join(base, "rotating-token")
+		if err := os.Symlink(oldTarget, link); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		t.Setenv(daemonRemoteTokenEnv, "")
+		t.Setenv(daemonRemoteTokenFileEnv, link)
+		t.Setenv(daemonRemoteTokenFileResolvedEnv, oldTarget)
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(newTarget, link); err != nil {
+			t.Fatal(err)
+		}
+
+		got := protectedCredentialPaths()
+		for _, want := range []string{link, oldTarget} {
+			if !stringSliceContains(got, want) {
+				t.Fatalf("protected paths after retarget = %#v, want startup identity %q", got, want)
+			}
+		}
+		if stringSliceContains(got, newTarget) {
+			t.Fatalf("protected paths after retarget = %#v, current run must not silently re-authorize new target %q", got, newTarget)
+		}
+
+		t.Setenv(daemonRemoteTokenFileResolvedEnv, newTarget)
+		if got := protectedCredentialPaths(); !stringSliceContains(got, newTarget) {
+			t.Fatalf("protected paths after simulated restart = %#v, want new startup target %q", got, newTarget)
+		}
+	})
 }
 
 // TestProtectedCredentialsSurviveAllowRead locks in the non-opt-out guarantee:
@@ -306,9 +347,6 @@ func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
 	plan := mustBuildLinuxBwrapFilesystemPlan(t, profile)
 	assertArgsContainSequence(t, plan.Args, "--ro-bind", "/dev/null", token)
 
-	if !protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentialPaths()) {
-		t.Fatalf("spaced token %q under writable root %q must fail macOS preflight", token, workspace)
-	}
 }
 
 // A mandatory token named by a symlink fails the plan outright: bubblewrap
@@ -433,16 +471,71 @@ func TestSandboxManagerRejectsLinuxTokenHardLinkAlias(t *testing.T) {
 	}
 }
 
-// The macOS mirror of TestSandboxManagerRejectsLinuxTokenHardLinkAlias: an
-// alias that predates the command plan needs no writable root at all, because
-// Seatbelt denies the selected pathname rather than the inode and the default
-// restricted profile still grants reads under /. A second directory entry for
-// the token's inode is therefore readable (`cat alias`) even when no shell-
-// writable root shares the token's filesystem, so plan construction must fail
-// closed on the existing link count alone.
-func TestSandboxManagerRejectsMacOSTokenExistingHardLinkAlias(t *testing.T) {
+// A read-only "/" root exposes the namespace, not an alias for the masked token
+// inode. A token on a distinct filesystem is therefore the supported Linux
+// placement; a writable root on the token filesystem remains unsafe.
+func TestSandboxManagerAllowsLinuxTokenOnSeparateFilesystem(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux mount identity is exercised on Linux")
+	}
+	workspace := t.TempDir()
+	tokenDir, err := os.MkdirTemp("/dev/shm", "zero-token-")
+	if err != nil {
+		t.Skipf("distinct tmpfs unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tokenDir) })
+	if pathsShareFilesystem(workspace, tokenDir) {
+		t.Skip("/dev/shm is not a distinct filesystem on this host")
+	}
+	token := filepath.Join(tokenDir, "bridge-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+
+	policy := DefaultPolicy()
+	profile := PermissionProfileFromPolicy(workspace, policy, nil)
+	if credential, linkable := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentialPaths()); linkable {
+		t.Fatalf("separate-filesystem token %q reported linkable through %q", token, credential)
+	}
+	backend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox", Platform: "linux"}
+	if _, err := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           profile,
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	}); err != nil {
+		t.Fatalf("BuildCommandPlan with separate-filesystem token: %v", err)
+	}
+
+	sameFilesystemToken := filepath.Join(t.TempDir(), "bridge-token")
+	if err := os.WriteFile(sameFilesystemToken, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemonRemoteTokenFileEnv, sameFilesystemToken)
+	if credential, linkable := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentialPaths()); !linkable || credential != sameFilesystemToken {
+		t.Fatalf("same-filesystem writable-root linkable = %t credential = %q, want %q", linkable, credential, sameFilesystemToken)
+	}
+	if _, err := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           profile,
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	}); err == nil || !strings.Contains(err.Error(), "hard-link aliases") {
+		t.Fatalf("BuildCommandPlan same-filesystem error = %v, want hard-link alias refusal", err)
+	}
+}
+
+// macOS intentionally has no file-token placement exception: Seatbelt cannot
+// deny every inode alias across token rotation and daemon restart.
+func TestSandboxManagerRejectsMacOSFileTokenRegardlessOfLinkLayout(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		t.Skip("hard-link inode probing is exercised on darwin")
+		t.Skip("macOS file-token shell contract is exercised on darwin")
 	}
 	workspace := t.TempDir()
 	tokenDir := t.TempDir()
@@ -450,14 +543,9 @@ func TestSandboxManagerRejectsMacOSTokenExistingHardLinkAlias(t *testing.T) {
 	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	alias := filepath.Join(tokenDir, "token-alias")
-	if err := os.Link(token, alias); err != nil {
-		t.Skipf("fixture paths are not hard-linkable: %v", err)
-	}
 	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, token)
 
-	// No writable roots at all: only the existing-alias class can reject this.
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:      FileSystemRestricted,
@@ -465,39 +553,18 @@ func TestSandboxManagerRejectsMacOSTokenExistingHardLinkAlias(t *testing.T) {
 		},
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
-	if !protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentialPaths()) {
-		t.Fatalf("aliased token %q must fail the macOS preflight with no writable root configured", token)
-	}
-
 	policy := DefaultPolicy()
 	backend := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/bin/sandbox-exec", Platform: "darwin", CommandWrapping: true, NativeIsolation: true}
 	_, err := NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     workspace,
-		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "cat " + alias}, Dir: workspace},
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
 		Policy:            policy,
 		Profile:           profile,
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
-	if err == nil {
-		t.Fatal("BuildCommandPlan succeeded with an existing hard-linked token alias, want plan construction to fail closed")
-	}
-	if !strings.Contains(err.Error(), "hard-link aliases") {
-		t.Fatalf("BuildCommandPlan error = %v, want a hard-link alias refusal", err)
-	}
-
-	// Control: a single-link token under the same read-only profile stays
-	// accepted here. That case is governed by the documented maintainer policy
-	// on ordinary file tokens and shell sessions (see the PR description), not
-	// by this preflight — rejecting it would be a behavior change beyond this
-	// fix.
-	single := filepath.Join(tokenDir, "single-token")
-	if err := os.WriteFile(single, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(daemonRemoteTokenFileEnv, single)
-	if protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentialPaths()) {
-		t.Fatal("a single-link token with no writable-root overlap must stay governed by the maintainer policy, not auto-rejected")
+	if err == nil || !strings.Contains(err.Error(), "file-backed remote token") {
+		t.Fatalf("BuildCommandPlan error = %v, want unconditional macOS file-token shell refusal", err)
 	}
 }
 
@@ -620,93 +687,115 @@ func TestDisabledPolicyLeavesShellOutsideTheTokenBoundary(t *testing.T) {
 	}
 }
 
-// TestProtectedCredentialsMatchCaseVariantOnCaseInsensitiveFilesystems covers the
-// bypass a case-variant spelling opened: pathWithinRoot ends in filepath.Rel,
-// which folds case on Windows but NOT on darwin, whose default APFS volume is
-// case-insensitive — so `.../BRIDGE-TOKEN` missed the protected `.../bridge-token`
-// while the OS opened the same bearer-token file. On a case-sensitive filesystem
-// the variant is a genuinely different file and must stay unblocked.
-//
-// The expectation is pinned on runtime.GOOS rather than derived from
-// protectedPathFoldsCase: a test that asks the code under test what to expect
-// stays green when that predicate regresses and pins nothing.
-//
-// The decisive sub-case configures a token pathname WITHOUT creating it — the
-// creation/replacement/rotation window. No file exists, so protectedPathDenied's
-// SameFile fallback cannot fire and the case fold is the ONLY defence; this is
-// also where a wrongly-broad fold shows up, because folding on case-sensitive
-// Linux over-denies a genuinely different file, which is its own bug.
-//
-// Platform note: the fold is load-bearing on darwin alone. pathWithinRoot ends
-// in filepath.Rel, whose sameWord already EqualFolds on Windows, so a Windows
-// run denies the variant through the plain containment check and cannot detect
-// a fold regression; on darwin sameWord is byte-exact, so the absent-token
-// sub-case goes red exactly when protectedPathFoldsCase stops folding. The
-// macOS CI job is what proves this test's teeth.
-func TestProtectedCredentialsMatchCaseVariantOnCaseInsensitiveFilesystems(t *testing.T) {
-	wantDenied := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+func TestProtectedCredentialsFollowFilesystemCaseSemantics(t *testing.T) {
 	policy := Policy{Mode: ModeEnforce, EnforceWorkspace: true}
 
-	t.Run("absent token pathname", func(t *testing.T) {
-		ws, err := filepath.EvalSymlinks(t.TempDir())
-		if err != nil {
-			t.Fatalf("EvalSymlinks: %v", err)
+	for _, existing := range []bool{false, true} {
+		name := "absent token pathname"
+		if existing {
+			name = "existing token file"
 		}
-		configured := filepath.Join(ws, "bridge-token")
-		t.Setenv(daemonRemoteTokenEnv, "")
-		t.Setenv(daemonRemoteTokenFileEnv, configured)
-		variant := filepath.Join(filepath.Dir(configured), strings.ToUpper(filepath.Base(configured)))
-		if variant == configured {
-			t.Fatalf("fixture token %q has no case variant", configured)
-		}
-		scope, err := NewScope(ws, nil)
-		if err != nil {
-			t.Fatalf("NewScope: %v", err)
-		}
+		t.Run(name, func(t *testing.T) {
+			ws, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("EvalSymlinks: %v", err)
+			}
+			wantDenied := filesystemFoldsCaseForTest(t, ws)
+			configured := filepath.Join(ws, "bridge-token")
+			if existing {
+				if err := os.WriteFile(configured, []byte("secret"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(daemonRemoteTokenEnv, "")
+			t.Setenv(daemonRemoteTokenFileEnv, configured)
+			variant := filepath.Join(ws, strings.ToUpper(filepath.Base(configured)))
+			scope, err := NewScope(ws, nil)
+			if err != nil {
+				t.Fatalf("NewScope: %v", err)
+			}
 
-		for _, sideEffect := range []SideEffect{SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace} {
-			block := validatePathWithPolicy(scope, policy, sideEffect, true, ws, variant)
-			denied := block != nil && strings.Contains(block.Reason, "remote bridge token")
-			if denied != wantDenied {
-				t.Fatalf("%s on absent-token case variant %q: denied = %t, want %t (block = %#v)", sideEffect, variant, denied, wantDenied, block)
+			for _, sideEffect := range []SideEffect{SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace} {
+				block := validatePathWithPolicy(scope, policy, sideEffect, true, ws, variant)
+				denied := block != nil && strings.Contains(block.Reason, "remote bridge token")
+				if denied != wantDenied {
+					t.Fatalf("%s on case variant %q: denied = %t, want %t (block = %#v)", sideEffect, variant, denied, wantDenied, block)
+				}
+			}
+			engine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: policy, Scope: scope})
+			if excluded := engine.ReadExclusions().PathExcluded(variant); excluded != wantDenied {
+				t.Fatalf("read exclusions on case variant %q: excluded = %t, want %t", variant, excluded, wantDenied)
+			}
+			if block := validatePathWithPolicy(scope, policy, SideEffectWrite, true, ws, configured); block == nil || !strings.Contains(block.Reason, "remote bridge token") {
+				t.Fatalf("the configured token %q must stay unwritable", configured)
+			}
+		})
+	}
+}
+
+func filesystemFoldsCaseForTest(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "zero-case-probe")
+	variant := filepath.Join(dir, "ZERO-CASE-PROBE")
+	if err := os.WriteFile(probe, []byte("probe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(probe) })
+	probeInfo, err := os.Stat(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantInfo, err := os.Stat(variant)
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		t.Skipf("cannot determine filesystem case semantics: %v", err)
+	}
+	return os.SameFile(probeInfo, variantInfo)
+}
+
+func TestDetectPathCaseSemanticsUsesNearestExistingAncestor(t *testing.T) {
+	backing := filepath.Join(t.TempDir(), "backing")
+	if err := os.WriteFile(backing, []byte("probe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(backing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(t.TempDir(), "ProbeDir")
+	configured := filepath.Join(parent, "missing", "bridge-token")
+	variantName, ok := caseVariant(filepath.Base(parent))
+	if !ok {
+		t.Fatal("test parent has no case variant")
+	}
+	variantParent := filepath.Join(filepath.Dir(parent), variantName)
+
+	statWithVariant := func(variantResult error) func(string) (os.FileInfo, error) {
+		return func(path string) (os.FileInfo, error) {
+			switch path {
+			case parent:
+				return info, nil
+			case variantParent:
+				if variantResult != nil {
+					return nil, variantResult
+				}
+				return info, nil
+			default:
+				return nil, os.ErrNotExist
 			}
 		}
-		engine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: policy, Scope: scope})
-		if excluded := engine.ReadExclusions().PathExcluded(variant); excluded != wantDenied {
-			t.Fatalf("read exclusions on absent-token case variant %q: excluded = %t, want %t", variant, excluded, wantDenied)
-		}
-
-		// The exact spelling stays denied even though nothing exists yet: the
-		// lexical check protects the configured pathname through the window.
-		if block := validatePathWithPolicy(scope, policy, SideEffectWrite, true, ws, configured); block == nil || !strings.Contains(block.Reason, "remote bridge token") {
-			t.Fatalf("the configured-but-absent token %q must stay unwritable", configured)
-		}
-	})
-
-	t.Run("existing token file", func(t *testing.T) {
-		ws, token := protectedTokenFixture(t)
-		variant := filepath.Join(filepath.Dir(token), strings.ToUpper(filepath.Base(token)))
-		if variant == token {
-			t.Fatalf("fixture token %q has no case variant", token)
-		}
-		scope, err := NewScope(ws, nil)
-		if err != nil {
-			t.Fatalf("NewScope: %v", err)
-		}
-		existing := Policy{Mode: ModeEnforce, EnforceWorkspace: true, AllowRead: []string{ws}, AllowWrite: []string{ws}}
-
-		for _, sideEffect := range []SideEffect{SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace} {
-			block := validatePathWithPolicy(scope, existing, sideEffect, true, ws, variant)
-			denied := block != nil && strings.Contains(block.Reason, "remote bridge token")
-			if denied != wantDenied {
-				t.Fatalf("%s on case variant %q of an existing token: denied = %t, want %t (block = %#v)", sideEffect, variant, denied, wantDenied, block)
-			}
-		}
-		// The exact spelling is denied on every platform regardless.
-		if block := validatePathWithPolicy(scope, existing, SideEffectRead, true, ws, token); block == nil {
-			t.Fatalf("the configured token path %q must always be denied", token)
-		}
-	})
+	}
+	if got := detectPathCaseSemantics(configured, statWithVariant(nil)); got != pathCaseInsensitive {
+		t.Fatalf("case-insensitive ancestor detection = %v, want %v", got, pathCaseInsensitive)
+	}
+	if got := detectPathCaseSemantics(configured, statWithVariant(os.ErrNotExist)); got != pathCaseSensitive {
+		t.Fatalf("case-sensitive ancestor detection = %v, want %v", got, pathCaseSensitive)
+	}
+	if got := detectPathCaseSemantics(configured, statWithVariant(os.ErrPermission)); got != pathCaseUnknown {
+		t.Fatalf("indeterminate ancestor detection = %v, want %v", got, pathCaseUnknown)
+	}
 }
 
 // TestProtectedCredentialsDoNotBlockUnrelatedRequests keeps the exclusion inert

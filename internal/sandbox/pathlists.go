@@ -3,8 +3,9 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 // This file implements the fine-grained AllowRead/DenyRead/AllowWrite/DenyWrite
@@ -42,33 +43,13 @@ func resolvePolicyPath(entry string) (string, bool) {
 	return resolved, true
 }
 
-// These name the alternative sources of the remote bridge's bearer token. They
-// are duplicated from internal/daemon/remote (which cannot be imported here)
-// exactly like the copies scrubSensitiveEnv keeps.
+// These aliases keep the sandbox tests and environment boundary tied to the
+// shared token-source model instead of duplicating string literals.
 const (
-	daemonRemoteTokenEnv     = "ZERO_DAEMON_REMOTE_TOKEN"
-	daemonRemoteTokenFileEnv = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+	daemonRemoteTokenEnv             = remotetoken.EnvToken
+	daemonRemoteTokenFileEnv         = remotetoken.EnvTokenFile
+	daemonRemoteTokenFileResolvedEnv = remotetoken.EnvTokenFileResolved
 )
-
-// selectedDaemonRemoteTokenFile returns the token-file pointer only when the
-// daemon would use it. TokenFromEnv gives the inline token precedence, so an
-// inherited file pointer is not a credential when both variables are set.
-//
-// The pointer is used verbatim, mirroring remote.TokenFilePathFromEnv: the
-// daemon reads whatever bytes the variable names, so trimming whitespace here
-// would leave a token file whose name begins or ends with a space unprotected
-// while the daemon still reads it. Only a value that is entirely whitespace
-// counts as unset.
-func selectedDaemonRemoteTokenFile() string {
-	if strings.TrimSpace(os.Getenv(daemonRemoteTokenEnv)) != "" {
-		return ""
-	}
-	configured := os.Getenv(daemonRemoteTokenFileEnv)
-	if strings.TrimSpace(configured) == "" {
-		return ""
-	}
-	return configured
-}
 
 // The daemon-token pathname contract
 //
@@ -78,23 +59,16 @@ func selectedDaemonRemoteTokenFile() string {
 // the rule is written down once here:
 //
 //  1. The env value is pathname DATA, not a word. Only an all-whitespace value
-//     counts as unset (selectedDaemonRemoteTokenFile). It is never trimmed,
+//     counts as unset (remotetoken.SelectedFilePath). It is never trimmed,
 //     never shell-split, and "~" is never expanded — os.ReadFile, the daemon's
-//     own reader, treats it literally, so anything else protects a file the
-//     daemon does not read.
-//  2. Both the SELECTED spelling and the target it currently resolves to are
-//     protected (daemonTokenDenyPaths). `serve-remote` canonicalizes what it
-//     selects, but an inherited symlinked value must not leave the link
-//     replaceable.
+//     own reader, treats it literally.
+//  2. The token source carries two identities: the operator-configured absolute
+//     spelling and the object resolved at daemon startup. Both remain protected;
+//     resolving never overwrites the only configured identity.
 //  3. Tool arguments are compared as EXACT bytes, because that is what the tool
 //     opens (aliasedStringArg does not trim). requestPaths gates on the exact
-//     argument; see the comment there for the read_file bypass that trimming
-//     produced. This coexists with the case fold below: exact bytes govern
-//     WHICH argument strings enter the gate (no whitespace coercion), while the
-//     fold governs only the final lexical containment comparison inside
-//     pathUnderProtectedRoot. One normalizes nothing before matching; the other
-//     folds exactly one dimension, on platforms where a case-variant spelling
-//     opens the same file.
+//     argument. Filesystem-derived case equivalence is applied only by the final
+//     containment comparison; it does not rewrite the argument bytes.
 //  4. Protection is NOT re-includable. AllowRead, a permission grant, and a
 //     session profile all leave it in place, on every platform.
 //
@@ -104,47 +78,17 @@ func selectedDaemonRemoteTokenFile() string {
 // protectedCredentialPaths returns credential files that Zero's own in-process
 // file tools must never read or modify, independent of Policy.
 //
-// This is deliberately separate from credentialDenyReadPaths, which only shapes
-// the OS sandbox profile for wrapped shell commands: read_file resolves scoped
-// paths itself, and grep/glob build their exclusions from the policy, so a
-// profile-only rule leaves the in-process tool boundary open. It is also
-// separate from Policy.DenyRead, whose emptiness gates escalated (unsandboxed)
-// execution and must keep reflecting user configuration alone.
-//
-// Entries here are NOT re-includable through AllowRead/AllowWrite or a
-// session/turn permission profile: the bridge bearer token grants control of
-// this daemon, so a remote-controlled agent must not be able to read it, nor
-// replace it to hijack the next bridge start, even when the file sits inside
-// its own session workspace. Unlike the profile list this applies on Windows
-// too, where filesystem deny-read has no sandbox representation (#662).
-//
-// Both the selected pathname and the target it currently resolves to are
-// protected: `zero daemon serve-remote` canonicalizes the value it selects (see
-// remote.CanonicalizeTokenFileEnv), but a symlinked selected value inherited
-// from elsewhere must not leave the link replaceable.
+// The shared token source retains the operator-configured absolute spelling and
+// the object resolved at daemon startup. The former reserves the authority
+// boundary across replacement and restart; the latter protects the bearer object
+// currently held by the daemon. A non-daemon caller without the resolved marker
+// resolves the current target best-effort.
 func protectedCredentialPaths() []string {
-	// os.ReadFile — the daemon's own reader — treats the value literally, so a
-	// relative path resolves against the working directory and a leading "~" is
-	// NOT expanded. resolvePolicyPath would expand it and protect the wrong file.
-	return daemonTokenDenyPaths(selectedDaemonRemoteTokenFile())
-}
-
-// daemonTokenDenyPaths is the shared pathname authority for both the
-// in-process boundary and OS sandbox profiles. Filename whitespace is data:
-// only an entirely blank setting is unset, matching the daemon reader.
-func daemonTokenDenyPaths(configured string) []string {
-	if strings.TrimSpace(configured) == "" {
+	source, selected := remotetoken.SourceFromEnv()
+	if !selected {
 		return nil
 	}
-	absolute, err := filepath.Abs(configured)
-	if err != nil {
-		return nil
-	}
-	paths := []string{absolute}
-	if resolved, err := filepath.EvalSymlinks(absolute); err == nil && resolved != absolute {
-		paths = append(paths, resolved)
-	}
-	return dedupeStrings(paths)
+	return dedupeStrings(source.Paths())
 }
 
 // protectedCredentialPathBlock returns the block for the first requested path
@@ -238,41 +182,96 @@ func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
 	return false
 }
 
-// protectedPathFoldsCase reports whether a case-variant spelling of a path opens
-// the SAME file on this platform, so the protected-credential comparison must
-// fold case to stay closed.
-//
-// pathWithinRoot ends in filepath.Rel, which ALREADY folds case on Windows
-// (path_windows.go's sameWord uses strings.EqualFold) but never on Unix. macOS
-// volumes are case-insensitive by default (APFS), so without folding a request
-// for `.../Bridge-Token` misses a protected `.../bridge-token` while the OS
-// opens the very same bearer-token file. Windows is listed too so the guarantee
-// does not silently depend on a filepath.Rel implementation detail.
-//
-// Case-sensitive outliers (a case-sensitive APFS volume) only make this
-// over-deny a genuinely different file that happens to differ by case alone,
-// which is the safe direction for a credential the sandbox must never expose.
-func protectedPathFoldsCase() bool {
-	return runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+type pathCaseSemantics uint8
+
+const (
+	pathCaseUnknown pathCaseSemantics = iota
+	pathCaseSensitive
+	pathCaseInsensitive
+)
+
+// protectedPathFoldsCase derives name equivalence from the filesystem that owns
+// the protected path, not from GOOS. For an absent token it probes the nearest
+// existing ancestor, which preserves the reservation through rotation. An
+// indeterminate result fails closed by folding.
+func protectedPathFoldsCase(path string) bool {
+	return detectPathCaseSemantics(path, os.Stat) != pathCaseSensitive
+}
+
+func detectPathCaseSemantics(path string, stat func(string) (os.FileInfo, error)) pathCaseSemantics {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return pathCaseUnknown
+	}
+	current = filepath.Clean(current)
+	for {
+		info, statErr := stat(current)
+		if statErr == nil {
+			name := filepath.Base(current)
+			if variantName, ok := caseVariant(name); ok {
+				variant := filepath.Join(filepath.Dir(current), variantName)
+				variantInfo, variantErr := stat(variant)
+				switch {
+				case variantErr == nil && os.SameFile(info, variantInfo):
+					return pathCaseInsensitive
+				case variantErr == nil:
+					return pathCaseSensitive
+				case os.IsNotExist(variantErr):
+					return pathCaseSensitive
+				default:
+					return pathCaseUnknown
+				}
+			}
+		} else if !os.IsNotExist(statErr) {
+			return pathCaseUnknown
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return pathCaseUnknown
+		}
+		current = parent
+	}
+}
+
+func caseVariant(name string) (string, bool) {
+	for index := range len(name) {
+		switch {
+		case name[index] >= 'a' && name[index] <= 'z':
+			return name[:index] + string(name[index]-('a'-'A')) + name[index+1:], true
+		case name[index] >= 'A' && name[index] <= 'Z':
+			return name[:index] + string(name[index]+('a'-'A')) + name[index+1:], true
+		}
+	}
+	return "", false
 }
 
 // pathUnderProtectedRoot is pathUnderPolicyRoot for the automatic credential
-// exclusions: identical anchoring and symlink normalization, plus the platform's
-// filesystem case semantics. Only the final containment comparison folds — the
-// normalization above it keeps operating on the path as spelled, so symlink
-// resolution is unaffected.
+// exclusions: identical anchoring and symlink normalization, plus the owning
+// filesystem's case semantics.
 func pathUnderProtectedRoot(requestedPath, root, workspaceRoot string) bool {
 	normalized, ok := normalizePathForPolicyRoot(requestedPath, root, workspaceRoot)
 	if !ok {
 		return false
 	}
-	if pathWithinRoot(root, normalized) {
+	if pathWithinRootExact(root, normalized) {
 		return true
 	}
-	if !protectedPathFoldsCase() {
+	if !protectedPathFoldsCase(root) {
 		return false
 	}
-	return pathWithinRoot(strings.ToLower(root), strings.ToLower(normalized))
+	return pathWithinRootExact(strings.ToLower(root), strings.ToLower(normalized))
+}
+
+func pathWithinRootExact(root, candidate string) bool {
+	root = filepath.Clean(root)
+	candidate = filepath.Clean(candidate)
+	if candidate == root {
+		return true
+	}
+	if filepath.Dir(root) == root {
+		return strings.HasPrefix(candidate, root)
+	}
+	return strings.HasPrefix(candidate, root+string(filepath.Separator))
 }
 
 // resolvePolicyPaths resolves and de-duplicates a list of policy path entries,

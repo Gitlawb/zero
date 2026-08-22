@@ -83,6 +83,7 @@ func TestTokenFilePathFromEnvPreservesFilenameWhitespace(t *testing.T) {
 // the daemon boundary: the file the bridge authenticates against must survive
 // canonicalization byte for byte.
 func TestCanonicalizeTokenFileEnvKeepsTrailingSpaceFilename(t *testing.T) {
+	t.Setenv(EnvTokenFileResolved, "")
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows filenames cannot end in a space")
 	}
@@ -110,9 +111,10 @@ func TestCanonicalizeTokenFileEnvKeepsTrailingSpaceFilename(t *testing.T) {
 	}
 }
 
-// TestCanonicalizeTokenFileEnv pins the value every child process (and the
-// sandbox profile derived for it) inherits to the file this process reads.
+// TestCanonicalizeTokenFileEnv pins the configured absolute spelling and the
+// resolved startup object for every worker.
 func TestCanonicalizeTokenFileEnv(t *testing.T) {
+	t.Setenv(EnvTokenFileResolved, "")
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
@@ -142,7 +144,7 @@ func TestCanonicalizeTokenFileEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("symlinked pathname is resolved", func(t *testing.T) {
+	t.Run("symlinked pathname retains configured and resolved identities", func(t *testing.T) {
 		link := filepath.Join(base, "tok-link")
 		if err := os.Symlink(token, link); err != nil {
 			t.Skipf("symlink unsupported: %v", err)
@@ -152,8 +154,31 @@ func TestCanonicalizeTokenFileEnv(t *testing.T) {
 		if err := CanonicalizeTokenFileEnv(); err != nil {
 			t.Fatalf("CanonicalizeTokenFileEnv: %v", err)
 		}
-		if got := os.Getenv(EnvTokenFile); got != token {
-			t.Fatalf("%s = %q, want the resolved target %q", EnvTokenFile, got, token)
+		if got := os.Getenv(EnvTokenFile); got != link {
+			t.Fatalf("%s = %q, want configured path %q", EnvTokenFile, got, link)
+		}
+		if got := os.Getenv(EnvTokenFileResolved); got != token {
+			t.Fatalf("%s = %q, want resolved target %q", EnvTokenFileResolved, got, token)
+		}
+
+		replacement := filepath.Join(base, "replacement-token")
+		if err := os.WriteFile(replacement, []byte("replacement\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(replacement, link); err != nil {
+			t.Fatal(err)
+		}
+		if tok, err := TokenFromEnv(); err != nil || tok != "from-file" {
+			t.Fatalf("TokenFromEnv after symlink replacement = %q, %v, want startup-pinned token", tok, err)
+		}
+		if err := CanonicalizeTokenFileEnv(); err != nil {
+			t.Fatalf("CanonicalizeTokenFileEnv after restart: %v", err)
+		}
+		if tok, err := TokenFromEnv(); err != nil || tok != "replacement" {
+			t.Fatalf("TokenFromEnv after simulated restart = %q, %v, want replacement target", tok, err)
 		}
 	})
 

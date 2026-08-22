@@ -280,9 +280,9 @@ func TestSandboxManagerRejectsUnavailableBackendForProtectedToken(t *testing.T) 
 	}
 }
 
-func TestSandboxManagerRejectsMacOSTokenInsideWritableWorkspace(t *testing.T) {
+func TestSandboxManagerRejectsMacOSFileTokenShell(t *testing.T) {
 	t.Setenv(daemonRemoteTokenEnv, "")
-	t.Setenv(daemonRemoteTokenFileEnv, "/workspace/bridge-token")
+	t.Setenv(daemonRemoteTokenFileEnv, "/credentials/bridge-token")
 	workspace := "/workspace"
 	policy := DefaultPolicy()
 	backend := Backend{
@@ -294,54 +294,18 @@ func TestSandboxManagerRejectsMacOSTokenInsideWritableWorkspace(t *testing.T) {
 		NativeIsolation: true,
 	}
 	_, err := NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
-		WorkspaceRoot:     workspace,
-		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
-		Policy:            policy,
-		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		WorkspaceRoot: workspace,
+		Command:       CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:        policy,
+		Profile: PermissionProfile{FileSystem: FileSystemPolicy{
+			Kind:      FileSystemRestricted,
+			ReadRoots: []string{string(filepath.Separator)},
+		}},
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "hard-link aliases") {
-		t.Fatalf("BuildCommandPlan error = %v, want macOS hard-link-alias failure", err)
-	}
-}
-
-func TestProtectedCredentialLinkableIntoWritableMacOSRoot(t *testing.T) {
-	restricted := PermissionProfile{FileSystem: FileSystemPolicy{
-		Kind:       FileSystemRestricted,
-		WriteRoots: []WritableRoot{{Root: "/Users/Test/Workspace"}},
-	}}
-	if !protectedCredentialLinkableIntoWritableMacOSRoot(restricted, []string{normalizeProfilePath("/users/test/workspace/token")}) {
-		t.Fatal("case-variant token under a macOS write root should be rejected")
-	}
-	if protectedCredentialLinkableIntoWritableMacOSRoot(restricted, []string{normalizeProfilePath("/Users/Test/Credentials/token")}) {
-		t.Fatal("token outside every macOS write root should remain allowed")
-	}
-	restricted.FileSystem.AllowTemp = true
-	if !protectedCredentialLinkableIntoWritableMacOSRoot(restricted, []string{normalizeProfilePath("/private/tmp/bridge-token")}) {
-		t.Fatal("token under an allowed temporary root should be rejected")
-	}
-	unrestricted := PermissionProfile{FileSystem: FileSystemPolicy{Kind: FileSystemUnrestricted}}
-	if !protectedCredentialLinkableIntoWritableMacOSRoot(unrestricted, []string{"/credentials/token"}) {
-		t.Fatal("an unrestricted macOS filesystem makes every token path shell-writable")
-	}
-
-	writable := t.TempDir()
-	targetDir := t.TempDir()
-	target := filepath.Join(targetDir, "token")
-	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(writable, "token-link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	symlinkProfile := PermissionProfile{FileSystem: FileSystemPolicy{
-		Kind:       FileSystemRestricted,
-		WriteRoots: []WritableRoot{{Root: writable}},
-	}}
-	if !protectedCredentialLinkableIntoWritableMacOSRoot(symlinkProfile, []string{link, target}) {
-		t.Fatal("selected symlink inside a write root must be rejected even when its target is outside")
+	if err == nil || !strings.Contains(err.Error(), "file-backed remote token") {
+		t.Fatalf("BuildCommandPlan error = %v, want macOS file-token shell refusal", err)
 	}
 }
 

@@ -235,9 +235,9 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		(policyHasExplicitDeny(policy) || protectedCredentialNeedsNative) {
 		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny rules or protected credentials cannot be enforced")
 	}
-	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "darwin" &&
-		protectedCredentialLinkableIntoWritableMacOSRoot(profile, protectedCredentials) {
-		return SandboxExecutionRequest{}, errors.New("macOS Seatbelt denies the remote token pathname, not its inode, so hard-link aliases defeat it: an existing alias is reachable without any write access and a shell-writable root sharing the token's filesystem can create one; use ZERO_DAEMON_REMOTE_TOKEN, remove aliases of the token file, or place it outside every shell-writable root")
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled &&
+		manager.goos == "darwin" && len(protectedCredentials) > 0 {
+		return SandboxExecutionRequest{}, errors.New("macOS Seatbelt cannot protect a file-backed remote token from inode aliases across its lifecycle; sandboxed shell commands require ZERO_DAEMON_REMOTE_TOKEN")
 	}
 	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "linux" {
 		if credential, ok := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentials); ok {
@@ -303,28 +303,30 @@ func policyHasExplicitDeny(policy Policy) bool {
 	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
 }
 
-// protectedCredentialLinkableIntoWritableMacOSRoot reports a mandatory token
-// whose bearer bytes a sandboxed shell could reach through a second directory
-// entry, in either of two classes:
+// macOS deliberately has no placement exception for file-backed tokens.
+// Seatbelt can deny configured and resolved pathnames, but not every existing or
+// future inode alias, and a restart authorizes the configured pathname again.
+// BuildExecutionRequest therefore rejects shell execution whenever file-backed
+// remote authentication is selected. In-process tools remain protected.
+
+// protectedCredentialLinkableIntoLinuxShellRoot reports a mandatory token that a
+// shell command could reach through a second directory entry for the same inode,
+// and the offending pathname.
 //
-//   - An EXISTING alias: Seatbelt denies the selected pathname, not the inode,
-//     so any other name for the same file defeats the denial without waiting
-//     for shell write access. pathHardLinkCount above one proves one exists
-//     somewhere the planner cannot enumerate.
-//   - A FUTURE alias: a writable root that contains the token or shares its
-//     filesystem lets the shell create the link itself.
-//
-// This mirrors protectedCredentialLinkableIntoLinuxShellRoot, which applies the
-// same existing-link check before its root loop.
-func protectedCredentialLinkableIntoWritableMacOSRoot(profile PermissionProfile, protected []string) bool {
+// Bubblewrap masks each selected pathname. A READ root containing that masked
+// spelling does not expose another alias by itself; an existing alias is proven
+// separately by the link count. A FUTURE alias requires a shell-writable root on
+// the same filesystem. Keeping those classes separate makes the documented
+// separate-filesystem placement usable even when the normal read root is "/".
+func protectedCredentialLinkableIntoLinuxShellRoot(profile PermissionProfile, protected []string) (string, bool) {
 	if len(protected) == 0 {
-		return false
+		return "", false
 	}
 	if profile.FileSystem.Kind == FileSystemUnrestricted {
-		return true
+		return protected[0], true
 	}
 	if profile.FileSystem.Kind != FileSystemRestricted {
-		return false
+		return "", false
 	}
 	writeRoots := make([]string, 0, len(profile.FileSystem.WriteRoots)+len(sandboxWritableSubpaths))
 	for _, root := range profile.FileSystem.WriteRoots {
@@ -339,57 +341,9 @@ func protectedCredentialLinkableIntoWritableMacOSRoot(profile PermissionProfile,
 			continue
 		}
 		if count, ok := pathHardLinkCount(credential); ok && count > 1 {
-			return true
-		}
-		for _, root := range writeRoots {
-			if pathWithinMacOSRoot(root, credential) || pathsShareFilesystem(root, credential) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// protectedCredentialLinkableIntoLinuxShellRoot reports a mandatory token that a
-// shell command could reach through a second directory entry for the same inode,
-// and the offending pathname.
-//
-// The bubblewrap plan binds /dev/null over each configured pathname, which hides
-// that name and nothing else. A hard link is another name for the same inode, so
-// an alias in any root the shell can read defeats the mask, and one that already
-// exists needs neither the token-file variable nor a new link operation. Linking
-// requires the alias and the target to sit on one filesystem, so sharing a device
-// with a shell-visible root is what makes the class reachable; an existing link
-// count above one proves an alias the planner cannot enumerate.
-func protectedCredentialLinkableIntoLinuxShellRoot(profile PermissionProfile, protected []string) (string, bool) {
-	if len(protected) == 0 {
-		return "", false
-	}
-	if profile.FileSystem.Kind == FileSystemUnrestricted {
-		return protected[0], true
-	}
-	if profile.FileSystem.Kind != FileSystemRestricted {
-		return "", false
-	}
-	// Read roots count as well as write roots: reading an existing alias is
-	// enough to recover the token, no write access required.
-	roots := make([]string, 0, len(profile.FileSystem.ReadRoots)+len(profile.FileSystem.WriteRoots)+len(sandboxWritableSubpaths))
-	roots = append(roots, normalizeProfilePaths(profile.FileSystem.ReadRoots)...)
-	for _, root := range profile.FileSystem.WriteRoots {
-		roots = append(roots, normalizeProfilePath(root.Root))
-	}
-	if profile.FileSystem.AllowTemp {
-		roots = append(roots, normalizeProfilePaths(sandboxWritableSubpaths)...)
-	}
-	for _, credential := range protected {
-		credential = filepath.Clean(credential)
-		if credential == "." || credential == "" {
-			continue
-		}
-		if count, ok := pathHardLinkCount(credential); ok && count > 1 {
 			return credential, true
 		}
-		for _, root := range roots {
+		for _, root := range writeRoots {
 			if root == "" {
 				continue
 			}
@@ -399,25 +353,6 @@ func protectedCredentialLinkableIntoLinuxShellRoot(profile PermissionProfile, pr
 		}
 	}
 	return "", false
-}
-
-func pathWithinMacOSRoot(root, candidate string) bool {
-	if pathWithinRoot(root, candidate) || pathWithinRoot(strings.ToLower(root), strings.ToLower(candidate)) {
-		return true
-	}
-	rootInfo, err := os.Stat(root)
-	if err != nil {
-		return false
-	}
-	for current := candidate; ; current = filepath.Dir(current) {
-		if info, err := os.Stat(current); err == nil && os.SameFile(rootInfo, info) {
-			return true
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return false
-		}
-	}
 }
 
 func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest) (CommandPlan, error) {

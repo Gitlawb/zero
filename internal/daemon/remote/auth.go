@@ -23,16 +23,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 // Env vars the bridge reads for its bearer token.
 const (
-	EnvToken     = "ZERO_DAEMON_REMOTE_TOKEN"
-	EnvTokenFile = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+	EnvToken             = remotetoken.EnvToken
+	EnvTokenFile         = remotetoken.EnvTokenFile
+	EnvTokenFileResolved = remotetoken.EnvTokenFileResolved
 )
 
 // ErrUnauthorized is returned when a token does not match.
@@ -84,14 +85,15 @@ func TokenFilePathFromEnv() string {
 	return configured
 }
 
-// TokenFromEnv resolves the bridge token from EnvToken, or a file named by
-// EnvTokenFile. It never logs the token.
+// TokenFromEnv resolves the bridge token from EnvToken, or the file source
+// selected by EnvTokenFile. After daemon startup resolution it reads the pinned
+// object rather than re-following a mutable configured symlink.
 func TokenFromEnv() (string, error) {
 	if t := strings.TrimSpace(os.Getenv(EnvToken)); t != "" {
 		return t, nil
 	}
-	if file := TokenFilePathFromEnv(); file != "" {
-		data, err := os.ReadFile(file)
+	if source, selected := remotetoken.SourceFromEnv(); selected {
+		data, err := os.ReadFile(source.ReadPath())
 		if err != nil {
 			return "", fmt.Errorf("remote: read token file: %w", err)
 		}
@@ -104,45 +106,27 @@ func TokenFromEnv() (string, error) {
 	return "", fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
 }
 
-// CanonicalizeTokenFileEnv rewrites EnvTokenFile in this process's environment
-// to the absolute, symlink-resolved path TokenFromEnv actually reads, so every
-// child process — and the sandbox profile derived for it — refers to the same
-// file this bridge authenticated against. `zero daemon serve-remote` calls it
-// before it starts serving.
-//
-// Two mismatches motivate it. TokenFromEnv passes the value to os.ReadFile, so a
-// relative value resolves against the STARTING process's working directory,
-// while a worker inherits the same string and resolves it against its own
-// session directory — the profile would then protect a path that holds no token
-// while the real bearer file stays readable. Resolving symlinks up front also
-// keeps a link pathname out of the derived deny rules, which matters because
-// bubblewrap cannot mount over a symlink destination.
+// CanonicalizeTokenFileEnv records both identities of the selected token file
+// before workers start: the operator-configured absolute spelling and the
+// symlink-resolved object this daemon authenticated against. Keeping both
+// prevents worker CWD changes from retargeting a relative value without losing
+// the configured authority boundary across replacement and restart.
 //
 // It is a deliberate no-op when EnvToken supplies the token: TokenFromEnv
 // prefers the inline value, so an unused (even dangling) file pointer must not
 // change the outcome or fail the start.
 func CanonicalizeTokenFileEnv() error {
-	if strings.TrimSpace(os.Getenv(EnvToken)) != "" {
-		return nil
-	}
-	configured := TokenFilePathFromEnv()
-	if configured == "" {
-		return nil
-	}
-	absolute, err := filepath.Abs(configured)
+	source, selected, err := remotetoken.ResolveSource()
 	if err != nil {
-		return fmt.Errorf("remote: resolve token file %q: %w", configured, err)
+		return fmt.Errorf("remote: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		// TokenFromEnv would fail on the same path a moment later; reporting it here
-		// names the resolution step that failed.
-		return fmt.Errorf("remote: resolve token file %q: %w", configured, err)
-	}
-	if resolved == configured {
+	if !selected {
 		return nil
 	}
-	return os.Setenv(EnvTokenFile, resolved)
+	if err := remotetoken.PersistSource(source); err != nil {
+		return fmt.Errorf("remote: persist token file source: %w", err)
+	}
+	return nil
 }
 
 // Attestation is an optional post-token hook (e.g. workload attestation). The

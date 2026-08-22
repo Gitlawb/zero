@@ -41,7 +41,7 @@ func TestSandboxManagerRejectsMacOSTokenHardLinkableIntoWritableWorkspace(t *tes
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "hard-link aliases") {
-		t.Fatalf("BuildCommandPlan error = %v, want macOS hard-link-alias failure", err)
+	if err == nil || !strings.Contains(err.Error(), "file-backed remote token") {
+		t.Fatalf("BuildCommandPlan error = %v, want macOS file-token shell refusal", err)
 	}
 }

@@ -44,6 +44,15 @@ func TestDaemonUsage(t *testing.T) {
 	if code != exitSuccess || !strings.Contains(out, "Usage: zero daemon") {
 		t.Fatalf("--help exit=%d out=%q", code, out)
 	}
+	for _, want := range []string{
+		"macOS shell commands require the inline token",
+		"file only when it has no hard-link aliases",
+		"shell-writable root shares its filesystem",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("--help does not state %q in the file-token shell contract: %q", want, out)
+		}
+	}
 }
 
 func TestDaemonUnknownSubcommand(t *testing.T) {
@@ -228,18 +237,25 @@ func TestDaemonServeRemoteCanonicalizesTokenFileBeforeStartingWorkers(t *testing
 	}
 	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
 	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", "token")
+	t.Setenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED", "")
 
 	code, _, _ := runDaemonCLI(t, "serve-remote", "--addr", "127.0.0.1:not-a-port", "--tls-cert", certFile, "--tls-key", keyFile)
 	if code != exitCrash {
 		t.Fatalf("serve-remote exit = %d, want bind failure", code)
 	}
-	want := filepath.Join(startDir, "token")
-	want, err := filepath.EvalSymlinks(want)
+	configured, err := filepath.Abs(filepath.Join(startDir, "token"))
 	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", want, err)
+		t.Fatalf("Abs(token): %v", err)
 	}
-	if got := os.Getenv("ZERO_DAEMON_REMOTE_TOKEN_FILE"); got != want {
-		t.Fatalf("ZERO_DAEMON_REMOTE_TOKEN_FILE = %q, want daemon-pinned path %q", got, want)
+	resolved, err := filepath.EvalSymlinks(configured)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", configured, err)
+	}
+	if got := os.Getenv("ZERO_DAEMON_REMOTE_TOKEN_FILE"); got != configured {
+		t.Fatalf("ZERO_DAEMON_REMOTE_TOKEN_FILE = %q, want configured path %q", got, configured)
+	}
+	if got := os.Getenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED"); got != resolved {
+		t.Fatalf("resolved token source = %q, want %q", got, resolved)
 	}
 }
 

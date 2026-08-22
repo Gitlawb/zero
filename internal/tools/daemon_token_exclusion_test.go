@@ -400,6 +400,7 @@ func TestApplyPatchDeniesTrailingSpaceDaemonTokenPath(t *testing.T) {
 	// CanonicalizeTokenFileEnv is the production daemon boundary and preserves
 	// filename whitespace while converting the selected path to an absolute one.
 	t.Setenv(remote.EnvTokenFile, filepath.Join(ws, ".", "bridge-token "))
+	t.Setenv(remote.EnvTokenFileResolved, "")
 	if err := remote.CanonicalizeTokenFileEnv(); err != nil {
 		t.Fatalf("CanonicalizeTokenFileEnv: %v", err)
 	}

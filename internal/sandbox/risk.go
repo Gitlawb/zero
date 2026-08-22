@@ -376,6 +376,8 @@ func patchHeaderPaths(patch string) ([]string, error) {
 	inHunk := false
 	type diffSection struct {
 		rawDiff               string
+		parsedSource          string
+		parsedDestination     string
 		diffParsed            bool
 		extendedSource        string
 		extendedDestination   string
@@ -397,24 +399,26 @@ func patchHeaderPaths(patch string) ([]string, error) {
 		if section.hasUnifiedSource != section.hasUnifiedDestination {
 			return fmt.Errorf("incomplete unified file path headers")
 		}
-		if section.diffParsed {
-			return nil
-		}
+
 		var source, destination string
 		switch {
-		case section.hasExtendedSource && section.hasExtendedDest:
-			source = "a/" + section.extendedSource
-			destination = "b/" + section.extendedDestination
-		case section.hasUnifiedSource && section.hasUnifiedDestination && section.unifiedSource != "/dev/null" && section.unifiedDestination != "/dev/null":
-			source = section.unifiedSource
-			destination = section.unifiedDestination
+		case section.hasExtendedSource:
+			source, destination = section.extendedSource, section.extendedDestination
+			if !diffGitLineMatchesChange(section.rawDiff, section.parsedSource, section.parsedDestination, section.diffParsed, source, destination) {
+				return fmt.Errorf("diff --git paths disagree with the copy or rename headers")
+			}
+		case section.hasUnifiedSource && section.unifiedSource != "/dev/null" && section.unifiedDestination != "/dev/null":
+			var ok bool
+			source, destination, ok = normalizeUnifiedDiffPaths(section.rawDiff, section.parsedSource, section.parsedDestination, section.diffParsed, section.unifiedSource, section.unifiedDestination)
+			if !ok {
+				return fmt.Errorf("diff --git paths disagree with the unified file path headers")
+			}
+		case section.diffParsed:
+			source, destination = normalizeDiffGitPaths(section.parsedSource, section.parsedDestination)
 		default:
 			return fmt.Errorf("ambiguous diff --git path operands")
 		}
-		if !diffGitLineMatchesPaths(section.rawDiff, source, destination) {
-			return fmt.Errorf("diff --git paths disagree with the file path headers")
-		}
-		paths = append(paths, stripPatchPrefix(source), stripPatchPrefix(destination))
+		paths = append(paths, filepath.ToSlash(source), filepath.ToSlash(destination))
 		return nil
 	}
 	setExtendedPath := func(source bool, path string) error {
@@ -429,7 +433,6 @@ func patchHeaderPaths(patch string) ([]string, error) {
 			}
 			section.extendedDestination, section.hasExtendedDest = path, true
 		}
-		paths = append(paths, filepath.ToSlash(path))
 		return nil
 	}
 	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
@@ -453,10 +456,7 @@ func patchHeaderPaths(patch string) ([]string, error) {
 				return nil, err
 			}
 			section = diffSection{rawDiff: line[len("diff --git "):]}
-			if source, destination, ok := parseDiffGitPaths(line[len("diff --git "):]); ok {
-				paths = append(paths, stripPatchPrefix(source), stripPatchPrefix(destination))
-				section.diffParsed = true
-			}
+			section.parsedSource, section.parsedDestination, section.diffParsed = parseDiffGitPaths(section.rawDiff)
 		case strings.HasPrefix(line, "copy from "):
 			path, ok := parseExtendedGitPath(line[len("copy from "):])
 			if !ok || section.rawDiff == "" {
@@ -509,19 +509,28 @@ func patchHeaderPaths(patch string) ([]string, error) {
 			oldRemaining, newRemaining = parsePatchHunkCounts(line)
 			inHunk = oldRemaining > 0 || newRemaining > 0
 		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			if strings.HasPrefix(line, "--- ") && section.rawDiff != "" &&
+				section.hasUnifiedSource && section.hasUnifiedDestination {
+				if err := flushSection(); err != nil {
+					return nil, err
+				}
+				section = diffSection{}
+			}
 			path, ok := patchFileHeaderPath(line)
 			if !ok {
 				return nil, fmt.Errorf("invalid unified file path header")
 			}
-			if path != "" {
+			if path == "" {
+				continue
+			}
+			if section.rawDiff == "" {
 				paths = append(paths, stripPatchPrefix(path))
-				if section.rawDiff != "" {
-					if strings.HasPrefix(line, "--- ") {
-						section.unifiedSource, section.hasUnifiedSource = path, true
-					} else {
-						section.unifiedDestination, section.hasUnifiedDestination = path, true
-					}
-				}
+				continue
+			}
+			if strings.HasPrefix(line, "--- ") {
+				section.unifiedSource, section.hasUnifiedSource = path, true
+			} else {
+				section.unifiedDestination, section.hasUnifiedDestination = path, true
 			}
 		}
 	}
@@ -530,7 +539,6 @@ func patchHeaderPaths(patch string) ([]string, error) {
 	}
 	return paths, nil
 }
-
 func parseDiffGitPaths(line string) (string, string, bool) {
 	if line == "" {
 		return "", "", false
@@ -544,8 +552,8 @@ func parseDiffGitPaths(line string) (string, string, bool) {
 		return source, destination, ok && validDiffGitPaths(source, destination)
 	}
 
-	// When only the destination is quoted, its opening quote uniquely separates
-	// the two operands even if the unquoted source contains ordinary spaces.
+	// A quoted destination uniquely separates the operands even when the source
+	// contains ordinary spaces.
 	for separator := strings.Index(line, " \""); separator >= 0; {
 		if destination, ok := parseWholeGitPath(line[separator+1:]); ok {
 			source := line[:separator]
@@ -560,13 +568,10 @@ func parseDiffGitPaths(line string) (string, string, bool) {
 		separator += next + 1
 	}
 
-	// For unquoted operands, only a space immediately followed by the synthetic
-	// b/ prefix can be the separator. Preserve exactly one separator byte: any
-	// preceding or trailing spaces remain filename data.
 	type candidate struct{ source, destination string }
 	var candidates []candidate
-	for separator := 0; separator+1 < len(line); separator++ {
-		if line[separator] != ' ' || !strings.HasPrefix(line[separator+1:], "b/") {
+	for separator := range len(line) {
+		if line[separator] != ' ' {
 			continue
 		}
 		source, destination := line[:separator], line[separator+1:]
@@ -574,17 +579,26 @@ func parseDiffGitPaths(line string) (string, string, bool) {
 			candidates = append(candidates, candidate{source: source, destination: destination})
 		}
 	}
-	if len(candidates) == 1 {
-		return candidates[0].source, candidates[0].destination, true
+	var prefixed []candidate
+	for _, candidate := range candidates {
+		if hasDefaultGitPrefixes(candidate.source, candidate.destination) {
+			prefixed = append(prefixed, candidate)
+		}
+	}
+	if len(prefixed) == 1 {
+		return prefixed[0].source, prefixed[0].destination, true
 	}
 	var same []candidate
 	for _, candidate := range candidates {
-		if candidate.source[2:] == candidate.destination[2:] {
+		if candidate.source == candidate.destination {
 			same = append(same, candidate)
 		}
 	}
 	if len(same) == 1 {
 		return same[0].source, same[0].destination, true
+	}
+	if len(candidates) == 1 {
+		return candidates[0].source, candidates[0].destination, true
 	}
 	return "", "", false
 }
@@ -601,11 +615,49 @@ func parseWholeGitPath(input string) (string, bool) {
 }
 
 func validDiffGitPaths(source, destination string) bool {
-	return len(source) > 2 && len(destination) > 2 && strings.HasPrefix(source, "a/") && strings.HasPrefix(destination, "b/")
+	return source != "" && destination != ""
+}
+
+func hasDefaultGitPrefixes(source, destination string) bool {
+	return len(source) > 2 && len(destination) > 2 &&
+		strings.HasPrefix(source, "a/") && strings.HasPrefix(destination, "b/")
+}
+
+func normalizeDiffGitPaths(source, destination string) (string, string) {
+	if hasDefaultGitPrefixes(source, destination) {
+		return source[2:], destination[2:]
+	}
+	return source, destination
+}
+
+func diffGitLineMatchesChange(raw, parsedSource, parsedDestination string, parsed bool, source, destination string) bool {
+	if parsed {
+		if parsedSource == source && parsedDestination == destination {
+			return true
+		}
+		if parsedSource == "a/"+source && parsedDestination == "b/"+destination {
+			return true
+		}
+	}
+	return diffGitLineMatchesPaths(raw, source, destination) ||
+		diffGitLineMatchesPaths(raw, "a/"+source, "b/"+destination)
+}
+
+func normalizeUnifiedDiffPaths(raw, parsedSource, parsedDestination string, parsed bool, source, destination string) (string, string, bool) {
+	if hasDefaultGitPrefixes(source, destination) {
+		normalizedSource, normalizedDestination := source[2:], destination[2:]
+		if diffGitLineMatchesChange(raw, parsedSource, parsedDestination, parsed, normalizedSource, normalizedDestination) {
+			return normalizedSource, normalizedDestination, true
+		}
+	}
+	if diffGitLineMatchesChange(raw, parsedSource, parsedDestination, parsed, source, destination) {
+		return source, destination, true
+	}
+	return "", "", false
 }
 
 func diffGitLineMatchesPaths(line, source, destination string) bool {
-	for separator := 0; separator < len(line); separator++ {
+	for separator := range len(line) {
 		if line[separator] == ' ' && line[:separator] == source && line[separator+1:] == destination {
 			return true
 		}
