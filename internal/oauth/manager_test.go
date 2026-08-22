@@ -300,6 +300,67 @@ func TestManagerGetFreshRefreshesExpired(t *testing.T) {
 	}
 }
 
+func TestManagerRefreshPersistenceUsesCommitToken(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(context.Context, *Manager, string) error
+	}{
+		{
+			name: "GetFresh",
+			run: func(ctx context.Context, manager *Manager, key string) error {
+				_, err := manager.GetFresh(ctx, key)
+				return err
+			},
+		},
+		{
+			name: "Handle401",
+			run: func(ctx context.Context, manager *Manager, key string) error {
+				_, err := manager.Handle401(ctx, key)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fp := newFakeProvider(t, `{"access_token":"must-not-be-saved","expires_in":3600}`)
+			store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := ProviderKey("demo")
+			previous := Token{AccessToken: "previous", RefreshToken: "refresh", ExpiresAt: time.Now().Add(-time.Hour)}
+			if err := store.Save(key, previous); err != nil {
+				t.Fatal(err)
+			}
+			commitErr := errors.New("ownership changed before refresh save")
+			commitCalls := 0
+			manager, err := NewManager(ManagerOptions{
+				Store: store,
+				Env: map[string]string{
+					"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+					"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+				},
+				CommitToken: func(string, Token) error {
+					commitCalls++
+					return commitErr
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.run(context.Background(), manager, key); !errors.Is(err, commitErr) {
+				t.Fatalf("refresh error = %v, want CommitToken rejection", err)
+			}
+			if commitCalls != 1 {
+				t.Fatalf("CommitToken calls = %d, want 1", commitCalls)
+			}
+			stored, ok, err := store.Load(key)
+			if err != nil || !ok || stored.AccessToken != previous.AccessToken {
+				t.Fatalf("rejected refresh changed token: token=%+v ok=%v err=%v", stored, ok, err)
+			}
+		})
+	}
+}
+
 func TestManagerGetFreshSkipsValidToken(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"should-not-be-used"}`)
 	env := map[string]string{

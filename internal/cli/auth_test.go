@@ -1038,6 +1038,7 @@ func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 // runs — so the folded-name adoption itself is pinned where it is reachable, in
 // TestPersistedProviderIdentityRulesMatchTheCredentialStore (internal/config).
 func TestRunAuthLogoutKeepsDistinctUnicodeCredentials(t *testing.T) {
+	setCLIUserConfigRoot(t)
 	const longS = "ſ"
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	storePath := withAuthStore(t)
@@ -1307,6 +1308,7 @@ func TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone(t *testing.T) {
 }
 
 func TestRunAuthLogoutRejectsAmbiguousCatalogAddress(t *testing.T) {
+	setCLIUserConfigRoot(t)
 	storePath := withAuthStore(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "config.json")

@@ -548,7 +548,7 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if len(parsed.positional) == 1 {
 		configPath, err := deps.userConfigPath()
 		if err != nil {
-			return writeAppError(stderr, err.Error(), exitCrash)
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 		credentialCandidates, _, err = config.ProviderCredentialCandidates(configPath, parsed.positional[0])
 		if err != nil {
@@ -596,7 +596,7 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	provider := parsed.positional[0]
 	configPath, err := deps.userConfigPath()
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	credentialCandidates, _, err := config.ProviderCredentialCandidates(configPath, provider)
 	if err != nil {
@@ -605,7 +605,7 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if len(credentialCandidates) == 0 {
 		return writeAppError(stderr, redaction.ErrorMessage(fmt.Errorf("provider identity %q resolved to no credential candidates", provider), redaction.Options{}), exitCrash)
 	}
-	manager, err := newAuthManager(deps, stdout, "", "")
+	manager, err := newAuthManager(deps, stdout, configPath, provider)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}

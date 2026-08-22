@@ -224,6 +224,9 @@ type ProviderCommitResult struct {
 // and a rejected write restores the credential entry it displaced, so a failed
 // mutation cannot leave another profile's secret behind.
 func CommitProviderProfile(path string, commit ProviderCommit) (ProviderCommitResult, error) {
+	if strings.TrimSpace(commit.Profile.Name) == "" {
+		return ProviderCommitResult{}, fmt.Errorf("provider name is required")
+	}
 	var persisted ProviderProfile
 	cfg, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
 		persisted = commit.Profile

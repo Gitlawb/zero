@@ -13,7 +13,9 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestSetActiveProviderSwitchesConfiguredProvider(t *testing.T) {
@@ -1005,15 +1007,15 @@ func TestEditProviderWritesReplacementKeyUnderNewName(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	path := filepath.Join(dir, "config.json")
 	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{
-		Name: "gw", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://gw.example.com/v1", Model: "m1",
+		Name: "gw", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://gw.example.com/v1", Model: "m1", APIKeyEnv: "STALE_GATEWAY_KEY",
 	}}}, 0o600)
 
 	cfg, err := EditProvider(path, ProviderEdit{Name: "gw", NewName: "gateway", APIKey: "sk-new"})
 	if err != nil {
 		t.Fatalf("EditProvider() error = %v", err)
 	}
-	if cfg.Providers[0].Name != "gateway" || !cfg.Providers[0].APIKeyStored {
-		t.Fatalf("edited profile = %+v", cfg.Providers[0])
+	if cfg.Providers[0].Name != "gateway" || !cfg.Providers[0].APIKeyStored || cfg.Providers[0].APIKeyEnv != "" {
+		t.Fatalf("edited profile = %+v, want stored-key marker with stale APIKeyEnv cleared", cfg.Providers[0])
 	}
 	store, err := ProviderKeyStoreAt(dir)
 	if err != nil {
@@ -1421,6 +1423,64 @@ func TestRepairUnnamedProviderPreservesLegacyNameResolution(t *testing.T) {
 	})
 }
 
+func TestRepairUnnamedProviderSerializesWithConcurrentMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "legacy",
+		Providers: []ProviderProfile{
+			{Name: "", ProviderKind: ProviderKindOpenAI, Model: "gpt-4o"},
+			{Name: "other", ProviderKind: ProviderKindOpenAI, Model: "old-model"},
+		},
+	}, 0o600)
+
+	originalAcquire := acquireProviderWriteLock
+	acquired := make(chan struct{})
+	continueRepair := make(chan struct{})
+	var once sync.Once
+	acquireProviderWriteLock = func(configPath string) (func() error, error) {
+		release, err := originalAcquire(configPath)
+		if err != nil {
+			return nil, err
+		}
+		once.Do(func() {
+			close(acquired)
+			<-continueRepair
+		})
+		return release, nil
+	}
+	t.Cleanup(func() { acquireProviderWriteLock = originalAcquire })
+
+	repairDone := make(chan error, 1)
+	go func() {
+		_, err := RepairUnnamedProvider(path, "work")
+		repairDone <- err
+	}()
+	<-acquired
+
+	mutationDone := make(chan error, 1)
+	go func() {
+		_, err := SetProviderModel(path, "other", "new-model")
+		mutationDone <- err
+	}()
+	select {
+	case err := <-mutationDone:
+		t.Fatalf("concurrent mutation escaped repair lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(continueRepair)
+	if err := <-repairDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-mutationDone; err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := readConfigFixture(t, path)
+	if cfg.Providers[0].Name != "work" || cfg.Providers[1].Model != "new-model" {
+		t.Fatalf("serialized result lost a mutation: %+v", cfg.Providers)
+	}
+}
+
 func TestRepairUnnamedProviderRejectsAmbiguousRepairWithoutWriting(t *testing.T) {
 	for name, cfg := range map[string]FileConfig{
 		"name collision":   {Providers: []ProviderProfile{{Name: ""}, {Name: "OPENAI"}}},
@@ -1582,6 +1642,7 @@ func TestCredentialKeyRetainedRequiresASurvivingOwner(t *testing.T) {
 // The delete confirmation must be able to promise exactly what the delete does,
 // so the pre-mutation answer has to match the post-mutation one.
 func TestProviderKeyRetainedAfterRemovalMatchesPostRemovalAnswer(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
 		Providers: []ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "WORK", APIKeyStored: true}},

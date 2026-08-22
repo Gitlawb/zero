@@ -22,6 +22,7 @@ type providerIdentityFixture struct {
 
 func seedProviderIdentityFixture(t *testing.T, fixture providerIdentityFixture) string {
 	t.Helper()
+	setCLIUserConfigRoot(t)
 	t.Setenv(config.ActiveProviderEnv, "")
 
 	configPath, err := config.DefaultUserConfigPath()

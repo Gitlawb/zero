@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,30 @@ func TestCommitProviderProfileRejectedCollisionKeepsExistingKey(t *testing.T) {
 	}
 	if key != "sk-original" {
 		t.Fatalf("rejected write replaced the existing profile's key: got %q", key)
+	}
+}
+
+func TestCommitProviderProfileRejectsEmptyNameBeforeSideEffects(t *testing.T) {
+	for _, key := range []string{"", "sk-secret"} {
+		t.Run(fmt.Sprintf("key-length-%d", len(key)), func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+			path := filepath.Join(dir, "config.json")
+			_, err := CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{APIKey: key}})
+			if err == nil || !strings.Contains(err.Error(), "provider name is required") {
+				t.Fatalf("CommitProviderProfile error = %v, want provider-name validation", err)
+			}
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("empty-name commit touched config: %v", statErr)
+			}
+			store, storeErr := ProviderKeyStoreAt(dir)
+			if storeErr != nil {
+				t.Fatal(storeErr)
+			}
+			if _, ok, getErr := store.Get("openai"); getErr != nil || ok {
+				t.Fatalf("empty-name commit touched credential store: ok=%v err=%v", ok, getErr)
+			}
+		})
 	}
 }
 

@@ -1224,6 +1224,26 @@ func TestWizardProviderStoredKey(t *testing.T) {
 	}
 }
 
+func TestAdvanceProviderWizardRedactsStoredKeyOwnershipError(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrst"
+	m := model{
+		savedProviders: []config.ProviderProfile{{
+			Name: secret, CatalogID: "different-catalog", APIKeyStored: true,
+		}},
+		providerWizard: &providerWizardState{
+			step:      providerWizardStepProvider,
+			providers: []providercatalog.Descriptor{{ID: strings.ToUpper(secret), Name: "Secret-shaped provider"}},
+		},
+	}
+	next, _ := m.advanceProviderWizard()
+	if next.providerWizard == nil {
+		t.Fatal("wizard closed after ownership error")
+	}
+	if strings.Contains(next.providerWizard.err, secret) || !strings.Contains(next.providerWizard.err, "REDACTED") {
+		t.Fatalf("ownership error was not redacted: %q", next.providerWizard.err)
+	}
+}
+
 func TestProviderWizardManageKeyRemove(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	t.Run("exclusive catalog alias is removed and memory is refreshed", func(t *testing.T) {
