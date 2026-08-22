@@ -143,7 +143,13 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	side.activeLoopID = ""
 	side.loopTicking = false
 	side.specialists.clear()
-	side.plan.clear()
+	// Plan mode (and the in-memory plan) belongs to the parent session. A
+	// side surface that inherited it would stay read-only, or leak the
+	// parent's draft into a conversation that never drafted it. Match
+	// /new and /resume: exit plan mode and clear plan state on the side
+	// only. The saved parent keeps its own plan mode and panel for restore.
+	side = side.exitPlanMode()
+	side = side.resetPlanForSessionSwitch()
 	side.planDetailGen++
 	side.streamingText = nil
 	side.streamingReasoning = ""
@@ -198,6 +204,30 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		kind: actionAppendSystem,
 		text: "Returned from the isolated BTW conversation. Its messages were not added to this session.",
 	})
+	// Entering BTW clears (or the side conversation may replace) the shared
+	// update_plan tool state. Re-sync from the parent session's plan file the
+	// same way /resume does after a session switch, so the restored surface
+	// matches the durable plan and not whatever the side conversation left.
+	// Surface I/O/parse failures so the restored panel and shared update_plan
+	// state are not silently left out of sync with the durable file.
+	if items, ok, err := parent.reloadPlanFromFile(); err != nil {
+		// Side surface cleared shared update_plan on enter; do not restore a
+		// stale sticky panel when the durable reload fails (empty tool + old
+		// panel would desync). Clear parent plan state, then surface the error.
+		parent = parent.resetPlanForSessionSwitch()
+		parent.transcript = reduceTranscript(parent.transcript, transcriptAction{
+			kind: actionAppendError,
+			text: "plan reload error: " + err.Error(),
+		})
+	} else if ok {
+		parent.plan.updateFromItems(items, parent.now())
+	} else {
+		// Missing durable plan (ok=false, err=nil): enterBTW already cleared
+		// the shared update_plan tool. Clear the restored parent's sticky
+		// panel too so tool and panel stay consistent rather than leaving a
+		// stale panel with an empty tool.
+		parent = parent.resetPlanForSessionSwitch()
+	}
 	parent.resetFlushFrontier("· returned from btw ·")
 	var goalCmd tea.Cmd
 	parent, goalCmd = parent.launchGoalContinuationIfReady()
@@ -207,7 +237,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 func btwCommandUnavailable(command parsedCommand) bool {
 	arg := strings.ToLower(strings.TrimSpace(command.text))
 	switch command.kind {
-	case commandNew, commandResume, commandRename, commandSpec, commandLoop, commandGoal,
+	case commandNew, commandResume, commandRename, commandSpec, commandPlan, commandLoop, commandGoal,
 		commandRewind, commandCompact, commandSTTModel, commandMCP:
 		return true
 	case commandModel:
