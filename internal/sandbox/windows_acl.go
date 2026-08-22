@@ -16,16 +16,9 @@ const (
 	// WindowsACLRevokeCapability removes any existing ACE (allow or deny) for
 	// Capability at Path, without itself granting or denying anything (applied
 	// via SetEntriesInAclW's SET_ACCESS mode with a zero mask, not
-	// REVOKE_ACCESS — see windowsACLAccess for why). It reconciles stale
-	// shared/descendant DenyWrite ACEs an earlier setup run applied for the
-	// stable read-only capability SID (see BuildWindowsACLPlan) that a later
-	// run no longer intends: if a path previously covered by the
-	// shared-root/descendant DenyWrite mitigation is later configured as an
-	// allowed write root, that old deny is otherwise left on disk and wins
-	// over the new Allow under Windows' deny-before-allow evaluation — see
-	// jatmn's review. Clearing a SID with no matching ACE is a safe no-op, so
-	// this can always be emitted unconditionally alongside every write-root
-	// Allow entry.
+	// REVOKE_ACCESS — see windowsACLAccess for why). It is consumed by
+	// applyWindowsACLPlan for migration cleanup and tests; no current
+	// plan-generation path emits this action, preserving legacy-process confinement.
 	WindowsACLRevokeCapability WindowsACLAction = "revoke-capability"
 )
 
@@ -44,33 +37,15 @@ type WindowsACLEntry struct {
 	Materialize bool `json:"materialize,omitempty"`
 	// ScanDescendants marks a shared-root DenyWrite entry whose EXISTING
 	// writable descendants must ALSO be denied, one direct (non-inheriting)
-	// deny per writable descendant, at apply time. A non-inherited deny on the
-	// root object alone does not cover a pre-existing child that independently
-	// grants Users/Authenticated Users write, because a Windows access check
-	// for that child never consults a non-inherited ACE on its parent. This is
-	// deliberately NOT serialized (json:"-"): the concrete descendant set is
-	// live-filesystem state that differs between the setup process and a later
-	// command run, so folding it into the hashed plan would make
-	// ValidateWindowsSandboxSetupMarker non-deterministic. The flag itself is
-	// derived deterministically from the same inputs on both sides, and the
-	// descendant enumeration/denies happen as an apply-time side effect in
-	// applyWindowsACLPlan (windows-only), never in the cross-platform plan hash.
+	// deny per writable descendant, at apply time. This flag and its associated
+	// walker are consumed by applyWindowsACLPlan and tests; no current
+	// plan-generation path sets this flag since broad shared-root DenyWrite ACEs
+	// and SID broadening are no longer planned.
 	ScanDescendants bool `json:"-"`
-	// RevokeDescendants marks a write-root's WindowsACLRevokeCapability entry
-	// (see the constant below) as needing the same stale-deny cleanup applied
-	// recursively to the root's existing descendants, not just the root path
-	// itself. A tree scanned and denied by an earlier setup run (either
-	// because it WAS one of the four shared roots, or because it was a
-	// writable descendant applyWindowsSharedDescendantDenies found and denied
-	// elsewhere in the tree) can later be promoted to an allowed write root by
-	// the caller configuring some ANCESTOR of it as a WriteRoot. Revoking only
-	// at the exact configured root leaves any stale direct, non-inheriting
-	// deny on that ancestor's descendants in place, and a stale deny wins over
-	// the newly-added inheritable Allow under Windows' deny-before-allow
-	// evaluation — see jatmn's review. Like ScanDescendants, this is
-	// deliberately NOT serialized (json:"-"): the concrete stale-deny set is
-	// live-filesystem state, and the actual descendant walk/revoke happens as
-	// an apply-time side effect in applyWindowsACLPlan (windows-only).
+	// RevokeDescendants marks a WindowsACLRevokeCapability entry as needing
+	// stale-deny cleanup applied recursively to existing descendants, not just
+	// the root path itself. This flag is consumed by applyWindowsACLPlan for
+	// migration cleanup and tests; no current plan-generation path sets this flag.
 	RevokeDescendants bool `json:"-"`
 }
 

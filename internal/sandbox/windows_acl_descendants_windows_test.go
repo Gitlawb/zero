@@ -568,8 +568,12 @@ func TestWindowsAceSIDSkipsUnhandledAceTypes(t *testing.T) {
 }
 
 func TestWindowsPathDeniesCapabilitySIDRequiresEssentialWriteMask(t *testing.T) {
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	sid := caps.ReadOnly
 	dir := t.TempDir()
-	sid := "S-1-1-0"
 
 	group := windowsACLPathGroup{
 		Path: dir,
@@ -634,7 +638,14 @@ func denyCapabilityMask(t *testing.T, path, capabilitySID string, mask windows.A
 // pass through a Users/AuthUsers allow under a partial-deny check that only
 // tested non-zero overlap with the probe mask.
 func TestWindowsPathDeniesCapabilitySIDRejectsPartialWriteDeny(t *testing.T) {
-	const sidStr = "S-1-1-0"
+	// Synthetic capability SID: a full DenyWrite for a group the test process
+	// belongs to (e.g. Everyone) denies DELETE/WRITE_DAC and blocks t.TempDir
+	// cleanup.
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	sidStr := caps.ReadOnly
 	dir := t.TempDir()
 	denyCapabilityMask(t, dir, sidStr, windows.FILE_WRITE_ATTRIBUTES)
 

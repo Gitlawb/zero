@@ -42,32 +42,3 @@ func windowsPathIsDriveRootPath(path string) bool {
 	c := trimmed[0]
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
-
-// windowsMountPathIsOnlySystemDrive reports whether a volume mount path is the
-// system drive root (e.g. `C:\` or `C:`) rather than another letter or a
-// folder mount such as `C:\mnt\data`. Used by the volume gate so a second
-// fixed volume mounted only as a folder is rejected the same as one mounted
-// on a drive letter.
-func windowsMountPathIsOnlySystemDrive(mountPath, systemDrive string) bool {
-	trimmed := strings.TrimSuffix(mountPath, `\`)
-	return strings.EqualFold(strings.ToUpper(trimmed), strings.ToUpper(systemDrive))
-}
-
-// windowsMountPathsAreOnlySystemDrive reports whether mountPaths (a fixed
-// volume's DOS/folder mount points from GetVolumePathNamesForVolumeName) name
-// the system drive root and nothing else. A fixed volume with NO mount paths
-// at all is still directly reachable through its raw "\\?\Volume{GUID}\"
-// path even though it has no conventional mount point, so an empty list
-// fails closed (false) instead of being read as "unreachable." Pure string
-// logic so non-Windows tests can pin the fail-closed cases without Win32.
-func windowsMountPathsAreOnlySystemDrive(mountPaths []string, systemDrive string) bool {
-	if len(mountPaths) == 0 {
-		return false
-	}
-	for _, mountPath := range mountPaths {
-		if !windowsMountPathIsOnlySystemDrive(mountPath, systemDrive) {
-			return false
-		}
-	}
-	return true
-}
