@@ -519,16 +519,18 @@ const (
 // spelling can address such a pair, which keeps repairing a legacy config
 // possible.
 func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, PersistedIdentityMatch, error) {
-	identity = strings.TrimSpace(identity)
-	if identity == "" {
-		return ProviderProfile{}, PersistedIdentityNone, nil
-	}
 	providers, err := persistedProviders(path)
 	if err != nil {
 		return ProviderProfile{}, PersistedIdentityNone, err
 	}
-	var exactName *ProviderProfile
-	exactMatches := 0
+	return resolvePersistedProviderIdentity(providers, identity)
+}
+
+func resolvePersistedProviderIdentity(providers []ProviderProfile, identity string) (ProviderProfile, PersistedIdentityMatch, error) {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ProviderProfile{}, PersistedIdentityNone, nil
+	}
 	var foldedName *ProviderProfile
 	foldedMatches := 0
 	var catalogRow *ProviderProfile
@@ -588,14 +590,18 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 // the "xai" token and key belong to whoever logged in under that spelling —
 // deleting them while logging out of "work-xai" takes down a sibling's login.
 func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
-	catalogID = strings.TrimSpace(catalogID)
-	owner = strings.TrimSpace(owner)
-	if catalogID == "" || owner == "" {
-		return false, nil
-	}
 	providers, err := persistedProviders(path)
 	if err != nil {
 		return false, err
+	}
+	return catalogIdentityExclusive(providers, catalogID, owner), nil
+}
+
+func catalogIdentityExclusive(providers []ProviderProfile, catalogID, owner string) bool {
+	catalogID = strings.TrimSpace(catalogID)
+	owner = strings.TrimSpace(owner)
+	if catalogID == "" || owner == "" {
+		return false
 	}
 	for _, row := range providers {
 		name := strings.TrimSpace(row.Name)
@@ -603,10 +609,10 @@ func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 			continue
 		}
 		if sameProviderIdentity(name, catalogID) || sameProviderIdentity(row.CatalogID, catalogID) {
-			return false, nil
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
 // ProviderCredentialCandidates returns every credential-store key that can
@@ -626,6 +632,18 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 			err = fmt.Errorf("%s", redaction.ErrorMessage(err, redaction.Options{}))
 		}
 	}()
+	providers, err := persistedProviders(path)
+	if err != nil {
+		canonicalName = strings.TrimSpace(addressedName)
+		if canonicalName != "" {
+			candidates = []string{canonicalName}
+		}
+		return candidates, canonicalName, err
+	}
+	return providerCredentialCandidates(providers, addressedName)
+}
+
+func providerCredentialCandidates(providers []ProviderProfile, addressedName string) (candidates []string, canonicalName string, err error) {
 	add := func(candidate string) {
 		candidate = strings.TrimSpace(candidate)
 		if candidate != "" && !slices.Contains(candidates, candidate) {
@@ -634,7 +652,7 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 	}
 	canonicalName = strings.TrimSpace(addressedName)
 	add(canonicalName)
-	row, match, err := ResolvePersistedProviderIdentity(path, addressedName)
+	row, match, err := resolvePersistedProviderIdentity(providers, addressedName)
 	if err != nil {
 		if match == PersistedIdentityAmbiguous {
 			return nil, canonicalName, err
@@ -642,15 +660,20 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 		return candidates, canonicalName, err
 	}
 	if match == PersistedIdentityNone {
+		catalogMatches := 0
+		for _, provider := range providers {
+			if sameProviderIdentity(provider.CatalogID, addressedName) {
+				catalogMatches++
+			}
+		}
+		if catalogMatches > 1 {
+			return nil, canonicalName, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id", addressedName, catalogMatches)
+		}
 		return candidates, canonicalName, nil
 	}
 	canonicalName = strings.TrimSpace(row.Name)
 	add(canonicalName)
-	exclusive, err := CatalogIdentityExclusive(path, row.CatalogID, canonicalName)
-	if err != nil {
-		return candidates, canonicalName, err
-	}
-	if exclusive {
+	if catalogIdentityExclusive(providers, row.CatalogID, canonicalName) {
 		add(row.CatalogID)
 	}
 	return candidates, canonicalName, nil

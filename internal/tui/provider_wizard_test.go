@@ -1300,7 +1300,7 @@ func TestProviderWizardManageKeyErrorsAreRedacted(t *testing.T) {
 		m := newModel(context.Background(), Options{UserConfigPath: path})
 		m.providerWizard = &providerWizardState{manageProviderName: "work", manageKeyCursor: 2}
 		next, _ := m.applyManageKeyChoice()
-		if !strings.Contains(next.providerWizard.err, "REDACTED") {
+		if !strings.Contains(next.providerWizard.err, "REDACTED") || strings.Contains(next.providerWizard.err, secret) {
 			t.Fatalf("preflight error was not redacted: %q", next.providerWizard.err)
 		}
 	})
@@ -1313,7 +1313,7 @@ func TestProviderWizardManageKeyErrorsAreRedacted(t *testing.T) {
 		m := newModel(context.Background(), Options{UserConfigPath: path})
 		m.providerWizard = &providerWizardState{manageProviderName: secret, manageKeyCursor: 2}
 		next, _ := m.applyManageKeyChoice()
-		if !strings.Contains(next.providerWizard.err, "REDACTED") {
+		if !strings.Contains(next.providerWizard.err, "REDACTED") || strings.Contains(next.providerWizard.err, secret) {
 			t.Fatalf("candidate error was not redacted: %q", next.providerWizard.err)
 		}
 	})

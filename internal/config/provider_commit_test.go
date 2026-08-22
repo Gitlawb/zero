@@ -323,15 +323,17 @@ func TestCommitProviderProfileFailsClosedWhenLockIsBusy(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	lockPath := filepath.Join(dir, ".zero-provider-write.lock")
-	if err := os.WriteFile(lockPath, []byte("live-holder"), 0o600); err != nil {
+	heldRelease, err := lockProviderWrite(path)
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = heldRelease() })
 	oldTimeout := providerWriteLockTimeout
+	// This test replaces a package-level timeout and must not run in parallel.
 	providerWriteLockTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { providerWriteLockTimeout = oldTimeout })
 
-	_, err := CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{Name: "work", APIKey: "sk-new"}})
+	_, err = CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{Name: "work", APIKey: "sk-new"}})
 	if err == nil || !strings.Contains(err.Error(), "busy") {
 		t.Fatalf("CommitProviderProfile error = %v, want retryable busy error", err)
 	}
@@ -478,6 +480,65 @@ func TestCommitCatalogProviderLoginHoldsLockThroughPersistence(t *testing.T) {
 	}
 	if err := <-removeDone; err != nil {
 		t.Fatalf("RemoveProvider() error = %v", err)
+	}
+}
+
+func TestDeleteResolvedProviderCredentialsSerializesReassignment(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{
+		Name: "work-acme", CatalogID: "acme", APIKeyStored: true,
+	}}}, 0o600)
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work-acme", "old-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	publishingRemoval := make(chan struct{})
+	continueRemoval := make(chan struct{})
+	originalPublish := publishProviderConfig
+	// This test replaces a package-level publication seam and must not run in parallel.
+	publishProviderConfig = func(configPath string, cfg FileConfig) error {
+		if len(cfg.Providers) == 1 && !cfg.Providers[0].APIKeyStored {
+			close(publishingRemoval)
+			<-continueRemoval
+		}
+		return originalPublish(configPath, cfg)
+	}
+	t.Cleanup(func() { publishProviderConfig = originalPublish })
+
+	removeDone := make(chan error, 1)
+	go func() {
+		_, _, err := DeleteResolvedProviderCredentials(path, "acme")
+		removeDone <- err
+	}()
+	<-publishingRemoval
+
+	reassignDone := make(chan error, 1)
+	go func() {
+		_, err := CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{
+			Name: "work-acme", CatalogID: "acme", APIKey: "new-key",
+		}})
+		reassignDone <- err
+	}()
+	select {
+	case err := <-reassignDone:
+		t.Fatalf("reassignment completed outside the removal transaction: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(continueRemoval)
+	if err := <-removeDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reassignDone; err != nil {
+		t.Fatal(err)
+	}
+	if key, ok, err := store.Get("work-acme"); err != nil || !ok || key != "new-key" {
+		t.Fatalf("reassigned credential = %q ok=%v err=%v, want new-key", key, ok, err)
 	}
 }
 
