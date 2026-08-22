@@ -87,6 +87,8 @@ jobs:
   race:
     name: Race Detector
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # A race the detector newly reports can present as a deadlock rather than a
     # failure, and the default job timeout is six hours. This job is expected to
     # be the longest in the workflow, so the ceiling is generous but finite.
