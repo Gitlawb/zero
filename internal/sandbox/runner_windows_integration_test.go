@@ -451,6 +451,9 @@ func runWindowsRealSmokeCommandExpectError(t *testing.T, runnerExe string, base 
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runnerExe, args...)
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("Windows sandbox command timed out: %v\n%s", ctx.Err(), output)
+	}
 	if err == nil {
 		t.Fatalf("Windows sandbox command exit code = 0, want error containing %v\n%s", wantSubstr, output)
 	}
