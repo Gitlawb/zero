@@ -289,11 +289,21 @@ func (s *Store) Load(key string) (Token, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, err := s.readState()
+	var (
+		token Token
+		ok    bool
+	)
+	err := s.blob.withLock(s.now, func() error {
+		state, err := s.readState()
+		if err != nil {
+			return err
+		}
+		token, ok = state.Tokens[key]
+		return nil
+	})
 	if err != nil {
 		return Token{}, false, err
 	}
-	token, ok := state.Tokens[key]
 	return token, ok, nil
 }
 
@@ -325,7 +335,12 @@ func (s *Store) Delete(key string) (bool, error) {
 func (s *Store) Status(prefix string) ([]Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, err := s.readState()
+	var state storeFile
+	err := s.blob.withLock(s.now, func() error {
+		var err error
+		state, err = s.readState()
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -782,6 +797,9 @@ func parseKeyringManifest(head string) (keyringManifest, error) {
 		return malformed("names a generation with no chunks")
 	}
 	if len(m.digest) != hex.EncodedLen(sha256.Size) {
+		return malformed("has an invalid digest")
+	}
+	if _, err := hex.DecodeString(m.digest); err != nil {
 		return malformed("has an invalid digest")
 	}
 	return m, nil

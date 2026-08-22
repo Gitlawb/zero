@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,55 @@ func TestStoreKeyringWriteCommitsOnlyAtTheManifest(t *testing.T) {
 	}
 }
 
+// TestStoreKeyringWriteFailsOnFinalManifestPublication asserts that when the
+// final manifest publication fails after all chunk writes succeed, the previous
+// manifest and committed blob remain readable, the new login is not visible,
+// and the target generation's written accounts remain tracked for cleanup.
+func TestStoreKeyringWriteFailsOnFinalManifestPublication(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	s := newCappedKeyringStore(t, kr)
+	mustSave(t, s, "first", bigToken("a"))
+	mustSave(t, s, "second", bigToken("b"))
+
+	before := manifestOf(t, kr)
+	boom := errors.New("keychain is locked on manifest publish")
+
+	// Allow reservation and chunk writes to succeed, but fail when publishing
+	// the final manifest with next.live.
+	anchorSets := 0
+	kr.failSet = func(account string) error {
+		if account == keyringAccount {
+			anchorSets++
+			if anchorSets > 1 {
+				return boom
+			}
+		}
+		return nil
+	}
+
+	if err := s.Save(ProviderKey("third"), bigToken("c")); !errors.Is(err, boom) {
+		t.Fatalf("Save with failing final manifest publication: err = %v, want %v", err, boom)
+	}
+	kr.failSet = nil
+
+	if got := mustLoad(t, s, "first"); got.AccessToken != bigToken("a").AccessToken {
+		t.Error("a failed final manifest publication damaged the committed blob")
+	}
+	if _, ok, _ := s.Load(ProviderKey("third")); ok {
+		t.Error("a write that failed final manifest publication was visible anyway")
+	}
+
+	after := manifestOf(t, kr)
+	if after.live != before.live {
+		t.Fatalf("live generation moved on failed final manifest publication: %q -> %q", before.live, after.live)
+	}
+	assertNoStrayChunks(t, kr, after)
+
+	// A subsequent write successfully cleans up the orphaned generation chunks
+	mustSave(t, s, "fourth", bigToken("d"))
+	assertNoStrayChunks(t, kr, manifestOf(t, kr))
+}
+
 // TestStoreKeyringAlternatesGenerationsAndRetiresTheOld covers the ping-pong:
 // each write lands in the generation that is not live, and the retired one is
 // removed so a previous login's tokens do not linger in the keychain.
@@ -318,6 +368,7 @@ func TestParseKeyringManifestRejectsMalformed(t *testing.T) {
 		"non-numeric count":  keyringManifestPrefix + "a:x:0:" + digest,
 		"live has no chunks": keyringManifestPrefix + "a:0:2:" + digest,
 		"short digest":       keyringManifestPrefix + "a:1:0:beef",
+		"non-hex digest":     keyringManifestPrefix + "a:1:0:" + strings.Repeat("g", 64),
 	} {
 		if _, err := parseKeyringManifest(head); err == nil {
 			t.Errorf("%s: parseKeyringManifest(%q) succeeded, want an error", name, head)
@@ -332,9 +383,22 @@ func TestParseKeyringManifestRejectsMalformed(t *testing.T) {
 func assertNoStrayChunks(t *testing.T, kr *fakeKR, manifest keyringManifest) {
 	t.Helper()
 	for _, family := range []string{keyringChunkFamilyA, keyringChunkFamilyB} {
-		stored := kr.chunkAccounts(family)
-		if len(stored) > manifest.counts[family] {
-			t.Errorf("generation %q holds %d chunks (%v) but the manifest counts %d", family, len(stored), stored, manifest.counts[family])
+		count := manifest.counts[family]
+		for index := 0; index < keyringMaxChunks; index++ {
+			account := keyringAccount + "." + family + "." + strconv.Itoa(index)
+			_, exists := kr.data[keyringService+"/"+account]
+			if family == manifest.live {
+				if index < count && !exists {
+					t.Errorf("live generation %q is missing expected chunk index %d", family, index)
+				}
+				if index >= count && exists {
+					t.Errorf("live generation %q has stray chunk at index %d (count %d)", family, index, count)
+				}
+			} else {
+				if index >= count && exists {
+					t.Errorf("generation %q has stray chunk at index %d (count %d)", family, index, count)
+				}
+			}
 		}
 	}
 	if got := len(kr.chunkAccounts(manifest.live)); got != manifest.counts[manifest.live] {
@@ -413,5 +477,67 @@ func TestStoreKeyringSweepsStrayChunksOnFirstGrowth(t *testing.T) {
 		if _, ok := kr.data[keyringService+"/"+account]; ok {
 			t.Errorf("stray chunk %s survived the growth into the chunked layout", account)
 		}
+	}
+}
+
+// TestStoreKeyringReadSerializedWithLockDuringChunkedWrite verifies that readers
+// executing concurrently with a chunked writer hold the cross-process lock so they
+// do not observe a torn state (such as reading an old manifest after the writer
+// has deleted old-generation chunks).
+func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	kr := newCappedFakeKR(macOSLikeBudget)
+	writer, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatalf("NewStore(writer): %v", err)
+	}
+	reader, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatalf("NewStore(reader): %v", err)
+	}
+
+	mustSave(t, writer, "first", bigToken("a"))
+	mustSave(t, writer, "second", bigToken("b"))
+
+	// Manually acquire the lock to simulate writer holding the lock across
+	// manifest commit and chunk rotation.
+	lockPath := writer.blob.(keyringBlob).lockPath
+	unlock, err := acquireFileLock(lockPath, time.Now)
+	if err != nil {
+		t.Fatalf("acquireFileLock: %v", err)
+	}
+
+	// While lock is held, Load and Status should block.
+	loaded := make(chan Token, 1)
+	loadErr := make(chan error, 1)
+	go func() {
+		tok, _, err := reader.Load(ProviderKey("first"))
+		loadErr <- err
+		loaded <- tok
+	}()
+
+	// Ensure reader is waiting on lock.
+	select {
+	case <-loaded:
+		t.Fatal("reader.Load returned while lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release lock, allowing reader to complete.
+	unlock()
+
+	select {
+	case err := <-loadErr:
+		if err != nil {
+			t.Fatalf("reader.Load failed after unlock: %v", err)
+		}
+		tok := <-loaded
+		if tok.AccessToken != bigToken("a").AccessToken {
+			t.Errorf("reader.Load returned unexpected token: %v", tok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader.Load timed out waiting for lock release")
 	}
 }
