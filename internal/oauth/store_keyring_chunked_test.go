@@ -518,10 +518,20 @@ func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
 		loaded <- tok
 	}()
 
+	statused := make(chan []Status, 1)
+	statusErr := make(chan error, 1)
+	go func() {
+		st, err := reader.Status(KeyPrefixProvider)
+		statusErr <- err
+		statused <- st
+	}()
+
 	// Ensure reader is waiting on lock.
 	select {
 	case <-loaded:
 		t.Fatal("reader.Load returned while lock was held")
+	case <-statused:
+		t.Fatal("reader.Status returned while lock was held")
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -539,5 +549,18 @@ func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("reader.Load timed out waiting for lock release")
+	}
+
+	select {
+	case err := <-statusErr:
+		if err != nil {
+			t.Fatalf("reader.Status failed after unlock: %v", err)
+		}
+		st := <-statused
+		if len(st) != 2 {
+			t.Errorf("reader.Status returned %d entries, want 2", len(st))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader.Status timed out waiting for lock release")
 	}
 }
