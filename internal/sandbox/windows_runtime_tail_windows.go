@@ -162,7 +162,7 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHas
 	var iosb windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(
 		&handle,
-		windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+		windows.GENERIC_WRITE|windows.READ_CONTROL|windows.WRITE_DAC|windows.SYNCHRONIZE,
 		&attributes,
 		&iosb,
 		nil,
@@ -178,8 +178,76 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHas
 	}
 	file := os.NewFile(uintptr(handle), windowsSandboxRuntimeStampName)
 	defer file.Close()
+	// PROTECTED BEFORE ANYTHING IS WRITTEN, because the stamp lives inside the
+	// tree it attests. See protectWindowsRuntimeStamp.
+	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd())); err != nil {
+		return err
+	}
 	if _, err := file.WriteString(planHash); err != nil {
 		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
+	}
+	return nil
+}
+
+// protectWindowsRuntimeStamp gives the stamp its own DACL, excluding the
+// capability SID the sandboxed command runs with.
+//
+// THE ATTESTATION CANNOT LIVE IN THE SUBJECT'S OWN WRITABLE NAMESPACE. The
+// runtime root carries an AllowWrite entry for the capability SID with
+// SUB_CONTAINERS_AND_OBJECTS_INHERIT, which is exactly what lets a sandboxed
+// command write TMP, GOCACHE and the package-manager caches under it. A file
+// created inside that root inherits the same grant, so the restricted command
+// could open the stamp and overwrite it after passing its own pre-launch
+// validation. Its current command would continue, and every later elevated
+// command and zero doctor would then reject the altered plan hash until an
+// Administrator re-ran setup: a sandboxed process bricking the sandbox.
+//
+// Moving the stamp outside the tree is the other way to fix it and is worse:
+// the stamp works precisely because it dies with the tree, so eviction is
+// detectable without reading an ACE. Keeping it inside with inheritance
+// switched off preserves that and closes the hole.
+//
+// PROTECTED, not merely explicit: without SE_DACL_PROTECTED the inherited
+// capability ACE stays in the DACL alongside whatever is set here.
+func protectWindowsRuntimeStamp(handle windows.Handle) error {
+	owner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
+	if err != nil {
+		return fmt.Errorf("resolve owner SID for the sandbox runtime stamp: %w", err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return fmt.Errorf("resolve LocalSystem SID for the sandbox runtime stamp: %w", err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return fmt.Errorf("resolve Administrators SID for the sandbox runtime stamp: %w", err)
+	}
+	// Setup writes it, doctor and the elevated command read it; nothing else
+	// needs to reach it, and the capability SID is deliberately absent.
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)
+	for _, sid := range []*windows.SID{owner, system, administrators} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.SET_ACCESS,
+			Inheritance:       windows.NO_INHERITANCE,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		})
+	}
+	dacl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return fmt.Errorf("build the sandbox runtime stamp DACL: %w", err)
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil,
+	); err != nil {
+		return fmt.Errorf("protect the sandbox runtime setup stamp: %w", err)
 	}
 	return nil
 }
@@ -206,7 +274,7 @@ func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
 	var iosb windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(
 		&handle,
-		windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+		windows.GENERIC_WRITE|windows.READ_CONTROL|windows.WRITE_DAC|windows.SYNCHRONIZE,
 		&attributes,
 		&iosb,
 		nil,
@@ -222,6 +290,12 @@ func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
 	}
 	file := os.NewFile(uintptr(handle), windowsSandboxRuntimeStampName)
 	defer file.Close()
+	// Both writers protect. This one is the fallback path, and a stamp written
+	// here would inherit the same capability grant as one written through the
+	// ACL handle.
+	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd())); err != nil {
+		return err
+	}
 	if _, err := file.WriteString(planHash); err != nil {
 		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
 	}
