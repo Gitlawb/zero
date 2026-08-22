@@ -343,7 +343,19 @@ func broadLockTrustee(sid *windows.SID) bool {
 		return true
 	case strings.HasPrefix(value, "S-1-5-21-"):
 		// Machine/domain SIDs. RIDs below 1000 are the well-known groups (Domain
-		// Users, Domain Guests, ...); real accounts start at 1000.
+		// Users, Domain Guests, ...).
+		//
+		// Above that range the RID does NOT prove a single account: an
+		// admin-created local group gets a RID >= 1000 too, and resolving the SID
+		// is the only way to tell. That resolution is deliberately not done, and
+		// a named group is deliberately not fatal. A real Windows 11 box in this
+		// PR's review carried an inherited write ACE for the local group
+		// "CodexSandboxUsers" on its profile and temp directories; refusing there
+		// means no credential can be read or written on that machine at all. A
+		// named group with bounded membership on a directory this user owns is
+		// what the warning is for. The universal principals above — Everyone,
+		// Authenticated Users, BUILTIN\Users — are the ones that really mean "any
+		// account on this machine", and those still fail closed.
 		fields := strings.Split(value, "-")
 		relative, err := strconv.ParseUint(fields[len(fields)-1], 10, 32)
 		return err == nil && relative < 1000
