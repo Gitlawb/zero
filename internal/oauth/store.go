@@ -1,15 +1,19 @@
 package oauth
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -104,12 +108,41 @@ type KeyringClient interface {
 	Get(service, account string) (string, bool, error)
 	Set(service, account, secret string) error
 	Delete(service, account string) (bool, error)
+	// MaxSecretLen reports the largest secret, in bytes, Set accepts under
+	// (service, account); ok is false when the backend has no practical limit.
+	// keyringBlob needs it because macOS caps a keychain write well below the
+	// size of a multi-provider token blob (see the keyringBlob doc).
+	MaxSecretLen(service, account string) (int, bool)
 }
 
-// Keyring storage stores the whole token blob under one fixed entry.
+// Keyring storage anchors the token blob at one fixed entry, which holds either
+// the whole blob or, once that no longer fits, the manifest naming the chunks
+// that do (see keyringBlob).
 const (
 	keyringService = "zero"
 	keyringAccount = "oauth-tokens"
+)
+
+// Chunked keyring layout.
+//
+// keyringManifestPrefix marks the anchor entry as a manifest rather than a
+// whole blob. ":" is outside the base64 alphabet, so a stored blob can never
+// begin with this prefix and the two layouts are distinguishable without a
+// schema migration.
+//
+// keyringChunkFamilyA and B name the two generations a write alternates
+// between; keyringMaxChunks bounds both the accounts a read will probe and the
+// blob size the backend will accept.
+const (
+	keyringManifestPrefix = "zc1:"
+	keyringChunkFamilyA   = "a"
+	keyringChunkFamilyB   = "b"
+	keyringMaxChunks      = 64
+	// keyringMinChunkLen is the smallest per-entry budget worth splitting into.
+	// Below it the service and account names have eaten the command line, so no
+	// chunk count would fit the blob and the store says so instead of writing
+	// hundreds of tiny entries.
+	keyringMinChunkLen = 256
 )
 
 // Store persists OAuth tokens (provider + MCP namespaces) as one JSON blob,
@@ -256,11 +289,21 @@ func (s *Store) Load(key string) (Token, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, err := s.readState()
+	var (
+		token Token
+		ok    bool
+	)
+	err := s.blob.withLock(s.now, func() error {
+		state, err := s.readState()
+		if err != nil {
+			return err
+		}
+		token, ok = state.Tokens[key]
+		return nil
+	})
 	if err != nil {
 		return Token{}, false, err
 	}
-	token, ok := state.Tokens[key]
 	return token, ok, nil
 }
 
@@ -292,7 +335,12 @@ func (s *Store) Delete(key string) (bool, error) {
 func (s *Store) Status(prefix string) ([]Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, err := s.readState()
+	var state storeFile
+	err := s.blob.withLock(s.now, func() error {
+		var err error
+		state, err = s.readState()
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -469,8 +517,29 @@ func (b fileBlob) withLock(now func() time.Time, fn func() error) error {
 
 func (b fileBlob) location() string { return b.path }
 
-// keyringBlob persists the blob in the OS keyring as a single base64 entry
-// (base64 keeps the multi-line JSON a single, control-character-free value).
+// keyringBlob persists the blob in the OS keyring, base64-encoded (base64 keeps
+// the multi-line JSON a single, control-character-free value).
+//
+// macOS caps a keychain write at securityMaxLine bytes, because the secret
+// rides inside a `security -i` command line, and the blob holds every provider
+// and MCP login at once. That budget is 4039 bytes of base64 under the anchor
+// account, which is 3027 bytes of JSON: one OIDC login carrying an access
+// token, an ID token and a refresh token can fill it on its own, and two
+// reliably do. Storing the blob as one entry therefore turned a second login
+// into a hard "secret too large" failure with nothing saved.
+//
+// So a blob that does not fit is split across numbered entries and the anchor
+// account holds a manifest instead. Chunks live under two alternating
+// generations ("families"): a write fills the family that is NOT live, then
+// replaces the manifest. That single Set is the commit point, so until it lands
+// read() still returns the previous generation intact and a crash mid-write
+// loses nothing. Cleanup of the retired generation runs after the commit and
+// correctness never depends on it: the manifest states how many chunks each
+// family holds, and it is only ever written with a count it has already made
+// true, so a failed cleanup over-states and the next write deletes the excess.
+//
+// Backends with no size limit (Linux secret-tool reads the secret from stdin)
+// never reach the chunked layout, so their stored form is unchanged.
 type keyringBlob struct {
 	kr      KeyringClient
 	service string
@@ -480,25 +549,196 @@ type keyringBlob struct {
 	lockPath string
 }
 
+// keyringManifest describes which chunk generation is live and how many entries
+// each generation currently holds.
+type keyringManifest struct {
+	live   string
+	counts map[string]int
+	digest string
+}
+
 func (b keyringBlob) read() ([]byte, bool, error) {
-	enc, ok, err := b.kr.Get(b.service, b.account)
+	head, ok, err := b.kr.Get(b.service, b.account)
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+	head = strings.TrimSpace(head)
+	if !strings.HasPrefix(head, keyringManifestPrefix) {
+		data, err := decodeKeyringBlob(head)
+		return data, err == nil, err
+	}
+	manifest, err := parseKeyringManifest(head)
 	if err != nil {
-		return nil, false, fmt.Errorf("oauth: decode keyring token blob: %w", err)
+		return nil, false, err
+	}
+	count := manifest.counts[manifest.live]
+	var encoded strings.Builder
+	for index := range count {
+		part, ok, err := b.kr.Get(b.service, b.chunkAccount(manifest.live, index))
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			return nil, false, fmt.Errorf("oauth: keyring token blob at %s is missing chunk %d of %d", b.location(), index+1, count)
+		}
+		encoded.WriteString(strings.TrimSpace(part))
+	}
+	data, err := decodeKeyringBlob(encoded.String())
+	if err != nil {
+		return nil, false, err
+	}
+	// The corruption this guards against is the one that motivated chunking:
+	// `security -i` splits an overlong line into two garbage commands rather
+	// than refusing it, so a stored chunk can come back truncated.
+	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != manifest.digest {
+		return nil, false, fmt.Errorf("oauth: keyring token blob at %s failed its integrity check; the entries are inconsistent, so log in again", b.location())
 	}
 	return data, true, nil
 }
 
 func (b keyringBlob) write(data []byte) error {
-	return b.kr.Set(b.service, b.account, base64.StdEncoding.EncodeToString(data))
+	encoded := base64.StdEncoding.EncodeToString(data)
+	// Read the live manifest before overwriting anything: it names the
+	// generation this write must avoid, and the counts cleanup needs afterwards.
+	previous, err := b.readManifest()
+	if err != nil {
+		return err
+	}
+	if budget, bounded := b.kr.MaxSecretLen(b.service, b.account); !bounded || len(encoded) <= budget {
+		return b.writeWhole(encoded, previous)
+	}
+	return b.writeChunked(data, encoded, previous)
+}
+
+// writeWhole stores the blob under the anchor account, the layout every backend
+// without a size limit uses and the one a shrinking store returns to. The Set
+// is the commit point; the chunks it retires are deleted after it lands.
+func (b keyringBlob) writeWhole(encoded string, previous keyringManifest) error {
+	if err := b.kr.Set(b.service, b.account, encoded); err != nil {
+		return err
+	}
+	err := b.deleteChunkRange(keyringChunkFamilyA, 0, previous.counts[keyringChunkFamilyA], nil)
+	if err = b.deleteChunkRange(keyringChunkFamilyB, 0, previous.counts[keyringChunkFamilyB], err); err != nil {
+		return fmt.Errorf("oauth: tokens were saved, but a superseded keyring entry at %s could not be removed: %w", b.location(), err)
+	}
+	return nil
+}
+
+func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringManifest) error {
+	family := keyringChunkFamilyA
+	if previous.live == keyringChunkFamilyA {
+		family = keyringChunkFamilyB
+	}
+	// Size every chunk against the LONGEST account name the family can produce.
+	// On macOS the account shares the command line with the secret, so a budget
+	// derived from chunk 0 would overflow once the index grew a digit; pinning
+	// it to the highest index keeps the size independent of the final count.
+	budget, bounded := b.kr.MaxSecretLen(b.service, b.chunkAccount(family, keyringMaxChunks-1))
+	if !bounded || budget < keyringMinChunkLen {
+		return fmt.Errorf("oauth: keyring entries at %s hold at most %d bytes, too small to store the token blob; use file storage", b.location(), budget)
+	}
+	if len(encoded) > budget*keyringMaxChunks {
+		return fmt.Errorf("oauth: token blob is %d encoded bytes, over the %d the keyring at %s can hold; use file storage", len(encoded), budget*keyringMaxChunks, b.location())
+	}
+
+	count := (len(encoded) + budget - 1) / budget
+	// Make the manifest cover the range this write is about to occupy BEFORE
+	// occupying it. Without that, a write that dies partway through leaves
+	// chunks above the count the manifest records, and no later cleanup would
+	// know to delete them: a fragment of a token blob would sit in the keychain
+	// for good. Raising the count of a generation that is not live changes
+	// nothing a reader looks at, so the reservation is invisible until the
+	// commit below.
+	if previous.live == "" {
+		// Nothing to reserve against: the anchor still holds the whole blob, so
+		// writing a manifest here would destroy the only copy. Sweep the target
+		// generation instead. This runs once, when a store first outgrows a
+		// single entry, and only has anything to find if an earlier shrink was
+		// interrupted before its cleanup finished.
+		if err := b.deleteChunkRange(family, count, keyringMaxChunks, nil); err != nil {
+			return err
+		}
+	} else if count > previous.counts[family] {
+		reservation := keyringManifest{live: previous.live, counts: maps.Clone(previous.counts), digest: previous.digest}
+		reservation.counts[family] = count
+		if err := b.kr.Set(b.service, b.account, formatKeyringManifest(reservation)); err != nil {
+			return err
+		}
+		previous.counts[family] = count
+	}
+
+	for index := range count {
+		offset := index * budget
+		if err := b.kr.Set(b.service, b.chunkAccount(family, index), encoded[offset:min(offset+budget, len(encoded))]); err != nil {
+			return err
+		}
+	}
+	// This generation is not live yet, so trimming a longer previous one of it
+	// now is safe, and it makes the count the manifest is about to publish true
+	// before the manifest claims it.
+	if err := b.deleteChunkRange(family, count, previous.counts[family], nil); err != nil {
+		return err
+	}
+
+	next := keyringManifest{live: family, counts: maps.Clone(previous.counts), digest: hexDigest(data)}
+	next.counts[family] = count
+	if err := b.kr.Set(b.service, b.account, formatKeyringManifest(next)); err != nil {
+		return err
+	}
+
+	// Committed. The retired generation is now unreferenced, so deleting it is
+	// secret hygiene rather than correctness. Its count deliberately stays in
+	// the manifest afterwards: over-stating is the safe direction, it saves the
+	// next write a reservation, and if a delete here failed the next cleanup
+	// retries the same range.
+	retired := previous.live
+	if retired == "" || next.counts[retired] == 0 {
+		return nil
+	}
+	if err := b.deleteChunkRange(retired, 0, next.counts[retired], nil); err != nil {
+		return fmt.Errorf("oauth: tokens were saved, but a superseded keyring entry at %s could not be removed: %w", b.location(), err)
+	}
+	return nil
+}
+
+// readManifest returns the live manifest, or a zero manifest when the anchor
+// holds a whole blob or nothing at all. A malformed manifest is an error: the
+// chunks it names are unreachable without it, and overwriting it would strand
+// them in the keychain.
+func (b keyringBlob) readManifest() (keyringManifest, error) {
+	head, ok, err := b.kr.Get(b.service, b.account)
+	if err != nil || !ok {
+		return keyringManifest{counts: map[string]int{}}, err
+	}
+	head = strings.TrimSpace(head)
+	if !strings.HasPrefix(head, keyringManifestPrefix) {
+		return keyringManifest{counts: map[string]int{}}, nil
+	}
+	return parseKeyringManifest(head)
+}
+
+// deleteChunkRange removes chunks [from, to) of family, joining onto prior. It
+// takes prior so the two-family cleanup in writeWhole reports the first failure
+// without either delete being skipped.
+func (b keyringBlob) deleteChunkRange(family string, from, to int, prior error) error {
+	for index := from; index < to; index++ {
+		account := b.chunkAccount(family, index)
+		if _, err := b.kr.Delete(b.service, account); err != nil && prior == nil {
+			prior = fmt.Errorf("remove %s: %w", account, err)
+		}
+	}
+	return prior
+}
+
+func (b keyringBlob) chunkAccount(family string, index int) string {
+	return b.account + "." + family + "." + strconv.Itoa(index)
 }
 
 // withLock serializes the keyring's read-modify-write. Store.mu covers the
 // in-process case; lockPath (when set) adds cross-process exclusion so two
 // processes can't both read the blob, modify, and write — dropping a token.
+// The chunked layout needs it for a second reason: it makes a write's chunk
+// fills and its manifest commit one indivisible sequence to other processes.
 func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 	if b.lockPath == "" {
 		return fn()
@@ -512,6 +752,58 @@ func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 }
 
 func (b keyringBlob) location() string { return "keyring:" + b.service + "/" + b.account }
+
+func decodeKeyringBlob(encoded string) ([]byte, error) {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: decode keyring token blob: %w", err)
+	}
+	return data, nil
+}
+
+func hexDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// formatKeyringManifest renders "zc1:<live>:<countA>:<countB>:<sha256hex>".
+func formatKeyringManifest(m keyringManifest) string {
+	return keyringManifestPrefix + m.live +
+		":" + strconv.Itoa(m.counts[keyringChunkFamilyA]) +
+		":" + strconv.Itoa(m.counts[keyringChunkFamilyB]) +
+		":" + m.digest
+}
+
+func parseKeyringManifest(head string) (keyringManifest, error) {
+	malformed := func(detail string) (keyringManifest, error) {
+		return keyringManifest{}, fmt.Errorf("oauth: keyring token manifest %s", detail)
+	}
+	fields := strings.Split(strings.TrimPrefix(head, keyringManifestPrefix), ":")
+	if len(fields) != 4 {
+		return malformed("is malformed")
+	}
+	m := keyringManifest{live: fields[0], counts: map[string]int{}, digest: fields[3]}
+	if m.live != keyringChunkFamilyA && m.live != keyringChunkFamilyB {
+		return malformed(fmt.Sprintf("names unknown generation %q", m.live))
+	}
+	for i, family := range []string{keyringChunkFamilyA, keyringChunkFamilyB} {
+		count, err := strconv.Atoi(fields[i+1])
+		if err != nil || count < 0 || count > keyringMaxChunks {
+			return malformed(fmt.Sprintf("has invalid chunk count %q", fields[i+1]))
+		}
+		m.counts[family] = count
+	}
+	if m.counts[m.live] == 0 {
+		return malformed("names a generation with no chunks")
+	}
+	if len(m.digest) != hex.EncodedLen(sha256.Size) {
+		return malformed("has an invalid digest")
+	}
+	if _, err := hex.DecodeString(m.digest); err != nil {
+		return malformed("has an invalid digest")
+	}
+	return m, nil
+}
 
 // FormatStatuses renders a human-readable status table without leaking token
 // material.
