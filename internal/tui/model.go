@@ -101,6 +101,7 @@ type model struct {
 	peerPendingApproval  *peermsg.InboundMessage
 	sandboxStore         *sandbox.GrantStore
 	mcpConfig            config.MCPConfig
+	mcpSkipped           []internalmcp.SkippedServer
 	mcpPermissionStore   *internalmcp.PermissionStore
 	mcpTokenStore        *internalmcp.TokenStore
 	mcpCommand           func(context.Context, []string) MCPCommandResult
@@ -974,6 +975,7 @@ func newModel(ctx context.Context, options Options) model {
 		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
+		mcpSkipped:                  options.MCPSkipped,
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
