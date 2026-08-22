@@ -26,12 +26,14 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 // Env vars the bridge reads for its bearer token.
 const (
-	EnvToken     = "ZERO_DAEMON_REMOTE_TOKEN"
-	EnvTokenFile = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+	EnvToken             = remotetoken.EnvToken
+	EnvTokenFile         = remotetoken.EnvTokenFile
+	EnvTokenFileResolved = remotetoken.EnvTokenFileResolved
 )
 
 // ErrUnauthorized is returned when a token does not match.
@@ -66,14 +68,32 @@ func (a *TokenAuthenticator) Authenticate(token string) error {
 	return ErrUnauthorized
 }
 
-// TokenFromEnv resolves the bridge token from EnvToken, or a file named by
-// EnvTokenFile. It never logs the token.
+// TokenFilePathFromEnv returns the configured token-file pointer exactly as the
+// operator set it, or "" when the variable is unset or holds only whitespace.
+//
+// The value is a PATHNAME, and every consumer of it — os.ReadFile here, the
+// canonicalization below, the sandbox's protected-credential list — must agree
+// on which bytes name the file. A filename may legitimately begin or end with a
+// space, so trimming the value would make this boundary read one file while the
+// deny rules protect another. A value that is only whitespace still reads as
+// unset, which is what a blank variable means.
+func TokenFilePathFromEnv() string {
+	configured := os.Getenv(EnvTokenFile)
+	if strings.TrimSpace(configured) == "" {
+		return ""
+	}
+	return configured
+}
+
+// TokenFromEnv resolves the bridge token from EnvToken, or the file source
+// selected by EnvTokenFile. After daemon startup resolution it reads the pinned
+// object rather than re-following a mutable configured symlink.
 func TokenFromEnv() (string, error) {
 	if t := strings.TrimSpace(os.Getenv(EnvToken)); t != "" {
 		return t, nil
 	}
-	if file := strings.TrimSpace(os.Getenv(EnvTokenFile)); file != "" {
-		data, err := os.ReadFile(file)
+	if source, selected := remotetoken.SourceFromEnv(); selected {
+		data, err := os.ReadFile(source.ReadPath())
 		if err != nil {
 			return "", fmt.Errorf("remote: read token file: %w", err)
 		}
@@ -84,6 +104,29 @@ func TokenFromEnv() (string, error) {
 		return t, nil
 	}
 	return "", fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
+}
+
+// CanonicalizeTokenFileEnv records both identities of the selected token file
+// before workers start: the operator-configured absolute spelling and the
+// symlink-resolved object this daemon authenticated against. Keeping both
+// prevents worker CWD changes from retargeting a relative value without losing
+// the configured authority boundary across replacement and restart.
+//
+// It is a deliberate no-op when EnvToken supplies the token: TokenFromEnv
+// prefers the inline value, so an unused (even dangling) file pointer must not
+// change the outcome or fail the start.
+func CanonicalizeTokenFileEnv() error {
+	source, selected, err := remotetoken.ResolveSource()
+	if err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
+	if !selected {
+		return nil
+	}
+	if err := remotetoken.PersistSource(source); err != nil {
+		return fmt.Errorf("remote: persist token file source: %w", err)
+	}
+	return nil
 }
 
 // Attestation is an optional post-token hook (e.g. workload attestation). The

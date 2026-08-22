@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -678,6 +679,7 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 	// Seatbelt's last-match-wins evaluation without hiding ordinary extension
 	// files.
 	rules = append(rules, denyReadRulesInsideCarveouts(profile.FileSystem)...)
+	rules = append(rules, credentialDenyWriteRules(profile.FileSystem, policy)...)
 	rules = append(rules, writeRootCarveoutDenyRules(profile.FileSystem)...)
 	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
@@ -804,6 +806,13 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 	return "^" + escapedRoot + "/" + escapedName + "(/.*)?$"
 }
 
+// denyReadRules emits seatbelt deny rules for the profile's read-denied paths.
+// The rules name paths — `(literal …)` for files, `(subpath …)` for directories
+// — because that is the whole of seatbelt's vocabulary here. A user-configured
+// DenyRead can therefore still be bypassed through a hard-link name created
+// after profile construction. Automatic remote-token protection fails closed
+// before launch whenever the token can be linked into a shell-writable root;
+// in-process tools close inode aliases separately (see protectedPathDenied).
 func denyReadRules(fs FileSystemPolicy) []string {
 	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
 	rules := denySeatbeltPathRules("file-read*", denied)
@@ -899,8 +908,44 @@ func denyWriteRulesFromPaths(paths []string) []string {
 	return denySeatbeltPathRules("file-write*", paths)
 }
 
+// credentialDenyWriteRules write-denies the AUTOMATIC credential entries of
+// DenyRead — the cloud credential stores and the remote bridge token file.
+// Denying reads does not imply denying writes, and the broad
+// (allow file-write* ...) above covers every workspace root plus the default
+// temp roots, so a credential file under one of those stayed truncatable and
+// replaceable: enough to deny service, or to swap the secret the next process
+// reads. denySeatbeltPathRules keeps emitting read + unlink denials for the
+// whole DenyRead list, so a user-configured read-denied path that their build
+// legitimately writes (a cache or generated directory) stays writable — only
+// Zero's own credential entries lose the write direction.
+func credentialDenyWriteRules(fs FileSystemPolicy, _ Policy) []string {
+	automatic := dedupeStrings(append(append([]string{}, fs.DenyReadIfExists...), protectedCredentialPaths()...))
+	if len(automatic) == 0 {
+		return nil
+	}
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	paths := make([]string, 0, len(automatic))
+	for _, path := range automatic {
+		// Only paths the profile actually read-denies: credentialDenyReadPaths
+		// already drops AllowRead opt-outs, and this keeps the two lists in step.
+		if slices.Contains(denied, path) {
+			paths = append(paths, path)
+		}
+	}
+	return denyWriteRulesFromPaths(dedupeStrings(paths))
+}
+
 func denySeatbeltPathRules(action string, paths []string) []string {
-	return denySeatbeltNormalizedPathRules(action, normalizeProfilePaths(paths))
+	protected := protectedCredentialPaths()
+	resolved := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if slices.Contains(protected, path) {
+			resolved = append(resolved, path)
+		} else if normalized := normalizeProfilePath(path); normalized != "" {
+			resolved = append(resolved, normalized)
+		}
+	}
+	return denySeatbeltNormalizedPathRules(action, resolved)
 }
 
 func denySeatbeltNormalizedPathRules(action string, paths []string) []string {
@@ -1045,10 +1090,10 @@ func seatbeltPlatformRuntimeRules() string {
 		`  (literal "/dev/zero"))`,
 		`(allow file-read-data file-test-existence file-write-data (subpath "/dev/fd"))`,
 		`(allow file-read* file-test-existence file-write-data file-ioctl (literal "/dev/dtracehelper"))`,
-		`(allow file-read* file-test-existence file-write* (subpath "/tmp"))`,
-		`(allow file-read* file-write* (subpath "/private/tmp"))`,
-		`(allow file-read* file-write* (subpath "/var/tmp"))`,
-		`(allow file-read* file-write* (subpath "/private/var/tmp"))`,
+		`(allow file-read* file-test-existence (subpath "/tmp"))`,
+		`(allow file-read* (subpath "/private/tmp"))`,
+		`(allow file-read* (subpath "/var/tmp"))`,
+		`(allow file-read* (subpath "/private/var/tmp"))`,
 		`(allow file-read* file-test-existence`,
 		`  (literal "/System/Library/CoreServices")`,
 		`  (literal "/System/Library/CoreServices/.SystemVersionPlatform.plist")`,
@@ -1106,14 +1151,11 @@ func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
 		"GITLAB_TOKEN",
 		"GH_TOKEN",
 		"ZERO_WEBSEARCH_API_KEY",
-		"ZERO_DAEMON_REMOTE_TOKEN",
-		// The file form of the same bridge token. TokenFromEnv accepts either,
-		// so scrubbing only the inline variable left the pointer readable, and
-		// the default sandbox posture is read-all. There is no fallback
-		// location to guess at, the path comes from this variable alone, so
-		// removing it closes the leak rather than half of it. Same reasoning as
-		// GOOGLE_APPLICATION_CREDENTIALS below.
-		"ZERO_DAEMON_REMOTE_TOKEN_FILE",
+		daemonRemoteTokenEnv,
+		// Both identities of the file-backed bridge token are internal
+		// authority pointers. Neither belongs in an agent-controlled child.
+		daemonRemoteTokenFileEnv,
+		daemonRemoteTokenFileResolvedEnv,
 	}
 	for _, descriptor := range providercatalog.All() {
 		for _, key := range descriptor.AuthEnvVars {

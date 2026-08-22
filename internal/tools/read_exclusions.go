@@ -29,3 +29,24 @@ func sandboxReadExcluder(engine *sandbox.Engine) readExcluder {
 	}
 	return readExcluder{file: rx.PathExcluded, dir: rx.DirExcluded}
 }
+
+// sandboxReadExcluderWithin is sandboxReadExcluder for callers that can name
+// their workspace root, and it differs in one way that matters: when there is
+// no engine it still excludes the automatic protected credentials.
+//
+// Registry.Run funnels into RunWithOptions with empty options, so "no engine"
+// is a real production path (MCP, legacy callers), not just a test shape. The
+// protected-credential set is derived from this process's environment rather
+// than from a policy, so there is no engine to consult for it and no reason for
+// that path to disclose the bridge bearer token. Policy-driven DenyRead still
+// requires an engine — without one there is no policy to apply.
+func sandboxReadExcluderWithin(engine *sandbox.Engine, workspaceRoot string) readExcluder {
+	if engine != nil {
+		return sandboxReadExcluder(engine)
+	}
+	rx := sandbox.ProtectedCredentialExclusions(workspaceRoot)
+	if !rx.Active() {
+		return readExcluder{}
+	}
+	return readExcluder{file: rx.PathExcluded, dir: rx.DirExcluded}
+}

@@ -1,6 +1,10 @@
 package tools
 
-import "path/filepath"
+import (
+	"path/filepath"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
+)
 
 // MutationTargets returns the workspace-relative paths a tool call will write to,
 // so the session layer can snapshot their before-state for safe rewind. It is a
@@ -24,6 +28,10 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 	case "apply_patch":
 		// Resolve the patch via the SAME alias key list apply_patch uses.
 		patch, err := aliasedStringArg(args, []string{"patch", "diff"}, "", true, false)
+		if err != nil {
+			return nil
+		}
+		patchPaths, err := sandbox.PatchHeaderPaths(patch)
 		if err != nil {
 			return nil
 		}
@@ -54,10 +62,10 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 		// Enforce the same workspace confinement apply_patch applies (against the
 		// resolved apply dir), so a patch with a traversal path (../x) never yields
 		// an out-of-workspace target.
-		if err := validatePatchPaths(applyRoot, patch); err != nil {
+		if err := validatePatchPaths(applyRoot, patchPaths); err != nil {
 			return nil
 		}
-		paths := changedFilesFromPatch(relativeRoot, patch)
+		paths := changedFilesFromPatch(relativeRoot, patchPaths)
 		if len(paths) == 0 {
 			return nil
 		}

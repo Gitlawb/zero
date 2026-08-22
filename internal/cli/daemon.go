@@ -64,6 +64,11 @@ Commands:
                             daemon. Requires a bearer token in $ZERO_DAEMON_REMOTE_TOKEN
                             (or $ZERO_DAEMON_REMOTE_TOKEN_FILE). --bundle-dir enables
                             git-bundle uploads, extracted into per-link work trees.
+                            An inline token takes precedence, so a stale token-file pointer is intentionally not protected as the live credential.
+                            macOS shell commands require the inline token because
+                            Seatbelt cannot deny inode aliases. Linux accepts a token
+                            file only when it has no hard-link aliases and no
+                            shell-writable root shares its filesystem.
   link --remote <host:port> --repo <dir> --id <name> [--out <file>]
                             Upload repo's git history to the remote as a bundle and
                             print the extracted remote path. --out saves a session
@@ -517,6 +522,12 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 	// Fail closed: TLS cert/key + a bearer token are mandatory.
 	tlsConfig, err := remote.ServerTLSConfig(certFile, keyFile)
 	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	// Carry both the configured absolute spelling and the resolved startup object
+	// before workers inherit the environment. The configured identity reserves the
+	// authority boundary across restart; the resolved identity protects this run.
+	if err := remote.CanonicalizeTokenFileEnv(); err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	token, err := remote.TokenFromEnv()
