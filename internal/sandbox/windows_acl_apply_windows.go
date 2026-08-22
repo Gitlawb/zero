@@ -26,11 +26,44 @@ type windowsACLSnapshot struct {
 	Materialized bool
 }
 
+// windowsACLStampRequest asks the apply to write the runtime setup stamp THROUGH
+// THE SAME HANDLE it just applied the capability ACE through.
+//
+// The stamp exists to prove that the directory a command later uses is the
+// object setup granted the ACE to. Writing it afterwards by pathname cannot
+// prove that, however carefully the second open is done: the ACE goes on
+// through a rooted handle, that handle closes, network setup runs, and only then
+// does the marker write re-open the name. A local process that can reach the
+// user-owned runtime tree can remove the predictable root in that window and
+// put an ordinary directory in its place. The re-open correctly rejects a
+// junction, but an ordinary replacement is not a reparse point and is not the
+// ACL-bearing object either, so it collects a valid-looking stamp. Marker
+// validation then passes over a directory with no capability ACE, and the next
+// WRITE_RESTRICTED command fails its cache and TMP writes with setup insisting
+// it is current.
+//
+// Closing that means never naming the target again after the ACE lands. The
+// hash is known before the apply, so the stamp can simply ride along.
+type windowsACLStampRequest struct {
+	Root     string
+	PlanHash string
+}
+
+// windowsACLStampSwapHook fires in the exact window this design closes: after
+// the capability ACE is on the object and before the stamp is written. Nil in
+// production; a test uses it to replace the runtime root with an ordinary
+// directory, which is what a local process would do.
+var windowsACLStampSwapHook func(path string)
+
 func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
+	return applyWindowsACLPlanWithStamp(plan, nil)
+}
+
+func applyWindowsACLPlanWithStamp(plan WindowsACLPlan, stamp *windowsACLStampRequest) (func() error, error) {
 	groups := groupWindowsACLPlanByPath(plan)
 	snapshots := make([]windowsACLSnapshot, 0, len(groups))
 	for _, group := range groups {
-		snapshot, applied, err := applyWindowsACLPathGroup(group)
+		snapshot, applied, err := applyWindowsACLPathGroupWithStamp(group, stamp)
 		if err != nil {
 			rollbackErr := rollbackWindowsACLSnapshots(snapshots)
 			if rollbackErr != nil {
@@ -73,6 +106,10 @@ func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {
 }
 
 func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bool, error) {
+	return applyWindowsACLPathGroupWithStamp(group, nil)
+}
+
+func applyWindowsACLPathGroupWithStamp(group windowsACLPathGroup, stamp *windowsACLStampRequest) (windowsACLSnapshot, bool, error) {
 	path := strings.TrimSpace(group.Path)
 	if path == "" || len(group.Entries) == 0 {
 		return windowsACLSnapshot{}, false, nil
@@ -138,6 +175,17 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 	// The handle has served its purpose (read+write bound to one object) and is
 	// closed now — rollback re-opens no-follow rather than holding a handle for
 	// the whole sandbox lifetime, since one caller discards the rollback closure.
+	// BEFORE THE HANDLE CLOSES, and only for the target the stamp names. This is
+	// the whole point: the ACE and the stamp land on one kernel object with no
+	// pathname resolution in between.
+	if stamp != nil && windowsSameRuntimeRootPath(stamp.Root, path) {
+		if windowsACLStampSwapHook != nil {
+			windowsACLStampSwapHook(path)
+		}
+		if err := writeWindowsRuntimeStampToDirectoryHandle(handle, stamp.PlanHash); err != nil {
+			return fail(fmt.Errorf("stamp windows ACL target %s: %w", path, err))
+		}
+	}
 	_ = windows.CloseHandle(handle)
 	return windowsACLSnapshot{Path: path, Descriptor: descriptor, Materialized: materialized}, true, nil
 }
@@ -151,6 +199,24 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 // is exactly the redirection this guard exists to prevent. A missing target is
 // surfaced as os.ErrNotExist so the caller's materialize path still fires.
 func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
+	// A RUNTIME ROOT IS OPENED BY HANDLE, NOT BY NAME.
+	//
+	// FILE_FLAG_OPEN_REPARSE_POINT below protects only the FINAL component; every
+	// ancestor in the pathname is resolved normally. The runtime tail is the one
+	// part of the tree Zero creates and therefore the one part an unprivileged
+	// local user can predict and pre-empt, and junctions need no privilege, so a
+	// swap at an owned ancestor between the last check and this open redirects the
+	// elevated capability ACL into a directory of their choosing.
+	//
+	// Everything else here is the user's own tree, where an ancestor reparse point
+	// is ordinary configuration and following it is correct.
+	if _, _, owned := windowsSandboxRuntimeOwnedTail(path); owned {
+		handle, err := openWindowsRuntimeTailDirectory(path, windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_TRAVERSE)
+		if err != nil {
+			return 0, false, err
+		}
+		return handle, true, nil
+	}
 	utf16Path, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, false, fmt.Errorf("encode windows ACL target %s: %w", path, err)

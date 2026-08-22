@@ -100,10 +100,31 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 	}
 	profile := sandbox.PermissionProfileFromPolicy(workspaceRoot, doctorSandboxPolicy(sandboxConfig), scope)
 	setupConfig := sandbox.WindowsSandboxSetupConfig{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        workspaceRoot,
-		WorkspaceRoots:    []string{workspaceRoot},
-		PermissionProfile: profile,
+		SandboxHome:    sandboxHome,
+		CommandCWD:     workspaceRoot,
+		WorkspaceRoots: []string{workspaceRoot},
+		// The same augmentation setup and the command plan apply, so doctor
+		// fingerprints what a real command fingerprints. Checking the bare profile
+		// made doctor call a correctly prepared machine "out of date", which is the
+		// mismatch this pairing exists to close. Safe to resolve in this process:
+		// doctor runs in the operator's shell, not behind the sandbox TEMP
+		// redirection that stops the runner deriving these for itself.
+		//
+		// The RECORDED runtime root goes on the profile as well, because that is
+		// what makes the stamp check run at all. Without it profile.Runtime is nil,
+		// validateWindowsSandboxRuntimeStamp returns nil early, and doctor reported
+		// a healthy sandbox on a machine whose runtime tree had been evicted and
+		// silently recreated without the capability ACE -- precisely the state the
+		// stamp exists to catch, and the state where every sandboxed command then
+		// fails with nothing explaining why.
+		//
+		// Read from the marker rather than selected, so doctor takes no lease and
+		// creates nothing. A marker from an older schema records no root, which
+		// leaves this exactly as it was.
+		PermissionProfile: sandbox.WindowsSandboxProfileWithRuntimeRoots(
+			sandbox.PermissionProfileWithRuntimeRoot(profile, sandbox.WindowsSandboxRecordedRuntimeRoot(sandboxHome)),
+			[]string{workspaceRoot},
+		),
 	}
 	if err := sandbox.ValidateWindowsSandboxSetupMarker(setupConfig); err != nil {
 		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but Windows sandbox setup is missing or out of date: %v.", backend.Name, err), map[string]any{
