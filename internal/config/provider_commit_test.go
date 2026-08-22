@@ -163,6 +163,26 @@ func TestCommitProviderProfileReturnsCommittedResultWhenLockReleaseFails(t *test
 	}
 }
 
+func TestProviderOperationDoesNotClaimSkippedPublicationOnReleaseFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	oldAcquire := acquireProviderWriteLock
+	// This test replaces a package-level lock seam and must not run in parallel.
+	acquireProviderWriteLock = func(string) (func() error, error) {
+		return func() error { return errors.New("injected release failure") }, nil
+	}
+	t.Cleanup(func() { acquireProviderWriteLock = oldAcquire })
+
+	err := StoreProviderCredential(path, "work", "sk-secret")
+	if err == nil || !strings.Contains(err.Error(), "releasing the provider config/key transaction lock failed") {
+		t.Fatalf("StoreProviderCredential error = %v, want release failure", err)
+	}
+	if strings.Contains(err.Error(), "was committed") {
+		t.Fatalf("skipped publication was reported as committed: %v", err)
+	}
+}
+
 // KeepStoredKey is the path that must not touch the store at all: the profile
 // already references a credential this write is not replacing.
 func TestCommitProviderProfileKeepStoredKeyLeavesStoreUntouched(t *testing.T) {
@@ -253,12 +273,12 @@ func TestCommitProviderProfileConcurrentCaseVariantsKeepOneKey(t *testing.T) {
 	if key != keys[committed] {
 		t.Fatalf("stored key = %q, want %q — the rejected write replaced it", key, keys[committed])
 	}
-	names, err = PersistedProviderNames(path)
+	providers, err := persistedProviders(path)
 	if err != nil {
-		t.Fatalf("PersistedProviderNames() error = %v", err)
+		t.Fatalf("persistedProviders() error = %v", err)
 	}
-	if len(names) != 1 || names[0] != committed {
-		t.Fatalf("persisted rows = %v, want only %q", names, committed)
+	if len(providers) != 1 || providers[0].Name != committed {
+		t.Fatalf("persisted rows = %v, want only %q", providers, committed)
 	}
 }
 
@@ -539,6 +559,13 @@ func TestDeleteResolvedProviderCredentialsSerializesReassignment(t *testing.T) {
 	}
 	if key, ok, err := store.Get("work-acme"); err != nil || !ok || key != "new-key" {
 		t.Fatalf("reassigned credential = %q ok=%v err=%v, want new-key", key, ok, err)
+	}
+	final, err := loadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Providers) != 1 || !final.Providers[0].APIKeyStored {
+		t.Fatalf("final config = %+v, want one row with apiKeyStored", final.Providers)
 	}
 }
 

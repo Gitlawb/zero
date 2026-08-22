@@ -360,9 +360,9 @@ func TestCompleteDeviceLoginBeforeSaveFailurePreservesPreviousToken(t *testing.T
 	}
 	wantErr := errors.New("config changed during login")
 	manager, err := NewManager(ManagerOptions{
-		Store:      store,
-		HTTPClient: fp.server.Client(),
-		BeforeSave: func() error { return wantErr },
+		Store:       store,
+		HTTPClient:  fp.server.Client(),
+		CommitToken: func(string, Token) error { return wantErr },
 	})
 	if err != nil {
 		t.Fatal(err)

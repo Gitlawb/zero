@@ -343,7 +343,7 @@ func TestRunAuthLogoutClearsCaseVariantStoredMarker(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestRunAuthLogoutRejectsAmbiguousConfigBeforeCredentialDeletion(t *testing.
 	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +561,7 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
-	store, err := config.ProviderKeyStoreAt(dir)
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +621,7 @@ func TestRunAuthLogoutClearsMarkerForCaseVariantSpelling(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStoreAt(dir)
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
