@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -58,6 +59,49 @@ const (
 	SandboxDenialKindSandbox = "sandbox"
 	SandboxDenialKindNetwork = "network"
 )
+
+// PolicyRefusalMeta marks a Result the registry produced INSTEAD of running the
+// tool, and its value names which gate refused.
+//
+// This exists because output is tool-controlled and therefore cannot classify
+// anything. `bash` preserves arbitrary stdout and stderr on a StatusError for
+// any nonzero exit, so an ALLOWED command that prints "Sandbox block" and exits
+// 1 is indistinguishable, by text, from a sandbox refusal that never ran. The
+// two have opposite meanings for retry and for the failure-streak accounting:
+// one is a command that executed and failed, the other is a command the policy
+// stopped. markStructuredSandboxDenial already states this rule for the sandbox
+// adapter ("Classification is never inferred from stdout or stderr"); this
+// carries the same guarantee across the rest of the pre-execution gates.
+//
+// Set it on every path that returns before the tool runs. A refusal without it
+// reads as an ordinary execution failure, which is the safe direction (retried
+// rather than counted as a denial) but still wrong.
+const PolicyRefusalMeta = "policy_refusal"
+
+// The gates that can refuse before execution. Values are stable strings because
+// they are written into result metadata that session readers persist.
+const (
+	PolicyRefusalSandboxDenied      = "sandbox_denied"
+	PolicyRefusalSandboxApproval    = "sandbox_approval_required"
+	PolicyRefusalPermissionRequired = "permission_required"
+	PolicyRefusalPermissionDenied   = "permission_denied"
+	PolicyRefusalToolNotEnabled     = "tool_not_enabled"
+)
+
+// refusalResult builds the error Result for a gate that refused to run a tool,
+// carrying the marker so classification never has to read Output.
+func refusalResult(output string, category string) Result {
+	result := errorResult(output)
+	result.Meta = map[string]string{PolicyRefusalMeta: category}
+	return result
+}
+
+// IsPolicyRefusalResult reports whether the registry refused this call before
+// the tool ran. Exported so the agent loop classifies from the marker rather
+// than from model-visible text.
+func IsPolicyRefusalResult(result Result) bool {
+	return strings.TrimSpace(result.Meta[PolicyRefusalMeta]) != ""
+}
 
 type Safety struct {
 	SideEffect SideEffect
