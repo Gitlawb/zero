@@ -3,10 +3,13 @@
 package credstore
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func secureTestDirectory(t *testing.T, dir string) {
@@ -97,7 +100,60 @@ func TestFileLockRejectsInsecureExistingLockFile(t *testing.T) {
 	if err := os.WriteFile(store.lockPath(), nil, 0o666); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(store.lockPath(), 0o666); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Set("openai", "secret"); err == nil || !strings.Contains(err.Error(), "unsafe permissions") {
 		t.Fatalf("Set error = %v, want insecure lock rejection", err)
+	}
+}
+
+func TestOpenCredentialLockFileRetriesENOENT(t *testing.T) {
+	dir, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+
+	original := credentialLockOpenat
+	calls := 0
+	// This test replaces a package-level syscall seam and must not run in parallel.
+	credentialLockOpenat = func(directoryFD int, name string, flags int, mode uint32) (int, error) {
+		calls++
+		if calls == 1 {
+			return -1, unix.ENOENT
+		}
+		return unix.Openat(directoryFD, name, flags, mode)
+	}
+	t.Cleanup(func() { credentialLockOpenat = original })
+
+	fd, err := openCredentialLockFile(int(dir.Fd()), "lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Close(fd); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("Openat calls = %d, want 2", calls)
+	}
+}
+
+func TestOpenCredentialLockFileStopsAfterThreeENOENTs(t *testing.T) {
+	original := credentialLockOpenat
+	calls := 0
+	// This test replaces a package-level syscall seam and must not run in parallel.
+	credentialLockOpenat = func(int, string, int, uint32) (int, error) {
+		calls++
+		return -1, unix.ENOENT
+	}
+	t.Cleanup(func() { credentialLockOpenat = original })
+
+	fd, err := openCredentialLockFile(-1, "lock")
+	if fd != -1 || !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("openCredentialLockFile = (%d, %v), want (-1, ENOENT)", fd, err)
+	}
+	if calls != 3 {
+		t.Fatalf("Openat calls = %d, want 3", calls)
 	}
 }
