@@ -399,25 +399,14 @@ func runProvidersRepairConfig(args []string, stdout io.Writer, stderr io.Writer,
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	cfg, err := config.RepairUnnamedProvider(configPath, options.name)
+	// repaired comes from the repair itself. Re-deriving the defaulting rules
+	// here reported activeProvider as the repaired name whenever that value
+	// already belonged to a different row and the fallback had actually named
+	// this one — the command said "Named legacy provider Groq" about a row it
+	// had named "openai".
+	_, repaired, err := config.RepairUnnamedProvider(configPath, options.name)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
-	}
-	repaired := ""
-	for _, provider := range cfg.Providers {
-		if options.name != "" && provider.Name == strings.TrimSpace(options.name) {
-			repaired = provider.Name
-			break
-		}
-	}
-	if repaired == "" {
-		repaired = strings.TrimSpace(options.name)
-		if repaired == "" {
-			repaired = strings.TrimSpace(cfg.ActiveProvider)
-		}
-		if repaired == "" {
-			repaired = "openai"
-		}
 	}
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{"repairedProvider": repaired, "configPath": configPath}); err != nil {

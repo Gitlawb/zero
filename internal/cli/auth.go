@@ -108,6 +108,18 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth openrouter takes no arguments (got %q)", args[0]))
 	}
+	// Two checks, one lifecycle. This one refuses config we can already tell is
+	// unpublishable BEFORE the browser flow mints a live remote credential:
+	// validation lived only inside saveOpenRouterProviderKey, past the
+	// irreversible boundary, so a legacy unnamed or duplicate-name config sent
+	// the user through OpenRouter's authorization and then handed back an
+	// orphaned key with a nonzero exit. The sibling chatgpt and login flows check
+	// here too. The second check stays where it is, immediately before
+	// EnsureCatalogProvider, because the config can change while the browser flow
+	// is open.
+	if err := preflightAuthLogin(deps); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
 	key, err := deps.openRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 		Out:        stdout,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},

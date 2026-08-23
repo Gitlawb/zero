@@ -1216,9 +1216,16 @@ func TestRemoveProviderPublishesRepairWhileUnnamedProblemRemains(t *testing.T) {
 func TestRepairUnnamedProviderRejectsRepairThatIntroducesDuplicate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: ""}, {Name: "work"}}}, 0o600)
-	_, err := RepairUnnamedProvider(path, "WORK")
-	if err == nil || !strings.Contains(err.Error(), "ambiguous persisted provider names") {
-		t.Fatalf("error = %v, want newly introduced duplicate rejection", err)
+	_, _, err := RepairUnnamedProvider(path, "WORK")
+	// The collision is now caught BEFORE the candidate config is built, so the
+	// message names the row that owns the identity instead of reporting an
+	// "ambiguous persisted provider names" state the file never had. The
+	// rejection and the untouched file are unchanged.
+	if err == nil || !strings.Contains(err.Error(), `persisted provider "work" already uses that identity`) {
+		t.Fatalf("error = %v, want a collision rejection naming the owning row", err)
+	}
+	if !strings.Contains(err.Error(), "--name") {
+		t.Fatalf("error = %v, want the escape flag named", err)
 	}
 	after, readErr := os.ReadFile(path)
 	if readErr != nil || !bytes.Equal(after, before) {
@@ -1333,7 +1340,7 @@ func TestRepairUnnamedProviderPreservesLegacyNameResolution(t *testing.T) {
 			Providers:      []ProviderProfile{{Name: "  ", Model: "legacy-model"}},
 			MaxTurns:       17,
 		}, 0o600)
-		cfg, err := RepairUnnamedProvider(path, "")
+		cfg, _, err := RepairUnnamedProvider(path, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1354,7 +1361,7 @@ func TestRepairUnnamedProviderPreservesLegacyNameResolution(t *testing.T) {
 				{Name: "other", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
 			},
 		}, 0o600)
-		cfg, err := RepairUnnamedProvider(path, "work")
+		cfg, _, err := RepairUnnamedProvider(path, "work")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1373,7 +1380,7 @@ func TestRepairUnnamedProviderPreservesLegacyNameResolution(t *testing.T) {
 	t.Run("openai fallback", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
 		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Model: "gpt-4o"}}}, 0o600)
-		cfg, err := RepairUnnamedProvider(path, "")
+		cfg, _, err := RepairUnnamedProvider(path, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1391,7 +1398,7 @@ func TestRepairUnnamedProviderRejectsAmbiguousRepairWithoutWriting(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
 			before := writeConfigFixture(t, path, cfg, 0o600)
-			if _, err := RepairUnnamedProvider(path, ""); err == nil {
+			if _, _, err := RepairUnnamedProvider(path, ""); err == nil {
 				t.Fatal("ambiguous repair succeeded")
 			}
 			after, err := os.ReadFile(path)
@@ -1408,7 +1415,7 @@ func TestRepairUnnamedProviderRejectsAmbiguousRepairWithoutWriting(t *testing.T)
 func TestRepairUnnamedProviderAllowsExplicitUniqueName(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: ""}, {Name: "OPENAI"}}}, 0o600)
-	cfg, err := RepairUnnamedProvider(path, "legacy")
+	cfg, _, err := RepairUnnamedProvider(path, "legacy")
 	if err != nil {
 		t.Fatal(err)
 	}

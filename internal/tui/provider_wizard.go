@@ -475,9 +475,14 @@ type providerWizardState struct {
 	// Edit state: field-level editor for one saved profile.
 	editOriginal config.ProviderProfile
 	editDraft    config.ProviderProfile
-	editCursor   int
-	editField    providerEditField
-	editBuffer   string
+	// editOwner is the provenance of the row being edited, captured when the
+	// edit began. saveManagerEdit consumes it instead of re-deriving ownership
+	// from editOriginal.Name, which is a resolved spelling that says nothing
+	// about which layer produced the row.
+	editOwner  config.ProviderRowOwnership
+	editCursor int
+	editField  providerEditField
+	editBuffer string
 }
 
 func (m model) newProviderWizard() *providerWizardState {

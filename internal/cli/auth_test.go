@@ -502,19 +502,63 @@ func TestRunAuthLogoutRejectsConfigPathFailureBeforeCredentialDeletion(t *testin
 	}
 }
 
-// A legacy duplicate-row config cannot be published, and the rejection must not
-// cost the user the OpenRouter key they were already working with: the capture
-// is validated first, and a rejected publication restores the previous secret
-// rather than deleting the shared entry.
+// Local state that already makes publication impossible must be rejected BEFORE
+// the browser flow mints a live remote credential. Validation used to live only
+// inside saveOpenRouterProviderKey, past that irreversible boundary, so a legacy
+// config sent the user through OpenRouter's authorization and then handed back
+// an orphaned key with a nonzero exit.
+func TestRunAuthOpenRouterRejectsInvalidConfigBeforeAuthorizing(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			t.Error("browser authorization started despite config that cannot be published")
+			return "sk-minted", nil
+		},
+	})
+	if code == exitSuccess {
+		t.Fatalf("exit = %d, want non-zero for a config that cannot be published", code)
+	}
+	if !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("stderr = %q, want the local rejection", stderr.String())
+	}
+	// No key was minted, so nothing is handed back for manual use either.
+	if strings.Contains(stdout.String(), "sk-minted") {
+		t.Fatalf("stdout = %q, want no minted key", stdout.String())
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != seed {
+		t.Fatalf("rejected login rewrote config:\n%s", after)
+	}
+}
+
+// The second check is not redundant with the first: the config can change while
+// the browser flow is open. A legacy duplicate-row config that appears during
+// authorization must still be rejected, and the rejection must not cost the user
+// the OpenRouter key they were already working with — the capture is validated
+// first, and a rejected publication restores the previous secret rather than
+// deleting the shared entry.
 func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
-	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+	// Valid when the command starts, so the preflight before authorization passes.
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
 	store, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
@@ -527,6 +571,10 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
 		userConfigPath: func() (string, error) { return configPath, nil },
 		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			// Another process edits config.json while the browser flow is open.
+			if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+				t.Fatalf("seed the mid-authorization config: %v", err)
+			}
 			return "sk-minted", nil
 		},
 	})

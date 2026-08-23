@@ -741,3 +741,102 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 		}
 	})
 }
+
+// The bare repair used activeProvider as the unnamed row's default name even
+// when that value already selected a DIFFERENT named row. It then proposed a
+// duplicate, rejected its own candidate, left the file unchanged, and reported
+// that the file contained duplicate rows — about a file whose second row has no
+// name at all — without mentioning the --name escape that works.
+//
+// activeProvider is now only a default while it selects no named row, so this
+// case falls through to the "openai" fallback and succeeds. The command also
+// reports the name the row actually got: it used to re-derive the defaulting
+// rules and say "Named legacy provider Groq" about a row named "openai".
+func TestRunProvidersRepairConfigDoesNotProposeAnOwnedActiveName(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"activeProvider":"Groq","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"Groq","provider_kind":"openai","model":"llama"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := runWithDeps([]string{"providers", "repair-config"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		t.Fatalf("bare repair exit=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Named legacy provider openai") {
+		t.Fatalf("repair reported a name the row did not get: %q", stdout.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "openai" || cfg.Providers[1].Name != "Groq" {
+		t.Fatalf("repaired rows = %+v", cfg.Providers)
+	}
+	// activeProvider already selected the named row; the repair must not move it.
+	if cfg.ActiveProvider != "Groq" {
+		t.Fatalf("ActiveProvider = %q, want the untouched Groq pointer", cfg.ActiveProvider)
+	}
+	resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("fresh Resolve after repair: %v", err)
+	}
+	if resolved.Provider.Name != "Groq" {
+		t.Fatalf("resolved provider = %q, want Groq", resolved.Provider.Name)
+	}
+}
+
+// When the fallback name is ALSO owned there is no free default left, so the
+// repair must stop before mutating and say which name it wanted, who owns it,
+// and the command that works. Reporting a duplicate that exists only in the
+// rejected candidate state left the user with no next step.
+func TestRunProvidersRepairConfigExplainsCollidingDefaultName(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"activeProvider":"openai","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"openai","provider_kind":"openai","model":"gpt-4.1"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := providerSetupDeps(configPath)
+
+	if code := runWithDeps([]string{"providers", "repair-config"}, &stdout, &stderr, deps); code == exitSuccess {
+		t.Fatalf("bare repair succeeded with no free default name; stdout=%q", stdout.String())
+	}
+	message := stderr.String()
+	if !strings.Contains(message, `"openai"`) {
+		t.Fatalf("failure does not name the proposed default: %q", message)
+	}
+	if !strings.Contains(message, "zero providers repair-config --name") {
+		t.Fatalf("failure does not show the escape command: %q", message)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("refused repair rewrote config:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	// The guidance must actually work, and the result must resolve.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "repair-config", "--name", "legacy"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("guided repair exit=%d stderr=%q", code, stderr.String())
+	}
+	resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("fresh Resolve after guided repair: %v", err)
+	}
+	if resolved.Provider.Name != "openai" {
+		t.Fatalf("resolved provider = %q, want the untouched active openai row", resolved.Provider.Name)
+	}
+	if readFileConfig(t, configPath).Providers[0].Name != "legacy" {
+		t.Fatalf("guided repair did not name the legacy row: %+v", readFileConfig(t, configPath).Providers)
+	}
+}

@@ -722,7 +722,7 @@ func TestProviderManagerKeepsDistinctUnicodeLiveProviderOnOtherRowMutation(t *te
 	t.Run("edit s", func(t *testing.T) {
 		t.Setenv(config.ActiveProviderEnv, "ſ")
 		m := newModelWithRows(t)
-		m.providerWizard.beginProviderEdit(m.savedProviders[0])
+		m.providerWizard.beginProviderEdit(m.savedProviders[0], managerRowOwnership(t, m, m.savedProviders[0].Name))
 		m.providerWizard.editDraft.Model = "s-updated"
 		next, _ := m.saveManagerEdit()
 		if next.providerName != "ſ" || next.providerProfile.Name != "ſ" {
@@ -785,7 +785,7 @@ func TestProviderManagerSoleRowCaseVariantTracksLiveSession(t *testing.T) {
 		t.Fatalf("manageActiveName = %q, want the sole row's spelling WORK", got)
 	}
 
-	m.providerWizard.beginProviderEdit(profile)
+	m.providerWizard.beginProviderEdit(profile, managerRowOwnership(t, m, profile.Name))
 	m.providerWizard.editDraft.Name = "OFFICE"
 	next, _ := m.saveManagerEdit()
 
@@ -995,16 +995,28 @@ func TestProviderDeleteKeyNoteMakesNoClaimWithoutAResolvableRow(t *testing.T) {
 		name       string
 		configJSON string
 		row        string
+		// resolved is every row spelling the manager is displaying.
+		resolved []string
 	}{
 		{
 			name:       "env-derived row with no persisted profile",
 			configJSON: `{"providers":[{"name":"other"}]}`,
 			row:        "openai",
+			resolved:   []string{"other", "openai"},
 		},
 		{
 			name:       "ambiguous duplicate rows the delete cannot resolve",
 			configJSON: `{"providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`,
 			row:        "Work",
+			resolved:   []string{"work", "WORK", "Work"},
+		},
+		{
+			// The project row's identity belongs to the user row listed beside
+			// it, so this row owns nothing on disk and promises nothing.
+			name:       "project row whose identity a listed user row owns",
+			configJSON: `{"providers":[{"name":"work","apiKeyStored":true}]}`,
+			row:        "WORK",
+			resolved:   []string{"work", "WORK"},
 		},
 	}
 	for _, testCase := range cases {
@@ -1013,13 +1025,17 @@ func TestProviderDeleteKeyNoteMakesNoClaimWithoutAResolvableRow(t *testing.T) {
 			if err := os.WriteFile(path, []byte(testCase.configJSON), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if note := providerDeleteKeyNote(path, testCase.row); note != "" {
+			owner, err := config.ProviderRowOwnershipAt(path, testCase.resolved, testCase.row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if note := providerDeleteKeyNote(path, owner); note != "" {
 				t.Fatalf("note = %q, want no claim about the stored key", note)
 			}
 		})
 	}
 	// No user config path at all: nothing can be promised either.
-	if note := providerDeleteKeyNote("", "work"); note != "" {
+	if note := providerDeleteKeyNote("", config.ProviderRowOwnership{UserBacked: true, PersistedName: "work"}); note != "" {
 		t.Fatalf("note = %q, want no claim without a config path", note)
 	}
 }
@@ -1034,8 +1050,29 @@ func TestProviderDeleteKeyNoteResolvesCaseVariantSpelling(t *testing.T) {
 		t.Fatal(err)
 	}
 	// "work" addresses the sole WORK row, whose removal takes the key with it.
-	note := providerDeleteKeyNote(path, "work")
+	// No other displayed row carries "WORK", so the bridge is safe here — that
+	// sibling check is the whole difference from the project-row case above.
+	owner, err := config.ProviderRowOwnershipAt(path, []string{"work", "other"}, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owner.UserBacked || owner.PersistedName != "WORK" {
+		t.Fatalf("ownership = %+v, want the sole WORK row", owner)
+	}
+	note := providerDeleteKeyNote(path, owner)
 	if !strings.Contains(note, "also removes its stored API key") {
 		t.Fatalf("note = %q, want the key-removal wording for the resolved row", note)
 	}
+}
+
+// managerRowOwnership resolves a row's provenance exactly as
+// reloadProviderManagerRows does, so a test that drives beginProviderEdit
+// directly cannot hand the edit a stronger ownership than the manager would.
+func managerRowOwnership(t *testing.T, m model, name string) config.ProviderRowOwnership {
+	t.Helper()
+	owner, err := config.ProviderRowOwnershipAt(m.userConfigPath, config.ProviderProfileNames(m.savedProviders), name)
+	if err != nil {
+		t.Fatalf("resolve ownership for %q: %v", name, err)
+	}
+	return owner
 }

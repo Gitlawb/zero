@@ -54,6 +54,31 @@ func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	return exitSuccess
 }
 
+// providersSubcommands is the ONE inventory of `zero providers` subcommands.
+// Dispatch, the help text, and the shell completion tree previously each kept
+// their own list, and `repair-config` shipped in the first two while every
+// generated completion script offered the old set — so the recovery command the
+// new validation errors name could not be tab-completed into existence.
+//
+// The completion tree is built from this slice (see completionRoot) and
+// TestProvidersSubcommandInventoryMatchesDispatchAndHelp holds the other two
+// surfaces to it, so a new subcommand cannot reach users through one door only.
+// Each entry is the canonical name first, then its aliases.
+var providersSubcommands = [][]string{
+	{"current"},
+	{"list"},
+	{"catalog"},
+	{"add"},
+	{"check"},
+	{"use"},
+	{"remove", "rm"},
+	{"rename"},
+	{"repair-config"},
+	{"setup"},
+	{"detect"},
+	{"models"},
+}
+
 func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	command := "list"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {

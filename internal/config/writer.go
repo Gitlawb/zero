@@ -101,18 +101,23 @@ func writeProviderNameRepair(path string, before FileConfig, after FileConfig) e
 // activeProvider, falling back to "openai"; preserve that choice unless the
 // user supplies a replacement. Multiple unnamed rows are left untouched because
 // selecting one would silently merge or discard profiles.
-func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) {
+//
+// The chosen name is returned rather than left for the caller to re-derive: the
+// defaulting rules below are the only thing that knows which name the row got,
+// and the CLI re-deriving them reported activeProvider as the repaired name
+// while the row had actually been named by the fallback.
+func RepairUnnamedProvider(path string, replacement string) (FileConfig, string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return FileConfig{}, fmt.Errorf("config path is required")
+		return FileConfig{}, "", fmt.Errorf("config path is required")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+		return FileConfig{}, "", fmt.Errorf("read config %s: %w", path, err)
 	}
 	var cfg FileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		return FileConfig{}, "", fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 	unnamed := -1
 	for index := range cfg.Providers {
@@ -120,12 +125,12 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) 
 			continue
 		}
 		if unnamed >= 0 {
-			return FileConfig{}, fmt.Errorf("multiple unnamed persisted providers require manual repair in config.json")
+			return FileConfig{}, "", fmt.Errorf("multiple unnamed persisted providers require manual repair in config.json")
 		}
 		unnamed = index
 	}
 	if unnamed < 0 {
-		return FileConfig{}, fmt.Errorf("no unnamed persisted provider found")
+		return FileConfig{}, "", fmt.Errorf("no unnamed persisted provider found")
 	}
 	activeName := strings.TrimSpace(cfg.ActiveProvider)
 	activeMatchesNamedRow := false
@@ -142,11 +147,32 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) 
 		}
 	}
 	name := strings.TrimSpace(replacement)
-	if name == "" {
-		name = strings.TrimSpace(cfg.ActiveProvider)
+	explicit := name != ""
+	if !explicit {
+		// activeProvider is a safe default for the unnamed row ONLY while it
+		// selects no named row. Once activeMatchesNamedRow is true, that value is
+		// evidence the active pointer belongs to the OTHER row — reusing it as
+		// this row's name proposes a duplicate, and the validation below then
+		// rejects a state the file never had, reporting "duplicate <name> rows"
+		// about a file whose second row has no name at all.
+		if !activeMatchesNamedRow {
+			name = activeName
+		}
+		if name == "" {
+			name = "openai"
+		}
 	}
-	if name == "" {
-		name = "openai"
+	if conflict, collides := conflictingProviderRowName(cfg, unnamed, name); collides {
+		if explicit {
+			return FileConfig{}, "", fmt.Errorf(
+				"cannot name the unnamed provider %q: persisted provider %q already uses that identity; choose a different --name",
+				name, conflict)
+		}
+		// Say what the proposed name was, that it is already taken, and the exact
+		// command that gets out of it. The bare form has no other escape.
+		return FileConfig{}, "", fmt.Errorf(
+			"the unnamed provider would default to %q, which persisted provider %q already uses; rerun with `zero providers repair-config --name <unique-name>`",
+			name, conflict)
 	}
 	cfg.Providers[unnamed].Name = name
 	// A nonempty active name that matched no named row was the legacy selector
@@ -158,12 +184,37 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, error) 
 	}
 	var before FileConfig
 	if err := json.Unmarshal(data, &before); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		return FileConfig{}, "", fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 	if err := writeProviderNameRepair(path, before, cfg); err != nil {
-		return FileConfig{}, err
+		return FileConfig{}, "", err
 	}
-	return cfg, nil
+	return cfg, name, nil
+}
+
+// conflictingProviderRowName reports the persisted row, other than the one being
+// repaired, that already owns the proposed name. Identity is the credential
+// store's rule, matching ValidatePersistedProviderNames, so the check refuses
+// exactly what the write would refuse — before the write, and with a message
+// that describes the file rather than the rejected candidate state.
+func conflictingProviderRowName(cfg FileConfig, repairing int, name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	for index := range cfg.Providers {
+		if index == repairing {
+			continue
+		}
+		rowName := strings.TrimSpace(cfg.Providers[index].Name)
+		if rowName == "" {
+			continue
+		}
+		if rowName == name || sameProviderIdentity(rowName, name) {
+			return rowName, true
+		}
+	}
+	return "", false
 }
 
 // sameProviderIdentity reports whether two persisted spellings name the same
@@ -252,27 +303,24 @@ func ResolvePersistedProviderName(path string, input string) (string, error) {
 	return resolvePersistedProviderName(providers, input)
 }
 
+// resolvePersistedProviderName is LookupProviderName with errors — the shared
+// exact-first / unique-normalized / ambiguous rule, not a second copy of it.
 func resolvePersistedProviderName(providers []ProviderProfile, input string) (string, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return "", fmt.Errorf("provider name is required")
 	}
-	match := ""
-	matches := 0
-	for _, provider := range providers {
-		name := strings.TrimSpace(provider.Name)
-		if name == input {
-			return name, nil
+	name, lookup := LookupProviderName(ProviderProfileNames(providers), input)
+	switch lookup {
+	case ProviderNameExact, ProviderNameNormalized:
+		return name, nil
+	case ProviderNameAmbiguous:
+		matches := 0
+		for _, provider := range providers {
+			if sameProviderIdentity(strings.TrimSpace(provider.Name), input) {
+				matches++
+			}
 		}
-		if sameProviderIdentity(name, input) {
-			match = name
-			matches++
-		}
-	}
-	switch {
-	case matches == 1:
-		return match, nil
-	case matches > 1:
 		return "", fmt.Errorf("ambiguous provider %q: %d rows in config.json differ only by case; rename or remove one row", input, matches)
 	default:
 		return "", fmt.Errorf("provider %q not found", input)
