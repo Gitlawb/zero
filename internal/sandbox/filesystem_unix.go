@@ -4,23 +4,52 @@ package sandbox
 
 import (
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
 
 // pathsShareFilesystem reports whether two paths live on the same filesystem.
-// The second result is false when either path cannot be inspected, because an
-// uninspectable root is not evidence of separation: callers reason about where a
-// hard link COULD be created, so an unknown answer must be treated as "could".
+//
+// A path that does not exist YET is answered from its nearest existing
+// ancestor: a write root the sandbox creates lands on whatever filesystem its
+// parent is on, so "not created yet" is a knowable answer rather than an unknown
+// one. That distinction matters because the profile carries roots for every
+// platform — /private/tmp and /var/folders are macOS spellings that simply do
+// not exist on Linux, and reading each of them as "cannot tell" would refuse
+// every file-backed token on Linux.
+//
+// known is false only when a path's whole ancestor chain is uninspectable. That
+// really is unknown, and an uninspectable root is not evidence of separation:
+// callers reason about where a hard link COULD be created, so they must treat it
+// as "could".
 func pathsShareFilesystem(left, right string) (shared bool, known bool) {
-	var leftStat, rightStat unix.Stat_t
-	if err := unix.Stat(left, &leftStat); err != nil {
+	leftDevice, leftKnown := pathFilesystemID(left)
+	if !leftKnown {
 		return false, false
 	}
-	if err := unix.Stat(right, &rightStat); err != nil {
+	rightDevice, rightKnown := pathFilesystemID(right)
+	if !rightKnown {
 		return false, false
 	}
-	return leftStat.Dev == rightStat.Dev, true
+	return leftDevice == rightDevice, true
+}
+
+// pathFilesystemID returns the device ID owning path, walking up to the nearest
+// existing ancestor for a path that has not been created yet.
+func pathFilesystemID(path string) (uint64, bool) {
+	current := filepath.Clean(path)
+	for {
+		var stat unix.Stat_t
+		if err := unix.Stat(current, &stat); err == nil {
+			return uint64(stat.Dev), true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return 0, false
+		}
+		current = parent
+	}
 }
 
 // pathHardLinkCount reports the number of directory entries that name the file's

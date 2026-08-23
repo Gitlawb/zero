@@ -614,10 +614,13 @@ func TestSandboxManagerRejectsWindowsFileBackedTokenShell(t *testing.T) {
 	}
 }
 
-// An uninspectable write root is not evidence that the token lives on a separate
-// filesystem — it is a root a hard link might still be creatable in. The Linux
-// planner must read the unknown answer as "could" and refuse.
-func TestLinuxTokenPlannerFailsClosedOnUninspectableWriteRoot(t *testing.T) {
+// A write root the sandbox has not created yet still resolves to a filesystem:
+// it lands on whichever one its parent is on. A root under the workspace is
+// therefore a place a hard link to a same-filesystem token could be created, and
+// the planner must refuse — while a root whose whole ancestor chain is missing
+// (the macOS-only spellings the profile carries on every platform) must NOT be
+// read as an unknown that refuses everything.
+func TestLinuxTokenPlannerReadsUncreatedWriteRootFromItsParent(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux mount identity is exercised on Linux")
 	}
@@ -637,17 +640,36 @@ func TestLinuxTokenPlannerFailsClosedOnUninspectableWriteRoot(t *testing.T) {
 	t.Setenv(daemonRemoteTokenFileEnv, token)
 	t.Setenv(daemonRemoteTokenFileResolvedEnv, "")
 
-	missing := filepath.Join(workspace, "not-created-yet")
-	profile := PermissionProfile{
-		FileSystem: FileSystemPolicy{
-			Kind:       FileSystemRestricted,
-			ReadRoots:  []string{string(filepath.Separator)},
-			WriteRoots: []WritableRoot{{Root: missing}},
-		},
-		Network: NetworkPolicy{Mode: NetworkDeny},
+	profileWith := func(root string) PermissionProfile {
+		return PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				ReadRoots:  []string{string(filepath.Separator)},
+				WriteRoots: []WritableRoot{{Root: root}},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		}
 	}
-	if credential, linkable := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentialPaths()); !linkable || credential != token {
-		t.Fatalf("linkable = %t credential = %q, want %q refused behind an uninspectable write root", linkable, credential, token)
+
+	// Both temp dirs are on the same filesystem, so a root that will be created
+	// under the workspace is a hard-link site for the token.
+	missing := filepath.Join(workspace, "not-created-yet")
+	if shared, known := pathsShareFilesystem(missing, token); !known || !shared {
+		t.Skipf("workspace %q and token %q are not on one filesystem (shared=%t known=%t)", workspace, token, shared, known)
+	}
+	if credential, linkable := protectedCredentialLinkableIntoLinuxShellRoot(profileWith(missing), protectedCredentialPaths()); !linkable || credential != token {
+		t.Fatalf("linkable = %t credential = %q, want %q refused behind a not-yet-created same-filesystem write root", linkable, credential, token)
+	}
+
+	// /private/... is a macOS spelling with no Linux counterpart, and the profile
+	// carries it on every platform. Answering it from `/` keeps it a real answer
+	// instead of an unknown that would refuse every file-backed token on Linux —
+	// the regression that broke TestSandboxManagerAllowsLinuxTokenOnSeparateFilesystem.
+	if _, err := os.Stat("/private"); err == nil {
+		t.Skip("/private exists on this host, so it is not the platform-foreign case")
+	}
+	if _, known := pathsShareFilesystem("/private/tmp", token); !known {
+		t.Fatal(`pathsShareFilesystem("/private/tmp", token) reported unknown, want the answer resolved from an existing ancestor`)
 	}
 }
 
