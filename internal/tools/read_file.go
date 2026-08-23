@@ -126,7 +126,7 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 		return errorResult("Error reading file " + requestedPath + ": " + err.Error())
 	}
 
-	stats, err := scanReadFileStats(absolutePath)
+	stats, err := scanReadFileStats(absolutePath, tool.workspaceRoot)
 	if err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}
@@ -136,7 +136,7 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	// not the authoritative content hash.
 	options.FileTracker.RecordHash(absolutePath, stats.hash, stats.info)
 	if byteMode {
-		result, seenStart, seenEnd := renderReadFileBytes(absolutePath, relativePath, stats.bytes, byteOffset, byteLimit)
+		result, seenStart, seenEnd := renderReadFileBytes(absolutePath, relativePath, tool.workspaceRoot, stats.bytes, byteOffset, byteLimit)
 		if result.Status == StatusOK && !result.Truncated && seenEnd > seenStart {
 			if options.deferFileObservation {
 				result.pendingFileObservation = &pendingFileObservation{
@@ -156,7 +156,7 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	if directBudget {
 		maxBytes = readOutputBudgetBytes
 	}
-	result := renderReadFileRange(absolutePath, relativePath, stats.lines, startLine, endLine, maxLines, maxBytes)
+	result := renderReadFileRange(absolutePath, relativePath, tool.workspaceRoot, stats.lines, startLine, endLine, maxLines, maxBytes)
 	if result.Status == StatusOK && result.Meta["truncation_reason"] != "byte_budget" {
 		seenStart, seenEnd := renderedReadRange(stats.lines, startLine, endLine, maxLines)
 		if options.deferFileObservation {
@@ -192,7 +192,7 @@ func renderedReadRange(total, start, end, maxLines int) (int, int) {
 	return start, end
 }
 
-func renderReadFileRange(absolutePath string, relativePath string, total int, startLine int, endLine int, maxLines int, maxBytes int) Result {
+func renderReadFileRange(absolutePath string, relativePath string, workspaceRoot string, total int, startLine int, endLine int, maxLines int, maxBytes int) Result {
 	if startLine > total {
 		return okResult(fmt.Sprintf("File: %s\n(offset %d is past the end of the file, which has %d lines)", relativePath, startLine, total))
 	}
@@ -244,7 +244,7 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 		budgetedOutput.WriteString("\n")
 	}
 	budgetedOutput.WriteString("\n")
-	if err := appendReadFileRange(budgetedOutput, absolutePath, startLine, selectedLines, width); err != nil {
+	if err := appendReadFileRange(budgetedOutput, absolutePath, workspaceRoot, startLine, selectedLines, width); err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}
 	if truncated {
@@ -284,8 +284,8 @@ type readFileStats struct {
 	info  os.FileInfo
 }
 
-func scanReadFileStats(path string) (readFileStats, error) {
-	file, err := os.Open(path)
+func scanReadFileStats(path, workspaceRoot string) (readFileStats, error) {
+	file, _, err := protectedReadOpen(path, workspaceRoot)
 	if err != nil {
 		return readFileStats{}, err
 	}
@@ -316,11 +316,11 @@ func scanReadFileStats(path string) (readFileStats, error) {
 	return readFileStats{lines: lines, bytes: bytes, hash: hex.EncodeToString(hasher.Sum(nil)), info: info}, nil
 }
 
-func renderReadFileBytes(path, relativePath string, total, requestedStart, limit int) (Result, int, int) {
+func renderReadFileBytes(path, relativePath, workspaceRoot string, total, requestedStart, limit int) (Result, int, int) {
 	if requestedStart >= total {
 		return okResult(fmt.Sprintf("File: %s\n(byte_offset %d is past the end of the file, which has %d bytes)", relativePath, requestedStart, total)), 0, 0
 	}
-	file, err := os.Open(path)
+	file, _, err := protectedReadOpen(path, workspaceRoot)
 	if err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error()), 0, 0
 	}
@@ -357,8 +357,8 @@ func renderReadFileBytes(path, relativePath string, total, requestedStart, limit
 	return Result{Status: StatusOK, Output: output, Meta: map[string]string{"next_byte_offset": strconv.Itoa(end)}}, start, end
 }
 
-func appendReadFileRange(output *outputBudgetBuilder, path string, startLine int, selectedLines int, width int) error {
-	file, err := os.Open(path)
+func appendReadFileRange(output *outputBudgetBuilder, path string, workspaceRoot string, startLine int, selectedLines int, width int) error {
+	file, _, err := protectedReadOpen(path, workspaceRoot)
 	if err != nil {
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -64,7 +65,15 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
-	contentBytes, err := os.ReadFile(absolutePath)
+	// protectedReadOpen binds the daemon-token check to the handle the content is
+	// actually read from — see internal/tools/protected_credentials.go. Also the
+	// ONLY protection this read has when called through the plain registry API.
+	readFile, _, err := protectedReadOpen(absolutePath, tool.workspaceRoot)
+	if err != nil {
+		return errorResult("Error reading " + relativePath + ": " + err.Error())
+	}
+	contentBytes, err := io.ReadAll(readFile)
+	readFile.Close()
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
@@ -152,6 +161,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	}
 	editedSpans := replacementByteSpans(content, oldString, newString, replaceAll)
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
+		return errorResult("Error writing " + relativePath + ": " + err.Error())
+	}
+	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {

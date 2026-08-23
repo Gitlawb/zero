@@ -274,7 +274,16 @@ func validatePatchPaths(root string, patchPaths []string) error {
 		if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
 			return fmt.Errorf("patch path %q must stay inside the workspace", path)
 		}
-		if _, _, err := resolveWorkspaceTargetPath(root, path); err != nil {
+		absolute, _, err := resolveWorkspaceTargetPath(root, path)
+		if err != nil {
+			return err
+		}
+		// Engine-independent: the git-apply flow below shells out to an external
+		// process this package cannot bind a handle to, so unlike write_file/
+		// edit_file this is pathname-level protection only — see
+		// internal/tools/protected_credentials.go. It is also the ONLY protection
+		// this tool has when called through the plain registry API.
+		if err := protectedMutationDenied(absolute, root); err != nil {
 			return err
 		}
 	}
@@ -288,6 +297,14 @@ func recheckPatchWriteTargets(root string, patchPaths []string) error {
 		}
 		if err := recheckWorkspaceWriteTarget(root, path); err != nil {
 			return err
+		}
+		// Re-checked immediately before git apply runs, narrowing (not closing —
+		// git apply is an external process) the window between the initial
+		// validatePatchPaths check and the actual write.
+		if absolute, _, err := resolveWorkspaceTargetPath(root, path); err == nil {
+			if err := protectedMutationDenied(absolute, root); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

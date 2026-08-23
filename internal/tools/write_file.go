@@ -107,6 +107,12 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	// Engine-independent: this is the ONLY protection write_file has when called
+	// through the plain registry API (Registry.Run, or RunWithOptions with no
+	// sandbox engine) — see internal/tools/protected_credentials.go.
+	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}

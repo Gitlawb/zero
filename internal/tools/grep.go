@@ -63,15 +63,18 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool grepTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.runWith(ctx, args, readExcluder{}, true)
+	return tool.runWith(ctx, args, sandboxReadExcluderWithin(nil, tool.workspaceRoot), true)
 }
 
+// RunWithOptions falls back to sandboxReadExcluderWithin rather than a bare
+// no-op excluder when options.Sandbox is nil. Registry.Run funnels into this
+// with an empty RunOptions, which is a real production path (MCP tool
+// dispatch that predates a Sandbox engine, and any future caller of the plain
+// registry API) — without the fallback, grep could return the bridge token's
+// contents from a workspace search whenever no engine happened to be passed,
+// even though list_directory's equivalent engine-less path already protects it.
 func (tool grepTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
-	exclude := readExcluder{}
-	if options.Sandbox != nil {
-		exclude = sandboxReadExcluder(options.Sandbox)
-	}
-	return tool.runWith(ctx, args, exclude, false)
+	return tool.runWith(ctx, args, sandboxReadExcluderWithin(options.Sandbox, tool.workspaceRoot), false)
 }
 
 // RunWithSandbox runs the search while skipping subtrees the sandbox policy

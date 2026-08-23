@@ -640,7 +640,9 @@ func runDaemonLink(args []string, stdout io.Writer, stderr io.Writer) int {
 		return writeExecUsageError(stderr, "daemon link requires --remote, --repo, and --id (or --show <file>)")
 	}
 	if strings.TrimSpace(token) == "" {
-		token, _ = remote.TokenFromEnv() // best effort; UploadRepoBundle rejects an empty token
+		// A one-shot client that never ran CanonicalizeTokenFileEnv must not trust
+		// an inherited resolved marker — see TokenFromFreshEnv.
+		token, _ = remote.TokenFromFreshEnv() // best effort; UploadRepoBundle rejects an empty token
 	}
 	link, err := remote.UploadRepoBundle(remote.RemoteConfig{
 		Address:    addr,
@@ -683,7 +685,9 @@ func dialForCLI(flags remoteDialFlags) (*daemon.Client, error) {
 	}
 	token := strings.TrimSpace(flags.Token)
 	if token == "" {
-		token, _ = remote.TokenFromEnv() // best effort; DialRemote rejects an empty token
+		// A one-shot client that never ran CanonicalizeTokenFileEnv must not trust
+		// an inherited resolved marker — see TokenFromFreshEnv.
+		token, _ = remote.TokenFromFreshEnv() // best effort; DialRemote rejects an empty token
 	}
 	return remote.DialRemote(remote.RemoteConfig{
 		Address:    flags.Addr,

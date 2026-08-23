@@ -154,3 +154,62 @@ func TestResourcesReadRefusesHardLinkedToken(t *testing.T) {
 		t.Fatalf("resources/read error disclosed token bytes: %q", read.Error.Message)
 	}
 }
+
+// TestServeMCPResourcesWorkWithoutADaemonToken pins the ordinary MCP startup
+// shape: no ZERO_DAEMON_REMOTE_TOKEN_FILE at all. credentialGuard.ReadExclusions()
+// used to return a nil *ReadExclusions whenever the disabled-mode policy had
+// nothing protected, and listResources/readResource called methods on it
+// directly. Those methods happen to be nil-receiver-safe (Active checks rx !=
+// nil first), so this never actually panicked — but the shape is exactly what
+// a future non-nil-safe method addition would turn into a crash on the most
+// common MCP configuration there is. ReadExclusions() now always returns a
+// real, inactive matcher for a non-nil engine, removing the landmine outright.
+func TestServeMCPResourcesWorkWithoutADaemonToken(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "ordinary.txt"), []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(remote.EnvToken, "")
+	t.Setenv(remote.EnvTokenFile, "")
+
+	var input bytes.Buffer
+	writeServerTestMessage(t, &input, rpcMessage{ID: 1, Method: "resources/list"})
+	writeServerTestMessage(t, &input, rpcMessage{
+		ID:     2,
+		Method: "resources/read",
+		Params: mustRaw(map[string]any{"uri": fileURI(filepath.Join(workspace, "ordinary.txt"))}),
+	})
+	var output bytes.Buffer
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Serve panicked with no daemon token configured: %v", r)
+		}
+	}()
+	if err := Serve(context.Background(), &input, &output, tools.NewRegistry(), ServeOptions{WorkspaceRoot: workspace}); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+
+	reader := newMessageReader(&output)
+	var listed struct {
+		Resources []Resource `json:"resources"`
+	}
+	decodeServerTestResult(t, readServerTestMessage(t, reader), &listed)
+	found := false
+	for _, resource := range listed.Resources {
+		if resource.Name == "ordinary.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resources/list omitted the ordinary file: %#v", listed.Resources)
+	}
+
+	var read struct {
+		Contents []ResourceContents `json:"contents"`
+	}
+	decodeServerTestResult(t, readServerTestMessage(t, reader), &read)
+	if len(read.Contents) != 1 || read.Contents[0].Text != "ordinary\n" {
+		t.Fatalf("resources/read = %#v, want the ordinary file's contents", read.Contents)
+	}
+}

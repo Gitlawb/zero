@@ -89,6 +89,44 @@ func TokenFromEnv() (string, error) {
 	return "", fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
 }
 
+// TokenFromFreshEnv is TokenFromEnv for a caller that has NOT run
+// CanonicalizeTokenFileEnv and must not trust an inherited
+// ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED marker.
+//
+// That marker is a daemon-worker handoff value, not an independently
+// authoritative selector: remotetoken.SourceFromEnv binds it to whatever
+// ZERO_DAEMON_REMOTE_TOKEN_FILE happens to be set to right now, without proving
+// it is THAT value's resolved identity. A one-shot client process — `zero
+// daemon link`, or a remote dial — inherits its environment from its own
+// parent, which can carry a resolved marker left over from an unrelated prior
+// `serve-remote` invocation in the same shell. If the operator then points
+// EnvTokenFile at a different file, this client reads the stale target instead:
+// it can authenticate with a revoked credential, or fail against a valid one.
+//
+// remotetoken.ResolveSource ignores the marker and always resolves fresh, which
+// is exactly the property a caller that never canonicalized needs.
+func TokenFromFreshEnv() (string, error) {
+	if t := strings.TrimSpace(os.Getenv(EnvToken)); t != "" {
+		return t, nil
+	}
+	source, selected, err := remotetoken.ResolveSource()
+	if err != nil {
+		return "", fmt.Errorf("remote: %w", err)
+	}
+	if !selected {
+		return "", fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
+	}
+	data, err := os.ReadFile(source.ReadPath())
+	if err != nil {
+		return "", fmt.Errorf("remote: read token file: %w", err)
+	}
+	t := strings.TrimSpace(string(data))
+	if t == "" {
+		return "", errors.New("remote: token file is empty")
+	}
+	return t, nil
+}
+
 // CanonicalizeTokenFileEnv records both identities of the selected token file
 // before workers start: the operator-configured absolute spelling and the
 // symlink-resolved object this daemon authenticated against. Keeping both

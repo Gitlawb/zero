@@ -360,6 +360,15 @@ func resolveStructuredPatchTarget(root, path string) (structuredPatchTarget, err
 	if err != nil {
 		return structuredPatchTarget{}, err
 	}
+	// Every structured-patch target (add/delete/update, and both the from and to
+	// side of a move) funnels through here, so one check covers all of them —
+	// engine-independent, and the only protection a structured patch has when
+	// called through the plain registry API. os.Root already confines the actual
+	// read/write to this tree without following an escaping symlink, but that is
+	// containment, not a refusal of one specific in-tree file.
+	if err := protectedMutationDenied(absolute, root); err != nil {
+		return structuredPatchTarget{}, err
+	}
 	return structuredPatchTarget{requested: path, absolute: absolute, relative: relative}, nil
 }
 

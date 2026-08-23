@@ -60,6 +60,83 @@ func TestTokenFromEnv(t *testing.T) {
 	}
 }
 
+// TestTokenFromEnvTrustsAStaleInheritedResolvedMarker documents the shape
+// TokenFromFreshEnv exists to avoid: SourceFromEnv (behind TokenFromEnv) binds
+// EnvTokenFileResolved to whatever EnvTokenFile is set to right now, without
+// proving it is THAT value's resolved identity. A process that inherits a
+// resolved marker left over from an unrelated prior daemon (same shell,
+// different invocation) reads the stale target once EnvTokenFile is repointed.
+// This is the vulnerable baseline; TestTokenFromFreshEnvIgnoresAStaleResolvedMarker
+// is the fix.
+func TestTokenFromEnvTrustsAStaleInheritedResolvedMarker(t *testing.T) {
+	t.Setenv(EnvToken, "")
+	oldToken := filepath.Join(t.TempDir(), "old-token")
+	if err := os.WriteFile(oldToken, []byte("old-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newDir := t.TempDir()
+	newToken := filepath.Join(newDir, "new-token")
+	if err := os.WriteFile(newToken, []byte("new-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The shell still carries a resolved marker for the OLD token from an
+	// unrelated prior serve-remote invocation.
+	t.Setenv(EnvTokenFileResolved, oldToken)
+	// The operator has since pointed EnvTokenFile at the new token.
+	t.Setenv(EnvTokenFile, newToken)
+
+	tok, err := TokenFromEnv()
+	if err != nil {
+		t.Fatalf("TokenFromEnv: %v", err)
+	}
+	if tok != "old-secret" {
+		t.Fatalf("TokenFromEnv = %q, want it to demonstrate the stale-marker bug by reading old-secret (got the correct new-secret — has the underlying contract changed?)", tok)
+	}
+}
+
+// TestTokenFromFreshEnvIgnoresAStaleResolvedMarker is the fix: a caller that
+// has not run CanonicalizeTokenFileEnv — a one-shot client such as `zero daemon
+// link` or a remote dial — must always resolve EnvTokenFile fresh rather than
+// trust an inherited resolved marker that could belong to a different
+// configured value.
+func TestTokenFromFreshEnvIgnoresAStaleResolvedMarker(t *testing.T) {
+	t.Setenv(EnvToken, "")
+	oldToken := filepath.Join(t.TempDir(), "old-token")
+	if err := os.WriteFile(oldToken, []byte("old-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newDir := t.TempDir()
+	newToken := filepath.Join(newDir, "new-token")
+	if err := os.WriteFile(newToken, []byte("new-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvTokenFileResolved, oldToken)
+	t.Setenv(EnvTokenFile, newToken)
+
+	tok, err := TokenFromFreshEnv()
+	if err != nil {
+		t.Fatalf("TokenFromFreshEnv: %v", err)
+	}
+	if tok != "new-secret" {
+		t.Fatalf("TokenFromFreshEnv = %q, want new-secret (the currently configured file, not the stale marker)", tok)
+	}
+
+	// Inline precedence is preserved: an inline token still wins over both the
+	// configured file and any resolved marker.
+	t.Setenv(EnvToken, "inline-secret")
+	if tok, err := TokenFromFreshEnv(); err != nil || tok != "inline-secret" {
+		t.Fatalf("TokenFromFreshEnv(inline) = %q, %v", tok, err)
+	}
+	t.Setenv(EnvToken, "")
+
+	// No configured file at all still errors, matching TokenFromEnv.
+	t.Setenv(EnvTokenFile, "")
+	t.Setenv(EnvTokenFileResolved, "")
+	if _, err := TokenFromFreshEnv(); err == nil {
+		t.Fatal("TokenFromFreshEnv with neither var set must error")
+	}
+}
+
 // TestSelectedFilePathPreservesFilenameWhitespace pins the pointer as a
 // pathname rather than a trimmed word. Trimming it made this boundary select
 // "<dir>/bridge-token" while the operator had named "<dir>/bridge-token " —

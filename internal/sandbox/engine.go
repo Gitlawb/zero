@@ -141,8 +141,18 @@ func (engine *Engine) LookupCommandPrefixForSession(toolName string, command []s
 // ReadExclusions returns the resolved DenyRead/AllowRead exclusion matcher for
 // this engine's policy, resolving each policy entry ONCE. The search tools build
 // it a single time per run and reuse it across the whole walk so the predicates
-// don't re-run Abs/EvalSymlinks per visited path. Returns nil for a nil engine
-// (the matcher's methods treat nil as "exclude nothing").
+// don't re-run Abs/EvalSymlinks per visited path. Returns nil ONLY for a nil
+// engine — every other path returns a non-nil matcher, inactive when there is
+// nothing to exclude.
+//
+// A non-nil-engine caller that skipped the nil check (there is one, but a
+// second one should never have to exist) would otherwise call Active()/
+// PathExcluded()/FileExcluded() on a nil *ReadExclusions when no token is
+// selected and the policy is disabled — the ordinary MCP startup shape.
+// Those methods happen to be nil-receiver-safe today (Active checks rx != nil
+// first), so that specific call never actually panics, but relying on every
+// future method staying nil-safe is a needless landmine when returning a real,
+// inactive value costs nothing.
 func (engine *Engine) ReadExclusions() *ReadExclusions {
 	// A disabled policy enforces nothing the USER configured, so it must not
 	// filter search results by DenyRead either (Evaluate likewise allows every
@@ -155,11 +165,7 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 	}
 	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == ModeDisabled {
-		protected := protectedCredentialPaths()
-		if len(protected) == 0 {
-			return nil
-		}
-		exclusions := newReadExclusions(engine.workspaceRoot, nil, nil, protected)
+		exclusions := newReadExclusions(engine.workspaceRoot, nil, nil, protectedCredentialPaths())
 		return &exclusions
 	}
 	exclusions := newReadExclusions(
