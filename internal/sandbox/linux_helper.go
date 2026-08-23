@@ -477,6 +477,13 @@ func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 		if executableRegularFile(candidate) {
 			return LinuxSandboxHelperCommand{Name: candidate}, nil
 		}
+		// Self-exec fallback: the main zero binary can act as the sandbox helper directly
+		if executableRegularFile(exe) {
+			return LinuxSandboxHelperCommand{
+				Name:       exe,
+				ArgsPrefix: []string{"__sandbox-helper"},
+			}, nil
+		}
 	}
 	if path, err := exec.LookPath(LinuxSandboxHelperName); err == nil && path != "" {
 		return LinuxSandboxHelperCommand{Name: path}, nil
