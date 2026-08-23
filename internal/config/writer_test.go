@@ -1595,36 +1595,94 @@ func TestRemoveProviderNormalizesStaleActiveProviderSpelling(t *testing.T) {
 	}
 }
 
+// A row whose catalogId names a DIFFERENT catalog provider is a competing
+// claim, so it is still refused — and the refusal has to carry the command
+// that resolves it, because `zero auth login` is where a user with such a
+// config arrives and the message is all they get.
 func TestEnsureCatalogProviderRequiresPositiveCatalogOwnership(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		catalogID string
-	}{
-		{name: "foreign catalog", catalogID: "custom-openai-compatible"},
-		{name: "missing catalog", catalogID: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "zero.json")
-			before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{
+		Name:         "OpenRouter",
+		CatalogID:    "custom-openai-compatible",
+		ProviderKind: ProviderKindOpenAICompatible,
+		BaseURL:      "https://corp.example/v1",
+		Model:        "corp-model",
+		APIKeyStored: true,
+	}}}, 0o600)
+
+	_, err := EnsureCatalogProvider(path, "openrouter")
+	if err == nil || !strings.Contains(err.Error(), "does not prove ownership") {
+		t.Fatalf("EnsureCatalogProvider error = %v, want ownership rejection", err)
+	}
+	for _, remedy := range []string{"zero providers remove OpenRouter", "zero providers add openrouter"} {
+		if !strings.Contains(err.Error(), remedy) {
+			t.Fatalf("error %q must name the way out %q", err, remedy)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("foreign profile was rewritten:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// The shape every config written before catalog ids existed has: a row NAMED
+// for the catalog provider, claiming no catalog id at all. An absent claim is
+// not a competing one, so the login backfills the id onto that row — the same
+// self-healing `zero providers add openrouter` already performs — instead of
+// dead-ending a user who has no way to discover that command.
+func TestEnsureCatalogProviderAdoptsLegacyRowWithoutCatalogID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "other",
+		Providers: []ProviderProfile{
+			{Name: "other", CatalogID: "xai"},
+			{
 				Name:         "OpenRouter",
-				CatalogID:    tc.catalogID,
 				ProviderKind: ProviderKindOpenAICompatible,
 				BaseURL:      "https://corp.example/v1",
 				Model:        "corp-model",
 				APIKeyStored: true,
-			}}}, 0o600)
+			},
+		},
+	}, 0o600)
 
-			if _, err := EnsureCatalogProvider(path, "openrouter"); err == nil || !strings.Contains(err.Error(), "does not prove ownership") {
-				t.Fatalf("EnsureCatalogProvider error = %v, want ownership rejection", err)
-			}
-			after, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(after, before) {
-				t.Fatalf("foreign profile was rewritten:\nbefore: %s\nafter: %s", before, after)
-			}
-		})
+	if err := PreflightCatalogProviderLogin(path, "openrouter"); err != nil {
+		t.Fatalf("PreflightCatalogProviderLogin must clear the way for the backfill: %v", err)
+	}
+	ensured, err := EnsureCatalogProvider(path, "openrouter")
+	if err != nil {
+		t.Fatalf("EnsureCatalogProvider: %v", err)
+	}
+	if ensured.Created {
+		t.Fatalf("legacy row must be adopted, not duplicated: %+v", ensured)
+	}
+	if ensured.Name != "OpenRouter" {
+		t.Fatalf("Name = %q, want the row's own spelling OpenRouter", ensured.Name)
+	}
+	if ensured.Active != "other" {
+		t.Fatalf("Active = %q, want the user's active provider left alone", ensured.Active)
+	}
+
+	saved := readConfigFixture(t, path)
+	if len(saved.Providers) != 2 {
+		t.Fatalf("providers = %+v, want the legacy row adopted rather than a second one added", saved.Providers)
+	}
+	adopted := saved.Providers[1]
+	if adopted.CatalogID != "openrouter" {
+		t.Fatalf("catalogId = %q, want it backfilled to openrouter", adopted.CatalogID)
+	}
+	// Everything else on the row is the user's and stays untouched.
+	if adopted.Name != "OpenRouter" || adopted.BaseURL != "https://corp.example/v1" || adopted.Model != "corp-model" || !adopted.APIKeyStored {
+		t.Fatalf("adoption rewrote the user's fields: %+v", adopted)
+	}
+
+	// Now that the row proves ownership, the second login is a plain no-op.
+	again, err := EnsureCatalogProvider(path, "openrouter")
+	if err != nil || again.Created || again.Name != "OpenRouter" {
+		t.Fatalf("EnsureCatalogProvider (second) = %+v, %v; want the same row untouched", again, err)
 	}
 }
 

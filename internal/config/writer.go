@@ -260,8 +260,10 @@ func PreflightUserConfig(path string) error {
 // PreflightCatalogProviderLogin is the preflight for a credential login against
 // a catalog provider. A login does not mint a new spelling, so a case-variant
 // persisted row may be reused only when its catalogId positively proves that it
-// owns the requested catalog identity. A matching display name alone is not
-// ownership: custom profiles may use catalog-like names for unrelated endpoints.
+// owns the requested catalog identity, or when it claims no catalog identity at
+// all and the login can backfill one. A matching display name over a catalogId
+// pointing somewhere ELSE is not ownership: custom profiles may use
+// catalog-like names for unrelated endpoints.
 //
 // The collision check still runs when nothing owns the identity, because that is
 // the case where a row WILL be created. It is unreachable today given
@@ -277,9 +279,12 @@ func PreflightCatalogProviderLogin(path, catalogID string) error {
 		if err != nil {
 			return err
 		}
-		if _, owned, err := catalogProviderOwner(providers, descriptor.ID); err != nil {
+		// An adoptable row is as good as an owning one here: the login writes
+		// the catalog id onto that existing row instead of minting a spelling,
+		// so the collision check below does not apply to it either.
+		if _, ownership, err := catalogProviderOwner(providers, descriptor.ID); err != nil {
 			return err
-		} else if owned {
+		} else if ownership != catalogOwnershipNone {
 			return nil
 		}
 		return PreflightProviderWrite(path, descriptor.ID)
@@ -301,12 +306,29 @@ func providerOwnsCatalog(provider ProviderProfile, catalogID string) bool {
 	return rowCatalogID != "" && sameProviderIdentity(rowCatalogID, catalogID)
 }
 
-// catalogProviderOwner resolves the one persisted row that positively owns a
-// catalog identity. Catalog ids may normally be shared by named profiles, but a
-// catalog-addressed login cannot choose among them: it would store one shared
-// provider:<catalog-id> token that logout/status/refresh cannot attribute safely.
-// A different row owning the catalog spelling as its NAME is equally ambiguous.
-func catalogProviderOwner(providers []ProviderProfile, catalogID string) (ProviderProfile, bool, error) {
+// catalogOwnership reports how a persisted config relates to a catalog identity.
+type catalogOwnership int
+
+const (
+	// catalogOwnershipNone: no row claims the identity, so a login creates one.
+	catalogOwnershipNone catalogOwnership = iota
+	// catalogOwnershipOwned: exactly one row proves ownership through its catalogId.
+	catalogOwnershipOwned
+	// catalogOwnershipAdoptable: exactly one row carries the catalog spelling as
+	// its NAME and claims no catalog id at all. An empty catalogId is an absent
+	// claim, not a competing one, so that row is the answer once the id is
+	// backfilled onto it — the same self-healing `zero providers add <id>`
+	// performs for configs written before catalog ids existed.
+	catalogOwnershipAdoptable
+)
+
+// catalogProviderOwner resolves the one persisted row that owns a catalog
+// identity, returning its index in providers (-1 when there is none). Catalog
+// ids may normally be shared by named profiles, but a catalog-addressed login
+// cannot choose among them: it would store one shared provider:<catalog-id>
+// token that logout/status/refresh cannot attribute safely. A different row
+// owning the catalog spelling as its NAME is equally ambiguous.
+func catalogProviderOwner(providers []ProviderProfile, catalogID string) (int, catalogOwnership, error) {
 	catalogID = strings.TrimSpace(catalogID)
 	ownerIndex := -1
 	owners := 0
@@ -317,22 +339,42 @@ func catalogProviderOwner(providers []ProviderProfile, catalogID string) (Provid
 		}
 	}
 	if owners > 1 {
-		return ProviderProfile{}, false, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id", catalogID, owners)
+		return -1, catalogOwnershipNone, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id; remove one with `zero providers remove <name>`", catalogID, owners)
 	}
 	if owners == 1 {
 		for index, provider := range providers {
 			if index != ownerIndex && sameProviderIdentity(provider.Name, catalogID) {
-				return ProviderProfile{}, false, fmt.Errorf("provider identity %q is ambiguous: saved profile %q uses it as a name while %q uses it as a catalog id", catalogID, strings.TrimSpace(provider.Name), strings.TrimSpace(providers[ownerIndex].Name))
+				return -1, catalogOwnershipNone, fmt.Errorf("provider identity %q is ambiguous: saved profile %q uses it as a name while %q uses it as a catalog id; rename or remove one with `zero providers remove %s`", catalogID, strings.TrimSpace(provider.Name), strings.TrimSpace(providers[ownerIndex].Name), strings.TrimSpace(provider.Name))
 			}
 		}
-		return providers[ownerIndex], true, nil
+		return ownerIndex, catalogOwnershipOwned, nil
 	}
-	for _, provider := range providers {
+
+	namedIndex := -1
+	named := 0
+	for index, provider := range providers {
 		if sameProviderIdentity(provider.Name, catalogID) {
-			return ProviderProfile{}, false, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogId is %q)", strings.TrimSpace(provider.Name), catalogID, strings.TrimSpace(provider.CatalogID))
+			namedIndex = index
+			named++
 		}
 	}
-	return ProviderProfile{}, false, nil
+	switch {
+	case named == 0:
+		return -1, catalogOwnershipNone, nil
+	case named > 1:
+		// ValidatePersistedProviderNames rejects this pair before every caller
+		// reaches here; kept so a narrowing of that validation fails closed.
+		return -1, catalogOwnershipNone, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a name; remove one with `zero providers remove <name>`", catalogID, named)
+	}
+	if strings.TrimSpace(providers[namedIndex].CatalogID) == "" {
+		return namedIndex, catalogOwnershipAdoptable, nil
+	}
+	// The row names itself for this catalog provider while its catalogId claims
+	// a different one. That is a competing claim, not an absent one, so it is
+	// refused — but the refusal carries the way out, because this path is
+	// reached from `zero auth login`, where a user with an old config arrives.
+	name := strings.TrimSpace(providers[namedIndex].Name)
+	return -1, catalogOwnershipNone, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogId is %q); rename or remove that row with `zero providers remove %s`, then run `zero providers add %s`", name, catalogID, strings.TrimSpace(providers[namedIndex].CatalogID), name, catalogID)
 }
 
 // ResolvePersistedProviderName maps a user- or session-supplied provider
@@ -728,9 +770,14 @@ type EnsuredProvider struct {
 // storing a token: a login is only reachable from the provider list and
 // `zero providers use` when a profile exists, but a login must never replace or
 // deactivate the user's current active provider — so an existing profile whose
-// Name or CatalogID already matches is left completely untouched (its name,
+// CatalogID already matches is left completely untouched (its name,
 // credentials, and model are the user's), and a created profile is NOT marked
 // active unless no provider was active at all.
+//
+// The one write onto an existing row is the catalog-id backfill for a legacy
+// profile NAMED for the catalog provider that carries no catalog id: without it
+// a config written before catalog ids existed dead-ends every login with an
+// ownership error the user has no way to act on.
 func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -752,10 +799,24 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 	if err := ValidatePersistedProviderNames(cfg); err != nil {
 		return EnsuredProvider{}, err
 	}
-	if owner, owned, err := catalogProviderOwner(cfg.Providers, descriptor.ID); err != nil {
+	owner, ownership, err := catalogProviderOwner(cfg.Providers, descriptor.ID)
+	if err != nil {
 		return EnsuredProvider{}, err
-	} else if owned {
-		return EnsuredProvider{Name: owner.Name, Active: cfg.ActiveProvider}, nil
+	}
+	switch ownership {
+	case catalogOwnershipOwned:
+		return EnsuredProvider{Name: cfg.Providers[owner].Name, Active: cfg.ActiveProvider}, nil
+	case catalogOwnershipAdoptable:
+		// The row already carries this catalog spelling as its name and claims
+		// no catalog id, which is how every config written before catalog ids
+		// existed looks. Backfilling that one absent field is what makes the
+		// row provably the owner; the name, credentials, base URL, and model
+		// stay exactly as the user left them.
+		cfg.Providers[owner].CatalogID = descriptor.ID
+		if err := writeConfigFile(path, cfg); err != nil {
+			return EnsuredProvider{}, err
+		}
+		return EnsuredProvider{Name: cfg.Providers[owner].Name, Active: cfg.ActiveProvider}, nil
 	}
 
 	profile := ProviderProfile{

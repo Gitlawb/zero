@@ -801,6 +801,59 @@ func TestRunAuthChatGPTAllowsCaseVariantPersistedProfile(t *testing.T) {
 	}
 }
 
+// A config written before catalog ids existed has a row NAMED for the provider
+// and no catalogId at all. Strict ownership refused that login with an error
+// the user could not act on, while the fix — `zero providers add chatgpt` —
+// appeared nowhere. An absent catalog id is not a competing claim, so the login
+// backfills it onto the row it already found.
+func TestRunAuthChatGPTAdoptsLegacyProfileWithoutCatalogID(t *testing.T) {
+	storePath := withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"other","providers":[{"name":"other","catalogId":"xai"},{"name":"ChatGPT","model":"corp-model"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "chatgpt"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		chatGPTLogin: func(context.Context, provideroauth.ChatGPTOptions) (oauth.Token, error) {
+			return oauth.Token{AccessToken: "fresh"}, nil
+		},
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, want success; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "does not prove ownership") {
+		t.Fatalf("legacy profile must be adopted, not refused: %q %q", stdout.String(), stderr.String())
+	}
+	if token, ok, err := store.Load(oauth.ProviderKey("chatgpt")); err != nil || !ok || token.AccessToken != "fresh" {
+		t.Fatalf("stored token = %+v, %v, %v; want the fresh login saved", token, ok, err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("providers = %+v, want the legacy row adopted rather than a duplicate added", cfg.Providers)
+	}
+	adopted := cfg.Providers[1]
+	if adopted.Name != "ChatGPT" || adopted.CatalogID != "chatgpt" || adopted.Model != "corp-model" {
+		t.Fatalf("adopted row = %+v, want catalogId backfilled and the user's name/model kept", adopted)
+	}
+	if cfg.ActiveProvider != "other" {
+		t.Fatalf("activeProvider = %q, want the user's active provider untouched", cfg.ActiveProvider)
+	}
+}
+
 func TestRunAuthRefreshResolvesCatalogLoginCandidates(t *testing.T) {
 	storePath := withAuthStore(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
