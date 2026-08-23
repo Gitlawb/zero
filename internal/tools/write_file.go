@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 type writeFileTool struct {
@@ -107,7 +109,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
