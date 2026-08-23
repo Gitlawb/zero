@@ -76,6 +76,11 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (any, error)
 // NotifyFunc handles an inbound notification (no response is sent).
 type NotifyFunc func(ctx context.Context, params json.RawMessage)
 
+const (
+	maxFrameBytes         = 64 * 1024 * 1024
+	maxConcurrentRequests = 128
+)
+
 // Conn is a JSON-RPC 2.0 peer over a single ndjson stream pair. It both serves
 // inbound requests/notifications (via registered handlers) and issues outbound
 // requests/notifications — needed because ACP is bidirectional (the agent calls
@@ -95,7 +100,8 @@ type Conn struct {
 	pending map[int64]chan rpcMessage
 	closed  bool
 
-	wg sync.WaitGroup // tracks in-flight inbound handlers
+	sem chan struct{}
+	wg  sync.WaitGroup // tracks in-flight inbound handlers
 }
 
 // NewConn builds a peer reading ndjson from r and writing ndjson to w. This
@@ -111,6 +117,7 @@ func NewConn(r io.Reader, w io.Writer) *Conn {
 		handlers:  make(map[string]HandlerFunc),
 		notifiers: make(map[string]NotifyFunc),
 		pending:   make(map[int64]chan rpcMessage),
+		sem:       make(chan struct{}, maxConcurrentRequests),
 	}
 }
 
@@ -297,14 +304,18 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 		c.deliver(msg)
 	case msg.isRequest():
 		c.wg.Add(1)
+		c.acquireSem(ctx)
 		go func(m rpcMessage) {
+			defer c.releaseSem()
 			defer c.wg.Done()
 			c.dispatchRequest(ctx, m)
 		}(msg)
 	case msg.isNotify():
 		if fn := c.notifiers[msg.Method]; fn != nil {
 			c.wg.Add(1)
+			c.acquireSem(ctx)
 			go func(m rpcMessage) {
+				defer c.releaseSem()
 				defer c.wg.Done()
 				fn(ctx, m.Params)
 			}(msg)
@@ -314,6 +325,26 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 		if len(msg.ID) > 0 {
 			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
 		}
+	}
+}
+
+func (c *Conn) acquireSem(ctx context.Context) {
+	if c.sem == nil {
+		return
+	}
+	select {
+	case c.sem <- struct{}{}:
+	case <-ctx.Done():
+	}
+}
+
+func (c *Conn) releaseSem() {
+	if c.sem == nil {
+		return
+	}
+	select {
+	case <-c.sem:
+	default:
 	}
 }
 
