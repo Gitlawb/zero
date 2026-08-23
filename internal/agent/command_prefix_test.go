@@ -271,3 +271,53 @@ func TestSafeGitCommandStopsAtTerminalGlobalOptions(t *testing.T) {
 		}
 	}
 }
+
+// TestSafeGitCommandRejectsDashCEvenWithAnApprovableSubcommand isolates the
+// -C rejection from the terminal-global short circuit above (`-C repo --help
+// diff` never reaches gitHasUnsafeGlobalOption's -C case at all, because
+// --help stops the scan first). -C changes which repository the read-only
+// subcommand inspects, so an approval for the workspace repo must not extend
+// to a different one named this way — even for status/log/diff/show/branch,
+// which are otherwise auto-approved.
+func TestSafeGitCommandRejectsDashCEvenWithAnApprovableSubcommand(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "-C", "repo", "status"},
+		{"git", "-Crepo", "status"},
+		{"git", "-C", "repo", "branch"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; -C must never be auto-approved", command)
+		}
+	}
+}
+
+// TestSafeGitCommandRejectsSubcommandsOutsideTheApprovedList proves the
+// refactor onto sandbox.GitSubcommand (a shared reader that resolves ANY
+// subcommand, not just the five this matcher approves) did not widen what
+// gets auto-approved: a resolvable-but-unapproved subcommand, and no
+// subcommand at all, both stay rejected.
+func TestSafeGitCommandRejectsSubcommandsOutsideTheApprovedList(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "push", "origin", "main"},
+		{"git", "commit", "-m", "msg"},
+		{"git", "fetch", "origin"},
+		{"git"},
+		{"git", "-C", "repo"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; want rejected", command)
+		}
+	}
+	// The approved subcommands still resolve correctly through the same shared
+	// reader, with a global option in front — end-to-end proof the subIndex
+	// arithmetic across the sandbox.GitSubcommand boundary is still right.
+	for _, command := range [][]string{
+		{"git", "status"},
+		{"git", "--git-dir", "/repo/.git", "log"},
+		{"git", "branch"},
+	} {
+		if !safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = false; want approved", command)
+		}
+	}
+}

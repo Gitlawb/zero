@@ -530,10 +530,38 @@ func TestGitGlobalOptionsResolveIdenticallyOnBothPaths(t *testing.T) {
 	}{
 		{"push origin main", true},
 		{"-C repo push origin main", true},
+		// -C is a joined-value spelling too: `-Crepo` is one token, and its embedded
+		// value must not be mistaken for the subcommand.
+		{"-Crepo push origin main", true},
+		{"-C repo -C repo2 push origin main", true},
 		{"--git-dir /repo/.git fetch origin", true},
+		// Every separate-value global against every remote verb this scanner
+		// treats as network, not just push+fetch above: the option-consumption
+		// rule is shared, so one representative pairing per option is what
+		// actually exercises drift, but each remote VERB gets its own row too —
+		// a verb this scanner has never seen paired with an option is exactly
+		// where a hand-maintained verb list would be missed.
+		{"--work-tree /repo pull origin main", true},
+		{"--attr-source HEAD clone https://example.com/repo.git", true},
+		{"--config-env foo=bar ls-remote origin", true},
+		{"--namespace ns send-pack origin main", true},
+		{"--super-prefix sub/ fetch origin", true},
 		{"--no-pager push origin main", true},
 		{"PUSH origin main", true},
 		{"--Git-Dir repo PUSH origin main", true},
+		// Local commit forms must stay quiet with a global in front, not just
+		// bare — a global that is handled correctly for push but breaks commit
+		// would be a regression this scanner would otherwise never see, since
+		// every existing local-form row here is bare.
+		{"-C repo commit -m msg", false},
+		{"--git-dir /repo/.git commit -m msg", false},
+		{"--work-tree /repo status", false},
+		// Value-layer negative: the global's VALUE is a token that is itself a
+		// remote verb's spelling. A scanner that fails to skip the value (instead
+		// of reading it as the next word to classify) would misread this as
+		// local — "push" here is --git-dir's argument, never git's own argv.
+		{"--git-dir push status", false},
+		{"-C push status", false},
 		{"archive --mtime 2024-01-01 --remote origin HEAD", true},
 		{"archive --format --remote=origin HEAD", true},
 		{"archive --mtime --remote=origin HEAD", true},

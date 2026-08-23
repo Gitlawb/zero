@@ -526,30 +526,43 @@ func parseGitInvocation(words []string) gitInvocation {
 
 // GitGlobalOptionConsumesValue lists git's global options whose value is a
 // separate token. It is shared with internal/agent's command-prefix parser so
-// the two security-sensitive scans cannot drift.
+// the two security-sensitive scans cannot drift — internal/agent reaches this
+// through GitSubcommand, which resolves the whole grammar (terminal globals
+// included) in one place, rather than importing the terminal-global table
+// separately.
 //
 // `--exec-path` is deliberately absent: its value is inline-only
 // (`--exec-path=<path>`), and the bare spelling is terminal — see
 // gitTerminalGlobalOptions.
-// GitTerminalGlobalOption reports whether a git global option makes git print
-// something from the local installation and exit, so nothing after it is a
-// subcommand. It is the exported view of gitTerminalGlobalOptions, shared with
-// internal/agent's command-prefix parser for the same reason
-// GitGlobalOptionConsumesValue is: while each scan carried its own option
-// grammar, `git --help status` was the safe prefix `git status` to one parser
-// and a terminal help invocation to the other, and every new option had to be
-// remembered in two places.
-func GitTerminalGlobalOption(option string) bool {
-	return gitTerminalGlobalOptions[strings.ToLower(strings.TrimSpace(option))]
-}
-
 func GitGlobalOptionConsumesValue(option string) bool {
 	switch strings.ToLower(option) {
-	case "-c", "--attr-source", "--config-env", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
+	// -c (config override, `-c name=value`) and -C (run as if started in
+	// <path>) are DIFFERENT git global options that happen to both take a
+	// separate-token value — they are listed explicitly rather than left to
+	// fold together under strings.ToLower, so this stays correct if the two
+	// options' value-taking behavior ever diverges, and so a reader does not
+	// have to notice the case-fold to see -C is covered at all.
+	case "-c", "-C", "--attr-source", "--config-env", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
 		return true
 	default:
 		return false
 	}
+}
+
+// GitSubcommand resolves the git subcommand a command line will actually run,
+// or reports that none runs — no subcommand is present (e.g. bare `git`, or
+// `git -C repo` with nothing after it), or a terminal global like --help/
+// --version made everything after it non-executed help/version text instead.
+// It is parseGitInvocation's exported view, so a consumer outside this
+// package — internal/agent's prefix-approval matcher — reads git's global
+// options through the SAME grammar the network classifier does, rather than
+// maintaining its own skip list that can silently drift from this one.
+func GitSubcommand(words []string) (index int, subcommand string, ok bool) {
+	invocation := parseGitInvocation(words)
+	if invocation.kind != gitCommandSubcommand {
+		return 0, "", false
+	}
+	return invocation.subcommandIndex, invocation.subcommand, true
 }
 
 func npxUsesNetwork(_ []string) bool {
