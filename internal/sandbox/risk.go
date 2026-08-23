@@ -146,6 +146,18 @@ func matchesUnparseableNetworkAt(command string, depth int) bool {
 			}
 		}
 	}
+	// The segments above were cut under POSIX quoting. CMD honors only `"`, so
+	// re-cut the same text under its rules before handing it to the CMD readers;
+	// otherwise a quote form CMD ignores hides a separator it acts on.
+	if posixSingleQuoteHidesCMDSeparator(command) {
+		for _, tokenInfo := range fallbackCMDCommandTokenInfo(command) {
+			for _, body := range cmdCommandBodyTokenInfoCandidates(tokenInfo) {
+				if cmdBodyUsesNetwork(body, depth) {
+					return true
+				}
+			}
+		}
+	}
 	return false
 }
 
@@ -268,7 +280,14 @@ func resolveCommandArgv(body []string, depth int) commandResolution {
 		}
 		return commandKnownLocal
 	}
-	return literalProgramNetworkResolution(program, args)
+	resolution := literalProgramNetworkResolution(program, args)
+	if program == "git" && resolution == commandKnownLocal &&
+		gitSelectionDynamic(args, func(index int) bool { return fallbackTokenLooksDynamic(args[index]) }) {
+		// The fallback never expands these values, so a subcommand it cannot read
+		// is not a subcommand it has proven local. See gitSelectionDynamic.
+		return commandUnresolved
+	}
+	return resolution
 }
 
 // fallbackTokenLooksDynamic reports whether a token selected as executable
@@ -319,16 +338,25 @@ func validCMDVariableName(name string) bool {
 	return true
 }
 
+// fallbackPayloadUsesNetwork classifies CMD payload text, so it reads the text
+// under CMD's quoting as well as the shared POSIX tokenization — a `'` CMD
+// treats as ordinary text must not hide the separator that follows it.
 func fallbackPayloadUsesNetwork(payload string, depth int) bool {
-	for _, tokenInfo := range fallbackCommandTokenInfo(payload) {
-		if len(tokenInfo) > 0 && strings.EqualFold(tokenInfo[0].value, "start") {
-			if body := cmdStartPayloadTokenInfo(tokenInfo[1:]); len(body) > 0 && fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
-				return true
+	tokenizations := [][][]fallbackCommandToken{fallbackCommandTokenInfo(payload)}
+	if posixSingleQuoteHidesCMDSeparator(payload) {
+		tokenizations = append(tokenizations, fallbackCMDCommandTokenInfo(payload))
+	}
+	for _, tokenInfos := range tokenizations {
+		for _, tokenInfo := range tokenInfos {
+			if len(tokenInfo) > 0 && strings.EqualFold(tokenInfo[0].value, "start") {
+				if body := cmdStartPayloadTokenInfo(tokenInfo[1:]); len(body) > 0 && fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+					return true
+				}
 			}
-		}
-		for _, body := range cmdCommandBodyTokenInfoCandidates(tokenInfo) {
-			if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
-				return true
+			for _, body := range cmdCommandBodyTokenInfoCandidates(tokenInfo) {
+				if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+					return true
+				}
 			}
 		}
 	}
@@ -574,13 +602,43 @@ func cmdConditionPayload(fields []string) []string {
 
 // cmdForPayload returns the command after DO, which is the only part of a FOR
 // loop that executes. `for %i in (curl) do echo %i` must not resolve to curl.
+//
+// DO counts only OUTSIDE the IN (...) set. `do` is an ordinary word inside it,
+// and CMD accepts it there: in `for %i in (do x) do curl https://evil.test` the
+// first `do` is a set ELEMENT, so selecting it resolved the classifier from `x`
+// and never reached the curl that actually runs. Tracking parenthesis depth
+// picks the loop keyword instead, and an unbalanced set — which CMD itself
+// rejects — yields no body rather than a guessed one.
 func cmdForPayload(fields []string) []string {
+	depth := 0
+	quoted := false
 	for index, field := range fields {
-		if strings.EqualFold(strings.Trim(field, `"`), "do") {
+		if depth == 0 && strings.EqualFold(strings.Trim(field, `"`), "do") {
 			return fields[index+1:]
 		}
+		depth, quoted = cmdParenDepth(field, depth, quoted)
 	}
 	return nil
+}
+
+// cmdParenDepth advances the parenthesis depth across one token, ignoring
+// parentheses inside double quotes. Quote state is carried between tokens
+// because a quoted run with a space in it can span them.
+func cmdParenDepth(field string, depth int, quoted bool) (int, bool) {
+	for _, r := range field {
+		switch {
+		case r == '"':
+			quoted = !quoted
+		case quoted:
+		case r == '(':
+			depth++
+		case r == ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return depth, quoted
 }
 
 // fallbackCMDForFCommands extracts the command source that CMD FOR /F executes
@@ -995,6 +1053,54 @@ func fallbackCommandTokens(command string) [][]string {
 }
 
 func fallbackCommandTokenInfo(command string) [][]fallbackCommandToken {
+	return fallbackCommandTokenInfoIn(command, false)
+}
+
+// fallbackCMDCommandTokenInfo tokenizes the same text under CMD's quoting rules,
+// where `"` is the ONLY quote character.
+//
+// The POSIX reading of `echo ' & curl https://evil.test` puts `& curl …` inside
+// the echo argument, so the segment resolves to echo and classifies local. CMD
+// has no single-quote quoting at all: the `'` is literal text, `&` is a command
+// separator, and curl runs. The same holds for backticks, which execute nothing
+// under CMD. Any text handed to a CMD reader is tokenized both ways so a quote
+// form one runtime ignores cannot hide a separator from the other.
+func fallbackCMDCommandTokenInfo(command string) [][]fallbackCommandToken {
+	return fallbackCommandTokenInfoIn(command, true)
+}
+
+// posixSingleQuoteHidesCMDSeparator reports the one disagreement that matters:
+// a POSIX single-quoted region — quoted to this tokenizer, ordinary text to CMD
+// — containing a CMD command separator. In `echo ' & curl https://evil.test`
+// the quote swallows `& curl …` into echo's argument, while cmd.exe runs curl.
+//
+// Merely containing a `'` is not enough to justify re-reading the text: POSIX
+// constructs whose quoted regions hide nothing (`env -S 'printf ok' …`) would
+// re-segment into shapes that mean nothing under CMD, and a fail-closed pass
+// that fires on them is just noise. `;` is deliberately not a separator here —
+// CMD treats it as an argument delimiter, not a command boundary. Double quotes
+// quote under both languages, so they hide nothing from either.
+func posixSingleQuoteHidesCMDSeparator(command string) bool {
+	escaped := false
+	var quote rune
+	for _, r := range command {
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case quote == 0 && (r == '\'' || r == '"'):
+			quote = r
+		case quote == r:
+			quote = 0
+		case quote == '\'' && (r == '&' || r == '|'):
+			return true
+		}
+	}
+	return false
+}
+
+func fallbackCommandTokenInfoIn(command string, cmdQuoting bool) [][]fallbackCommandToken {
 	// Command strings commonly preserve cmd.exe's escaped quote spelling.
 	command = strings.ReplaceAll(command, `\"`, `"`)
 	var commands [][]fallbackCommandToken
@@ -1033,8 +1139,9 @@ func fallbackCommandTokenInfo(command string) [][]fallbackCommandToken {
 		}
 		// Backticks execute inside unquoted and double-quoted text, but are
 		// literal inside single quotes. Preserve the surrounding quote while the
-		// substitution body is scanned as its own command.
-		if r == '`' && quote != '\'' {
+		// substitution body is scanned as its own command. CMD has no command
+		// substitution, so under its rules a backtick is ordinary text.
+		if r == '`' && quote != '\'' && !cmdQuoting {
 			flushCommand()
 			if backtick {
 				if len(delimiters) > 0 && delimiters[len(delimiters)-1].opener == '`' {
@@ -1046,6 +1153,12 @@ func fallbackCommandTokenInfo(command string) [][]fallbackCommandToken {
 				quote = 0
 			}
 			backtick = !backtick
+			continue
+		}
+		if r == '\'' && cmdQuoting {
+			// Literal text to CMD, and deliberately NOT a word boundary: the
+			// point of this pass is that the quote hides nothing.
+			word.WriteRune(r)
 			continue
 		}
 		if r == '\'' || r == '"' {

@@ -243,8 +243,53 @@ func resolveASTCommandNetwork(words []*syntax.Word, depth int) commandResolution
 		return commandUnresolved
 	case program == "strace" && straceSourceDynamic(args):
 		return commandUnresolved
+	case program == "git" && resolution == commandKnownLocal:
+		if gitSelectionDynamic(textArgs, func(index int) bool { return !isLiteralWord(args[index]) }) {
+			return commandUnresolved
+		}
 	}
 	return resolution
+}
+
+// gitSelectionDynamic reports whether an expansion this scan cannot read could
+// choose what git actually does: the SUBCOMMAND itself, or `git archive`'s
+// --remote, the one option that turns a local tree export into a request to
+// another host.
+//
+// wordText drops an expansion, so the reconstructed argv shows a subcommand git
+// may never run: `git $VERB origin main` reads as `git origin main` — an
+// unrecognized, therefore local, subcommand — while the shell runs `git push`.
+// A dynamic word BEFORE the subcommand counts too, because it can shift which
+// token git reads as the subcommand: an empty expansion or one that word-splits
+// changes the position, even as the value of a global option that normally
+// consumes it.
+//
+// Past the subcommand nothing else can change the answer, so ordinary forms like
+// `git commit -m "$MESSAGE"` stay proven-local and keep their quiet path.
+//
+// dynamic reports whether the word at an index is unreadable. The AST path
+// supplies isLiteralWord and the fallback supplies fallbackTokenLooksDynamic, so
+// neither can classify a shape the other fails closed on.
+func gitSelectionDynamic(words []string, dynamic func(index int) bool) bool {
+	invocation := parseGitInvocation(words)
+	limit := len(words)
+	if invocation.kind == gitCommandSubcommand {
+		limit = min(invocation.subcommandIndex+1, len(words))
+	}
+	for index := range limit {
+		if dynamic(index) {
+			return true
+		}
+	}
+	if invocation.kind != gitCommandSubcommand || invocation.subcommand != "archive" {
+		return false
+	}
+	for index := invocation.subcommandIndex + 1; index < len(words); index++ {
+		if dynamic(index) {
+			return true
+		}
+	}
+	return false
 }
 
 // literalProgramNetworkResolution classifies a program after launcher argv has

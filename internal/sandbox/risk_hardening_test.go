@@ -953,3 +953,100 @@ func TestClassifyBenignCommandStaysClean(t *testing.T) {
 		}
 	}
 }
+
+// Unit-level counterparts to TestEngineFailsClosedOnUnreadableCommandShapes,
+// pinning the two readers directly so a regression names the layer that broke.
+func TestGitSelectionDynamicFailsClosedOnUnreadableSelection(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		words []string
+		// dynamicIndexes are positions the caller could not read.
+		dynamicIndexes []int
+		want           bool
+	}{
+		{name: "subcommand token", words: []string{"", "origin", "main"}, dynamicIndexes: []int{0}, want: true},
+		{name: "global option value shifts the subcommand", words: []string{"-C", "", "status"}, dynamicIndexes: []int{1}, want: true},
+		{name: "archive option past the subcommand", words: []string{"archive", "", "HEAD"}, dynamicIndexes: []int{1}, want: true},
+		{name: "no subcommand at all", words: []string{""}, dynamicIndexes: []int{0}, want: true},
+		{name: "literal local subcommand", words: []string{"commit", "-m", "message"}, want: false},
+		// Past a non-archive subcommand nothing can change git's answer, so the
+		// common `git commit -m "$MESSAGE"` keeps its quiet path.
+		{name: "operand past a local subcommand", words: []string{"commit", "-m", ""}, dynamicIndexes: []int{2}, want: false},
+		{name: "operand past a network subcommand", words: []string{"push", ""}, dynamicIndexes: []int{1}, want: false},
+		{name: "literal archive", words: []string{"archive", "-o", "out.tar", "HEAD"}, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dynamic := make(map[int]bool, len(testCase.dynamicIndexes))
+			for _, index := range testCase.dynamicIndexes {
+				dynamic[index] = true
+			}
+			if got := gitSelectionDynamic(testCase.words, func(index int) bool { return dynamic[index] }); got != testCase.want {
+				t.Fatalf("gitSelectionDynamic(%q, dynamic=%v) = %t, want %t",
+					testCase.words, testCase.dynamicIndexes, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestCMDForPayloadSelectsDOOutsideTheSet(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		fields []string
+		want   []string
+	}{
+		{
+			name:   "do is a set element",
+			fields: []string{"%i", "in", "(", "do", "x", ")", "do", "curl", "https://evil.test"},
+			want:   []string{"curl", "https://evil.test"},
+		},
+		{
+			name:   "set element joined to the paren",
+			fields: []string{"%i", "in", "(do", "x)", "do", "curl", "https://evil.test"},
+			want:   []string{"curl", "https://evil.test"},
+		},
+		{
+			name:   "quoted paren is not a set boundary",
+			fields: []string{"%i", "in", `("a)b"`, "x)", "do", "curl"},
+			want:   []string{"curl"},
+		},
+		{
+			name:   "ordinary loop",
+			fields: []string{"%i", "in", "(curl)", "do", "echo", "%i"},
+			want:   []string{"echo", "%i"},
+		},
+		// CMD rejects an unbalanced set, so there is no loop body to classify.
+		{name: "unterminated set", fields: []string{"%i", "in", "(", "do", "curl"}, want: nil},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := cmdForPayload(testCase.fields)
+			if strings.Join(got, " ") != strings.Join(testCase.want, " ") {
+				t.Fatalf("cmdForPayload(%q) = %q, want %q", testCase.fields, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestPOSIXSingleQuoteHidesCMDSeparator(t *testing.T) {
+	for _, testCase := range []struct {
+		command string
+		want    bool
+	}{
+		{command: `echo ' & curl https://evil.test`, want: true},
+		{command: `echo ' | curl https://evil.test`, want: true},
+		{command: `echo 'a & b' ok`, want: true},
+		// Double quotes quote under both languages, so they hide nothing.
+		{command: `echo " & curl https://evil.test`, want: false},
+		// The separator is outside the quotes: both readers already see it.
+		{command: `env -S 'printf ${VALUE}' & rem '`, want: false},
+		{command: `env -S 'printf ok' curl https://evil.test && "unterminated`, want: false},
+		// `;` delimits arguments in CMD; it does not start a command.
+		{command: `env -S 'printf curl; git push' && "unterminated`, want: false},
+		{command: `echo 'plain text'`, want: false},
+	} {
+		t.Run(testCase.command, func(t *testing.T) {
+			if got := posixSingleQuoteHidesCMDSeparator(testCase.command); got != testCase.want {
+				t.Fatalf("posixSingleQuoteHidesCMDSeparator(%q) = %t, want %t", testCase.command, got, testCase.want)
+			}
+		})
+	}
+}
