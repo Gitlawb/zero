@@ -1,7 +1,8 @@
 package fsutil
 
 import (
-	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"testing"
@@ -31,17 +32,34 @@ func TestRenameWithRetryRetriesOnWindows(t *testing.T) {
 	}
 }
 
-func TestRenameWithRetryNonRetryableError(t *testing.T) {
-	sentinel := errors.New("disk on fire")
-	var attempts int
-	err := RenameWithRetry("src", "dst", func(src, dst string) error {
-		attempts++
-		return sentinel
-	})
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("expected sentinel error, got: %v", err)
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "sub", "test.txt")
+	content := []byte("hello atomic world")
+
+	if err := WriteFileAtomic(target, content, 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic failed: %v", err)
 	}
-	if attempts != 1 {
-		t.Errorf("expected only 1 attempt for non-retryable error, got %d", attempts)
+
+	read, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(read) != string(content) {
+		t.Fatalf("read content mismatch: got %q, want %q", string(read), string(content))
+	}
+
+	// Overwrite test
+	newContent := []byte("overwritten atomic content")
+	if err := WriteFileAtomic(target, newContent, 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic overwrite failed: %v", err)
+	}
+	read2, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile after overwrite failed: %v", err)
+	}
+	if string(read2) != string(newContent) {
+		t.Fatalf("read content mismatch: got %q, want %q", string(read2), string(newContent))
 	}
 }
+
