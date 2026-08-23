@@ -314,32 +314,32 @@ func TestExtractTarGzRejectsChainedSymlinkEscapingFile(t *testing.T) {
 		t.Skip("symlinks not supported")
 	}
 	dir := t.TempDir()
-	archivePath := filepath.Join(dir, "archive.tar.gz")
-
-	file, err := os.Create(archivePath)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	gw := gzip.NewWriter(file)
-	tw := tar.NewWriter(gw)
-
-	// Symlink pointing outside
-	h1 := &tar.Header{
-		Name:     "sub/link_dir",
-		Typeflag: tar.TypeSymlink,
-		Linkname: "../../outside_dir",
-	}
-	if err := tw.WriteHeader(h1); err != nil {
-		t.Fatalf("WriteHeader h1: %v", err)
-	}
-
-	tw.Close()
-	gw.Close()
-	file.Close()
-
 	destDir := filepath.Join(dir, "extracted")
+	outsideDir := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatalf("Mkdir dest: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("Mkdir outside: %v", err)
+	}
+	// chain -> mid -> outsideDir. Lexical path destDir/chain/pwned.txt stays
+	// under destDir; EvalSymlinks of the chain does not.
+	if err := os.Symlink(outsideDir, filepath.Join(destDir, "mid")); err != nil {
+		t.Fatalf("symlink mid: %v", err)
+	}
+	if err := os.Symlink("mid", filepath.Join(destDir, "chain")); err != nil {
+		t.Fatalf("symlink chain: %v", err)
+	}
+
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+	writeTestTarGz(t, archivePath, map[string]string{
+		"chain/pwned.txt": "escaped",
+	})
+
 	if err := extractArchive(archivePath, destDir); err == nil {
-		t.Fatal("expected error extracting escaping symlink directory")
+		t.Fatal("expected error extracting a file through a chained escaping symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "pwned.txt")); !os.IsNotExist(err) {
+		t.Fatalf("escaped file exists outside destDir: %v", err)
 	}
 }
-
