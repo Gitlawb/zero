@@ -18,6 +18,16 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	mode := perm
+	info, err := os.Lstat(filename)
+	switch {
+	case err == nil:
+		if info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
+	case !os.IsNotExist(err):
+		return err
+	}
 	tmpFile, err := os.CreateTemp(dir, ".zero-tmp-*")
 	if err != nil {
 		return err
@@ -31,7 +41,7 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpName)
 	}()
 
-	if err := tmpFile.Chmod(perm); err != nil {
+	if err := tmpFile.Chmod(mode); err != nil {
 		return err
 	}
 	if _, err := tmpFile.Write(data); err != nil {
@@ -47,7 +57,6 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 
 	return ReplaceWithRetry(tmpName, filename, nil)
 }
-
 
 // CommittedReplacementCleanupError reports that a replacement was committed,
 // but the old destination retained at BackupPath could not be removed. Callers
