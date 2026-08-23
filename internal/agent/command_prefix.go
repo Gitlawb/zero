@@ -373,71 +373,69 @@ func validSedPrintArg(arg string) bool {
 	return true
 }
 
+// gitApprovableReadOnlySubcommands are the only git subcommands this prefix
+// matcher will ever auto-approve. Every other resolvable subcommand (push,
+// commit, ...) — and the case where no subcommand resolves at all — is
+// rejected by the zero value of the map lookup below, so this list is the
+// single place that grants approval; nothing else needs to enumerate it.
+var gitApprovableReadOnlySubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true, "branch": true,
+}
+
+// safeGitCommand approves only status/log/diff/show/branch with no global
+// option this matcher has not specifically vetted as safe.
+//
+// Subcommand resolution goes through sandbox.GitSubcommand — the SAME reader
+// the network classifier uses — instead of a parallel hand-rolled scan of
+// git's global-option grammar. Two independent scans of the same grammar is
+// exactly what let this path and the classifier disagree about which token is
+// the subcommand (an omitted -C in one, present in the other) even though
+// both were nominally checking the same thing; sharing the reader removes the
+// second copy that can drift.
 func safeGitCommand(command []string) bool {
-	subIndex, subcommand, ok := gitSubcommand(command)
-	if !ok {
+	if len(command) < 2 {
 		return false
 	}
+	// sandbox.GitSubcommand indexes into command[1:] (it does not expect the
+	// "git" argv[0] itself); shift its answer back into command's own indexing
+	// so the slices below still mean what they did before this used the shared
+	// reader.
+	subIndex, subcommand, ok := sandbox.GitSubcommand(command[1:])
+	if !ok || !gitApprovableReadOnlySubcommands[subcommand] {
+		return false
+	}
+	subIndex++
 	if gitHasUnsafeGlobalOption(command[1:subIndex]) {
 		return false
 	}
 	args := command[subIndex+1:]
-	switch subcommand {
-	case "status", "log", "diff", "show":
-		return gitArgsReadOnly(args)
-	case "branch":
+	if subcommand == "branch" {
 		return gitArgsReadOnly(args) && gitBranchReadOnly(args)
-	default:
-		return false
 	}
+	return gitArgsReadOnly(args)
 }
 
-func gitSubcommand(command []string) (int, string, bool) {
-	for index := 1; index < len(command); index++ {
-		arg := command[index]
-		if sandbox.GitGlobalOptionConsumesValue(arg) {
-			index++
-			continue
-		}
-		// A terminal global makes git print and exit, so the token after it is
-		// help text rather than a subcommand. Stopping here keeps this parser
-		// aligned with the sandbox classifier, which already stops: without it
-		// `git --help status` resolved to the read-only prefix `git status`
-		// and was auto-approved as a command it is not.
-		if sandbox.GitTerminalGlobalOption(arg) {
-			return 0, "", false
-		}
-		if gitOptionHasInlineValue(arg) || arg == "--" || strings.HasPrefix(arg, "-") {
-			continue
-		}
-		switch arg {
-		case "status", "log", "diff", "show", "branch":
-			return index, arg, true
-		default:
-			return 0, "", false
-		}
-	}
-	return 0, "", false
-}
-
-func gitOptionHasInlineValue(arg string) bool {
-	return strings.HasPrefix(arg, "--attr-source=") ||
-		strings.HasPrefix(arg, "--config-env=") ||
-		strings.HasPrefix(arg, "--exec-path=") ||
-		strings.HasPrefix(arg, "--git-dir=") ||
-		strings.HasPrefix(arg, "--namespace=") ||
-		strings.HasPrefix(arg, "--super-prefix=") ||
-		strings.HasPrefix(arg, "--work-tree=") ||
-		((strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-c")) && len(arg) > 2)
-}
-
+// gitHasUnsafeGlobalOption rejects global options this matcher has not
+// specifically vetted as compatible with the read-only subcommands above.
+// -C changes which repository status/log/diff/show/branch inspects — a prefix
+// approved against the workspace repo must not silently extend to `git -C
+// /elsewhere status`, which reports on a DIFFERENT repository the approval
+// was never about. --upload-pack lets a fetch/clone run an arbitrary program
+// on the remote side; it is listed here defensively even though none of the
+// five approvable subcommands accept it, so a future addition to that list
+// does not silently inherit the gap.
+//
+// This still reads git's shared skip-list (GitGlobalOptionConsumesValue) to
+// step over an option's separate-token value correctly; only the "-C is
+// unsafe regardless" judgment is specific to this matcher, so it stays local
+// rather than joining the classifier's shared grammar.
 func gitHasUnsafeGlobalOption(args []string) bool {
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
 		case strings.HasPrefix(arg, "--upload-pack"):
 			return true
-		case arg == "-C" || strings.HasPrefix(arg, "-C"):
+		case strings.HasPrefix(arg, "-C"):
 			return true
 		case sandbox.GitGlobalOptionConsumesValue(arg):
 			index++
