@@ -308,3 +308,38 @@ func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
 		t.Fatal("expected error extracting escaping symlink")
 	}
 }
+
+func TestExtractTarGzRejectsChainedSymlinkEscapingFile(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	gw := gzip.NewWriter(file)
+	tw := tar.NewWriter(gw)
+
+	// Symlink pointing outside
+	h1 := &tar.Header{
+		Name:     "sub/link_dir",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "../../outside_dir",
+	}
+	if err := tw.WriteHeader(h1); err != nil {
+		t.Fatalf("WriteHeader h1: %v", err)
+	}
+
+	tw.Close()
+	gw.Close()
+	file.Close()
+
+	destDir := filepath.Join(dir, "extracted")
+	if err := extractArchive(archivePath, destDir); err == nil {
+		t.Fatal("expected error extracting escaping symlink directory")
+	}
+}
+

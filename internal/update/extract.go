@@ -167,7 +167,43 @@ func safeExtractPath(destDir string, name string) (string, error) {
 	if target != destDirClean && !strings.HasPrefix(target, destDirClean+string(os.PathSeparator)) {
 		return "", fmt.Errorf("archive entry escapes destination: %s", name)
 	}
+	if err := verifyNoSymlinkEscape(destDirClean, target); err != nil {
+		return "", err
+	}
 	return target, nil
+}
+
+func verifyNoSymlinkEscape(destDirClean string, target string) error {
+	rel, err := filepath.Rel(destDirClean, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("archive entry escapes destination: %s", target)
+	}
+	current := destDirClean
+	parts := strings.Split(rel, string(os.PathSeparator))
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				break
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return err
+			}
+			resolved = filepath.Clean(resolved)
+			if resolved != destDirClean && !strings.HasPrefix(resolved, destDirClean+string(os.PathSeparator)) {
+				return fmt.Errorf("archive symlink %s escapes destination: %s", current, resolved)
+			}
+		}
+	}
+	return nil
 }
 
 // findByBasename recursively searches root for the first regular file whose
