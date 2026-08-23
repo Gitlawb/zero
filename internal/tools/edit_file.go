@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
-	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 type editFileTool struct {
@@ -155,7 +153,8 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	if err := fsutil.WriteFileAtomic(absolutePath, []byte(updated), 0o644); err != nil {
+	cleanupWarning, err := committedWrite(absolutePath, []byte(updated), 0o644)
+	if err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
@@ -195,6 +194,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		suffix = "s"
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
+	if cleanupWarning != "" {
+		summary += " " + cleanupWarning
+	}
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
