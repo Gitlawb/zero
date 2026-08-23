@@ -149,6 +149,78 @@ func TestEvaluateLauncherResolutionContract(t *testing.T) {
 	}
 }
 
+// Three shapes where a reading the classifier could not perform was being
+// reported as "no network" rather than as unresolved. Each ran through the
+// engine, because the property that matters is the prompt the operator sees.
+func TestEngineFailsClosedOnUnreadableCommandShapes(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	networkCases := []struct {
+		name    string
+		command string
+	}{
+		// The expansion chooses git's subcommand. The reconstructed argv shows
+		// `git origin main`, an unknown local subcommand, while the shell runs
+		// whatever VERB holds — `push` included.
+		{name: "git subcommand from an expansion", command: `VERB=push; git $VERB origin main`},
+		{name: "git subcommand from a quoted expansion", command: `VERB=push; git "$VERB" origin main`},
+		// Same reading through the unparseable fallback rather than the AST.
+		{name: "git subcommand from an expansion, fallback", command: `git $VERB origin main && "unterminated`},
+		// archive is local until --remote makes it a fetch from another host, so
+		// an unreadable option word past the subcommand counts for archive alone.
+		{name: "git archive options from an expansion", command: `OPTS=--remote=origin; git archive $OPTS HEAD`},
+		// `do` inside the IN set is a set element, not the loop keyword. Selecting
+		// the first one resolved the loop body from `x` and never reached the curl
+		// that runs. The spaced spelling is the one that was actually wrong: with
+		// `(do` joined, the token is not `do` and the old scan landed correctly by
+		// accident, which is why the joined form is kept alongside it rather than
+		// instead of it.
+		{name: "cmd FOR with do inside the set", command: `for %i in (do x) do curl https://evil.test`},
+		{name: "cmd FOR with a spaced set", command: `for %i in ( do x ) do curl https://evil.test`},
+		// CMD has no single-quote quoting: the quote is literal text, `&` is a
+		// separator, and curl runs. POSIX tokenization hid it inside echo's
+		// argument.
+		{name: "cmd separator hidden by a POSIX quote", command: `echo ' & curl https://evil.test`},
+		{name: "cmd separator hidden by a POSIX quote, piped", command: `echo ' | curl https://evil.test`},
+	}
+	for _, testCase := range networkCases {
+		t.Run("network/"+testCase.name, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": testCase.command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want network prompt", testCase.command, decision.Action, decision.Reason)
+			}
+		})
+	}
+
+	// The fail-closed rule must not swallow the ordinary readable forms: a
+	// literal local subcommand stays quiet even with expansions in its operands,
+	// a local archive stays local, and a FOR loop over a network-looking set
+	// still resolves from its body.
+	localCases := []struct {
+		name    string
+		command string
+	}{
+		{name: "literal local subcommand with a dynamic operand", command: `git commit -m "$MESSAGE"`},
+		{name: "local archive", command: `git archive -o out.tar HEAD`},
+		{name: "archive with a dynamic operand past --", command: `git archive -o out.tar -- HEAD`},
+		{name: "for loop body is echo", command: `for %i in (curl) do echo %i`},
+		{name: "posix quote hiding no separator", command: `echo 'plain text'`},
+	}
+	for _, testCase := range localCases {
+		t.Run("local/"+testCase.name, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": testCase.command},
+			})
+			if decision.Reason == ReasonNetworkBlocked || HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want proven-local network classification", testCase.command, decision)
+			}
+		})
+	}
+}
+
 func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
