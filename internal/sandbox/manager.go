@@ -3,6 +3,7 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -239,6 +240,10 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		manager.goos == "darwin" && len(protectedCredentials) > 0 {
 		return SandboxExecutionRequest{}, errors.New("macOS Seatbelt cannot protect a file-backed remote token from inode aliases across its lifecycle; sandboxed shell commands require ZERO_DAEMON_REMOTE_TOKEN")
 	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled &&
+		manager.goos == "windows" && len(protectedCredentials) > 0 {
+		return SandboxExecutionRequest{}, errors.New("the Windows sandbox enforces writes through ACLs and has no filesystem deny-read rule, so it cannot keep a file-backed remote token out of a sandboxed shell; sandboxed shell commands require ZERO_DAEMON_REMOTE_TOKEN")
+	}
 	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "linux" {
 		if credential, ok := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentials); ok {
 			return SandboxExecutionRequest{}, fmt.Errorf("bubblewrap cannot protect the remote token file %q from hard-link aliases in a shell-accessible root: a /dev/null bind covers one pathname, not the inode; use ZERO_DAEMON_REMOTE_TOKEN, place the file on a separate filesystem, or remove that root from the sandbox", credential)
@@ -303,6 +308,12 @@ func policyHasExplicitDeny(policy Policy) bool {
 	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
 }
 
+// Windows deliberately has no placement exception either: credentialDenyReadPaths
+// returns nothing there (the ACL model has no read-deny rule — see #662), so a
+// wrapped shell would run with the token readable under every pathname. The
+// in-process tool gate still applies on Windows, which is what keeps read_file
+// and friends covered while the shell boundary stays refused.
+//
 // macOS deliberately has no placement exception for file-backed tokens.
 // Seatbelt can deny configured and resolved pathnames, but not every existing or
 // future inode alias, and a restart authorizes the configured pathname again.
@@ -340,14 +351,27 @@ func protectedCredentialLinkableIntoLinuxShellRoot(profile PermissionProfile, pr
 		if credential == "." || credential == "" {
 			continue
 		}
-		if count, ok := pathHardLinkCount(credential); ok && count > 1 {
+		// An absent token has no inode to alias; the lexical pathname rule is
+		// what reserves it through rotation. Any OTHER inspection failure leaves
+		// the alias question unanswered, and an unanswered question about a
+		// bearer token is a refusal.
+		count, err := pathHardLinkCount(credential)
+		switch {
+		case err == nil && count > 1:
+			return credential, true
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			return credential, true
 		}
 		for _, root := range writeRoots {
 			if root == "" {
 				continue
 			}
-			if pathWithinRoot(root, credential) || pathsShareFilesystem(root, credential) {
+			if pathWithinRoot(root, credential) {
+				return credential, true
+			}
+			// An uninspectable root is not proof of a separate filesystem: it is
+			// a root a hard link might still be creatable in.
+			if shared, known := pathsShareFilesystem(root, credential); !known || shared {
 				return credential, true
 			}
 		}

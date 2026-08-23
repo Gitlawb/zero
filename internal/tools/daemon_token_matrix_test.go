@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // The gate and the tool must resolve a path argument to the SAME bytes.
@@ -173,6 +175,37 @@ func TestDaemonTokenProtectionMatrix(t *testing.T) {
 				contents, err := os.ReadFile(token)
 				if err != nil || string(contents) != "bridge-secret\n" {
 					t.Fatalf("token changed after a denied patch: contents=%q err=%v", contents, err)
+				}
+				// WHICH layer refused is the point of the row. "The executor
+				// tripped over a path that does not exist" is not protection,
+				// so require the refusal to come from the sandbox.
+				if !strings.HasPrefix(result.Output, "Sandbox block") {
+					t.Fatalf("apply_patch was not refused by the sandbox gate: output=%q", result.Output)
+				}
+				headerPaths, err := sandbox.PatchHeaderPaths(patch)
+				if err != nil {
+					t.Fatalf("PatchHeaderPaths: %v", err)
+				}
+				switch {
+				case strings.TrimSpace(target) != target:
+					// A structured patch cannot name THIS token at all: the
+					// sandbox's header parser and the executor's both trim the
+					// header, so the patch describes "bridge-token" — a file
+					// that does not exist — and the token is unreachable rather
+					// than gate-denied. Pin that agreement explicitly, because
+					// if either parser stopped trimming, the gate would inspect
+					// a different name than the executor opens, which is the
+					// exact divergence this branch was opened for.
+					if len(headerPaths) != 1 || headerPaths[0] != filepath.ToSlash(strings.TrimSpace(target)) {
+						t.Fatalf("patch header paths = %q, want only the trimmed spelling the executor opens", headerPaths)
+					}
+				case !filepath.IsAbs(target):
+					// An in-workspace relative spelling reaches the credential
+					// gate, which is the layer that must refuse it. (An absolute
+					// spelling is refused one step earlier, as out-of-workspace.)
+					if !strings.Contains(result.Output, "holds the remote bridge token") {
+						t.Fatalf("apply_patch refusal did not come from the credential gate: output=%q", result.Output)
+					}
 				}
 			})
 		})

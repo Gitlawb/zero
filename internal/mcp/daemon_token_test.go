@@ -116,3 +116,41 @@ func TestServeMCPExcludesDaemonTokenFromResources(t *testing.T) {
 		t.Fatalf("resources/read error disclosed token bytes: %q", read.Error.Message)
 	}
 }
+
+// resources/read decides from the handle it opened, not from a pathname it
+// checked and then reopened. A hard link is a second name for the same inode, so
+// no pathname rule covers it — the exclusion has to compare the object, and the
+// object it compares must be the one the read returns.
+func TestResourcesReadRefusesHardLinkedToken(t *testing.T) {
+	workspace := t.TempDir()
+	token := filepath.Join(workspace, "bridge-token")
+	const secret = "mcp-hardlink-secret"
+	if err := os.WriteFile(token, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(workspace, "notes.txt")
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("workspace filesystem is not hard-linkable: %v", err)
+	}
+	t.Setenv(remote.EnvToken, "")
+	t.Setenv(remote.EnvTokenFile, token)
+
+	var input bytes.Buffer
+	writeServerTestMessage(t, &input, rpcMessage{
+		ID:     1,
+		Method: "resources/read",
+		Params: mustRaw(map[string]any{"uri": fileURI(alias)}),
+	})
+	var output bytes.Buffer
+	if err := Serve(context.Background(), &input, &output, tools.NewRegistry(), ServeOptions{WorkspaceRoot: workspace}); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+
+	read := readServerTestMessage(t, newMessageReader(&output))
+	if read.Error == nil || len(read.Result) != 0 {
+		t.Fatalf("resources/read alias response = %#v, want not-found without contents", read)
+	}
+	if strings.Contains(read.Error.Message, secret) {
+		t.Fatalf("resources/read error disclosed token bytes: %q", read.Error.Message)
+	}
+}

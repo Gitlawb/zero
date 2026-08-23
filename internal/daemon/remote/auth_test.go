@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 func TestTokenAuthenticator(t *testing.T) {
@@ -58,24 +60,35 @@ func TestTokenFromEnv(t *testing.T) {
 	}
 }
 
-// TestTokenFilePathFromEnvPreservesFilenameWhitespace pins the pointer as a
+// TestSelectedFilePathPreservesFilenameWhitespace pins the pointer as a
 // pathname rather than a trimmed word. Trimming it made this boundary select
 // "<dir>/bridge-token" while the operator had named "<dir>/bridge-token " —
 // which fails the daemon start at best, and at worst reads and protects a
 // different file than the one holding the bearer token.
-func TestTokenFilePathFromEnvPreservesFilenameWhitespace(t *testing.T) {
+//
+// remotetoken.SelectedFilePath is the single selector behind both SourceFromEnv
+// and ResolveSource, so this covers the pathname rule for every consumer of the
+// contract rather than one boundary's copy of it.
+func TestSelectedFilePathPreservesFilenameWhitespace(t *testing.T) {
 	t.Setenv(EnvToken, "")
 	for _, configured := range []string{"/srv/zero/bridge-token ", " /srv/zero/bridge-token", "/srv/zero/ token "} {
 		t.Setenv(EnvTokenFile, configured)
-		if got := TokenFilePathFromEnv(); got != configured {
-			t.Fatalf("TokenFilePathFromEnv() = %q, want the configured pathname %q", got, configured)
+		if got := remotetoken.SelectedFilePath(); got != configured {
+			t.Fatalf("SelectedFilePath() = %q, want the configured pathname %q", got, configured)
 		}
 	}
 	for _, blank := range []string{"", "   ", "\t\n"} {
 		t.Setenv(EnvTokenFile, blank)
-		if got := TokenFilePathFromEnv(); got != "" {
-			t.Fatalf("TokenFilePathFromEnv() = %q for a blank value, want unset", got)
+		if got := remotetoken.SelectedFilePath(); got != "" {
+			t.Fatalf("SelectedFilePath() = %q for a blank value, want unset", got)
 		}
+	}
+	// An inline token wins: the file pointer is not selected at all, so nothing
+	// downstream protects or reads a file the bridge never authenticates against.
+	t.Setenv(EnvToken, "inline-secret")
+	t.Setenv(EnvTokenFile, "/srv/zero/bridge-token ")
+	if got := remotetoken.SelectedFilePath(); got != "" {
+		t.Fatalf("SelectedFilePath() = %q while an inline token is set, want unset", got)
 	}
 }
 

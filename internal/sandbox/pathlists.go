@@ -130,11 +130,51 @@ func protectedCredentialPathBlock(request Request, workspaceRoot string) *pathBl
 // protectedPathDenied reports whether path targets one of the protected
 // credential files. There is no allow-list consultation by design.
 func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
-	if len(protected) == 0 {
+	return newProtectedPathCache(protected).denied(workspaceRoot, path)
+}
+
+// protectedPathCache resolves the parts of the check that depend only on the
+// protected set and not on the path being tested: the owning filesystem’s case
+// semantics per entry, and each entry’s os.FileInfo for the inode comparison. A
+// search walk builds one and reuses it for every visited file, so PathExcluded
+// stops paying several stat calls per entry across a large repository.
+//
+// The cached FileInfo is a snapshot taken when the exclusions are built. That is
+// the right lifetime for one walk or one request; the lexical rule below needs
+// no stat at all and is what keeps the configured pathname reserved when the
+// token is rotated underneath a long walk.
+type protectedPathCache struct {
+	roots []string
+	folds []bool
+	infos []os.FileInfo
+}
+
+func newProtectedPathCache(roots []string) *protectedPathCache {
+	if len(roots) == 0 {
+		return nil
+	}
+	cache := &protectedPathCache{
+		roots: roots,
+		folds: make([]bool, len(roots)),
+		infos: make([]os.FileInfo, len(roots)),
+	}
+	for index, root := range roots {
+		cache.folds[index] = protectedPathFoldsCase(root)
+		if info, err := os.Stat(root); err == nil {
+			cache.infos[index] = info
+		}
+	}
+	return cache
+}
+
+// denied reports whether path targets one of the protected credential files.
+// There is no allow-list consultation by design.
+func (cache *protectedPathCache) denied(workspaceRoot, path string) bool {
+	if cache == nil {
 		return false
 	}
-	for _, entry := range protected {
-		if pathUnderProtectedRoot(path, entry, workspaceRoot) {
+	for index, root := range cache.roots {
+		if pathUnderProtectedRootFolding(path, root, workspaceRoot, cache.folds[index]) {
 			return true
 		}
 	}
@@ -146,8 +186,18 @@ func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
 	// catches symbolic links, while SameFile catches hard links (and any other
 	// platform-specific names for the same file).
 	//
-	// This inode-level closure is specific to Zero's in-process tools, which see
-	// every requested path before opening it. The OS layer is pathname-based and
+	// What this closes and what it does NOT: the comparison is made BEFORE the
+	// tool opens the path, so it catches every alias that exists at check time
+	// and stays put — a symlink or hard link created after the token path was
+	// selected. It is not an open-time binding, so a writer that repoints a
+	// symlink between this check and the tool's own open still wins that race.
+	// Closing that window means passing an open handle down to the comparison,
+	// which the tool layer does not do today: read_file and friends resolve a
+	// path argument and open it themselves. ReadExclusions.FileExcluded is the
+	// handle-bound form for the callers that DO own the open (MCP resources/read
+	// reads through it), and it is where the rest should migrate.
+	//
+	// The OS layer is pathname-based and
 	// stays that way: seatbelt and Bubblewrap rules name paths, so a sandboxed
 	// shell on macOS can still `ln <token> alias && cat alias` — a hard link is a
 	// second name for the same inode, and no path-based rule covers a name that
@@ -173,9 +223,37 @@ func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
 	if err != nil {
 		return false
 	}
+	// A protected credential is a regular file, so a directory, device, or
+	// socket reached by a walk can never be an alias of one. Deciding that from
+	// the stat already taken keeps the SameFile comparisons off the majority of
+	// the entries in a tree walk.
+	if !requestInfo.Mode().IsRegular() {
+		return false
+	}
+	for _, protectedInfo := range cache.infos {
+		if protectedInfo == nil {
+			continue
+		}
+		if os.SameFile(requestInfo, protectedInfo) {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedInfoDenied compares an ALREADY-OPEN object against the protected
+// credential set. The caller holds the handle its os.FileInfo came from, so the
+// answer describes the object that will actually be read rather than whatever
+// the pathname resolves to on a second look — there is no window between this
+// check and the use. Callers that own the open should prefer it; a caller that
+// only has a pathname is stuck with the pre-open comparison above.
+func protectedInfoDenied(protected []string, info os.FileInfo) bool {
+	if info == nil {
+		return false
+	}
 	for _, entry := range protected {
 		protectedInfo, err := os.Stat(entry)
-		if err == nil && os.SameFile(requestInfo, protectedInfo) {
+		if err == nil && os.SameFile(info, protectedInfo) {
 			return true
 		}
 	}
@@ -245,10 +323,12 @@ func caseVariant(name string) (string, bool) {
 	return "", false
 }
 
-// pathUnderProtectedRoot is pathUnderPolicyRoot for the automatic credential
-// exclusions: identical anchoring and symlink normalization, plus the owning
-// filesystem's case semantics.
-func pathUnderProtectedRoot(requestedPath, root, workspaceRoot string) bool {
+// pathUnderProtectedRootFolding is pathUnderPolicyRoot for the automatic
+// credential exclusions: identical anchoring and symlink normalization, plus the
+// owning filesystem's case semantics — which the caller supplies, because
+// deriving it probes ancestors and depends only on the root. protectedPathCache
+// derives it once per root and reuses it for every path a walk visits.
+func pathUnderProtectedRootFolding(requestedPath, root, workspaceRoot string, folds bool) bool {
 	normalized, ok := normalizePathForPolicyRoot(requestedPath, root, workspaceRoot)
 	if !ok {
 		return false
@@ -256,7 +336,7 @@ func pathUnderProtectedRoot(requestedPath, root, workspaceRoot string) bool {
 	if pathWithinRootExact(root, normalized) {
 		return true
 	}
-	if !protectedPathFoldsCase(root) {
+	if !folds {
 		return false
 	}
 	return pathWithinRootExact(strings.ToLower(root), strings.ToLower(normalized))
@@ -400,9 +480,20 @@ func readDeniedResolved(workspaceRoot string, denyRoots, allowRoots []string, pa
 // Active() only when a credential is actually selected, so the no-token case
 // stays a no-op and the walk behaves exactly as it did before.
 func ProtectedCredentialExclusions(workspaceRoot string) ReadExclusions {
+	return newReadExclusions(workspaceRoot, nil, nil, protectedCredentialPaths())
+}
+
+// newReadExclusions builds the matcher with the per-run constants of the
+// protected set resolved once. Every construction site goes through it so the
+// cache is never left nil on a set that has entries — a ReadExclusions built as
+// a bare literal would re-stat each protected entry per visited path.
+func newReadExclusions(workspaceRoot string, denyRoots, allowRoots, protectedRoots []string) ReadExclusions {
 	return ReadExclusions{
 		workspaceRoot:  workspaceRoot,
-		protectedRoots: protectedCredentialPaths(),
+		denyRoots:      denyRoots,
+		allowRoots:     allowRoots,
+		protectedRoots: protectedRoots,
+		protected:      newProtectedPathCache(protectedRoots),
 	}
 }
 
@@ -417,6 +508,9 @@ type ReadExclusions struct {
 	// protectedRoots are the automatic credential exclusions
 	// (protectedCredentialPaths); AllowRead never re-includes them.
 	protectedRoots []string
+	// protected caches what the protected-set check can resolve ahead of the
+	// walk. Nil when nothing is protected.
+	protected *protectedPathCache
 }
 
 // Active reports whether anything is excluded: a configured DenyRead root or an
@@ -433,10 +527,41 @@ func (rx *ReadExclusions) PathExcluded(path string) bool {
 	if !rx.Active() {
 		return false
 	}
-	if protectedPathDenied(rx.protectedRoots, rx.workspaceRoot, path) {
+	if rx.protectedDenied(path) {
 		return true
 	}
 	return readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path)
+}
+
+// FileExcluded is PathExcluded for a caller that has already OPENED the object,
+// with info taken from that handle (os.File.Stat). Binding the credential
+// comparison to the opened object removes the check-to-use window a pathname
+// check leaves open: a rename or a repointed symlink between the check and the
+// read cannot change what info describes, because it describes the handle the
+// caller will read from rather than whatever the name resolves to next.
+//
+// The pathname rules still apply on top, so a configured token pathname stays
+// excluded even when the file behind it does not exist.
+func (rx *ReadExclusions) FileExcluded(path string, info os.FileInfo) bool {
+	if !rx.Active() {
+		return false
+	}
+	if rx.protectedDenied(path) {
+		return true
+	}
+	if protectedInfoDenied(rx.protectedRoots, info) {
+		return true
+	}
+	return readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path)
+}
+
+func (rx *ReadExclusions) protectedDenied(path string) bool {
+	if rx.protected != nil {
+		return rx.protected.denied(rx.workspaceRoot, path)
+	}
+	// A ReadExclusions built as a bare literal (tests, older call sites) still
+	// gets the full check, just without the per-run cache.
+	return protectedPathDenied(rx.protectedRoots, rx.workspaceRoot, path)
 }
 
 // DirExcluded reports whether a directory subtree can be skipped wholesale during
@@ -449,7 +574,7 @@ func (rx *ReadExclusions) DirExcluded(path string) bool {
 	}
 	// A protected credential entry is a file, so it only prunes a directory when
 	// the directory IS that entry; PathExcluded still filters it during the walk.
-	if protectedPathDenied(rx.protectedRoots, rx.workspaceRoot, path) {
+	if rx.protectedDenied(path) {
 		return true
 	}
 	if !readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path) {

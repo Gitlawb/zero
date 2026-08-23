@@ -159,14 +159,16 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 		if len(protected) == 0 {
 			return nil
 		}
-		return &ReadExclusions{workspaceRoot: engine.workspaceRoot, protectedRoots: protected}
+		exclusions := newReadExclusions(engine.workspaceRoot, nil, nil, protected)
+		return &exclusions
 	}
-	return &ReadExclusions{
-		workspaceRoot:  engine.workspaceRoot,
-		denyRoots:      resolvePolicyPaths(policy.DenyRead),
-		allowRoots:     resolvePolicyPaths(policy.AllowRead),
-		protectedRoots: protectedCredentialPaths(),
-	}
+	exclusions := newReadExclusions(
+		engine.workspaceRoot,
+		resolvePolicyPaths(policy.DenyRead),
+		resolvePolicyPaths(policy.AllowRead),
+		protectedCredentialPaths(),
+	)
+	return &exclusions
 }
 
 // ReadExclusionGlobs returns the ripgrep-style --glob exclusion args for this

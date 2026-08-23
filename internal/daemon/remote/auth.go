@@ -68,23 +68,6 @@ func (a *TokenAuthenticator) Authenticate(token string) error {
 	return ErrUnauthorized
 }
 
-// TokenFilePathFromEnv returns the configured token-file pointer exactly as the
-// operator set it, or "" when the variable is unset or holds only whitespace.
-//
-// The value is a PATHNAME, and every consumer of it — os.ReadFile here, the
-// canonicalization below, the sandbox's protected-credential list — must agree
-// on which bytes name the file. A filename may legitimately begin or end with a
-// space, so trimming the value would make this boundary read one file while the
-// deny rules protect another. A value that is only whitespace still reads as
-// unset, which is what a blank variable means.
-func TokenFilePathFromEnv() string {
-	configured := os.Getenv(EnvTokenFile)
-	if strings.TrimSpace(configured) == "" {
-		return ""
-	}
-	return configured
-}
-
 // TokenFromEnv resolves the bridge token from EnvToken, or the file source
 // selected by EnvTokenFile. After daemon startup resolution it reads the pinned
 // object rather than re-following a mutable configured symlink.

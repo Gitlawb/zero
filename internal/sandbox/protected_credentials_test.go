@@ -443,8 +443,8 @@ func TestSandboxManagerRejectsLinuxTokenHardLinkAlias(t *testing.T) {
 	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, token)
 
-	if _, ok := pathHardLinkCount(token); !ok {
-		t.Fatal("pathHardLinkCount could not inspect the token fixture")
+	if _, err := pathHardLinkCount(token); err != nil {
+		t.Fatalf("pathHardLinkCount could not inspect the token fixture: %v", err)
 	}
 	if credential, linkable := protectedCredentialLinkableIntoLinuxShellRoot(
 		PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil),
@@ -484,8 +484,8 @@ func TestSandboxManagerAllowsLinuxTokenOnSeparateFilesystem(t *testing.T) {
 		t.Skipf("distinct tmpfs unavailable: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tokenDir) })
-	if pathsShareFilesystem(workspace, tokenDir) {
-		t.Skip("/dev/shm is not a distinct filesystem on this host")
+	if shared, known := pathsShareFilesystem(workspace, tokenDir); shared || !known {
+		t.Skip("/dev/shm is not a verifiably distinct filesystem on this host")
 	}
 	token := filepath.Join(tokenDir, "bridge-token")
 	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
@@ -565,6 +565,89 @@ func TestSandboxManagerRejectsMacOSFileTokenRegardlessOfLinkLayout(t *testing.T)
 	})
 	if err == nil || !strings.Contains(err.Error(), "file-backed remote token") {
 		t.Fatalf("BuildCommandPlan error = %v, want unconditional macOS file-token shell refusal", err)
+	}
+}
+
+// Windows has no read-deny rule at all: credentialDenyReadPaths returns nothing
+// there, so a wrapped shell would run with the bridge token readable under every
+// pathname. The refusal is therefore unconditional, exactly like the macOS one
+// above, and does not depend on the host actually being Windows — a Windows plan
+// is buildable from any host.
+func TestSandboxManagerRejectsWindowsFileBackedTokenShell(t *testing.T) {
+	workspace := t.TempDir()
+	tokenDir := t.TempDir()
+	token := filepath.Join(tokenDir, "bridge-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+	t.Setenv(daemonRemoteTokenFileResolvedEnv, "")
+
+	policy := DefaultPolicy()
+	backend := Backend{Name: BackendWindowsRestrictedToken, Available: true, Platform: "windows", CommandWrapping: true, NativeIsolation: true}
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
+	_, err := manager.BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "cmd.exe", Args: []string{"/c", "type bridge-token"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "file-backed remote token") {
+		t.Fatalf("BuildExecutionRequest error = %v, want a Windows file-token shell refusal", err)
+	}
+
+	// Without a file-backed token the same request must still build: the refusal
+	// is scoped to the credential, not to Windows.
+	t.Setenv(daemonRemoteTokenFileEnv, "")
+	if _, err := manager.BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "cmd.exe", Args: []string{"/c", "echo hi"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	}); err != nil {
+		t.Fatalf("BuildExecutionRequest without a token file = %v, want success", err)
+	}
+}
+
+// An uninspectable write root is not evidence that the token lives on a separate
+// filesystem — it is a root a hard link might still be creatable in. The Linux
+// planner must read the unknown answer as "could" and refuse.
+func TestLinuxTokenPlannerFailsClosedOnUninspectableWriteRoot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux mount identity is exercised on Linux")
+	}
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := filepath.Join(tokenDir, "bridge-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+	t.Setenv(daemonRemoteTokenFileResolvedEnv, "")
+
+	missing := filepath.Join(workspace, "not-created-yet")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:       FileSystemRestricted,
+			ReadRoots:  []string{string(filepath.Separator)},
+			WriteRoots: []WritableRoot{{Root: missing}},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	if credential, linkable := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentialPaths()); !linkable || credential != token {
+		t.Fatalf("linkable = %t credential = %q, want %q refused behind an uninspectable write root", linkable, credential, token)
 	}
 }
 
