@@ -26,6 +26,23 @@ func TestUnparseableFallbackKeepsNetworkForServingCommands(t *testing.T) {
 			unparseable: `if "%OS%"=="Windows_NT" (npm run dev) else (npm start)`,
 		},
 		{
+			// The flagged spelling is the one that regressed: the AST path lost it
+			// to option-value confusion and the fallback only ever listed the
+			// serving word directly after the program name, so BOTH paths dropped
+			// the gate for the same command at the same time.
+			name:        "package manager dev script behind a global option",
+			parseable:   `npm --prefix ./web run dev`,
+			unparseable: `if "%OS%"=="Windows_NT" (npm --prefix ./web run dev) else (npm --prefix ./web start)`,
+		},
+		{
+			// The fetching half of the same confusion: `npm --prefix ./web install`
+			// really does reach the registry, and it lost the gate on both paths for
+			// the same reason the serving form did.
+			name:        "package manager install behind a global option",
+			parseable:   `npm --prefix ./web install`,
+			unparseable: `if "%OS%"=="Windows_NT" (npm --prefix ./web install) else (true)`,
+		},
+		{
 			name:        "python http server",
 			parseable:   `python -m http.server 8000`,
 			unparseable: `if "%OS%"=="Windows_NT" (python -m http.server 8000) else (true)`,

@@ -365,7 +365,13 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	}
 	sess.turnMu.Lock()
 	defer sess.turnMu.Unlock()
-	mode := agent.PermissionMode(p.ModeID)
+	// Normalized before the switch, for the same reason the TUI normalizes at its
+	// own boundary: the mode arrives as data, so the accepted legacy "unsafe"
+	// spelling reaches this switch unrewritten and falls through to default. The
+	// client that asks for the disallowed mode by its documented old name is then
+	// told it does not exist, which reads as "try another spelling" rather than
+	// "this door is closed over ACP".
+	mode := agent.NormalizePermissionMode(agent.PermissionMode(p.ModeID))
 	switch mode {
 	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
 		sess.setMode(mode)
@@ -401,7 +407,10 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 		// set_mode and set_config_option) serialize mode flips consistently.
 		sess.turnMu.Lock()
 		defer sess.turnMu.Unlock()
-		mode := agent.PermissionMode(p.Value)
+		// Normalized like handleSetMode above: this is the second advertised mode
+		// door, and an alias that only one of them rewrites is a difference
+		// between two paths that are meant to be the same contract.
+		mode := agent.NormalizePermissionMode(agent.PermissionMode(p.Value))
 		switch mode {
 		case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
 			sess.setMode(mode)

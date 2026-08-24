@@ -2875,6 +2875,46 @@ func TestConfirmDoesNothingWithoutALiveOffer(t *testing.T) {
 	}
 }
 
+// The legacy "unsafe" spelling never arrives as the Go constant. It comes off a
+// saved config, a launch script or a wrapper, and newModel is where the TUI
+// commits to a mode, so the alias has to be canonical HERE — one layer down,
+// agent.Run normalizes the same run to full-auto, and the two layers disagreeing
+// about one value is the whole bug. Both consequences are asserted because they
+// fail in opposite directions: the escape gate refuses a mode the user asked
+// for, and the footer names a mode the run is not in.
+func TestLegacyUnsafeAliasIsCanonicalAtTheTUIBoundary(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionMode("unsafe")})
+	// Reported rather than fatal, so the two consequences below are still
+	// exercised and named when the normalization goes missing.
+	if m.permissionMode != agent.PermissionModeFullAuto {
+		t.Errorf("newModel kept the legacy spelling: permissionMode = %q, want %q", m.permissionMode, agent.PermissionModeFullAuto)
+	}
+
+	// "!" shell escapes are gated on the canonical mode, so an unnormalized
+	// session refused the escapes its own mode is supposed to allow.
+	m.input.SetValue("!echo hi")
+	updated, cmd := m.handleSubmit()
+	if cmd == nil {
+		lastSystem := ""
+		rows := updated.(model).transcript
+		for i := len(rows) - 1; i >= 0; i-- {
+			if rows[i].kind == rowSystem {
+				lastSystem = rows[i].text
+				break
+			}
+		}
+		t.Errorf("legacy unsafe alias gated its own ! escape, got nil cmd and system text %q", lastSystem)
+	}
+
+	// modeLabel has a default arm that echoes whatever string it was given, so
+	// an unnormalized session rendered "unsafe" in the footer — the exact name
+	// this branch renamed away from.
+	label, _ := m.modeLabel()
+	if label != "full-auto" {
+		t.Fatalf("modeLabel = %q, want %q", label, "full-auto")
+	}
+}
+
 // Leaving unsafe must be one press and must never need confirming: getting
 // stricter is always allowed to be easy.
 func TestLeavingUnsafeIsOnePress(t *testing.T) {
@@ -3114,6 +3154,19 @@ func TestScrimViewportLine(t *testing.T) {
 	}
 	if !strings.Contains(scrimmed, "\x1b[2m") {
 		t.Fatalf("scrim must apply faint styling around semantic colors, got %q", scrimmed)
+	}
+	// SGR 22 clears faint just as 0 does, so the scrim has to be reapplied after
+	// it too. The fixture has to carry a non-markdown sequence as well: a line
+	// whose only sequences are bold and its 22 terminator is not "externally
+	// styled", so it takes the whole-line render path and never reaches
+	// sgrClearsFaint at all.
+	boldSpan := "\x1b[38;2;235;80;110mremoved\x1b[0m \x1b[1mbold\x1b[22m tail"
+	reapplied := scrimViewportLine(boldSpan, 40)
+	if ansi.Strip(reapplied) != "removed bold tail" {
+		t.Fatalf("scrim must preserve text around SGR 22, got %q", ansi.Strip(reapplied))
+	}
+	if !strings.Contains(reapplied, "\x1b[22m\x1b[2m") {
+		t.Fatalf("scrim must reapply faint after SGR 22, got %q", reapplied)
 	}
 }
 

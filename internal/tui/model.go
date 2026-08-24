@@ -2265,8 +2265,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// sequence shift+tab, away, back, ctrl+g enters full-auto with no live
 		// offer in front of it and silently turns permission prompts off.
 		//
-		// Cleared BEFORE the early return below, since that return skips the
-		// keypress-wide reset entirely.
+		// Cleared here because a BlurMsg never reaches the tea.KeyPressMsg
+		// handler, so the keypress-wide reset that cancels the offer for every
+		// other key never runs for it.
 		m.unsafeArmed = false
 		var petMouseCmd tea.Cmd
 		if m.petDragActive {
