@@ -34,14 +34,7 @@ jobs:
           cache: true
 
       - name: Check formatting
-        shell: bash
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "::error::gofmt needed on:" >&2
-            echo "$unformatted" >&2
-            exit 1
-          fi
+        run: make fmt-check
 
       - name: Vet
         run: go vet ./...
@@ -83,18 +76,20 @@ jobs:
         run: |
           if [ -f coverage.out ]; then
             total_cov=$(go tool cover -func=coverage.out | grep 'total:' | awk '{print $3}')
-            echo "### 📊 Test Coverage Summary: **${total_cov}**" >> $GITHUB_STEP_SUMMARY
-            echo "<details><summary>Coverage per package</summary>" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Package | Function | Coverage |" >> $GITHUB_STEP_SUMMARY
-            echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
-            go tool cover -func=coverage.out | grep -v 'total:' | tail -n 25 | while read -r line; do
-              pkg=$(echo "$line" | awk '{print $1}')
-              fn=$(echo "$line" | awk '{print $2}')
-              cov=$(echo "$line" | awk '{print $3}')
-              echo "| \`$pkg\` | \`$fn\` | **$cov** |" >> $GITHUB_STEP_SUMMARY
-            done
-            echo "</details>" >> $GITHUB_STEP_SUMMARY
+            {
+              echo "### 📊 Test Coverage Summary: **${total_cov}**"
+              echo "<details><summary>Coverage per function</summary>"
+              echo ""
+              echo "| File | Function | Coverage |"
+              echo "| :--- | :--- | :--- |"
+              go tool cover -func=coverage.out | grep -v 'total:' | while read -r line; do
+                file=$(echo "$line" | awk '{print $1}')
+                fn=$(echo "$line" | awk '{print $2}')
+                cov=$(echo "$line" | awk '{print $3}')
+                echo "| \`$file\` | \`$fn\` | **$cov** |"
+              done
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload coverage artifact
