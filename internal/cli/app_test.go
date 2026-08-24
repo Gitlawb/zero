@@ -502,6 +502,7 @@ func TestRunNoArgsPaintsBeforeOptionalDefaultMCPIsReady(t *testing.T) {
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
+	configResult := make(chan error, 1)
 
 	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
 		getwd:          func() (string, error) { return cwd, nil },
@@ -515,9 +516,11 @@ func TestRunNoArgsPaintsBeforeOptionalDefaultMCPIsReady(t *testing.T) {
 		newMCPStore:      func() (*mcp.PermissionStore, error) { return permissionStore, nil },
 		newMCPTokenStore: func() (*mcp.TokenStore, error) { return tokenStore, nil },
 		registerMCPTools: func(_ context.Context, registry *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			var configErr error
 			if _, ok := cfg.Servers["exa"]; !ok || len(cfg.Servers) != 1 {
-				t.Fatalf("optional MCP config = %#v, want only exa", cfg.Servers)
+				configErr = fmt.Errorf("optional MCP config = %#v, want only exa", cfg.Servers)
 			}
+			configResult <- configErr
 			close(started)
 			<-release
 			registry.Register(cliFakeMCPRegistryTool{})
@@ -546,6 +549,9 @@ func TestRunNoArgsPaintsBeforeOptionalDefaultMCPIsReady(t *testing.T) {
 
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if configErr := <-configResult; configErr != nil {
+		t.Fatal(configErr)
 	}
 }
 

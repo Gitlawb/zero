@@ -28,6 +28,8 @@ const (
 	responsesWebSocketReadLimit  = 16 << 20
 )
 
+var errCodexTurnSessionBusy = errors.New("codex turn session already has an active stream")
+
 // NewCodexTurnSessionProvider enables one Responses WebSocket connection for
 // each agent run. The session falls back to the existing HTTP/SSE provider when
 // the endpoint cannot upgrade or loses its response chain.
@@ -68,6 +70,7 @@ type codexTurnSession struct {
 	lastRequest    *responsesRequest
 	lastResponseID string
 	lastOutput     []inputItem
+	streamActive   bool
 
 	prewarmOnce sync.Once
 	prewarmDone chan struct{}
@@ -113,11 +116,16 @@ func (session *codexTurnSession) Stream(ctx context.Context, request zeroruntime
 	}
 
 	session.mu.Lock()
+	if session.streamActive {
+		session.mu.Unlock()
+		return nil, errCodexTurnSessionBusy
+	}
 	if session.webSocketOff || session.connection == nil {
 		session.mu.Unlock()
 		trace.FromContext(ctx).Counter(trace.CounterResponsesHTTPFallback, 1)
 		return session.provider.StreamCompletion(ctx, request)
 	}
+	session.streamActive = true
 	connection := session.connection
 	wireRequest := *fullRequest
 	wireRequest.Type = responsesWebSocketRequest
@@ -135,14 +143,22 @@ func (session *codexTurnSession) Stream(ctx context.Context, request zeroruntime
 
 	body, err := json.Marshal(wireRequest)
 	if err != nil {
+		session.releaseStream()
 		return nil, fmt.Errorf("encode codex websocket request: %w", err)
 	}
 	events := make(chan zeroruntime.StreamEvent, 16)
 	go func() {
 		defer close(events)
+		defer session.releaseStream()
 		session.streamWebSocket(ctx, connection, body, fullRequest, request, events)
 	}()
 	return events, nil
+}
+
+func (session *codexTurnSession) releaseStream() {
+	session.mu.Lock()
+	session.streamActive = false
+	session.mu.Unlock()
 }
 
 func (session *codexTurnSession) Compact(context.Context, zeroruntime.CompletionRequest) ([]zeroruntime.Message, error) {

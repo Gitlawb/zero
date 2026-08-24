@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -389,7 +390,7 @@ func TestCodexTurnSessionReportsWebSocketIdleTimeout(t *testing.T) {
 	defer server.Close()
 
 	provider := newCodexSessionTestProvider(t, server)
-	provider.inner.streamIdleTimeout = 20 * time.Millisecond
+	provider.inner.streamIdleTimeout = 200 * time.Millisecond
 	session := openCodexSession(t, provider)
 	defer session.Close()
 	stream, err := session.Stream(t.Context(), zeroruntime.CompletionRequest{
@@ -406,8 +407,54 @@ func TestCodexTurnSessionReportsWebSocketIdleTimeout(t *testing.T) {
 			break
 		}
 	}
-	if !strings.Contains(streamError, "idle timeout after 20ms") {
+	if !strings.Contains(streamError, "idle timeout after 200ms") {
 		t.Fatalf("stream error = %q, want idle-timeout detail", streamError)
+	}
+}
+
+func TestCodexTurnSessionRejectsOverlappingStreams(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseStream := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseStream)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.CloseNow()
+		if _, _, err := connection.Read(request.Context()); err != nil {
+			return
+		}
+		close(started)
+		<-release
+		writeWebSocketEvents(request.Context(), connection,
+			`{"type":"response.completed","response":{"id":"resp-1","status":"completed"}}`,
+		)
+	}))
+	defer server.Close()
+
+	provider := newCodexSessionTestProvider(t, server)
+	session := openCodexSession(t, provider)
+	defer session.Close()
+	request := zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "Hello"}},
+	}
+	first, err := session.Stream(t.Context(), request)
+	if err != nil {
+		t.Fatalf("first Stream: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first WebSocket stream did not start")
+	}
+	if _, err := session.Stream(t.Context(), request); !errors.Is(err, errCodexTurnSessionBusy) {
+		t.Fatalf("overlapping Stream error = %v, want %v", err, errCodexTurnSessionBusy)
+	}
+	releaseStream()
+	for range first {
 	}
 }
 

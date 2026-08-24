@@ -1,6 +1,9 @@
 package zeroruntime
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestToolCallCollectorPreservesProviderMetadataAndFreeformState(t *testing.T) {
 	collector := newToolCallCollector()
@@ -33,5 +36,30 @@ func TestToolCallCollectorPreservesEmptyPublicID(t *testing.T) {
 	call := collected.ToolCalls[0]
 	if call.ID != "" || call.ProviderCallID != "provider-1" || call.Name != "read_file" {
 		t.Fatalf("empty-public-id tool call = %#v", call)
+	}
+}
+
+func TestCollectStreamErrorPreservesIncompleteToolCallMetadata(t *testing.T) {
+	events := make(chan StreamEvent, 2)
+	events <- StreamEvent{
+		Type:               StreamEventToolCallStart,
+		ToolCallID:         "public-1",
+		ToolCallProviderID: "provider-1",
+		ToolName:           "apply_patch",
+		ToolCallFreeform:   true,
+	}
+	events <- StreamEvent{Type: StreamEventError, Error: "stream failed"}
+	close(events)
+
+	collected := CollectStreamWithOptions(context.Background(), events, CollectOptions{})
+	if collected.Error != "stream failed" {
+		t.Fatalf("collected error = %q, want stream failed", collected.Error)
+	}
+	if len(collected.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want one incomplete call", collected.ToolCalls)
+	}
+	call := collected.ToolCalls[0]
+	if call.ProviderCallID != "provider-1" || !call.Freeform {
+		t.Fatalf("incomplete tool call lost provider metadata: %#v", call)
 	}
 }

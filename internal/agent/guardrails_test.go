@@ -304,6 +304,16 @@ func TestRunDoesNotInjectPlanReminderForBoundedToolSequence(t *testing.T) {
 	}
 }
 
+func TestPlanReminderWaitsForTurnThresholdAfterEnoughToolCalls(t *testing.T) {
+	state := guardState{totalToolCalls: 7}
+	if got := state.planReminder(6); got != "" {
+		t.Fatalf("planReminder(6) = %q, want no reminder before turn threshold", got)
+	}
+	if state.notCalledReminderSent {
+		t.Fatal("early turn marked the not-called reminder as sent")
+	}
+}
+
 func repeatedReadTurns(count int) [][]zeroruntime.StreamEvent {
 	turns := make([][]zeroruntime.StreamEvent, 0, count)
 	for range count {
