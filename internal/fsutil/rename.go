@@ -55,7 +55,25 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	return ReplaceWithRetry(tmpName, filename, nil)
+	replaceErr := ReplaceWithRetry(tmpName, filename, nil)
+	if replaceErr == nil || isCommittedReplacement(replaceErr) {
+		syncDir(dir)
+	}
+	return replaceErr
+}
+
+func isCommittedReplacement(err error) bool {
+	var committed *CommittedReplacementCleanupError
+	return errors.As(err, &committed)
+}
+
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	_ = d.Sync()
 }
 
 // CommittedReplacementCleanupError reports that a replacement was committed,

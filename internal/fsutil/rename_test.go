@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -74,6 +75,11 @@ func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
 		if err := os.Chmod(target, want); err != nil {
 			t.Fatalf("Chmod: %v", err)
 		}
+		initialInfo, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("Stat initial: %v", err)
+		}
+		expectedMode := initialInfo.Mode().Perm()
 		if err := WriteFileAtomic(target, []byte("new"), 0o644); err != nil {
 			t.Fatalf("WriteFileAtomic: %v", err)
 		}
@@ -81,8 +87,8 @@ func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Stat: %v", err)
 		}
-		if got := info.Mode().Perm(); got != want {
-			t.Fatalf("mode = %04o, want %04o", got, want)
+		if got := info.Mode().Perm(); got != expectedMode {
+			t.Fatalf("mode = %04o, want %04o", got, expectedMode)
 		}
 		got, err := os.ReadFile(target)
 		if err != nil {
@@ -91,6 +97,21 @@ func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
 		if string(got) != "new" {
 			t.Fatalf("content = %q, want %q", got, "new")
 		}
+	}
+}
+
+func TestRenameWithRetryNonRetryableError(t *testing.T) {
+	var attempts int
+	expectedErr := os.ErrInvalid
+	err := RenameWithRetry("src", "dst", func(src, dst string) error {
+		attempts++
+		return expectedErr
+	})
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("got err %v, want %v", err, expectedErr)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
 	}
 }
 

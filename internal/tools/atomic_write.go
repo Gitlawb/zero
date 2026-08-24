@@ -17,7 +17,7 @@ func committedWrite(path string, data []byte, perm os.FileMode) (string, error) 
 	}
 	var committed *fsutil.CommittedReplacementCleanupError
 	if errors.As(err, &committed) {
-		return committed.Error(), nil
+		return "replacement committed, but backup cleanup failed", nil
 	}
 	return "", err
 }
