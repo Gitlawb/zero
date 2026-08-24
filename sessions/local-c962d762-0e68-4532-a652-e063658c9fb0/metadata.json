@@ -3,8 +3,8 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:48:53.027Z",
-  "durationMs": 14891483,
+  "endedAt": "2026-08-24T08:48:57.772Z",
+  "durationMs": 14896229,
   "status": "running",
   "tokens": {
     "total": 101547,
@@ -16,19 +16,18 @@
   },
   "toolCalls": 82,
   "lines": {
-    "added": 109,
-    "removed": 2
+    "added": 37,
+    "removed": 12
   },
   "filesChanged": [
-    "internal/memory/escape_test.go",
-    "internal/memory/memory.go"
+    "internal/memory/escape_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "af6ca75f6001053d86e451989ec6946457ba6abb",
+    "headAfter": "52452fafc5b4dd847bbf5dad3eeec1091cbd86a6",
     "commitShas": [
-      "af6ca75f6001053d86e451989ec6946457ba6abb"
+      "52452fafc5b4dd847bbf5dad3eeec1091cbd86a6"
     ]
   },
   "summary": "The mutation that survived nine tests now fails. Documenting the two genuinely unreachable branches and shipping #897:",
