@@ -3,31 +3,33 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:00:57.914Z",
-  "durationMs": 12016370,
+  "endedAt": "2026-08-24T08:01:28.039Z",
+  "durationMs": 12046495,
   "status": "running",
   "tokens": {
-    "total": 64360,
-    "input": 92,
-    "output": 64268
+    "total": 65533,
+    "input": 94,
+    "output": 65439
   },
   "cost": {
-    "usd": 21.9041
+    "usd": 22.2215
   },
-  "toolCalls": 42,
+  "toolCalls": 43,
   "lines": {
-    "added": 16,
-    "removed": 8
+    "added": 286,
+    "removed": 27
   },
   "filesChanged": [
-    "internal/acp/agent_test.go"
+    "internal/acp/agent.go",
+    "internal/acp/agent_test.go",
+    "internal/acp/types.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "1970457a5ae01ea09dddb24b599f2af93e805065",
+    "headAfter": "f58e34fb6e471196e32b50acfd3ad390582f21bc",
     "commitShas": [
-      "1970457a5ae01ea09dddb24b599f2af93e805065"
+      "f58e34fb6e471196e32b50acfd3ad390582f21bc"
     ]
   },
   "summary": "Confirmed at wire level for both methods. Adding the note the verifier asked for on the unwired field, then shipping:",
