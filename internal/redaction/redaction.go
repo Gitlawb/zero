@@ -75,7 +75,12 @@ var sensitiveKeys = map[string]struct{}{
 // Applied via ReplaceAllStringFunc rather than the plain list below.
 var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 
-// textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
+type secretPatternTrigger struct {
+	prefixes []string
+	patterns []*regexp.Regexp
+}
+
+// triggeredSecretPatterns mirror secrets.Scan for end-boundary behavior and the
 // shared high-confidence shapes. A leading \b keeps each pattern from firing
 // mid-word; a trailing \b is omitted so a secret followed by more word
 // characters outside its body class (e.g. AKIA…EXAMPLEEXTRA) still matches,
@@ -84,16 +89,18 @@ var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 // (not in secrets.Scan); ASIA temporary access keys are kept alongside AKIA.
 // openai keys are handled separately (digit filter). JWT has a strict form
 // (both segments start with eyJ) and a looser three-segment form.
-var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
-	regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`),
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+var triggeredSecretPatterns = []secretPatternTrigger{
+	{prefixes: []string{"sk-ant-"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`)}},
+	{prefixes: []string{"github_pat_"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`)}},
+	{prefixes: []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`)}},
+	{prefixes: []string{"glpat-"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`)}},
+	{prefixes: []string{"AIza"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`)}},
+	{prefixes: []string{"xox"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`)}},
+	{prefixes: []string{"AKIA", "ASIA"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`)}},
+	{prefixes: []string{"eyJ"}, patterns: []*regexp.Regexp{
+		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+	}},
 }
 
 var (
@@ -213,7 +220,7 @@ func RedactString(value string, options Options) string {
 		})
 	}
 	if strings.Contains(redacted, ":") {
-		if strings.Contains(strings.ToLower(redacted), "authorization") {
+		if containsCaseInsensitive(redacted, "authorization") {
 			redacted = headerPattern.ReplaceAllStringFunc(redacted, func(match string) string {
 				groups := headerPattern.FindStringSubmatch(match)
 				if groups[2] != "" {
@@ -247,32 +254,52 @@ func RedactString(value string, options Options) string {
 			return replacement
 		})
 	}
-	if strings.Contains(redacted, "sk-ant-") {
-		redacted = textSecretPatterns[0].ReplaceAllString(redacted, replacement)
-	}
-	if strings.Contains(redacted, "github_pat_") {
-		redacted = textSecretPatterns[1].ReplaceAllString(redacted, replacement)
-	}
-	if strings.Contains(redacted, "ghp_") || strings.Contains(redacted, "gho_") || strings.Contains(redacted, "ghu_") || strings.Contains(redacted, "ghs_") || strings.Contains(redacted, "ghr_") {
-		redacted = textSecretPatterns[2].ReplaceAllString(redacted, replacement)
-	}
-	if strings.Contains(redacted, "glpat-") {
-		redacted = textSecretPatterns[3].ReplaceAllString(redacted, replacement)
-	}
-	if strings.Contains(redacted, "AIza") {
-		redacted = textSecretPatterns[4].ReplaceAllString(redacted, replacement)
-	}
-	if strings.Contains(redacted, "xox") {
-		redacted = textSecretPatterns[5].ReplaceAllString(redacted, replacement)
-	}
-	if strings.Contains(redacted, "AKIA") || strings.Contains(redacted, "ASIA") {
-		redacted = textSecretPatterns[6].ReplaceAllString(redacted, replacement)
-	}
-	if strings.Contains(redacted, "eyJ") {
-		redacted = textSecretPatterns[7].ReplaceAllString(redacted, replacement)
-		redacted = textSecretPatterns[8].ReplaceAllString(redacted, replacement)
+	for _, entry := range triggeredSecretPatterns {
+		hasPrefix := false
+		for _, p := range entry.prefixes {
+			if strings.Contains(redacted, p) {
+				hasPrefix = true
+				break
+			}
+		}
+		if hasPrefix {
+			for _, pat := range entry.patterns {
+				redacted = pat.ReplaceAllString(redacted, replacement)
+			}
+		}
 	}
 	return redacted
+}
+
+func containsCaseInsensitive(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(s) < len(substr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			c1 := s[i+j]
+			c2 := substr[j]
+			if c1 != c2 && toLowerASCII(c1) != toLowerASCII(c2) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func toLowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // knownOpenAIKeyPrefix is the redaction-side twin of secrets.knownOpenAIKeyPrefix:
