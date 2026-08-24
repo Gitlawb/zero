@@ -23,13 +23,24 @@ func scopeOutsideRoots(t *testing.T) (workspace string, outside string) {
 	// the helper skipped, and every test built on it reported green having
 	// asserted nothing. A skip is not a pass. scope_extra_read_test.go already
 	// places its grant under home for the same reason.
+	// FATAL, NOT SKIP — the comment above says a skip is not a pass, and these two
+	// lines were still skipping. Every caller of this helper asserts an
+	// AUTHORIZATION boundary: who may write where, and whose release revokes it.
+	// A skip means that assertion never ran and the build went green anyway,
+	// which is the failure mode this helper was written to close in the first
+	// place. Neither of these is a precondition an environment reasonably
+	// withholds: os.UserHomeDir resolves on every platform Zero supports, and a
+	// home that will not accept a temporary directory is a broken machine rather
+	// than a limited one. If either ever fires, the right outcome is a red build
+	// somebody fixes, not silent non-coverage of the sandbox's write rules.
+	// Reported by CodeRabbit.
 	home, err := os.UserHomeDir()
 	if err != nil {
-		t.Skipf("no home directory to place a grant outside the default write roots: %v", err)
+		t.Fatalf("no home directory to place a grant outside the default write roots: %v", err)
 	}
 	base, err := os.MkdirTemp(home, "zeromax-scope-")
 	if err != nil {
-		t.Skipf("cannot create a directory outside the default write roots: %v", err)
+		t.Fatalf("cannot create a directory outside the default write roots: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	// PROVED, not assumed. The whole point of this helper is that a temporary
@@ -41,6 +52,13 @@ func scopeOutsideRoots(t *testing.T) (workspace string, outside string) {
 		resolved = base
 	}
 	for _, root := range defaultTempWriteRoots() {
+		// THE ONE LEGITIMATE SKIP IN THIS HELPER, and it is deliberate. Here the
+		// fixture built correctly and the environment is fine — the grant simply
+		// cannot demonstrate anything, because a path already inside a default
+		// write root is writable before any temporary grant exists. Running on
+		// would assert a permission that was never in question. The skip message
+		// names the covering root so a future default that swallows $HOME reads as
+		// an honest gap rather than a mystery.
 		if pathWithinRoot(root, resolved) {
 			t.Skipf("%s is already covered by the default write root %s, so a temporary grant here would prove nothing", resolved, root)
 		}
@@ -48,8 +66,11 @@ func scopeOutsideRoots(t *testing.T) (workspace string, outside string) {
 	workspace = filepath.Join(base, "ws")
 	outside = filepath.Join(base, "outside")
 	for _, dir := range []string{workspace, outside} {
+		// Fatal for the same reason as above: base was just created successfully,
+		// so a subdirectory failing under it is a broken machine, not a platform
+		// that declines to offer one.
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Skipf("cannot prepare %s: %v", dir, err)
+			t.Fatalf("cannot prepare %s: %v", dir, err)
 		}
 	}
 	return workspace, outside
