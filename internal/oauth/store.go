@@ -579,7 +579,7 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 			return nil, false, err
 		}
 		if !ok {
-			return nil, false, fmt.Errorf("oauth: keyring token blob at %s is missing chunk %d of %d", b.location(), index+1, count)
+			return nil, false, fmt.Errorf("oauth: keyring token blob at %s is missing chunk %d of %d; the entries are incomplete, so log in again", b.location(), index+1, count)
 		}
 		encoded.WriteString(strings.TrimSpace(part))
 	}
@@ -613,6 +613,14 @@ func (b keyringBlob) write(data []byte) error {
 // writeWhole stores the blob under the anchor account, the layout every backend
 // without a size limit uses and the one a shrinking store returns to. The Set
 // is the commit point; the chunks it retires are deleted after it lands.
+//
+// A delete that fails here leaves residue the manifest can no longer describe,
+// because the anchor now holds the blob rather than the counts. Nothing
+// reclaims it until the store next outgrows a single entry, where writeChunked
+// sweeps both generations; a store that shrinks once and never grows again
+// keeps it. Sweeping on every whole write would close that, but it costs a
+// keyringMaxChunks-wide probe per save — 128 `security` invocations on macOS —
+// for residue that only an already-failed delete can produce.
 func (b keyringBlob) writeWhole(encoded string, previous keyringManifest) error {
 	if err := b.kr.Set(b.service, b.account, encoded); err != nil {
 		return err
@@ -651,11 +659,24 @@ func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringM
 	// commit below.
 	if previous.live == "" {
 		// Nothing to reserve against: the anchor still holds the whole blob, so
-		// writing a manifest here would destroy the only copy. Sweep the target
-		// generation instead. This runs once, when a store first outgrows a
+		// writing a manifest here would destroy the only copy. Sweep both
+		// generations instead. This runs once, when a store first outgrows a
 		// single entry, and only has anything to find if an earlier shrink was
 		// interrupted before its cleanup finished.
-		if err := b.deleteChunkRange(family, count, keyringMaxChunks, nil); err != nil {
+		//
+		// Both, not just the target: writeWhole replaced the anchor with the
+		// blob, so the counts that named the chunks a failed cleanup left
+		// behind are gone. The manifest cannot state the range any more and no
+		// later write derives it, so this is the only sweep that will ever
+		// reach them. Sweeping just the target would leave the other
+		// generation's chunks, and the token material in them, unreferenced
+		// for good.
+		other := keyringChunkFamilyB
+		if family == keyringChunkFamilyB {
+			other = keyringChunkFamilyA
+		}
+		err := b.deleteChunkRange(family, count, keyringMaxChunks, nil)
+		if err = b.deleteChunkRange(other, 0, keyringMaxChunks, err); err != nil {
 			return err
 		}
 	} else if count > previous.counts[family] {
@@ -739,6 +760,13 @@ func (b keyringBlob) chunkAccount(family string, index int) string {
 // processes can't both read the blob, modify, and write — dropping a token.
 // The chunked layout needs it for a second reason: it makes a write's chunk
 // fills and its manifest commit one indivisible sequence to other processes.
+//
+// Readers (Load, Status) take it as well, which is deliberate and not a
+// leftover: the generational layout already hands them a consistent view
+// without it, but holding it keeps a read from observing a torn manifest on a
+// backend whose Set is not atomic, and it bounds a reader behind at most one
+// writer. acquireFileLock reclaims after fileLockStaleAfter, so a crashed
+// holder cannot wedge the hot path.
 func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 	if b.lockPath == "" {
 		return fn()

@@ -24,6 +24,9 @@ type fakeKR struct {
 	// sets counts successful writes per account, so a test can assert the order
 	// a write publishes in.
 	sets map[string]int
+	// failDelete, when non-nil, decides whether removing account fails, standing
+	// in for a keychain that refuses a delete while it is busy or locked.
+	failDelete func(account string) error
 }
 
 func newFakeKR() *fakeKR { return &fakeKR{data: map[string]string{}, sets: map[string]int{}} }
@@ -54,6 +57,11 @@ func (f *fakeKR) Set(service, account, secret string) error {
 	return nil
 }
 func (f *fakeKR) Delete(service, account string) (bool, error) {
+	if f.failDelete != nil {
+		if err := f.failDelete(account); err != nil {
+			return false, err
+		}
+	}
 	key := service + "/" + account
 	_, ok := f.data[key]
 	delete(f.data, key)

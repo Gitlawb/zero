@@ -564,3 +564,62 @@ func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
 		t.Fatal("reader.Status timed out waiting for lock release")
 	}
 }
+
+// TestStoreKeyringShrinkResidueIsReclaimedOnRegrowth is the regression for a
+// retired generation orphaned permanently. Cleanup is hygiene rather than
+// correctness only while a manifest exists to state the counts; writeWhole
+// replaces the anchor with the blob and the counts go with it. A shrink whose
+// delete of the retired generation fails therefore leaves chunks that the next
+// growth would never sweep, because that growth only ever targets family A.
+// The token material in them would sit in the keychain for good.
+func TestStoreKeyringShrinkResidueIsReclaimedOnRegrowth(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	s := newCappedKeyringStore(t, kr)
+
+	// Grow until family B is the live generation, so a shrink from here is the
+	// one that retires it.
+	mustSave(t, s, "first", bigToken("a"))
+	mustSave(t, s, "second", bigToken("b"))
+	mustSave(t, s, "third", bigToken("c"))
+	if live := manifestOf(t, kr).live; live != keyringChunkFamilyB {
+		t.Fatalf("live generation = %q, want %q", live, keyringChunkFamilyB)
+	}
+
+	// Shrink back to a whole entry with a keychain that refuses to remove
+	// family B, the generation being retired on the way down.
+	kr.failDelete = func(account string) error {
+		if strings.HasPrefix(account, keyringAccount+"."+keyringChunkFamilyB+".") {
+			return errors.New("keychain busy")
+		}
+		return nil
+	}
+	for _, key := range []string{"second", "third"} {
+		if _, err := s.Delete(ProviderKey(key)); err != nil && !strings.Contains(err.Error(), "could not be removed") {
+			t.Fatalf("Delete(%s): %v", key, err)
+		}
+	}
+	kr.failDelete = nil
+	if head, _, _ := kr.Get(keyringService, keyringAccount); strings.HasPrefix(head, keyringManifestPrefix) {
+		t.Fatal("store did not shrink back to a whole entry, so the orphaning path was never taken")
+	}
+	orphans := kr.chunkAccounts(keyringChunkFamilyB)
+	if len(orphans) == 0 {
+		t.Fatal("setup did not strand any family-B chunks")
+	}
+
+	// Grow back into the chunked layout. This is the only sweep that can still
+	// reach the stranded generation, because the manifest that named it is gone.
+	mustSave(t, s, "fourth", bigToken("d"))
+
+	manifest := manifestOf(t, kr)
+	if manifest.live != keyringChunkFamilyA {
+		t.Fatalf("live generation after regrowth = %q, want %q", manifest.live, keyringChunkFamilyA)
+	}
+	if got := kr.chunkAccounts(keyringChunkFamilyB); len(got) != 0 {
+		t.Errorf("family B still holds %d unreferenced chunks after regrowth: %v", len(got), got)
+	}
+	assertNoStrayChunks(t, kr, manifest)
+	if got := mustLoad(t, s, "fourth"); got.AccessToken != bigToken("d").AccessToken {
+		t.Error("token stored across the regrowth did not survive")
+	}
+}
