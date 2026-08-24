@@ -3,21 +3,21 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:43:52.065Z",
-  "durationMs": 14590521,
+  "endedAt": "2026-08-24T08:44:18.729Z",
+  "durationMs": 14617185,
   "status": "running",
   "tokens": {
-    "total": 87344,
-    "input": 144,
-    "output": 87200
+    "total": 89040,
+    "input": 148,
+    "output": 88892
   },
   "cost": {
-    "usd": 33.3167
+    "usd": 33.9711
   },
-  "toolCalls": 66,
+  "toolCalls": 68,
   "lines": {
-    "added": 58,
-    "removed": 12
+    "added": 427,
+    "removed": 54
   },
   "filesChanged": [
     "internal/measurements/measurements.go",
@@ -26,11 +26,11 @@
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "5d975161deadb264ebb1e9f1e925b9d28a7ecbd1",
+    "headAfter": "bca8262c360d519310038eeafa8bec7a675b3526",
     "commitShas": [
-      "5d975161deadb264ebb1e9f1e925b9d28a7ecbd1"
+      "bca8262c360d519310038eeafa8bec7a675b3526"
     ]
   },
-  "summary": "All four mechanisms verified. Rebasing and shipping #909:",
+  "summary": "Now #897 — closing the three surviving mutations the verifier found:",
   "originUrl": "https://getorigin.io/sessions/local-c962d762-0e68-4532-a652-e063658c9fb0"
 }
