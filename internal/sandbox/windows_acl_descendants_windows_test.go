@@ -711,9 +711,11 @@ func TestWindowsEnumerateWritableDescendantsSkipsJunctions(t *testing.T) {
 	}
 }
 
-// TestApplyWindowsSharedDescendantDeniesIdempotentRootDeny pins that a second
-// apply on an already-covered root does not stack another DenyWrite ACE.
-func TestApplyWindowsSharedDescendantDeniesIdempotentRootDeny(t *testing.T) {
+// TestApplyWindowsACLPathGroupIdempotentDenyWrite pins that a repeated
+// applyWindowsACLPathGroup DenyWrite merge on an already-covered root does not
+// stack another DenyWrite ACE. The descendant walker's own idempotency is
+// covered by TestApplyWindowsSharedDescendantDeniesAppliesAndRollsBack.
+func TestApplyWindowsACLPathGroupIdempotentDenyWrite(t *testing.T) {
 	dir := t.TempDir()
 	// Synthetic capability SID so DenyWrite's WRITE_DAC/DELETE bits do not
 	// lock the test out of its own temp dir.

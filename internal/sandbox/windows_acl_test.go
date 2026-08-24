@@ -107,11 +107,7 @@ func TestBuildWindowsACLPlanOmitsSharedDenyPathsWhenUnelevated(t *testing.T) {
 		t.Fatalf("BuildWindowsACLPlan: %v", err)
 	}
 	assertNoSharedSystemDenyWrites(t, plan)
-	for _, entry := range plan.Entries {
-		if entry.Action == WindowsACLRevokeCapability {
-			t.Fatalf("unelevated plan = %#v, want no WindowsACLRevokeCapability entry", plan.Entries)
-		}
-	}
+	assertNoWindowsACLRevokes(t, plan)
 }
 
 // windowsSharedDenyPathsForTest calls the same trusted-path resolution

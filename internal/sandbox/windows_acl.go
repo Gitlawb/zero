@@ -31,8 +31,8 @@ type WindowsACLEntry struct {
 	// every directory ACE inheritable (SUB_CONTAINERS_AND_OBJECTS_INHERIT),
 	// and SetNamedSecurityInfo automatically propagates any inheritable ACE
 	// down onto the target's EXISTING descendants (not just new ones it
-	// creates going forward) — see the shared-deny-path entries below for
-	// why that is unsafe on broad system roots.
+	// creates going forward), which is why direct-only denies must set this
+	// flag rather than rely on inheritance.
 	NoInherit   bool `json:"noInherit,omitempty"`
 	Materialize bool `json:"materialize,omitempty"`
 	// ScanDescendants marks a shared-root DenyWrite entry whose EXISTING
