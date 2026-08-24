@@ -8,8 +8,14 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/lockutil"
+)
+
+const (
+	daemonLockStaleAfter = 30 * time.Second
+	daemonLockRetryDelay = 10 * time.Millisecond
 )
 
 // Single-instance lock. Mirrors reference-daemon-code-agent-js/supervisor.js's
@@ -61,18 +67,30 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 		if perr == nil && pid > 0 && isAlive(pid) {
 			return nil, fmt.Errorf("%w (pid %d)", ErrAlreadyRunning, pid)
 		}
-		// Stale lock (dead PID or unreadable) — reclaim it atomically, then retry the
-		// O_EXCL create. A blind Remove here races: two daemons starting at once could
-		// both read the stale PID, both Remove, and then one Removes the OTHER's
+		// If PID could not be parsed (e.g. 0-byte file during active creation),
+		// check if the file is fresh (created recently). If so, wait briefly and retry.
+		if perr != nil || pid <= 0 {
+			if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) <= daemonLockStaleAfter {
+				time.Sleep(daemonLockRetryDelay)
+				continue
+			}
+		}
+		// Stale lock (dead PID or old unparseable lock) — reclaim it atomically, then
+		// retry the O_EXCL create. A blind Remove here races: two daemons starting at once
+		// could both read the stale PID, both Remove, and then one Removes the OTHER's
 		// freshly-created lock — leaving both "holding" the single-instance lock.
 		// reclaimStaleLock renames the file aside so only one racer wins the rename,
 		// and restores it if a live holder reacquired in the gap (D6).
-		if _, rerr := reclaimStaleLock(path, isAlive); rerr != nil {
+		cleared, rerr := reclaimStaleLock(path, isAlive)
+		if rerr != nil {
 			// Reclaim hit a hard failure: the rename aside failed outright, or a
 			// live holder's lock could not be put back (the lock path may be
 			// missing, so re-acquiring would break the single-instance guarantee).
 			// Fail closed instead of spinning to the deadline.
 			return nil, fmt.Errorf("daemon: reclaim stale lock: %w", rerr)
+		}
+		if !cleared {
+			time.Sleep(daemonLockRetryDelay)
 		}
 	}
 	return nil, ErrAlreadyRunning
@@ -93,7 +111,14 @@ func reclaimStaleLock(path string, isAlive func(pid int) bool) (bool, error) {
 	suffix := fmt.Sprintf("%d-%d", os.Getpid(), daemonLockSeq.Add(1))
 	return lockutil.ReclaimStaleLock(path, suffix, func(reclaimedPath string) bool {
 		pid, err := readPidFile(reclaimedPath)
-		return err == nil && pid > 0 && isAlive(pid)
+		if err == nil && pid > 0 {
+			return isAlive(pid)
+		}
+		// If PID is unreadable, check if the file was modified recently (not stale).
+		if info, statErr := os.Stat(reclaimedPath); statErr == nil && time.Since(info.ModTime()) <= daemonLockStaleAfter {
+			return true // fresh, restore rather than steal
+		}
+		return false
 	})
 }
 
