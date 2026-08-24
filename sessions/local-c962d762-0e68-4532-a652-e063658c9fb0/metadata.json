@@ -3,34 +3,34 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T15:12:17.359Z",
-  "durationMs": 37895811,
+  "endedAt": "2026-08-24T15:23:18.652Z",
+  "durationMs": 38557106,
   "status": "running",
   "tokens": {
-    "total": 236148,
-    "input": 482,
-    "output": 235666
+    "total": 269743,
+    "input": 540,
+    "output": 269203
   },
   "cost": {
-    "usd": 105.594
+    "usd": 118.77
   },
-  "toolCalls": 224,
+  "toolCalls": 253,
   "lines": {
-    "added": 189,
-    "removed": 26
+    "added": 477,
+    "removed": 210
   },
   "filesChanged": [
-    "internal/tools/file_tracker.go",
-    "internal/tools/file_tracker_test.go"
+    "internal/measurements/measurements.go",
+    "internal/measurements/measurements_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "21907165fae18ec27cb9016c9f392459b96afbcd",
+    "headAfter": "358555135ee1ba85699ef560f646b3656ba65e65",
     "commitShas": [
-      "21907165fae18ec27cb9016c9f392459b96afbcd"
+      "358555135ee1ba85699ef560f646b3656ba65e65"
     ]
   },
-  "summary": "Mutation caught — 3.2 MB and 3.6 MB where the guard allows 4 KB. Full gauntlet and push:",
+  "summary": "All three mutations caught. Committing with an honest account of the two I couldn't close:",
   "originUrl": "https://getorigin.io/sessions/local-c962d762-0e68-4532-a652-e063658c9fb0"
 }
