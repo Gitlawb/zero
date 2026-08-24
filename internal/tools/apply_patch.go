@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 type applyPatchTool struct {
@@ -20,11 +22,11 @@ func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
 			name:        "apply_patch",
-			description: "Apply a patch inside the workspace or an explicitly granted extra write root.",
+			description: "Apply a multi-hunk or multi-file patch inside the workspace (or a granted extra write root). Structured format:\n*** Begin Patch\n*** Update File: src/app.js\n@@\n unchanged context line\n-removed line\n+added line\n*** End Patch\nUse \"*** Add File: path\" with \"+\" lines to create a file and \"*** Delete File: path\" to remove one; several sections may follow each other. A unified diff (git apply -p1) is also accepted. Paths are workspace-relative; absolute paths inside the workspace are fine. For a single targeted change, edit_file is simpler.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"patch": {Type: "string", Description: "A unified diff or a structured *** Begin Patch patch to apply."},
+					"patch": {Type: "string", Description: "The structured (*** Begin Patch) or unified-diff patch text."},
 					"cwd":   {Type: "string", Description: "Directory where the patch should be applied. Relative paths stay in the workspace; use an absolute path to target a granted extra write root. Defaults to workspace root.", Default: "."},
 				},
 				Required:             []string{"patch"},
@@ -59,6 +61,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	if isStructuredPatch(patch) {
 		return tool.runStructuredPatch(applyRoot, relativeRoot, patch, options)
 	}
+	patch = relativizeUnifiedPatchPaths(applyRoot, patch)
 	if err := validatePatchPaths(applyRoot, patch); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
@@ -135,7 +138,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 			wasWhole := wholeBefore[absolute] || fullySupplied[absolute]
 			options.FileTracker.Record(absolute, content, info)
 			if wasWhole {
-				lines := lineCount(string(content))
+				lines := trackedLineTotal(string(content))
 				options.FileTracker.RecordSeenRange(absolute, 1, lines, lines)
 			}
 		}
@@ -260,15 +263,107 @@ func changedFilesFromPatch(relativeRoot string, patch string) []string {
 	return paths
 }
 
+// relativizeUnifiedPatchPaths rewrites absolute file paths in a unified diff's
+// headers (`diff --git`, `---`, `+++`) to apply-root-relative "a/…"/"b/…" paths
+// when they resolve inside the root, so `git apply -p1` can consume a patch
+// whose author echoed the absolute paths it was shown. Paths outside the root
+// and every hunk body line are left untouched; validatePatchPaths still rejects
+// anything that escapes the workspace.
+// normalizePatchPathForRoot resolves platform-level symlinks (macOS /var ->
+// /private/var) in the prefix of an absolute patch path that lies outside the
+// apply root, so a path the model copied from read_file compares equal to the
+// symlink-resolved root. Relative paths are returned unchanged.
+func normalizePatchPathForRoot(root string, path string) string {
+	if !filepath.IsAbs(path) {
+		return path
+	}
+	resolvedRoot, err := filepath.Abs(root)
+	if err != nil {
+		return path
+	}
+	if evaluated, err := filepath.EvalSymlinks(resolvedRoot); err == nil {
+		resolvedRoot = evaluated
+	}
+	return sandbox.NormalizePrefixForRoot(path, resolvedRoot)
+}
+
+func relativizeUnifiedPatchPaths(root string, patch string) string {
+	relativize := func(path string) (string, bool) {
+		if path == "" || path == "/dev/null" || !filepath.IsAbs(path) {
+			return path, false
+		}
+		if _, relative, err := resolveWorkspaceTargetPath(root, normalizePatchPathForRoot(root, path)); err == nil && relative != "." {
+			return relative, true
+		}
+		return path, false
+	}
+	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	oldRemaining, newRemaining := 0, 0
+	inHunk := false
+	changed := false
+	for index, line := range lines {
+		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
+			switch {
+			case strings.HasPrefix(line, "-"):
+				oldRemaining--
+			case strings.HasPrefix(line, "+"):
+				newRemaining--
+			case strings.HasPrefix(line, "\\"):
+			default:
+				oldRemaining--
+				newRemaining--
+			}
+			continue
+		}
+		inHunk = false
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				a, aok := relativize(fields[2])
+				b, bok := relativize(fields[3])
+				if aok || bok {
+					if aok {
+						fields[2] = "a/" + a
+					}
+					if bok {
+						fields[3] = "b/" + b
+					}
+					lines[index] = strings.Join(fields, " ")
+					changed = true
+				}
+			}
+		case strings.HasPrefix(line, "@@"):
+			oldRemaining, newRemaining = parseHunkCounts(line)
+			inHunk = oldRemaining > 0 || newRemaining > 0
+		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			if relative, ok := relativize(patchFileHeaderPath(line)); ok {
+				prefix := "a/"
+				if strings.HasPrefix(line, "+++ ") {
+					prefix = "b/"
+				}
+				lines[index] = line[:4] + prefix + relative
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return patch
+	}
+	return strings.Join(lines, "\n")
+}
+
 func validatePatchPaths(root string, patch string) error {
 	for _, path := range patchHeaderPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
-		if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+		// Relative traversal is rejected here; an absolute path is checked by
+		// resolveWorkspaceTargetPath, which only accepts one inside the root.
+		if path == ".." || strings.HasPrefix(path, "../") {
 			return fmt.Errorf("patch path %q must stay inside the workspace", path)
 		}
-		if _, _, err := resolveWorkspaceTargetPath(root, path); err != nil {
+		if _, _, err := resolveWorkspaceTargetPath(root, normalizePatchPathForRoot(root, path)); err != nil {
 			return err
 		}
 	}

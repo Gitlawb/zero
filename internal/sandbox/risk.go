@@ -281,11 +281,15 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	if patch == "" {
 		return nil
 	}
+	// Only relative traversal is rejected up front. Absolute paths flow through
+	// the regular workspace-scope validation below (requestPaths), which accepts
+	// one inside the workspace and denies one outside — a model that echoes the
+	// absolute path read_file showed it must not be blocked for that alone.
 	for _, path := range applyPatchPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
-		if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+		if path == ".." || strings.HasPrefix(path, "../") {
 			return &pathBlock{
 				Code:   BlockOutsideWorkspace,
 				Path:   path,

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/pathjail"
@@ -63,8 +64,45 @@ type structuredPatchChange struct {
 	mode   os.FileMode
 }
 
+// structuredPatchMarkerPattern accepts the canonical "*** Begin Patch" /
+// "*** End Patch" markers plus the decorated spellings models commonly emit
+// ("*** Begin Patch ***", "***Begin Patch", trailing whitespace). A strict
+// byte-equal match here made every patch from some models fail on line 1 and
+// pushed them into whole-file rewrites.
+var structuredPatchMarkerPattern = regexp.MustCompile(`^\*{3}\s*(Begin|End) Patch\s*\**\s*$`)
+
+// unifiedHunkRangePattern recognises a unified-diff range header ("-12,4 +12,6",
+// optionally followed by "@@ heading") written inside a structured hunk marker.
+// The line numbers carry no information for the context-anchored grammar, so
+// the range is dropped and only an explicit heading is kept as the anchor.
+var unifiedHunkRangePattern = regexp.MustCompile(`^-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*(?:@@\s*(.*))?$`)
+
+const structuredPatchFormatHint = ` (format: "*** Begin Patch", then "*** Update File: path" / "*** Add File: path" / "*** Delete File: path" sections whose hunks start with "@@" and use " " context, "-" removed and "+" added lines, then "*** End Patch")`
+
+// structuredPatchMarker classifies a line as the "begin" or "end" marker of a
+// structured patch, or "" when it is neither.
+func structuredPatchMarker(line string) string {
+	match := structuredPatchMarkerPattern.FindStringSubmatch(strings.TrimSpace(line))
+	if match == nil {
+		return ""
+	}
+	return strings.ToLower(match[1])
+}
+
+// structuredHunkAnchor normalises the text after a hunk's "@@ " marker. A
+// unified-diff range is dropped (its optional heading survives as the anchor);
+// anything else is used verbatim.
+func structuredHunkAnchor(context string) string {
+	context = strings.TrimSpace(context)
+	if match := unifiedHunkRangePattern.FindStringSubmatch(context); match != nil {
+		return strings.TrimSpace(match[1])
+	}
+	return context
+}
+
 func isStructuredPatch(patch string) bool {
-	return strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), structuredPatchBegin)
+	first, _, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "\n")
+	return structuredPatchMarker(first) == "begin"
 }
 
 func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch string, options RunOptions) Result {
@@ -122,11 +160,11 @@ func parseStructuredPatch(patch string) ([]structuredPatchOperation, error) {
 		return nil, fmt.Errorf("structured patch is empty")
 	}
 	lines := strings.Split(normalized, "\n")
-	if strings.TrimSpace(lines[0]) != structuredPatchBegin {
-		return nil, fmt.Errorf("the first line of a structured patch must be %q", structuredPatchBegin)
+	if structuredPatchMarker(lines[0]) != "begin" {
+		return nil, fmt.Errorf("the first line of a structured patch must be %q%s", structuredPatchBegin, structuredPatchFormatHint)
 	}
-	if strings.TrimSpace(lines[len(lines)-1]) != structuredPatchEnd {
-		return nil, fmt.Errorf("the last line of a structured patch must be %q", structuredPatchEnd)
+	if structuredPatchMarker(lines[len(lines)-1]) != "end" {
+		return nil, fmt.Errorf("the last line of a structured patch must be %q%s", structuredPatchEnd, structuredPatchFormatHint)
 	}
 
 	var operations []structuredPatchOperation
@@ -191,8 +229,12 @@ func parseStructuredPatch(patch string) ([]structuredPatchOperation, error) {
 				}
 				if trimmed == "@@" || strings.HasPrefix(trimmed, structuredHunkContext) {
 					chunk := structuredPatchChunk{}
+					rest := ""
 					if trimmed != "@@" {
-						chunk.context = strings.TrimPrefix(trimmed, structuredHunkContext)
+						rest = strings.TrimPrefix(trimmed, structuredHunkContext)
+					}
+					if anchor := structuredHunkAnchor(rest); anchor != "" {
+						chunk.context = anchor
 						chunk.hasContext = true
 					}
 					op.chunks = append(op.chunks, chunk)
@@ -248,7 +290,7 @@ func structuredPatchPath(header, prefix string, line int) (string, error) {
 }
 
 func isStructuredPatchHeader(line string) bool {
-	return line == structuredPatchEnd || strings.HasPrefix(line, structuredAddFile) || strings.HasPrefix(line, structuredDeleteFile) || strings.HasPrefix(line, structuredUpdateFile)
+	return structuredPatchMarker(line) == "end" || strings.HasPrefix(line, structuredAddFile) || strings.HasPrefix(line, structuredDeleteFile) || strings.HasPrefix(line, structuredUpdateFile)
 }
 
 func structuredPatchLineError(line int, message string) error {
@@ -353,10 +395,14 @@ func planStructuredPatch(root *os.Root, operations []structuredPatchOperation, t
 }
 
 func resolveStructuredPatchTarget(root, path string) (structuredPatchTarget, error) {
-	if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(filepath.ToSlash(path), "../") {
+	// Relative traversal is rejected outright. An absolute path is allowed when
+	// it resolves inside the apply root (models routinely echo the absolute path
+	// they were shown by read_file); resolveWorkspaceTargetPath rejects anything
+	// that lands outside.
+	if path == ".." || strings.HasPrefix(filepath.ToSlash(path), "../") {
 		return structuredPatchTarget{}, fmt.Errorf("patch path %q must stay inside the workspace", path)
 	}
-	absolute, relative, err := resolveWorkspaceTargetPath(root, path)
+	absolute, relative, err := resolveWorkspaceTargetPath(root, normalizePatchPathForRoot(root, path))
 	if err != nil {
 		return structuredPatchTarget{}, err
 	}
@@ -706,7 +752,7 @@ func recordStructuredPatchFile(tracker *FileTracker, absolute string, created, s
 	info, _ := os.Stat(absolute)
 	tracker.Record(absolute, content, info)
 	if seenWhole {
-		lines := lineCount(string(content))
+		lines := trackedLineTotal(string(content))
 		tracker.RecordSeenRange(absolute, 1, lines, lines)
 	}
 	if created {

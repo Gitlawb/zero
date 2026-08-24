@@ -189,3 +189,20 @@ func lineCount(s string) int {
 	}
 	return strings.Count(s, "\n") + 1
 }
+
+// trackedLineTotal reports a file's line count the way read_file reports it
+// to the FileTracker (newline-terminated lines, plus an unterminated last
+// line; an empty file is one line). Writers must record this same number:
+// RecordSeenRange resets every observation when the total changes, so a
+// writer that recorded lineCount (one higher for a trailing newline) made the
+// next partial read_file wipe whole-file knowledge and refuse the next edit.
+func trackedLineTotal(s string) int {
+	if s == "" {
+		return 1
+	}
+	total := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		total++
+	}
+	return total
+}
