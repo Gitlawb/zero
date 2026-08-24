@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
+  "model": "claude-opus-5",
+  "startedAt": "2026-08-24T04:40:41.532Z",
+  "endedAt": "2026-08-24T05:47:46.360Z",
+  "durationMs": 4024807,
+  "status": "running",
+  "tokens": {
+    "total": 23996,
+    "input": 34,
+    "output": 23962
+  },
+  "cost": {
+    "usd": 9.8817
+  },
+  "toolCalls": 15,
+  "lines": {
+    "added": 484,
+    "removed": 13
+  },
+  "filesChanged": [
+    "internal/tools/edit_file.go",
+    "internal/tools/edit_preserves_reads_test.go",
+    "internal/tools/file_tracker.go"
+  ],
+  "git": {
+    "branch": "HEAD",
+    "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
+    "headAfter": "3013d4113bd026d0a6208dd71e089ef77bd663bc",
+    "commitShas": [
+      "3013d4113bd026d0a6208dd71e089ef77bd663bc"
+    ]
+  },
+  "summary": "All seven fix agents are running. Retrying the #908 rebase:",
+  "originUrl": "https://getorigin.io/sessions/local-c962d762-0e68-4532-a652-e063658c9fb0"
+}
