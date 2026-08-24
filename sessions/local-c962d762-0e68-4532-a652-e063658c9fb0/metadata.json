@@ -3,42 +3,33 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:58:49.485Z",
-  "durationMs": 15487940,
+  "endedAt": "2026-08-24T12:49:07.245Z",
+  "durationMs": 29305700,
   "status": "running",
   "tokens": {
-    "total": 123194,
-    "input": 222,
-    "output": 122972
+    "total": 178204,
+    "input": 362,
+    "output": 177842
   },
   "cost": {
-    "usd": 46.6267
+    "usd": 76.5159
   },
-  "toolCalls": 105,
+  "toolCalls": 168,
   "lines": {
-    "added": 484,
-    "removed": 39
+    "added": 24,
+    "removed": 3
   },
   "filesChanged": [
-    "internal/acp/agent.go",
-    "internal/acp/agent_test.go",
-    "internal/sandbox/analyzer.go",
-    "internal/sandbox/analyzer_local_server_test.go",
-    "internal/sandbox/analyzer_test.go",
-    "internal/sandbox/risk.go",
-    "internal/sandbox/unparseable_network_superset_test.go",
-    "internal/tui/model.go",
-    "internal/tui/model_test.go",
-    "internal/tui/session.go"
+    "internal/sandbox/scope_temporary_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "4a77c20cbdfcea5105c72ca578b48da99707729b",
+    "headAfter": "5e4cab548375a98547e8c0b2bc4ca9e10b1aa18d",
     "commitShas": [
-      "4a77c20cbdfcea5105c72ca578b48da99707729b"
+      "5e4cab548375a98547e8c0b2bc4ca9e10b1aa18d"
     ]
   },
-  "summary": "Both mutations now caught. Fixing the doc-comment overclaim the verifier flagged, then shipping #883:",
+  "summary": "Verified — a broken fixture now fails loudly instead of skipping green. Committing and pushing #911:",
   "originUrl": "https://getorigin.io/sessions/local-c962d762-0e68-4532-a652-e063658c9fb0"
 }
