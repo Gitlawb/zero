@@ -41,10 +41,11 @@ type ServerOptions struct {
 	Now     func() time.Time
 	Log     func(string)
 	isAlive func(int) bool // test hook for the single-instance lock
-	// replaceStatusFile and syncStatusParent are test hooks for the status-file
-	// commit boundary. nil selects the production filesystem operations.
-	replaceStatusFile func(src, dst string) error
-	syncStatusParent  func(dir string) error
+	// beforeStatusReplace, replaceStatusFile, and syncStatusParent are test hooks
+	// for the status-file commit boundary. nil selects production behavior.
+	beforeStatusReplace func()
+	replaceStatusFile   func(root *os.Root, src, dst string) error
+	syncStatusParent    func(root *os.Root) error
 }
 
 // NewServer validates options and builds a Server.
@@ -212,7 +213,7 @@ func (s *Server) writeStatusFile() error {
 	if err != nil {
 		return err
 	}
-	if err := writeStatusFileAtomically(s.opts.Paths.Status, data, 0o600, s.opts.replaceStatusFile, s.opts.syncStatusParent); err != nil {
+	if err := writeStatusFileAtomically(s.opts.Paths.Status, data, 0o600, s.opts.beforeStatusReplace, s.opts.replaceStatusFile, s.opts.syncStatusParent); err != nil {
 		var committed *statusFileCommittedError
 		if errors.As(err, &committed) {
 			s.logf("daemon: %v", committed)

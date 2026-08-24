@@ -11,6 +11,7 @@ import (
 func newTestServer(t *testing.T, launcher Launcher) (*Server, Paths) {
 	t.Helper()
 	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
 	paths := Paths{
 		Socket: filepath.Join(dir, "d.sock"),
 		Lock:   filepath.Join(dir, "d.lock"),
