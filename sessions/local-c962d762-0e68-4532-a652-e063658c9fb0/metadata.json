@@ -3,8 +3,8 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:00:51.113Z",
-  "durationMs": 12009569,
+  "endedAt": "2026-08-24T08:00:57.914Z",
+  "durationMs": 12016370,
   "status": "running",
   "tokens": {
     "total": 64360,
@@ -16,19 +16,18 @@
   },
   "toolCalls": 42,
   "lines": {
-    "added": 58,
-    "removed": 9
+    "added": 16,
+    "removed": 8
   },
   "filesChanged": [
-    "internal/acp/agent.go",
     "internal/acp/agent_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "6fa23fb01f93cd58ee275e646776c0417fbaaba2",
+    "headAfter": "1970457a5ae01ea09dddb24b599f2af93e805065",
     "commitShas": [
-      "6fa23fb01f93cd58ee275e646776c0417fbaaba2"
+      "1970457a5ae01ea09dddb24b599f2af93e805065"
     ]
   },
   "summary": "Confirmed at wire level for both methods. Adding the note the verifier asked for on the unwired field, then shipping:",
