@@ -60,16 +60,21 @@ func checkStatusDirOwner(root *os.Root, _ os.FileInfo) (returnErr error) {
 		return fmt.Errorf("status directory security descriptor is unavailable")
 	}
 
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	token := windows.GetCurrentProcessToken()
+	user, err := token.GetTokenUser()
 	if err != nil {
 		return fmt.Errorf("resolve current Windows user: %w", err)
+	}
+	tokenOwner, err := currentWindowsTokenOwner(token)
+	if err != nil {
+		return fmt.Errorf("resolve current Windows token owner: %w", err)
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil {
 		return fmt.Errorf("read status directory owner: %w", err)
 	}
-	if owner == nil || !owner.Equals(user.User.Sid) {
-		return fmt.Errorf("status directory is not owned by the current Windows user")
+	if owner == nil || (!owner.Equals(user.User.Sid) && !owner.Equals(tokenOwner)) {
+		return fmt.Errorf("status directory is not owned by the current Windows token")
 	}
 
 	dacl, _, err := descriptor.DACL()
@@ -100,6 +105,27 @@ func checkStatusDirOwner(root *os.Root, _ os.FileInfo) (returnErr error) {
 		}
 	}
 	return nil
+}
+
+type statusDirectoryTokenOwner struct {
+	owner *windows.SID
+}
+
+func currentWindowsTokenOwner(token windows.Token) (*windows.SID, error) {
+	var size uint32
+	err := windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size)
+	if err != windows.ERROR_INSUFFICIENT_BUFFER {
+		return nil, err
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &buffer[0], size, &size); err != nil {
+		return nil, err
+	}
+	owner := (*statusDirectoryTokenOwner)(unsafe.Pointer(&buffer[0])).owner
+	if owner == nil {
+		return nil, errors.New("Windows access token has no default owner")
+	}
+	return owner.Copy()
 }
 
 func allowedStatusDirectoryTrustee(trustee, user *windows.SID) bool {
