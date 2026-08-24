@@ -105,7 +105,7 @@ func TestRunStopsAnUncategorizedHeadlessRefusalAtTheFailureBound(t *testing.T) {
 	}
 	// Categorized now, so the stop answer says refused. Previously the loop could
 	// not tell and reported a repeated failure.
-	want := toolFailureStopAnswer("bash", toolFailureStopAt, false, true)
+	want := toolFailureStopAnswer("bash", toolFailureStopAt, toolFailureCauseSameRefusal)
 	if result.FinalAnswer != want {
 		t.Errorf("final answer =\n  %q\nwant\n  %q", result.FinalAnswer, want)
 	}
@@ -175,7 +175,7 @@ func TestRunStopsAnUncategorizedVaryingSandboxRefusalAtTheVariedBound(t *testing
 	if tool.ran != toolFailureAnyErrorStopAt {
 		t.Errorf("the tool was called %d times, want the run halted at %d", tool.ran, toolFailureAnyErrorStopAt)
 	}
-	want := toolFailureStopAnswer("write_file", toolFailureAnyErrorStopAt, true, false)
+	want := toolFailureStopAnswer("write_file", toolFailureAnyErrorStopAt, toolFailureCauseVariedExecuted)
 	if result.FinalAnswer != want {
 		t.Errorf("final answer =\n  %q\nwant\n  %q", result.FinalAnswer, want)
 	}

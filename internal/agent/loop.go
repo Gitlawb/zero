@@ -777,8 +777,20 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
 				messages = append(messages, toolImageMessages...)
-				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Varied, outcome.Refused)
+				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Cause)
 				result.Messages = copyMessages(messages)
+				// THE HALT HAS TO CROSS THE TERMINAL-STATUS BOUNDARY TOO.
+				//
+				// This branch returns straight out, so it never reached the
+				// completion gate that the max-turns paths below go through. Under
+				// RequireCompletionSignal `zero exec` treats only Incomplete as exit
+				// 4 and otherwise emits run_end("success", 0), so a task that was
+				// denied six times, or failed through the twelve-call bound, became
+				// a successful automation result having done none of the work.
+				if options.RequireCompletionSignal {
+					result.Incomplete = true
+					result.IncompleteReason = toolFailureIncompleteReason(call.Name, outcome.Cause)
+				}
 				return result, nil
 			}
 			if outcome.InjectHint && failureHint == "" {
