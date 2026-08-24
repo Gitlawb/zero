@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -360,5 +362,401 @@ func TestFileViewKeysDeferToBlockingModal(t *testing.T) {
 	m = updated.(model)
 	if !m.fileView.active {
 		t.Fatal("Esc with a permission prompt up must not exit the file view")
+	}
+}
+
+// TestFileViewRepeatedViewNoDiskIOOrHighlighting proves that repeated calls
+// to render the full file view do not perform disk I/O or Chroma syntax
+// highlighting after the initial load, and that modifying the file on disk
+// properly invalidates and triggers a reload.
+func TestFileViewRepeatedViewNoDiskIOOrHighlighting(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "sample.go")
+	content := "package main\n\nfunc main() {\n\tprintln(\"hello world\")\n}\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = m.openFileView("sample.go")
+	m = m.setFileViewMode(fileViewFull)
+
+	// First render: Misses cache, performs 1 disk read and 1 highlight call
+	firstRender := m.renderFileViewFull(80)
+	if !strings.Contains(firstRender, "hello world") {
+		t.Fatalf("first render missing content: %s", firstRender)
+	}
+
+	statsAfterFirst := fileViewCacheStatsForTest()
+	if statsAfterFirst.DiskReads != 1 {
+		t.Fatalf("expected 1 disk read on initial view, got %d", statsAfterFirst.DiskReads)
+	}
+	if statsAfterFirst.HighlightCalls != 1 {
+		t.Fatalf("expected 1 highlight call on initial view, got %d", statsAfterFirst.HighlightCalls)
+	}
+
+	// Repeated renders (e.g. 10 frames during typing/scrolling/resize)
+	for i := 0; i < 10; i++ {
+		rendered := m.renderFileViewFull(80)
+		if rendered != firstRender {
+			t.Fatalf("subsequent render %d mismatch", i)
+		}
+	}
+
+	statsAfterRepeated := fileViewCacheStatsForTest()
+	if statsAfterRepeated.DiskReads != 1 {
+		t.Fatalf("repeated View calls must not trigger disk reads, got %d", statsAfterRepeated.DiskReads)
+	}
+	if statsAfterRepeated.HighlightCalls != 1 {
+		t.Fatalf("repeated View calls must not trigger Chroma highlighting, got %d", statsAfterRepeated.HighlightCalls)
+	}
+	if statsAfterRepeated.CacheHits != 10 {
+		t.Fatalf("expected 10 cache hits, got %d", statsAfterRepeated.CacheHits)
+	}
+
+	// Same byte length as `content`, so only mtime can invalidate the entry.
+	newContent := "package main\n\nfunc main() {\n\tprintln(\"HELLO WORLD\")\n}\n"
+	if len(newContent) != len(content) {
+		t.Fatalf("test setup: newContent length %d must match original length %d", len(newContent), len(content))
+	}
+	if err := os.WriteFile(filePath, []byte(newContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filePath, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	updatedRender := m.renderFileViewFull(80)
+	if !strings.Contains(updatedRender, "HELLO WORLD") {
+		t.Fatalf("expected updated content after disk mutation, got: %s", updatedRender)
+	}
+
+	statsAfterUpdate := fileViewCacheStatsForTest()
+	if statsAfterUpdate.DiskReads != 2 {
+		t.Fatalf("expected 2 disk reads after file change, got %d", statsAfterUpdate.DiskReads)
+	}
+	if statsAfterUpdate.HighlightCalls != 2 {
+		t.Fatalf("expected 2 highlight calls after file change, got %d", statsAfterUpdate.HighlightCalls)
+	}
+}
+
+// TestFileViewMaxBytesBudgetTruncation verifies that files exceeding the
+// total byte budget (fileViewMaxBytes) are truncated and display the trailer.
+func TestFileViewMaxBytesBudgetTruncation(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "giant_bytes.txt")
+
+	// Generate a file with total size ~1.5 MB (> fileViewMaxBytes of 1 MiB)
+	line := strings.Repeat("a", 500) + "\n"
+	numLines := (fileViewMaxBytes / 500) + 100
+	var sb strings.Builder
+	for i := 0; i < numLines; i++ {
+		sb.WriteString(line)
+	}
+	if err := os.WriteFile(filePath, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = m.openFileView("giant_bytes.txt")
+	m = m.setFileViewMode(fileViewFull)
+
+	body := m.renderFileViewFull(80)
+	plain := plainRender(t, body)
+
+	if !strings.Contains(plain, "truncated") {
+		t.Fatalf("expected truncation trailer for file exceeding byte budget, got:\n%s", plain)
+	}
+
+	renderedLines := strings.Split(plain, "\n")
+	if len(renderedLines) >= numLines {
+		t.Fatalf("rendered line count %d should be strictly less than total file lines %d", len(renderedLines), numLines)
+	}
+}
+
+// TestFileViewMaxLineBytesBudgetTruncation verifies that single overlong lines
+// exceeding fileViewMaxLineBytes are clamped without crashing or unbounded memory.
+func TestFileViewMaxLineBytesBudgetTruncation(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "giant_line.js")
+
+	// Generate a single overlong line of 50,000 bytes (> fileViewMaxLineBytes of 4096)
+	giantLine := "let data = \"" + strings.Repeat("x", 50000) + "\";\nlet next = 1;\n"
+	if err := os.WriteFile(filePath, []byte(giantLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = m.openFileView("giant_line.js")
+	m = m.setFileViewMode(fileViewFull)
+
+	body := m.renderFileViewFull(80)
+	plain := plainRender(t, body)
+
+	if !strings.Contains(plain, "let next = 1") {
+		t.Fatalf("expected next line to be readable after overlong line truncation, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "truncated") {
+		t.Fatalf("expected truncation trailer for overlong line, got:\n%s", plain)
+	}
+}
+
+// TestFileViewCacheEviction verifies that the LRU cache caps entry count to
+// defaultFileViewCacheMaxEntries.
+func TestFileViewCacheEviction(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	numFiles := defaultFileViewCacheMaxEntries + 10
+	for i := 0; i < numFiles; i++ {
+		fname := fmt.Sprintf("file_%d.txt", i)
+		if err := os.WriteFile(filepath.Join(dir, fname), []byte(fmt.Sprintf("content %d\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	for i := 0; i < numFiles; i++ {
+		fname := fmt.Sprintf("file_%d.txt", i)
+		m = m.openFileView(fname)
+		m = m.setFileViewMode(fileViewFull)
+		_ = m.renderFileViewFull(80)
+	}
+
+	defaultFileViewCache.mu.Lock()
+	cachedCount := len(defaultFileViewCache.items)
+	defaultFileViewCache.mu.Unlock()
+
+	if cachedCount > defaultFileViewCacheMaxEntries {
+		t.Fatalf("cache size %d exceeded maxEntries %d", cachedCount, defaultFileViewCacheMaxEntries)
+	}
+}
+
+// TestFileViewClearOnThemeChange verifies that switching themes clears the
+// file view cache so updated palette styles are applied.
+func TestFileViewClearOnThemeChange(t *testing.T) {
+	defer applyTheme(themeDark, true)
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "code.go")
+	if err := os.WriteFile(filePath, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = m.openFileView("code.go")
+	m = m.setFileViewMode(fileViewFull)
+	_ = m.renderFileViewFull(80)
+
+	defaultFileViewCache.mu.Lock()
+	entriesBefore := len(defaultFileViewCache.items)
+	defaultFileViewCache.mu.Unlock()
+
+	if entriesBefore == 0 {
+		t.Fatal("expected cached entries before theme switch")
+	}
+
+	applyTheme(themeLight, false)
+
+	defaultFileViewCache.mu.Lock()
+	entriesAfter := len(defaultFileViewCache.items)
+	defaultFileViewCache.mu.Unlock()
+
+	if entriesAfter != 0 {
+		t.Fatalf("expected cache to be cleared after theme change, got %d entries", entriesAfter)
+	}
+}
+
+// TestReadFileViewBounded_GiantSingleLineStopsAtBudget verifies that reading a
+// multi-megabyte physical line without newlines stops immediately at maxTotalBytes
+// rather than reading through to EOF or loading the entire line into memory.
+func TestReadFileViewBounded_GiantSingleLineStopsAtBudget(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "giant_single_line.txt")
+
+	// 5 MiB single line without any newlines
+	totalSize := 5 * 1024 * 1024
+	giantContent := strings.Repeat("A", totalSize)
+	if err := os.WriteFile(filePath, []byte(giantContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	maxTotalBytes := 1 << 20 // 1 MiB budget
+	maxLineBytes := 4096     // 4 KiB line cap
+	maxLines := 4000
+
+	res := readFileViewBounded(filePath, maxLines, maxLineBytes, maxTotalBytes)
+	if res.err != nil {
+		t.Fatalf("unexpected read error: %v", res.err)
+	}
+
+	if !res.truncated {
+		t.Fatal("expected truncated=true when reading 5 MiB single line with 1 MiB budget")
+	}
+
+	if len(res.lines) != 1 {
+		t.Fatalf("expected exactly 1 truncated line, got %d", len(res.lines))
+	}
+
+	if len(res.lines[0]) > maxLineBytes {
+		t.Fatalf("retained line length %d exceeded per-line cap %d", len(res.lines[0]), maxLineBytes)
+	}
+}
+
+// TestReadFileViewBounded_ExactMaxBytesNotTruncated verifies that a file exactly
+// equal in size to maxTotalBytes without extra unread bytes is read completely
+// without an erroneous truncation flag or trailer.
+func TestReadFileViewBounded_ExactMaxBytesNotTruncated(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "exact_budget.txt")
+
+	maxTotalBytes := 1024 * 1024 // 1 MiB
+	maxLineBytes := 4096
+	maxLines := 4000
+
+	// Construct exactly 1024 * 1024 bytes with 512 lines of 2048 bytes (2047 chars + '\n')
+	lineLen := 2048
+	numLines := maxTotalBytes / lineLen
+	remainder := maxTotalBytes % lineLen
+
+	var sb strings.Builder
+	for i := 0; i < numLines; i++ {
+		sb.WriteString(strings.Repeat("B", lineLen-1) + "\n")
+	}
+	if remainder > 0 {
+		sb.WriteString(strings.Repeat("C", remainder))
+	}
+
+	content := []byte(sb.String())
+	if len(content) != maxTotalBytes {
+		t.Fatalf("generated content size %d != %d", len(content), maxTotalBytes)
+	}
+
+	if err := os.WriteFile(filePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := readFileViewBounded(filePath, maxLines, maxLineBytes, maxTotalBytes)
+	if res.err != nil {
+		t.Fatalf("unexpected read error: %v", res.err)
+	}
+
+	if res.truncated {
+		t.Fatal("expected truncated=false for file exactly matching maxTotalBytes with no trailing data")
+	}
+
+	totalReadLen := 0
+	for _, l := range res.lines {
+		totalReadLen += len(l)
+	}
+	if totalReadLen == 0 {
+		t.Fatal("expected lines to be populated")
+	}
+}
+
+// TestReadFileViewBounded_ExactMaxBytesUnterminatedLineTruncated verifies that a single
+// unterminated physical line of exactly maxTotalBytes is correctly marked truncated=true
+// when the line length exceeds maxLineBytes.
+func TestReadFileViewBounded_ExactMaxBytesUnterminatedLineTruncated(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "exact_single_line_unterminated.txt")
+
+	maxTotalBytes := 1024 * 1024 // 1 MiB
+	maxLineBytes := 4096
+	maxLines := 4000
+
+	// 1 MiB continuous single line without any newlines
+	content := []byte(strings.Repeat("X", maxTotalBytes))
+	if err := os.WriteFile(filePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := readFileViewBounded(filePath, maxLines, maxLineBytes, maxTotalBytes)
+	if res.err != nil {
+		t.Fatalf("unexpected read error: %v", res.err)
+	}
+
+	if !res.truncated {
+		t.Fatal("expected truncated=true for 1 MiB single unterminated line clipped at maxLineBytes")
+	}
+
+	if len(res.lines) != 1 {
+		t.Fatalf("expected exactly 1 line, got %d", len(res.lines))
+	}
+	if len(res.lines[0]) > maxLineBytes {
+		t.Fatalf("retained line length %d exceeded maxLineBytes %d", len(res.lines[0]), maxLineBytes)
+	}
+}
+
+// TestFileViewCache_RenderVariantsBoundedUnderResize verifies that varying width
+// and changed-line fingerprints cannot grow an entry's renders map beyond
+// fileViewMaxRenderVariants, even under concurrent access from multiple goroutines.
+func TestFileViewCache_RenderVariantsBoundedUnderResize(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "resize_test.go")
+	if err := os.WriteFile(filePath, []byte("package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = m.openFileView("resize_test.go")
+	m = m.setFileViewMode(fileViewFull)
+
+	// Execute mixed-width getOrRender calls concurrently from multiple goroutines
+	var wg sync.WaitGroup
+	workers := 8
+	callsPerWorker := 20
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for i := 0; i < callsPerWorker; i++ {
+				width := 40 + ((workerID*callsPerWorker + i) % 50)
+				changed := map[string]bool{}
+				if width%2 == 0 {
+					changed[fmt.Sprintf("marker_%d_%d", workerID, width)] = true
+				}
+				_ = defaultFileViewCache.getOrRender(filePath, "resize_test.go", width, changed)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	defaultFileViewCache.mu.Lock()
+	elem, ok := defaultFileViewCache.items[filePath]
+	defaultFileViewCache.mu.Unlock()
+
+	if !ok || elem == nil {
+		t.Fatal("expected cached entry for file")
+	}
+
+	entry := elem.Value.(*fileViewCachedEntry)
+	entry.rendersMu.RLock()
+	variantCount := len(entry.renders)
+	keyCount := len(entry.renderKeys)
+	entry.rendersMu.RUnlock()
+
+	if variantCount > fileViewMaxRenderVariants {
+		t.Fatalf("variant count %d exceeded maximum limit %d", variantCount, fileViewMaxRenderVariants)
+	}
+	if keyCount > fileViewMaxRenderVariants {
+		t.Fatalf("renderKeys count %d exceeded maximum limit %d", keyCount, fileViewMaxRenderVariants)
 	}
 }

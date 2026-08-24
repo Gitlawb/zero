@@ -15,20 +15,397 @@ package tui
 
 import (
 	"bufio"
+	"container/list"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // fileViewMaxLines caps the full-file mode so a giant generated file can't
-// freeze a render; the tail collapses into a "… N more lines" trailer.
-const fileViewMaxLines = 4000
+// freeze a render; the tail collapses into a "… more lines (file truncated at N for display)" trailer.
+const (
+	fileViewMaxLines               = 4000
+	fileViewMaxBytes               = 1 << 20 // 1 MiB total read budget per file
+	fileViewMaxLineBytes           = 4096    // 4 KiB max line length budget
+	defaultFileViewCacheMaxEntries = 64
+	fileViewMaxRenderVariants      = 4 // max rendered variants (width/fingerprint) per cached file entry
+)
 
 const (
 	fileViewDiff = iota
 	fileViewFull
 )
+
+// fileViewCacheStats tracks disk I/O, Chroma highlighting, and cache hits/misses.
+type fileViewCacheStats struct {
+	DiskReads       int
+	HighlightCalls  int
+	CacheHits       int
+	CacheMisses     int
+	Evictions       int
+	ThemeClears     int
+	RenderEvictions int
+}
+
+type fileViewCachedEntry struct {
+	targetPath   string
+	displayPath  string
+	modTime      time.Time
+	size         int64
+	lines        []string
+	display      []string
+	truncated    bool
+	omittedLines bool
+
+	rendersMu  sync.RWMutex
+	renderKeys []string          // LRU order: oldest at index 0, most recent at end
+	renders    map[string]string // key: "width:changedLinesFingerprint" -> formatted ANSI string
+}
+
+func (e *fileViewCachedEntry) getRender(key string) (string, bool) {
+	e.rendersMu.RLock()
+	val, ok := e.renders[key]
+	e.rendersMu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	e.rendersMu.Lock()
+	for i, k := range e.renderKeys {
+		if k == key {
+			e.renderKeys = append(append(e.renderKeys[:i], e.renderKeys[i+1:]...), key)
+			break
+		}
+	}
+	e.rendersMu.Unlock()
+	return val, true
+}
+
+func (e *fileViewCachedEntry) putRender(key string, val string) {
+	e.rendersMu.Lock()
+	defer e.rendersMu.Unlock()
+	if _, ok := e.renders[key]; !ok {
+		for len(e.renders) >= fileViewMaxRenderVariants {
+			if len(e.renderKeys) > 0 {
+				oldKey := e.renderKeys[0]
+				e.renderKeys = e.renderKeys[1:]
+				delete(e.renders, oldKey)
+			} else {
+				for k := range e.renders {
+					delete(e.renders, k)
+					break
+				}
+			}
+		}
+		e.renderKeys = append(e.renderKeys, key)
+	}
+	e.renders[key] = val
+}
+
+type fileViewRenderCache struct {
+	mu         sync.Mutex
+	maxEntries int
+	items      map[string]*list.Element // targetPath -> *list.Element containing *fileViewCachedEntry
+	lru        *list.List
+	statsData  fileViewCacheStats
+}
+
+var defaultFileViewCache = newFileViewRenderCache(defaultFileViewCacheMaxEntries)
+
+func newFileViewRenderCache(maxEntries int) *fileViewRenderCache {
+	return &fileViewRenderCache{
+		maxEntries: maxEntries,
+		items:      make(map[string]*list.Element),
+		lru:        list.New(),
+	}
+}
+
+func (c *fileViewRenderCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]*list.Element)
+	c.lru.Init()
+}
+
+func (c *fileViewRenderCache) resetStats() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.statsData = fileViewCacheStats{}
+}
+
+func (c *fileViewRenderCache) stats() fileViewCacheStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.statsData
+}
+
+type fileViewReadResult struct {
+	lines        []string
+	truncated    bool
+	omittedLines bool
+	err          error
+}
+
+func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBytes int) fileViewReadResult {
+	file, err := os.Open(path)
+	if err != nil {
+		return fileViewReadResult{err: err}
+	}
+	defer file.Close()
+
+	var lines []string
+	var totalSourceBytes int
+	truncated := false
+	omittedLines := false
+
+	// Enforce hard source-byte read limit to avoid reading unbounded data from disk.
+	// We allow up to maxTotalBytes + 1 so we can detect truncation without reading to EOF.
+	limitReader := io.LimitReader(file, int64(maxTotalBytes)+1)
+	reader := bufio.NewReader(limitReader)
+
+	for len(lines) < maxLines && totalSourceBytes < maxTotalBytes {
+		var lineBuf []byte
+		var lineTruncated bool
+
+		for {
+			chunk, isPrefix, err := reader.ReadLine()
+			chunkLen := len(chunk)
+			if chunkLen > 0 {
+				remainTotal := maxTotalBytes - totalSourceBytes
+				if remainTotal <= 0 {
+					truncated = true
+					omittedLines = true
+					if len(lineBuf) > 0 {
+						lines = append(lines, string(lineBuf))
+					}
+					goto finished
+				}
+
+				if chunkLen > remainTotal {
+					chunk = chunk[:remainTotal]
+					totalSourceBytes += remainTotal
+					truncated = true
+					omittedLines = true
+					lineTruncated = true
+				} else {
+					totalSourceBytes += chunkLen
+				}
+
+				remainLine := maxLineBytes - len(lineBuf)
+				if remainLine > 0 {
+					if len(chunk) > remainLine {
+						lineBuf = append(lineBuf, chunk[:remainLine]...)
+						lineTruncated = true
+					} else {
+						lineBuf = append(lineBuf, chunk...)
+					}
+				} else {
+					lineTruncated = true
+				}
+			}
+
+			if err != nil {
+				if len(lineBuf) > 0 {
+					lines = append(lines, string(lineBuf))
+					if lineTruncated {
+						truncated = true
+					}
+				}
+				if !errors.Is(err, io.EOF) {
+					if len(lines) == 0 {
+						return fileViewReadResult{err: err}
+					}
+					truncated = true
+					omittedLines = true
+				}
+				goto finished
+			}
+
+			if totalSourceBytes >= maxTotalBytes {
+				if isPrefix {
+					truncated = true
+					omittedLines = true
+				} else if lineTruncated {
+					truncated = true
+				}
+				if len(lineBuf) > 0 {
+					lines = append(lines, string(lineBuf))
+				}
+				goto finished
+			}
+
+			if !isPrefix {
+				break
+			}
+		}
+
+		if lineTruncated {
+			truncated = true
+		}
+		lines = append(lines, string(lineBuf))
+		if totalSourceBytes >= maxTotalBytes {
+			break
+		}
+	}
+
+finished:
+	if !omittedLines {
+		if reader.Buffered() > 0 {
+			truncated = true
+			omittedLines = true
+		} else if _, err := reader.Peek(1); err == nil {
+			truncated = true
+			omittedLines = true
+		} else {
+			var probe [1]byte
+			if n, _ := file.Read(probe[:]); n > 0 {
+				truncated = true
+				omittedLines = true
+			}
+		}
+	}
+
+	return fileViewReadResult{
+		lines:        lines,
+		truncated:    truncated,
+		omittedLines: omittedLines,
+	}
+}
+
+func changedLinesFingerprint(changed map[string]bool) string {
+	if len(changed) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(changed))
+	for k, v := range changed {
+		if v {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "\x00")
+}
+
+func formatFileViewLines(lines []string, display []string, changed map[string]bool, truncated bool, omittedLines bool, width int) string {
+	gutterW := len(fmt.Sprintf("%d", len(lines)))
+	textBudget := maxInt(8, width-gutterW-3) // gutter + space + marker column
+
+	var b strings.Builder
+	for i, line := range display {
+		line = fitStyledLine(line, textBudget)
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		marker := " "
+		if changed != nil && len(lines) > i && changed[strings.TrimSpace(lines[i])] {
+			marker = zeroTheme.accent.Render("▎")
+		}
+		b.WriteString(zeroTheme.faintest.Render(fmt.Sprintf("%*d ", gutterW, i+1)))
+		b.WriteString(marker)
+		b.WriteString(line)
+	}
+	if truncated {
+		// No exact remaining-line count: computing one would require reading the
+		// rest of the file, defeating the bounded read above.
+		b.WriteString("\n")
+		if omittedLines {
+			b.WriteString(zeroTheme.faint.Render(fmt.Sprintf("… more lines (file truncated at %d for display)", len(lines))))
+		} else {
+			b.WriteString(zeroTheme.faint.Render("… (line content truncated at display limit)"))
+		}
+	}
+	return b.String()
+}
+
+func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
+	stat, err := os.Stat(targetPath)
+	if err != nil {
+		return zeroTheme.faint.Render("Could not read file: " + err.Error())
+	}
+
+	modTime := stat.ModTime()
+	size := stat.Size()
+	changedFingerprint := changedLinesFingerprint(changed)
+	renderKey := fmt.Sprintf("%d:%s", width, changedFingerprint)
+
+	c.mu.Lock()
+	if elem, ok := c.items[targetPath]; ok {
+		entry := elem.Value.(*fileViewCachedEntry)
+		if entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
+			c.statsData.CacheHits++
+			c.lru.MoveToFront(elem)
+			c.mu.Unlock()
+
+			if rendered, ok := entry.getRender(renderKey); ok {
+				return rendered
+			}
+
+			// Re-format for the new width or changed markers using cached display and lines
+			rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width)
+			entry.putRender(renderKey, rendered)
+			return rendered
+		}
+	}
+
+	c.statsData.CacheMisses++
+	c.statsData.DiskReads++
+	c.mu.Unlock()
+
+	readRes := readFileViewBounded(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes)
+	if readRes.err != nil && len(readRes.lines) == 0 {
+		return zeroTheme.faint.Render("Could not read file: " + readRes.err.Error())
+	}
+
+	c.mu.Lock()
+	c.statsData.HighlightCalls++
+	c.mu.Unlock()
+
+	display, ok := highlightCodeForPath(readRes.lines, displayPath, 1<<20, nil)
+	if !ok || len(display) != len(readRes.lines) {
+		display = readRes.lines
+	}
+
+	rendered := formatFileViewLines(readRes.lines, display, changed, readRes.truncated, readRes.omittedLines, width)
+
+	entry := &fileViewCachedEntry{
+		targetPath:   targetPath,
+		displayPath:  displayPath,
+		modTime:      modTime,
+		size:         size,
+		lines:        readRes.lines,
+		display:      display,
+		truncated:    readRes.truncated,
+		omittedLines: readRes.omittedLines,
+		renderKeys:   []string{renderKey},
+		renders:      map[string]string{renderKey: rendered},
+	}
+
+	c.mu.Lock()
+	if elem, ok := c.items[targetPath]; ok {
+		c.lru.Remove(elem)
+		delete(c.items, targetPath)
+	}
+	elem := c.lru.PushFront(entry)
+	c.items[targetPath] = elem
+
+	for len(c.items) > c.maxEntries {
+		back := c.lru.Back()
+		if back == nil {
+			break
+		}
+		backEntry := back.Value.(*fileViewCachedEntry)
+		delete(c.items, backEntry.targetPath)
+		c.lru.Remove(back)
+	}
+	c.mu.Unlock()
+
+	return rendered
+}
 
 // fileViewState manages the drill-in view for a touched file. When active, the
 // transcript body swaps to the file's diff/content instead of the chat rows.
@@ -170,64 +547,7 @@ func (m model) renderFileViewFull(width int) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	// Stream the read and stop at the cap: os.ReadFile would load a multi-GB
-	// file wholesale before any truncation, which is the exact render freeze
-	// fileViewMaxLines exists to prevent.
-	file, err := os.Open(target)
-	if err != nil {
-		return zeroTheme.faint.Render("Could not read file: " + err.Error())
-	}
-	defer file.Close()
-	var lines []string
-	truncated := false
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		if len(lines) == fileViewMaxLines {
-			truncated = true
-			break
-		}
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		if len(lines) == 0 {
-			return zeroTheme.faint.Render("Could not read file: " + err.Error())
-		}
-		truncated = true // e.g. a single over-long line mid-file: show what we have
-	}
-
-	changed := m.fileViewChangedLines()
-	gutterW := len(fmt.Sprintf("%d", len(lines)))
-	textBudget := maxInt(8, width-gutterW-3) // gutter + space + marker column
-	// Highlight with an effectively-infinite measure so the highlighter never
-	// wraps — output lines stay 1:1 with file lines and the gutter numbering
-	// can't desync. Each line is then truncated to the column budget below.
-	display, ok := highlightCodeForPath(lines, m.fileView.path, 1<<20, nil)
-	if !ok || len(display) != len(lines) {
-		display = lines // no lexer for this path: render plain
-	}
-
-	var b strings.Builder
-	for i, line := range display {
-		line = fitStyledLine(line, textBudget)
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		marker := " "
-		if changed[strings.TrimSpace(lines[i])] {
-			marker = zeroTheme.accent.Render("▎")
-		}
-		b.WriteString(zeroTheme.faintest.Render(fmt.Sprintf("%*d ", gutterW, i+1)))
-		b.WriteString(marker)
-		b.WriteString(line)
-	}
-	if truncated {
-		// No exact remaining-line count: computing one would require reading the
-		// rest of the file, defeating the bounded read above.
-		b.WriteString("\n")
-		b.WriteString(zeroTheme.faint.Render(fmt.Sprintf("… more lines (file truncated at %d for display)", len(lines))))
-	}
-	return b.String()
+	return defaultFileViewCache.getOrRender(target, m.fileView.path, width, m.fileViewChangedLines())
 }
 
 // fileViewChangedLines collects the trimmed text of every line the session's
