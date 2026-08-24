@@ -71,12 +71,13 @@ func (m *model) mcpText() string {
 
 func (m *model) refreshMCPViewState() {
 	m.mcpViewStateCache = BuildMCPViewState(MCPStateOptions{
-		Config:          m.mcpConfig,
-		Registry:        m.registry,
-		PermissionStore: m.mcpPermissionStore,
-		PermissionMode:  string(m.permissionMode),
-		TokenStore:      m.mcpTokenStore,
-		Skipped:         m.mcpSkipped,
+		Config:             m.mcpConfig,
+		Registry:           m.registry,
+		PermissionStore:    m.mcpPermissionStore,
+		PermissionMode:     string(m.permissionMode),
+		TokenStore:         m.mcpTokenStore,
+		Skipped:            m.mcpSkipped,
+		SkippedCredentials: m.mcpSkippedCredentials,
 	})
 	m.mcpViewStateReady = true
 }

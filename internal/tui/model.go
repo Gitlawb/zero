@@ -96,32 +96,36 @@ type model struct {
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
 	// fall back to a per-run manager. Torn down in quit().
-	lspManager           *lsp.Manager
-	sessionStore         *sessions.Store
-	peerService          *peermsg.Service
-	peerInbox            []peermsg.InboundMessage
-	peerApprovalQueue    []peermsg.InboundMessage
-	peerPendingApproval  *peermsg.InboundMessage
-	sandboxStore         *sandbox.GrantStore
-	mcpConfig            config.MCPConfig
-	mcpSkipped           []internalmcp.SkippedServer
-	mcpPermissionStore   *internalmcp.PermissionStore
-	mcpTokenStore        *internalmcp.TokenStore
-	mcpCommand           func(context.Context, []string) MCPCommandResult
-	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
-	mcpViewStateCache    MCPViewState
-	mcpViewStateReady    bool
-	mcpCommandSeq        int
-	mcpCommandCancel     context.CancelFunc
-	sandboxSetupSeq      int
-	sandboxSetupInFlight bool
-	doctorCommandSeq     int
-	doctorInFlight       bool
-	doctorFrame          int
-	activeSession        sessions.Metadata
-	pendingSessionTitle  string
-	sessionEvents        []sessions.Event
-	btw                  btwState
+	lspManager          *lsp.Manager
+	sessionStore        *sessions.Store
+	peerService         *peermsg.Service
+	peerInbox           []peermsg.InboundMessage
+	peerApprovalQueue   []peermsg.InboundMessage
+	peerPendingApproval *peermsg.InboundMessage
+	sandboxStore        *sandbox.GrantStore
+	mcpConfig           config.MCPConfig
+	mcpSkipped          []internalmcp.SkippedServer
+	// mcpSkippedCredentials fingerprints the credential material that existed
+	// when mcpSkipped was captured, so a later render cannot re-derive a weaker
+	// redaction for the same retained error. See staleMCPObservation.
+	mcpSkippedCredentials string
+	mcpPermissionStore    *internalmcp.PermissionStore
+	mcpTokenStore         *internalmcp.TokenStore
+	mcpCommand            func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand   func(context.Context) SandboxSetupCommandResult
+	mcpViewStateCache     MCPViewState
+	mcpViewStateReady     bool
+	mcpCommandSeq         int
+	mcpCommandCancel      context.CancelFunc
+	sandboxSetupSeq       int
+	sandboxSetupInFlight  bool
+	doctorCommandSeq      int
+	doctorInFlight        bool
+	doctorFrame           int
+	activeSession         sessions.Metadata
+	pendingSessionTitle   string
+	sessionEvents         []sessions.Event
+	btw                   btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
 	// surface. It survives returning to the parent so a late message from an old
 	// side run can never match a run in a later BTW conversation.
@@ -996,6 +1000,7 @@ func newModel(ctx context.Context, options Options) model {
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
 		mcpSkipped:                  options.MCPSkipped,
+		mcpSkippedCredentials:       mcpCredentialFingerprint(options.MCPTokenStore.SecretValues()),
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
