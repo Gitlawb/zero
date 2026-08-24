@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
@@ -27,6 +30,12 @@ type MCPStateOptions struct {
 	// means a failure is recorded here rather than returned. Without it this
 	// panel reports configuration instead of reality.
 	Skipped []mcp.SkippedServer
+	// SkippedCredentials fingerprints the credential material that existed when
+	// Skipped was captured. See mcpCredentialFingerprint: an observation retains
+	// a RAW error, and redaction happens at render, so the safety of fixed text
+	// would otherwise depend on mutable state read later. Empty means the caller
+	// did not record one, and the check is skipped.
+	SkippedCredentials string
 }
 
 type mcpServerNamedTool interface {
@@ -52,14 +61,14 @@ func BuildMCPViewState(options MCPStateOptions) MCPViewState {
 	}
 
 	return MCPViewState{
-		Servers:     buildMCPServerViews(options.Config, toolCounts, options.Skipped, options.TokenStore),
+		Servers:     buildMCPServerViews(options.Config, toolCounts, options.Skipped, options.TokenStore, options.SkippedCredentials),
 		Tools:       toolViews,
 		Permissions: buildMCPPermissionSummary(options),
 		OAuth:       buildMCPOAuthSummary(options.Config, options.TokenStore),
 	}
 }
 
-func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skipped []mcp.SkippedServer, tokenStore *mcp.TokenStore) []MCPServerView {
+func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skipped []mcp.SkippedServer, tokenStore *mcp.TokenStore, capturedCredentials string) []MCPServerView {
 	failures := make(map[string]error, len(skipped))
 	for _, entry := range skipped {
 		failures[entry.Name] = entry.Err
@@ -97,6 +106,10 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 			if err, ok := failures[name]; ok {
 				state = "failed"
 				message = redactMCPFailureReason(err, raw, tokenSecrets)
+				if staleMCPObservation(capturedCredentials, tokenSecrets) {
+					message = mcpStaleObservationReason
+				}
+
 				if strings.TrimSpace(message) == "" {
 					message = "server did not start"
 				}
@@ -183,29 +196,14 @@ func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets 
 // rejoiners are gone, because that is the string a reader sees and the only one
 // whose tail is the real tail.
 func dropTrailingSecretPrefix(rendered string, secrets []string) string {
-	window := len(rendered)
-	if window > maxMCPSecretMatchWindow {
-		window = maxMCPSecretMatchWindow
-	}
 	cut := len(rendered)
 	for _, secret := range secrets {
-		if len(secret) < shortestMCPSecret {
+		size := longestPrefixSuffix(secret, rendered)
+		if !recoverableSecretPrefix(size, len(secret)) {
 			continue
 		}
-		// The longest prefix of this secret that the text ends with. Walk down from
-		// the window rather than up, so the largest leak is found first.
-		for size := window; size >= shortestMCPSecret; size-- {
-			if size > len(secret) {
-				continue
-			}
-			start := len(rendered) - size
-			if start < 0 || start >= cut {
-				continue
-			}
-			if rendered[start:] == secret[:size] {
-				cut = start
-				break
-			}
+		if start := len(rendered) - size; start < cut {
+			cut = start
 		}
 	}
 	if cut == len(rendered) {
@@ -512,7 +510,13 @@ func redactedCommandArgs(values []string) []string {
 				trimmed = append(trimmed, flag+" "+redactMCPHeaderValue(rest))
 				continue
 			}
-			if isMCPHeaderFlag(value) {
+			if flag, carried, ok := mcpHeaderArgument(value); ok {
+				if carried != "" {
+					// Attached "-HName: value": the credential is in THIS
+					// argument, so there is no next one to claim.
+					trimmed = append(trimmed, flag+redactMCPHeaderValue(carried))
+					continue
+				}
 				trimmed = append(trimmed, value)
 				redactNext = true
 				redactNextHeader = true
@@ -798,7 +802,29 @@ func mcpPermissionTarget(grant mcp.PermissionGrant) string {
 // its own way of making an error message useless.
 func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	values := make([]string, 0, len(raw.Headers)+len(raw.Env)+len(raw.Args)+2)
+	// AMBIGUOUS values go through credentialCandidates, whose shortestMCPSecret
+	// floor keeps ordinary short configuration ("v=1", "mode=sse") out of the
+	// redaction set. That floor is a readability trade-off, and it is only
+	// defensible while the value might not be a credential at all.
 	add := func(value string) {
+		values = append(values, credentialCandidates(value)...)
+	}
+	// KNOWN values skip the floor. Provenance has already settled that these are
+	// secret: a field named ClientSecret, or the value of a credential-bearing
+	// flag that sensitiveMCPArgValues identified as such. Routing them through
+	// the ambiguity heuristic discarded anything under eight bytes, so a
+	// six-byte client secret echoed back in an error_description, or a short
+	// value passed through --api-key, survived into the panel and the
+	// transcript. Stored tokens are already protected at any non-empty length;
+	// this makes the configured sources agree with them.
+	//
+	// The candidate walk still runs, so the "<scheme> <credential>" shape is
+	// split as before; what changes is that the whole value is kept regardless
+	// of length.
+	addKnown := func(value string) {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			values = append(values, trimmed)
+		}
 		values = append(values, credentialCandidates(value)...)
 	}
 	for _, value := range raw.Headers {
@@ -813,7 +839,7 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// invocation usually prints that invocation back, and connectStdio appends
 	// the captured stderr to the initialization error this panel renders.
 	for _, value := range sensitiveMCPArgValues(raw.Args) {
-		add(value)
+		addKnown(value)
 	}
 	// THE ENDPOINT ITSELF CARRIES CREDENTIALS. HTTP and SSE send the configured
 	// URL verbatim, and it accepts both userinfo and arbitrary query keys, so
@@ -829,9 +855,27 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	for _, value := range mcpURLSecretValues(raw.URL) {
 		add(value)
 	}
-	add(raw.Auth)
+	addKnown(raw.Auth)
 	if raw.OAuth != nil {
-		add(raw.OAuth.ClientSecret)
+		addKnown(raw.OAuth.ClientSecret)
+		// THE OAUTH ENDPOINTS ARE REACHED DURING STARTUP TOO, and they carry
+		// credentials in exactly the way the main URL does. With a stored token a
+		// 401 from the server triggers a refresh, oauth.PostToken then posts to
+		// TokenEndpoint, and a dial or TLS failure comes back wrapped in a
+		// *url.Error that retains the path and query. Collecting only from
+		// raw.URL left an accepted endpoint such as
+		// "https://auth.invalid/token?workspace=<opaque>" outside the candidate
+		// set, so the value reached the panel and the transcript intact.
+		for _, endpoint := range []string{
+			raw.OAuth.TokenEndpoint,
+			raw.OAuth.AuthorizationEndpoint,
+			raw.OAuth.RegistrationEndpoint,
+			raw.OAuth.IssuerURL,
+		} {
+			for _, value := range mcpURLSecretValues(endpoint) {
+				add(value)
+			}
+		}
 	}
 	return values
 }
@@ -1011,22 +1055,71 @@ func credentialCandidates(value string) []string {
 // --auth-type is collected as well. Redacting an enum out of a message costs
 // some readability; not redacting a credential costs the credential, so the
 // collection is deliberately the wider of the two.
-func isMCPHeaderFlag(value string) bool {
+// mcpHeaderArgument parses ONE argument into the header flag it names and the
+// header text it carries, if any.
+//
+// ONE PARSER FOR BOTH CONSUMERS. The redaction collector and the target row
+// each derived the accepted shapes separately and drifted apart: an argument
+// the reason redacted printed verbatim in the target one line below. Everything
+// that decides "is this a header, and where is its value" now happens here.
+//
+// carried is the header text when this argument holds it, and empty when the
+// value is the NEXT argument. The attached form "-HName: value" is included
+// because it is the conventional curl spelling and neither consumer recognised
+// it: the flag name parsed as "HName:..." and matched nothing.
+//
+// The long form folds case; the SHORT form does not, deliberately. "-H" is the
+// header flag and "-h" is help, which takes no value, so folding here would
+// consume the next argument after "-h" and blank an unrelated word out of every
+// message that mentions it.
+func mcpHeaderArgument(value string) (flag string, carried string, ok bool) {
 	trimmed := strings.TrimSpace(value)
 	if !strings.HasPrefix(trimmed, "-") {
-		return false
+		return "", "", false
 	}
-	name := strings.TrimLeft(trimmed, "-")
-	if key, _, ok := strings.Cut(name, "="); ok {
-		name = key
+	// Long form first, so "--header..." is never mistaken for the short "-H".
+	if rest, matched := cutFoldPrefix(trimmed, "--header"); matched {
+		switch {
+		case rest == "":
+			return trimmed, "", true
+		case strings.HasPrefix(rest, "="):
+			return trimmed[:len(trimmed)-len(rest)], strings.TrimSpace(rest[1:]), true
+		case strings.HasPrefix(rest, " "):
+			return trimmed[:len(trimmed)-len(rest)], strings.TrimSpace(rest), true
+		}
+		return "", "", false
 	}
-	if key, _, ok := strings.Cut(name, " "); ok {
-		name = key
+	if !strings.HasPrefix(trimmed, "-H") {
+		return "", "", false
 	}
-	if name == "H" {
-		return true
+	rest := trimmed[len("-H"):]
+	switch {
+	case rest == "":
+		return trimmed, "", true
+	case strings.HasPrefix(rest, "="):
+		return "-H", strings.TrimSpace(rest[1:]), true
+	case strings.HasPrefix(rest, " "):
+		return "-H", strings.TrimSpace(rest), true
+	case strings.HasPrefix(rest, "-"):
+		// "-H-something" is not a header spelling; refuse rather than guess.
+		return "", "", false
 	}
-	return strings.EqualFold(name, "header")
+	// Attached: "-HName: value".
+	return "-H", rest, true
+}
+
+// cutFoldPrefix reports whether s begins with prefix under case folding, and
+// returns what follows it.
+func cutFoldPrefix(s, prefix string) (string, bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return "", false
+	}
+	return s[len(prefix):], true
+}
+
+func isMCPHeaderFlag(value string) bool {
+	_, _, ok := mcpHeaderArgument(value)
+	return ok
 }
 
 func sensitiveMCPArgValues(args []string) []string {
@@ -1111,6 +1204,14 @@ func sensitiveMCPArgValues(args []string) []string {
 			values = append(values, collected)
 			continue
 		}
+		// The attached header spelling, "-HName: value", carries its value in
+		// this same argument. Neither pass recognised it: the flag name parsed
+		// as "HName:..." and matched nothing, so the value was never collected
+		// here and printed whole one row below.
+		if _, carried, ok := mcpHeaderArgument(arg); ok && carried != "" {
+			values = append(values, headerValue(carried))
+			continue
+		}
 		// Only an actual FLAG claims the next argument. isSensitiveMCPDisplayFlag
 		// strips leading dashes before matching, so it says yes to a bare
 		// positional word too, and the documented GitHub server config
@@ -1153,4 +1254,113 @@ func rawURLUserinfo(rawURL string) string {
 		return ""
 	}
 	return authority[:at]
+}
+
+// recoverableSecretPrefix reports whether a surviving prefix of size bytes
+// gives away enough of a total-byte credential to matter.
+//
+// There has to be SOME floor or the tail of nearly every message disappears:
+// with a handful of candidates one of them almost always begins with whatever
+// character the text happens to end on, and cutting there would cost a
+// character for nothing. The previous floor was a flat eight bytes, which is
+// wrong in the direction that counts, because seven bytes of an eight-byte
+// credential is the credential. So the rule is proportional as well as
+// absolute: eight or more characters is independently useful, and so is half of
+// the value however short it is.
+func recoverableSecretPrefix(size, total int) bool {
+	if size <= 0 || total <= 0 {
+		return false
+	}
+	return size >= shortestMCPSecret || size*2 >= total
+}
+
+// longestPrefixSuffix returns the length of the longest prefix of pattern that
+// is also a suffix of text.
+//
+// THE SEARCH IS SIZED TO THE CREDENTIAL, NOT TO A CONSTANT. The previous
+// version inspected a fixed 4 KiB window at the end of the text, so a
+// credential beginning before that window could never be matched: the inspected
+// span started partway through it, and a middle is not a prefix. Measured on
+// this code, a 6000-byte value positioned across the cut left 5000 of its bytes
+// on the panel.
+//
+// KMP over "pattern + sentinel + tail" answers it in one pass. The work is
+// linear in the CONFIGURED value, which the operator owns and which is already
+// bounded, rather than in anything the remote server sent, so a hostile error
+// cannot widen it.
+func longestPrefixSuffix(pattern, text string) int {
+	if pattern == "" || text == "" {
+		return 0
+	}
+	if len(text) > len(pattern) {
+		text = text[len(text)-len(pattern):]
+	}
+	const sentinel = "\x00"
+	if strings.Contains(pattern, sentinel) || strings.Contains(text, sentinel) {
+		// Unreachable for a rendered failure reason, whose control bytes are
+		// already stripped. Degrade to the direct answer rather than trust a
+		// sentinel that is not one.
+		for size := len(text); size > 0; size-- {
+			if strings.HasSuffix(text, pattern[:size]) {
+				return size
+			}
+		}
+		return 0
+	}
+	combined := pattern + sentinel + text
+	failure := make([]int, len(combined))
+	for i := 1; i < len(combined); i++ {
+		length := failure[i-1]
+		for length > 0 && combined[i] != combined[length] {
+			length = failure[length-1]
+		}
+		if combined[i] == combined[length] {
+			length++
+		}
+		failure[i] = length
+	}
+	return failure[len(combined)-1]
+}
+
+// mcpStaleObservationReason replaces a startup failure whose redaction context
+// no longer exists. The row still reports that the server failed, which is what
+// the observation actually established; only the reason is withheld.
+const mcpStaleObservationReason = "startup failed; the details were dropped because the stored credentials changed since they were recorded"
+
+// SAFETY MUST BE MONOTONIC OVER AN OBSERVATION.
+//
+// A retained skipped entry holds the RAW startup error, and every rebuild
+// redacts it again from whatever the token store holds at that moment. That
+// makes the safety of fixed text depend on mutable external state, and the
+// dependency runs the wrong way: `/mcp oauth logout` deletes the stored bearer
+// and returns the configuration unchanged, so retainedMCPSkipped keeps the
+// observation while the candidate set that was hiding the bearer disappears.
+// The next render then writes the credential into the panel and the transcript,
+// AFTER the user asked for it to be forgotten. Refresh rotation, deletion by
+// another process, and a token-store read failure all do the same thing.
+//
+// Rather than retain a second copy of the credentials, which would be a second
+// long-lived plaintext store, the observation carries a FINGERPRINT of the
+// material that made it safe. A change means the guarantee cannot be
+// reproduced, so the reason is withheld instead of re-derived.
+func staleMCPObservation(captured string, current []string) bool {
+	if captured == "" {
+		// No fingerprint recorded, so there is nothing to compare and no claim to
+		// make. Callers that want the guarantee record one.
+		return false
+	}
+	return captured != mcpCredentialFingerprint(current)
+}
+
+// mcpCredentialFingerprint identifies a set of credential values without
+// retaining them. Order-independent, because SecretValues enumerates a map.
+func mcpCredentialFingerprint(values []string) string {
+	sorted := append([]string(nil), values...)
+	sort.Strings(sorted)
+	digest := sha256.New()
+	for _, value := range sorted {
+		// Length-prefixed so ["ab","c"] and ["a","bc"] cannot collide.
+		fmt.Fprintf(digest, "%d:%s", len(value), value)
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
