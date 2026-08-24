@@ -226,7 +226,7 @@ func TestMailboxLockReleaseKeepsStablePath(t *testing.T) {
 		t.Fatalf("ensureInboxDir: %v", err)
 	}
 	lockPath := path + ".lock"
-	releaseA, err := acquireLock(lockPath, time.Second)
+	releaseA, err := acquireLock(mb.BaseDir, lockPath, time.Second)
 	if err != nil {
 		t.Fatalf("acquire A: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestAcquireLockIgnoresOldUnlockedFile(t *testing.T) {
 	if err := os.Chtimes(lockPath, old, old); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
-	release, err := acquireLock(lockPath, time.Second)
+	release, err := acquireLock(filepath.Dir(lockPath), lockPath, time.Second)
 	if err != nil {
 		t.Fatalf("acquire over old unlocked file: %v", err)
 	}
@@ -260,13 +260,34 @@ func TestAcquireLockIgnoresOldUnlockedFile(t *testing.T) {
 func TestAcquireLockDoesNotBreakHeldLock(t *testing.T) {
 	// File age is irrelevant while the kernel reports an active holder.
 	lockPath := filepath.Join(t.TempDir(), "x.lock")
-	release, err := acquireLock(lockPath, time.Second)
+	release, err := acquireLock(filepath.Dir(lockPath), lockPath, time.Second)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	defer release()
-	if _, err := acquireLock(lockPath, 50*time.Millisecond); err == nil {
+	if _, err := acquireLock(filepath.Dir(lockPath), lockPath, 50*time.Millisecond); err == nil {
 		t.Fatal("acquireLock admitted a second holder")
+	}
+}
+
+func TestAcquireLockRefusesRedirectedPath(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	const sentinel = "do not overwrite"
+	if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := makeRedirectedLockPath(t, root, target)
+	if release, err := acquireLock(root, lockPath, time.Second); err == nil {
+		release()
+		t.Fatal("acquireLock followed a redirected lock path")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != sentinel {
+		t.Fatalf("redirected target was modified: %q", data)
 	}
 }
 

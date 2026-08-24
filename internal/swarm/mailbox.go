@@ -204,7 +204,7 @@ func (m *Mailbox) Send(team, recipient string, msg Message) error {
 	if err := m.ensureInboxDir(path); err != nil {
 		return err
 	}
-	release, err := acquireLock(path+".lock", m.lockTimeout())
+	release, err := acquireLock(m.BaseDir, path+".lock", m.lockTimeout())
 	if err != nil {
 		return err
 	}
@@ -236,7 +236,7 @@ func (m *Mailbox) ReadAndConsume(team, recipient string) ([]Message, error) {
 	if err := m.ensureInboxDir(path); err != nil {
 		return nil, err
 	}
-	release, err := acquireLock(path+".lock", m.lockTimeout())
+	release, err := acquireLock(m.BaseDir, path+".lock", m.lockTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -335,10 +335,10 @@ func (m *Mailbox) atomicWriteJSON(path string, data any) error {
 // acquireLock takes an exclusive advisory lock through a stable lock file. It
 // retries with a short backoff until timeout. The kernel releases the lock when
 // a holder exits, so crash recovery never moves or deletes the canonical path.
-func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
+func acquireLock(root, lockPath string, timeout time.Duration) (func(), error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		lock, err := lockutil.TryAcquireFileLock(lockPath)
+		lock, err := lockutil.TryAcquireFileLockAt(root, lockPath)
 		if err == nil {
 			return func() { _ = lock.Release() }, nil
 		}

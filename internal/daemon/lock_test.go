@@ -87,6 +87,35 @@ func TestLockReleaseKeepsStableFile(t *testing.T) {
 	}
 }
 
+func TestReadPidFileMetadataFormats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	for _, test := range []struct {
+		name     string
+		metadata string
+		wantPID  int
+		wantErr  bool
+	}{
+		{name: "legacy PID", metadata: "4242\n", wantPID: 4242},
+		{name: "PID and holder sequence", metadata: "4242-7\n", wantPID: 4242},
+		{name: "missing sequence", metadata: "4242-", wantErr: true},
+		{name: "non-numeric sequence", metadata: "4242-next", wantErr: true},
+		{name: "extra component", metadata: "4242-7-8", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(test.metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := readPidFile(path)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("readPidFile() error = %v, wantErr %v", err, test.wantErr)
+			}
+			if !test.wantErr && got != test.wantPID {
+				t.Fatalf("readPidFile() = %d, want %d", got, test.wantPID)
+			}
+		})
+	}
+}
+
 func TestProcessAliveSelfAndDead(t *testing.T) {
 	if !osProcessAlive(os.Getpid()) {
 		t.Fatal("osProcessAlive(self) = false, want true")

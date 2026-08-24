@@ -65,5 +65,20 @@ func readPidFile(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(strings.TrimSpace(string(data)))
+	metadata := strings.TrimSpace(string(data))
+	if pid, err := strconv.Atoi(metadata); err == nil {
+		return pid, nil
+	}
+	pidText, sequenceText, ok := strings.Cut(metadata, "-")
+	if !ok || pidText == "" || sequenceText == "" || strings.Contains(sequenceText, "-") {
+		return 0, fmt.Errorf("daemon: parse lock PID metadata %q", metadata)
+	}
+	if _, err := strconv.ParseUint(sequenceText, 10, 64); err != nil {
+		return 0, fmt.Errorf("daemon: parse lock holder sequence: %w", err)
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		return 0, fmt.Errorf("daemon: parse lock PID: %w", err)
+	}
+	return pid, nil
 }

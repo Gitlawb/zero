@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -74,6 +75,77 @@ func TestFileLockMetadata(t *testing.T) {
 	}
 	if err := lock.WriteMetadata(nil); !errors.Is(err, ErrLockReleased) {
 		t.Fatalf("write after release = %v, want ErrLockReleased", err)
+	}
+}
+
+func TestFileLockConcurrentFirstAcquisition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	const contenders = 200
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+	locks := make(chan *FileLock, contenders)
+	var ready sync.WaitGroup
+	ready.Add(contenders)
+	for range contenders {
+		go func() {
+			ready.Done()
+			<-start
+			lock, err := TryAcquireFileLock(path)
+			if lock != nil {
+				locks <- lock
+			}
+			results <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range contenders {
+		err := <-results
+		if err != nil && !errors.Is(err, ErrLockHeld) {
+			t.Errorf("concurrent first acquire: %v", err)
+		}
+	}
+	close(locks)
+	for lock := range locks {
+		if err := lock.Release(); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestFileLockRefusesMultiplyLinkedEntry(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	lockPath := filepath.Join(dir, "lock")
+	const sentinel = "do not overwrite"
+	if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, lockPath); err != nil {
+		t.Fatalf("create redirected hard link: %v", err)
+	}
+	if lock, err := TryAcquireFileLock(lockPath); err == nil {
+		_ = lock.Release()
+		t.Fatal("TryAcquireFileLock accepted a multiply-linked entry")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != sentinel {
+		t.Fatalf("redirected target was modified: %q", data)
+	}
+}
+
+func TestFileLockAtRejectsEscapingPath(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(filepath.Dir(base), "outside.lock")
+	if lock, err := TryAcquireFileLockAt(base, outside); err == nil {
+		_ = lock.Release()
+		t.Fatal("TryAcquireFileLockAt accepted a path outside its root")
+	}
+	if _, err := os.Stat(outside); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("escaping path was created: %v", err)
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -38,7 +40,27 @@ type FileLock struct {
 // waiting. A contended lock returns ErrLockHeld. The kernel releases a lock if
 // its process exits, so an old unlocked file never needs stale reclamation.
 func TryAcquireFileLock(path string) (*FileLock, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	return TryAcquireFileLockAt(filepath.Dir(path), path)
+}
+
+// TryAcquireFileLockAt attempts to lock path while confining every component
+// below root to a handle-relative traversal. root is the caller's trusted
+// boundary and may itself be reached through a legitimate link; links and
+// reparse points below it are rejected before metadata can be written.
+func TryAcquireFileLockAt(root, path string) (*FileLock, error) {
+	if root == "" {
+		return nil, errors.New("lockutil: lock root is empty")
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return nil, fmt.Errorf("lockutil: resolve lock path relative to root: %w", err)
+	}
+	relative = filepath.Clean(relative)
+	if relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("lockutil: lock path %q escapes root %q", path, root)
+	}
+
+	file, err := openLockFileAt(root, relative, path)
 	if err != nil {
 		return nil, fmt.Errorf("lockutil: open lock file: %w", err)
 	}
