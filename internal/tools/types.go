@@ -191,23 +191,43 @@ type OutcomeDiagnostics struct {
 	Reason                  string
 }
 
-// ModelOutput returns the finalized provider-facing text, falling back to the
-// legacy field for direct Tool.Run callers that have not crossed the registry.
-func (result Result) ModelOutput() string {
-	base := result.Output
+// BaseModelOutput returns the UNDECORATED provider-facing text: the finalized
+// model view, falling back to the legacy field for direct Tool.Run callers that
+// have not crossed the registry. It carries no enforcement notices.
+//
+// Callers that PROJECT a result into another carrier (the agent loop building an
+// agent.ToolResult) must copy this, not ModelOutput, and copy the typed notice
+// slice alongside it. Storing already-rendered text next to the same notices is
+// two representations of one fact with no contract between them, and whichever
+// side of the projection loses its finalized outcome renders the disclosure
+// twice.
+func (result Result) BaseModelOutput() string {
 	if result.Outcome.finalized {
-		base = result.Outcome.ModelView
+		return result.Outcome.ModelView
 	}
-	return WithEnforcementNotices(base, result.EnforcementNotices)
+	return result.Output
 }
 
-// HumanDisplay returns the finalized presentation, falling back to the legacy
-// display for direct Tool.Run callers.
-func (result Result) HumanDisplay() Display {
-	display := result.Display
+// BaseDisplay is BaseModelOutput for the presentation half, and carries no
+// enforcement notices for the same reason.
+func (result Result) BaseDisplay() Display {
 	if result.Outcome.finalized {
-		display = result.Outcome.HumanView
+		return result.Outcome.HumanView
 	}
+	return result.Display
+}
+
+// ModelOutput returns the finalized provider-facing text with the enforcement
+// disclosure rendered in front of it. This is the only place the model view is
+// decorated.
+func (result Result) ModelOutput() string {
+	return WithEnforcementNotices(result.BaseModelOutput(), result.EnforcementNotices)
+}
+
+// HumanDisplay returns the finalized presentation with the enforcement
+// disclosure rendered in front of the summary.
+func (result Result) HumanDisplay() Display {
+	display := result.BaseDisplay()
 	display.Summary = WithEnforcementNotices(display.Summary, result.EnforcementNotices)
 	return display
 }
