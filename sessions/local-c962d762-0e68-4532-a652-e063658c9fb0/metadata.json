@@ -3,35 +3,34 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:01:28.039Z",
-  "durationMs": 12046495,
+  "endedAt": "2026-08-24T08:39:18.339Z",
+  "durationMs": 14316795,
   "status": "running",
   "tokens": {
-    "total": 65533,
-    "input": 94,
-    "output": 65439
+    "total": 81035,
+    "input": 122,
+    "output": 80913
   },
   "cost": {
-    "usd": 22.2215
+    "usd": 29.848
   },
-  "toolCalls": 43,
+  "toolCalls": 55,
   "lines": {
-    "added": 286,
-    "removed": 27
+    "added": 146,
+    "removed": 13
   },
   "filesChanged": [
-    "internal/acp/agent.go",
-    "internal/acp/agent_test.go",
-    "internal/acp/types.go"
+    "internal/sandbox/scope.go",
+    "internal/sandbox/scope_temp_refcount_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "f58e34fb6e471196e32b50acfd3ad390582f21bc",
+    "headAfter": "c715392e5b6b88ef6b6019f25ff6828c8bfaeb63",
     "commitShas": [
-      "f58e34fb6e471196e32b50acfd3ad390582f21bc"
+      "c715392e5b6b88ef6b6019f25ff6828c8bfaeb63"
     ]
   },
-  "summary": "Confirmed at wire level for both methods. Adding the note the verifier asked for on the unwired field, then shipping:",
+  "summary": "Now #909 — verifying the uncommitted work myself before committing:",
   "originUrl": "https://getorigin.io/sessions/local-c962d762-0e68-4532-a652-e063658c9fb0"
 }
