@@ -463,6 +463,26 @@ func indexString(values []string, want string) int {
 	return -1
 }
 
+func TestFindLinuxSandboxHelperCommandSelfExec(t *testing.T) {
+	cmd, err := findLinuxSandboxHelperCommand()
+	if err != nil {
+		t.Fatalf("findLinuxSandboxHelperCommand failed: %v", err)
+	}
+	if cmd.Name == "" {
+		t.Fatal("expected non-empty command name")
+	}
+	// When self-exec is selected, ArgsPrefix must contain __sandbox-helper
+	if len(cmd.ArgsPrefix) > 0 && cmd.ArgsPrefix[0] == "__sandbox-helper" {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatalf("os.Executable: %v", err)
+		}
+		if cmd.Name != exe {
+			t.Fatalf("cmd.Name = %q, want os.Executable %q", cmd.Name, exe)
+		}
+	}
+}
+
 func argsContainSequence(args []string, sequence ...string) bool {
 	return argsSequenceIndex(args, sequence...) >= 0
 }
