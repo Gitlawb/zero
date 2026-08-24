@@ -130,3 +130,10 @@ func windowsTokenPrivilegeLUIDs(token windows.Token) (map[windows.LUID]struct{},
 	}
 	return held, nil
 }
+
+func init() {
+	// One source of truth: the preflight that gates provisioning is the same
+	// function the launch path runs, so a change to what a launch requires
+	// cannot leave setup provisioning for a capability that no longer exists.
+	windowsPrincipalLaunchPreflight = enableWindowsPrincipalLaunchPrivileges
+}
