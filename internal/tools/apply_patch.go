@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 type applyPatchTool struct {
@@ -17,6 +19,83 @@ type applyPatchTool struct {
 }
 
 func (applyPatchTool) isBuiltInApplyPatch() {}
+
+// PrepareFreeformApplyPatchArguments converts native structured-patch input
+// into the ordinary apply_patch argument map used by permission checks and tool
+// execution. Absolute patch-header paths select a granted write root and are
+// rewritten relative to that root; relative-only patches keep workspace-root
+// behavior.
+func PrepareFreeformApplyPatchArguments(tool Tool, patch string) (map[string]any, error) {
+	preparer, ok := tool.(interface {
+		prepareFreeformArguments(string) (map[string]any, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("tool is not Zero's built-in apply_patch")
+	}
+	return preparer.prepareFreeformArguments(patch)
+}
+
+func (tool applyPatchTool) prepareFreeformArguments(patch string) (map[string]any, error) {
+	args := map[string]any{"patch": patch}
+	if !isStructuredPatch(patch) {
+		return args, nil
+	}
+
+	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	selectedRoot := ""
+	for index, line := range lines {
+		prefix := ""
+		switch {
+		case strings.HasPrefix(line, structuredAddFile):
+			prefix = structuredAddFile
+		case strings.HasPrefix(line, structuredDeleteFile):
+			prefix = structuredDeleteFile
+		case strings.HasPrefix(line, structuredUpdateFile):
+			prefix = structuredUpdateFile
+		case strings.HasPrefix(line, structuredMoveTo):
+			prefix = structuredMoveTo
+		default:
+			continue
+		}
+		path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		root, relative, err := tool.freeformPatchRoot(path)
+		if err != nil {
+			return nil, err
+		}
+		if selectedRoot != "" && selectedRoot != root {
+			return nil, fmt.Errorf("freeform patch spans multiple write roots")
+		}
+		selectedRoot = root
+		lines[index] = prefix + filepath.ToSlash(relative)
+	}
+	if selectedRoot != "" {
+		args["cwd"] = selectedRoot
+		args["patch"] = strings.Join(lines, "\n")
+	}
+	return args, nil
+}
+
+func (tool applyPatchTool) freeformPatchRoot(path string) (string, string, error) {
+	roots, err := scopedRoots(tool.workspaceRoot, tool.scope)
+	if err != nil {
+		return "", "", err
+	}
+	var firstErr error
+	for _, root := range roots {
+		candidate := sandbox.NormalizePrefixForRoot(path, root)
+		_, relative, err := resolveWorkspaceTargetPath(root, candidate)
+		if err == nil {
+			return root, relative, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return "", "", firstErr
+}
 
 func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{

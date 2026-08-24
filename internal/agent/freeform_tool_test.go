@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -52,6 +53,71 @@ func TestFreeformApplyPatchUsesExistingToolExecutionPath(t *testing.T) {
 	}
 	if string(content) != "hello\n" {
 		t.Fatalf("patched content = %q, want hello newline", content)
+	}
+}
+
+func TestFreeformApplyPatchSupportsGrantedExtraRoot(t *testing.T) {
+	root := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(root, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedApplyPatchTool(root, scope))
+	target := filepath.Join(extra, "hello.txt")
+	patch := "*** Begin Patch\n*** Add File: " + target + "\n+hello\n*** End Patch\n"
+
+	result, err := executeToolCall(context.Background(), registry, zeroruntime.ToolCall{
+		ID: "call-1", Name: "apply_patch", Arguments: patch, Freeform: true,
+	}, PermissionModeUnsafe, Options{Cwd: root, FileTracker: tools.NewFileTracker()})
+	if err != nil {
+		t.Fatalf("executeToolCall: %v", err)
+	}
+	if result.Status != tools.StatusOK {
+		t.Fatalf("freeform extra-root apply_patch status = %s: %s", result.Status, result.Output)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read extra-root patched file: %v", err)
+	}
+	if string(content) != "hello\n" {
+		t.Fatalf("patched content = %q, want hello newline", content)
+	}
+}
+
+func TestFreeformApplyPatchRejectsAbsolutePathOutsideGrantedRoots(t *testing.T) {
+	root := t.TempDir()
+	granted := t.TempDir()
+	outside, err := os.MkdirTemp(".", ".zero-ungranted-patch-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
+	outside, err = filepath.Abs(outside)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	scope, err := sandbox.NewScope(root, []string{granted})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedApplyPatchTool(root, scope))
+	target := filepath.Join(outside, "blocked.txt")
+	patch := "*** Begin Patch\n*** Add File: " + target + "\n+blocked\n*** End Patch\n"
+
+	result, err := executeToolCall(context.Background(), registry, zeroruntime.ToolCall{
+		ID: "call-1", Name: "apply_patch", Arguments: patch, Freeform: true,
+	}, PermissionModeUnsafe, Options{Cwd: root})
+	if err != nil {
+		t.Fatalf("executeToolCall: %v", err)
+	}
+	if result.Status != tools.StatusError {
+		t.Fatalf("ungranted absolute patch status = %s, want error: %s", result.Status, result.Output)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("ungranted absolute patch created target: %v", err)
 	}
 }
 

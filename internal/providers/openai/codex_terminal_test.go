@@ -105,6 +105,9 @@ func TestCodexApplyPatchUsesFreeformWireContract(t *testing.T) {
 	if !strings.Contains(request.Tools[0].Format.Definition, "*** Begin Patch") {
 		t.Fatalf("apply_patch grammar = %q", request.Tools[0].Format.Definition)
 	}
+	if !strings.Contains(request.Tools[0].Description, "absolute file paths") || !strings.Contains(request.Tools[0].Description, "granted extra write root") {
+		t.Fatalf("apply_patch description does not explain extra-root paths: %q", request.Tools[0].Description)
+	}
 	if len(request.Input) != 3 || request.Input[1].Type != "custom_tool_call" || request.Input[1].ID != "item-1" ||
 		request.Input[1].CallID != "call-1" || request.Input[1].Input != patch ||
 		request.Input[2].Type != "custom_tool_call_output" || request.Input[2].CallID != "call-1" {

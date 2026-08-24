@@ -1134,7 +1134,16 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 				Output:     "Error: Unsupported freeform tool call for " + call.Name + ".",
 			}, nil
 		}
-		args["patch"] = call.Arguments
+		prepared, err := tools.PrepareFreeformApplyPatchArguments(tool, call.Arguments)
+		if err != nil {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: Invalid freeform apply_patch input: " + err.Error(),
+			}, nil
+		}
+		args = prepared
 	} else if call.Arguments != "" {
 		if err := decodeToolArguments(call.Arguments, &args); err != nil {
 			return ToolResult{

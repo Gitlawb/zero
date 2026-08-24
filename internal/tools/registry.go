@@ -171,7 +171,14 @@ func (registry *Registry) Clone() *Registry {
 		return clone
 	}
 	snapshot := registry.Snapshot()
-	clone.RegisterBatch(snapshot.Tools)
+	clonedTools := make([]Tool, 0, len(snapshot.Tools))
+	for _, tool := range snapshot.Tools {
+		if cloner, ok := tool.(interface{ cloneForRegistry(*Registry) Tool }); ok {
+			tool = cloner.cloneForRegistry(clone)
+		}
+		clonedTools = append(clonedTools, tool)
+	}
+	clone.RegisterBatch(clonedTools)
 	clone.generation = snapshot.Generation
 	return clone
 }
