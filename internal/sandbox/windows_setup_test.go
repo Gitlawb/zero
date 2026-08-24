@@ -163,6 +163,7 @@ func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 // environment there let the two halves disagree, so the serialized value must
 // win over the environment in BOTH directions.
 func TestWindowsSandboxSetupPrincipalOptInSurvivesElevatedEnvironment(t *testing.T) {
+	allowPrincipalLaunchForTest(t)
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
 		Network:    NetworkPolicy{Mode: NetworkAllow},
@@ -217,6 +218,7 @@ func TestWindowsSandboxSetupPrincipalOptInSurvivesElevatedEnvironment(t *testing
 // "no principal": provisioning less than the caller asked for and reporting
 // success is the silent downgrade this protocol exists to prevent.
 func TestParseWindowsSandboxSetupArgsRejectsUnreadablePrincipalOptIn(t *testing.T) {
+	allowPrincipalLaunchForTest(t)
 	optIn := true
 	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		SandboxHome:       t.TempDir(),
@@ -367,6 +369,7 @@ func TestWindowsSandboxSetupConfigFromCommandPreservesProfileInputs(t *testing.T
 // states, so getting it backwards is a test failure here rather than a surprise
 // on a real elevated machine.
 func TestWindowsSandboxSetupArgsUnsetPrincipalOptInConsultsEnvironment(t *testing.T) {
+	allowPrincipalLaunchForTest(t)
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
 		Network:    NetworkPolicy{Mode: NetworkAllow},

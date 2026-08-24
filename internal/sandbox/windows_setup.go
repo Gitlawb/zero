@@ -188,6 +188,26 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	if len(workspaceRoots) == 0 {
 		workspaceRoots = []string{commandCWD}
 	}
+	// DO NOT PROVISION A PRINCIPAL THIS CALLER COULD NEVER LAUNCH.
+	//
+	// Launching a command as a separate account needs SeAssignPrimaryTokenPrivilege
+	// and SeIncreaseQuotaPrivilege, and an ordinary unelevated process holds
+	// neither. Elevated setup does not fix that, because the command runs later
+	// from the caller, not from setup. Without this check setup succeeds
+	// completely, creating a local account, its password, its logon-right
+	// assignments, workspace ACEs, the recovery ledger and network filter state,
+	// and then every principal-mode command refuses before opening its executable.
+	// The operator is left with durable machine state serving a backend that
+	// cannot run, and nothing said so at the point they could act on it.
+	//
+	// Checked HERE, in the caller's own process, because that is the process whose
+	// privileges decide the answer, and this runs before anything crosses the UAC
+	// boundary. The error names the opt-out so there is a way forward.
+	if options.principalOptIn() && windowsPrincipalLaunchPreflight != nil {
+		if err := windowsPrincipalLaunchPreflight(); err != nil {
+			return nil, fmt.Errorf("refusing to provision a sandbox principal: %w", err)
+		}
+	}
 	// Augmented here, in the caller's shell, before the args cross into the
 	// elevated helper. Same reason the opt-in and caller SID are: the value has to
 	// be resolved where the environment is the operator's.
@@ -733,3 +753,9 @@ func WindowsSandboxPrincipalRoleForNetwork(network NetworkMode) string {
 	}
 	return "offline"
 }
+
+// windowsPrincipalLaunchPreflight reports whether this process could start a
+// command as a separate principal. Nil off Windows, where the principal backend
+// does not exist, and set from the Windows launch path so the check and the
+// launch cannot disagree about what is required.
+var windowsPrincipalLaunchPreflight func() error
