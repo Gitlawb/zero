@@ -389,15 +389,21 @@ func (client *Client) readLoop() {
 		// It must never be routed as a response to a pending client request.
 		if message.Method != "" {
 			if message.ID != nil {
-				client.mu.Lock()
-				_ = client.writer.write(rpcMessage{
-					ID: message.ID,
-					Error: &rpcError{
-						Code:    -32601,
-						Message: fmt.Sprintf("Method %q not supported", message.Method),
-					},
-				})
-				client.mu.Unlock()
+				// Send the courtesy -32601 reply asynchronously off the read loop so
+				// an undrained server stdin pipe never stalls readLoop or holds client.mu.
+				id := message.ID
+				method := message.Method
+				go func() {
+					client.mu.Lock()
+					defer client.mu.Unlock()
+					_ = client.writer.write(rpcMessage{
+						ID: id,
+						Error: &rpcError{
+							Code:    -32601,
+							Message: fmt.Sprintf("Method %q not supported", method),
+						},
+					})
+				}()
 			}
 			continue
 		}

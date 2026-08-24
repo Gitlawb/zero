@@ -905,3 +905,47 @@ func TestStdioClientIgnoresServerInitiatedRequestsInPendingResponses(t *testing.
 	}
 }
 
+// TestStdioClientUndrainedServerDoesNotStallReadLoop proves that when a server
+// stops draining its stdin, an asynchronous courtesy -32601 reply does not stall
+// the read loop or block client.mu from servicing legitimate responses.
+func TestStdioClientUndrainedServerDoesNotStallReadLoop(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	client.ensureReader()
+
+	// 1. Register a pending response for call ID 1
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	// 2. Server sends request ID 2 (we DO NOT drain outReader so server stdin pipe is blocked)
+	serverReq := `{"jsonrpc":"2.0","id":2,"method":"roots/list","params":{}}` + "\n"
+	go func() {
+		_, _ = inWriter.Write([]byte(serverReq))
+		// 3. Immediately send response for ID 1
+		serverResp := `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n"
+		_, _ = inWriter.Write([]byte(serverResp))
+	}()
+
+	// 4. Verify the response for ID 1 is delivered without being stalled by the undrained pipe
+	select {
+	case res := <-responses:
+		if res.message.Method != "" || len(res.message.Result) == 0 {
+			t.Fatalf("expected valid response for ID 1, got %#v", res.message)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("readLoop stalled on undrained error write; pending response was not delivered")
+	}
+}
