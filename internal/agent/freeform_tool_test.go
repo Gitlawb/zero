@@ -17,6 +17,30 @@ type customApplyPatchTool struct {
 	calls int
 }
 
+type fixedPathScope struct {
+	roots []string
+}
+
+func (scope fixedPathScope) Roots() []string {
+	return append([]string(nil), scope.roots...)
+}
+
+func newFixedPathScope(t *testing.T, roots ...string) fixedPathScope {
+	t.Helper()
+	resolved := make([]string, 0, len(roots))
+	for _, root := range roots {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			t.Fatalf("Abs(%q): %v", root, err)
+		}
+		if physical, err := filepath.EvalSymlinks(absolute); err == nil {
+			absolute = physical
+		}
+		resolved = append(resolved, absolute)
+	}
+	return fixedPathScope{roots: resolved}
+}
+
 func (*customApplyPatchTool) Name() string        { return "apply_patch" }
 func (*customApplyPatchTool) Description() string { return "custom JSON tool" }
 func (*customApplyPatchTool) Parameters() tools.Schema {
@@ -90,19 +114,8 @@ func TestFreeformApplyPatchSupportsGrantedExtraRoot(t *testing.T) {
 func TestFreeformApplyPatchRejectsAbsolutePathOutsideGrantedRoots(t *testing.T) {
 	root := t.TempDir()
 	granted := t.TempDir()
-	outside, err := os.MkdirTemp(".", ".zero-ungranted-patch-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(outside) })
-	outside, err = filepath.Abs(outside)
-	if err != nil {
-		t.Fatalf("Abs: %v", err)
-	}
-	scope, err := sandbox.NewScope(root, []string{granted})
-	if err != nil {
-		t.Fatalf("NewScope: %v", err)
-	}
+	outside := t.TempDir()
+	scope := newFixedPathScope(t, root, granted)
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewScopedApplyPatchTool(root, scope))
 	target := filepath.Join(outside, "blocked.txt")
@@ -128,23 +141,12 @@ func TestPreparedFreeformPatchRejectsIntermediateSymlinkSwap(t *testing.T) {
 	}
 	root := t.TempDir()
 	extra := t.TempDir()
-	outside, err := os.MkdirTemp(".", ".zero-patch-swap-outside-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(outside) })
-	outside, err = filepath.Abs(outside)
-	if err != nil {
-		t.Fatalf("Abs: %v", err)
-	}
+	outside := t.TempDir()
 	intermediate := filepath.Join(extra, "nested")
 	if err := os.Mkdir(intermediate, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
-	scope, err := sandbox.NewScope(root, []string{extra})
-	if err != nil {
-		t.Fatalf("NewScope: %v", err)
-	}
+	scope := newFixedPathScope(t, root, extra)
 	tool := tools.NewScopedApplyPatchTool(root, scope)
 	target := filepath.Join(intermediate, "blocked.txt")
 	patch := "*** Begin Patch\n*** Add File: " + target + "\n+blocked\n*** End Patch\n"
