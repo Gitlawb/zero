@@ -3,8 +3,8 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:57:35.168Z",
-  "durationMs": 15413623,
+  "endedAt": "2026-08-24T08:57:40.718Z",
+  "durationMs": 15419174,
   "status": "running",
   "tokens": {
     "total": 121570,
@@ -16,19 +16,32 @@
   },
   "toolCalls": 104,
   "lines": {
-    "added": 15,
-    "removed": 3
+    "added": 435,
+    "removed": 30
   },
   "filesChanged": [
+    "internal/agent/loop.go",
     "internal/agent/types.go",
-    "internal/sandbox/types.go"
+    "internal/cli/app.go",
+    "internal/cli/exec.go",
+    "internal/sandbox/analyzer.go",
+    "internal/sandbox/analyzer_local_server_test.go",
+    "internal/specialist/exec.go",
+    "internal/specialist/exec_test.go",
+    "internal/swarm/permission_rank_test.go",
+    "internal/swarm/team.go",
+    "internal/tui/model.go",
+    "internal/tui/permission_mode_arm_test.go",
+    "internal/tui/permission_mode_offer_filename_test.go",
+    "internal/tui/permission_mode_offer_test.go",
+    "internal/tui/tui_fixes_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "07ce11f65d47e16f069fede2b699411724d591e3",
+    "headAfter": "d57e395210420e934b0e89dd04c131924f4021b3",
     "commitShas": [
-      "07ce11f65d47e16f069fede2b699411724d591e3"
+      "d57e395210420e934b0e89dd04c131924f4021b3"
     ]
   },
   "summary": "Both mutations now caught. Fixing the doc-comment overclaim the verifier flagged, then shipping #883:",
