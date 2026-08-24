@@ -3,8 +3,8 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:43:38.915Z",
-  "durationMs": 14577372,
+  "endedAt": "2026-08-24T08:43:42.214Z",
+  "durationMs": 14580670,
   "status": "running",
   "tokens": {
     "total": 87344,
@@ -16,8 +16,8 @@
   },
   "toolCalls": 66,
   "lines": {
-    "added": 120,
-    "removed": 25
+    "added": 46,
+    "removed": 1
   },
   "filesChanged": [
     "internal/measurements/measurements.go",
@@ -26,9 +26,9 @@
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "0aacd65971ebcc22bcdfafc5e49ef992d3bede8c",
+    "headAfter": "85c31508e506a1a22919d9b63a64e5eb12becbf5",
     "commitShas": [
-      "0aacd65971ebcc22bcdfafc5e49ef992d3bede8c"
+      "85c31508e506a1a22919d9b63a64e5eb12becbf5"
     ]
   },
   "summary": "All four mechanisms verified. Rebasing and shipping #909:",
