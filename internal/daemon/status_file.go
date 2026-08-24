@@ -108,15 +108,23 @@ func writeStatusFileAtomically(
 	if replace != nil {
 		rename = func(src, dst string) error { return replace(root, src, dst) }
 	}
+	var committedWarning error
 	if err := fsutil.RenameWithRetry(tempName, statusName, rename); err != nil {
-		return fmt.Errorf("replace status file: %w", err)
+		var committedReplacement *fsutil.CommittedReplacementCleanupError
+		if !errors.As(err, &committedReplacement) {
+			return fmt.Errorf("replace status file: %w", err)
+		}
+		committedWarning = fmt.Errorf("clean up replaced status file: %w", err)
 	}
 	committed = true
 	if syncParent == nil {
 		syncParent = syncStatusRoot
 	}
 	if err := syncParent(root); err != nil {
-		return &statusFileCommittedError{cause: fmt.Errorf("sync status directory: %w", err)}
+		committedWarning = errors.Join(committedWarning, fmt.Errorf("sync status directory: %w", err))
+	}
+	if committedWarning != nil {
+		return &statusFileCommittedError{cause: committedWarning}
 	}
 	return nil
 }
@@ -132,7 +140,7 @@ func validateStatusRoot(root *os.Root) error {
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("status directory permissions are %04o, want owner-only", info.Mode().Perm())
 	}
-	if err := checkStatusDirOwner(info); err != nil {
+	if err := checkStatusDirOwner(root, info); err != nil {
 		return err
 	}
 	return nil

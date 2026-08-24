@@ -206,6 +206,55 @@ func TestWriteStatusFileContinuesAfterDirectorySyncWarning(t *testing.T) {
 	assertNoStatusTemps(t, dir)
 }
 
+func TestWriteStatusFileContinuesAfterCommittedReplacementWarning(t *testing.T) {
+	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
+	path := filepath.Join(dir, "daemon.status")
+	if err := os.WriteFile(path, []byte(`{"pid":7}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupErr := errors.New("injected backup cleanup failure")
+	parentSynced := false
+	var logs []string
+	server := &Server{
+		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
+		opts: ServerOptions{
+			Paths:   Paths{Socket: filepath.Join(dir, "daemon.sock"), Status: path},
+			Version: 5,
+			Log:     func(message string) { logs = append(logs, message) },
+			replaceStatusFile: func(root *os.Root, src, dst string) error {
+				if err := fsutil.RenameWithRetry(src, dst, root.Rename); err != nil {
+					return err
+				}
+				return &fsutil.CommittedReplacementCleanupError{
+					BackupPath: filepath.Join(dir, ".zero-replace-backup"),
+					Cause:      cleanupErr,
+				}
+			},
+			syncStatusParent: func(*os.Root) error {
+				parentSynced = true
+				return nil
+			},
+		},
+	}
+
+	if err := server.writeStatusFile(); err != nil {
+		t.Fatalf("writeStatusFile returned a post-commit warning as failure: %v", err)
+	}
+	if !parentSynced {
+		t.Fatal("status directory was not synced after committed replacement warning")
+	}
+	status := readStatusDocument(t, path)
+	if status.Version != 5 {
+		t.Fatalf("published status = %+v, want version 5", status)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], cleanupErr.Error()) {
+		t.Fatalf("logs = %q, want committed cleanup warning", logs)
+	}
+	assertNoStatusTemps(t, dir)
+}
+
 func TestWriteStatusFileBindsDirectoryDuringAncestorSwap(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "live")
@@ -213,20 +262,26 @@ func TestWriteStatusFileBindsDirectoryDuringAncestorSwap(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	secureStatusTestDir(t, dir)
 	path := filepath.Join(dir, "daemon.status")
 	if err := os.WriteFile(path, []byte(`{"pid":7}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	substitute := []byte(`{"pid":999,"socket":"substitute"}`)
+	var swapErr error
 	server := &Server{
 		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
 		opts: ServerOptions{
 			Paths:   Paths{Socket: filepath.Join(dir, "daemon.sock"), Status: path},
-			Version: 5,
+			Version: 6,
 			beforeStatusReplace: func() {
-				if err := os.Rename(dir, movedDir); err != nil {
-					t.Fatalf("move bound status directory: %v", err)
+				swapErr = os.Rename(dir, movedDir)
+				if swapErr != nil {
+					if runtime.GOOS == "windows" {
+						return
+					}
+					t.Fatalf("move bound status directory: %v", swapErr)
 				}
 				if err := os.Mkdir(dir, 0o700); err != nil {
 					t.Fatalf("create substitute status directory: %v", err)
@@ -241,14 +296,28 @@ func TestWriteStatusFileBindsDirectoryDuringAncestorSwap(t *testing.T) {
 	if err := server.writeStatusFile(); err != nil {
 		t.Fatalf("writeStatusFile: %v", err)
 	}
+	if swapErr != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatalf("unexpected directory-swap error: %v", swapErr)
+		}
+		status := readStatusDocument(t, path)
+		if status.Version != 6 {
+			t.Fatalf("status after blocked swap = %+v, want version 6", status)
+		}
+		if _, err := os.Lstat(movedDir); !os.IsNotExist(err) {
+			t.Fatalf("moved directory exists after blocked Windows swap: %v", err)
+		}
+		assertNoStatusTemps(t, dir)
+		return
+	}
 	if got, err := os.ReadFile(path); err != nil {
 		t.Fatal(err)
 	} else if string(got) != string(substitute) {
 		t.Fatalf("substitute destination changed: %q", got)
 	}
 	status := readStatusDocument(t, filepath.Join(movedDir, "daemon.status"))
-	if status.Version != 5 {
-		t.Fatalf("bound status = %+v, want version 5", status)
+	if status.Version != 6 {
+		t.Fatalf("bound status = %+v, want version 6", status)
 	}
 	assertNoStatusTemps(t, dir)
 	assertNoStatusTemps(t, movedDir)
@@ -307,9 +376,5 @@ func assertNoStatusTemps(t *testing.T, dir string) {
 
 func secureStatusTestDir(t *testing.T, dir string) {
 	t.Helper()
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	secureStatusTestDirPlatform(t, dir)
 }
