@@ -379,3 +379,18 @@ func TestGitSendPackIsNetwork(t *testing.T) {
 		}
 	}
 }
+
+func TestGitSubcommandPreservesOriginalAndNormalizedSpelling(t *testing.T) {
+	selection, ok := GitSubcommand([]string{"-c", "alias.STATUS=!curl", "STATUS"})
+	if !ok {
+		t.Fatal("GitSubcommand did not resolve the alias-shaped subcommand")
+	}
+	if selection.Index != 2 || selection.Original != "STATUS" || selection.Normalized != "status" {
+		t.Fatalf("GitSubcommand = %#v, want index 2, original STATUS, normalized status", selection)
+	}
+
+	lowercase, ok := GitSubcommand([]string{"--attr-source", "HEAD", "status"})
+	if !ok || lowercase.Index != 2 || lowercase.Original != "status" || lowercase.Normalized != "status" {
+		t.Fatalf("lowercase GitSubcommand = %#v ok=%v", lowercase, ok)
+	}
+}

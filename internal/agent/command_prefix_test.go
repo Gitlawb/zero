@@ -46,6 +46,25 @@ func TestSafeGitCommandConsumesAttrSourceOptionValue(t *testing.T) {
 	}
 }
 
+func TestSafeGitCommandRejectsCaseDistinctAliasSubcommand(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "-c", "alias.STATUS=!curl", "STATUS", "https://example.invalid"},
+		{"git", "-c", "alias.Status=!curl", "Status", "https://example.invalid"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; case-distinct aliases must not receive reusable prefixes", command)
+		}
+	}
+	if prefix := proposedCommandPrefix("bash", map[string]any{
+		"command": `make test && git -c alias.STATUS=!curl STATUS https://example.invalid`,
+	}); prefix != nil {
+		t.Fatalf("case-distinct alias was accepted as a safe tail and exposed prefix %#v", prefix)
+	}
+	if !safeGitCommand([]string{"git", "--attr-source", "HEAD", "status"}) {
+		t.Fatal("ordinary lowercase status with a vetted global option must remain approvable")
+	}
+}
+
 func TestProposedCommandPrefixSupportsSegmentedCommands(t *testing.T) {
 	got := proposedCommandPrefix("bash", map[string]any{"command": "ps aux | head -5"})
 	if runtime.GOOS == "windows" {

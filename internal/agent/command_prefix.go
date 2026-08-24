@@ -382,34 +382,32 @@ var gitApprovableReadOnlySubcommands = map[string]bool{
 	"status": true, "log": true, "diff": true, "show": true, "branch": true,
 }
 
-// safeGitCommand approves only status/log/diff/show/branch with no global
-// option this matcher has not specifically vetted as safe.
+// safeGitCommand approves only exact lowercase spellings of
+// status/log/diff/show/branch with no global option this matcher has not
+// specifically vetted as safe.
 //
-// Subcommand resolution goes through sandbox.GitSubcommand — the SAME reader
-// the network classifier uses — instead of a parallel hand-rolled scan of
-// git's global-option grammar. Two independent scans of the same grammar is
-// exactly what let this path and the classifier disagree about which token is
-// the subcommand (an omitted -C in one, present in the other) even though
-// both were nominally checking the same thing; sharing the reader removes the
-// second copy that can drift.
+// Subcommand resolution goes through sandbox.GitSubcommand so option parsing
+// stays shared with the classifier, but authorization compares Original, never
+// Normalized. Git aliases are case-sensitive: STATUS can be an arbitrary alias
+// even though the classifier conservatively recognizes its normalized spelling
+// as status.
 func safeGitCommand(command []string) bool {
 	if len(command) < 2 {
 		return false
 	}
-	// sandbox.GitSubcommand indexes into command[1:] (it does not expect the
-	// "git" argv[0] itself); shift its answer back into command's own indexing
-	// so the slices below still mean what they did before this used the shared
-	// reader.
-	subIndex, subcommand, ok := sandbox.GitSubcommand(command[1:])
-	if !ok || !gitApprovableReadOnlySubcommands[subcommand] {
+	selection, ok := sandbox.GitSubcommand(command[1:])
+	if !ok || !gitApprovableReadOnlySubcommands[selection.Original] {
 		return false
 	}
-	subIndex++
+	// GitSubcommand indexes into command[1:] (it does not expect the "git"
+	// argv[0] itself); shift its answer back into command's own indexing so the
+	// slices below retain their command-relative meaning.
+	subIndex := selection.Index + 1
 	if gitHasUnsafeGlobalOption(command[1:subIndex]) {
 		return false
 	}
 	args := command[subIndex+1:]
-	if subcommand == "branch" {
+	if selection.Original == "branch" {
 		return gitArgsReadOnly(args) && gitBranchReadOnly(args)
 	}
 	return gitArgsReadOnly(args)
