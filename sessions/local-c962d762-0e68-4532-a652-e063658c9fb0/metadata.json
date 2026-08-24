@@ -3,8 +3,8 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T07:58:45.256Z",
-  "durationMs": 11883712,
+  "endedAt": "2026-08-24T07:58:51.603Z",
+  "durationMs": 11890051,
   "status": "running",
   "tokens": {
     "total": 61537,
@@ -16,19 +16,18 @@
   },
   "toolCalls": 38,
   "lines": {
-    "added": 69,
-    "removed": 1
+    "added": 40,
+    "removed": 11
   },
   "filesChanged": [
-    "internal/sandbox/scope.go",
-    "internal/sandbox/scope_temp_refcount_test.go"
+    "internal/sandbox/scope_temporary_test.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "001d96d7e88438bb69a36350459045c20c46dca5",
+    "headAfter": "0cd6a2f362bbb26a9c031ebb5bef8bb47e869626",
     "commitShas": [
-      "001d96d7e88438bb69a36350459045c20c46dca5"
+      "0cd6a2f362bbb26a9c031ebb5bef8bb47e869626"
     ]
   },
   "summary": "#911's fix independently mutation-confirmed. Rebasing, committing, pushing:",
