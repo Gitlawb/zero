@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 // Server is the daemon control plane. Mirrors reference-daemon-code-agent-js/
@@ -208,7 +210,7 @@ func (s *Server) writeStatusFile() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.opts.Paths.Status, data, 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(s.opts.Paths.Status, data, 0o600); err != nil {
 		return fmt.Errorf("daemon: write status file: %w", err)
 	}
 	return nil

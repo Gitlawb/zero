@@ -5,10 +5,67 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
 )
+
+// WriteFileAtomic writes data to a temporary file in the same directory as filename,
+// flushes and syncs it to disk, and replaces filename atomically via ReplaceWithRetry.
+func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	mode := perm
+	info, err := os.Lstat(filename)
+	switch {
+	case err == nil:
+		if info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
+	case !os.IsNotExist(err):
+		return err
+	}
+	tmpFile, err := os.CreateTemp(dir, ".zero-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = tmpFile.Close()
+		}
+		_ = os.Remove(tmpName)
+	}()
+
+	if err := tmpFile.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	closed = true
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	replaceErr := ReplaceWithRetry(tmpName, filename, nil)
+	if replaceErr == nil || isCommittedReplacement(replaceErr) {
+		_ = SyncDir(dir)
+	}
+	return replaceErr
+}
+
+func isCommittedReplacement(err error) bool {
+	var committed *CommittedReplacementCleanupError
+	return errors.As(err, &committed)
+}
 
 // CommittedReplacementCleanupError reports that a replacement was committed,
 // but the old destination retained at BackupPath could not be removed. Callers
@@ -83,4 +140,25 @@ func isWindowsSharingOrLockViolation(err error) bool {
 		return errno == ERROR_SHARING_VIOLATION || errno == ERROR_LOCK_VIOLATION
 	}
 	return false
+}
+
+// SyncDir fsyncs a directory so a file create or rename within it is durable
+// across crashes. On platforms that do not support directory syncing (such as
+// Windows), it returns nil.
+func SyncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		// Windows does not support fsync on a directory handle; the rename is
+		// best-effort durable there.
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
