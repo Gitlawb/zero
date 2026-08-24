@@ -79,3 +79,47 @@ func TestServingStillRequiresNetworkApproval(t *testing.T) {
 		}
 	}
 }
+
+// A GLOBAL OPTION BEFORE THE SUBCOMMAND MUST NOT HIDE IT.
+//
+// The subcommand scan skips flags but not the word they CONSUME, so
+// `npm --prefix ./web run dev` resolved to "./web" and the dev server stopped
+// being recognised at all — it lost the network approval its unflagged spelling
+// gets, and on Windows that approval IS the egress control. A global option
+// ahead of the subcommand is documented usage for every one of these tools
+// (`npm --prefix`, `pnpm -C`, `yarn --cwd`, `bun --cwd`), not a contrived form.
+//
+// Driven off packageManagerServingScripts rather than a written-out list, so a
+// script name added there is covered in the flagged spelling too instead of only
+// in the one someone remembered to type.
+func TestPackageManagerOptionValuesDoNotHideTheServingSubcommand(t *testing.T) {
+	if len(packageManagerServingScripts) == 0 {
+		t.Fatal("SETUP INVALID: no serving scripts to check")
+	}
+	for _, manager := range []struct{ prog, option string }{
+		{"npm", "--prefix"},
+		{"pnpm", "-C"},
+		{"yarn", "--cwd"},
+		{"bun", "--cwd"},
+	} {
+		for script := range packageManagerServingScripts {
+			for _, command := range []string{
+				manager.prog + " " + manager.option + " ./web " + script,
+				manager.prog + " " + manager.option + " ./web run " + script,
+			} {
+				t.Run(command, func(t *testing.T) {
+					analysis := AnalyzeCommand(command)
+					if analysis.TooComplex {
+						t.Fatalf("SETUP INVALID: %q was expected to parse", command)
+					}
+					if !analysis.LocalServer {
+						t.Errorf("%q binds a local port, but the option's value was read as its subcommand", command)
+					}
+					if !analysis.Network {
+						t.Errorf("%q lost the network approval its unflagged spelling receives", command)
+					}
+				})
+			}
+		}
+	}
+}

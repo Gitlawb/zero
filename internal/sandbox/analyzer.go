@@ -77,6 +77,17 @@ var localServerPrograms = map[string]bool{
 	"astro":       true,
 }
 
+// packageManagerServingScripts are the script names that start a dev server
+// across npm, pnpm, yarn and bun. Authoritative: risk.go's unparseable fallback
+// has to stay a superset of what this flags, and the superset test drives its
+// cases off this map so a name added here cannot silently weaken the fallback.
+var packageManagerServingScripts = map[string]bool{
+	"start":   true,
+	"serve":   true,
+	"dev":     true,
+	"preview": true,
+}
+
 // AnalyzeCommand parses script and reports interactive/destructive/network usage
 // from the shell AST. A script that cannot be parsed yields TooComplex (with no
 // other flags set) so the caller can decide how to treat an unanalyzable command.
@@ -293,23 +304,29 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 	if packageManagerOffline(words) {
 		return false
 	}
-	first := firstSubcommand(words, aliases)
-	switch first {
-	case "install", "add", "ci", "create", "dlx", "publish", "unpublish",
-		"login", "logout", "adduser", "whoami", "ping", "audit", "outdated",
-		"update", "upgrade", "search", "view", "info", "show", "dist-tag",
-		"deprecate", "owner", "org", "team", "token", "profile", "access":
-		return true
-	// start / serve / dev / preview are handled by packageManagerRunsLocalServer
-	// instead. They start a dev server, which binds rather than fetches, and
-	// `npm run dev` is the single most common command an agent is asked to run
-	// while building something. Classifying it as egress made every one of them
-	// stop for a network approval that protected nothing.
-	case "exec":
-		// Package-manager exec commands may resolve and download a missing
-		// package before launching it. An explicit offline flag keeps this path
-		// inside the isolated namespace; otherwise request egress up front.
-		return true
+	operands, eatable := commandOperands(words)
+	for index := 0; index < subcommandPositions(operands, eatable); index++ {
+		subcommand := operands[index]
+		if alias, ok := aliases[subcommand]; ok {
+			subcommand = alias
+		}
+		switch subcommand {
+		case "install", "add", "ci", "create", "dlx", "publish", "unpublish",
+			"login", "logout", "adduser", "whoami", "ping", "audit", "outdated",
+			"update", "upgrade", "search", "view", "info", "show", "dist-tag",
+			"deprecate", "owner", "org", "team", "token", "profile", "access":
+			return true
+		// start / serve / dev / preview are handled by packageManagerRunsLocalServer
+		// instead. They start a dev server, which binds rather than fetches, and
+		// `npm run dev` is the single most common command an agent is asked to run
+		// while building something. Classifying it as egress made every one of them
+		// stop for a network approval that protected nothing.
+		case "exec":
+			// Package-manager exec commands may resolve and download a missing
+			// package before launching it. An explicit offline flag keeps this path
+			// inside the isolated namespace; otherwise request egress up front.
+			return true
+		}
 	}
 	return false
 }
@@ -417,18 +434,101 @@ func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
 }
 
 // packageManagerRunsLocalServer covers `npm run dev` and its siblings across the
-// package managers, both as a direct subcommand and behind `run`.
+// package managers, both as a direct subcommand and behind `run`, and wherever
+// global options push the subcommand off its usual position. See
+// subcommandPositions for why the subcommand is not simply the first operand.
 func packageManagerRunsLocalServer(words []string) bool {
-	switch firstSubcommand(words, nil) {
-	case "start", "serve", "dev", "preview":
-		return true
-	case "run":
-		switch secondSubcommand(words) {
-		case "start", "serve", "dev", "preview":
+	operands, eatable := commandOperands(words)
+	for index := 0; index < subcommandPositions(operands, eatable); index++ {
+		if packageManagerServingScripts[operands[index]] {
+			return true
+		}
+		if operands[index] == "run" && index+1 < len(operands) && packageManagerServingScripts[operands[index+1]] {
 			return true
 		}
 	}
 	return false
+}
+
+// commandOperands returns a command's non-flag words in order, and whether a
+// flag came before the first of them. The program name is expected to be
+// stripped already.
+func commandOperands(words []string) (operands []string, eatable int) {
+	// eatable counts the LEADING RUN of operands that each sit immediately after
+	// a flag, and so might be that flag's value rather than the subcommand.
+	// Adjacency is the whole rule: an option can only consume the word next to
+	// it, and the first operand that is NOT preceded by a flag cannot be anyone's
+	// value, so the run ends there and the subcommand is at or before it.
+	previousWasFlag := false
+	counting := true
+	for _, word := range words {
+		if word == "" {
+			continue
+		}
+		if strings.HasPrefix(word, "-") {
+			previousWasFlag = true
+			continue
+		}
+		if isNumericToken(word) {
+			previousWasFlag = false
+			continue
+		}
+		if counting {
+			if previousWasFlag {
+				eatable++
+			} else {
+				counting = false
+			}
+		}
+		operands = append(operands, word)
+		previousWasFlag = false
+	}
+	return operands, eatable
+}
+
+// subcommandPositions reports how many leading operands could be the subcommand.
+//
+// Skipping flags is not enough, because it does not skip the words they CONSUME.
+// `npm --prefix ./web run dev` then resolves to "./web" — the option's VALUE —
+// and the invocation stops being recognized at all: the dev server loses the
+// network approval its unflagged spelling gets, and `npm --prefix ./web install`
+// loses it while genuinely fetching. That is not a contrived spelling; a global
+// option before the subcommand is documented usage for every one of these tools
+// (`npm --prefix`, `pnpm -C`, `yarn --cwd`, `bun --cwd`).
+//
+// Which options take a value is deliberately not enumerated. That is four tools
+// each free to add one, and a list like that leaks silently the moment they do.
+// ADJACENCY IS USED INSTEAD, because it is the actual grammar: an option can only
+// consume the word immediately after it. Every leading operand that sits right
+// after a flag might be that flag's value, so each one opens another position;
+// the first operand NOT preceded by a flag cannot be anyone's value, and the
+// window closes there.
+//
+// A FIXED WINDOW OF TWO WAS THE BUG. It covered exactly one value-taking option
+// and no more, so a second one walked straight past it — measured before this
+// change:
+//
+//	npm --prefix ./web install                    -> network (correct)
+//	npm --prefix ./web --loglevel warn install    -> NOT network
+//	npm --registry https://r.test --prefix ./web install -> NOT network
+//	pnpm -C ./web --filter web add left-pad       -> NOT network
+//
+// all four genuinely fetching. Counting the flags rather than fixing the number
+// closes the class at any arity without naming a single option.
+//
+// The false positives the old cap was protecting against are unaffected, because
+// they turn on adjacency too: `npm run build --workspace dev` and `npm run test
+// -- --grep start` both put an unflagged operand FIRST, so the window is one
+// position and "dev" and "start" are never reached. That is a stronger guarantee
+// than the cap gave — it held only because two happened to be short enough.
+func subcommandPositions(operands []string, eatable int) int {
+	if len(operands) == 0 {
+		return 0
+	}
+	if positions := eatable + 1; positions < len(operands) {
+		return positions
+	}
+	return len(operands)
 }
 
 func pythonModuleRunsLocalServer(words []string) bool {

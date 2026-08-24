@@ -9,6 +9,18 @@ import (
 	"strings"
 )
 
+// leadingOptionsPattern spans the global options a package manager accepts
+// before its subcommand, including the word an option consumes as its value:
+// `npm --prefix ./web run dev` and `pnpm -C ./web run dev` are documented usage,
+// and without this the fallback only ever saw the unflagged spelling.
+//
+// The value is optional on purpose, so both readings of `--flag word` are
+// covered. That over-matches — `npm --prefix run` matches too — which is the
+// direction this fallback is already documented to favour: it runs only after
+// the command was declared too complex to parse, where catching an obvious
+// network program matters more than proving exact shell syntax.
+const leadingOptionsPattern = `(\s+-{1,2}\S+(\s+\S+)?)*`
+
 var (
 	// destructiveCommandPattern matches the highest-risk shell forms:
 	//   - rm -rf (with combined/reordered r/f flags) targeting /, $HOME (bare,
@@ -54,7 +66,7 @@ var (
 	// the approval gate disappearing on exactly the platform where it is the only
 	// egress control. Restored until a runner actually provides a scoped listener
 	// capability and the AST path stops setting Network for these itself.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|exec|x|dlx)\b|\b(npm|pnpm|yarn|bun)\s+(run|dev|serve|start|preview)\b|\b(http-server|serve|vite|next|nuxt|astro)\b|\b(python(2|3)?|py)\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\b(python(2|3)?|py)\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
+	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)` + leadingOptionsPattern + `\s+(install|add|publish|login|exec|x|dlx)\b|\b(npm|pnpm|yarn|bun)` + leadingOptionsPattern + `\s+(run|dev|serve|start|preview)\b|\b(http-server|serve|vite|next|nuxt|astro)\b|\b(python(2|3)?|py)\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\b(python(2|3)?|py)\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.
