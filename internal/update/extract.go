@@ -178,6 +178,13 @@ func verifyNoSymlinkEscape(destDirClean string, target string) error {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return fmt.Errorf("archive entry escapes destination: %s", target)
 	}
+	destDirResolved, err := filepath.EvalSymlinks(destDirClean)
+	if err != nil {
+		destDirResolved = destDirClean
+	} else {
+		destDirResolved = filepath.Clean(destDirResolved)
+	}
+
 	current := destDirClean
 	parts := strings.Split(rel, string(os.PathSeparator))
 	for _, part := range parts {
@@ -195,10 +202,23 @@ func verifyNoSymlinkEscape(destDirClean string, target string) error {
 		if info.Mode()&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(current)
 			if err != nil {
-				return err
+				if os.IsNotExist(err) {
+					// Dangling symlink is allowed if its relative destination stays within destDir.
+					linkTarget, readErr := os.Readlink(current)
+					if readErr != nil {
+						return readErr
+					}
+					if filepath.IsAbs(linkTarget) {
+						return fmt.Errorf("archive symlink %s has absolute target: %s", current, linkTarget)
+					}
+					resolved = filepath.Clean(filepath.Join(filepath.Dir(current), linkTarget))
+				} else {
+					return err
+				}
 			}
 			resolved = filepath.Clean(resolved)
-			if resolved != destDirClean && !strings.HasPrefix(resolved, destDirClean+string(os.PathSeparator)) {
+			if resolved != destDirResolved && !strings.HasPrefix(resolved, destDirResolved+string(os.PathSeparator)) &&
+				resolved != destDirClean && !strings.HasPrefix(resolved, destDirClean+string(os.PathSeparator)) {
 				return fmt.Errorf("archive symlink %s escapes destination: %s", current, resolved)
 			}
 		}
