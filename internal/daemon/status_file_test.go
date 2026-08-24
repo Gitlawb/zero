@@ -15,6 +15,7 @@ import (
 
 func TestWriteStatusFilePreservesPreviousDocumentWhenReplaceFails(t *testing.T) {
 	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
 	path := filepath.Join(dir, "daemon.status")
 	previous := []byte(`{"pid":7,"socket":"old.sock","version":1,"startedAt":"2026-08-01T00:00:00Z"}`)
 	if err := os.WriteFile(path, previous, 0o600); err != nil {
@@ -27,8 +28,8 @@ func TestWriteStatusFilePreservesPreviousDocumentWhenReplaceFails(t *testing.T) 
 		opts: ServerOptions{
 			Paths:   Paths{Status: path},
 			Version: 2,
-			replaceStatusFile: func(src, dst string) error {
-				staged, err := os.ReadFile(src)
+			replaceStatusFile: func(root *os.Root, src, dst string) error {
+				staged, err := root.ReadFile(src)
 				if err != nil {
 					t.Fatalf("read staged status: %v", err)
 				}
@@ -36,7 +37,7 @@ func TestWriteStatusFilePreservesPreviousDocumentWhenReplaceFails(t *testing.T) 
 				if err := json.Unmarshal(staged, &decoded); err != nil {
 					t.Fatalf("staged status is incomplete JSON: %v", err)
 				}
-				current, err := os.ReadFile(dst)
+				current, err := root.ReadFile(dst)
 				if err != nil {
 					t.Fatalf("read previous status at commit boundary: %v", err)
 				}
@@ -64,6 +65,7 @@ func TestWriteStatusFilePreservesPreviousDocumentWhenReplaceFails(t *testing.T) 
 
 func TestWriteStatusFilePublishesCompleteRestrictedDocument(t *testing.T) {
 	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
 	path := filepath.Join(dir, "daemon.status")
 	if err := os.WriteFile(path, []byte(`{"pid":7}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -76,9 +78,9 @@ func TestWriteStatusFilePublishesCompleteRestrictedDocument(t *testing.T) {
 		opts: ServerOptions{
 			Paths:   Paths{Socket: filepath.Join(dir, "daemon.sock"), Status: path},
 			Version: 3,
-			syncStatusParent: func(got string) error {
-				if got != dir {
-					t.Fatalf("synced parent = %q, want %q", got, dir)
+			syncStatusParent: func(root *os.Root) error {
+				if _, err := root.Stat("."); err != nil {
+					t.Fatalf("stat bound status parent: %v", err)
 				}
 				parentSynced = true
 				return nil
@@ -117,6 +119,7 @@ func TestWriteStatusFilePublishesCompleteRestrictedDocument(t *testing.T) {
 
 func TestWriteStatusFileReaderSeesCompleteDocumentsDuringPublication(t *testing.T) {
 	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
 	path := filepath.Join(dir, "daemon.status")
 	previous := StatusFile{
 		PID:       7,
@@ -140,10 +143,10 @@ func TestWriteStatusFileReaderSeesCompleteDocumentsDuringPublication(t *testing.
 		opts: ServerOptions{
 			Paths:   Paths{Socket: filepath.Join(dir, "new.sock"), Status: path},
 			Version: 2,
-			replaceStatusFile: func(src, dst string) error {
+			replaceStatusFile: func(root *os.Root, src, dst string) error {
 				close(replacementReady)
 				<-publish
-				return fsutil.ReplaceWithRetry(src, dst, nil)
+				return fsutil.RenameWithRetry(src, dst, root.Rename)
 			},
 		},
 	}
@@ -170,56 +173,9 @@ func TestWriteStatusFileReaderSeesCompleteDocumentsDuringPublication(t *testing.
 	assertNoStatusTemps(t, dir)
 }
 
-func TestWriteStatusFileContinuesAfterCommittedReplacementWarning(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "daemon.status")
-	if err := os.WriteFile(path, []byte(`{"pid":7}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cleanupErr := errors.New("injected backup cleanup failure")
-	var logs []string
-	parentSynced := false
-	server := &Server{
-		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
-		opts: ServerOptions{
-			Paths:   Paths{Socket: filepath.Join(dir, "daemon.sock"), Status: path},
-			Version: 4,
-			Log:     func(message string) { logs = append(logs, message) },
-			replaceStatusFile: func(src, dst string) error {
-				if err := fsutil.ReplaceWithRetry(src, dst, nil); err != nil {
-					return err
-				}
-				return &fsutil.CommittedReplacementCleanupError{
-					BackupPath: filepath.Join(dir, ".zero-replace-backup"),
-					Cause:      cleanupErr,
-				}
-			},
-			syncStatusParent: func(string) error {
-				parentSynced = true
-				return nil
-			},
-		},
-	}
-
-	if err := server.writeStatusFile(); err != nil {
-		t.Fatalf("writeStatusFile returned a post-commit warning as failure: %v", err)
-	}
-	if !parentSynced {
-		t.Fatal("status parent directory was not synced after committed replacement warning")
-	}
-	status := readStatusDocument(t, path)
-	if status.Version != 4 {
-		t.Fatalf("published status = %+v, want version 4", status)
-	}
-	if len(logs) != 1 || !strings.Contains(logs[0], cleanupErr.Error()) {
-		t.Fatalf("logs = %q, want committed cleanup warning", logs)
-	}
-	assertNoStatusTemps(t, dir)
-}
-
 func TestWriteStatusFileContinuesAfterDirectorySyncWarning(t *testing.T) {
 	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
 	path := filepath.Join(dir, "daemon.status")
 	if err := os.WriteFile(path, []byte(`{"pid":7}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -231,9 +187,9 @@ func TestWriteStatusFileContinuesAfterDirectorySyncWarning(t *testing.T) {
 		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
 		opts: ServerOptions{
 			Paths:            Paths{Socket: filepath.Join(dir, "daemon.sock"), Status: path},
-			Version:          5,
+			Version:          4,
 			Log:              func(message string) { logs = append(logs, message) },
-			syncStatusParent: func(string) error { return syncErr },
+			syncStatusParent: func(*os.Root) error { return syncErr },
 		},
 	}
 
@@ -241,11 +197,86 @@ func TestWriteStatusFileContinuesAfterDirectorySyncWarning(t *testing.T) {
 		t.Fatalf("writeStatusFile returned a post-commit warning as failure: %v", err)
 	}
 	status := readStatusDocument(t, path)
-	if status.Version != 5 {
-		t.Fatalf("published status = %+v, want version 5", status)
+	if status.Version != 4 {
+		t.Fatalf("published status = %+v, want version 4", status)
 	}
 	if len(logs) != 1 || !strings.Contains(logs[0], syncErr.Error()) {
 		t.Fatalf("logs = %q, want directory sync warning", logs)
+	}
+	assertNoStatusTemps(t, dir)
+}
+
+func TestWriteStatusFileBindsDirectoryDuringAncestorSwap(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "live")
+	movedDir := filepath.Join(parent, "moved")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "daemon.status")
+	if err := os.WriteFile(path, []byte(`{"pid":7}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	substitute := []byte(`{"pid":999,"socket":"substitute"}`)
+	server := &Server{
+		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
+		opts: ServerOptions{
+			Paths:   Paths{Socket: filepath.Join(dir, "daemon.sock"), Status: path},
+			Version: 5,
+			beforeStatusReplace: func() {
+				if err := os.Rename(dir, movedDir); err != nil {
+					t.Fatalf("move bound status directory: %v", err)
+				}
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatalf("create substitute status directory: %v", err)
+				}
+				if err := os.WriteFile(path, substitute, 0o600); err != nil {
+					t.Fatalf("write substitute status: %v", err)
+				}
+			},
+		},
+	}
+
+	if err := server.writeStatusFile(); err != nil {
+		t.Fatalf("writeStatusFile: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil {
+		t.Fatal(err)
+	} else if string(got) != string(substitute) {
+		t.Fatalf("substitute destination changed: %q", got)
+	}
+	status := readStatusDocument(t, filepath.Join(movedDir, "daemon.status"))
+	if status.Version != 5 {
+		t.Fatalf("bound status = %+v, want version 5", status)
+	}
+	assertNoStatusTemps(t, dir)
+	assertNoStatusTemps(t, movedDir)
+}
+
+func TestWriteStatusFileRejectsBroadStatusDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory access is governed by DACLs, not Unix mode bits")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "daemon.status")
+
+	server := &Server{
+		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
+		opts: ServerOptions{
+			Paths:   Paths{Status: path},
+			Version: 6,
+		},
+	}
+	err := server.writeStatusFile()
+	if err == nil || !strings.Contains(err.Error(), "want owner-only") {
+		t.Fatalf("writeStatusFile error = %v, want owner-only directory rejection", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("status file created in broad directory: %v", err)
 	}
 	assertNoStatusTemps(t, dir)
 }
@@ -271,5 +302,14 @@ func assertNoStatusTemps(t *testing.T, dir string) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary status files remain: %v", matches)
+	}
+}
+
+func secureStatusTestDir(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
