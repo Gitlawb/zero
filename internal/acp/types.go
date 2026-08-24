@@ -127,9 +127,14 @@ type McpServer struct {
 }
 
 type NewSessionParams struct {
-	Cwd                   string      `json:"cwd"`
-	McpServers            []McpServer `json:"mcpServers"`
-	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	Cwd        string      `json:"cwd"`
+	McpServers []McpServer `json:"mcpServers"`
+	// AdditionalDirectories is declared by the protocol and consumed nowhere in
+	// this repo yet. When it is wired up it must go through requestedWorkspace
+	// like Cwd does: these are client-supplied paths with no absoluteness rule of
+	// their own, which is the same shape as the resume-cwd hole that made
+	// {"sessionId":"known"} activate a session against this process's directory.
+	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
 }
 
 type NewSessionResult struct {
@@ -176,6 +181,10 @@ type ListSessionsResult struct {
 	NextCursor string        `json:"nextCursor,omitempty"`
 }
 
+// session/resume takes session/load's wire shape, so its cwd is a plain string
+// too and an omitted one decodes exactly like an empty one. Sharing the type is
+// safe only because activatePersistedSession requires an absolute cwd from the
+// request itself — nothing downstream may supply a default for either method.
 type ResumeSessionParams = LoadSessionParams
 type ResumeSessionResult = LoadSessionResult
 

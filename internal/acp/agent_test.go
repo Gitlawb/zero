@@ -352,8 +352,9 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	workspace := t.TempDir()
 	var created NewSessionResult
-	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
 	option := created.ConfigOptions[0]
@@ -383,7 +384,7 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	h = newHarness(t, deps)
 	defer h.stop()
 	var loaded LoadSessionResult
-	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID}, &loaded); err != nil {
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace}, &loaded); err != nil {
 		t.Fatalf("session/load: %v", err)
 	}
 	if len(loaded.ConfigOptions) != 2 || loaded.ConfigOptions[0].CurrentValue != "gpt-5.4-mini" {
@@ -434,8 +435,9 @@ func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	workspace := t.TempDir()
 	var created NewSessionResult
-	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
 	var selected SetSessionConfigOptionResult
@@ -451,7 +453,7 @@ func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
 	h = newHarness(t, deps)
 	defer h.stop()
 	var loaded LoadSessionResult
-	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID}, &loaded); err != nil {
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace}, &loaded); err != nil {
 		t.Fatalf("session/load: %v", err)
 	}
 	option := loaded.ConfigOptions[0]
@@ -1059,10 +1061,10 @@ func TestSessionListResolvesEveryWorkspace(t *testing.T) {
 
 func TestResumeRefusesARelativePersistedWorkspace(t *testing.T) {
 	// OMITTING THE ENTRY FROM THE LISTING IS NOT THE WHOLE FIX. A client can ask
-	// to resume any id it already knows, and session/resume falls back to the
-	// persisted cwd when the request carries none — so a stored "." was resolved
-	// against this process's directory and the session bound to it, with no error
-	// returned at all. Both doors need the same lock.
+	// to resume any id it already knows, and a stored "." still resolves against
+	// this process's directory — so a request naming that directory would be told
+	// it matched, and the conversation bound to a workspace it never belonged to.
+	// Both doors need the same lock.
 	deps := testDeps(t)
 	deps.ResolveWorkspaceRoot = normalisingResolver(t)
 	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "relative-ws", Cwd: "."}); err != nil {
@@ -1074,6 +1076,14 @@ func TestResumeRefusesARelativePersistedWorkspace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// The directory the stored "." rebases onto. Naming it explicitly is what
+	// makes this test reach the persisted-cwd guard: a request with no cwd is now
+	// refused earlier, for a different reason, and would pass either way.
+	here, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// BOTH ACTIVATING METHODS, not just one. session/load and session/resume are
 	// separate entry points that today share activatePersistedSession — so a test
 	// through either passes while the guard holds. Naming both here is what keeps
@@ -1082,14 +1092,212 @@ func TestResumeRefusesARelativePersistedWorkspace(t *testing.T) {
 	elsewhere := t.TempDir()
 	var out LoadSessionResult
 	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
-		// No cwd at all: the request that used to succeed by rebasing onto
-		// whatever directory this process happens to be running in.
-		if err := h.client.Call(ctx, method, LoadSessionParams{SessionID: "relative-ws"}, &out); err == nil {
-			t.Errorf("%s of a relative persisted workspace succeeded; the session was rebound to the ACP process directory", method)
+		// The invented root offered back as the answer: without the guard the two
+		// sides agree, because both were produced by resolving "." here.
+		err := h.client.Call(ctx, method, LoadSessionParams{SessionID: "relative-ws", Cwd: here}, &out)
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || !strings.Contains(rpcErr.Message, "not an absolute path") {
+			t.Errorf("%s of a relative persisted workspace into the ACP process directory %q = %v, want a persisted-workspace error", method, here, err)
 		}
 		// And an unrelated workspace must not be accepted as its home either.
 		if err := h.client.Call(ctx, method, ResumeSessionParams{SessionID: "relative-ws", Cwd: elsewhere}, &out); err == nil {
 			t.Errorf("%s of a relative persisted workspace into %q succeeded", method, elsewhere)
 		}
+	}
+}
+
+// processDirectoryResolver mirrors internal/cli/exec.go resolveWorkspaceRoot,
+// the resolver the real ACP surface is wired with: a blank cwd becomes the
+// directory the process was started in, a relative one is joined onto it. base
+// stands in for that directory so the test never depends on where `go test`
+// happens to run.
+func processDirectoryResolver(t *testing.T, base string) func(string) (string, error) {
+	t.Helper()
+	return func(cwd string) (string, error) {
+		resolved := strings.TrimSpace(cwd)
+		if resolved == "" {
+			resolved = base
+		} else if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(base, resolved)
+		}
+		resolved = filepath.Clean(resolved)
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", errors.New("workspace is not a directory")
+		}
+		return resolved, nil
+	}
+}
+
+// A REQUEST THAT NAMES NO WORKSPACE ACTIVATES NOTHING.
+//
+// ResumeSessionParams is an alias for LoadSessionParams, and cwd is a plain
+// string on both, so JSON decoding cannot tell an omitted field from an empty
+// one. The blank case used to be answered with the persisted cwd, which made
+// {"sessionId":"known"} — a request carrying no workspace at all — a complete
+// and successful activation. A relative cwd was worse than useless rather than
+// rejected: it was joined onto whatever directory the editor spawned `zero acp`
+// in, so it could agree with the persisted root by accident and hand the session
+// over anyway.
+//
+// The cases go over the wire as raw JSON on purpose. Marshalling a Go struct
+// always emits "cwd":"" and would never exercise the absent field, which is
+// where the defect lives.
+func TestActivationRequiresAnAbsoluteRequestWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	processDir := t.TempDir()
+	workspace := filepath.Join(processDir, "project")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deps.ResolveWorkspaceRoot = processDirectoryResolver(t, processDir)
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "persisted", Cwd: workspace}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		params  json.RawMessage
+		message string
+	}{
+		// The finding: cwd absent from the wire entirely.
+		{"omitted", json.RawMessage(`{"sessionId":"persisted","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{"empty", json.RawMessage(`{"sessionId":"persisted","cwd":"","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{"whitespace", json.RawMessage(`{"sessionId":"persisted","cwd":"   ","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		// "project" resolves onto processDir and MATCHES the persisted root, so
+		// this is the relative case that used to be accepted, not merely mis-erroring.
+		{"relative", json.RawMessage(`{"sessionId":"persisted","cwd":"project","mcpServers":[]}`), "cwd must be an absolute path: project"},
+		{"dot relative", json.RawMessage(`{"sessionId":"persisted","cwd":"./project","mcpServers":[]}`), "cwd must be an absolute path: ./project"},
+	}
+
+	// BOTH ACTIVATING METHODS. They share activatePersistedSession today; naming
+	// both keeps this honest if resume is ever given its own path.
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		for _, tc := range cases {
+			t.Run(method+"/"+tc.name, func(t *testing.T) {
+				h := newHarness(t, deps)
+				defer h.stop()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				var out LoadSessionResult
+				err := h.client.Call(ctx, method, tc.params, &out)
+				var rpcErr *rpcError
+				if !errors.As(err, &rpcErr) {
+					t.Fatalf("%s %s = %v, want a JSON-RPC error", method, tc.params, err)
+				}
+				if rpcErr.Code != codeInvalidParams {
+					t.Errorf("%s %s error code = %d, want %d", method, tc.params, rpcErr.Code, codeInvalidParams)
+				}
+				if rpcErr.Message != tc.message {
+					t.Errorf("%s %s error = %q, want %q", method, tc.params, rpcErr.Message, tc.message)
+				}
+				// AND THE SESSION IS NOT LIVE. The error alone would not prove it:
+				// activation publishes the session before it returns, so a refusal
+				// that still registered would leave session/prompt and session/set_mode
+				// working on a workspace the client never named.
+				modeErr := h.client.Call(ctx, MethodSessionSetMode,
+					SetSessionModeParams{SessionID: "persisted", ModeID: string(agent.PermissionModeAuto)},
+					&SetSessionModeResult{})
+				if !errors.As(modeErr, &rpcErr) || rpcErr.Message != "unknown session: persisted" {
+					t.Errorf("after a refused %s the session was live: set_mode = %v, want %q", method, modeErr, "unknown session: persisted")
+				}
+			})
+		}
+	}
+
+	// The same request with the workspace spelled out is what the client is
+	// expected to send, and it still works.
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: "persisted", Cwd: workspace, McpServers: []McpServer{}}, &out); err != nil {
+		t.Fatalf("session/resume with an absolute cwd: %v", err)
+	}
+}
+
+// session/new roots a BRAND NEW session, and its sandbox and file-tool
+// confinement, at the client's cwd. The same absent-field decoding applied
+// there: {"mcpServers":[]} created a session rooted at the ACP process's own
+// directory and persisted that invented path as the session's workspace.
+func TestSessionNewRequiresAnAbsoluteWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	processDir := t.TempDir()
+	deps.ResolveWorkspaceRoot = processDirectoryResolver(t, processDir)
+	if err := os.MkdirAll(filepath.Join(processDir, "project"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, tc := range []struct {
+		params  json.RawMessage
+		message string
+	}{
+		{json.RawMessage(`{"mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{json.RawMessage(`{"cwd":"","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{json.RawMessage(`{"cwd":"project","mcpServers":[]}`), "cwd must be an absolute path: project"},
+	} {
+		var created NewSessionResult
+		err := h.client.Call(ctx, MethodSessionNew, tc.params, &created)
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || rpcErr.Message != tc.message {
+			t.Errorf("session/new %s = %v, want invalid params %q", tc.params, err, tc.message)
+		}
+		if created.SessionID != "" {
+			t.Errorf("session/new %s created session %q despite refusing the request", tc.params, created.SessionID)
+		}
+	}
+
+	listed, err := deps.Store.ListResumable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Errorf("refused session/new requests persisted %d session(s); the first is rooted at %q", len(listed), listed[0].Cwd)
+	}
+}
+
+// The cwd filter is the one ACP leaves optional, so blank still means "no
+// filter" — but a relative one would be rebased onto the ACP process directory
+// and answer about a workspace the client never named.
+func TestSessionListRejectsARelativeCwdFilter(t *testing.T) {
+	deps := testDeps(t)
+	processDir := t.TempDir()
+	workspace := filepath.Join(processDir, "project")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deps.ResolveWorkspaceRoot = processDirectoryResolver(t, processDir)
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "persisted", Cwd: workspace}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out ListSessionsResult
+	err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: "project"}, &out)
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || rpcErr.Message != "cwd must be an absolute path: project" {
+		t.Errorf("session/list with a relative cwd filter = %v, want invalid params %q", err, "cwd must be an absolute path: project")
+	}
+
+	// Omitting the filter is still legal, and still lists the session.
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &out); err != nil {
+		t.Fatalf("session/list without a filter: %v", err)
+	}
+	if len(out.Sessions) != 1 || out.Sessions[0].SessionID != "persisted" {
+		t.Errorf("unfiltered session/list = %+v, want the one persisted session", out.Sessions)
 	}
 }

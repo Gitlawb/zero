@@ -130,12 +130,41 @@ func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any
 
 // ---- session lifecycle ----
 
+// requestedWorkspace is the single rule for a cwd that arrived from the client,
+// applied before the value can reach ResolveWorkspaceRoot.
+//
+// THE REQUEST'S OWN CWD IS THE ONLY THING ALLOWED TO PICK A ROOT. Every params
+// type spells cwd as a plain string, so an absent field and an empty one decode
+// to exactly the same "", and the resolver treats "" as "use the directory this
+// process was started in" and joins a relative cwd onto it. Those two defaults
+// meet in the middle: `{"sessionId":"known"}` used to activate a persisted
+// session, and `{}` used to create one, both rooted at wherever the editor
+// happened to spawn `zero acp` — which then becomes the sandbox and file-tool
+// confinement root. The client never named that directory, so it is a root the
+// server invented, and ACP requires an absolute cwd on every method carrying
+// one. Rejecting here is what keeps a missing field from being answered with a
+// guess.
+func requestedWorkspace(cwd string) (string, error) {
+	trimmed := strings.TrimSpace(cwd)
+	if trimmed == "" {
+		return "", RPCError(codeInvalidParams, "cwd is required and must be an absolute path")
+	}
+	if !filepath.IsAbs(trimmed) {
+		return "", RPCError(codeInvalidParams, "cwd must be an absolute path: "+trimmed)
+	}
+	return trimmed, nil
+}
+
 func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (any, error) {
 	var p NewSessionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/new params")
 	}
-	root, err := a.deps.ResolveWorkspaceRoot(p.Cwd)
+	cwd, err := requestedWorkspace(p.Cwd)
+	if err != nil {
+		return nil, err
+	}
+	root, err := a.deps.ResolveWorkspaceRoot(cwd)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, err.Error())
 	}
@@ -176,6 +205,16 @@ func (a *Agent) handleSessionResume(ctx context.Context, params json.RawMessage)
 // history as ordered session/update notifications; session/resume deliberately
 // does not, which makes it safe for an already-rendered desktop reconnect.
 func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParams, replay bool) (any, error) {
+	// BOTH METHODS, BEFORE ANYTHING IS LOOKED UP. session/resume shares this
+	// params type with session/load, so the wire cannot tell an omitted cwd from
+	// an empty one; the blank case used to be answered with the persisted cwd,
+	// which made {"sessionId":"known"} a complete, successful activation request.
+	// Validating here rather than in one handler is what keeps the two entry
+	// points from drifting apart.
+	cwd, err := requestedWorkspace(p.Cwd)
+	if err != nil {
+		return nil, err
+	}
 	meta, err := a.deps.Store.Get(p.SessionID)
 	if err != nil || meta == nil {
 		return nil, RPCError(codeInvalidParams, "session not found: "+p.SessionID)
@@ -184,10 +223,10 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 		return nil, RPCError(codeInvalidParams, "session has no persisted workspace: "+p.SessionID)
 	}
 	// SAME RULE ON THE WAY IN. Omitting a relative entry from the listing is not
-	// enough: session/resume falls back to meta.Cwd when the client sends no cwd,
-	// so a stored "." resolved against this process's directory and bound the
-	// conversation to it — verified returning no error at all. A workspace that
-	// cannot be identified is not one this session can be restored into.
+	// enough: a stored "." still resolves against this process's directory, so a
+	// client that hands back that same directory as its cwd would be sold the
+	// invented root as a match. A workspace that cannot be identified is not one
+	// this session can be restored into.
 	if !filepath.IsAbs(meta.Cwd) {
 		return nil, RPCError(codeInvalidParams, "session workspace is not an absolute path, so it cannot be identified: "+p.SessionID)
 	}
@@ -195,11 +234,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, "persisted session workspace is unavailable: "+err.Error())
 	}
-	cwdInput := p.Cwd
-	if strings.TrimSpace(cwdInput) == "" {
-		cwdInput = meta.Cwd
-	}
-	root, err := a.deps.ResolveWorkspaceRoot(cwdInput)
+	root, err := a.deps.ResolveWorkspaceRoot(cwd)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, err.Error())
 	}
@@ -256,10 +291,17 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 	if err != nil {
 		return nil, RPCError(codeInternalError, "list sessions: "+err.Error())
 	}
+	// The filter is the one cwd ACP leaves optional, so a blank one means "no
+	// filter" rather than an error — but a relative one is rebased onto this
+	// process's directory exactly like the others, and would then silently answer
+	// about a workspace the client never named.
 	var cwd string
 	if strings.TrimSpace(p.Cwd) != "" {
-		var err error
-		cwd, err = a.deps.ResolveWorkspaceRoot(p.Cwd)
+		filter, err := requestedWorkspace(p.Cwd)
+		if err != nil {
+			return nil, err
+		}
+		cwd, err = a.deps.ResolveWorkspaceRoot(filter)
 		if err != nil {
 			return nil, RPCError(codeInvalidParams, err.Error())
 		}
