@@ -86,12 +86,19 @@ func (tool applyPatchTool) freeformPatchRoot(path string) (string, string, error
 	var firstErr error
 	for _, root := range roots {
 		candidate := sandbox.NormalizePrefixForRoot(path, root)
-		_, relative, err := resolveWorkspaceTargetPath(root, candidate)
-		if err == nil {
-			return root, relative, nil
+		candidate, err = filepath.Abs(candidate)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		relative, err := filepath.Rel(root, candidate)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
+			return root, filepath.ToSlash(relative), nil
 		}
 		if firstErr == nil {
-			firstErr = err
+			firstErr = outsideWorkspaceError(path)
 		}
 	}
 	return "", "", firstErr

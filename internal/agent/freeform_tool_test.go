@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -118,6 +119,52 @@ func TestFreeformApplyPatchRejectsAbsolutePathOutsideGrantedRoots(t *testing.T) 
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("ungranted absolute patch created target: %v", err)
+	}
+}
+
+func TestPreparedFreeformPatchRejectsIntermediateSymlinkSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating directory symlinks requires privileges on Windows")
+	}
+	root := t.TempDir()
+	extra := t.TempDir()
+	outside, err := os.MkdirTemp(".", ".zero-patch-swap-outside-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
+	outside, err = filepath.Abs(outside)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	intermediate := filepath.Join(extra, "nested")
+	if err := os.Mkdir(intermediate, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	scope, err := sandbox.NewScope(root, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	tool := tools.NewScopedApplyPatchTool(root, scope)
+	target := filepath.Join(intermediate, "blocked.txt")
+	patch := "*** Begin Patch\n*** Add File: " + target + "\n+blocked\n*** End Patch\n"
+	args, err := tools.PrepareFreeformApplyPatchArguments(tool, patch)
+	if err != nil {
+		t.Fatalf("PrepareFreeformApplyPatchArguments: %v", err)
+	}
+
+	if err := os.Remove(intermediate); err != nil {
+		t.Fatalf("Remove intermediate: %v", err)
+	}
+	if err := os.Symlink(outside, intermediate); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	result := tool.Run(context.Background(), args)
+	if result.Status != tools.StatusError {
+		t.Fatalf("symlink-swapped patch status = %s, want error: %s", result.Status, result.Output)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "blocked.txt")); !os.IsNotExist(err) {
+		t.Fatalf("symlink-swapped patch wrote outside root: %v", err)
 	}
 }
 
