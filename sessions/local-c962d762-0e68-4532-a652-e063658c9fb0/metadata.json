@@ -3,8 +3,8 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:57:45.603Z",
-  "durationMs": 15424059,
+  "endedAt": "2026-08-24T08:57:51.623Z",
+  "durationMs": 15430077,
   "status": "running",
   "tokens": {
     "total": 121570,
@@ -16,18 +16,23 @@
   },
   "toolCalls": 104,
   "lines": {
-    "added": 20,
-    "removed": 6
+    "added": 74,
+    "removed": 16
   },
   "filesChanged": [
-    "internal/tui/plan_mode_test.go"
+    "internal/cli/completions.go",
+    "internal/cli/exec_tools.go",
+    "internal/sandbox/analyzer.go",
+    "internal/sandbox/analyzer_local_server_test.go",
+    "internal/sandbox/analyzer_test.go",
+    "internal/tui/model.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "669631a136405b4088e3626b69cd03f27bbccf92",
+    "headAfter": "590e5e03f95bd4b1c2d2d72024d69d6ed23356e0",
     "commitShas": [
-      "669631a136405b4088e3626b69cd03f27bbccf92"
+      "590e5e03f95bd4b1c2d2d72024d69d6ed23356e0"
     ]
   },
   "summary": "Both mutations now caught. Fixing the doc-comment overclaim the verifier flagged, then shipping #883:",
