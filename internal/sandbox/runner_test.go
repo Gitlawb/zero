@@ -503,7 +503,8 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	// generated directory the build legitimately writes must not become read-only
 	// just because it is excluded from reads. Only Zero's own automatic credential
 	// entries are write-denied (see TestProtectedCredentialsDenyReadAndWrite...).
-	if strings.Contains(sbpl, `(deny file-write* (subpath "`+normalizedSecretRead+`"))`) {
+	if strings.Contains(sbpl, `(deny file-write* (subpath "`+normalizedSecretRead+`"))`) ||
+		strings.Contains(sbpl, `(deny file-write* (literal "`+normalizedSecretRead+`"))`) {
 		t.Fatalf("a user-configured DenyRead path must stay writable:\n%s", sbpl)
 	}
 	allowIdx := strings.Index(sbpl, "(allow file-write*")

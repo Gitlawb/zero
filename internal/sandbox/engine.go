@@ -342,8 +342,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	scope := engine.scopeFor(request.WorkspaceRoot)
 	risk := classifyWithScope(request, scope)
 	// Patch targets must be established before every policy short-circuit,
-	// including ModeDisabled: the automatic daemon-token boundary still applies
-	// to in-process tools when user sandboxing is off.
+	// including ModeDisabled. Besides making the automatic daemon-token boundary
+	// enforceable, this keeps apply_patch anchored to the workspace when user
+	// sandboxing is off; the tool itself has the same non-optional containment.
 	if block := applyPatchPathBlock(request); block != nil {
 		return deny(request, risk, block.Code, block.Path, block.Reason, false)
 	}

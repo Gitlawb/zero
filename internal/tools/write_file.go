@@ -2,9 +2,10 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -55,14 +56,22 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveScopedTargetPath(tool.workspaceRoot, tool.scope, requestedPath)
+	target, err := resolveScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error writing file " + requestedPath + ": " + err.Error())
 	}
+	absolutePath, relativePath := target.absolute, target.display
+	root, err := os.OpenRoot(target.root)
+	if err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
 
 	existed := false
-	if _, err := os.Stat(absolutePath); err == nil {
+	writeMode := os.FileMode(0o644)
+	if info, err := root.Stat(target.relative); err == nil {
 		existed = true
+		writeMode = info.Mode()
 		if !overwrite {
 			return errorResult("Error: " + relativePath + " already exists. Pass overwrite: true to replace it.")
 		}
@@ -70,60 +79,51 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 
-	// On overwrite, refuse to clobber a tracked file that changed on disk outside
-	// Zero since it was last read — the new content was likely composed against a
-	// stale view. Only read current bytes when there is a baseline to compare,
-	// so a first-touch create/overwrite stays a single write with no extra read.
+	priorContent := ""
 	if existed {
+		readFile, _, rerr := protectedRootRead(root, target.relative, absolutePath, tool.workspaceRoot)
+		if rerr != nil {
+			return errorResult("Error writing file " + relativePath + ": " + rerr.Error())
+		}
+		current, rerr := io.ReadAll(readFile)
+		closeErr := readFile.Close()
+		if rerr != nil || closeErr != nil {
+			return errorResult("Error writing file " + relativePath + ": " + errors.Join(rerr, closeErr).Error())
+		}
+		priorContent = string(current)
+		// On overwrite, refuse to clobber a tracked file that changed on disk
+		// outside Zero since it was last read.
 		if options.FileTracker != nil && !options.FileTracker.SeenWhole(absolutePath) {
 			return errorResult(fileUnseenMessage(relativePath))
 		}
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
-			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
-			// the overwrite rather than clobbering a file whose current state is
-			// unknown (it may have been replaced or removed out from under us).
-			current, rerr := os.ReadFile(absolutePath)
-			if rerr != nil {
-				return errorResult(fileConflictMessage(relativePath))
-			}
 			if cerr := options.FileTracker.CheckConflict(absolutePath, current); cerr != nil {
 				return errorResult(fileConflictMessage(relativePath))
 			}
 		}
 	}
 
-	// Capture the prior content (before we replace it) so an overwrite can show a
-	// real diff; a fresh create stays "" and previews as all-additions.
-	priorContent := ""
-	if existed {
-		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
-			priorContent = string(prev)
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
-	}
-	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
-	}
-	// Engine-independent: this is the ONLY protection write_file has when called
-	// through the plain registry API (Registry.Run, or RunWithOptions with no
-	// sandbox engine) — see internal/tools/protected_credentials.go.
+	// Engine-independent lexical refusal, followed by an atomic rooted publish.
+	// If a concurrent writer swaps this name to a token hard link after the
+	// check, Rename replaces that directory entry; it never truncates the token
+	// inode. A create uses an exclusive no-replace publish for the same reason.
 	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
+	if _, err := writeRootedFile(root, target.relative, []byte(content), writeMode, !overwrite); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
-	// FileTracker baseline: recording pre-format content would make the very
-	// next edit look like an external modification and trip the conflict guard.
-	content = maybeFormatWrittenFile(ctx, absolutePath, content)
+	// Pathname-based formatters and diagnostics reopen the published name. Skip
+	// them while a protected token is selected, or they would reintroduce the
+	// same swap window the rooted atomic write closes.
+	credentialsActive := protectedCredentialsActive(tool.workspaceRoot)
+	if !credentialsActive {
+		content = maybeFormatWrittenFile(ctx, absolutePath, content)
+	}
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
-	newInfo, _ := os.Stat(absolutePath)
+	newInfo, _ := root.Stat(target.relative)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
 	if content == modelKnownContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(content), lineCount(content))
@@ -143,7 +143,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		lines++
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
-	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	if !credentialsActive {
+		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	}
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for

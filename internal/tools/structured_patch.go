@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/Gitlawb/zero/internal/pathjail"
 )
 
 const (
@@ -98,11 +96,11 @@ func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch str
 		case structuredPatchDelete:
 			options.FileTracker.Forget(change.from.absolute)
 		case structuredPatchAdd:
-			recordStructuredPatchFile(options.FileTracker, change.to.absolute, true, true)
+			recordStructuredPatchFile(workspace, options.FileTracker, change.to, true, true)
 		case structuredPatchUpdate:
 			wasWhole := wholeBefore[change.from.absolute]
 			options.FileTracker.Forget(change.from.absolute)
-			recordStructuredPatchFile(options.FileTracker, change.to.absolute, false, wasWhole)
+			recordStructuredPatchFile(workspace, options.FileTracker, change.to, false, wasWhole)
 		}
 	}
 
@@ -319,14 +317,15 @@ func planStructuredPatch(root *os.Root, operations []structuredPatchOperation, t
 			}
 			change.after = operation.contents
 		case structuredPatchDelete, structuredPatchUpdate:
-			info, err := root.Stat(from.relative)
+			file, info, err := protectedRootRead(root, from.relative, from.absolute, root.Name())
 			if err != nil {
-				return nil, fmt.Errorf("stating %s: %w", from.relative, err)
+				return nil, fmt.Errorf("opening %s: %w", from.relative, err)
 			}
 			change.mode = info.Mode()
-			content, err := root.ReadFile(from.relative)
-			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", from.relative, err)
+			content, readErr := io.ReadAll(file)
+			closeErr := file.Close()
+			if readErr != nil || closeErr != nil {
+				return nil, fmt.Errorf("reading %s: %w", from.relative, errors.Join(readErr, closeErr))
 			}
 			if err := tracker.CheckConflict(from.absolute, content); err != nil {
 				return nil, fmt.Errorf("%s", fileConflictMessage(from.relative))
@@ -560,10 +559,10 @@ func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bo
 		}
 		return true, nil
 	case structuredPatchAdd:
-		return writeStructuredPatchFile(root, change.to, change.after, change.mode, true)
+		return writeRootedFile(root, change.to.relative, []byte(change.after), change.mode, true)
 	case structuredPatchUpdate:
 		moving := change.from.absolute != change.to.absolute
-		committed, err := writeStructuredPatchFile(root, change.to, change.after, change.mode, moving)
+		committed, err := writeRootedFile(root, change.to.relative, []byte(change.after), change.mode, moving)
 		if err != nil {
 			return committed, err
 		}
@@ -575,36 +574,6 @@ func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bo
 		return true, nil
 	}
 	return false, fmt.Errorf("unsupported structured patch operation")
-}
-
-func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, content string, mode os.FileMode, createOnly bool) (bool, error) {
-	parent := filepath.Dir(target.relative)
-	if err := root.MkdirAll(parent, 0o755); err != nil {
-		return false, fmt.Errorf("creating parent directory for %s: %w", target.relative, err)
-	}
-	temp, tempName, err := pathjail.CreateTemp(root, parent, "zero-patch", ".tmp")
-	if err != nil {
-		return false, fmt.Errorf("writing %s: %w", target.relative, err)
-	}
-	defer func() { _ = removeStructuredPatchTemp(root, tempName) }()
-	if _, err := temp.WriteString(content); err != nil {
-		_ = temp.Close()
-		return false, fmt.Errorf("writing %s: %w", target.relative, err)
-	}
-	if err := temp.Chmod(mode.Perm()); err != nil {
-		_ = temp.Close()
-		return false, fmt.Errorf("writing %s: %w", target.relative, err)
-	}
-	if err := temp.Close(); err != nil {
-		return false, fmt.Errorf("writing %s: %w", target.relative, err)
-	}
-	if createOnly {
-		return publishStructuredPatchNoReplace(root, tempName, target.relative, mode)
-	}
-	if err := root.Rename(tempName, target.relative); err != nil {
-		return false, fmt.Errorf("writing %s: %w", target.relative, err)
-	}
-	return true, nil
 }
 
 func publishStructuredPatchNoReplace(root *os.Root, source, target string, mode os.FileMode) (bool, error) {
@@ -703,23 +672,28 @@ func removeStructuredPatchTemp(root *os.Root, name string) error {
 	return errors.Join(chmodErr, removeErr)
 }
 
-func recordStructuredPatchFile(tracker *FileTracker, absolute string, created, seenWhole bool) {
+func recordStructuredPatchFile(root *os.Root, tracker *FileTracker, target structuredPatchTarget, created, seenWhole bool) {
 	if tracker == nil {
 		return
 	}
-	content, err := os.ReadFile(absolute)
+	file, info, err := protectedRootRead(root, target.relative, target.absolute, root.Name())
 	if err != nil {
-		tracker.Forget(absolute)
+		tracker.Forget(target.absolute)
 		return
 	}
-	info, _ := os.Stat(absolute)
-	tracker.Record(absolute, content, info)
+	content, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		tracker.Forget(target.absolute)
+		return
+	}
+	tracker.Record(target.absolute, content, info)
 	if seenWhole {
 		lines := lineCount(string(content))
-		tracker.RecordSeenRange(absolute, 1, lines, lines)
+		tracker.RecordSeenRange(target.absolute, 1, lines, lines)
 	}
 	if created {
-		tracker.RecordCreated(absolute)
+		tracker.RecordCreated(target.absolute)
 	}
 }
 

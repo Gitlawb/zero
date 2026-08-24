@@ -2,7 +2,11 @@ package tools
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,15 +108,8 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 		}
 	}
 
-	command := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patchPath)
-	command.Dir = applyRoot
-	output, err := command.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return errorResult("Error applying patch: " + message)
+	if err := applyUnifiedPatchStaged(ctx, applyRoot, patchPath, patchPaths); err != nil {
+		return errorResult("Error applying patch: " + err.Error())
 	}
 
 	summary := "Patch applied successfully."
@@ -131,23 +128,205 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	// input determines the whole output, so a follow-up edit needs no wasted read.
 	// Partial observations remain conservative and are cleared by Record.
 	for _, changed := range result.ChangedFiles {
-		if absolute, _, rerr := resolveScopedPath(tool.workspaceRoot, tool.scope, changed); rerr == nil {
-			content, readErr := os.ReadFile(absolute)
-			if readErr != nil {
-				options.FileTracker.Forget(absolute)
-				continue
-			}
-			info, _ := os.Stat(absolute)
-			wasWhole := wholeBefore[absolute] || fullySupplied[absolute]
-			options.FileTracker.Record(absolute, content, info)
-			if wasWhole {
-				lines := lineCount(string(content))
-				options.FileTracker.RecordSeenRange(absolute, 1, lines, lines)
-			}
+		target, rerr := resolveScopedReadTarget(tool.workspaceRoot, tool.scope, changed)
+		if rerr != nil {
+			continue
+		}
+		root, openErr := os.OpenRoot(target.root)
+		if openErr != nil {
+			options.FileTracker.Forget(target.absolute)
+			continue
+		}
+		file, info, readErr := protectedRootRead(root, target.relative, target.absolute, tool.workspaceRoot)
+		_ = root.Close()
+		if readErr != nil {
+			options.FileTracker.Forget(target.absolute)
+			continue
+		}
+		content, contentErr := io.ReadAll(file)
+		closeErr := file.Close()
+		if contentErr != nil || closeErr != nil {
+			options.FileTracker.Forget(target.absolute)
+			continue
+		}
+		wasWhole := wholeBefore[target.absolute] || fullySupplied[target.absolute]
+		options.FileTracker.Record(target.absolute, content, info)
+		if wasWhole {
+			lines := lineCount(string(content))
+			options.FileTracker.RecordSeenRange(target.absolute, 1, lines, lines)
 		}
 	}
 	recordCreatedPatchTargets(options.FileTracker, createdTargets)
 	return result
+}
+
+type stagedPatchFile struct {
+	exists  bool
+	mode    os.FileMode
+	content []byte
+	link    string
+}
+
+func applyUnifiedPatchStaged(ctx context.Context, rootPath, patchPath string, patchPaths []string) error {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	stageDir, err := os.MkdirTemp("", "zero-patch-stage-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stageDir)
+	stage, err := os.OpenRoot(stageDir)
+	if err != nil {
+		return err
+	}
+	defer stage.Close()
+
+	targets := make([]structuredPatchTarget, 0, len(patchPaths))
+	before := make(map[string]stagedPatchFile, len(patchPaths))
+	seen := make(map[string]bool, len(patchPaths))
+	for _, path := range patchPaths {
+		if path == "" || path == "/dev/null" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		target, err := resolveStructuredPatchTarget(rootPath, path)
+		if err != nil {
+			return err
+		}
+		snapshot, err := captureRootedPatchFile(root, target, rootPath)
+		if err != nil {
+			return err
+		}
+		if snapshot.exists {
+			if err := materializeStagedPatchFile(stage, target.relative, snapshot, true); err != nil {
+				return err
+			}
+		}
+		targets = append(targets, target)
+		before[target.relative] = snapshot
+	}
+
+	command := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patchPath)
+	command.Dir = stageDir
+	output, err := command.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return errors.New(message)
+	}
+
+	after := make(map[string]stagedPatchFile, len(targets))
+	for _, target := range targets {
+		snapshot, err := captureRootedPatchFile(stage, target, stageDir)
+		if err != nil {
+			return err
+		}
+		after[target.relative] = snapshot
+	}
+	// Publish complete outputs first, then removals. A rename/copy destination
+	// that raced into existence fails before its source is removed.
+	for _, target := range targets {
+		snapshot := after[target.relative]
+		if !snapshot.exists {
+			continue
+		}
+		if err := recheckWorkspaceWriteTarget(rootPath, target.relative); err != nil {
+			return err
+		}
+		if err := protectedMutationDenied(target.absolute, rootPath); err != nil {
+			return err
+		}
+		if err := materializeStagedPatchFile(root, target.relative, snapshot, !before[target.relative].exists); err != nil {
+			return err
+		}
+	}
+	for _, target := range targets {
+		if !before[target.relative].exists || after[target.relative].exists {
+			continue
+		}
+		if err := recheckWorkspaceWriteTarget(rootPath, target.relative); err != nil {
+			return err
+		}
+		if err := protectedMutationDenied(target.absolute, rootPath); err != nil {
+			return err
+		}
+		if err := root.Remove(target.relative); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func captureRootedPatchFile(root *os.Root, target structuredPatchTarget, workspaceRoot string) (stagedPatchFile, error) {
+	info, err := root.Lstat(target.relative)
+	if os.IsNotExist(err) {
+		return stagedPatchFile{}, nil
+	}
+	if err != nil {
+		return stagedPatchFile{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		link, err := root.Readlink(target.relative)
+		if err != nil {
+			return stagedPatchFile{}, err
+		}
+		return stagedPatchFile{exists: true, mode: info.Mode(), link: link}, nil
+	}
+	if !info.Mode().IsRegular() {
+		return stagedPatchFile{}, fmt.Errorf("patch target %q is not a regular file or symlink", target.relative)
+	}
+	file, openedInfo, err := protectedRootRead(root, target.relative, target.absolute, workspaceRoot)
+	if err != nil {
+		return stagedPatchFile{}, err
+	}
+	content, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return stagedPatchFile{}, errors.Join(readErr, closeErr)
+	}
+	return stagedPatchFile{exists: true, mode: openedInfo.Mode(), content: content}, nil
+}
+
+func materializeStagedPatchFile(root *os.Root, relative string, file stagedPatchFile, createOnly bool) error {
+	if file.mode&os.ModeSymlink != 0 {
+		return publishRootedSymlink(root, relative, file.link, createOnly)
+	}
+	_, err := writeRootedFile(root, relative, file.content, file.mode, createOnly)
+	return err
+}
+
+func publishRootedSymlink(root *os.Root, relative, target string, createOnly bool) error {
+	parent := filepath.Dir(relative)
+	if err := root.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	if createOnly {
+		return root.Symlink(target, relative)
+	}
+	for range 10 {
+		noise := make([]byte, 8)
+		if _, err := rand.Read(noise); err != nil {
+			return err
+		}
+		temp := filepath.Join(parent, ".zero-link."+hex.EncodeToString(noise))
+		if err := root.Symlink(target, temp); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return err
+		}
+		if err := root.Rename(temp, relative); err != nil {
+			_ = root.Remove(temp)
+			return err
+		}
+		return nil
+	}
+	return errors.New("could not create a temporary symlink with an unused name")
 }
 
 func missingPatchTargets(root string, patchPaths []string) []string {

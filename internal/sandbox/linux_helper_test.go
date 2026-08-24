@@ -366,7 +366,7 @@ func TestLinuxBwrapMandatoryPathRotationToUnprotectedSymlinkFailsClosed(t *testi
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, mandatory); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 
 	plan, err := buildLinuxBwrapFilesystemPlan(profile)

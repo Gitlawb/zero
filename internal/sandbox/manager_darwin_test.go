@@ -24,6 +24,7 @@ func TestSandboxManagerRejectsMacOSTokenHardLinkableIntoWritableWorkspace(t *tes
 
 	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, token)
+	t.Setenv(daemonRemoteTokenFileResolvedEnv, "")
 	policy := DefaultPolicy()
 	backend := Backend{
 		Name:            BackendMacOSSeatbelt,

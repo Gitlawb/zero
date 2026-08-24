@@ -217,6 +217,16 @@ type PathScope interface {
 	Roots() []string
 }
 
+// rootedScopedPath carries the pathname spellings used for user-facing output
+// alongside the root handle boundary used for the actual filesystem operation.
+// absolute is canonical and relative is expressed against root.
+type rootedScopedPath struct {
+	absolute string
+	display  string
+	root     string
+	relative string
+}
+
 type readPathScope interface {
 	ReadRoots() []string
 }
@@ -284,6 +294,29 @@ func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath 
 		}
 	}
 	return "", "", firstErr
+}
+
+func resolveScopedReadTarget(workspaceRoot string, scope PathScope, requestedPath string) (rootedScopedPath, error) {
+	absolute, display, err := resolveScopedReadPath(workspaceRoot, scope, requestedPath)
+	if err != nil {
+		return rootedScopedPath{}, err
+	}
+	if spillPath, ok := resolveSpillReadPath(requestedPath); ok && spillPath == absolute {
+		root, relative, err := rootedPathWithin([]string{spillRootPath()}, absolute)
+		if err != nil {
+			return rootedScopedPath{}, err
+		}
+		return rootedScopedPath{absolute: absolute, display: display, root: root, relative: relative}, nil
+	}
+	roots, err := scopedReadRoots(workspaceRoot, scope)
+	if err != nil {
+		return rootedScopedPath{}, err
+	}
+	root, relative, err := rootedPathWithin(roots, absolute)
+	if err != nil {
+		return rootedScopedPath{}, err
+	}
+	return rootedScopedPath{absolute: absolute, display: display, root: root, relative: relative}, nil
 }
 
 // resolveScopedPath is resolveWorkspacePath generalized to a scope: relative
@@ -372,30 +405,41 @@ func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPat
 	return "", "", firstErr
 }
 
-// recheckScopedWriteTarget mirrors recheckWorkspaceWriteTarget across roots.
-// Prefix symlinks outside a root are resolved per root (macOS /var aliasing);
-// symlinks INSIDE a root stay visible to the single-root checks, so a write
-// target may resolve through a symlink only when its final location lies
-// inside a DIFFERENT granted root — mirroring sandbox.Scope.validate's
-// documented widening.
-func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPath string) error {
-	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
-		return recheckWorkspaceWriteTarget(workspaceRoot, requestedPath)
+func resolveScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPath string) (rootedScopedPath, error) {
+	absolute, display, err := resolveScopedTargetPath(workspaceRoot, scope, requestedPath)
+	if err != nil {
+		return rootedScopedPath{}, err
 	}
 	roots, err := scopedRoots(workspaceRoot, scope)
 	if err != nil {
-		return err
+		return rootedScopedPath{}, err
 	}
-	var firstErr error
-	for _, root := range roots {
-		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
-		err := recheckWorkspaceWriteTarget(root, candidate)
-		if err == nil {
-			return nil
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
+	root, relative, err := rootedPathWithin(roots, absolute)
+	if err != nil {
+		return rootedScopedPath{}, err
 	}
-	return firstErr
+	return rootedScopedPath{absolute: absolute, display: display, root: root, relative: relative}, nil
+}
+
+func rootedPathWithin(roots []string, absolute string) (string, string, error) {
+	for _, candidate := range roots {
+		root, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		root, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(root, absolute)
+		if err != nil || filepath.IsAbs(relative) || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if relative == "" {
+			relative = "."
+		}
+		return root, relative, nil
+	}
+	return "", "", outsideWorkspaceError(absolute)
 }

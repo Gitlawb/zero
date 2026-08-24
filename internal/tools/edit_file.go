@@ -61,14 +61,19 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
+	target, err := resolveScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
-	// protectedReadOpen binds the daemon-token check to the handle the content is
-	// actually read from — see internal/tools/protected_credentials.go. Also the
-	// ONLY protection this read has when called through the plain registry API.
-	readFile, _, err := protectedReadOpen(absolutePath, tool.workspaceRoot)
+	absolutePath, relativePath := target.absolute, target.display
+	root, err := os.OpenRoot(target.root)
+	if err != nil {
+		return errorResult("Error reading " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
+	// Bind both workspace containment and credential identity to the handle the
+	// content is actually read from.
+	readFile, readInfo, err := protectedRootRead(root, target.relative, absolutePath, tool.workspaceRoot)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
@@ -160,23 +165,25 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return okResult("No changes: new_string is identical to old_string.")
 	}
 	editedSpans := replacementByteSpans(content, oldString, newString, replaceAll)
-	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
-		return errorResult("Error writing " + relativePath + ": " + err.Error())
-	}
 	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {
+	// Publish a complete replacement through the same root. A raced swap to the
+	// token is replaced as a directory entry, never opened for truncation.
+	if _, err := writeRootedFile(root, target.relative, []byte(updated), readInfo.Mode(), false); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
-	// FileTracker re-baseline: recording pre-format content would make the very
-	// next edit look like an external modification and trip the conflict guard.
-	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
+	// Pathname-based formatters and diagnostics reopen the published name. Skip
+	// them while a protected token is selected, or they would reintroduce the
+	// same swap window the rooted atomic write closes.
+	credentialsActive := protectedCredentialsActive(tool.workspaceRoot)
+	if !credentialsActive {
+		updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
+	}
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
-	newInfo, _ := os.Stat(absolutePath)
+	newInfo, _ := root.Stat(target.relative)
 	options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
 	if updated == modelKnownContent {
 		if previouslySeenWhole {
@@ -193,7 +200,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		suffix = "s"
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
-	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	if !credentialsActive {
+		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	}
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line

@@ -213,3 +213,144 @@ func TestProtectedReadOpenClosesTheCheckToUseWindow(t *testing.T) {
 		t.Fatalf("read_file served the token through a path swapped after an earlier successful read: %+v", after)
 	}
 }
+
+func TestProtectedReadOpenRejectsRacedEscapingSymlink(t *testing.T) {
+	ws := t.TempDir()
+	token := filepath.Join(t.TempDir(), "bridge-token")
+	if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(path, []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", token)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(token, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	file, _, err := protectedReadOpen(path, ws)
+	if file != nil {
+		file.Close()
+	}
+	if err == nil {
+		t.Fatal("rooted read followed a raced symlink outside the workspace")
+	}
+}
+
+func TestRootedMutationPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
+	for _, name := range []string{"write_file", "edit_file", "unified_patch"} {
+		t.Run(name, func(t *testing.T) {
+			ws := t.TempDir()
+			token := filepath.Join(ws, "bridge-token")
+			path := filepath.Join(ws, "notes.txt")
+			if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("ordinary\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
+			t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", token)
+			if err := protectedMutationDenied(path, ws); err != nil {
+				t.Fatalf("ordinary preflight failed: %v", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(token, path); err != nil {
+				t.Skipf("workspace filesystem is not hard-linkable: %v", err)
+			}
+			root, err := os.OpenRoot(ws)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			switch name {
+			case "unified_patch":
+				err = materializeStagedPatchFile(root, "notes.txt", stagedPatchFile{
+					exists: true, mode: 0o644, content: []byte("patched\n"),
+				}, false)
+			default:
+				_, err = writeRootedFile(root, "notes.txt", []byte("updated\n"), 0o644, false)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if content, err := os.ReadFile(token); err != nil || string(content) != "bridge-secret\n" {
+				t.Fatalf("token changed through raced alias: content=%q err=%v", content, err)
+			}
+		})
+	}
+}
+
+func TestStructuredPatchPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
+	ws := t.TempDir()
+	token := filepath.Join(ws, "bridge-token")
+	path := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", token)
+	operations, err := parseStructuredPatch("*** Begin Patch\n*** Update File: notes.txt\n@@\n-ordinary\n+updated\n*** End Patch\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	changes, err := planStructuredPatch(root, operations, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || strings.Contains(changes[0].before, "bridge-secret") {
+		t.Fatalf("structured plan exposed unexpected content: %#v", changes)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(token, path); err != nil {
+		t.Skipf("workspace filesystem is not hard-linkable: %v", err)
+	}
+	if err := applyStructuredPatchChanges(root, changes, nil); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(token); err != nil || string(content) != "bridge-secret\n" {
+		t.Fatalf("token changed through raced structured patch alias: content=%q err=%v", content, err)
+	}
+}
+
+func TestStructuredPatchPlanningRejectsProtectedAliasHandle(t *testing.T) {
+	ws := t.TempDir()
+	token := filepath.Join(ws, "bridge-token")
+	alias := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("workspace filesystem is not hard-linkable: %v", err)
+	}
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", token)
+	operations, err := parseStructuredPatch("*** Begin Patch\n*** Update File: notes.txt\n@@\n-bridge-secret\n+attacker\n*** End Patch\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if changes, err := planStructuredPatch(root, operations, nil); err == nil || len(changes) != 0 {
+		t.Fatalf("structured plan accepted protected alias: changes=%#v err=%v", changes, err)
+	}
+}

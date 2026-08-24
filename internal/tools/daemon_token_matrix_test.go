@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -114,9 +115,12 @@ func TestDaemonTokenProtectionMatrix(t *testing.T) {
 				registry.Register(NewScopedWriteFileTool(ws, nil))
 				result := registry.RunWithOptions(context.Background(), "write_file",
 					map[string]any{"path": spelling.arg(ws, token), "content": "attacker\n"},
-					RunOptions{Sandbox: engine})
+					RunOptions{Sandbox: engine, PermissionGranted: true})
 				if result.Status == StatusOK {
 					t.Fatalf("write_file overwrote the protected token: output=%q", result.Output)
+				}
+				if !strings.Contains(result.Output, "holds the remote bridge token") {
+					t.Fatalf("write_file refusal did not come from the credential gate: output=%q", result.Output)
 				}
 				// A refused write must leave the bearer intact, not truncate it.
 				contents, err := os.ReadFile(token)
@@ -165,10 +169,13 @@ func TestDaemonTokenProtectionMatrix(t *testing.T) {
 				registry := NewRegistry()
 				registry.Register(NewScopedApplyPatchTool(ws, nil))
 				target := spelling.arg(ws, token)
-				patch := "*** Begin Patch\n*** Update File: " + target +
-					"\n@@\n-bridge-secret\n+attacker\n*** End Patch\n"
+				oldPath := strconv.Quote("a/" + filepath.ToSlash(target))
+				newPath := strconv.Quote("b/" + filepath.ToSlash(target))
+				patch := "--- " + oldPath + "\n+++ " + newPath +
+					"\n@@ -1 +1 @@\n-bridge-secret\n+attacker\n"
 				result := registry.RunWithOptions(context.Background(), "apply_patch",
-					map[string]any{"patch": patch}, RunOptions{Sandbox: engine})
+					map[string]any{"patch": patch},
+					RunOptions{Sandbox: engine, PermissionGranted: true})
 				if result.Status == StatusOK {
 					t.Fatalf("apply_patch rewrote the protected token: output=%q", result.Output)
 				}
@@ -176,36 +183,20 @@ func TestDaemonTokenProtectionMatrix(t *testing.T) {
 				if err != nil || string(contents) != "bridge-secret\n" {
 					t.Fatalf("token changed after a denied patch: contents=%q err=%v", contents, err)
 				}
-				// WHICH layer refused is the point of the row. "The executor
-				// tripped over a path that does not exist" is not protection,
-				// so require the refusal to come from the sandbox.
-				if !strings.HasPrefix(result.Output, "Sandbox block") {
-					t.Fatalf("apply_patch was not refused by the sandbox gate: output=%q", result.Output)
-				}
 				headerPaths, err := sandbox.PatchHeaderPaths(patch)
 				if err != nil {
 					t.Fatalf("PatchHeaderPaths: %v", err)
 				}
-				switch {
-				case strings.TrimSpace(target) != target:
-					// A structured patch cannot name THIS token at all: the
-					// sandbox's header parser and the executor's both trim the
-					// header, so the patch describes "bridge-token" — a file
-					// that does not exist — and the token is unreachable rather
-					// than gate-denied. Pin that agreement explicitly, because
-					// if either parser stopped trimming, the gate would inspect
-					// a different name than the executor opens, which is the
-					// exact divergence this branch was opened for.
-					if len(headerPaths) != 1 || headerPaths[0] != filepath.ToSlash(strings.TrimSpace(target)) {
-						t.Fatalf("patch header paths = %q, want only the trimmed spelling the executor opens", headerPaths)
+				if len(headerPaths) != 2 || headerPaths[0] != filepath.ToSlash(target) ||
+					headerPaths[1] != filepath.ToSlash(target) {
+					t.Fatalf("patch header paths = %q, want exact target spelling twice", headerPaths)
+				}
+				if filepath.IsAbs(target) {
+					if !strings.Contains(result.Output, "must stay inside the workspace") {
+						t.Fatalf("absolute apply_patch refusal did not come from workspace containment: output=%q", result.Output)
 					}
-				case !filepath.IsAbs(target):
-					// An in-workspace relative spelling reaches the credential
-					// gate, which is the layer that must refuse it. (An absolute
-					// spelling is refused one step earlier, as out-of-workspace.)
-					if !strings.Contains(result.Output, "holds the remote bridge token") {
-						t.Fatalf("apply_patch refusal did not come from the credential gate: output=%q", result.Output)
-					}
+				} else if !strings.Contains(result.Output, "holds the remote bridge token") {
+					t.Fatalf("apply_patch refusal did not come from the credential gate: output=%q", result.Output)
 				}
 			})
 		})
