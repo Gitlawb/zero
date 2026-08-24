@@ -284,24 +284,40 @@ func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.writeRootCoversLocked(root) {
-		// Covered already. If a TEMPORARY write grant is what covers it, take a
-		// reference so the covering holder's cleanup cannot revoke this one —
-		// the same rule as reads, and it has to be the same rule or a write
-		// grant would keep the bug reads no longer have.
-		for existing := range s.tempWrites {
-			if pathWithinRoot(existing, root) {
-				s.tempWrites[existing]++
-				covering := existing
-				return root, oncePerHolder(func() { s.releaseTemporaryWrite(covering) }), nil
-			}
-		}
+	// A PERMANENT grant is the only cover that needs no bookkeeping: it outlives
+	// every temporary holder, so there is nothing to keep alive and nothing to
+	// release.
+	if s.permanentWriteRootCoversLocked(root) {
 		return root, func() {}, nil
 	}
-	s.extraRoots = append(s.extraRoots, root)
 	if s.tempWrites == nil {
 		s.tempWrites = map[string]int{}
 	}
+	// THE SAME ROOT, ANOTHER HOLDER: one entry, two references. Only an exact
+	// match shares an entry — a NARROWER request must not, which is the whole
+	// point below.
+	if _, held := s.tempWrites[root]; held {
+		s.tempWrites[root]++
+		return root, oncePerHolder(func() { s.releaseTemporaryWrite(root) }), nil
+	}
+	// A NARROWER REQUEST RECORDS ITS OWN ROOT, even when a broader temporary
+	// grant currently covers it.
+	//
+	// Borrowing a reference on the covering root kept this holder alive, which
+	// was the point, but it kept the COVERING ROOT alive to do it — and
+	// extraRoots is what validate() authorises writes from. So once the broad
+	// holder released, a caller that had asked to write one subdirectory was
+	// left holding write authority over the whole tree its neighbour had asked
+	// for, including siblings it never named. Reported by CodeRabbit, and it is
+	// the write-side twin of the read-side escalation @jatmn found: one
+	// reference cannot be both a lifetime and a capability, whichever side of
+	// the read/write boundary it sits on.
+	//
+	// Recording the requested root separately gives each holder exactly the
+	// authority it asked for and a lifetime of its own. The nesting costs an
+	// extra entry in extraRoots while both are live, which is redundant but not
+	// wrong — the broader root already permits everything the narrower one does.
+	s.extraRoots = append(s.extraRoots, root)
 	s.tempWrites[root] = 1
 	return root, oncePerHolder(func() { s.releaseTemporaryWrite(root) }), nil
 }

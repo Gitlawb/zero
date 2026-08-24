@@ -497,3 +497,120 @@ func TestAReaderOutlivingItsWriterKeepsReadAuthorityOnly(t *testing.T) {
 		}
 	})
 }
+
+// A NARROWER WRITE HOLDER MUST NOT INHERIT ITS NEIGHBOUR'S TREE.
+//
+// The write-side twin of the read-side escalation above, and the same root
+// cause: a nested holder used to take a reference on the BROADER temporary root
+// that happened to cover it. That kept the nested holder alive, which was the
+// point, but it kept the covering root alive to do it — and extraRoots is what
+// validate() authorises writes from. Once the broad holder released, a caller
+// that had asked for one subdirectory held write authority over the whole tree,
+// siblings included. Reported by CodeRabbit.
+func TestANestedWriteHolderKeepsOnlyItsOwnSubtree(t *testing.T) {
+	workspace, outsideBase := scopeOutsideRoots(t)
+	outer := filepath.Join(outsideBase, "outer")
+	inner := filepath.Join(outer, "inner")
+	sibling := filepath.Join(outer, "sibling")
+	for _, dir := range []string{outer, inner, sibling} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, releaseOuter, err := scope.AddTemporaryWrite(outer)
+	if err != nil {
+		t.Fatalf("temporary write on the broad root: %v", err)
+	}
+	_, releaseInner, err := scope.AddTemporaryWrite(inner)
+	if err != nil {
+		t.Fatalf("temporary write on the nested root: %v", err)
+	}
+
+	// THE BROAD HOLDER GOES FIRST — the nested holder outliving it is what
+	// exposes whose authority it is actually holding.
+	releaseOuter()
+
+	if block := scope.validate(filepath.Join(inner, "mine.txt")); block != nil {
+		t.Errorf("the nested holder lost the subtree it asked for: %v", block.Reason)
+	}
+	if block := scope.validate(filepath.Join(sibling, "not-mine.txt")); block == nil {
+		t.Error("the nested holder can write a SIBLING it never asked for: the broad holder's authority outlived the broad holder")
+	}
+	if block := scope.validate(filepath.Join(outer, "not-mine.txt")); block == nil {
+		t.Error("the nested holder can write the covering root itself after its holder released")
+	}
+
+	releaseInner()
+	if block := scope.validate(filepath.Join(inner, "mine.txt")); block == nil {
+		t.Error("the nested root outlived its only holder")
+	}
+}
+
+// The opposite order, as a control: the nested holder releasing first must not
+// disturb the broad holder that is still live.
+func TestANestedWriteHolderReleasingFirstLeavesTheBroadGrant(t *testing.T) {
+	workspace, outsideBase := scopeOutsideRoots(t)
+	outer := filepath.Join(outsideBase, "outer")
+	inner := filepath.Join(outer, "inner")
+	for _, dir := range []string{outer, inner} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, releaseOuter, err := scope.AddTemporaryWrite(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, releaseInner, err := scope.AddTemporaryWrite(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseInner()
+	if block := scope.validate(filepath.Join(inner, "still-ok.txt")); block != nil {
+		t.Errorf("the nested holder's release revoked the broad holder's coverage: %v", block.Reason)
+	}
+	releaseOuter()
+	if block := scope.validate(filepath.Join(inner, "gone.txt")); block == nil {
+		t.Error("the tree outlived every holder")
+	}
+}
+
+// TWO HOLDERS OF THE SAME ROOT SHARE ONE ENTRY. Only an exact match shares —
+// a narrower request must not, which is what the escalation test above pins.
+func TestTwoHoldersOfTheSameWriteRootShareOneEntry(t *testing.T) {
+	workspace, outsideBase := scopeOutsideRoots(t)
+	target := filepath.Join(outsideBase, "shared")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, releaseFirst, err := scope.AddTemporaryWrite(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, releaseSecond, err := scope.AddTemporaryWrite(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseFirst()
+	if block := scope.validate(filepath.Join(target, "still-held.txt")); block != nil {
+		t.Errorf("one holder's release revoked the other's grant on the same root: %v", block.Reason)
+	}
+	releaseSecond()
+	if block := scope.validate(filepath.Join(target, "gone.txt")); block == nil {
+		t.Error("the shared root outlived both holders")
+	}
+}
