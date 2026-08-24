@@ -3,8 +3,8 @@
   "sessionId": "local-c962d762-0e68-4532-a652-e063658c9fb0",
   "model": "claude-opus-5",
   "startedAt": "2026-08-24T04:40:41.532Z",
-  "endedAt": "2026-08-24T08:57:33.251Z",
-  "durationMs": 15411707,
+  "endedAt": "2026-08-24T08:57:35.168Z",
+  "durationMs": 15413623,
   "status": "running",
   "tokens": {
     "total": 121570,
@@ -16,44 +16,19 @@
   },
   "toolCalls": 104,
   "lines": {
-    "added": 122,
-    "removed": 100
+    "added": 15,
+    "removed": 3
   },
   "filesChanged": [
-    "internal/acp/agent.go",
-    "internal/acp/agent_test.go",
-    "internal/agent/compaction_test.go",
-    "internal/agent/loop.go",
-    "internal/agent/loop_test.go",
     "internal/agent/types.go",
-    "internal/cli/app.go",
-    "internal/cli/app_test.go",
-    "internal/cli/exec.go",
-    "internal/cli/exec_parse.go",
-    "internal/cli/exec_test.go",
-    "internal/cli/exec_tools.go",
-    "internal/cli/trust_e2e_test.go",
-    "internal/sandbox/engine.go",
-    "internal/sandbox/engine_test.go",
-    "internal/sandbox/normalize.go",
-    "internal/sandbox/types.go",
-    "internal/specialist/exec.go",
-    "internal/tools/bash_tool_test.go",
-    "internal/tools/registry_test.go",
-    "internal/tui/keybindings.go",
-    "internal/tui/model.go",
-    "internal/tui/model_test.go",
-    "internal/tui/peer_messages.go",
-    "internal/tui/permission_mode_arm_test.go",
-    "internal/tui/tui_fixes_test.go",
-    "internal/tui/view.go"
+    "internal/sandbox/types.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "05249310c7cc1ea07d2ebd2758210d261860b1f7",
+    "headAfter": "07ce11f65d47e16f069fede2b699411724d591e3",
     "commitShas": [
-      "05249310c7cc1ea07d2ebd2758210d261860b1f7"
+      "07ce11f65d47e16f069fede2b699411724d591e3"
     ]
   },
   "summary": "Both mutations now caught. Fixing the doc-comment overclaim the verifier flagged, then shipping #883:",
