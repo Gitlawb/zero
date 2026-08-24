@@ -71,6 +71,16 @@ func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
 
 func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing.T) {
 	workspace := t.TempDir()
+	// BOTH derivation inputs belong to the test, not just the cache one. The
+	// fallback root is derived from os.TempDir(), which reads TMPDIR on Unix and
+	// TMP/TEMP on Windows, and its name is deterministic, so stubbing only the
+	// cache left this test creating a persistent tree in the developer real temp
+	// directory that later runs then found already present.
+	tempHome := t.TempDir()
+	t.Setenv("TMPDIR", tempHome)
+	t.Setenv("TMP", tempHome)
+	t.Setenv("TEMP", tempHome)
+
 	original := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
@@ -79,7 +89,16 @@ func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing
 	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}
-	defer release()
+	defer func() {
+		release()
+		// Only the root this test created.
+		_ = os.RemoveAll(runtimeState.Root)
+	}()
+	// And the redirect actually took, or the cleanup above removes one tree while
+	// the real one is still left behind somewhere else.
+	if !pathWithinRoot(canonicalSandboxWorkspaceRoot(tempHome), runtimeState.Root) {
+		t.Fatalf("fallback runtime root %q is outside the test-owned temp directory %q", runtimeState.Root, tempHome)
+	}
 	if pathWithinRoot(workspace, runtimeState.Root) {
 		t.Fatalf("fallback runtime root %q must stay outside workspace %q", runtimeState.Root, workspace)
 	}

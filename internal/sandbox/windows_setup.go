@@ -110,13 +110,25 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	// select. The lease is released straight away: it is taken here only to learn
 	// which root wins, and the command acquires its own.
 	//
-	// A selection failure is not fatal here. The old derivation is still applied
-	// below, so a machine where the lease cannot be taken at all behaves exactly
-	// as it did before rather than losing the ability to run setup.
-	if selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...), false); selectErr == nil {
-		lease.release()
-		options.PermissionProfile = permissionProfileWithRuntime(options.PermissionProfile, SandboxRuntime{Root: selected})
+	// A SELECTION FAILURE IS FATAL HERE, and continuing was the bug.
+	//
+	// Continuing left the profile with no runtime root while setup went on to
+	// provision a derived tree, apply the capability ACLs and write the marker.
+	// That marker records an empty runtime root, so it attests nothing about the
+	// tree. A later command makes its own concrete selection, finds no stamp on
+	// what it selected and refuses, and re-running setup reaches this same branch
+	// and records nothing again: the permanent brick described above, reached by
+	// the one path that was allowed to skip the fix.
+	//
+	// Failing now is failing before any ACL or marker state is persisted, so the
+	// operator is left in a state a retry can get out of, and the message names
+	// the step that actually failed.
+	selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...), false)
+	if selectErr != nil {
+		return nil, fmt.Errorf("select the sandbox runtime root for setup: %w", selectErr)
 	}
+	lease.release()
+	options.PermissionProfile = permissionProfileWithRuntime(options.PermissionProfile, SandboxRuntime{Root: selected})
 	options.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(options.PermissionProfile, workspaceRoots)
 	profileJSON, err := json.Marshal(options.PermissionProfile)
 	if err != nil {

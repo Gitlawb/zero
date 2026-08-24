@@ -55,6 +55,31 @@ type windowsACLStampRequest struct {
 // directory, which is what a local process would do.
 var windowsACLStampSwapHook func(path string)
 
+// windowsACLStampWriteHook replaces the ride-along stamp write. Nil in
+// production; a test uses it to reach the post-commit failure path, which no
+// ordinary input produces once the bound handle is already open.
+var windowsACLStampWriteHook func(path string) error
+
+// writeRidingStamp writes the stamp through the handle the capability ACE was
+// applied on, or through the test hook when one is installed.
+func writeRidingStamp(handle windows.Handle, path string, planHash string) error {
+	if windowsACLStampWriteHook != nil {
+		return windowsACLStampWriteHook(path)
+	}
+	return writeWindowsRuntimeStampToDirectoryHandle(handle, planHash)
+}
+
+// restoreWindowsACLThroughHandle puts a captured DACL back on the object the
+// handle names, by handle rather than by pathname for the same reason the stamp
+// rides along: after the apply, the name is no longer proof of the object.
+func restoreWindowsACLThroughHandle(handle windows.Handle, descriptor *windows.SECURITY_DESCRIPTOR) error {
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("read the captured windows DACL: %w", err)
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+}
+
 func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
 	return applyWindowsACLPlanWithStamp(plan, nil)
 }
@@ -182,7 +207,18 @@ func applyWindowsACLPathGroupWithStamp(group windowsACLPathGroup, stamp *windows
 		if windowsACLStampSwapHook != nil {
 			windowsACLStampSwapHook(path)
 		}
-		if err := writeWindowsRuntimeStampToDirectoryHandle(handle, stamp.PlanHash); err != nil {
+		if err := writeRidingStamp(handle, path, stamp.PlanHash); err != nil {
+			// THE ACE AND ITS STAMP ARE ONE TRANSACTION.
+			//
+			// SetSecurityInfo above has already committed, and this function
+			// returns no rollback closure on its error paths, so the caller has
+			// nothing to compensate with. Without this restore a failed setup
+			// reports failure while leaving the capability grant on a pre-existing
+			// runtime root: the tree stays writable by the restricted token and
+			// nothing on disk records that it should not be.
+			if restoreErr := restoreWindowsACLThroughHandle(handle, descriptor); restoreErr != nil {
+				return fail(fmt.Errorf("stamp windows ACL target %s: %w (the committed ACL could not be restored either: %v)", path, err, restoreErr))
+			}
 			return fail(fmt.Errorf("stamp windows ACL target %s: %w", path, err))
 		}
 	}
