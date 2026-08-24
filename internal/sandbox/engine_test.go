@@ -165,6 +165,14 @@ func TestEngineFailsClosedOnUnreadableCommandShapes(t *testing.T) {
 		{name: "git subcommand from a quoted expansion", command: `VERB=push; git "$VERB" origin main`},
 		// Same reading through the unparseable fallback rather than the AST.
 		{name: "git subcommand from an expansion, fallback", command: `git $VERB origin main && "unterminated`},
+		{
+			name:    "case-distinct git alias supplied through config",
+			command: `git -c alias.STATUS=!curl STATUS https://example.invalid`,
+		},
+		{
+			name:    "case-distinct git alias through cmd fallback",
+			command: `git -c alias.STATUS=!curl STATUS https://example.invalid & rem '`,
+		},
 		// archive is local until --remote makes it a fetch from another host, so
 		// an unreadable option word past the subcommand counts for archive alone.
 		{name: "git archive options from an expansion", command: `OPTS=--remote=origin; git archive $OPTS HEAD`},

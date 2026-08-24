@@ -2628,6 +2628,62 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotOfferPrefixApprovalForCaseDistinctGitAlias(t *testing.T) {
+	root := t.TempDir()
+	command := `make test && git -c alias.STATUS=!curl STATUS https://example.invalid`
+	retryTool := &sandboxDeniedRetryTool{}
+	registry := tools.NewRegistry()
+	registry.Register(retryTool)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":` + quoteJSONString(command) + `}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	requestCount := 0
+
+	_, err := Run(context.Background(), "inspect status", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       "medium",
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requestCount++
+			if len(request.CommandPrefix) != 0 {
+				t.Fatalf("case-distinct alias must not have a command prefix: %#v", request.CommandPrefix)
+			}
+			if containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAllowPrefix) ||
+				containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAlwaysAllowPrefix) {
+				t.Fatalf("case-distinct alias must not offer reusable prefix approval: %#v", request.AvailableDecisions)
+			}
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "deny alias execution"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("permission requests = %d, want one non-prefix request", requestCount)
+	}
+	for index, call := range retryTool.calls {
+		if shellCommandRequiresEscalated(call) {
+			t.Fatalf("call %d received require_escalated: %#v", index, call)
+		}
+	}
+}
+
 func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 	root := t.TempDir()
 	command := "echo rm -rf /"

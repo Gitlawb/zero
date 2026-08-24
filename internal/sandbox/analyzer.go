@@ -297,6 +297,7 @@ func gitSelectionDynamic(words []string, dynamic func(index int) bool) bool {
 // in resolveCommandArgv so AST and fallback paths cannot select different
 // children before reaching this program-specific table.
 func literalProgramNetworkResolution(prog string, words []string) commandResolution {
+	originalWords := words
 	prog = normalizeProgramToken(trimCMDEchoPrefixToken(prog))
 	normalized := make([]string, len(words))
 	for index := range words {
@@ -339,7 +340,7 @@ func literalProgramNetworkResolution(prog string, words []string) commandResolut
 	case "go":
 		return commandNetworkResolution(firstSubcommand(words, nil) == "get")
 	case "git":
-		return commandNetworkResolution(gitUsesNetwork(words))
+		return gitNetworkResolution(originalWords)
 	case "gh":
 		return commandNetworkResolution(ghUsesNetwork(words))
 	default:
@@ -382,12 +383,19 @@ func packageManagerOffline(words []string) bool {
 	return false
 }
 
-func gitUsesNetwork(words []string) bool {
+func gitNetworkResolution(words []string) commandResolution {
 	invocation := parseGitInvocation(words)
 	if invocation.kind != gitCommandSubcommand {
 		// No subcommand at all, or a global option that makes git print locally
 		// and exit before any subcommand runs.
-		return false
+		return commandKnownLocal
+	}
+	// Git builtin names and aliases are case-sensitive. A case-distinct spelling
+	// such as STATUS can therefore select an arbitrary alias even though status
+	// is a known local builtin. Classification may normalize to recognize known
+	// builtins, but it must not report an alias-shaped invocation as proven local.
+	if invocation.subcommandOriginal != invocation.subcommand {
+		return commandUnresolved
 	}
 	switch invocation.subcommand {
 	// send-pack is push's plumbing counterpart — `git send-pack origin main`
@@ -395,15 +403,15 @@ func gitUsesNetwork(words []string) bool {
 	// same operation two different answers depending on which spelling was
 	// used.
 	case "clone", "fetch", "pull", "push", "ls-remote", "send-pack":
-		return true
+		return commandKnownNetwork
 	case "archive":
 		// `git archive HEAD` streams a tree out of the local object store and needs
 		// no egress at all; only `--remote=<repo>` sends the request to another
 		// host. Classifying every archive as network cost a proactive network
 		// prompt on a purely local command.
-		return gitTargetsRemoteArchive(words, invocation.subcommandIndex)
+		return commandNetworkResolution(gitTargetsRemoteArchive(words, invocation.subcommandIndex))
 	default:
-		return false
+		return commandKnownLocal
 	}
 }
 
@@ -464,6 +472,10 @@ type gitInvocation struct {
 	kind gitCommandKind
 	// subcommand is set only for gitCommandSubcommand.
 	subcommand string
+	// subcommandOriginal preserves the exact token Git will dispatch. Git alias
+	// lookup is case-sensitive, so authorization callers must not replace it
+	// with subcommand's normalized classifier spelling.
+	subcommandOriginal string
 	// subcommandIndex is the position in the original argument slice.
 	subcommandIndex int
 	// terminalOption is set only for gitCommandTerminalGlobal.
@@ -501,7 +513,8 @@ var gitTerminalGlobalOptions = map[string]bool{
 // resolves the same option set for its own prefix matching.
 func parseGitInvocation(words []string) gitInvocation {
 	for index := 0; index < len(words); index++ {
-		word := strings.ToLower(words[index])
+		original := words[index]
+		word := strings.ToLower(original)
 		if word == "" {
 			continue
 		}
@@ -519,7 +532,12 @@ func parseGitInvocation(words []string) gitInvocation {
 		if isNumericToken(word) {
 			continue
 		}
-		return gitInvocation{kind: gitCommandSubcommand, subcommand: word, subcommandIndex: index}
+		return gitInvocation{
+			kind:               gitCommandSubcommand,
+			subcommand:         word,
+			subcommandOriginal: original,
+			subcommandIndex:    index,
+		}
 	}
 	return gitInvocation{kind: gitCommandNone}
 }
@@ -549,20 +567,30 @@ func GitGlobalOptionConsumesValue(option string) bool {
 	}
 }
 
+// GitSubcommandInfo is the shared result of resolving Git's global-option
+// grammar. Original is the exact token Git dispatches; Normalized is for
+// conservative classification only. Authorization must compare Original
+// against an explicit allowlist because Git alias lookup is case-sensitive.
+type GitSubcommandInfo struct {
+	Index      int
+	Original   string
+	Normalized string
+}
+
 // GitSubcommand resolves the git subcommand a command line will actually run,
 // or reports that none runs — no subcommand is present (e.g. bare `git`, or
 // `git -C repo` with nothing after it), or a terminal global like --help/
 // --version made everything after it non-executed help/version text instead.
-// It is parseGitInvocation's exported view, so a consumer outside this
-// package — internal/agent's prefix-approval matcher — reads git's global
-// options through the SAME grammar the network classifier does, rather than
-// maintaining its own skip list that can silently drift from this one.
-func GitSubcommand(words []string) (index int, subcommand string, ok bool) {
+func GitSubcommand(words []string) (GitSubcommandInfo, bool) {
 	invocation := parseGitInvocation(words)
 	if invocation.kind != gitCommandSubcommand {
-		return 0, "", false
+		return GitSubcommandInfo{}, false
 	}
-	return invocation.subcommandIndex, invocation.subcommand, true
+	return GitSubcommandInfo{
+		Index:      invocation.subcommandIndex,
+		Original:   invocation.subcommandOriginal,
+		Normalized: invocation.subcommand,
+	}, true
 }
 
 func npxUsesNetwork(_ []string) bool {
