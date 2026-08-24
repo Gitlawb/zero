@@ -2,6 +2,7 @@
 package fsutil
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -13,22 +14,27 @@ import (
 
 // WriteFileAtomic writes data to a temporary file in the same directory as filename,
 // flushes and syncs it to disk, and replaces filename atomically via ReplaceWithRetry.
+// For new files, it honors the process umask by creating the temporary file with
+// os.OpenFile(..., perm). For existing regular files, it preserves the existing file mode.
 func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(filename)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	mode := perm
+
+	var existingMode *os.FileMode
 	info, err := os.Lstat(filename)
 	switch {
 	case err == nil:
 		if info.Mode().IsRegular() {
-			mode = info.Mode().Perm()
+			m := info.Mode().Perm()
+			existingMode = &m
 		}
 	case !os.IsNotExist(err):
 		return err
 	}
-	tmpFile, err := os.CreateTemp(dir, ".zero-tmp-*")
+
+	tmpFile, err := createTempFile(dir, perm)
 	if err != nil {
 		return err
 	}
@@ -41,8 +47,10 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpName)
 	}()
 
-	if err := tmpFile.Chmod(mode); err != nil {
-		return err
+	if existingMode != nil {
+		if err := tmpFile.Chmod(*existingMode); err != nil {
+			return err
+		}
 	}
 	if _, err := tmpFile.Write(data); err != nil {
 		return err
@@ -60,6 +68,22 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		syncDir(dir)
 	}
 	return replaceErr
+}
+
+func createTempFile(dir string, perm os.FileMode) (*os.File, error) {
+	for i := 0; i < 10000; i++ {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, err
+		}
+		name := filepath.Join(dir, fmt.Sprintf(".zero-tmp-%x", b))
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return f, err
+	}
+	return nil, errors.New("fsutil: failed to create temporary file after repeated attempts")
 }
 
 func isCommittedReplacement(err error) bool {
