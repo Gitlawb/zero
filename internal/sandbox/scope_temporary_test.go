@@ -14,66 +14,57 @@ import (
 // grant for a path under one is a no-op — every assertion here would pass
 // against code that grants nothing at all. That is RULES §2.3 in its exact
 // form, and it caught the first version of this test.
-func scopeOutsideRoots(t *testing.T) (workspace string, outside string) {
+// scopeOutsideRoots builds a workspace and a directory outside it, both under
+// test-owned storage, and returns a Scope that treats the second as genuinely
+// outside.
+//
+// THE FIXTURE PROBLEM AND ITS ACTUAL CAUSE. NewScope seeds the system temporary
+// directory as a permanent write root, so an ordinary t.TempDir() grant is
+// covered before any temporary grant exists and every assertion built on it is
+// vacuous. The first fix for that reached into os.UserHomeDir() to find ground
+// the defaults do not already own — which worked, and bought two new problems:
+// a hermetic runner may expose HOME read-only, so the tests failed at MkdirTemp
+// before asserting anything; and on an ordinary machine they wrote fixtures into
+// the developer's real home and left zeromax-scope-* debris behind whenever a
+// run was interrupted. Reported by @jatmn.
+//
+// The cause is the seeded defaults, not the location, so the Scope is built
+// DIRECTLY here — the same pattern scopeOutsideDefaults and temporaryWriteFixture
+// already use. With no defaults seeded, t.TempDir() is outside by construction,
+// the fixture is hermetic, and nothing touches HOME.
+//
+// Paths are symlink-resolved because the scope stores resolved roots and macOS
+// hands out /var/... temp directories that resolve to /private/var/...; an
+// unresolved fixture path compares unequal to the root the scope just recorded.
+func scopeOutsideRoots(t *testing.T) (scope *Scope, workspace string, outside string) {
 	t.Helper()
-	// The home directory, which no platform lists as a default write root —
-	// Windows takes %TEMP%/%TMP% and the rest take /tmp plus $TMPDIR. The first
-	// version reached for /Users/Shared and fell back to /var/empty, both of
-	// which exist only on this side of the fence: on Windows neither resolves,
-	// the helper skipped, and every test built on it reported green having
-	// asserted nothing. A skip is not a pass. scope_extra_read_test.go already
-	// places its grant under home for the same reason.
-	// FATAL, NOT SKIP — the comment above says a skip is not a pass, and these two
-	// lines were still skipping. Every caller of this helper asserts an
-	// AUTHORIZATION boundary: who may write where, and whose release revokes it.
-	// A skip means that assertion never ran and the build went green anyway,
-	// which is the failure mode this helper was written to close in the first
-	// place. Neither of these is a precondition an environment reasonably
-	// withholds: os.UserHomeDir resolves on every platform Zero supports, and a
-	// home that will not accept a temporary directory is a broken machine rather
-	// than a limited one. If either ever fires, the right outcome is a red build
-	// somebody fixes, not silent non-coverage of the sandbox's write rules.
-	// Reported by CodeRabbit.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("no home directory to place a grant outside the default write roots: %v", err)
+	workspace = resolvedFixturePath(t, t.TempDir())
+	outside = filepath.Join(resolvedFixturePath(t, t.TempDir()), "outside")
+	// FATAL, NOT SKIP. Every caller of this helper asserts an AUTHORIZATION
+	// boundary, so a skipped fixture means that assertion never ran and the build
+	// reported green anyway. t.TempDir() already failed the test if it could not
+	// provide storage, so a subdirectory failing under it is a broken machine.
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatalf("cannot prepare %s: %v", outside, err)
 	}
-	base, err := os.MkdirTemp(home, "zeromax-scope-")
-	if err != nil {
-		t.Fatalf("cannot create a directory outside the default write roots: %v", err)
+	scope = &Scope{workspaceRoot: workspace}
+	// PROVED AGAINST THIS SCOPE, not against production's default list. The point
+	// of the helper is that a grant here changes something, and the only thing
+	// that can answer that is the scope the test will actually use. Checking
+	// defaultTempWriteRoots() instead asks about a scope nobody builds here — and
+	// says "prove nothing" for a t.TempDir() path that this scope, seeded with no
+	// defaults, genuinely does not cover.
+	//
+	// Asserting the NEGATIVE up front is also what keeps every caller honest: it
+	// establishes that the target begins unauthorised, so a later success is the
+	// grant's doing and not the fixture's placement.
+	if scope.validate(filepath.Join(outside, "probe.txt")) == nil {
+		t.Fatalf("%s is writable before any grant exists, so a temporary grant here would prove nothing", outside)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	// PROVED, not assumed. The whole point of this helper is that a temporary
-	// grant here is not already covered, and asserting it against the same list
-	// production consults means a future default write root turns these tests
-	// into an honest skip rather than a silent no-op.
-	resolved, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		resolved = base
+	if scope.validateRead(filepath.Join(outside, "probe.txt")) == nil {
+		t.Fatalf("%s is readable before any grant exists, so a temporary read grant here would prove nothing", outside)
 	}
-	for _, root := range defaultTempWriteRoots() {
-		// THE ONE LEGITIMATE SKIP IN THIS HELPER, and it is deliberate. Here the
-		// fixture built correctly and the environment is fine — the grant simply
-		// cannot demonstrate anything, because a path already inside a default
-		// write root is writable before any temporary grant exists. Running on
-		// would assert a permission that was never in question. The skip message
-		// names the covering root so a future default that swallows $HOME reads as
-		// an honest gap rather than a mystery.
-		if pathWithinRoot(root, resolved) {
-			t.Skipf("%s is already covered by the default write root %s, so a temporary grant here would prove nothing", resolved, root)
-		}
-	}
-	workspace = filepath.Join(base, "ws")
-	outside = filepath.Join(base, "outside")
-	for _, dir := range []string{workspace, outside} {
-		// Fatal for the same reason as above: base was just created successfully,
-		// so a subdirectory failing under it is a broken machine, not a platform
-		// that declines to offer one.
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatalf("cannot prepare %s: %v", dir, err)
-		}
-	}
-	return workspace, outside
+	return scope, workspace, outside
 }
 
 func hasReadRoot(scope *Scope, root string) bool {
@@ -89,11 +80,7 @@ func hasReadRoot(scope *Scope, root string) bool {
 // tools in the same parallel batch, both blocked on the same directory, is
 // exactly this — and read-only tools are the ones the batch runs concurrently.
 func TestATemporaryReadSurvivesASiblingsCleanup(t *testing.T) {
-	workspace, outside := scopeOutsideRoots(t)
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scope, _, outside := scopeOutsideRoots(t)
 	// The probe that the fix must make unnecessary: without it this reads
 	// true -> false.
 	if hasReadRoot(scope, outside) {
@@ -122,22 +109,31 @@ func TestATemporaryReadSurvivesASiblingsCleanup(t *testing.T) {
 	}
 }
 
-// A BROADER temporary grant covering a narrower request is the same defect one
-// level up: the narrower caller gets no root of its own, so it must hold a
-// reference on whatever covers it.
-func TestANarrowerRequestHoldsTheCoveringGrant(t *testing.T) {
-	workspace, outside := scopeOutsideRoots(t)
+// A NARROWER REQUEST KEEPS ITS OWN SUBTREE AND NOTHING WIDER.
+//
+// THIS TEST USED TO ASSERT THE OPPOSITE, and the earlier version is worth
+// recording because it is how the escalation survived a review round. It was
+// written to prove a LIFETIME property — the broad holder's cleanup must not
+// revoke a live narrow holder — and it proved that by asserting the BROAD root
+// was still present afterwards. That is the defect stated as a requirement: the
+// narrow holder was keeping its neighbour's whole tree alive in order to keep
+// itself alive, so the surviving reader could read siblings it never asked for.
+//
+// Lifetime and capability are two properties and one reference cannot carry
+// both. The assertions below name them separately: the requested path stays
+// readable while its holder lives, AND a sibling under the released broad root
+// is denied as soon as the holder that authorised it exits. Reported by @jatmn.
+func TestANarrowerReaderKeepsOnlyItsOwnSubtree(t *testing.T) {
+	scope, _, outside := scopeOutsideRoots(t)
 	nested := filepath.Join(outside, "nested")
-	if err := os.MkdirAll(nested, 0o700); err != nil {
-		// FATAL, NOT SKIP. This directory is the fixture, not a precondition the
-		// environment might reasonably withhold — skipping on it reports a broken
-		// setup as a passing run, which is the one thing a test must never do.
-		// The sibling test above already fails here for the same reason.
-		t.Fatal(err)
-	}
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
+	sibling := filepath.Join(outside, "sibling")
+	for _, dir := range []string{nested, sibling} {
+		// FATAL, NOT SKIP. These directories are the fixture, not a precondition
+		// the environment might reasonably withhold — skipping on them reports a
+		// broken setup as a passing run.
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	_, undoBroad, err := scope.AddTemporaryRead(outside)
@@ -148,13 +144,99 @@ func TestANarrowerRequestHoldsTheCoveringGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// THE BROAD HOLDER GOES FIRST. The narrow holder outliving it is what exposes
+	// whose authority it is actually holding.
 	undoBroad()
-	if !hasReadRoot(scope, outside) {
-		t.Fatal("the broad holder's cleanup revoked coverage the narrow holder still needs")
+	if block := scope.validateRead(filepath.Join(nested, "mine.txt")); block != nil {
+		t.Errorf("the broad holder's cleanup revoked the subtree the narrow holder asked for: %v", block.Reason)
 	}
+	if block := scope.validateRead(filepath.Join(sibling, "not-mine.txt")); block == nil {
+		t.Error("the narrow reader can read a SIBLING it never asked for: the broad holder's authority outlived the broad holder")
+	}
+	if block := scope.validateRead(filepath.Join(outside, "not-mine.txt")); block == nil {
+		t.Error("the narrow reader can read the covering root itself after its holder released")
+	}
+
 	undoNarrow()
-	if hasReadRoot(scope, outside) {
-		t.Fatal("the root outlived its last holder")
+	if block := scope.validateRead(filepath.Join(nested, "mine.txt")); block == nil {
+		t.Error("the nested root outlived its only holder")
+	}
+}
+
+// The opposite order, as a control: the narrow reader releasing first must not
+// disturb the broad reader that is still live.
+func TestANarrowerReaderReleasingFirstLeavesTheBroadGrant(t *testing.T) {
+	scope, _, outside := scopeOutsideRoots(t)
+	nested := filepath.Join(outside, "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, undoBroad, err := scope.AddTemporaryRead(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, undoNarrow, err := scope.AddTemporaryRead(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	undoNarrow()
+	if block := scope.validateRead(filepath.Join(nested, "still-ok.txt")); block != nil {
+		t.Errorf("the narrow holder's release revoked the broad holder's coverage: %v", block.Reason)
+	}
+	undoBroad()
+	if block := scope.validateRead(filepath.Join(nested, "gone.txt")); block == nil {
+		t.Error("the tree outlived every holder")
+	}
+}
+
+// TWO READERS OF THE SAME ROOT SHARE ONE ENTRY. Only an exact match shares; a
+// narrower one never does, which is what the escalation test above pins.
+func TestTwoReadersOfTheSameRootShareOneEntry(t *testing.T) {
+	scope, _, outside := scopeOutsideRoots(t)
+	_, undoFirst, err := scope.AddTemporaryRead(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, undoSecond, err := scope.AddTemporaryRead(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	undoFirst()
+	if block := scope.validateRead(filepath.Join(outside, "still-held.txt")); block != nil {
+		t.Errorf("one reader's release revoked the other's grant on the same root: %v", block.Reason)
+	}
+	undoSecond()
+	if block := scope.validateRead(filepath.Join(outside, "gone.txt")); block == nil {
+		t.Error("the shared root outlived both holders")
+	}
+}
+
+// A NARROW PERMANENT READ IS NOT BORROWED FROM A BROAD TEMPORARY ONE. The old
+// scan walked readRoots in order and stopped at the first entry covering the
+// path, so a broad TEMPORARY root earlier in the slice shadowed a narrower
+// PERMANENT one later — and the caller took a reference it did not need on a
+// grant that was about to end.
+func TestAPermanentReadIsNotShadowedByABroadTemporaryOne(t *testing.T) {
+	scope, _, outside := scopeOutsideRoots(t)
+	nested := filepath.Join(outside, "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The broad TEMPORARY grant is taken first, so it sits earlier in readRoots.
+	_, undoBroad, err := scope.AddTemporaryRead(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scope.AddRead(nested); err != nil {
+		t.Fatal(err)
+	}
+
+	undoBroad()
+	if block := scope.validateRead(filepath.Join(nested, "mine.txt")); block != nil {
+		t.Errorf("a PERMANENT read grant died with a broad temporary one that merely preceded it: %v", block.Reason)
 	}
 }
 
@@ -162,11 +244,7 @@ func TestANarrowerRequestHoldsTheCoveringGrant(t *testing.T) {
 // holder's cleanup — the undo for a request it already covers is genuinely
 // nothing.
 func TestATemporaryGrantNeverRevokesAPermanentRoot(t *testing.T) {
-	workspace, outside := scopeOutsideRoots(t)
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scope, _, outside := scopeOutsideRoots(t)
 	if _, err := scope.AddRead(outside); err != nil {
 		t.Fatal(err)
 	}
@@ -183,11 +261,7 @@ func TestATemporaryGrantNeverRevokesAPermanentRoot(t *testing.T) {
 // The same rule for WRITE roots, or a write grant keeps the bug reads no longer
 // have.
 func TestATemporaryWriteSurvivesASiblingsCleanup(t *testing.T) {
-	workspace, outside := scopeOutsideRoots(t)
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scope, _, outside := scopeOutsideRoots(t)
 	covered := func() bool {
 		for _, existing := range scope.Roots() {
 			if existing == outside {
@@ -222,11 +296,7 @@ func TestATemporaryWriteSurvivesASiblingsCleanup(t *testing.T) {
 // root must be present the whole time at least one holder has it, and gone once
 // the last releases.
 func TestConcurrentHoldersOfOneRoot(t *testing.T) {
-	workspace, outside := scopeOutsideRoots(t)
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scope, _, outside := scopeOutsideRoots(t)
 
 	const holders = 8
 	var wg sync.WaitGroup

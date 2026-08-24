@@ -104,7 +104,7 @@ func TestTemporaryReadGrantsSurviveConcurrentReleases(t *testing.T) {
 
 // A read covered by a TEMPORARY WRITE root must take a reference too.
 //
-// writeRootCoversLocked scans extraRoots, and AddTemporaryWrite appends
+// permanentWriteRootCoversLocked scans extraRoots, and AddTemporaryWrite appends
 // temporary write roots there — so "covered by a write root" does not mean
 // "covered permanently". Without a reference the write holder's cleanup silently
 // revoked the reader's access: the same defect the refcount closes, reached
@@ -172,11 +172,7 @@ func hasExtraRoot(scope *Scope, root string) bool {
 // entire difference between Add and AddTemporaryWrite.
 func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 	t.Run("write, same root", func(t *testing.T) {
-		workspace, outside := scopeOutsideRoots(t)
-		scope, err := NewScope(workspace, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		scope, _, outside := scopeOutsideRoots(t)
 		_, releaseTemp, err := scope.AddTemporaryWrite(outside)
 		if err != nil {
 			t.Fatal(err)
@@ -191,11 +187,7 @@ func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 	})
 
 	t.Run("read, same root", func(t *testing.T) {
-		workspace, outside := scopeOutsideRoots(t)
-		scope, err := NewScope(workspace, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		scope, _, outside := scopeOutsideRoots(t)
 		_, releaseTemp, err := scope.AddTemporaryRead(outside)
 		if err != nil {
 			t.Fatal(err)
@@ -213,13 +205,9 @@ func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 	// Promoting in place cannot help here — the narrow root has to be recorded
 	// in its own right, or it goes when the broad one does.
 	t.Run("broad temporary over narrow permanent", func(t *testing.T) {
-		workspace, outside := scopeOutsideRoots(t)
+		scope, _, outside := scopeOutsideRoots(t)
 		inner := filepath.Join(outside, "inner")
 		if err := os.MkdirAll(inner, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		scope, err := NewScope(workspace, nil)
-		if err != nil {
 			t.Fatal(err)
 		}
 		_, releaseBroad, err := scope.AddTemporaryWrite(outside)
@@ -247,11 +235,7 @@ func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 	// is a temporary READ. Each claim is a separate branch, and neither was
 	// exercised from the read side.
 	t.Run("permanent read under a temporary write", func(t *testing.T) {
-		workspace, outside := scopeOutsideRoots(t)
-		scope, err := NewScope(workspace, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		scope, _, outside := scopeOutsideRoots(t)
 		_, releaseWrite, err := scope.AddTemporaryWrite(outside)
 		if err != nil {
 			t.Fatal(err)
@@ -266,13 +250,9 @@ func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 	})
 
 	t.Run("broad temporary read over narrow permanent read", func(t *testing.T) {
-		workspace, outside := scopeOutsideRoots(t)
+		scope, _, outside := scopeOutsideRoots(t)
 		inner := filepath.Join(outside, "inner")
 		if err := os.MkdirAll(inner, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		scope, err := NewScope(workspace, nil)
-		if err != nil {
 			t.Fatal(err)
 		}
 		_, releaseBroad, err := scope.AddTemporaryRead(outside)
@@ -298,11 +278,7 @@ func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 // prevent, reached through a duplicate call rather than a sibling's cleanup.
 // Deferred cleanups in a retry path are how a real caller does this by accident.
 func TestOneHoldersUndoIsIdempotent(t *testing.T) {
-	workspace, outside := scopeOutsideRoots(t)
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scope, workspace, outside := scopeOutsideRoots(t)
 	_, undoFirst, err := scope.AddTemporaryRead(outside)
 	if err != nil {
 		t.Fatal(err)
@@ -322,11 +298,10 @@ func TestOneHoldersUndoIsIdempotent(t *testing.T) {
 		t.Error("the root outlived its last holder")
 	}
 
-	// The write side takes the same rule.
-	writeScope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The write side takes the same rule. Built directly for the same reason the
+	// helper is: NewScope would seed the system temp directory as a permanent
+	// write root, which already covers this fixture and makes the grant vacuous.
+	writeScope := &Scope{workspaceRoot: workspace}
 	_, undoWriteFirst, err := writeScope.AddTemporaryWrite(outside)
 	if err != nil {
 		t.Fatal(err)
@@ -508,7 +483,7 @@ func TestAReaderOutlivingItsWriterKeepsReadAuthorityOnly(t *testing.T) {
 // that had asked for one subdirectory held write authority over the whole tree,
 // siblings included. Reported by CodeRabbit.
 func TestANestedWriteHolderKeepsOnlyItsOwnSubtree(t *testing.T) {
-	workspace, outsideBase := scopeOutsideRoots(t)
+	scope, _, outsideBase := scopeOutsideRoots(t)
 	outer := filepath.Join(outsideBase, "outer")
 	inner := filepath.Join(outer, "inner")
 	sibling := filepath.Join(outer, "sibling")
@@ -516,10 +491,6 @@ func TestANestedWriteHolderKeepsOnlyItsOwnSubtree(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-	}
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
 	}
 	_, releaseOuter, err := scope.AddTemporaryWrite(outer)
 	if err != nil {
@@ -553,17 +524,13 @@ func TestANestedWriteHolderKeepsOnlyItsOwnSubtree(t *testing.T) {
 // The opposite order, as a control: the nested holder releasing first must not
 // disturb the broad holder that is still live.
 func TestANestedWriteHolderReleasingFirstLeavesTheBroadGrant(t *testing.T) {
-	workspace, outsideBase := scopeOutsideRoots(t)
+	scope, _, outsideBase := scopeOutsideRoots(t)
 	outer := filepath.Join(outsideBase, "outer")
 	inner := filepath.Join(outer, "inner")
 	for _, dir := range []string{outer, inner} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-	}
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
-		t.Fatal(err)
 	}
 	_, releaseOuter, err := scope.AddTemporaryWrite(outer)
 	if err != nil {
@@ -587,13 +554,9 @@ func TestANestedWriteHolderReleasingFirstLeavesTheBroadGrant(t *testing.T) {
 // TWO HOLDERS OF THE SAME ROOT SHARE ONE ENTRY. Only an exact match shares —
 // a narrower request must not, which is what the escalation test above pins.
 func TestTwoHoldersOfTheSameWriteRootShareOneEntry(t *testing.T) {
-	workspace, outsideBase := scopeOutsideRoots(t)
+	scope, _, outsideBase := scopeOutsideRoots(t)
 	target := filepath.Join(outsideBase, "shared")
 	if err := os.MkdirAll(target, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	scope, err := NewScope(workspace, nil)
-	if err != nil {
 		t.Fatal(err)
 	}
 	_, releaseFirst, err := scope.AddTemporaryWrite(target)

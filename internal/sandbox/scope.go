@@ -170,6 +170,29 @@ func (s *Scope) temporaryWriteLocked(root string) bool {
 // One helper rather than a copy per caller because Add, AddRead and
 // AddTemporaryRead all turn on the same question, and three copies of "covered,
 // but by what" is how one of them ends up answering it differently.
+// permanentReadRootCoversLocked reports whether root is already readable by a
+// grant that outlives every temporary holder.
+//
+// SLICE ORDER MUST NOT DECIDE THIS. The old check walked readRoots and stopped at
+// the first entry covering the path, so a BROAD TEMPORARY root sitting earlier in
+// the slice shadowed a narrower PERMANENT one later — and the caller was handed a
+// reference on somebody else's grant when it needed no reference at all. Asking
+// the whole question first, over both lists, makes the answer independent of
+// insertion order.
+//
+// Write roots count: a grant that permits writing permits reading the same tree.
+func (s *Scope) permanentReadRootCoversLocked(root string) bool {
+	if s.permanentWriteRootCoversLocked(root) {
+		return true
+	}
+	for _, existing := range s.readRoots {
+		if pathWithinRoot(existing, root) && !s.temporaryReadLocked(existing) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Scope) permanentWriteRootCoversLocked(root string) bool {
 	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
 		if pathWithinRoot(existing, root) && !s.temporaryWriteLocked(existing) {
@@ -201,10 +224,8 @@ func (s *Scope) AddRead(path string) (string, error) {
 	if s.permanentWriteRootCoversLocked(root) {
 		return root, nil
 	}
-	for _, existing := range s.readRoots {
-		if pathWithinRoot(existing, root) && !s.temporaryReadLocked(existing) {
-			return root, nil
-		}
+	if s.permanentReadRootCoversLocked(root) {
+		return root, nil
 	}
 	for _, existing := range s.readRoots {
 		if existing == root && s.temporaryReadLocked(existing) {
@@ -252,23 +273,28 @@ func (s *Scope) AddTemporaryRead(path string) (string, func(), error) {
 	// right. An earlier draft of this comment said readRoots fed ReadRoots() and
 	// nothing else, which was false — a reviewer checking the claim would have
 	// found ExtraReadRoots() and been right to distrust the rest of it.
-	for _, existing := range s.readRoots {
-		if !pathWithinRoot(existing, root) {
-			continue
-		}
-		// Already covered — but by WHAT decides whether this caller has
-		// something to release. A permanent read root outlives every grant, so
-		// the undo is genuinely nothing. A TEMPORARY one is held by another
-		// caller who will release it, and that caller must not be able to
-		// revoke this one's access: take a reference on the covering root, so
-		// it survives until the last holder is done.
-		if _, temporary := s.tempReads[existing]; temporary {
-			s.tempReads[existing]++
-			covering := existing
-			return root, oncePerHolder(func() { s.releaseTemporaryRead(covering) }), nil
-		}
+	if s.permanentReadRootCoversLocked(root) {
 		return root, func() {}, nil
 	}
+	if s.tempReads == nil {
+		s.tempReads = map[string]int{}
+	}
+	// THE SAME ROOT, ANOTHER HOLDER: one entry, two references. Only an EXACT
+	// match shares — a narrower request must not, which is the whole point below.
+	if _, held := s.tempReads[root]; held {
+		s.tempReads[root]++
+		return root, oncePerHolder(func() { s.releaseTemporaryRead(root) }), nil
+	}
+	// A NARROWER REQUEST RECORDS ITS OWN ROOT, even under a broader temporary
+	// read that currently covers it.
+	//
+	// Borrowing the covering root's reference kept this reader alive by keeping
+	// the BROAD ROOT alive, and readRoots feeds validateRead and the native
+	// sandbox profile. So once the broad reader released, a caller that had asked
+	// to read one subdirectory was left able to read the whole tree its neighbour
+	// had asked for, siblings included. Reported by @jatmn, and it is the read
+	// twin of the write escalation fixed above: the refcount key decides not only
+	// WHEN an entry disappears but WHICH path stays authorised while it lives.
 	s.readRoots = append(s.readRoots, root)
 	if s.tempReads == nil {
 		s.tempReads = map[string]int{}
@@ -320,15 +346,6 @@ func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
 	s.extraRoots = append(s.extraRoots, root)
 	s.tempWrites[root] = 1
 	return root, oncePerHolder(func() { s.releaseTemporaryWrite(root) }), nil
-}
-
-func (s *Scope) writeRootCoversLocked(root string) bool {
-	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
-		if pathWithinRoot(existing, root) {
-			return true
-		}
-	}
-	return false
 }
 
 // releaseTemporaryRead drops ONE holder's reference and removes the root only
