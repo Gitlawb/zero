@@ -483,6 +483,23 @@ func TestFindLinuxSandboxHelperCommandSelfExec(t *testing.T) {
 	}
 }
 
+func TestBuildLinuxSandboxBwrapPlanSelfExecInsertsHelperVerb(t *testing.T) {
+	plan, err := buildLinuxSandboxBwrapPlan(LinuxSandboxBwrapOptions{
+		Config: LinuxSandboxHelperConfig{
+			SandboxPolicyCWD: t.TempDir(),
+			CommandCWD:       t.TempDir(),
+			Command:          []string{"echo", "hello"},
+		},
+		HelperPath: "/usr/local/bin/zero",
+	})
+	if err != nil {
+		t.Fatalf("buildLinuxSandboxBwrapPlan failed: %v", err)
+	}
+	if !argsContainSequence(plan.Args, "--", "/usr/local/bin/zero", "__sandbox-helper", "--sandbox-policy-cwd") {
+		t.Fatalf("bwrap plan args missing __sandbox-helper after self-exec helperPath: %v", plan.Args)
+	}
+}
+
 func argsContainSequence(args []string, sequence ...string) bool {
 	return argsSequenceIndex(args, sequence...) >= 0
 }

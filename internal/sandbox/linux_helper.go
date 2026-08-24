@@ -213,6 +213,9 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 		}
 	}
 	args = append(args, "--", helperPath)
+	if filepath.Base(helperPath) != LinuxSandboxHelperName {
+		args = append(args, "__sandbox-helper")
+	}
 	args = append(args, innerArgs...)
 	return linuxSandboxBwrapPlan{
 		Args:                   args,
