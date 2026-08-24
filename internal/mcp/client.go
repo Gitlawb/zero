@@ -388,7 +388,7 @@ func (client *Client) readLoop() {
 		// A message with a Method is a server-initiated request or notification.
 		// It must never be routed as a response to a pending client request.
 		if message.Method != "" {
-			if message.ID != nil {
+			if message.ID != nil && jsonRPCIDEchoable(message.ID) {
 				// Send the courtesy -32601 reply asynchronously off the read loop so
 				// an undrained server stdin pipe never stalls readLoop or holds client.mu.
 				id := message.ID
@@ -488,6 +488,27 @@ func rpcIDMatches(value any, id int) bool {
 		return err == nil && parsed == int64(id)
 	case string:
 		return typed == strconv.Itoa(id)
+	default:
+		return false
+	}
+}
+
+// jsonRPCIDEchoable reports whether id is a valid JSON-RPC 2.0 identifier type
+// (string, integer, or float with no fractional part) that is safe to echo back.
+func jsonRPCIDEchoable(id any) bool {
+	if id == nil {
+		return false
+	}
+	switch v := id.(type) {
+	case string:
+		return true
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	case float64:
+		return v == float64(int64(v))
+	case json.Number:
+		_, err := v.Int64()
+		return err == nil
 	default:
 		return false
 	}

@@ -949,3 +949,41 @@ func TestStdioClientUndrainedServerDoesNotStallReadLoop(t *testing.T) {
 		t.Fatal("readLoop stalled on undrained error write; pending response was not delivered")
 	}
 }
+
+func TestStdioClientDropsInvalidServerRequestIDs(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	client.ensureReader()
+
+	// Server sends request with boolean ID (invalid JSON-RPC id)
+	serverReq := `{"jsonrpc":"2.0","id":true,"method":"roots/list","params":{}}` + "\n"
+	go func() {
+		_, _ = inWriter.Write([]byte(serverReq))
+	}()
+
+	// Read should not produce any output response for invalid ID
+	buf := make([]byte, 1024)
+	readChan := make(chan int, 1)
+	go func() {
+		n, _ := outReader.Read(buf)
+		readChan <- n
+	}()
+
+	select {
+	case n := <-readChan:
+		t.Fatalf("unexpected reply for invalid ID: %s", string(buf[:n]))
+	case <-time.After(100 * time.Millisecond):
+		// Expected: dropped cleanly
+	}
+}
