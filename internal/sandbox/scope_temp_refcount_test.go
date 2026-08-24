@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -343,4 +344,156 @@ func TestOneHoldersUndoIsIdempotent(t *testing.T) {
 	if hasExtraRoot(writeScope, outside) {
 		t.Error("the write root outlived its last holder")
 	}
+}
+
+// temporaryWriteFixture builds a nested pair of real directories and a scope
+// that covers neither: an OUTER directory a temporary write grant will take,
+// and an INNER one below it that a temporary read grant will ask for.
+//
+// Built directly rather than through NewScope, for the reason
+// scopeOutsideDefaults documents: NewScope seeds the system temp directory as a
+// PERMANENT write root, which would cover the whole fixture and send every
+// branch under test down the "genuinely permanent" path instead. Both paths are
+// returned symlink-resolved because normalizeScopeRoot resolves what it stores,
+// and on macOS the fixture's /var spelling is a symlink to /private/var.
+func temporaryWriteFixture(t *testing.T) (scope *Scope, workspace, outer, inner string) {
+	t.Helper()
+	outer = filepath.Join(t.TempDir(), "outer")
+	inner = filepath.Join(outer, "inner")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspace = resolvedFixturePath(t, t.TempDir())
+	return &Scope{workspaceRoot: workspace}, workspace, resolvedFixturePath(t, outer), resolvedFixturePath(t, inner)
+}
+
+func resolvedFixturePath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve fixture %s: %v", path, err)
+	}
+	return resolved
+}
+
+// A READER MUST NOT INHERIT ITS WRITER'S AUTHORITY.
+//
+// The reader's dependency on a covering TEMPORARY WRITE root was recorded as a
+// reference on that root — one reference standing for both the lifetime and the
+// capability. Release the WRITER first and the reference kept the path in
+// extraRoots, which is the list Roots() feeds validate(), so the surviving
+// read-only holder could WRITE anywhere below a write grant that had already
+// ended — including paths it never asked to read.
+//
+// This is TestAReadGrantIsReadableButNotWritable's property for temporary
+// grants: read authority stays read authority, whichever holder leaves first.
+func TestAReaderOutlivingItsWriterKeepsReadAuthorityOnly(t *testing.T) {
+	t.Run("the writer releases first", func(t *testing.T) {
+		scope, workspace, outer, inner := temporaryWriteFixture(t)
+
+		writeRoot, releaseWrite, err := scope.AddTemporaryWrite(outer)
+		if err != nil {
+			t.Fatalf("temporary write: %v", err)
+		}
+		if writeRoot != outer {
+			t.Fatalf("temporary write granted %q, want %q", writeRoot, outer)
+		}
+		readRoot, releaseRead, err := scope.AddTemporaryRead(inner)
+		if err != nil {
+			t.Fatalf("temporary read: %v", err)
+		}
+		if readRoot != inner {
+			t.Fatalf("temporary read granted %q, want %q", readRoot, inner)
+		}
+		// The reader holds a read root of its own and NO reference on the write
+		// root. Both halves matter: the first is what survives the writer, the
+		// second is what stops the write root surviving with it.
+		//
+		// Errorf, not Fatalf: these say WHY the behavior below breaks, and a
+		// bookkeeping check that aborts the run hides the behavior it explains.
+		scope.mu.RLock()
+		writeHolders := scope.tempWrites[outer]
+		readHolders := scope.tempReads[inner]
+		scope.mu.RUnlock()
+		if writeHolders != 1 {
+			t.Errorf("tempWrites[%s] = %d, want 1: the reader took a reference on the WRITE root", outer, writeHolders)
+		}
+		if readHolders != 1 {
+			t.Errorf("tempReads[%s] = %d, want 1: the reader kept no read root of its own", inner, readHolders)
+		}
+
+		// The WRITE holder finishes; only the read-only holder is left.
+		releaseWrite()
+
+		if got := scope.ExtraRoots(); len(got) != 0 {
+			t.Errorf("ExtraRoots() = %v, want none: the reader held the write root open", got)
+		}
+		if got, want := scope.ReadRoots(), []string{workspace, inner}; !slices.Equal(got, want) {
+			t.Errorf("ReadRoots() = %v, want %v", got, want)
+		}
+
+		target := filepath.Join(inner, "audit-me.go")
+		if block := scope.validateRead(target); block != nil {
+			t.Errorf("the writer's cleanup revoked a live read grant on %q: %v", target, block)
+		}
+		block := scope.validate(target)
+		if block == nil {
+			t.Fatalf("a read-only holder may still WRITE %q after the write grant ended", target)
+		}
+		if block.Code != BlockOutsideWorkspace {
+			t.Errorf("write block code = %q, want %q", block.Code, BlockOutsideWorkspace)
+		}
+		if block.Path != target {
+			t.Errorf("write block path = %q, want %q", block.Path, target)
+		}
+		// The escalation was never confined to the path the reader asked for —
+		// a borrowed reference carries the whole covering root — so a sibling
+		// the reader never named has to be denied too.
+		sibling := filepath.Join(outer, "sibling.txt")
+		if block := scope.validate(sibling); block == nil {
+			t.Errorf("a read-only holder of %q may still WRITE %q, which it never asked to read", inner, sibling)
+		}
+
+		releaseRead()
+		if got, want := scope.ReadRoots(), []string{workspace}; !slices.Equal(got, want) {
+			t.Errorf("ReadRoots() = %v, want %v: the read root outlived its last holder", got, want)
+		}
+	})
+
+	// A CONTROL, NOT COVERAGE FOR THE FINDING. This subtest passes on the
+	// unfixed tree too — the escalation needs the WRITER to go first, which the
+	// subtest above exercises. It earns its place by pinning that the opposite
+	// release order was not broken while fixing the dangerous one, and it is
+	// labelled so nobody counts it as evidence the finding is closed.
+	t.Run("the reader releases first (control: passes unfixed)", func(t *testing.T) {
+		scope, _, outer, inner := temporaryWriteFixture(t)
+
+		_, releaseWrite, err := scope.AddTemporaryWrite(outer)
+		if err != nil {
+			t.Fatalf("temporary write: %v", err)
+		}
+		_, releaseRead, err := scope.AddTemporaryRead(inner)
+		if err != nil {
+			t.Fatalf("temporary read: %v", err)
+		}
+
+		// The other order, which the fix must not break: the writer keeps FULL
+		// authority for as long as it holds the grant.
+		releaseRead()
+		buildLog := filepath.Join(outer, "build.log")
+		if block := scope.validate(buildLog); block != nil {
+			t.Fatalf("the reader's cleanup revoked the live write grant on %q: %v", buildLog, block)
+		}
+		if got, want := scope.ExtraRoots(), []string{outer}; !slices.Equal(got, want) {
+			t.Errorf("ExtraRoots() = %v, want %v", got, want)
+		}
+
+		releaseWrite()
+		if block := scope.validate(buildLog); block == nil {
+			t.Errorf("the write root %q outlived its only holder", outer)
+		}
+		if block := scope.validateRead(filepath.Join(inner, "audit-me.go")); block == nil {
+			t.Errorf("the read root %q outlived its only holder", inner)
+		}
+	})
 }
