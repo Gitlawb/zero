@@ -1,0 +1,145 @@
+package cli
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/agentsessions"
+	"github.com/Gitlawb/zero/internal/sessions"
+)
+
+func writeImportFixture(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// THE HUMAN-READABLE SUMMARY IS ANOTHER PRODUCT'S BYTES ON A TERMINAL. The
+// --json branch above it is structurally escaped and redacted; this branch
+// printed the title and the cwd exactly as the foreign store wrote them, so an
+// escape repainted the block and a title — usually the user's first prompt, and
+// so the likeliest place for a pasted key — was shown verbatim. The listing
+// alongside it already sanitized every field it drew, which is what made the
+// omission easy to miss.
+func TestImportSummarySanitizesTheTitleAndCwdItPrints(t *testing.T) {
+	home := t.TempDir()
+	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-w", "hostile.jsonl"),
+		strings.Join([]string{
+			`{"type":"user","cwd":"/w/\u001b[2Kmoved/proj","sessionId":"hostile","message":{"role":"user","content":"hi"}}`,
+			`{"type":"ai-title","aiTitle":"rotate the key\nsk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA","sessionId":"hostile"}`,
+		}, "\n")+"\n")
+	// Every root the discovery code resolves, not only the redirect variable:
+	// claudeCodeRoot falls back to HOME, and the other three adapters have no
+	// redirect at all, so leaving HOME alone would index the developer's own
+	// transcripts.
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	if code := runSessionsImport(store, "claude-code:hostile", sessionCommandOptions{}, stdout, stderr); code != exitSuccess {
+		t.Fatalf("import exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	// Exact lines. "contains no escape" would pass for output that dropped the
+	// fields entirely, and the point is that they stay readable.
+	for _, want := range []string{
+		"  title:        rotate the key [REDACTED]\n",
+		"  cwd:          /w/[2Kmoved/proj\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("import summary is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("a terminal escape reached the import summary:\n%q", out)
+	}
+	if strings.Contains(out, "sk-ant-api03-") {
+		t.Errorf("a credential-shaped title reached the import summary:\n%q", out)
+	}
+}
+
+// The warning is built from the recorded cwd, which is the same foreign bytes
+// one sentence later — CodeRabbit named it separately for that reason. Called
+// directly rather than through the command so the assertion is on the sentence
+// itself and cannot be satisfied by an earlier guard declining the input.
+func TestImportWorkspaceWarningSanitizesTheRecordedPath(t *testing.T) {
+	warning := importWorkspaceWarning("/elsewhere/\x1b[31mred\x1b[0m/proj")
+	const want = "Note: this session ran in /elsewhere/[31mred[0m/proj, not the current directory.\n" +
+		"      Paths mentioned in it refer to that tree."
+	if warning != want {
+		t.Errorf("warning = %q, want %q", warning, want)
+	}
+
+	// The comparison behind it still runs on the recorded path, so a session
+	// imported from this very directory stays silent.
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := importWorkspaceWarning(working); got != "" {
+		t.Errorf("a session recorded in the current directory warned anyway: %q", got)
+	}
+}
+
+// A SESSION IMPORTED BY AN EARLIER BUILD STILL HOLDS THE RAW BYTES. Import only
+// began sanitizing what it stores at this change, so the summary has to clean
+// its own output rather than trust the record — and through runSessionsImport
+// that is unobservable, because the session it just wrote is already clean. This
+// supplies the record an older build left behind.
+func TestTheImportSummaryCleansAStoredTitleAndCwdItDidNotWrite(t *testing.T) {
+	result := agentsessions.ImportResult{
+		Session: sessions.Metadata{
+			SessionID: "zero_1",
+			Title:     "rotate the key\nsk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA",
+			Cwd:       "/w/\x1b[2Kmoved/proj",
+		},
+		Events: 3,
+		Source: agentsessions.ForeignSession{Agent: "claude-code", ID: "abc\x1b[2Kdef"},
+	}
+	got := importSummaryLines(result)
+	want := []string{
+		"Imported claude-code session abc[2Kdef",
+		"",
+		"  zero session: zero_1",
+		"  title:        rotate the key [REDACTED]",
+		"  cwd:          /w/[2Kmoved/proj",
+		"  events:       3",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("summary has %d lines, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// An empty title and cwd still read as "(none)" rather than as a blank column —
+// sanitizing must not have swallowed the placeholder.
+func TestTheImportSummaryStillSaysNoneForAnEmptyTitleAndCwd(t *testing.T) {
+	got := importSummaryLines(agentsessions.ImportResult{
+		Session: sessions.Metadata{SessionID: "zero_1"},
+		Source:  agentsessions.ForeignSession{Agent: "codex", ID: "x"},
+	})
+	for _, want := range []string{"  title:        (none)", "  cwd:          (none)"} {
+		found := false
+		for _, line := range got {
+			if line == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("summary is missing %q: %q", want, got)
+		}
+	}
+}

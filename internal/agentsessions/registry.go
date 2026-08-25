@@ -2,6 +2,7 @@ package agentsessions
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -153,13 +154,18 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	}
 
 	created, err := store.Create(sessions.CreateInput{
-		// stripControl, not redact: the title is a foreign-authored label that
-		// becomes a /resume picker row, so its control bytes are the injection
-		// vector (#835/#876). Secret redaction is intentionally left to display,
-		// matching how native titles are handled (createSessionTitle stores the
-		// raw prompt; `zero sessions list` redacts on the way out).
-		Title:   stripControl(source.Title),
-		Cwd:     source.Cwd,
+		// THE STORE IS THE CHOKEPOINT, NOT EACH CONSUMER. These two fields are
+		// another product's bytes and every reader draws them: `zero sessions
+		// list`, the /resume picker, the import summary, the workspace warning.
+		// stripControl was not enough for a stored value — it deliberately keeps
+		// newlines, which is right for a transcript line and wrong for a label
+		// drawn as one row, and it does not redact, so a title (usually the
+		// user's first prompt, where a pasted key lands) stayed a live secret in
+		// the store for every consumer to leak independently. Two of them did.
+		// DisplayField is the one helper that strips controls FIRST and then
+		// redacts, the order redaction_order_test.go pins.
+		Title:   DisplayField(source.Title),
+		Cwd:     DisplayField(source.Cwd),
 		ModelID: source.ModelID,
 		Tag:     ImportTag(adapter.Name(), id),
 	})
@@ -168,7 +174,17 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	}
 	if len(events) > 0 {
 		if _, err := store.AppendEvents(created.SessionID, events); err != nil {
-			return ImportResult{}, err
+			// SAY WHAT WAS LEFT BEHIND. Create and AppendEvents are two steps and
+			// only the second one failed, so a session exists holding this
+			// import's tag and no transcript. The store has no delete, and adding
+			// one to unwind an import would hand every caller a destructive
+			// primitive for the sake of an error path, so the empty session stays
+			// on disk — named here, and refused as import provenance by the
+			// picker (see importedSourceRefs) so the foreign source stays offered
+			// and re-running this command works. Reported by @jatmn.
+			return ImportResult{}, fmt.Errorf(
+				"import %s into zero session %s: %w (the empty session was left in place; re-run the import to try again)",
+				id, created.SessionID, err)
 		}
 	}
 	return ImportResult{Session: created, Events: len(events), Source: source}, nil

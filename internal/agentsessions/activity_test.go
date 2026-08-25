@@ -309,3 +309,44 @@ func TestAnInterruptedWriteWithNoResultDoesNotClaimTheFile(t *testing.T) {
 		}
 	}
 }
+
+// THE BUDGET HAS TO BIND ON THE ASSEMBLED LINE. summaryEvents caps the tool
+// breakdown and then prepends the call/failure counts to it, so the headline
+// left the budget by exactly the length of that prefix. The existing budget test
+// never caught it because its tools all carry a recognised "file_path", which
+// routes them to the file buckets and leaves the breakdown empty — the overflow
+// only appears once the arguments are a schema this package does not know, which
+// is the fallback path the breakdown exists for.
+func TestTheActivityHeadlineIsTruncatedAfterItIsAssembled(t *testing.T) {
+	lines := []string{`{"type":"user","cwd":"/w","message":{"role":"user","content":"go"}}`}
+	for i := 0; i < 60; i++ {
+		lines = append(lines, claudeToolLines(
+			"t"+itoa(i), "unrecognised_tool_"+itoa(i), `{"unknown_argument_name":"x"}`, "ok", false)...)
+	}
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := summaryTexts(t, events)
+	if len(summaries) == 0 {
+		t.Fatal("no summary events produced")
+	}
+
+	headline := summaries[0]
+	// The prefix has to be there, or the breakdown alone would satisfy the budget
+	// for the wrong reason — that was the passing state before the fix.
+	if !strings.HasPrefix(headline, "Prior session activity: 60 tool calls.") {
+		t.Fatalf("the headline is not the count-prefixed line this test is about:\n%s", headline)
+	}
+	if !strings.Contains(headline, "Also: unrecognised_tool_") {
+		t.Fatalf("the breakdown never ran, so nothing could overflow:\n%s", headline)
+	}
+	if length := len([]rune(headline)); length != maxSummaryEventChars {
+		t.Errorf("headline is %d chars, want it cut to exactly the %d budget:\n%s",
+			length, maxSummaryEventChars, headline)
+	}
+	// Cut, not merely short: the ellipsis is what tells a reader the list goes on.
+	if !strings.HasSuffix(headline, "…") {
+		t.Errorf("an over-long headline was truncated without saying so:\n%s", headline)
+	}
+}

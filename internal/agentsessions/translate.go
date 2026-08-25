@@ -340,16 +340,32 @@ func omittedRecordsEvent(count int) sessions.AppendEventInput {
 // Controls are stripped FIRST so a secret cannot be split by an escape byte and
 // slip past the shape match, then redaction runs on the reassembled text. That
 // ordering is the same one redaction_order_test.go pins for the transcript path;
-// the display path needed it too. Newlines go as well, unlike the transcript
+// the display path needed it too. Layout goes as well, unlike the transcript
 // helper, because a metadata field is drawn as one row and a newline in it moves
 // the rest of the line somewhere the caller did not intend.
+//
+// TAB, NEWLINE AND RETURN BECOME A SPACE RATHER THAN VANISHING, and that gap is
+// load-bearing in the opposite direction to the stripping above. Every secret
+// pattern anchors on \b, so deleting the separator in "key<TAB>sk-ant-…" glued a
+// word character onto the shape and the match no longer fired — a title is
+// usually the user's first prompt, and a pasted key on the line after "key:" is
+// exactly how one arrives. Substituting keeps the field one row while leaving the
+// boundary the patterns need. It costs nothing that was being protected:
+// redaction_order_test.go already establishes that a credential cannot contain a
+// raw newline, so joining across one never reassembled a real secret. The
+// invisible bytes — C0, DEL, C1, Cf — are still DELETED, because those are the
+// ones an escape can hide inside a key.
 func DisplayField(value string) string {
 	var b strings.Builder
 	b.Grow(len(value))
 	for _, r := range value {
+		if r == '\t' || r == '\n' || r == '\r' {
+			b.WriteRune(' ')
+			continue
+		}
 		// Cf as well as control: see stripControl. A bidi override in a picker row
 		// reorders the rows's visible text without changing a byte of it.
-		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
 		b.WriteRune(r)

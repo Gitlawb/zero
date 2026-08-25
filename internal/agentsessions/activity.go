@@ -280,7 +280,12 @@ func (log *activityLog) summaryEvents() []sessions.AppendEventInput {
 	if extra := log.toolBreakdown(); extra != "" {
 		headline += " " + extra
 	}
-	events = append(events, noteEvent(headline))
+	// THE BUDGET APPLIES TO THE ASSEMBLED LINE, NOT TO A PIECE OF IT. Only the
+	// breakdown was capped, so the count prefix rode on top of an already
+	// full-length tail: a session full of unrecognised tool names produced a
+	// 500-character note, which is exactly where sessions.summarizePayload cuts —
+	// the mid-sentence truncation maxSummaryEventChars exists to keep off.
+	events = append(events, noteEvent(truncateToBudget(headline, maxSummaryEventChars)))
 
 	for _, section := range []struct {
 		label string
@@ -301,6 +306,10 @@ func (log *activityLog) summaryEvents() []sessions.AppendEventInput {
 
 // toolBreakdown names tools whose arguments yielded nothing, so an unrecognised
 // schema degrades to "Also: exec x4" rather than to silence.
+//
+// It returns the full list and does NOT cap it: the cap belongs to the caller,
+// which appends this to a count prefix. Capping here as well would truncate
+// twice and leave an ellipsis inside the line as well as at its end.
 func (log *activityLog) toolBreakdown() string {
 	if len(log.toolCounts) == 0 {
 		return ""
@@ -319,7 +328,7 @@ func (log *activityLog) toolBreakdown() string {
 		}
 		parts = append(parts, name)
 	}
-	return truncateToBudget("Also: "+strings.Join(parts, ", "), maxSummaryEventChars)
+	return "Also: " + strings.Join(parts, ", ")
 }
 
 // summaryLine renders one category, collapsing to a count once the list grows
