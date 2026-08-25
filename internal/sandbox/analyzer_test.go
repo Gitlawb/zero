@@ -394,3 +394,52 @@ func TestGitSubcommandPreservesOriginalAndNormalizedSpelling(t *testing.T) {
 		t.Fatalf("lowercase GitSubcommand = %#v ok=%v", lowercase, ok)
 	}
 }
+
+// TestGitGlobalOptionConsumesValueFoldsShortCaseDeliberately pins the case-fold
+// in GitGlobalOptionConsumesValue. -c and -C are DIFFERENT git options that
+// today both take a separate-token value, and the callers normalize the option
+// name before asking, so the two necessarily share one answer here. That is
+// safe only while their value-taking behavior agrees; if git ever changes one
+// of them, this test fails and the distinction has to be restored at the call
+// site by passing the original token, not by adding an unreachable uppercase
+// case to a switch that compares lowercased input.
+func TestGitGlobalOptionConsumesValueFoldsShortCaseDeliberately(t *testing.T) {
+	for _, option := range []string{"-c", "-C"} {
+		if !GitGlobalOptionConsumesValue(option) {
+			t.Fatalf("GitGlobalOptionConsumesValue(%q) = false, want true", option)
+		}
+	}
+	// Long options are all-lowercase in git; the fold must not invent new ones.
+	for _, option := range []string{"-d", "-x", "--exec-path", "--not-an-option"} {
+		if GitGlobalOptionConsumesValue(option) {
+			t.Fatalf("GitGlobalOptionConsumesValue(%q) = true, want false", option)
+		}
+	}
+}
+
+// TestGitSubcommandConsumesDashCOperand proves the -C operand is consumed in
+// both the separated and joined spellings, so the subcommand git dispatches is
+// the one found. Missing this would make `git -C repo push` resolve `repo` as
+// the subcommand, and an unknown subcommand is classified proven-local — the
+// network gate would be dropped on a real push.
+func TestGitSubcommandConsumesDashCOperand(t *testing.T) {
+	for _, tc := range []struct {
+		words []string
+		want  string
+		index int
+	}{
+		{words: []string{"-C", "repo", "push", "origin", "main"}, want: "push", index: 2},
+		{words: []string{"-Crepo", "push", "origin", "main"}, want: "push", index: 1},
+		{words: []string{"-C", "repo", "status"}, want: "status", index: 2},
+		{words: []string{"-c", "a=b", "push"}, want: "push", index: 2},
+	} {
+		info, ok := GitSubcommand(tc.words)
+		if !ok || info.Normalized != tc.want || info.Index != tc.index {
+			t.Fatalf("GitSubcommand(%q) = %+v ok=%v, want %q at %d", tc.words, info, ok, tc.want, tc.index)
+		}
+	}
+	// `git -C repo` runs nothing: the operand is consumed and no subcommand is left.
+	if info, ok := GitSubcommand([]string{"-C", "repo"}); ok {
+		t.Fatalf("GitSubcommand(-C repo) = %+v, want no subcommand", info)
+	}
+}

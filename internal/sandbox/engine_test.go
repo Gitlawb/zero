@@ -391,6 +391,22 @@ func TestEnginePromptsForReviewedUnparseableNetworkForms(t *testing.T) {
 		`strace --tips curl https://evil.test && "unterminated`,
 		`strace -fqo trace.log curl https://evil.test && "unterminated`,
 		`powershell -ep RemoteSigned curl https://evil.test & rem '`,
+		// A CMD FOR metavariable supplies the executable. CMD substitutes it
+		// before launching the body, so the spelling proves nothing about what
+		// runs and the network gate must survive. %%i is the batch spelling of
+		// the same reference, and %~dpi the modified form.
+		`for /f %i in (list.txt) do %i https://evil.test`,
+		`for /f %%i in (list.txt) do %%i https://evil.test`,
+		`for /f %i in (list.txt) do %~dpi https://evil.test`,
+		`for /f %i in (list.txt) do call %i https://evil.test`,
+		// A batch parameter in the same position is equally unreadable.
+		`%1 https://evil.test & rem '`,
+		// git -C takes a separate-token value; the subcommand is what follows it,
+		// so push must still be found in both the separated and joined spellings.
+		`git -C repo push origin main`,
+		`git -Crepo push origin main`,
+		`git -C repo push origin main & rem '`,
+		`git -Crepo push origin main & rem '`,
 		// PowerShell source that exists but cannot be read statically: an
 		// undecodable encoded payload, valid encoded network source, and a
 		// Command operand supplied by an expansion.
@@ -457,6 +473,16 @@ func TestEngineDoesNotPromptForNonNetworkCommandForms(t *testing.T) {
 		`bash -- -c 'curl https://evil.test' && "unterminated`,
 		`bash -Zc 'curl https://evil.test' && "unterminated`,
 		`bash -nc 'curl https://evil.test' && "unterminated`,
+		// FOR bodies whose executable IS readable keep their precision: the
+		// metavariable is ordinary data in an argument position, so recognizing
+		// it in executable position must not cost these a network prompt.
+		`for %i in (*.txt) do echo %i`,
+		`for /f %i in (list.txt) do type %i`,
+		`for %i in (a b c) do copy %i backup\%i`,
+		`for /f %i in (list.txt) do echo %i >> out.txt`,
+		// -C's operand is consumed, so a local subcommand after it stays local.
+		`git -C repo status`,
+		`git -Crepo status & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
