@@ -177,4 +177,8 @@ func TestRelativizeUnifiedPatchPathsLeavesHunkBodiesAlone(t *testing.T) {
 	if plain := "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-a\n+b\n"; relativizeUnifiedPatchPaths(root, plain) != plain {
 		t.Fatal("a patch without absolute paths must be returned unchanged")
 	}
+	crlf := "--- " + absolute + "\r\n+++ " + absolute + "\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n"
+	if got, want := relativizeUnifiedPatchPaths(root, crlf), "--- a/notes.txt\r\n+++ b/notes.txt\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n"; got != want {
+		t.Fatalf("CRLF patch must keep its line endings:\n%q\nwant\n%q", got, want)
+	}
 }

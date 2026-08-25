@@ -297,11 +297,15 @@ func relativizeUnifiedPatchPaths(root string, patch string) string {
 		}
 		return path, false
 	}
-	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	// Split on "\n" only and keep any trailing "\r" on each line, so a CRLF
+	// patch keeps its line endings everywhere except the rewritten headers.
+	lines := strings.Split(patch, "\n")
 	oldRemaining, newRemaining := 0, 0
 	inHunk := false
 	changed := false
-	for index, line := range lines {
+	for index, rawLine := range lines {
+		line := strings.TrimSuffix(rawLine, "\r")
+		eol := rawLine[len(line):]
 		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
 			switch {
 			case strings.HasPrefix(line, "-"):
@@ -329,7 +333,7 @@ func relativizeUnifiedPatchPaths(root string, patch string) string {
 					if bok {
 						fields[3] = "b/" + b
 					}
-					lines[index] = strings.Join(fields, " ")
+					lines[index] = strings.Join(fields, " ") + eol
 					changed = true
 				}
 			}
@@ -342,7 +346,7 @@ func relativizeUnifiedPatchPaths(root string, patch string) string {
 				if strings.HasPrefix(line, "+++ ") {
 					prefix = "b/"
 				}
-				lines[index] = line[:4] + prefix + relative
+				lines[index] = line[:4] + prefix + relative + eol
 				changed = true
 			}
 		}
