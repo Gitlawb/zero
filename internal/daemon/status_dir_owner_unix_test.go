@@ -17,6 +17,13 @@ func secureStatusTestDirPlatform(t *testing.T, dir string) {
 	}
 }
 
+func broadenStatusTestDirPlatform(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCheckStatusDirOwnerRejectsMissingMetadata(t *testing.T) {
 	err := checkStatusDirOwner(nil, statusDirOwnerTestInfo{})
 	if err == nil || !strings.Contains(err.Error(), "metadata is unavailable") {

@@ -26,7 +26,7 @@ func FormatCrashReport(label string, recovered any, stack []byte, ts time.Time) 
 
 // WriteCrashReport writes a crash report file into dir and returns its path.
 func WriteCrashReport(dir, label string, recovered any, stack []byte, ts time.Time) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, "crash-"+ts.UTC().Format("20060102-150405")+".log")

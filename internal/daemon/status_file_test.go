@@ -350,6 +350,23 @@ func TestWriteStatusFileRejectsBroadStatusDirectory(t *testing.T) {
 	assertNoStatusTemps(t, dir)
 }
 
+func TestSecureStatusRootHardensBroadCurrentUserDirectory(t *testing.T) {
+	dir := t.TempDir()
+	broadenStatusTestDirPlatform(t, dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := secureStatusRoot(root); err != nil {
+		t.Fatalf("secureStatusRoot: %v", err)
+	}
+	if err := validateStatusRoot(root); err != nil {
+		t.Fatalf("validate hardened status root: %v", err)
+	}
+}
+
 func readStatusDocument(t *testing.T, path string) StatusFile {
 	t.Helper()
 	data, err := os.ReadFile(path)
