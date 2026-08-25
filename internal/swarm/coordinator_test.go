@@ -103,6 +103,45 @@ func TestCoordinatorReassign(t *testing.T) {
 	}
 }
 
+func TestCoordinatorHandoffClaimKeepsTaskNonTerminalUntilFinished(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("t1", "a1", "team", "desc")
+	_ = c.SetStatus("t1", StatusRunning)
+	if _, err := c.BeginHandoff("t1"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	if task, _ := c.Get("t1"); task.Status != StatusRunning {
+		t.Fatalf("status during handoff = %v, want running until source exits", task.Status)
+	}
+	if _, err := c.BeginHandoff("t1"); err == nil {
+		t.Fatal("a second handoff claim must fail")
+	}
+	if err := c.Complete("t1", "late result"); err == nil {
+		t.Fatal("member completion must not win after handoff is claimed")
+	}
+	if err := c.Reassign("t1", "a2"); err == nil {
+		t.Fatal("orphan adoption must not race a claimed handoff")
+	}
+	if err := c.FinishHandoff("t1"); err != nil {
+		t.Fatalf("FinishHandoff: %v", err)
+	}
+	if task, _ := c.Get("t1"); task.Status != StatusHandedOff {
+		t.Fatalf("status after FinishHandoff = %v, want handed-off", task.Status)
+	}
+}
+
+func TestCoordinatorAbortHandoffRestoresNormalCompletion(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("t1", "a1", "team", "desc")
+	if _, err := c.BeginHandoff("t1"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	c.AbortHandoff("t1")
+	if err := c.Complete("t1", "done"); err != nil {
+		t.Fatalf("Complete after AbortHandoff: %v", err)
+	}
+}
+
 func TestCoordinatorColorStability(t *testing.T) {
 	c := NewCoordinator()
 	first := c.Color("a1")

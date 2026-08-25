@@ -79,7 +79,8 @@ type Swarm struct {
 	mu        sync.Mutex
 	teams     map[string]*Team
 	taskCwd   map[string]string // taskID -> cwd, for handoff/adoption relaunch
-	scheduler *Scheduler        // lazily created by Scheduler(); nil until first use
+	taskRuns  map[string]*taskRun
+	scheduler *Scheduler // lazily created by Scheduler(); nil until first use
 	idSeq     atomic.Uint64
 }
 
@@ -102,6 +103,39 @@ type Member struct {
 	TaskID    string
 	handle    MemberHandle
 	restarts  int
+}
+
+// taskRun owns the cancellation and completion boundary for one coordinator
+// task. The context is shared by every bounded relaunch of that task; done is
+// closed only after no current or queued member can execute it.
+type taskRun struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+}
+
+func newTaskRun(parent context.Context) *taskRun {
+	ctx, cancel := context.WithCancel(parent)
+	return &taskRun{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+}
+
+func (r *taskRun) stop() { r.cancel() }
+
+func (r *taskRun) stopped() bool {
+	select {
+	case <-r.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *taskRun) finish() {
+	r.once.Do(func() {
+		r.cancel()
+		close(r.done)
+	})
 }
 
 // New validates options and returns a Swarm.
@@ -145,6 +179,7 @@ func New(opts Options) (*Swarm, error) {
 		cancel:      cancel,
 		teams:       map[string]*Team{},
 		taskCwd:     map[string]string{},
+		taskRuns:    map[string]*taskRun{},
 	}, nil
 }
 
@@ -187,6 +222,7 @@ func (s *Swarm) Close() {
 		for _, team := range teams {
 			for _, spec := range team.clearQueue() {
 				_ = s.coord.Fail(spec.TaskID, ErrSwarmClosed.Error())
+				s.finishTaskRun(spec.TaskID)
 			}
 		}
 		// Every watcher is added while its admitting lifecycle ticket is still held,
@@ -248,6 +284,42 @@ func (s *Swarm) cwdFor(taskID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.taskCwd[taskID]
+}
+
+// startTaskRun installs a fresh execution boundary for taskID. Freshly spawned
+// tasks use unique ids; orphan adoption intentionally replaces the completed
+// boundary for the task it is reviving under a new member.
+func (s *Swarm) startTaskRun(taskID string) *taskRun {
+	run := newTaskRun(s.baseCtx)
+	s.mu.Lock()
+	s.taskRuns[taskID] = run
+	s.mu.Unlock()
+	return run
+}
+
+// ensureTaskRun returns the task's execution boundary, creating one for
+// internal/adopted paths that registered a coordinator task directly.
+func (s *Swarm) ensureTaskRun(taskID string) *taskRun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if run := s.taskRuns[taskID]; run != nil {
+		return run
+	}
+	run := newTaskRun(s.baseCtx)
+	s.taskRuns[taskID] = run
+	return run
+}
+
+func (s *Swarm) taskRun(taskID string) *taskRun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.taskRuns[taskID]
+}
+
+func (s *Swarm) finishTaskRun(taskID string) {
+	if run := s.taskRun(taskID); run != nil {
+		run.finish()
+	}
 }
 
 // Registry exposes the roster (for tool listing / user-defined registration).
@@ -376,6 +448,23 @@ func (t *Team) clearQueue() []MemberSpec {
 	queued := t.queue
 	t.queue = nil
 	return queued
+}
+
+// removeQueuedTask cancels a handoff source that has not taken a running slot
+// yet. It closes the queue/dequeue race under the same lock used by onExit.
+func (t *Team) removeQueuedTask(taskID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.queue {
+		if t.queue[i].TaskID != taskID {
+			continue
+		}
+		copy(t.queue[i:], t.queue[i+1:])
+		t.queue[len(t.queue)-1] = MemberSpec{}
+		t.queue = t.queue[:len(t.queue)-1]
+		return true
+	}
+	return false
 }
 
 func (t *Team) addMember(m *Member) {
