@@ -866,7 +866,9 @@ func TestStructuredPatchFailedDeleteDoesNotRecreateMissingFile(t *testing.T) {
 	}
 }
 
-func TestStructuredPatchMoveFailureLeavesPublishedDestination(t *testing.T) {
+// A move whose source vanished after planning is refused by the pre-commit
+// recheck before the destination is published, so nothing is left half-done.
+func TestStructuredPatchMoveWithMissingSourceIsRefusedBeforePublishing(t *testing.T) {
 	root := t.TempDir()
 	workspace, err := os.OpenRoot(root)
 	if err != nil {
@@ -883,14 +885,14 @@ func TestStructuredPatchMoveFailureLeavesPublishedDestination(t *testing.T) {
 	}
 
 	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
-	if err == nil || !strings.Contains(err.Error(), "partially applied") {
-		t.Fatalf("move with a missing source = %v, want partial-application error", err)
+	if err == nil || !strings.Contains(err.Error(), "before commit") || strings.Contains(err.Error(), "partially applied") {
+		t.Fatalf("move with a missing source = %v, want a pre-commit refusal with nothing applied", err)
 	}
 	if _, statErr := os.Stat(sourcePath); !os.IsNotExist(statErr) {
 		t.Fatalf("failed move recreated a missing source: %v", statErr)
 	}
-	if got := mustReadTestFile(t, destinationPath); got != "moved content\n" {
-		t.Fatalf("published move destination = %q", got)
+	if _, statErr := os.Stat(destinationPath); !os.IsNotExist(statErr) {
+		t.Fatalf("refused move must not publish the destination: %v", statErr)
 	}
 }
 
