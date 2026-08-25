@@ -119,6 +119,12 @@ type PreferencesConfig struct {
 	// the user turned idle recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
+	// CompactionModel routes compaction summarization calls to this model
+	// instead of the session's main model (summaries at main-model prices are
+	// the most expensive recurring event in long runs). Empty = automatic: a
+	// curated cheap model on official endpoints, the main model elsewhere.
+	// "main" forces the main model. ZERO_COMPACTION_MODEL overrides.
+	CompactionModel string `json:"compactionModel,omitempty"`
 }
 
 // RecentModelEntry is one provider-qualified model selection recorded in
