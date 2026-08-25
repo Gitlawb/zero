@@ -1676,10 +1676,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
 			return m.showTransientNoticeInline("Mouse interaction re-enabled.", transientNoticeSuccess), nil
+		case m.dictation.voiceModeEnabled && !m.dictation.active() && !m.transcriptDetailed && keyPrintable(msg) && !keyIs(msg, tea.KeySpace) && m.noBlockingModal():
+			// Ordinary typing takes ownership from an idle voice mode immediately.
+			// Preserve this first character and release any warm dictation server so
+			// the next Space reaches the composer instead of starting a recording.
+			next, cmd := m.toggleVoiceMode()
+			if typed, ok := next.applyComposerKey(msg); ok {
+				return typed, cmd
+			}
+			return next, cmd
 		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && keyIs(msg, tea.KeySpace) && !keyHasMod(msg, tea.ModCtrl) && !keyAlt(msg) && m.noBlockingModal():
 			// Voice mode (/voice) repurposes Space into the record gesture — the only
 			// dictation trigger — so it must not also type a space. Turn voice mode
-			// off (/voice) to type normally.
+			// off (/voice or ordinary typing) to type normally.
 			return m.handleVoiceSpacePress(msg)
 		case keyIs(msg, tea.KeyEsc):
 			// Esc is heavily overloaded below (subchat exit, MCP cancel, ask-user,

@@ -36,7 +36,7 @@ func TestToggleVoiceModeFlips(t *testing.T) {
 	if !next.dictation.voiceModeEnabled {
 		t.Fatal("first /voice should enable voice mode")
 	}
-	if next.transientNotice.text != "Voice mode on — hold Space to dictate; run /voice again to turn it off." {
+	if next.transientNotice.text != "Voice mode on — hold Space to dictate; start typing or run /voice again to turn it off." {
 		t.Errorf("voice-mode-on notice = %q", next.transientNotice.text)
 	}
 	if transcriptHasText(next, "Voice mode on") {
@@ -143,5 +143,28 @@ func TestVoiceSpaceToggleFallback(t *testing.T) {
 	next, _ := m.handleVoiceSpacePress(press)
 	if next.dictation.phase != dictStarting {
 		t.Errorf("toggle-mode Space should start recording (phase=%d)", next.dictation.phase)
+	}
+}
+
+func TestVoiceModeYieldsToOrdinaryTyping(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.dictation = batchOnlyController()
+	m.dictation.voiceModeEnabled = true
+
+	for _, key := range []tea.KeyPressMsg{
+		testKeyText("f"),
+		testKeyText("i"),
+		testKeyText("x"),
+		testKey(tea.KeySpace),
+	} {
+		updated, _ := m.Update(key)
+		m = updated.(model)
+	}
+
+	if m.dictation.voiceModeEnabled {
+		t.Fatal("ordinary typing should exit voice mode")
+	}
+	if got := m.composerValue(); got != "fix " {
+		t.Fatalf("composer value = %q, want typed prompt with its space preserved", got)
 	}
 }
