@@ -479,6 +479,35 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 	}
 }
 
+// TestStreamCompletionHTTPErrorCarriesStatusCodeAndCause verifies the StreamEvent
+// for an HTTP-level provider failure carries the raw status code and a redacted
+// cause separately from the classified, user-facing Error string — the detail
+// a session's "error" event needs to actually diagnose why a provider call
+// failed instead of only storing the flattened message (#674).
+func TestStreamCompletionHTTPErrorCarriesStatusCodeAndCause(t *testing.T) {
+	provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"upstream saw Bearer sk-secret"}}`, http.StatusInternalServerError)
+	})
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned setup error: %v", err)
+	}
+	events := readAll(stream)
+	if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
+		t.Fatalf("events = %#v, want one error", events)
+	}
+	event := events[0]
+	if event.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", event.StatusCode, http.StatusInternalServerError)
+	}
+	if !strings.Contains(event.Cause, "upstream saw Bearer") {
+		t.Fatalf("Cause = %q, want it to contain the upstream detail", event.Cause)
+	}
+	if strings.Contains(event.Cause, "sk-secret") {
+		t.Fatalf("Cause leaked token: %q", event.Cause)
+	}
+}
+
 func TestStreamCompletionHumanizesUpstreamUnreachableGatewayError(t *testing.T) {
 	// A local Ollama daemon serving a "-cloud" model answers on localhost but
 	// returns HTTP 502 with an opaque proxied transport error when it cannot reach
@@ -503,6 +532,15 @@ func TestStreamCompletionHumanizesUpstreamUnreachableGatewayError(t *testing.T) 
 		if !strings.Contains(got, want) {
 			t.Fatalf("error = %q, want it to contain %q", got, want)
 		}
+	}
+	// The humanized "upstream unreachable" message must not drop the response
+	// metadata a session error event needs — StatusCode/Cause must still reflect
+	// the real HTTP response, matching the classified-error path below it (#674).
+	if events[0].StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode = %d, want %d", events[0].StatusCode, http.StatusBadGateway)
+	}
+	if !strings.Contains(events[0].Cause, "TLS handshake timeout") {
+		t.Fatalf("Cause = %q, want it to contain the raw upstream detail", events[0].Cause)
 	}
 }
 
@@ -557,6 +595,31 @@ func TestStreamCompletionClassifiesStreamErrorCode(t *testing.T) {
 				t.Fatalf("error = %q, want prefix %q", events[0].Error, tc.wantPrefix)
 			}
 		})
+	}
+}
+
+// TestStreamCompletionStreamedErrorCarriesStatusCodeAndCause mirrors
+// TestStreamCompletionHTTPErrorCarriesStatusCodeAndCause for the other error
+// path: an error arriving inside a 200 OK SSE payload's "code" field rather
+// than the HTTP status (#674).
+func TestStreamCompletionStreamedErrorCarriesStatusCodeAndCause(t *testing.T) {
+	provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"error":{"message":"rate limited sk-secret, see Bearer token docs","code":"429"}}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
+		t.Fatalf("events = %#v, want one error", events)
+	}
+	event := events[0]
+	if event.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode = %d, want %d", event.StatusCode, http.StatusTooManyRequests)
+	}
+	if !strings.Contains(event.Cause, "rate limited") {
+		t.Fatalf("Cause = %q, want it to contain the upstream detail", event.Cause)
+	}
+	if strings.Contains(event.Cause, "sk-secret") {
+		t.Fatalf("Cause leaked token: %q", event.Cause)
 	}
 }
 

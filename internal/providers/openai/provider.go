@@ -312,8 +312,10 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 			}
 		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
-			Type:  zeroruntime.StreamEventError,
-			Error: provider.classifiedError(statusCode, chunk.Error.Message),
+			Type:       zeroruntime.StreamEventError,
+			Error:      provider.classifiedError(statusCode, chunk.Error.Message),
+			StatusCode: statusCode,
+			Cause:      provider.redact(chunk.Error.Message),
 		})
 		state.done = true
 		return false
@@ -399,12 +401,19 @@ func (provider *Provider) emitHTTPError(ctx context.Context, response *http.Resp
 	// localhost but returns a gateway error when it cannot reach its own backend.
 	// Surface that as a clear connectivity message instead of the raw proxied body.
 	if humanized, ok := providerio.UpstreamUnreachable(message); ok {
-		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact(humanized)})
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:       zeroruntime.StreamEventError,
+			Error:      provider.redact(humanized),
+			StatusCode: response.StatusCode,
+			Cause:      provider.redact(message),
+		})
 		return
 	}
 	sendEvent(ctx, events, zeroruntime.StreamEvent{
-		Type:  zeroruntime.StreamEventError,
-		Error: provider.classifiedError(response.StatusCode, message),
+		Type:       zeroruntime.StreamEventError,
+		Error:      provider.classifiedError(response.StatusCode, message),
+		StatusCode: response.StatusCode,
+		Cause:      provider.redact(message),
 	})
 }
 
