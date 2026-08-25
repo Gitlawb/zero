@@ -470,3 +470,111 @@ func TestUnifiedPatchKeepsAdjacentDashPlusContentLines(t *testing.T) {
 		t.Fatalf("content = %q", string(content))
 	}
 }
+
+// A unified deletion states the content it removes; it must be verified
+// against the current file before anything is deleted.
+func TestUnifiedPatchDeletionVerifiesExpectedContent(t *testing.T) {
+	deletion := func(path string, hunks ...string) string {
+		lines := []string{"diff --git a/" + path + " b/" + path, "deleted file mode 100644", "--- a/" + path, "+++ /dev/null"}
+		return strings.Join(append(append(lines, hunks...), ""), "\n")
+	}
+	t.Run("matching deletion succeeds", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "current\n")
+		result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": deletion("gone.txt", "@@ -1 +0,0 @@", "-current")})
+		if result.Status != StatusOK {
+			t.Fatalf("matching deletion should apply, got %s: %s", result.Status, result.Output)
+		}
+		if _, err := os.Stat(filepath.Join(root, "gone.txt")); !os.IsNotExist(err) {
+			t.Fatal("file must be deleted")
+		}
+	})
+	t.Run("stale deletion is refused untouched", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "current\n")
+		result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": deletion("gone.txt", "@@ -1 +0,0 @@", "-stale")})
+		if result.Status == StatusOK || !strings.Contains(result.Output, "does not match its current content") {
+			t.Fatalf("stale deletion must be refused, got %s: %s", result.Status, result.Output)
+		}
+		if content, _ := os.ReadFile(filepath.Join(root, "gone.txt")); string(content) != "current\n" {
+			t.Fatalf("file must be byte-for-byte unchanged, got %q", string(content))
+		}
+	})
+	t.Run("partial deletion is refused", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "one\ntwo\n")
+		result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": deletion("gone.txt", "@@ -1 +0,0 @@", "-one")})
+		if result.Status == StatusOK || !strings.Contains(result.Output, "leaves content behind") {
+			t.Fatalf("deletion that does not cover the file must be refused, got %s: %s", result.Status, result.Output)
+		}
+		if content, _ := os.ReadFile(filepath.Join(root, "gone.txt")); string(content) != "one\ntwo\n" {
+			t.Fatal("file must be unchanged")
+		}
+	})
+	t.Run("header-only deletion is refused", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "current\n")
+		result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": deletion("gone.txt")})
+		if result.Status == StatusOK || !strings.Contains(result.Output, "must include the hunk") {
+			t.Fatalf("header-only deletion must be refused, got %s: %s", result.Status, result.Output)
+		}
+		if _, err := os.Stat(filepath.Join(root, "gone.txt")); err != nil {
+			t.Fatal("file must still exist")
+		}
+	})
+	t.Run("multi-hunk deletion verifies everything before removing", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "a\nb\nc\nd\n")
+		good := deletion("gone.txt", "@@ -1,2 +0,0 @@", "-a", "-b", "@@ -3,2 +0,0 @@", "-c", "-d")
+		bad := deletion("gone.txt", "@@ -1,2 +0,0 @@", "-a", "-b", "@@ -3,2 +0,0 @@", "-c", "-stale")
+		result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": bad})
+		if result.Status == StatusOK {
+			t.Fatalf("deletion with one stale hunk must be refused: %s", result.Output)
+		}
+		if content, _ := os.ReadFile(filepath.Join(root, "gone.txt")); string(content) != "a\nb\nc\nd\n" {
+			t.Fatal("no hunk may be applied when any hunk is stale")
+		}
+		result = NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": good})
+		if result.Status != StatusOK {
+			t.Fatalf("multi-hunk deletion should apply, got %s: %s", result.Status, result.Output)
+		}
+		if _, err := os.Stat(filepath.Join(root, "gone.txt")); !os.IsNotExist(err) {
+			t.Fatal("file must be deleted")
+		}
+	})
+	t.Run("structured delete stays unconditional", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "anything\n")
+		patch := "*** Begin Patch\n*** Delete File: gone.txt\n*** End Patch\n"
+		if result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch}); result.Status != StatusOK {
+			t.Fatalf("structured delete should apply, got %s: %s", result.Status, result.Output)
+		}
+	})
+}
+
+// The source is re-read through the root immediately before commit, so a
+// change made after planning is refused instead of overwritten or removed.
+func TestApplyStructuredPatchChangeRefusesSourceChangedAfterPlanning(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "file.txt")
+	writeTestFile(t, path, "planned\n")
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+	target := structuredPatchTarget{requested: "file.txt", absolute: path, relative: "file.txt"}
+	for name, change := range map[string]structuredPatchChange{
+		"update": {kind: structuredPatchUpdate, from: target, to: target, before: "planned\n", after: "new\n", mode: 0o644},
+		"delete": {kind: structuredPatchDelete, from: target, to: target, before: "planned\n", mode: 0o644},
+	} {
+		writeTestFile(t, path, "changed after planning\n")
+		committed, err := applyStructuredPatchChange(workspace, change)
+		if err == nil || committed || !strings.Contains(err.Error(), "changed on disk between planning and commit") {
+			t.Fatalf("%s: expected a refusal, got committed=%v err=%v", name, committed, err)
+		}
+		if content, _ := os.ReadFile(path); string(content) != "changed after planning\n" {
+			t.Fatalf("%s: file must be untouched, got %q", name, string(content))
+		}
+	}
+}

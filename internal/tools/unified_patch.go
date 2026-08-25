@@ -11,7 +11,8 @@ import (
 // instead of handing pathnames to git apply after validation.
 //
 // Supported: file modifications, creations (--- /dev/null) and deletions
-// (+++ /dev/null), multiple hunks per file, "\ No newline at end of file"
+// (+++ /dev/null, verified against the content the hunks expect to remove),
+// multiple hunks per file, "\ No newline at end of file"
 // markers, a/ and b/ prefixes, git C-quoted paths, CRLF patches, and git's
 // "rename from/to" and "copy from/to" headers (with or without hunks). Headers
 // git emits around a hunk (diff --git, index, mode lines) are skipped; binary
@@ -54,6 +55,10 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 			if len(current.chunks) == 0 && current.movePath == "" {
 				return fmt.Errorf("unified diff for %s has no hunk lines", current.path)
 			}
+		case structuredPatchDelete:
+			if len(current.chunks) == 0 || !allStructuredPatchChunksHaveContent(current.chunks) {
+				return fmt.Errorf("unified deletion of %s must include the hunk with the content being removed", current.path)
+			}
 		}
 		operations = append(operations, *current)
 		current, chunk, added = nil, nil, nil
@@ -78,7 +83,9 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 		case oldPath == "/dev/null":
 			op.kind, op.path = structuredPatchAdd, newPath
 		case newPath == "/dev/null":
-			op.kind, op.path = structuredPatchDelete, oldPath
+			// A unified deletion states the content it expects to remove; keep
+			// its hunks so the planner verifies them before deleting.
+			op.kind, op.path, op.verifyDelete = structuredPatchDelete, oldPath, true
 		default:
 			op.kind, op.path = structuredPatchUpdate, oldPath
 			if newPath != oldPath {
@@ -220,7 +227,7 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 			oldRemaining, newRemaining = oldCount, newCount
 			inHunk = oldRemaining > 0 || newRemaining > 0
 			lastSide = 0
-			if current.kind == structuredPatchUpdate || current.kind == structuredPatchCopy {
+			if current.kind != structuredPatchAdd {
 				next := structuredPatchChunk{hasHint: true, hint: oldStart - 1}
 				if oldCount == 0 {
 					// A pure insertion's range names the line after which the

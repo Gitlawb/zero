@@ -46,6 +46,11 @@ type structuredPatchOperation struct {
 	// force the trailing-newline state of the result; structured patches keep
 	// the file's existing state.
 	eofNewline eofNewlineMode
+	// verifyDelete marks a deletion that carries the expected old content
+	// (a unified diff's "+++ /dev/null" hunks): the chunks must remove the
+	// whole current file, otherwise the deletion is stale and refused. A
+	// structured "*** Delete File" means "delete this path" and has no chunks.
+	verifyDelete bool
 }
 
 type eofNewlineMode uint8
@@ -398,6 +403,15 @@ func planStructuredPatch(root *os.Root, operations []structuredPatchOperation, t
 				return nil, fmt.Errorf("%s", fileConflictMessage(from.relative))
 			}
 			change.before = string(content)
+			if operation.kind == structuredPatchDelete && operation.verifyDelete {
+				remaining, err := applyStructuredPatchUpdate(change.before, from.relative, operation.chunks)
+				if err != nil {
+					return nil, fmt.Errorf("deletion of %s does not match its current content: %w", from.relative, err)
+				}
+				if strings.TrimSpace(remaining) != "" {
+					return nil, fmt.Errorf("deletion of %s leaves content behind; the hunks must remove the whole file", from.relative)
+				}
+			}
 			if operation.kind == structuredPatchUpdate || operation.kind == structuredPatchCopy {
 				updated, err := applyStructuredPatchUpdate(change.before, from.relative, operation.chunks)
 				if err != nil {
@@ -657,6 +671,19 @@ func forgetStructuredPatchFiles(tracker *FileTracker, changes []structuredPatchC
 }
 
 func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bool, error) {
+	// The planner validated the source against the bytes it read; re-read
+	// through the same root immediately before committing so a change made
+	// by another process in between is refused rather than overwritten or
+	// removed.
+	if change.kind != structuredPatchAdd {
+		current, err := root.ReadFile(change.from.relative)
+		if err != nil {
+			return false, fmt.Errorf("re-reading %s before commit: %w", change.from.relative, err)
+		}
+		if string(current) != change.before {
+			return false, fmt.Errorf("%s changed on disk between planning and commit; re-read it and retry", change.from.relative)
+		}
+	}
 	switch change.kind {
 	case structuredPatchDelete:
 		if err := root.Remove(change.from.relative); err != nil {
