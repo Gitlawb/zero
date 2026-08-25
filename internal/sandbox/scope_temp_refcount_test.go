@@ -155,7 +155,7 @@ func TestAReadCoveredByATemporaryWriteSurvivesItsRelease(t *testing.T) {
 }
 
 func hasExtraRoot(scope *Scope, root string) bool {
-	for _, existing := range scope.ExtraRoots() {
+	for _, existing := range writeRootsBeyondWorkspace(scope) {
 		if existing == root {
 			return true
 		}
@@ -219,7 +219,7 @@ func TestAPermanentGrantSurvivesTheTemporaryOneItCovered(t *testing.T) {
 		}
 		releaseBroad()
 		covered := false
-		for _, existing := range scope.ExtraRoots() {
+		for _, existing := range writeRootsBeyondWorkspace(scope) {
 			if pathWithinRoot(existing, inner) {
 				covered = true
 			}
@@ -400,7 +400,7 @@ func TestAReaderOutlivingItsWriterKeepsReadAuthorityOnly(t *testing.T) {
 		// The WRITE holder finishes; only the read-only holder is left.
 		releaseWrite()
 
-		if got := scope.ExtraRoots(); len(got) != 0 {
+		if got := writeRootsBeyondWorkspace(scope); len(got) != 0 {
 			t.Errorf("ExtraRoots() = %v, want none: the reader held the write root open", got)
 		}
 		if got, want := scope.ReadRoots(), []string{workspace, inner}; !slices.Equal(got, want) {
@@ -459,7 +459,7 @@ func TestAReaderOutlivingItsWriterKeepsReadAuthorityOnly(t *testing.T) {
 		if block := scope.validate(buildLog); block != nil {
 			t.Fatalf("the reader's cleanup revoked the live write grant on %q: %v", buildLog, block)
 		}
-		if got, want := scope.ExtraRoots(), []string{outer}; !slices.Equal(got, want) {
+		if got, want := writeRootsBeyondWorkspace(scope), []string{outer}; !slices.Equal(got, want) {
 			t.Errorf("ExtraRoots() = %v, want %v", got, want)
 		}
 
@@ -576,4 +576,20 @@ func TestTwoHoldersOfTheSameWriteRootShareOneEntry(t *testing.T) {
 	if block := scope.validate(filepath.Join(target, "gone.txt")); block == nil {
 		t.Error("the shared root outlived both holders")
 	}
+}
+
+// writeRootsBeyondWorkspace is Roots() without the workspace entry.
+//
+// These tests need to see which BEYOND-WORKSPACE write roots a scope currently
+// holds. There was an ExtraRoots() accessor that answered exactly this, but it
+// had no production caller — it belongs to #829's child-grant propagation, whose
+// consumer side is not on this branch, and @jatmn was right that carrying it here
+// leaves unrelated production surface in a PR scoped to refcounting. The
+// inspection is a test concern, so it lives in the tests.
+func writeRootsBeyondWorkspace(scope *Scope) []string {
+	all := scope.Roots()
+	if len(all) == 0 {
+		return nil
+	}
+	return append([]string(nil), all[1:]...)
 }

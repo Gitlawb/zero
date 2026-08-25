@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"path/filepath"
-	"slices"
 	"testing"
 )
 
@@ -24,34 +23,6 @@ func TestAReadGrantIsReadableButNotWritable(t *testing.T) {
 	}
 	if block := scope.validate(target); block == nil {
 		t.Fatalf("a read grant ALLOWED WRITING %q — a read grant escalated to write", target)
-	}
-}
-
-// ExtraReadRoots carries a read grant that ExtraRoots() omits, and never the
-// workspace root. This is the bug: a request_permissions READ grant lands in
-// readRoots, which ExtraRoots() (write grants only) does not return — so a child
-// handed only ExtraRoots() cannot read a path the parent was granted.
-//
-// The grant is created OUTSIDE the default temp roots (/tmp, $TMPDIR), which
-// NewScope seeds as write roots: a t.TempDir() grant would collapse into them and
-// prove nothing.
-func TestExtraReadRootsCarriesAReadGrantThatExtraRootsOmits(t *testing.T) {
-	scope, readGrant := grantOutsideDefaults(t)
-	readRoot, err := scope.AddRead(readGrant) // request_permissions read grant -> readRoots
-	if err != nil {
-		t.Fatalf("AddRead: %v", err)
-	}
-
-	if slices.Contains(scope.ExtraRoots(), readRoot) {
-		t.Fatalf("ExtraRoots carried the read grant %q — then there would be no bug to fix", readRoot)
-	}
-	if !slices.Contains(scope.ExtraReadRoots(), readRoot) {
-		t.Fatalf("ExtraReadRoots omitted the read grant %q: %v — a read-only child cannot audit a granted path",
-			readRoot, scope.ExtraReadRoots())
-	}
-	if slices.Contains(scope.ExtraReadRoots(), scope.WorkspaceRoot()) {
-		t.Fatalf("ExtraReadRoots included the workspace root %q — a worktree child would re-open the parent tree",
-			scope.WorkspaceRoot())
 	}
 }
 

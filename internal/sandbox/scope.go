@@ -59,19 +59,6 @@ func (s *Scope) WorkspaceRoot() string {
 }
 
 // Roots returns the workspace root first, then the extra roots, as a copy.
-// ExtraRoots returns ONLY the roots granted beyond the workspace, as a copy.
-//
-// Roots() includes the workspace root as well, which is right for a caller
-// asking "everything this run may write". It is wrong for a caller asking "what
-// does this run hold BEYOND its workspace" — and one such caller launches child
-// agents in an isolated worktree, where handing back the parent's workspace root
-// re-opens the very tree the worktree exists to protect.
-func (s *Scope) ExtraRoots() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]string(nil), s.extraRoots...)
-}
-
 func (s *Scope) Roots() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -89,27 +76,6 @@ func (s *Scope) ReadRoots() []string {
 	defer s.mu.RUnlock()
 	roots := make([]string, 0, 1+len(s.extraRoots)+len(s.readRoots))
 	roots = append(roots, s.workspaceRoot)
-	roots = append(roots, s.extraRoots...)
-	roots = append(roots, s.readRoots...)
-	return dedupeScopeRoots(roots)
-}
-
-// ExtraReadRoots returns every path the run may READ BEYOND its workspace — the
-// write grants AND the read-only grants, deduped, as a copy. It is ReadRoots()
-// without the workspace root.
-//
-// It exists for the same caller ExtraRoots() does: a child agent dispatched into
-// its own workspace, which the parent must be able to hand its beyond-workspace
-// access without also handing back the parent workspace root (see ExtraRoots).
-// ExtraRoots() alone is not enough for that child, because a read grant from
-// request_permissions lands in readRoots, not extraRoots — so a child given only
-// ExtraRoots() can read what the parent may WRITE beyond its workspace but not
-// what it was granted to READ, and a read-only audit of a granted path fails
-// "outside the workspace" for want of exactly this list.
-func (s *Scope) ExtraReadRoots() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	roots := make([]string, 0, len(s.extraRoots)+len(s.readRoots))
 	roots = append(roots, s.extraRoots...)
 	roots = append(roots, s.readRoots...)
 	return dedupeScopeRoots(roots)
@@ -263,16 +229,16 @@ func (s *Scope) AddTemporaryRead(path string) (string, func(), error) {
 	//
 	// One reference cannot be both the lifetime and the capability. The lifetime
 	// is kept below, as a temporary READ root for the path this caller actually
-	// asked for. readRoots feeds ReadRoots() and ExtraReadRoots(), and neither
-	// confers write authority — validate() authorises writes from workspaceRoot
-	// plus extraRoots, which this path never enters. So the reader survives its
-	// writer with read authority and only read authority.
+	// asked for. readRoots feeds ReadRoots(), which confers no write authority —
+	// validate() authorises writes from workspaceRoot plus extraRoots, and this
+	// path never enters that list. So the reader survives its writer with read
+	// authority and only read authority.
 	//
-	// That list matters more than it looks: it is the written justification for
-	// the whole design, so it has to be exhaustive rather than approximately
-	// right. An earlier draft of this comment said readRoots fed ReadRoots() and
-	// nothing else, which was false — a reviewer checking the claim would have
-	// found ExtraReadRoots() and been right to distrust the rest of it.
+	// That claim is the written justification for the whole design, so it has to
+	// stay exhaustive as the accessors change. It has already been wrong once, in
+	// both directions: an earlier draft said readRoots fed ReadRoots() and nothing
+	// else while ExtraReadRoots() also read it, and that accessor has since been
+	// removed as belonging to a different change.
 	if s.permanentReadRootCoversLocked(root) {
 		return root, func() {}, nil
 	}
