@@ -32,6 +32,9 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 	var added []string // collected "+" lines for a file creation
 	oldPath, newPath := "", ""
 	pendingFrom, pendingKind := "", structuredPatchUpdate
+	// git's header-only forms: "deleted file mode" / "new file mode" after a
+	// "diff --git" line with no ---/+++ pair describe an empty file.
+	diffPath, headerOnly := "", byte(0) // headerOnly is 'd' (deleted) or 'n' (new)
 	oldRemaining, newRemaining := 0, 0
 	inHunk := false
 	lastSide := byte(0) // '+' or '-' for the most recent content line
@@ -64,7 +67,28 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 		current, chunk, added = nil, nil, nil
 		return nil
 	}
+	flushHeaderOnly := func(line int) error {
+		if headerOnly == 0 {
+			return nil
+		}
+		if diffPath == "" {
+			return fmt.Errorf("invalid unified diff at line %d: file mode header without a diff --git path", line)
+		}
+		if err := finish(); err != nil {
+			return err
+		}
+		switch headerOnly {
+		case 'd':
+			operations = append(operations, structuredPatchOperation{kind: structuredPatchDelete, path: diffPath, line: line, verifyDelete: true})
+		case 'n':
+			operations = append(operations, structuredPatchOperation{kind: structuredPatchAdd, path: diffPath, line: line})
+		}
+		headerOnly, diffPath = 0, ""
+		return nil
+	}
 	startFile := func(line int) error {
+		// A ---/+++ pair means the file has hunks; it is not header-only.
+		headerOnly, diffPath = 0, ""
 		if oldPath == "" || newPath == "" {
 			return fmt.Errorf("invalid unified diff at line %d: hunk before a ---/+++ header pair", line)
 		}
@@ -112,8 +136,11 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 				// "\ No newline at end of file" qualifies the previous line's side.
 				if current != nil && lastSide == '+' {
 					current.eofNewline = eofNewlineAbsent
-				} else if current != nil && lastSide == '-' && current.eofNewline == eofNewlineKeep {
-					current.eofNewline = eofNewlinePresent
+				} else if current != nil && lastSide == '-' {
+					current.oldNoNewline = true
+					if current.eofNewline == eofNewlineKeep {
+						current.eofNewline = eofNewlinePresent
+					}
 				}
 				continue
 			case strings.HasPrefix(raw, "-"):
@@ -165,13 +192,26 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 			// "\ No newline at end of file" directly after a hunk's last line.
 			if current != nil && lastSide == '+' {
 				current.eofNewline = eofNewlineAbsent
-			} else if current != nil && lastSide == '-' && current.eofNewline == eofNewlineKeep {
-				current.eofNewline = eofNewlinePresent
+			} else if current != nil && lastSide == '-' {
+				current.oldNoNewline = true
+				if current.eofNewline == eofNewlineKeep {
+					current.eofNewline = eofNewlinePresent
+				}
 			}
 			continue
-		case strings.HasPrefix(raw, "diff --git "), strings.HasPrefix(raw, "index "),
-			strings.HasPrefix(raw, "new file mode "), strings.HasPrefix(raw, "deleted file mode "),
-			strings.HasPrefix(raw, "old mode "), strings.HasPrefix(raw, "new mode "):
+		case strings.HasPrefix(raw, "diff --git "):
+			if err := flushHeaderOnly(lineNumber); err != nil {
+				return nil, err
+			}
+			diffPath = diffGitNewPath(raw)
+			continue
+		case strings.HasPrefix(raw, "deleted file mode "):
+			headerOnly = 'd'
+			continue
+		case strings.HasPrefix(raw, "new file mode "):
+			headerOnly = 'n'
+			continue
+		case strings.HasPrefix(raw, "index "), strings.HasPrefix(raw, "old mode "), strings.HasPrefix(raw, "new mode "):
 			continue
 		case strings.HasPrefix(raw, "similarity index "), strings.HasPrefix(raw, "dissimilarity index "):
 			continue
@@ -252,6 +292,9 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 	if inHunk && (oldRemaining > 0 || newRemaining > 0) {
 		return nil, fmt.Errorf("invalid unified diff at line %d: hunk ended before its declared line counts", len(lines))
 	}
+	if err := flushHeaderOnly(len(lines)); err != nil {
+		return nil, err
+	}
 	if err := finish(); err != nil {
 		return nil, err
 	}
@@ -259,6 +302,37 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 		return nil, fmt.Errorf("unified diff contains no file changes")
 	}
 	return operations, nil
+}
+
+// diffGitNewPath returns the post-image path named by a "diff --git a/X b/Y"
+// line, handling git's C-quoted form; "" when it cannot be determined.
+func diffGitNewPath(line string) string {
+	rest := strings.TrimSpace(strings.TrimPrefix(line, "diff --git "))
+	if strings.HasPrefix(rest, "\"") {
+		// Two quoted tokens: skip the first, unquote the second.
+		end := strings.Index(rest[1:], "\"")
+		for end > 0 && rest[end] == '\\' {
+			next := strings.Index(rest[end+2:], "\"")
+			if next < 0 {
+				return ""
+			}
+			end += next + 2
+		}
+		if end < 0 || end+2 > len(rest) {
+			return ""
+		}
+		rest = strings.TrimSpace(rest[end+2:])
+		return stripPatchPrefix(unquoteGitPath(rest))
+	}
+	fields := strings.Fields(rest)
+	if len(fields) < 2 {
+		return ""
+	}
+	last := fields[len(fields)-1]
+	if strings.HasPrefix(last, "\"") {
+		return stripPatchPrefix(unquoteGitPath(last))
+	}
+	return stripPatchPrefix(last)
 }
 
 // parseHunkRange reads "@@ -a[,b] +c[,d] @@" and returns a, b and d; a missing

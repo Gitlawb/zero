@@ -47,10 +47,14 @@ type structuredPatchOperation struct {
 	// the file's existing state.
 	eofNewline eofNewlineMode
 	// verifyDelete marks a deletion that carries the expected old content
-	// (a unified diff's "+++ /dev/null" hunks): the chunks must remove the
-	// whole current file, otherwise the deletion is stale and refused. A
-	// structured "*** Delete File" means "delete this path" and has no chunks.
+	// (a unified diff's "+++ /dev/null" hunks, or git's header-only form for
+	// an empty file): the removed lines must equal the current file byte for
+	// byte, otherwise the deletion is stale and refused. A structured
+	// "*** Delete File" means "delete this path" and has no chunks.
 	verifyDelete bool
+	// oldNoNewline records a unified diff's "\ No newline at end of file"
+	// on the removed side, i.e. the old content did not end with a newline.
+	oldNoNewline bool
 }
 
 type eofNewlineMode uint8
@@ -404,12 +408,8 @@ func planStructuredPatch(root *os.Root, operations []structuredPatchOperation, t
 			}
 			change.before = string(content)
 			if operation.kind == structuredPatchDelete && operation.verifyDelete {
-				remaining, err := applyStructuredPatchUpdate(change.before, from.relative, operation.chunks)
-				if err != nil {
-					return nil, fmt.Errorf("deletion of %s does not match its current content: %w", from.relative, err)
-				}
-				if strings.TrimSpace(remaining) != "" {
-					return nil, fmt.Errorf("deletion of %s leaves content behind; the hunks must remove the whole file", from.relative)
+				if err := verifyUnifiedDeletion(change.before, from.relative, operation); err != nil {
+					return nil, err
 				}
 			}
 			if operation.kind == structuredPatchUpdate || operation.kind == structuredPatchCopy {
@@ -537,6 +537,36 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 		updated += lineEnding
 	}
 	return updated, nil
+}
+
+// verifyUnifiedDeletion checks, byte for byte, that the lines a unified
+// deletion removes are exactly the file's current content. A deletion is not
+// recoverable, so none of the whitespace tolerance used to locate update
+// hunks applies here; only the file's own line-ending style is normalised.
+// With no hunks (git's header-only form) the file must be empty.
+func verifyUnifiedDeletion(current, path string, operation structuredPatchOperation) error {
+	var removed []string
+	for _, chunk := range operation.chunks {
+		if len(chunk.new) > 0 {
+			return fmt.Errorf("deletion of %s must not add lines", path)
+		}
+		removed = append(removed, chunk.old...)
+	}
+	expected := strings.Join(removed, "\n")
+	if len(removed) > 0 && !operation.oldNoNewline {
+		expected += "\n"
+	}
+	actual := current
+	if structuredPatchLineEnding(current) == "\r\n" {
+		actual = strings.ReplaceAll(current, "\r\n", "\n")
+	}
+	if actual != expected {
+		if len(removed) == 0 {
+			return fmt.Errorf("deletion of %s expects an empty file but it has content; include the removed lines in the patch", path)
+		}
+		return fmt.Errorf("deletion of %s does not match its current content; the removed lines must equal the whole file", path)
+	}
+	return nil
 }
 
 // sequenceMatchesAt reports whether wanted appears verbatim at lines[start:].

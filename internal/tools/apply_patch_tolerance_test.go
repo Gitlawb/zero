@@ -504,7 +504,7 @@ func TestUnifiedPatchDeletionVerifiesExpectedContent(t *testing.T) {
 		root := t.TempDir()
 		writeTestFile(t, filepath.Join(root, "gone.txt"), "one\ntwo\n")
 		result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": deletion("gone.txt", "@@ -1 +0,0 @@", "-one")})
-		if result.Status == StatusOK || !strings.Contains(result.Output, "leaves content behind") {
+		if result.Status == StatusOK || !strings.Contains(result.Output, "does not match its current content") {
 			t.Fatalf("deletion that does not cover the file must be refused, got %s: %s", result.Status, result.Output)
 		}
 		if content, _ := os.ReadFile(filepath.Join(root, "gone.txt")); string(content) != "one\ntwo\n" {
@@ -564,9 +564,11 @@ func TestApplyStructuredPatchChangeRefusesSourceChangedAfterPlanning(t *testing.
 	}
 	defer workspace.Close()
 	target := structuredPatchTarget{requested: "file.txt", absolute: path, relative: "file.txt"}
+	destination := structuredPatchTarget{requested: "copy.txt", absolute: filepath.Join(root, "copy.txt"), relative: "copy.txt"}
 	for name, change := range map[string]structuredPatchChange{
 		"update": {kind: structuredPatchUpdate, from: target, to: target, before: "planned\n", after: "new\n", mode: 0o644},
 		"delete": {kind: structuredPatchDelete, from: target, to: target, before: "planned\n", mode: 0o644},
+		"copy":   {kind: structuredPatchCopy, from: target, to: destination, before: "planned\n", after: "planned\n", mode: 0o644},
 	} {
 		writeTestFile(t, path, "changed after planning\n")
 		committed, err := applyStructuredPatchChange(workspace, change)
@@ -576,5 +578,91 @@ func TestApplyStructuredPatchChangeRefusesSourceChangedAfterPlanning(t *testing.
 		if content, _ := os.ReadFile(path); string(content) != "changed after planning\n" {
 			t.Fatalf("%s: file must be untouched, got %q", name, string(content))
 		}
+		if _, statErr := os.Stat(filepath.Join(root, "copy.txt")); !os.IsNotExist(statErr) {
+			t.Fatalf("%s: refused change must not create copy.txt", name)
+		}
+	}
+}
+
+func TestUnifiedPatchDeletionIsByteExact(t *testing.T) {
+	deletion := func(hunks ...string) string {
+		return strings.Join(append(append([]string{"--- a/gone.txt", "+++ /dev/null"}, hunks...), ""), "\n")
+	}
+	for name, tc := range map[string]struct{ file, patch string }{
+		"trailing whitespace differs": {"current  \n", deletion("@@ -1 +0,0 @@", "-current")},
+		"indentation differs":         {"  current\n", deletion("@@ -1 +0,0 @@", "-current")},
+		"blank line not covered":      {"current\n\n", deletion("@@ -1 +0,0 @@", "-current")},
+		"space-only line not covered": {"current\n   \n", deletion("@@ -1 +0,0 @@", "-current")},
+		"missing final newline":       {"current", deletion("@@ -1 +0,0 @@", "-current")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "gone.txt"), tc.file)
+			result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": tc.patch})
+			if result.Status == StatusOK {
+				t.Fatalf("deletion must be byte-exact; %q was deleted by a non-matching hunk", tc.file)
+			}
+			if content, _ := os.ReadFile(filepath.Join(root, "gone.txt")); string(content) != tc.file {
+				t.Fatalf("file must be unchanged, got %q", string(content))
+			}
+		})
+	}
+	t.Run("no-newline marker on the removed side matches exactly", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "current")
+		patch := deletion("@@ -1 +0,0 @@", "-current", "\\ No newline at end of file")
+		if result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch}); result.Status != StatusOK {
+			t.Fatalf("deletion with a matching no-newline marker should apply, got %s: %s", result.Status, result.Output)
+		}
+		if _, err := os.Stat(filepath.Join(root, "gone.txt")); !os.IsNotExist(err) {
+			t.Fatal("file must be deleted")
+		}
+	})
+	t.Run("CRLF file matches an LF patch of the same content", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, filepath.Join(root, "gone.txt"), "a\r\nb\r\n")
+		if result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": deletion("@@ -1,2 +0,0 @@", "-a", "-b")}); result.Status != StatusOK {
+			t.Fatalf("CRLF deletion should apply, got %s: %s", result.Status, result.Output)
+		}
+	})
+}
+
+// git describes an empty file's creation or deletion with header lines only.
+func TestUnifiedPatchHeaderOnlyEmptyFileForms(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "empty.txt"), "")
+	writeTestFile(t, filepath.Join(root, "full.txt"), "content\n")
+	writeTestFile(t, filepath.Join(root, "keep.txt"), "a\n")
+	deleteHeader := func(path string) string {
+		return "diff --git a/" + path + " b/" + path + "\ndeleted file mode 100644\nindex e69de29..0000000\n"
+	}
+	// A non-empty file is not deleted by the header-only form.
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": deleteHeader("full.txt")})
+	if result.Status == StatusOK || !strings.Contains(result.Output, "expects an empty file") {
+		t.Fatalf("header-only deletion of a non-empty file must be refused, got %s: %s", result.Status, result.Output)
+	}
+	if _, err := os.Stat(filepath.Join(root, "full.txt")); err != nil {
+		t.Fatal("non-empty file must still exist")
+	}
+	// In a multi-file patch the empty-file deletion and creation are applied
+	// alongside a normal hunk.
+	patch := deleteHeader("empty.txt") +
+		"diff --git a/blank.txt b/blank.txt\nnew file mode 100644\nindex 0000000..e69de29\n" +
+		"diff --git a/keep.txt b/keep.txt\n--- a/keep.txt\n+++ b/keep.txt\n@@ -1 +1 @@\n-a\n+b\n"
+	result = NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("multi-file patch with header-only forms should apply, got %s: %s", result.Status, result.Output)
+	}
+	if _, err := os.Stat(filepath.Join(root, "empty.txt")); !os.IsNotExist(err) {
+		t.Fatal("empty file must be deleted")
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "blank.txt")); err != nil || len(content) != 0 {
+		t.Fatalf("empty file must be created, got err=%v content=%q", err, string(content))
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "keep.txt")); string(content) != "b\n" {
+		t.Fatalf("hunk file = %q", string(content))
+	}
+	if len(result.ChangedFiles) != 3 {
+		t.Fatalf("changed files = %v", result.ChangedFiles)
 	}
 }
