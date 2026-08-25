@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/pathjail"
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 const (
@@ -64,13 +65,6 @@ type structuredPatchChange struct {
 	mode   os.FileMode
 }
 
-// structuredPatchMarkerPattern accepts the canonical "*** Begin Patch" /
-// "*** End Patch" markers plus the decorated spellings models commonly emit
-// ("*** Begin Patch ***", "***Begin Patch", trailing whitespace). A strict
-// byte-equal match here made every patch from some models fail on line 1 and
-// pushed them into whole-file rewrites.
-var structuredPatchMarkerPattern = regexp.MustCompile(`^\*{3}\s*(Begin|End) Patch\s*\**\s*$`)
-
 // unifiedHunkRangePattern recognises a unified-diff range header ("-12,4 +12,6",
 // optionally followed by "@@ heading") written inside a structured hunk marker.
 // The line numbers carry no information for the context-anchored grammar, so
@@ -80,13 +74,12 @@ var unifiedHunkRangePattern = regexp.MustCompile(`^-\d+(?:,\d+)?\s+\+\d+(?:,\d+)
 const structuredPatchFormatHint = ` (format: "*** Begin Patch", then "*** Update File: path" / "*** Add File: path" / "*** Delete File: path" sections whose hunks start with "@@" and use " " context, "-" removed and "+" added lines, then "*** End Patch")`
 
 // structuredPatchMarker classifies a line as the "begin" or "end" marker of a
-// structured patch, or "" when it is neither.
+// structured patch, or "" when it is neither. The classifier is owned by the
+// sandbox package so the boundary check and the tool accept exactly the same
+// spellings; a strict byte-equal match here once made every patch from some
+// models fail on line 1 and pushed them into whole-file rewrites.
 func structuredPatchMarker(line string) string {
-	match := structuredPatchMarkerPattern.FindStringSubmatch(strings.TrimSpace(line))
-	if match == nil {
-		return ""
-	}
-	return strings.ToLower(match[1])
+	return sandbox.StructuredPatchMarker(line)
 }
 
 // structuredHunkAnchor normalises the text after a hunk's "@@ " marker. A
@@ -101,8 +94,7 @@ func structuredHunkAnchor(context string) string {
 }
 
 func isStructuredPatch(patch string) bool {
-	first, _, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "\n")
-	return structuredPatchMarker(first) == "begin"
+	return sandbox.IsStructuredPatch(patch)
 }
 
 func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch string, options RunOptions) Result {

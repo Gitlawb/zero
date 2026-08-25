@@ -300,8 +300,35 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	return nil
 }
 
+// structuredPatchMarkerPattern is the single classifier for structured-patch
+// markers, shared by the sandbox boundary and the apply_patch tool (which
+// imports this package). It accepts the canonical "*** Begin Patch" /
+// "*** End Patch" and the decorated spellings models emit ("*** Begin Patch ***",
+// "***Begin Patch", trailing whitespace). Both sides must agree: a spelling the
+// tool would apply but the sandbox did not recognise would make the sandbox
+// scan the patch as a unified diff, extract no targets, and validate nothing.
+var structuredPatchMarkerPattern = regexp.MustCompile(`^\*{3}\s*(Begin|End) Patch\s*\**\s*$`)
+
+// StructuredPatchMarker classifies a line as the "begin" or "end" marker of a
+// structured patch, or "" when it is neither.
+func StructuredPatchMarker(line string) string {
+	match := structuredPatchMarkerPattern.FindStringSubmatch(strings.TrimSpace(line))
+	if match == nil {
+		return ""
+	}
+	return strings.ToLower(match[1])
+}
+
+// IsStructuredPatch reports whether patch opens with a structured begin marker.
+// The tool applies exactly the patches this returns true for, so the sandbox
+// extracts structured header paths for exactly the same set.
+func IsStructuredPatch(patch string) bool {
+	first, _, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "\n")
+	return StructuredPatchMarker(first) == "begin"
+}
+
 func applyPatchPaths(patch string) []string {
-	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
+	if IsStructuredPatch(patch) {
 		return structuredPatchHeaderPaths(patch)
 	}
 	return patchHeaderPaths(patch)

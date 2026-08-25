@@ -59,8 +59,18 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 		return errorResult("Error applying patch: " + err.Error())
 	}
 	if isStructuredPatch(patch) {
+		// Structured patches (the format models use) are applied by Zero itself
+		// through an opened workspace root (os.Root): every read, create and
+		// write below is descriptor-relative and no-follow, so there is no
+		// pathname check-to-use window.
 		return tool.runStructuredPatch(applyRoot, relativeRoot, patch, options)
 	}
+	// Unified diffs are handed to git apply, which opens targets by name after
+	// the pathname checks below; that pre-existing check-to-use window is the
+	// same one the relative-path flow always had. Absolute paths are only ever
+	// rewritten to the same root-relative form relative paths already use, so
+	// this does not widen it. Moving unified diffs onto the os.Root path is a
+	// separate change.
 	patch = relativizeUnifiedPatchPaths(applyRoot, patch)
 	if err := validatePatchPaths(applyRoot, patch); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
