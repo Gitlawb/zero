@@ -3,12 +3,91 @@
 package execution
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// requireProcessState refuses to let a broken ps pipeline masquerade as passing
+// coverage. Every test in this file proves something about zombie detection,
+// and every one of those proofs is read out of ps — so if ps cannot report
+// state, the tests verify nothing whatever they do next.
+//
+// The old code answered that with t.Skip, which is indistinguishable from
+// success in CI output. This probes BOTH ps pipelines against this test
+// process, which is by definition alive and not a zombie, so a working ps must
+// report a live state for it. Failing that:
+//
+//   - In CI (or with ZERO_REQUIRE_PS=1) it is a hard failure. ps is present on
+//     every image used today, so its absence means the pipeline regressed and
+//     that has to surface immediately rather than as skipped-green.
+//   - Elsewhere it stays a skip, so a contributor on an exotic box is not
+//     blocked by an environment the project does not claim to support.
+//
+// This only covers "ps cannot report state at all". Once it passes, a later
+// failure to observe an EXPECTED state is a real defect, and the tests below
+// treat it as one.
+func requireProcessState(t *testing.T) {
+	t.Helper()
+	self := os.Getpid()
+	var reasons []string
+	// The production path: ps -A -o pid=,pgid=,stat=, parsed by
+	// processTableStateMatches. This is what signalTargetRunning consults.
+	if running, ok := processIsRunning(self); !ok || !running {
+		reasons = append(reasons, "the process table read used by signalTargetRunning reported no live state for this test process")
+	}
+	// This file's independent oracle: ps -o stat= -p <pid>. It is deliberately
+	// NOT the production parser, so a regression in that parser cannot hide by
+	// breaking the test's own precondition check in the same way.
+	if zombie, ok := processIsZombie(self); !ok || zombie {
+		reasons = append(reasons, "the per-PID state read used by this test file reported no live state for this test process")
+	}
+	if len(reasons) == 0 {
+		return
+	}
+	reason := "cannot read process state, so ps-based zombie detection is unverifiable here: " + strings.Join(reasons, "; ")
+	if requireWorkingPS() {
+		t.Fatal(reason + " — failing rather than skipping because CI (or ZERO_REQUIRE_PS) is set, where ps is expected to work")
+	}
+	t.Skip(reason)
+}
+
+// requireWorkingPS reports whether an unusable ps must fail the run instead of
+// skipping it. ZERO_REQUIRE_PS lets a developer opt into the strict behavior
+// locally to reproduce what CI does.
+func requireWorkingPS() bool {
+	if strings.TrimSpace(os.Getenv("ZERO_REQUIRE_PS")) != "" {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv("CI")) != ""
+}
+
+// awaitZombie blocks until pid is an unreaped zombie. The caller must not have
+// waited on the child, so the zombie is a stable state rather than a race: it
+// persists until something reaps it. Failing to reach it therefore means the
+// child never exited or ps stopped reporting its state, and both are defects
+// rather than reasons to skip.
+func awaitZombie(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		zombie, ok := processIsZombie(pid)
+		if ok && zombie {
+			return
+		}
+		if time.Now().After(deadline) {
+			if !ok {
+				t.Fatalf("pid %d left the process table without being reaped; this test never waited on it, so its zombie row must persist", pid)
+			}
+			t.Fatalf("pid %d did not reach the zombie state within 5s", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 // TestTerminateProcessTreeTreatsZombieGroupAsExited is the regression test for
 // counting unreaped processes as alive: kill(2) with signal 0 succeeds for a
@@ -17,6 +96,8 @@ import (
 // as "did not exit after SIGKILL" — a spurious cleanup failure whose timing
 // depended on when the reaper ran.
 func TestTerminateProcessTreeTreatsZombieGroupAsExited(t *testing.T) {
+	requireProcessState(t)
+
 	cmd := exec.Command("sh", "-c", "exit 0")
 	ConfigureProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
@@ -27,18 +108,12 @@ func TestTerminateProcessTreeTreatsZombieGroupAsExited(t *testing.T) {
 	// is exactly the state a terminated tree passes through.
 	t.Cleanup(func() { _ = cmd.Wait() })
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if zombie, ok := processIsZombie(pid); ok && zombie {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Skip("child did not reach the zombie state; ps output is unavailable in this environment")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if syscall.Kill(-pid, syscall.Signal(0)) != nil {
-		t.Skip("the zombie group is no longer signalable; cannot exercise the case")
+	awaitZombie(t, pid)
+	// A zombie still occupies the process table, so its group stays signalable.
+	// If it does not, the case this test exists to cover is not present and the
+	// assertions below would pass without meaning anything.
+	if err := syscall.Kill(-pid, syscall.Signal(0)); err != nil {
+		t.Fatalf("the zombie group %d is not signalable (%v); the zombie case cannot be exercised", pid, err)
 	}
 
 	if signalTargetRunning(-pid) {
@@ -53,6 +128,8 @@ func TestTerminateProcessTreeTreatsZombieGroupAsExited(t *testing.T) {
 // a live member must still be seen as running and then actually stopped, so the
 // zombie tolerance above cannot degrade into ignoring real processes.
 func TestTerminateProcessTreeStopsRunningGroup(t *testing.T) {
+	requireProcessState(t)
+
 	cmd := exec.Command("sh", "-c", "sleep 30")
 	ConfigureProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
@@ -67,7 +144,15 @@ func TestTerminateProcessTreeStopsRunningGroup(t *testing.T) {
 	if err := TerminateProcessTree(pid, time.Second, 10*time.Millisecond); err != nil {
 		t.Fatalf("TerminateProcessTree: %v", err)
 	}
-	if running, ok := processGroupHasRunningMember(pid); ok && running {
+	// ok reports whether ANY row for this group was found. This test never waits
+	// on the child, so its zombie row must still be there — an unknown state
+	// means ps stopped answering, not that the group is gone. Treating that as a
+	// pass is what let this assertion succeed without checking anything.
+	running, ok := processGroupHasRunningMember(pid)
+	if !ok {
+		t.Fatalf("process group %d has no rows after termination; the unreaped child's zombie row must persist, so the group's state is undeterminable rather than clean", pid)
+	}
+	if running {
 		t.Fatal("the group still has a running member after termination")
 	}
 }
@@ -82,6 +167,8 @@ func TestTerminateProcessTreeStopsRunningGroup(t *testing.T) {
 // "unknown" resulted every time, and signalTargetRunning conservatively (and
 // incorrectly) treated a zombie individual-PID target as still running.
 func TestSignalTargetRunningTreatsZombieIndividualPIDAsExited(t *testing.T) {
+	requireProcessState(t)
+
 	cmd := exec.Command("sh", "-c", "exit 0")
 	// Deliberately do NOT call ConfigureProcessGroup: the child inherits this
 	// test process's group, so it is not its own leader and processSignalTarget
@@ -92,40 +179,38 @@ func TestSignalTargetRunningTreatsZombieIndividualPIDAsExited(t *testing.T) {
 	pid := cmd.Process.Pid
 	t.Cleanup(func() { _ = cmd.Wait() })
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if zombie, ok := processIsZombie(pid); ok && zombie {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Skip("child did not reach the zombie state; ps output is unavailable in this environment")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitZombie(t, pid)
 
 	target, err := processSignalTarget(pid)
 	if err != nil {
 		t.Fatalf("processSignalTarget: %v", err)
 	}
+	// The child inherited this process's group, so its PGID is this process's
+	// PID and can never equal its own PID. A negative target here would mean
+	// processSignalTarget misread the group, which is the very thing the
+	// individual-PID fallback exists to handle.
 	if target != pid {
-		t.Skip("child unexpectedly became its own group leader; cannot exercise the individual-PID fallback")
+		t.Fatalf("processSignalTarget(%d) = %d, want the individual PID: the child inherited this process's group, so it is not its own leader", pid, target)
 	}
 	if signalTargetRunning(target) {
 		t.Fatal("a zombie individual-PID target must not count as running")
 	}
 }
 
-// processIsZombie reports a process's zombie state via ps. ok is false when the
-// state could not be read.
+// processIsZombie reports a process's zombie state via ps. It is deliberately a
+// separate, per-PID ps invocation rather than a reuse of the production
+// process-table parser: these tests assert what that parser concludes, so
+// borrowing it to establish their own preconditions would let one regression
+// silence both sides at once.
+//
+// ok is false when no state could be read, which after requireProcessState has
+// passed means the process left the table rather than that ps is broken.
 func processIsZombie(pid int) (zombie bool, ok bool) {
 	output, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return false, false
 	}
-	state := string(output)
-	for len(state) > 0 && (state[0] == ' ' || state[0] == '\n' || state[0] == '\t') {
-		state = state[1:]
-	}
+	state := strings.TrimLeft(string(output), " \n\t")
 	if state == "" {
 		return false, false
 	}
