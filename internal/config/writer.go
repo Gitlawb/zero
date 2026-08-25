@@ -16,6 +16,19 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
+	return upsertProviderLocked(path, profile, setActive)
+}
+
+// upsertProviderLocked is UpsertProvider's body for a caller that already holds
+// the config lock. EnsureCatalogProvider reads the document and then upserts
+// into it, and the lock is not reentrant, so it must reach the work this way
+// rather than through the exported function.
+func upsertProviderLocked(path string, profile ProviderProfile, setActive bool) (FileConfig, error) {
 	profile.Name = strings.TrimSpace(profile.Name)
 	if profile.Name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -81,6 +94,14 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 	if err != nil {
 		return EnsuredProvider{}, err
 	}
+	// One lock spans the existence scan AND the upsert: releasing between them
+	// would let another process create the same catalog profile in the window,
+	// and the second writer would clobber the first.
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return EnsuredProvider{}, err
+	}
+	defer unlock()
 
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -104,7 +125,7 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 		BaseURL:      descriptor.DefaultBaseURL,
 		Model:        descriptor.DefaultModel,
 	}
-	written, err := UpsertProvider(path, profile, false)
+	written, err := upsertProviderLocked(path, profile, false)
 	if err != nil {
 		return EnsuredProvider{}, err
 	}
@@ -120,6 +141,11 @@ func MarkProviderAPIKeyStored(path string, provider string) error {
 	if path == "" {
 		return fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		return fmt.Errorf("provider name is required")
@@ -149,6 +175,11 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -215,6 +246,11 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -266,6 +302,11 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	oldName = strings.TrimSpace(oldName)
 	newName = strings.TrimSpace(newName)
 	if oldName == "" || newName == "" {
@@ -352,6 +393,11 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	oldName := strings.TrimSpace(edit.Name)
 	if oldName == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -466,6 +512,11 @@ func SetProviderModel(path string, name string, model string) (FileConfig, error
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -503,6 +554,11 @@ func SetFavoriteModels(path string, models []string) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -529,6 +585,11 @@ func SetRecentModels(path string, entries []RecentModelEntry) (FileConfig, error
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -553,6 +614,11 @@ func SetRecapsEnabled(path string, enabled bool) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -576,6 +642,11 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -598,6 +669,11 @@ func SetPet(path string, pet string) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	cfg := FileConfig{}
 	data := []byte("{}")
 	if existing, err := os.ReadFile(path); err == nil {
@@ -610,7 +686,7 @@ func SetPet(path string, pet string) (FileConfig, error) {
 	}
 	pet = strings.TrimSpace(pet)
 	cfg.Preferences.Pet = pet
-	data, err := setPetPreferenceJSON(data, pet)
+	data, err = setPetPreferenceJSON(data, pet)
 	if err != nil {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
@@ -629,6 +705,11 @@ func SetSTTModel(path string, provider STTProviderKind, model string) (FileConfi
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -665,6 +746,11 @@ func SetSTTLocalEngine(path, binary, serverBinary, modelPath string, streaming b
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -702,6 +788,11 @@ func SetSTTProvider(path string, provider STTProviderKind) (FileConfig, error) {
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {

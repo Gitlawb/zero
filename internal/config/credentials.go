@@ -86,6 +86,11 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 	if path == "" || provider == "" {
 		return false, nil
 	}
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -121,6 +126,13 @@ func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) 
 	if path == "" || store == nil {
 		return 0, nil
 	}
+	// This runs on every startup, so it is the most likely writer to be racing
+	// an interactive mutation in another Zero process.
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

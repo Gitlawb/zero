@@ -50,6 +50,13 @@ func SetProviderDescription(path string, name string, description string) (FileC
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
 	}
+	// Locks like the production mutators so this seam can stand in for one in a
+	// concurrency test rather than being the one unsynchronized writer.
+	unlock, err := lockConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer unlock()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
