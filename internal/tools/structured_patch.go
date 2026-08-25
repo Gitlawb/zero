@@ -30,6 +30,9 @@ const (
 	structuredPatchAdd structuredPatchKind = iota
 	structuredPatchDelete
 	structuredPatchUpdate
+	// structuredPatchCopy creates movePath from path's content (plus any
+	// hunks) and keeps path; produced by a unified diff's "copy from/to".
+	structuredPatchCopy
 )
 
 type structuredPatchOperation struct {
@@ -39,7 +42,19 @@ type structuredPatchOperation struct {
 	contents string
 	chunks   []structuredPatchChunk
 	line     int
+	// eofNewline lets a unified diff's "\ No newline at end of file" marker
+	// force the trailing-newline state of the result; structured patches keep
+	// the file's existing state.
+	eofNewline eofNewlineMode
 }
+
+type eofNewlineMode uint8
+
+const (
+	eofNewlineKeep eofNewlineMode = iota
+	eofNewlinePresent
+	eofNewlineAbsent
+)
 
 type structuredPatchChunk struct {
 	context          string
@@ -48,6 +63,11 @@ type structuredPatchChunk struct {
 	new              []string
 	newSourceOffsets []int
 	endOfFile        bool
+	// hint is the 0-based line the hunk is expected at (from a unified diff's
+	// "@@ -a,b" range). When the expected lines match there it is used as-is;
+	// otherwise the hunk is located by content like a structured hunk.
+	hint    int
+	hasHint bool
 }
 
 type structuredPatchTarget struct {
@@ -102,6 +122,14 @@ func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch str
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
+	return applyPatchOperations(applyRoot, relativeRoot, operations, options)
+}
+
+// applyPatchOperations applies parsed operations (from either patch format)
+// through an opened workspace root: every stat, read, create and write is
+// descriptor-relative and refuses to follow a link out of the root, so there
+// is no pathname check-to-use window between validation and write.
+func applyPatchOperations(applyRoot, relativeRoot string, operations []structuredPatchOperation, options RunOptions) Result {
 	workspace, err := os.OpenRoot(applyRoot)
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
@@ -114,7 +142,7 @@ func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch str
 	wholeBefore := make(map[string]bool, len(changes))
 	if options.FileTracker != nil {
 		for _, change := range changes {
-			if change.kind == structuredPatchUpdate {
+			if change.kind == structuredPatchUpdate || change.kind == structuredPatchCopy {
 				wholeBefore[change.from.absolute] = options.FileTracker.SeenWhole(change.from.absolute)
 			}
 		}
@@ -133,6 +161,10 @@ func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch str
 			wasWhole := wholeBefore[change.from.absolute]
 			options.FileTracker.Forget(change.from.absolute)
 			recordStructuredPatchFile(options.FileTracker, change.to.absolute, false, wasWhole)
+		case structuredPatchCopy:
+			// The source is untouched; the destination inherits only what the
+			// model had actually seen of the source.
+			recordStructuredPatchFile(options.FileTracker, change.to.absolute, true, wholeBefore[change.from.absolute])
 		}
 	}
 
@@ -352,7 +384,7 @@ func planStructuredPatch(root *os.Root, operations []structuredPatchOperation, t
 				return nil, err
 			}
 			change.after = operation.contents
-		case structuredPatchDelete, structuredPatchUpdate:
+		case structuredPatchDelete, structuredPatchUpdate, structuredPatchCopy:
 			info, err := root.Stat(from.relative)
 			if err != nil {
 				return nil, fmt.Errorf("stating %s: %w", from.relative, err)
@@ -366,12 +398,15 @@ func planStructuredPatch(root *os.Root, operations []structuredPatchOperation, t
 				return nil, fmt.Errorf("%s", fileConflictMessage(from.relative))
 			}
 			change.before = string(content)
-			if operation.kind == structuredPatchUpdate {
+			if operation.kind == structuredPatchUpdate || operation.kind == structuredPatchCopy {
 				updated, err := applyStructuredPatchUpdate(change.before, from.relative, operation.chunks)
 				if err != nil {
 					return nil, err
 				}
-				change.after = updated
+				change.after = applyEOFNewline(updated, operation.eofNewline)
+				if operation.kind == structuredPatchCopy && from.absolute == to.absolute {
+					return nil, fmt.Errorf("cannot copy %s onto itself", from.relative)
+				}
 				if from.absolute != to.absolute {
 					if _, err := root.Lstat(to.relative); err == nil {
 						return nil, fmt.Errorf("cannot move %s to %s because the destination already exists", from.relative, to.relative)
@@ -427,9 +462,12 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 		if len(chunk.old) == 0 {
 			// A context anchor identifies the line immediately before a pure
 			// insertion. Only an explicit end-of-file hunk (or an unanchored
-			// insertion) belongs at the file end.
+			// insertion) belongs at the file end. A unified diff names the
+			// insertion point in its range instead.
 			start := lineIndex
-			if chunk.endOfFile || !chunk.hasContext {
+			if chunk.hasHint {
+				start = max(chunk.hint, lineIndex)
+			} else if chunk.endOfFile || !chunk.hasContext {
 				start = len(lines)
 			}
 			if start > len(lines) {
@@ -443,7 +481,13 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 			lineIndex = start
 			continue
 		}
-		index, ambiguous := findStructuredPatchSequence(lines, chunk.old, lineIndex, chunk.endOfFile)
+		var index int
+		ambiguous := false
+		if chunk.hasHint && chunk.hint >= lineIndex && sequenceMatchesAt(lines, chunk.old, chunk.hint) {
+			index = chunk.hint
+		} else {
+			index, ambiguous = findStructuredPatchSequence(lines, chunk.old, lineIndex, chunk.endOfFile)
+		}
 		if ambiguous {
 			return "", fmt.Errorf("expected lines are ambiguous in %s; provide more surrounding context:\n%s", path, strings.Join(chunk.old, "\n"))
 		}
@@ -476,6 +520,34 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 		updated += lineEnding
 	}
 	return updated, nil
+}
+
+// sequenceMatchesAt reports whether wanted appears verbatim at lines[start:].
+func sequenceMatchesAt(lines, wanted []string, start int) bool {
+	if start < 0 || start+len(wanted) > len(lines) {
+		return false
+	}
+	for offset, line := range wanted {
+		if lines[start+offset] != line {
+			return false
+		}
+	}
+	return true
+}
+
+// applyEOFNewline forces or strips a single trailing line ending when a
+// unified diff's end-of-file marker asked for it.
+func applyEOFNewline(content string, mode eofNewlineMode) string {
+	switch mode {
+	case eofNewlinePresent:
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			return content + structuredPatchLineEnding(content)
+		}
+	case eofNewlineAbsent:
+		content = strings.TrimSuffix(content, "\n")
+		content = strings.TrimSuffix(content, "\r")
+	}
+	return content
 }
 
 func structuredPatchReplacement(chunk structuredPatchChunk, source []string, start int) ([]string, error) {
@@ -588,7 +660,7 @@ func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bo
 			return false, fmt.Errorf("deleting %s: %w", change.from.relative, err)
 		}
 		return true, nil
-	case structuredPatchAdd:
+	case structuredPatchAdd, structuredPatchCopy:
 		return writeStructuredPatchFile(root, change.to, change.after, change.mode, true)
 	case structuredPatchUpdate:
 		moving := change.from.absolute != change.to.absolute

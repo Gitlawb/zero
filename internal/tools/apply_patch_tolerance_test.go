@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -147,38 +148,186 @@ func TestApplyPatchStillRejectsAbsolutePathsOutsideWorkspace(t *testing.T) {
 	}
 }
 
-func TestRelativizeUnifiedPatchPathsLeavesHunkBodiesAlone(t *testing.T) {
+// Unified diffs are applied in-process through the same os.Root engine as
+// structured patches: git C-quoted paths with whitespace resolve to one file,
+// and the same header outside the workspace is refused before anything is
+// written.
+func TestUnifiedPatchQuotedWhitespacePaths(t *testing.T) {
 	root := t.TempDir()
-	absolute := filepath.Join(root, "notes.txt")
+	dir := filepath.Join(root, "work tree")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "file.txt")
+	writeTestFile(t, target, "hello\nold\n")
+
+	quoted := func(path string) string { return strconv.Quote(path) }
+	inside := strings.Join([]string{
+		"diff --git " + quoted("a/"+filepath.ToSlash(target)) + " " + quoted("b/"+filepath.ToSlash(target)),
+		"--- " + quoted(target),
+		"+++ " + quoted(target),
+		"@@ -1,2 +1,2 @@",
+		" hello",
+		"-old",
+		"+new",
+		"",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": inside})
+	if result.Status != StatusOK {
+		t.Fatalf("quoted whitespace path inside the workspace should apply, got %s: %s", result.Status, result.Output)
+	}
+	content, _ := os.ReadFile(target)
+	if got := strings.ReplaceAll(string(content), "\r\n", "\n"); got != "hello\nnew\n" {
+		t.Fatalf("content = %q", got)
+	}
+	if len(result.ChangedFiles) != 1 || result.ChangedFiles[0] != "work tree/file.txt" {
+		t.Fatalf("changed files = %v", result.ChangedFiles)
+	}
+
+	outsideDir := filepath.Join(t.TempDir(), "other tree")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(outsideDir, "file.txt")
+	writeTestFile(t, outside, "hello\nold\n")
+	escape := strings.Join([]string{"--- " + quoted(outside), "+++ " + quoted(outside), "@@ -1,2 +1,2 @@", " hello", "-old", "+new", ""}, "\n")
+	result = NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": escape})
+	if result.Status == StatusOK {
+		t.Fatal("quoted whitespace path outside the workspace must be rejected")
+	}
+	if content, _ := os.ReadFile(outside); string(content) != "hello\nold\n" {
+		t.Fatal("outside file must be untouched")
+	}
+}
+
+// A workspace path that is swapped for a symlink escaping the root — the
+// classic check-to-use attack — is refused by the os.Root engine for both
+// formats, and the outside file is never modified.
+func TestApplyPatchRefusesSymlinkEscapingWorkspace(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	writeTestFile(t, outside, "hello\nold\n")
+	link := filepath.Join(root, "target.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	for name, patch := range map[string]string{
+		"unified":    strings.Join([]string{"--- a/target.txt", "+++ b/target.txt", "@@ -1,2 +1,2 @@", " hello", "-old", "+new", ""}, "\n"),
+		"structured": strings.Join([]string{"*** Begin Patch", "*** Update File: target.txt", "@@", " hello", "-old", "+new", "*** End Patch", ""}, "\n"),
+	} {
+		result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+		if result.Status == StatusOK {
+			t.Fatalf("%s patch through an escaping symlink must be refused", name)
+		}
+		if content, _ := os.ReadFile(outside); string(content) != "hello\nold\n" {
+			t.Fatalf("%s patch must not modify the file outside the workspace", name)
+		}
+	}
+}
+
+func TestUnifiedPatchCreatesDeletesAndHonoursNoNewlineMarker(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "gone.txt"), "bye\n")
+	writeTestFile(t, filepath.Join(root, "keep.txt"), "a\nb\n")
 	patch := strings.Join([]string{
-		"diff --git " + absolute + " " + absolute,
-		"--- " + absolute,
-		"+++ " + absolute,
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1,2 @@",
+		"+first",
+		"+second",
+		"\\ No newline at end of file",
+		"diff --git a/gone.txt b/gone.txt",
+		"deleted file mode 100644",
+		"--- a/gone.txt",
+		"+++ /dev/null",
+		"@@ -1 +0,0 @@",
+		"-bye",
+		"--- a/keep.txt",
+		"+++ b/keep.txt",
 		"@@ -1,2 +1,2 @@",
-		"-see " + absolute,
-		"+see " + absolute + " (kept)",
-		" --- not a header",
+		" a",
+		"-b",
+		"+c",
+		"\\ No newline at end of file",
 		"",
 	}, "\n")
-	got := relativizeUnifiedPatchPaths(root, patch)
-	want := strings.Join([]string{
-		"diff --git a/notes.txt b/notes.txt",
-		"--- a/notes.txt",
-		"+++ b/notes.txt",
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("multi-file unified patch should apply, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "new.txt")); string(content) != "first\nsecond" {
+		t.Fatalf("created file = %q", string(content))
+	}
+	if _, err := os.Stat(filepath.Join(root, "gone.txt")); !os.IsNotExist(err) {
+		t.Fatal("deleted file must be gone")
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "keep.txt")); string(content) != "a\nc" {
+		t.Fatalf("updated file = %q", string(content))
+	}
+	if len(result.ChangedFiles) != 3 {
+		t.Fatalf("changed files = %v", result.ChangedFiles)
+	}
+}
+
+func TestUnifiedPatchUsesRangeHintThenFallsBackToContext(t *testing.T) {
+	root := t.TempDir()
+	// Two identical blocks: the hunk's range picks the second one, which
+	// content search alone would call ambiguous.
+	writeTestFile(t, filepath.Join(root, "dup.txt"), "x\ny\nx\ny\n")
+	patch := strings.Join([]string{"--- a/dup.txt", "+++ b/dup.txt", "@@ -3,2 +3,2 @@", " x", "-y", "+z", ""}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("range-hinted hunk should apply, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "dup.txt")); string(content) != "x\ny\nx\nz\n" {
+		t.Fatalf("content = %q", string(content))
+	}
+	// A stale range (file grew above the hunk) still applies by unique context.
+	writeTestFile(t, filepath.Join(root, "moved.txt"), "header\nhello\nold\n")
+	patch = strings.Join([]string{"--- a/moved.txt", "+++ b/moved.txt", "@@ -1,2 +1,2 @@", " hello", "-old", "+new", ""}, "\n")
+	result = NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("offset hunk should apply by context, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "moved.txt")); string(content) != "header\nhello\nnew\n" {
+		t.Fatalf("content = %q", string(content))
+	}
+}
+
+func TestUnifiedPatchRenameWithHunkAndRejectsBinary(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "x.txt"), "hello\nold\n")
+	rename := strings.Join([]string{
+		"diff --git a/x.txt b/y.txt",
+		"similarity index 90%",
+		"rename from x.txt",
+		"rename to y.txt",
+		"--- a/x.txt",
+		"+++ b/y.txt",
 		"@@ -1,2 +1,2 @@",
-		"-see " + absolute,
-		"+see " + absolute + " (kept)",
-		" --- not a header",
+		" hello",
+		"-old",
+		"+new",
 		"",
 	}, "\n")
-	if got != want {
-		t.Fatalf("relativized patch mismatch:\n%s\n--- want ---\n%s", got, want)
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": rename})
+	if result.Status != StatusOK {
+		t.Fatalf("rename with hunk should apply, got %s: %s", result.Status, result.Output)
 	}
-	if plain := "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-a\n+b\n"; relativizeUnifiedPatchPaths(root, plain) != plain {
-		t.Fatal("a patch without absolute paths must be returned unchanged")
+	if _, err := os.Stat(filepath.Join(root, "x.txt")); !os.IsNotExist(err) {
+		t.Fatal("renamed source must be gone")
 	}
-	crlf := "--- " + absolute + "\r\n+++ " + absolute + "\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n"
-	if got, want := relativizeUnifiedPatchPaths(root, crlf), "--- a/notes.txt\r\n+++ b/notes.txt\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n"; got != want {
-		t.Fatalf("CRLF patch must keep its line endings:\n%q\nwant\n%q", got, want)
+	if content, _ := os.ReadFile(filepath.Join(root, "y.txt")); string(content) != "hello\nnew\n" {
+		t.Fatalf("renamed content = %q", string(content))
+	}
+	for name, patch := range map[string]string{
+		"binary": "diff --git a/x b/x\nBinary files a/x and b/x differ\n",
+		"empty":  "diff --git a/x b/x\n",
+	} {
+		if result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch}); result.Status == StatusOK {
+			t.Fatalf("%s patch must be rejected", name)
+		}
 	}
 }
