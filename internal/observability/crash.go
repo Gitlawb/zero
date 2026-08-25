@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/privatedir"
 )
 
 // crashExitCode is returned when a top-level panic is recovered.
@@ -26,7 +28,7 @@ func FormatCrashReport(label string, recovered any, stack []byte, ts time.Time) 
 
 // WriteCrashReport writes a crash report file into dir and returns its path.
 func WriteCrashReport(dir, label string, recovered any, stack []byte, ts time.Time) (string, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ensureCrashDirectory(dir); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, "crash-"+ts.UTC().Format("20060102-150405")+".log")
@@ -34,6 +36,24 @@ func WriteCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 		return "", err
 	}
 	return path, nil
+}
+
+func ensureCrashDirectory(dir string) error {
+	clean := filepath.Clean(dir)
+	defaultDir := filepath.Clean(DefaultCrashDir())
+	parent := filepath.Dir(clean)
+	// The default layout shares ~/.zero with the daemon runtime fallback. Keep
+	// both the shared parent and the crash-report child private. Custom crash
+	// destinations are hardened at the caller-supplied boundary only.
+	if clean == defaultDir && filepath.Base(clean) == "crashes" && filepath.Base(parent) == ".zero" {
+		if err := privatedir.Ensure(parent); err != nil {
+			return fmt.Errorf("secure crash report parent: %w", err)
+		}
+	}
+	if err := privatedir.Ensure(clean); err != nil {
+		return fmt.Errorf("secure crash report directory: %w", err)
+	}
+	return nil
 }
 
 // DefaultCrashDir is where crash reports are written by default.

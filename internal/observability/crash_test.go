@@ -55,6 +55,37 @@ func TestWriteCrashReportCreatesPrivateDefaultDirectories(t *testing.T) {
 	}
 }
 
+func TestWriteCrashReportHardensPreexistingDefaultDirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows DACL migration is covered by the daemon integration test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := DefaultCrashDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(home, ".zero"), dir} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := WriteCrashReport(dir, "cli", "boom", []byte("stack"), time.Now()); err != nil {
+		t.Fatalf("WriteCrashReport: %v", err)
+	}
+	for _, path := range []string{filepath.Join(home, ".zero"), dir} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got&0o077 != 0 {
+			t.Fatalf("directory %s permissions = %04o after migration, want owner-only", path, got)
+		}
+	}
+}
+
 func TestRecoverCapturesPanic(t *testing.T) {
 	dir := t.TempDir()
 	var stderr bytes.Buffer

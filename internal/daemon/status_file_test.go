@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Gitlawb/zero/internal/privatedir"
 )
 
 func TestWriteStatusFilePreservesPreviousDocumentWhenReplaceFails(t *testing.T) {
@@ -350,18 +351,18 @@ func TestWriteStatusFileRejectsBroadStatusDirectory(t *testing.T) {
 	assertNoStatusTemps(t, dir)
 }
 
-func TestSecureStatusRootHardensBroadCurrentUserDirectory(t *testing.T) {
+func TestPrivateDirHardensBroadCurrentUserStatusDirectory(t *testing.T) {
 	dir := t.TempDir()
 	broadenStatusTestDirPlatform(t, dir)
+	if err := privatedir.Ensure(dir); err != nil {
+		t.Fatalf("privatedir.Ensure: %v", err)
+	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
 
-	if err := secureStatusRoot(root); err != nil {
-		t.Fatalf("secureStatusRoot: %v", err)
-	}
 	if err := validateStatusRoot(root); err != nil {
 		t.Fatalf("validate hardened status root: %v", err)
 	}

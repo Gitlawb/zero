@@ -146,24 +146,6 @@ func validateStatusRoot(root *os.Root) error {
 	return nil
 }
 
-// secureStatusRoot migrates a current-user-owned runtime directory to the
-// owner-only invariant. hardenStatusDir performs both its ownership proof and
-// mutation through a handle beneath root; validation then independently checks
-// the resulting invariant before the directory can be used.
-func secureStatusRoot(root *os.Root) error {
-	info, err := root.Stat(".")
-	if err != nil {
-		return fmt.Errorf("inspect status directory before hardening: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("status directory is not a directory")
-	}
-	if err := hardenStatusDir(root); err != nil {
-		return err
-	}
-	return validateStatusRoot(root)
-}
-
 func createStatusTemp(root *os.Root, perm os.FileMode) (*os.File, string, error) {
 	for range 100 {
 		var suffix [16]byte

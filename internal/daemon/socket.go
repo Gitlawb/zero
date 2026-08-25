@@ -1,10 +1,10 @@
 package daemon
 
 import (
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+
+	"github.com/Gitlawb/zero/internal/privatedir"
 )
 
 // maxUnixSocketPath bounds the socket path to the smallest platform sun_path
@@ -36,28 +36,9 @@ func secureRuntimeParents(paths Paths) error {
 			continue
 		}
 		seen[absolute] = struct{}{}
-		if err := os.MkdirAll(absolute, 0o700); err != nil {
-			return fmt.Errorf("daemon: create %s directory: %w", parent.name, err)
-		}
-		if err := secureRuntimeDirectory(absolute); err != nil {
+		if err := privatedir.Ensure(absolute); err != nil {
 			return fmt.Errorf("daemon: secure %s directory: %w", parent.name, err)
 		}
-	}
-	return nil
-}
-
-func secureRuntimeDirectory(path string) (returnErr error) {
-	root, err := os.OpenRoot(path)
-	if err != nil {
-		return fmt.Errorf("open runtime directory: %w", err)
-	}
-	defer func() {
-		if err := root.Close(); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("close runtime directory: %w", err))
-		}
-	}()
-	if err := secureStatusRoot(root); err != nil {
-		return err
 	}
 	return nil
 }
