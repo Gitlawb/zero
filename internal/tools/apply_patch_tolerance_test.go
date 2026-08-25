@@ -331,3 +331,124 @@ func TestUnifiedPatchRenameWithHunkAndRejectsBinary(t *testing.T) {
 		}
 	}
 }
+
+func TestUnifiedPatchCopyOperation(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "src.txt"), "hello\nold\n")
+	copyPatch := func(from, to string, hunk bool) string {
+		lines := []string{"diff --git a/" + from + " b/" + to, "similarity index 90%", "copy from " + from, "copy to " + to}
+		if hunk {
+			lines = append(lines, "--- a/"+from, "+++ b/"+to, "@@ -1,2 +1,2 @@", " hello", "-old", "+new")
+		}
+		return strings.Join(append(lines, ""), "\n")
+	}
+
+	// Success: source kept, destination created with the hunk applied, and the
+	// destination inherits the source's tracker state (read whole -> whole).
+	tracker := NewFileTracker()
+	registry := NewRegistry()
+	registry.Register(NewScopedReadFileTool(root, nil))
+	registry.Register(NewScopedApplyPatchTool(root, nil))
+	opts := RunOptions{PermissionGranted: true, FileTracker: tracker}
+	if r := registry.RunWithOptions(context.Background(), "read_file", map[string]any{"path": "src.txt"}, opts); r.Status != StatusOK {
+		t.Fatalf("read: %s", r.Output)
+	}
+	result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": copyPatch("src.txt", "dst.txt", true)}, opts)
+	if result.Status != StatusOK {
+		t.Fatalf("copy with hunk should apply, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "src.txt")); string(content) != "hello\nold\n" {
+		t.Fatalf("copy must keep the source, got %q", string(content))
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "dst.txt")); string(content) != "hello\nnew\n" {
+		t.Fatalf("copy destination = %q", string(content))
+	}
+	if len(result.ChangedFiles) != 2 || result.ChangedFiles[0] != "src.txt" || result.ChangedFiles[1] != "dst.txt" {
+		t.Fatalf("changed files = %v", result.ChangedFiles)
+	}
+	destination, err := filepath.EvalSymlinks(filepath.Join(root, "dst.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.SeenWhole(destination) {
+		t.Fatal("destination copied from a fully read source must be tracked as seen whole")
+	}
+	unreadSource, _ := filepath.EvalSymlinks(filepath.Join(root, "src.txt"))
+	if _, tracked := tracker.Version(unreadSource); !tracked {
+		t.Fatal("source must stay tracked after a copy")
+	}
+
+	// Failure: destination already exists — nothing is written.
+	writeTestFile(t, filepath.Join(root, "taken.txt"), "keep\n")
+	result = NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": copyPatch("src.txt", "taken.txt", false)})
+	if result.Status == StatusOK || !strings.Contains(result.Output, "already exists") {
+		t.Fatalf("copy onto an existing destination must be refused, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "taken.txt")); string(content) != "keep\n" {
+		t.Fatal("existing destination must be untouched")
+	}
+
+	// Failure: copy onto itself.
+	result = NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": copyPatch("src.txt", "src.txt", false)})
+	if result.Status == StatusOK || !strings.Contains(result.Output, "onto itself") {
+		t.Fatalf("copy onto itself must be refused, got %s: %s", result.Status, result.Output)
+	}
+}
+
+func TestUnifiedPatchRejectsOverDeclaredHunkCounts(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "a.txt"), "hello\nold\n")
+	writeTestFile(t, filepath.Join(root, "b.txt"), "x\n")
+	// "-1,3 +1,3" over-declares a two-line hunk, so without a guard the next
+	// file's ---/+++ headers would be swallowed as "-"/"+" content.
+	patch := strings.Join([]string{
+		"--- a/a.txt", "+++ b/a.txt", "@@ -1,3 +1,3 @@", " hello", "-old", "+new",
+		"--- a/b.txt", "+++ b/b.txt", "@@ -1 +1 @@", "-x", "+y", "",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status == StatusOK || !strings.Contains(result.Output, "declared line counts") {
+		t.Fatalf("over-declared hunk must be reported as malformed, got %s: %s", result.Status, result.Output)
+	}
+	for name, want := range map[string]string{"a.txt": "hello\nold\n", "b.txt": "x\n"} {
+		if content, _ := os.ReadFile(filepath.Join(root, name)); string(content) != want {
+			t.Fatalf("%s must be untouched after a malformed patch, got %q", name, string(content))
+		}
+	}
+	// Truncated at end of input is reported the same way.
+	truncated := "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n hello\n-old\n"
+	if result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": truncated}); result.Status == StatusOK || !strings.Contains(result.Output, "declared line counts") {
+		t.Fatalf("truncated hunk must be reported as malformed, got %s: %s", result.Status, result.Output)
+	}
+}
+
+func TestUnifiedPatchNoNewlineMarkerOnlyAfterFinalHunk(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "two.txt"), "a\nb\nc\nd\ne\nf\n")
+	// A marker after the first of two hunks describes nothing real and must
+	// not leak into the second hunk's result: the patch is rejected untouched.
+	early := strings.Join([]string{
+		"--- a/two.txt", "+++ b/two.txt",
+		"@@ -1,2 +1,2 @@", " a", "-b", "+B", "\\ No newline at end of file",
+		"@@ -5,2 +5,2 @@", " e", "-f", "+F", "",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": early})
+	if result.Status == StatusOK || !strings.Contains(result.Output, "must follow the last hunk") {
+		t.Fatalf("marker before a later hunk must be rejected, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "two.txt")); string(content) != "a\nb\nc\nd\ne\nf\n" {
+		t.Fatal("rejected patch must not modify the file")
+	}
+	// The same marker after the final hunk applies and strips the newline.
+	final := strings.Join([]string{
+		"--- a/two.txt", "+++ b/two.txt",
+		"@@ -1,2 +1,2 @@", " a", "-b", "+B",
+		"@@ -5,2 +5,2 @@", " e", "-f", "+F", "\\ No newline at end of file", "",
+	}, "\n")
+	result = NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": final})
+	if result.Status != StatusOK {
+		t.Fatalf("two-hunk patch with a final marker should apply, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "two.txt")); string(content) != "a\nB\nc\nd\ne\nF" {
+		t.Fatalf("content = %q", string(content))
+	}
+}

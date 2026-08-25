@@ -463,7 +463,10 @@ func applyStructuredPatchUpdate(content, path string, chunks []structuredPatchCh
 			// A context anchor identifies the line immediately before a pure
 			// insertion. Only an explicit end-of-file hunk (or an unanchored
 			// insertion) belongs at the file end. A unified diff names the
-			// insertion point in its range instead.
+			// insertion point in its range instead; a zero-context hunk (as
+			// from `git diff -U0`) has nothing to verify the position against,
+			// so it is position-trusting by design — the same semantics git
+			// apply uses without fuzz. Hunks that carry context are verified.
 			start := lineIndex
 			if chunk.hasHint {
 				start = max(chunk.hint, lineIndex)

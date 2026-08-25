@@ -19,6 +19,11 @@ import (
 func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 	normalized := strings.TrimPrefix(strings.ReplaceAll(patch, "\r\n", "\n"), "\ufeff")
 	lines := strings.Split(normalized, "\n")
+	// The element after a final "\n" is the line terminator, not an empty
+	// context line; counting it would let a truncated hunk look complete.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
 
 	var operations []structuredPatchOperation
 	var current *structuredPatchOperation
@@ -87,6 +92,13 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 	for index, raw := range lines {
 		lineNumber := index + 1
 		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
+			// A "--- " line directly followed by "+++ " is the next file's
+			// header pair, not a removed line followed by an added one: an
+			// over-declared count would otherwise swallow both and the hunk
+			// would later fail against the wrong file.
+			if strings.HasPrefix(raw, "--- ") && index+1 < len(lines) && strings.HasPrefix(lines[index+1], "+++ ") {
+				return nil, fmt.Errorf("invalid unified diff at line %d: hunk ended before its declared line counts", lineNumber)
+			}
 			switch {
 			case strings.HasPrefix(raw, "\\"):
 				// "\ No newline at end of file" qualifies the previous line's side.
@@ -132,6 +144,12 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 		}
 		inHunk = false
 		trimmed := strings.TrimSpace(raw)
+		if oldRemaining > 0 || newRemaining > 0 {
+			// The hunk ended before its declared counts were consumed. Report
+			// it here rather than absorbing the next file's ---/+++ headers as
+			// "-"/"+" content and failing later against the wrong file.
+			return nil, fmt.Errorf("invalid unified diff at line %d: hunk ended before its declared line counts", lineNumber)
+		}
 		switch {
 		case trimmed == "":
 			continue
@@ -192,6 +210,12 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 			if !ok {
 				return nil, fmt.Errorf("invalid unified diff at line %d: malformed hunk header", lineNumber)
 			}
+			// "\ No newline at end of file" describes the end of the file, so it
+			// may only follow a file's final hunk; a marker before another hunk
+			// would otherwise leak into that later hunk's result.
+			if current.eofNewline != eofNewlineKeep {
+				return nil, fmt.Errorf("invalid unified diff at line %d: \"\\ No newline at end of file\" must follow the last hunk of a file", lineNumber)
+			}
 			oldRemaining, newRemaining = oldCount, newCount
 			inHunk = oldRemaining > 0 || newRemaining > 0
 			lastSide = 0
@@ -211,6 +235,9 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 		default:
 			return nil, fmt.Errorf("invalid unified diff at line %d: unexpected %q", lineNumber, trimmed)
 		}
+	}
+	if inHunk && (oldRemaining > 0 || newRemaining > 0) {
+		return nil, fmt.Errorf("invalid unified diff at line %d: hunk ended before its declared line counts", len(lines))
 	}
 	if err := finish(); err != nil {
 		return nil, err
