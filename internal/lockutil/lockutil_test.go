@@ -99,9 +99,13 @@ func TestFileLockConcurrentFirstAcquisition(t *testing.T) {
 	}
 	ready.Wait()
 	close(start)
+	acquired := 0
 	for range contenders {
 		err := <-results
-		if err != nil && !errors.Is(err, ErrLockHeld) {
+		switch {
+		case err == nil:
+			acquired++
+		case !errors.Is(err, ErrLockHeld):
 			t.Errorf("concurrent first acquire: %v", err)
 		}
 	}
@@ -110,6 +114,9 @@ func TestFileLockConcurrentFirstAcquisition(t *testing.T) {
 		if err := lock.Release(); err != nil {
 			t.Error(err)
 		}
+	}
+	if acquired != 1 {
+		t.Fatalf("concurrent first acquire: got %d holders, want 1", acquired)
 	}
 }
 
