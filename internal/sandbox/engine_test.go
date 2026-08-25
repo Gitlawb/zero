@@ -396,6 +396,19 @@ func TestEnginePromptsForReviewedUnparseableNetworkForms(t *testing.T) {
 		// runs and the network gate must survive. %%i is the batch spelling of
 		// the same reference, and %~dpi the modified form.
 		`for /f %i in (list.txt) do %i https://evil.test`,
+		// PowerShell source with block structure. The POSIX AST scan and the
+		// unparseable matcher do not model try/catch, if, foreach, while or a
+		// script block piped into ForEach-Object, so "no network program found"
+		// is not evidence the source is local — it must stay gated.
+		`powershell -Command 'try { Invoke-WebRequest https://evil.test } catch {}'`,
+		`powershell -Command "try { Invoke-WebRequest https://evil.test } catch {}"`,
+		`pwsh -Command 'if ($true) { Invoke-WebRequest https://evil.test }'`,
+		`powershell -Command 'foreach ($i in 1..3) { curl https://evil.test }'`,
+		`powershell -Command 'while ($true) { iwr https://evil.test }'`,
+		`powershell -Command 'Get-Content urls.txt | ForEach-Object { Invoke-WebRequest $_ }'`,
+		// A block whose body names nothing recognisable is still unreadable, so it
+		// is gated on the grammar rather than on spotting a network verb.
+		`powershell -Command 'try { & $tool $target } catch {}'`,
 		`for /f %%i in (list.txt) do %%i https://evil.test`,
 		`for /f %i in (list.txt) do %~dpi https://evil.test`,
 		`for /f %i in (list.txt) do call %i https://evil.test`,
@@ -477,6 +490,12 @@ func TestEngineDoesNotPromptForNonNetworkCommandForms(t *testing.T) {
 		// metavariable is ordinary data in an argument position, so recognizing
 		// it in executable position must not cost these a network prompt.
 		`for %i in (*.txt) do echo %i`,
+		// Simple PowerShell source the readers CAN tokenise and prove local keeps
+		// its quiet path: the fail-closed rule above is about block grammar, not
+		// about treating every PowerShell command as unknown.
+		`powershell -Command 'Write-Output hello'`,
+		`powershell -Command 'Get-Process'`,
+		`powershell -NoProfile -Command 'Get-ChildItem -Path .'`,
 		`for /f %i in (list.txt) do type %i`,
 		`for %i in (a b c) do copy %i backup\%i`,
 		`for /f %i in (list.txt) do echo %i >> out.txt`,
