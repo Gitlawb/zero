@@ -57,6 +57,7 @@ type Task struct {
 	SessionID string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	handoff   bool // internal claim; status stays non-terminal until the source exits
 }
 
 // agentColors palette for stable per-agent coloring in the TUI/status. Provider
@@ -144,7 +145,63 @@ func (c *Coordinator) SetStatus(id string, status TaskStatus) error {
 	if t.Status.terminal() && t.Status != status {
 		return fmt.Errorf("swarm: task %s is %s (terminal); cannot move to %s", id, t.Status, status)
 	}
+	if t.handoff {
+		return fmt.Errorf("swarm: task %s is being handed off; cannot move to %s", id, status)
+	}
 	t.Status = status
+	t.UpdatedAt = c.now()
+	c.notifyChangeLocked()
+	return nil
+}
+
+// BeginHandoff atomically claims a non-terminal task for one handoff caller
+// without reporting it terminal. The visible status remains pending/running
+// until FinishHandoff, so collectors cannot observe settled state while the
+// source member is still unwinding.
+func (c *Coordinator) BeginHandoff(id string) (Task, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.tasks[id]
+	if !ok {
+		return Task{}, fmt.Errorf("%w: %s", ErrUnknownTask, id)
+	}
+	if t.Status.terminal() {
+		return Task{}, fmt.Errorf("swarm: task %s already %s; cannot hand off", id, t.Status)
+	}
+	if t.handoff {
+		return Task{}, fmt.Errorf("swarm: task %s is already being handed off", id)
+	}
+	t.handoff = true
+	return *t, nil
+}
+
+// AbortHandoff releases a claim before the source member is cancelled. It is
+// used when preparing the successor (for example, delivering its note) fails.
+func (c *Coordinator) AbortHandoff(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if t, ok := c.tasks[id]; ok && t.handoff && !t.Status.terminal() {
+		t.handoff = false
+	}
+}
+
+// FinishHandoff publishes the terminal state only after the source execution
+// barrier has closed.
+func (c *Coordinator) FinishHandoff(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.tasks[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownTask, id)
+	}
+	if !t.handoff {
+		return fmt.Errorf("swarm: task %s has no handoff in progress", id)
+	}
+	if t.Status.terminal() {
+		return fmt.Errorf("swarm: task %s already %s", id, t.Status)
+	}
+	t.handoff = false
+	t.Status = StatusHandedOff
 	t.UpdatedAt = c.now()
 	c.notifyChangeLocked()
 	return nil
@@ -182,6 +239,9 @@ func (c *Coordinator) finish(id string, status TaskStatus, result, errMsg, sessi
 	if t.Status.terminal() {
 		return fmt.Errorf("swarm: task %s already %s", id, t.Status)
 	}
+	if t.handoff {
+		return fmt.Errorf("swarm: task %s is being handed off", id)
+	}
 	t.Status = status
 	t.Result = result
 	t.Err = errMsg
@@ -204,6 +264,9 @@ func (c *Coordinator) Reassign(id, newAgentID string) error {
 	}
 	if t.Status.terminal() {
 		return fmt.Errorf("swarm: task %s already %s; cannot reassign", id, t.Status)
+	}
+	if t.handoff {
+		return fmt.Errorf("swarm: task %s is being handed off; cannot reassign", id)
 	}
 	t.AgentID = newAgentID
 	t.Status = StatusPending
