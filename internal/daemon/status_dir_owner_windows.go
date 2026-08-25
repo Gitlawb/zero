@@ -123,13 +123,14 @@ func hardenStatusDir(root *os.Root) (returnErr error) {
 		return fmt.Errorf("access status directory hardening handle: %w", err)
 	}
 	// Root.Open uses NtCreateFile internally, so its handle cannot be passed to
-	// ReOpenFile (which requires a CreateFile handle). Open "." relative to the
-	// bound handle instead, requesting the security rights needed for the DACL
-	// update without resolving the directory by path again.
+	// ReOpenFile (which requires a CreateFile handle). Reopen the bound directory
+	// with an empty relative NT object name (the NT representation Go uses for
+	// "."), requesting the security rights needed for the DACL update without
+	// resolving the directory by path again.
 	var securityHandle windows.Handle
 	var openErr error
 	if err := raw.Control(func(rawHandle uintptr) {
-		objectName, nameErr := windows.NewNTUnicodeString(".")
+		objectName, nameErr := windows.NewNTUnicodeString("")
 		if nameErr != nil {
 			openErr = nameErr
 			return
