@@ -111,6 +111,135 @@ func TestFreeformApplyPatchSupportsGrantedExtraRoot(t *testing.T) {
 	}
 }
 
+func TestFreeformApplyPatchRejectsMixedWorkspaceAndExtraRoots(t *testing.T) {
+	for _, extraHasMatchingPath := range []bool{false, true} {
+		name := "extra target missing"
+		if extraHasMatchingPath {
+			name = "extra target exists"
+		}
+		t.Run(name, func(t *testing.T) {
+			workspace := t.TempDir()
+			extra := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(workspace, "src"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			workspaceTarget := filepath.Join(workspace, "src", "a.go")
+			if err := os.WriteFile(workspaceTarget, []byte("old\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			extraTarget := filepath.Join(extra, "src", "a.go")
+			if extraHasMatchingPath {
+				if err := os.MkdirAll(filepath.Dir(extraTarget), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(extraTarget, []byte("old\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scope, err := sandbox.NewScope(workspace, []string{extra})
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewScopedApplyPatchTool(workspace, scope))
+			extraCreated := filepath.Join(extra, "b.go")
+			patch := strings.Join([]string{
+				"*** Begin Patch",
+				"*** Update File: src/a.go",
+				"@@",
+				"-old",
+				"+new",
+				"*** Add File: " + extraCreated,
+				"+extra",
+				"*** End Patch",
+			}, "\n")
+
+			result, err := executeToolCall(context.Background(), registry, zeroruntime.ToolCall{
+				ID: "call-1", Name: "apply_patch", Arguments: patch, Freeform: true,
+			}, PermissionModeUnsafe, Options{Cwd: workspace, FileTracker: tools.NewFileTracker()})
+			if err != nil {
+				t.Fatalf("executeToolCall: %v", err)
+			}
+			if result.Status != tools.StatusError || !strings.Contains(result.Output, "mixes workspace-relative paths with an extra write root") {
+				t.Fatalf("mixed-root patch result = %s: %s", result.Status, result.Output)
+			}
+			if content, err := os.ReadFile(workspaceTarget); err != nil || string(content) != "old\n" {
+				t.Fatalf("workspace target changed: content=%q err=%v", content, err)
+			}
+			if extraHasMatchingPath {
+				if content, err := os.ReadFile(extraTarget); err != nil || string(content) != "old\n" {
+					t.Fatalf("extra-root target changed: content=%q err=%v", content, err)
+				}
+			}
+			if _, err := os.Stat(extraCreated); !os.IsNotExist(err) {
+				t.Fatalf("mixed-root patch created extra file: %v", err)
+			}
+		})
+	}
+}
+
+func TestFreeformApplyPatchAcceptsOneSemanticRoot(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		useExtraRoot bool
+	}{
+		{name: "workspace"},
+		{name: "extra root", useExtraRoot: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			extra := t.TempDir()
+			scope, err := sandbox.NewScope(workspace, []string{extra})
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := workspace
+			if test.useExtraRoot {
+				root = extra
+			}
+			if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(root, "src", "a.go")
+			if err := os.WriteFile(target, []byte("old\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			updatePath := target
+			if !test.useExtraRoot {
+				updatePath = filepath.Join("src", "a.go")
+			}
+			created := filepath.Join(root, "b.go")
+			patch := strings.Join([]string{
+				"*** Begin Patch",
+				"*** Update File: " + updatePath,
+				"@@",
+				"-old",
+				"+new",
+				"*** Add File: " + created,
+				"+created",
+				"*** End Patch",
+			}, "\n")
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewScopedApplyPatchTool(workspace, scope))
+			result, err := executeToolCall(context.Background(), registry, zeroruntime.ToolCall{
+				ID: "call-1", Name: "apply_patch", Arguments: patch, Freeform: true,
+			}, PermissionModeUnsafe, Options{Cwd: workspace, FileTracker: tools.NewFileTracker()})
+			if err != nil {
+				t.Fatalf("executeToolCall: %v", err)
+			}
+			if result.Status != tools.StatusOK {
+				t.Fatalf("single-root patch status = %s: %s", result.Status, result.Output)
+			}
+			if content, err := os.ReadFile(target); err != nil || string(content) != "new\n" {
+				t.Fatalf("updated content=%q err=%v", content, err)
+			}
+			if content, err := os.ReadFile(created); err != nil || string(content) != "created\n" {
+				t.Fatalf("created content=%q err=%v", content, err)
+			}
+		})
+	}
+}
+
 func TestFreeformApplyPatchRejectsAbsolutePathOutsideGrantedRoots(t *testing.T) {
 	root := t.TempDir()
 	granted := t.TempDir()

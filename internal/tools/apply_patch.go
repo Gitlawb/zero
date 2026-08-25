@@ -41,6 +41,7 @@ func (tool applyPatchTool) prepareFreeformArguments(patch string) (map[string]an
 
 	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
 	selectedRoot := ""
+	hasRelativeHeader := false
 	for index, line := range lines {
 		prefix := ""
 		switch {
@@ -57,6 +58,7 @@ func (tool applyPatchTool) prepareFreeformArguments(patch string) (map[string]an
 		}
 		path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 		if !filepath.IsAbs(path) {
+			hasRelativeHeader = true
 			continue
 		}
 		root, relative, err := tool.freeformPatchRoot(path)
@@ -70,6 +72,13 @@ func (tool applyPatchTool) prepareFreeformArguments(patch string) (map[string]an
 		lines[index] = prefix + filepath.ToSlash(relative)
 	}
 	if selectedRoot != "" {
+		roots, err := scopedRoots(tool.workspaceRoot, tool.scope)
+		if err != nil {
+			return nil, err
+		}
+		if hasRelativeHeader && selectedRoot != roots[0] {
+			return nil, fmt.Errorf("freeform patch mixes workspace-relative paths with an extra write root")
+		}
 		args["cwd"] = selectedRoot
 		args["patch"] = strings.Join(lines, "\n")
 	}
