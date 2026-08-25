@@ -866,7 +866,7 @@ func TestStructuredPatchFailedDeleteDoesNotRecreateMissingFile(t *testing.T) {
 	}
 }
 
-// A move whose source vanished after planning is refused by the pre-commit
+// A move whose source vanishes after planning is refused by the pre-commit
 // recheck before the destination is published, so nothing is left half-done.
 func TestStructuredPatchMoveWithMissingSourceIsRefusedBeforePublishing(t *testing.T) {
 	root := t.TempDir()
@@ -877,14 +877,27 @@ func TestStructuredPatchMoveWithMissingSourceIsRefusedBeforePublishing(t *testin
 	defer workspace.Close()
 	sourcePath := filepath.Join(root, "source.txt")
 	destinationPath := filepath.Join(root, "destination.txt")
+	writeTestFile(t, sourcePath, "removed source\n")
 	change := structuredPatchChange{
 		kind:   structuredPatchUpdate,
 		from:   structuredPatchTarget{absolute: sourcePath, relative: "source.txt"},
 		to:     structuredPatchTarget{absolute: destinationPath, relative: "destination.txt"},
 		before: "removed source\n", after: "moved content\n", mode: 0o644,
 	}
+	// The source exists at planning time and disappears just before commit.
+	removed := false
+	structuredPatchBeforeCommit = func(structuredPatchChange) {
+		if err := os.Remove(sourcePath); err != nil {
+			t.Fatal(err)
+		}
+		removed = true
+	}
+	defer func() { structuredPatchBeforeCommit = nil }()
 
 	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
+	if !removed {
+		t.Fatal("pre-commit hook did not run")
+	}
 	if err == nil || !strings.Contains(err.Error(), "before commit") || strings.Contains(err.Error(), "partially applied") {
 		t.Fatalf("move with a missing source = %v, want a pre-commit refusal with nothing applied", err)
 	}

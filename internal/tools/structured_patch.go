@@ -700,7 +700,15 @@ func forgetStructuredPatchFiles(tracker *FileTracker, changes []structuredPatchC
 	}
 }
 
+// structuredPatchBeforeCommit, when set, runs before each change's pre-commit
+// recheck. Tests use it to alter the filesystem between planning and commit
+// deterministically; it is nil in production.
+var structuredPatchBeforeCommit func(change structuredPatchChange)
+
 func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bool, error) {
+	if structuredPatchBeforeCommit != nil {
+		structuredPatchBeforeCommit(change)
+	}
 	// The planner validated the source against the bytes it read; re-read
 	// through the same root immediately before committing so a change made
 	// by another process in between is refused rather than overwritten or
