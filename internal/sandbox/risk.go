@@ -322,11 +322,15 @@ func applyPatchPathBlock(request Request) *pathBlock {
 			Reason: "patch paths cannot be established safely: " + err.Error(),
 		}
 	}
+	// Only relative traversal is rejected up front. Absolute paths flow through
+	// the regular workspace-scope validation below (requestPaths), which accepts
+	// one inside the workspace and denies one outside — a model that echoes the
+	// absolute path read_file showed it must not be blocked for that alone.
 	for _, path := range paths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
-		if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+		if path == ".." || strings.HasPrefix(path, "../") {
 			return &pathBlock{
 				Code:   BlockOutsideWorkspace,
 				Path:   path,
@@ -337,13 +341,40 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	return nil
 }
 
+// structuredPatchMarkerPattern is the single classifier for structured-patch
+// markers, shared by the sandbox boundary and the apply_patch tool (which
+// imports this package). It accepts the canonical "*** Begin Patch" /
+// "*** End Patch" and the decorated spellings models emit ("*** Begin Patch ***",
+// "***Begin Patch", trailing whitespace). Both sides must agree: a spelling the
+// tool would apply but the sandbox did not recognise would make the sandbox
+// scan the patch as a unified diff, extract no targets, and validate nothing.
+var structuredPatchMarkerPattern = regexp.MustCompile(`^\*{3}\s*(Begin|End) Patch\s*\**\s*$`)
+
+// StructuredPatchMarker classifies a line as the "begin" or "end" marker of a
+// structured patch, or "" when it is neither.
+func StructuredPatchMarker(line string) string {
+	match := structuredPatchMarkerPattern.FindStringSubmatch(strings.TrimSpace(line))
+	if match == nil {
+		return ""
+	}
+	return strings.ToLower(match[1])
+}
+
+// IsStructuredPatch reports whether patch opens with a structured begin marker.
+// The tool applies exactly the patches this returns true for, so the sandbox
+// extracts structured header paths for exactly the same set.
+func IsStructuredPatch(patch string) bool {
+	first, _, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "\n")
+	return StructuredPatchMarker(first) == "begin"
+}
+
 // PatchHeaderPaths returns every source and destination path declared by a
 // patch. Keeping this parser shared with apply_patch ensures the sandbox gate
 // and the tool's own path validation agree on what the executor will read or write. A
 // path-bearing git header that cannot be interpreted exactly rejects the patch:
 // silently omitting it would let git operate on a path the policy never saw.
 func PatchHeaderPaths(patch string) ([]string, error) {
-	if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(patch, "\ufeff")), "*** Begin Patch") {
+	if IsStructuredPatch(patch) {
 		return structuredPatchHeaderPaths(patch), nil
 	}
 	return patchHeaderPaths(patch)
@@ -631,7 +662,15 @@ func normalizeDiffGitPaths(source, destination string) (string, string) {
 }
 
 func diffGitLineMatchesChange(raw, parsedSource, parsedDestination string, parsed bool, source, destination string) bool {
+	// Compare separator-normalized spellings. A patch may name the same file
+	// with "/" in its `diff --git` operands and the host separator in its
+	// `---`/`+++` headers; treating those as disagreeing would reject a patch
+	// the executor applies to one file, which is a fail-closed refusal of valid
+	// input rather than a security boundary. filepath.ToSlash is a no-op on
+	// Unix, where a backslash is an ordinary filename byte.
+	source, destination = filepath.ToSlash(source), filepath.ToSlash(destination)
 	if parsed {
+		parsedSource, parsedDestination := filepath.ToSlash(parsedSource), filepath.ToSlash(parsedDestination)
 		if parsedSource == source && parsedDestination == destination {
 			return true
 		}

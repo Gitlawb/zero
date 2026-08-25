@@ -53,6 +53,7 @@ const (
 type SandboxManagerOptions struct {
 	GOOS             string
 	LookupExecutable func(string) (string, error)
+	DetectWSL        func() WSLInfo
 	Backend          Backend
 }
 
@@ -98,7 +99,7 @@ func NewSandboxManager(options SandboxManagerOptions) SandboxManager {
 		goos = runtime.GOOS
 	}
 	if backend.Name == "" {
-		backend = selectPlatformBackend(goos, options.LookupExecutable)
+		backend = selectPlatformBackend(goos, options.LookupExecutable, options.DetectWSL)
 	}
 	if backend.Platform == "" {
 		backend.Platform = goos
@@ -170,9 +171,12 @@ func lookupExecutable(name string) (string, error) {
 	return "", errors.New("executable file not found")
 }
 
-func selectPlatformBackend(goos string, lookup func(string) (string, error)) Backend {
+func selectPlatformBackend(goos string, lookup func(string) (string, error), detect func() WSLInfo) Backend {
 	if lookup == nil {
 		lookup = lookupExecutable
+	}
+	if detect == nil {
+		detect = detectWSL
 	}
 	switch goos {
 	case "linux":
@@ -182,7 +186,7 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 			}
 			return nativeBackend(goos, BackendLinuxBwrap, helper, "Linux sandbox helper available")
 		}
-		if info := detectWSL(); info.IsWSL {
+		if info := detect(); info.IsWSL {
 			return wslBackend(goos, info)
 		}
 		return unavailableBackend(goos, "Linux sandbox helper is not available")

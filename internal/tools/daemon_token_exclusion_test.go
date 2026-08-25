@@ -242,6 +242,14 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 		destination       string
 		wantControlSource []byte
 		wantControlTarget []byte
+		// controlUnsupported marks a patch form the in-process unified-diff
+		// engine does not implement, so the control cannot demonstrate an
+		// applied effect: apply_patch no longer shells out to git, and these
+		// forms now reach no file at all. The control then proves the weaker
+		// but still non-vacuous property that the refusal is a format refusal
+		// which creates nothing, while the protected case below must still be
+		// refused by the credential gate specifically.
+		controlUnsupported string
 	}{
 		{
 			name:      "header-only copy",
@@ -273,6 +281,9 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 				"rename new alias-renamed-token\n",
 			destination:       "alias-renamed-token",
 			wantControlTarget: original,
+			// Legacy "rename old"/"rename new" spellings; the in-process engine
+			// implements only git's "rename from"/"rename to".
+			controlUnsupported: `unexpected "rename old bridge token"`,
 		},
 		{
 			name:      "header-only copy preserves leading space",
@@ -284,6 +295,11 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 			destination:       "leading-space-copy",
 			wantControlSource: original,
 			wantControlTarget: original,
+			// The in-process rename/copy header parser trims the extracted path,
+			// so a leading-space filename resolves to a name that does not exist.
+			// That costs fidelity for such a file; it cannot reach the token,
+			// whose exact spelling the credential gate refuses first.
+			controlUnsupported: "opening bridge-token",
 		},
 		{
 			name:      "binary modification",
@@ -295,7 +311,8 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 				"ecmYc+DM?JuPA$?+Ni0cZ$jwj5Ov_A7;Q|0@R|sMN\n\n" +
 				"literal 23\n" +
 				"ecmYc)%1lX5)h$j<E=nz7$S=xF&&*5A;Q|0@YY2b<\n\n",
-			wantControlSource: []byte("attacker-data\x00modified\n"),
+			wantControlSource:  []byte("attacker-data\x00modified\n"),
+			controlUnsupported: "binary patches are not supported",
 		},
 		{
 			name:      "binary modification preserves trailing space",
@@ -307,7 +324,8 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 				"ecmYc+DM?JuPA$?+Ni0cZ$jwj5Ov_A7;Q|0@R|sMN\n\n" +
 				"literal 23\n" +
 				"ecmYc)%1lX5)h$j<E=nz7$S=xF&&*5A;Q|0@YY2b<\n\n",
-			wantControlSource: []byte("attacker-data\x00modified\n"),
+			wantControlSource:  []byte("attacker-data\x00modified\n"),
+			controlUnsupported: "binary patches are not supported",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -326,21 +344,39 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 				controlResult := controlRegistry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
 					"patch": tc.patch,
 				}, RunOptions{PermissionGranted: true})
-				if controlResult.Status != StatusOK {
-					t.Fatalf("control patch is invalid: %s", controlResult.Output)
-				}
-				controlSource, sourceErr := os.ReadFile(filepath.Join(control, tc.tokenName))
-				if tc.wantControlSource == nil {
-					if !os.IsNotExist(sourceErr) {
-						t.Fatalf("control source still exists after rename: contents=%q err=%v", controlSource, sourceErr)
+				switch {
+				case tc.controlUnsupported != "":
+					// The form itself is unimplemented, so it must be refused for
+					// a format reason — never silently applied — and it must not
+					// create the destination it names.
+					if controlResult.Status == StatusOK {
+						t.Fatalf("control patch was applied despite an unsupported form: %s", controlResult.Output)
 					}
-				} else if sourceErr != nil || string(controlSource) != string(tc.wantControlSource) {
-					t.Fatalf("control source: contents=%q err=%v", controlSource, sourceErr)
-				}
-				if tc.destination != "" {
-					controlTarget, err := os.ReadFile(filepath.Join(control, tc.destination))
-					if err != nil || string(controlTarget) != string(tc.wantControlTarget) {
-						t.Fatalf("control target: contents=%q err=%v", controlTarget, err)
+					if !strings.Contains(controlResult.Output, tc.controlUnsupported) {
+						t.Fatalf("control refusal = %q, want the %q format refusal", controlResult.Output, tc.controlUnsupported)
+					}
+					if tc.destination != "" {
+						if _, err := os.Stat(filepath.Join(control, tc.destination)); !os.IsNotExist(err) {
+							t.Fatalf("refused control patch created %q: err=%v", tc.destination, err)
+						}
+					}
+				default:
+					if controlResult.Status != StatusOK {
+						t.Fatalf("control patch is invalid: %s", controlResult.Output)
+					}
+					controlSource, sourceErr := os.ReadFile(filepath.Join(control, tc.tokenName))
+					if tc.wantControlSource == nil {
+						if !os.IsNotExist(sourceErr) {
+							t.Fatalf("control source still exists after rename: contents=%q err=%v", controlSource, sourceErr)
+						}
+					} else if sourceErr != nil || string(controlSource) != string(tc.wantControlSource) {
+						t.Fatalf("control source: contents=%q err=%v", controlSource, sourceErr)
+					}
+					if tc.destination != "" {
+						controlTarget, err := os.ReadFile(filepath.Join(control, tc.destination))
+						if err != nil || string(controlTarget) != string(tc.wantControlTarget) {
+							t.Fatalf("control target: contents=%q err=%v", controlTarget, err)
+						}
 					}
 				}
 			}

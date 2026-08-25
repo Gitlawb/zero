@@ -948,6 +948,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		FavoriteModels:       resolved.Preferences.FavoriteModels,
 		RecentModels:         resolved.Preferences.RecentModels,
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
+		CompactionModel:      resolved.Preferences.CompactionModel,
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
 		ProbeProviderHealth:  deps.probeProviderHealth,

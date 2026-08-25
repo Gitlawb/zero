@@ -3,107 +3,60 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
-// Single-instance lock. Mirrors reference-daemon-code-agent-js/supervisor.js's
-// lock file: a PID file created with O_EXCL. A second start fails; a STALE lock
-// left by a dead daemon (the recorded PID is no longer alive) is reclaimed so the
-// daemon recovers from an unclean shutdown without manual cleanup.
+// Single-instance lock. The stable PID file carries a kernel advisory lock for
+// the daemon's full lifetime. Process exit releases the lock automatically, so
+// stale metadata needs no rename/remove recovery protocol.
 
 // ErrAlreadyRunning is returned when a live daemon already holds the lock.
 var ErrAlreadyRunning = errors.New("daemon: another instance is already running")
 
 // fileLock is an acquired single-instance lock.
 type fileLock struct {
-	path string
+	lock *lockutil.FileLock
 }
 
 // processAlive reports whether pid is a live process. Implemented per-platform
 // (lock_posix.go / lock_windows.go). It is a package var so tests can stub it.
 var processAlive = osProcessAlive
 
-// acquireLock takes the single-instance lock at path, reclaiming a stale lock
-// whose recorded PID is dead. isAlive overrides the liveness check (tests pass a
-// stub); nil uses the real processAlive.
+// acquireLock takes the single-instance advisory lock at path. isAlive is used
+// only to enrich a contention error with the current holder's PID; the kernel
+// lock, not PID metadata, is authoritative.
 func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 	if isAlive == nil {
 		isAlive = processAlive
 	}
-	// At most two passes: create, or detect-stale-then-retry once.
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			// A failed PID write would leave a malformed lock file that another
-			// process reads as stale (unparsable PID) and wrongly reclaims, breaking
-			// the single-instance guarantee — so on write failure, remove it and fail.
-			if _, werr := fmt.Fprintf(f, "%d\n", os.Getpid()); werr != nil {
-				_ = f.Close()
-				_ = lockutil.RemoveLockFile(path)
-				return nil, werr
-			}
-			if cerr := f.Close(); cerr != nil {
-				_ = lockutil.RemoveLockFile(path)
-				return nil, cerr
-			}
-			return &fileLock{path: path}, nil
-		}
-		if !errors.Is(err, fs.ErrExist) && !errors.Is(err, os.ErrPermission) {
+	lock, err := lockutil.TryAcquireFileLock(path)
+	if err != nil {
+		if !errors.Is(err, lockutil.ErrLockHeld) {
 			return nil, err
 		}
 		pid, perr := readPidFile(path)
 		if perr == nil && pid > 0 && isAlive(pid) {
 			return nil, fmt.Errorf("%w (pid %d)", ErrAlreadyRunning, pid)
 		}
-		// Stale lock (dead PID or unreadable) — reclaim it atomically, then retry the
-		// O_EXCL create. A blind Remove here races: two daemons starting at once could
-		// both read the stale PID, both Remove, and then one Removes the OTHER's
-		// freshly-created lock — leaving both "holding" the single-instance lock.
-		// reclaimStaleLock renames the file aside so only one racer wins the rename,
-		// and restores it if a live holder reacquired in the gap (D6).
-		if _, rerr := reclaimStaleLock(path, isAlive); rerr != nil {
-			// Reclaim hit a hard failure: the rename aside failed outright, or a
-			// live holder's lock could not be put back (the lock path may be
-			// missing, so re-acquiring would break the single-instance guarantee).
-			// Fail closed instead of spinning to the deadline.
-			return nil, fmt.Errorf("daemon: reclaim stale lock: %w", rerr)
-		}
+		return nil, ErrAlreadyRunning
 	}
-	return nil, ErrAlreadyRunning
+	if err := lock.WriteMetadata([]byte(fmt.Sprintf("%d\n", os.Getpid()))); err != nil {
+		return nil, errors.Join(err, lock.Release())
+	}
+	return &fileLock{lock: lock}, nil
 }
 
-// daemonLockSeq makes each reclaim attempt's sidelined filename unique per process.
-var daemonLockSeq atomic.Uint64
-
-// reclaimStaleLock atomically reclaims a single-instance lock whose recorded
-// PID is dead, via lockutil.ReclaimStaleLock: the lock file is renamed aside
-// (only one racer can win the rename) and stolen only if the moved file's PID
-// is still dead; a holder that reacquired the lock in the gap between the
-// stale check and the rename carries a LIVE pid and is restored rather than
-// stolen. Returns true only when a genuinely stale lock was removed. A
-// non-nil error means the caller must fail closed instead of re-acquiring
-// (see lockutil.ReclaimStaleLock).
-func reclaimStaleLock(path string, isAlive func(pid int) bool) (bool, error) {
-	suffix := fmt.Sprintf("%d-%d", os.Getpid(), daemonLockSeq.Add(1))
-	return lockutil.ReclaimStaleLock(path, suffix, func(reclaimedPath string) bool {
-		pid, err := readPidFile(reclaimedPath)
-		return err == nil && pid > 0 && isAlive(pid)
-	})
-}
-
-// release removes the lock file. Safe to call once. An already-missing lock
-// file is not an error (lockutil.RemoveLockFile swallows it on every platform).
+// release drops the kernel lock and closes its handle. The stable PID file is
+// deliberately retained so contenders always address the same inode.
 func (l *fileLock) release() error {
-	if l == nil || l.path == "" {
+	if l == nil || l.lock == nil {
 		return nil
 	}
-	return lockutil.RemoveLockFile(l.path)
+	return l.lock.Release()
 }
 
 // readPidFile reads and parses the PID recorded in a lock file.
@@ -112,5 +65,20 @@ func readPidFile(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(strings.TrimSpace(string(data)))
+	metadata := strings.TrimSpace(string(data))
+	if pid, err := strconv.Atoi(metadata); err == nil {
+		return pid, nil
+	}
+	pidText, sequenceText, ok := strings.Cut(metadata, "-")
+	if !ok || pidText == "" || sequenceText == "" || strings.Contains(sequenceText, "-") {
+		return 0, fmt.Errorf("daemon: parse lock PID metadata %q", metadata)
+	}
+	if _, err := strconv.ParseUint(sequenceText, 10, 64); err != nil {
+		return 0, fmt.Errorf("daemon: parse lock holder sequence: %w", err)
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		return 0, fmt.Errorf("daemon: parse lock PID: %w", err)
+	}
+	return pid, nil
 }

@@ -191,11 +191,11 @@ func TestDaemonTokenProtectionMatrix(t *testing.T) {
 					headerPaths[1] != filepath.ToSlash(target) {
 					t.Fatalf("patch header paths = %q, want exact target spelling twice", headerPaths)
 				}
-				if filepath.IsAbs(target) {
-					if !strings.Contains(result.Output, "must stay inside the workspace") {
-						t.Fatalf("absolute apply_patch refusal did not come from workspace containment: output=%q", result.Output)
-					}
-				} else if !strings.Contains(result.Output, "holds the remote bridge token") {
+				// Every spelling — absolute included — must be refused by the
+				// credential gate itself. An absolute path inside the workspace
+				// is legitimate for an ordinary target, so the blanket
+				// absolute-path rejection cannot be what protects the token.
+				if !strings.Contains(result.Output, "holds the remote bridge token") {
 					t.Fatalf("apply_patch refusal did not come from the credential gate: output=%q", result.Output)
 				}
 			})

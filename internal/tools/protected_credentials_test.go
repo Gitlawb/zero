@@ -271,13 +271,25 @@ func TestRootedMutationPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
 			defer root.Close()
 			switch name {
 			case "unified_patch":
-				err = materializeStagedPatchFile(root, "notes.txt", stagedPatchFile{
-					exists: true, mode: 0o644, content: []byte("patched\n"),
-				}, false)
+				// A unified diff is translated into the same operations the
+				// structured engine applies, so it publishes through the same
+				// rooted atomic write rather than a pathname-level open.
+				operations, perr := parseUnifiedPatch("--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-ordinary\n+patched\n")
+				if perr != nil {
+					t.Fatal(perr)
+				}
+				var changes []structuredPatchChange
+				changes, err = planStructuredPatch(root, operations, nil)
+				if err == nil {
+					err = applyStructuredPatchChanges(root, changes, nil)
+				}
 			default:
 				_, err = writeRootedFile(root, "notes.txt", []byte("updated\n"), 0o644, false)
 			}
-			if err != nil {
+			// Planning refuses the raced alias outright; publishing, when it does
+			// run, must not reach the token either. Either outcome is acceptable,
+			// an altered token is not.
+			if err != nil && !strings.Contains(err.Error(), "remote bridge token") {
 				t.Fatal(err)
 			}
 			if content, err := os.ReadFile(token); err != nil || string(content) != "bridge-secret\n" {
@@ -321,7 +333,12 @@ func TestStructuredPatchPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
 	if err := os.Link(token, path); err != nil {
 		t.Skipf("workspace filesystem is not hard-linkable: %v", err)
 	}
-	if err := applyStructuredPatchChanges(root, changes, nil); err != nil {
+	// The commit either refuses the swapped target (the file changed between
+	// planning and commit, or it is the protected credential) or publishes
+	// atomically over the alias. Either is acceptable; an altered token is not.
+	err = applyStructuredPatchChanges(root, changes, nil)
+	if err != nil && !strings.Contains(err.Error(), "changed on disk") &&
+		!strings.Contains(err.Error(), "remote bridge token") {
 		t.Fatal(err)
 	}
 	if content, err := os.ReadFile(token); err != nil || string(content) != "bridge-secret\n" {

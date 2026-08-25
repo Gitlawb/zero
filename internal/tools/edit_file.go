@@ -187,7 +187,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
 	if updated == modelKnownContent {
 		if previouslySeenWhole {
-			options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(updated), lineCount(updated))
+			options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(updated), trackedLineTotal(updated))
 		} else {
 			for _, span := range editedSpans {
 				options.FileTracker.RecordSeenBytes(absolutePath, span.start, span.end, len(updated))
