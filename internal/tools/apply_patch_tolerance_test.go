@@ -452,3 +452,21 @@ func TestUnifiedPatchNoNewlineMarkerOnlyAfterFinalHunk(t *testing.T) {
 		t.Fatalf("content = %q", string(content))
 	}
 }
+
+// A removed "-- …" line directly followed by an added "++ …" line looks like a
+// ---/+++ header pair; the boundary check must not mistake it for one.
+func TestUnifiedPatchKeepsAdjacentDashPlusContentLines(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.sql"), "select 1;\n-- old comment\nselect 2;\n")
+	patch := strings.Join([]string{
+		"--- a/notes.sql", "+++ b/notes.sql",
+		"@@ -1,3 +1,3 @@", " select 1;", "--- old comment", "+++ new comment", " select 2;", "",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusOK {
+		t.Fatalf("adjacent -- / ++ content lines must apply, got %s: %s", result.Status, result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "notes.sql")); string(content) != "select 1;\n++ new comment\nselect 2;\n" {
+		t.Fatalf("content = %q", string(content))
+	}
+}

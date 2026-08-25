@@ -92,11 +92,12 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 	for index, raw := range lines {
 		lineNumber := index + 1
 		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
-			// A "--- " line directly followed by "+++ " is the next file's
-			// header pair, not a removed line followed by an added one: an
-			// over-declared count would otherwise swallow both and the hunk
-			// would later fail against the wrong file.
-			if strings.HasPrefix(raw, "--- ") && index+1 < len(lines) && strings.HasPrefix(lines[index+1], "+++ ") {
+			// A "--- " line followed by "+++ " and then a "@@" hunk header is
+			// the next file's header pair, not a removed "-- x" line followed by
+			// an added "++ y" line: an over-declared count would otherwise
+			// swallow both and the hunk would later fail against the wrong
+			// file. The "@@" requirement keeps a genuine adjacent pair intact.
+			if strings.HasPrefix(raw, "--- ") && index+2 < len(lines) && strings.HasPrefix(lines[index+1], "+++ ") && strings.HasPrefix(lines[index+2], "@@") {
 				return nil, fmt.Errorf("invalid unified diff at line %d: hunk ended before its declared line counts", lineNumber)
 			}
 			switch {
@@ -236,6 +237,11 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 			return nil, fmt.Errorf("invalid unified diff at line %d: unexpected %q", lineNumber, trimmed)
 		}
 	}
+	// Strict at end of input on purpose: a hunk cut short (typically a model
+	// response that stopped mid-patch) would otherwise apply as a partial
+	// change — removals without their replacements — which is worse than a
+	// clear error and a retry. Miscounted ranges with complete content are
+	// still tolerated at every other boundary.
 	if inHunk && (oldRemaining > 0 || newRemaining > 0) {
 		return nil, fmt.Errorf("invalid unified diff at line %d: hunk ended before its declared line counts", len(lines))
 	}
