@@ -24,8 +24,6 @@ const statusDirectoryWriteAccess = windows.ACCESS_MASK(
 		0x40, // FILE_DELETE_CHILD
 )
 
-var statusReOpenFile = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
-
 // checkStatusDirOwner validates ownership and write access through a handle
 // opened beneath root. Path-based ACL inspection would recreate the ancestor
 // swap race that Root is intended to close.
@@ -124,27 +122,44 @@ func hardenStatusDir(root *os.Root) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("access status directory hardening handle: %w", err)
 	}
+	// Root.Open uses NtCreateFile internally, so its handle cannot be passed to
+	// ReOpenFile (which requires a CreateFile handle). Open "." relative to the
+	// bound handle instead, requesting the security rights needed for the DACL
+	// update without resolving the directory by path again.
 	var securityHandle windows.Handle
-	var reopenErr error
+	var openErr error
 	if err := raw.Control(func(rawHandle uintptr) {
-		reopened, _, callErr := statusReOpenFile.Call(
-			rawHandle,
-			uintptr(windows.READ_CONTROL|windows.WRITE_DAC),
-			uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
-			uintptr(windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS),
-		)
-		securityHandle = windows.Handle(reopened)
-		if securityHandle == windows.InvalidHandle {
-			reopenErr = callErr
+		objectName, nameErr := windows.NewNTUnicodeString(".")
+		if nameErr != nil {
+			openErr = nameErr
+			return
 		}
+		openErr = windows.NtCreateFile(
+			&securityHandle,
+			windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+			&windows.OBJECT_ATTRIBUTES{
+				Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+				RootDirectory: windows.Handle(rawHandle),
+				ObjectName:    objectName,
+				Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+			},
+			&windows.IO_STATUS_BLOCK{},
+			nil,
+			windows.FILE_ATTRIBUTE_DIRECTORY,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			windows.FILE_OPEN,
+			windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT,
+			0,
+			0,
+		)
 	}); err != nil {
-		return fmt.Errorf("reopen status directory hardening handle: %w", err)
+		return fmt.Errorf("open status directory hardening handle: %w", err)
 	}
-	if reopenErr != nil {
-		return fmt.Errorf("reopen status directory with security access: %w", reopenErr)
+	if openErr != nil {
+		return fmt.Errorf("open status directory with security access: %w", openErr)
 	}
 	if securityHandle == 0 || securityHandle == windows.InvalidHandle {
-		return fmt.Errorf("reopen status directory with security access: invalid handle")
+		return fmt.Errorf("open status directory with security access: invalid handle")
 	}
 	defer func() {
 		if err := windows.CloseHandle(securityHandle); err != nil {
