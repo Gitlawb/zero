@@ -866,10 +866,10 @@ func classifyInterpreterSource(payload string, language interpreterSourceLanguag
 	if depth > maxAnalyzerDepth {
 		return commandUnresolved
 	}
-	if language == interpreterSourcePowerShell && strings.ContainsRune(payload, '`') {
-		// Backtick escaping and line continuation change PowerShell token
-		// boundaries but have no equivalent in the POSIX/CMD readers below.
-		return commandUnresolved
+	if language == interpreterSourcePowerShell {
+		if unreadable := powerShellSourceUnreadable(payload); unreadable != "" {
+			return commandUnresolved
+		}
 	}
 	result := AnalysisResult{}
 	analyzeInto(payload, &result, map[string]bool{}, depth)
@@ -877,6 +877,42 @@ func classifyInterpreterSource(payload string, language interpreterSourceLanguag
 		return commandKnownNetwork
 	}
 	return commandKnownLocal
+}
+
+// powerShellBlockPunctuation opens or closes a PowerShell script block or
+// statement block. Every block-structured form the language has — try/catch/
+// finally, if/else, foreach, for, while, do, switch, function, trap, param, and
+// a script block handed to ForEach-Object or the call operator — is written
+// with braces, so their presence is the single signal that the source has
+// structure the readers below do not model.
+const powerShellBlockPunctuation = "{}"
+
+// powerShellSourceUnreadable reports why PowerShell source cannot be proven
+// local by the readers classifyInterpreterSource runs, or "" when it can.
+//
+// Those readers are the POSIX AST scan and the unparseable-command matcher.
+// Neither models PowerShell grammar. They happen to read a simple
+// `Verb-Noun -Arg value` line correctly because it tokenizes like a POSIX
+// command, and that precision is worth keeping — but "the POSIX reader found no
+// network program in this PowerShell source" is not evidence the source is
+// local. `try { Invoke-WebRequest https://host } catch {}` is valid PowerShell
+// that performs the request, and neither reader models try/catch, so it drew no
+// network category at all.
+//
+// A conservative unresolved result is the contract here: only source a reader
+// can actually parse and prove local may skip the gate. Unresolved costs a
+// prompt on a shell request, not a denial, so the failure mode of being wrong
+// in this direction is a question rather than a broken command.
+func powerShellSourceUnreadable(payload string) string {
+	if strings.ContainsRune(payload, '`') {
+		// Backtick escaping and line continuation change PowerShell token
+		// boundaries but have no equivalent in the POSIX/CMD readers.
+		return "backtick escaping"
+	}
+	if strings.ContainsAny(payload, powerShellBlockPunctuation) {
+		return "script or statement block"
+	}
+	return ""
 }
 
 func pythonModuleUsesNetwork(words []string) bool {
