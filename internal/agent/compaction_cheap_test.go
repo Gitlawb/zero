@@ -135,7 +135,7 @@ func TestSummarizerFactoryErrorFallsBack(t *testing.T) {
 	if factoryCalls != 1 {
 		t.Fatalf("factory calls = %d, want 1 (sticky failure)", factoryCalls)
 	}
-	if state.summarizeProvider(context.Background(), main) != Provider(main) {
+	if _, dedicated := state.summarizeProvider(context.Background(), main); dedicated {
 		t.Fatal("after a factory failure the run must stay on the main provider")
 	}
 	if factoryCalls != 1 {
@@ -338,10 +338,10 @@ func TestSwitchModelReresolvesSummarizer(t *testing.T) {
 		},
 	}, nil)
 
-	if got := state.summarizeProvider(context.Background(), main); got != Provider(main) {
+	if _, dedicated := state.summarizeProvider(context.Background(), main); dedicated {
 		t.Fatal("on the cheap model the main provider must summarize")
 	}
-	if got := state.summarizeProvider(context.Background(), main); got != Provider(main) || len(factoryModels) != 1 {
+	if _, dedicated := state.summarizeProvider(context.Background(), main); dedicated || len(factoryModels) != 1 {
 		t.Fatalf("factory must run once per main model, calls=%v", factoryModels)
 	}
 
@@ -349,7 +349,7 @@ func TestSwitchModelReresolvesSummarizer(t *testing.T) {
 	if state.threshold != compactionThreshold(400_000) || state.window != 400_000 {
 		t.Fatalf("switchModel must re-derive the window, got threshold=%d window=%d", state.threshold, state.window)
 	}
-	if got := state.summarizeProvider(context.Background(), main); got != Provider(cheap) {
+	if got, dedicated := state.summarizeProvider(context.Background(), main); !dedicated || got != Provider(cheap) {
 		t.Fatal("after escalating to an expensive model the dedicated cheap summarizer must be used")
 	}
 	if len(factoryModels) != 2 || factoryModels[1] != "big-model" {
@@ -358,11 +358,11 @@ func TestSwitchModelReresolvesSummarizer(t *testing.T) {
 
 	// A broken summarizer is retried after the next switch.
 	state.summarizerBroken = true
-	if got := state.summarizeProvider(context.Background(), main); got != Provider(main) {
+	if _, dedicated := state.summarizeProvider(context.Background(), main); dedicated {
 		t.Fatal("a broken summarizer must fall back to main")
 	}
 	state.switchModel("other-model", 0)
-	if got := state.summarizeProvider(context.Background(), main); got != Provider(cheap) {
+	if got, dedicated := state.summarizeProvider(context.Background(), main); !dedicated || got != Provider(cheap) {
 		t.Fatal("a model switch must clear the broken flag and rebuild the summarizer")
 	}
 }
@@ -433,5 +433,37 @@ func TestRunEscalationRederivesContextWindow(t *testing.T) {
 	}
 	if windows[len(windows)-1] != 400_000 {
 		t.Fatalf("post-escalation window = %d, want 400000", windows[len(windows)-1])
+	}
+}
+
+// nonComparableProvider has a slice field, so comparing two Provider interface
+// values holding it would panic; the summarizer path must never compare them.
+type nonComparableProvider struct {
+	inner *mockProvider
+	tags  []string
+}
+
+func (p nonComparableProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	return p.inner.StreamCompletion(ctx, request)
+}
+
+func TestSummarizeClosureNeverComparesProviderValues(t *testing.T) {
+	broken := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventError, Error: "boom: model not found"},
+	}}}
+	main := nonComparableProvider{inner: summaryProvider("MAIN SUMMARY"), tags: []string{"x"}}
+	state := newCompactionState(Options{
+		ContextWindow:          1000,
+		CompactionPreserveLast: 2,
+		Summarizer:             func(context.Context, string) (Provider, error) { return nonComparableProvider{inner: broken}, nil },
+	}, nil)
+	summary, err := state.summarizeClosure(context.Background(), main)([]zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "history"}})
+	if err != nil || summary != "MAIN SUMMARY" {
+		t.Fatalf("fallback with non-comparable providers must not panic and must use main, got %q err=%v", summary, err)
+	}
+	// And with no dedicated summarizer at all the closure still works.
+	state = newCompactionState(Options{ContextWindow: 1000, CompactionPreserveLast: 2}, nil)
+	if _, err := state.summarizeClosure(context.Background(), main)([]zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "history"}}); err != nil {
+		t.Fatal(err)
 	}
 }

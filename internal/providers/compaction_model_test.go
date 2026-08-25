@@ -48,6 +48,11 @@ func TestCompactionModelIDCuratedDefaults(t *testing.T) {
 		t.Fatalf("google default = %q, want %q", got, defaultGoogleCompactionModel)
 	}
 
+	openai := config.ProviderProfile{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}
+	if got := CompactionModelID(openai, ""); got != defaultOpenAICompactionModel {
+		t.Fatalf("openai default = %q, want %q", got, defaultOpenAICompactionModel)
+	}
+
 	// Custom/compatible endpoints: catalog unknowable, no default.
 	compatible := config.ProviderProfile{
 		Name:         "opengateway",

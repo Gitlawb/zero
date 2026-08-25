@@ -492,27 +492,29 @@ func (state *compactionState) switchModel(modelID string, window int) {
 	state.summarizerBroken = false
 }
 
-// summarizeProvider returns the provider summarization calls should use: the
-// dedicated summarizer when one applies to the current main model and is
-// healthy, else the main provider. The factory runs at most once per main
-// model; a build error marks the summarizer broken for that model.
-func (state *compactionState) summarizeProvider(ctx context.Context, main Provider) Provider {
+// summarizeProvider returns the provider summarization calls should use and
+// whether it is the dedicated summarizer: that one when it applies to the
+// current main model and is healthy, else the main provider. The factory runs
+// at most once per main model; a build error marks the summarizer broken for
+// that model. Callers branch on the boolean rather than comparing Provider
+// values — interface comparison panics on a non-comparable dynamic type.
+func (state *compactionState) summarizeProvider(ctx context.Context, main Provider) (Provider, bool) {
 	if state.summarizerFactory == nil || state.summarizerBroken {
-		return main
+		return main, false
 	}
 	if !state.summarizerResolved {
 		state.summarizerResolved = true
 		built, err := state.summarizerFactory(ctx, state.mainModel)
 		if err != nil {
 			state.summarizerBroken = true
-			return main
+			return main, false
 		}
 		state.summarizerProvider = built
 	}
 	if state.summarizerProvider == nil {
-		return main
+		return main, false
 	}
-	return state.summarizerProvider
+	return state.summarizerProvider, true
 }
 
 // fitsWindow reports whether a calibrated size is safely under the limit the
@@ -696,9 +698,9 @@ func (state *compactionState) summarizeClosure(ctx context.Context, provider Pro
 		state.planner = newContextPlanner(contextPlannerConfig{})
 	}
 	return func(toSummarize []zeroruntime.Message) (string, error) {
-		chosen := state.summarizeProvider(ctx, provider)
+		chosen, dedicated := state.summarizeProvider(ctx, provider)
 		summary, err := summarizeWithPlanner(ctx, chosen, toSummarize, state.onUsage, state.planner, state.trace)
-		if err == nil || chosen == provider {
+		if err == nil || !dedicated {
 			return summary, err
 		}
 		state.summarizerBroken = true
