@@ -36,6 +36,12 @@ const (
 // holding a different one. lockutil keeps the sibling's path stable for the
 // same reason, and never removes it.
 //
+// The returned release function reports its own failure rather than swallowing
+// it: a failed Release can leave the lock held for the rest of the process, so
+// a mutator that returned success after it would be reporting a state the next
+// mutation cannot reproduce. Callers join it into their result (AGENTS.md:
+// "never report success when cleanup or unlock failed").
+//
 // This also serializes goroutines within one process: each acquisition opens
 // its own file description, so a second in-process attempt contends exactly as
 // another process would. The lock is NOT reentrant, so an exported mutator that
@@ -47,11 +53,17 @@ const (
 // shape. A writer that skipped this lock would reintroduce the lost update for
 // every field, so the lock has to be one authority across packages rather than
 // a private detail of this one.
-func LockFile(path string) (func(), error) {
-	return lockConfigFile(path)
+func LockFile(path string) (func() error, error) {
+	return lockConfigFileFn(path)
 }
 
-func lockConfigFile(path string) (func(), error) {
+// lockConfigFileFn is the seam the mutators call. Release failures cannot be
+// provoked through the public API — lockutil.Release is idempotent and reports
+// nil once released — so substituting this is the only way to assert that a
+// failed unlock actually reaches the caller instead of being swallowed.
+var lockConfigFileFn = lockConfigFile
+
+func lockConfigFile(path string) (func() error, error) {
 	lockPath := path + ".lock"
 	if dir := filepath.Dir(lockPath); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -62,7 +74,7 @@ func lockConfigFile(path string) (func(), error) {
 	for {
 		lock, err := lockutil.TryAcquireFileLock(lockPath)
 		if err == nil {
-			return func() { _ = lock.Release() }, nil
+			return lock.Release, nil
 		}
 		if !errors.Is(err, lockutil.ErrLockHeld) {
 			return nil, fmt.Errorf("config: acquire config lock: %w", err)

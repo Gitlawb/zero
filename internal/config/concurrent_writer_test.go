@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -320,5 +321,76 @@ func TestConfigConcurrentHelperProcess(t *testing.T) {
 	fmt.Println("ready")
 	if _, err := SetTheme(path, "child-theme"); err != nil {
 		t.Fatalf("child mutation: %v", err)
+	}
+}
+
+// TestMutationReportsUnlockFailure pins the AGENTS.md rule that a mutator must
+// never report success when unlock failed. A failed release can leave the lock
+// held for the rest of the process, so returning (cfg, nil) after one would
+// claim a state the next mutation cannot reproduce.
+//
+// lockutil.Release is idempotent and reports nil once released, so a real
+// release failure cannot be provoked through the public API — hence the seam.
+// The mutation itself must still have been published: the release failure
+// annotates the result, it does not undo the write.
+func TestMutationReportsUnlockFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	seedTestConfig(t, path)
+
+	releaseErr := errors.New("release exploded")
+	original := lockConfigFileFn
+	t.Cleanup(func() { lockConfigFileFn = original })
+	lockConfigFileFn = func(p string) (func() error, error) {
+		unlock, err := original(p)
+		if err != nil {
+			return nil, err
+		}
+		return func() error {
+			_ = unlock()
+			return releaseErr
+		}, nil
+	}
+
+	cfg, err := SetTheme(path, "dracula")
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("SetTheme err = %v, want it to carry the release failure", err)
+	}
+	if cfg.Preferences.Theme != "dracula" {
+		t.Errorf("returned config lost the mutation: theme = %q", cfg.Preferences.Theme)
+	}
+	if got := readTestConfig(t, path).Preferences.Theme; got != "dracula" {
+		t.Errorf("mutation was not published despite only the release failing: theme = %q", got)
+	}
+}
+
+// TestMutationErrorSurvivesUnlockFailure proves the two errors are joined
+// rather than chosen between: a release failure must not mask the mutation
+// error that actually explains what went wrong.
+func TestMutationErrorSurvivesUnlockFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	seedTestConfig(t, path)
+
+	releaseErr := errors.New("release exploded")
+	original := lockConfigFileFn
+	t.Cleanup(func() { lockConfigFileFn = original })
+	lockConfigFileFn = func(p string) (func() error, error) {
+		unlock, err := original(p)
+		if err != nil {
+			return nil, err
+		}
+		return func() error {
+			_ = unlock()
+			return releaseErr
+		}, nil
+	}
+
+	// An unknown provider is the mutation error; the release failure is joined
+	// onto it, and neither one disappears.
+	_, err := SetActiveProvider(path, "definitely-not-configured")
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("err = %v, want it to carry the release failure", err)
+	}
+	if !strings.Contains(err.Error(), "definitely-not-configured") {
+		t.Fatalf("err = %v, want it to still name the missing provider", err)
 	}
 }

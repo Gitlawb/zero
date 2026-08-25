@@ -50,7 +50,7 @@ func projectMCPConfigExists(workspaceRoot string) bool {
 	return len(fc.MCP.Servers) > 0
 }
 
-func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) (exitCode int) {
 	options, help, err := parseMCPAddArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -74,7 +74,14 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	defer unlock()
+	defer func() {
+		// A failed release leaves the lock held for the rest of the process, so
+		// exiting success here would claim a state the next config write cannot
+		// reproduce. It must not mask a failure this command already reported.
+		if releaseErr := unlock(); releaseErr != nil && exitCode == exitSuccess {
+			exitCode = writeAppError(stderr, redaction.ErrorMessage(releaseErr, redaction.Options{}), exitCrash)
+		}
+	}()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -118,7 +125,7 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	return exitSuccess
 }
 
-func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) (exitCode int) {
 	options, positional, help, err := parseMCPConfigPositionalCommand(args, "remove")
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -149,7 +156,14 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	defer unlock()
+	defer func() {
+		// A failed release leaves the lock held for the rest of the process, so
+		// exiting success here would claim a state the next config write cannot
+		// reproduce. It must not mask a failure this command already reported.
+		if releaseErr := unlock(); releaseErr != nil && exitCode == exitSuccess {
+			exitCode = writeAppError(stderr, redaction.ErrorMessage(releaseErr, redaction.Options{}), exitCrash)
+		}
+	}()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -185,7 +199,7 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	return exitSuccess
 }
 
-func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, disabled bool) int {
+func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, disabled bool) (exitCode int) {
 	commandName := "enable"
 	if disabled {
 		commandName = "disable"
@@ -220,7 +234,14 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	defer unlock()
+	defer func() {
+		// A failed release leaves the lock held for the rest of the process, so
+		// exiting success here would claim a state the next config write cannot
+		// reproduce. It must not mask a failure this command already reported.
+		if releaseErr := unlock(); releaseErr != nil && exitCode == exitSuccess {
+			exitCode = writeAppError(stderr, redaction.ErrorMessage(releaseErr, redaction.Options{}), exitCrash)
+		}
+	}()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
