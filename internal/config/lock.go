@@ -41,6 +41,16 @@ const (
 // another process would. The lock is NOT reentrant, so an exported mutator that
 // needs another mutator's work calls the unexported *Locked form instead of
 // re-entering through the public function.
+// LockFile exposes lockConfigFile to packages that edit the SAME user config
+// document without going through this package's mutators — internal/cli's MCP
+// editor reads, edits and republishes it with the identical temp-file+rename
+// shape. A writer that skipped this lock would reintroduce the lost update for
+// every field, so the lock has to be one authority across packages rather than
+// a private detail of this one.
+func LockFile(path string) (func(), error) {
+	return lockConfigFile(path)
+}
+
 func lockConfigFile(path string) (func(), error) {
 	lockPath := path + ".lock"
 	if dir := filepath.Dir(lockPath); dir != "." && dir != "" {

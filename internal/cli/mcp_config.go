@@ -66,6 +66,15 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
 	}
+	// This edits the same user config document the config package mutates, with
+	// the same read-modify-write + rename shape, so it takes the same
+	// cross-process lock. Without it, `zero mcp add` racing a provider or
+	// preference write would silently drop whichever landed first (issue #832).
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	defer unlock()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -132,6 +141,15 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
 	}
+	// This edits the same user config document the config package mutates, with
+	// the same read-modify-write + rename shape, so it takes the same
+	// cross-process lock. Without it, `zero mcp add` racing a provider or
+	// preference write would silently drop whichever landed first (issue #832).
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	defer unlock()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -194,6 +212,15 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
 	}
+	// This edits the same user config document the config package mutates, with
+	// the same read-modify-write + rename shape, so it takes the same
+	// cross-process lock. Without it, `zero mcp add` racing a provider or
+	// preference write would silently drop whichever landed first (issue #832).
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	defer unlock()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
