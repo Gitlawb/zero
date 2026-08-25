@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -553,5 +554,72 @@ func TestDaemonTokenAliasesDeniedEndToEnd(t *testing.T) {
 				t.Fatalf("grep omitted ordinary file while filtering %s:\n%s", aliasKind, result.Output)
 			}
 		})
+	}
+}
+
+// TestGrepDoesNotScanTokenAliasSwappedInAfterExclusion closes the check/use
+// window between grep's walk-time pathname exclusion and the os.Open in
+// scanGrepFile. A workspace writer can replace an ordinary candidate with a
+// hard link to the token in that window; path confinement cannot catch it,
+// because the alias is a real file inside the root under an ordinary name.
+// Only a decision bound to the opened handle can, so the seam below performs
+// the swap from inside the pathname check itself — deterministically, with no
+// scheduling assumptions.
+func TestGrepDoesNotScanTokenAliasSwappedInAfterExclusion(t *testing.T) {
+	ws, token, _ := daemonTokenFixture(t)
+	candidate := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(candidate, []byte("ordinary notes\n"), 0o600); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+
+	base := sandboxReadExcluderWithin(nil, ws)
+	if !base.fileExcluded(token) {
+		t.Fatal("fixture must protect the token by pathname")
+	}
+	swapped := false
+	exclude := base
+	exclude.file = func(path string) bool {
+		if !swapped && path == candidate {
+			swapped = true
+			if err := os.Remove(candidate); err != nil {
+				t.Fatalf("remove candidate: %v", err)
+			}
+			if err := os.Link(token, candidate); err != nil {
+				t.Skipf("workspace filesystem is not hard-linkable: %v", err)
+			}
+			// Cleared as an ordinary file, exactly as it was when visited.
+			return false
+		}
+		return base.fileExcluded(path)
+	}
+
+	var matches []grepMatch
+	err := scanGrepMatches(context.Background(), ws, ws, nil, exclude, false,
+		presenceGrepLineMatcher(regexp.MustCompile("bridge-secret")),
+		func(match grepMatch) bool {
+			matches = append(matches, match)
+			return true
+		})
+	if err != nil {
+		t.Fatalf("grep walk: %v", err)
+	}
+	if !swapped {
+		t.Fatal("the swap seam never ran, so the window was never exercised")
+	}
+	for _, match := range matches {
+		if strings.Contains(match.file, "notes.txt") || strings.Contains(match.file, "bridge-token") {
+			t.Fatalf("grep scanned the token alias swapped in after the exclusion: %+v", match)
+		}
+	}
+	// The ordinary workspace file must still be searched; the handle check may
+	// only ever remove the protected object from the results.
+	found := false
+	for _, match := range matches {
+		if strings.Contains(match.file, "main.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("handle check dropped ordinary matches: %+v", matches)
 	}
 }

@@ -353,7 +353,7 @@ func exactGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
 
 func scanGrepMatches(ctx context.Context, resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder, absolutePaths bool, matcher grepLineMatcher, emit func(grepMatch) bool) error {
 	err := walkGrepFiles(ctx, resolvedRoot, target, globMatcher, exclude, func(file string) error {
-		return scanGrepFile(ctx, resolvedRoot, absolutePaths, file, matcher, emit)
+		return scanGrepFile(ctx, resolvedRoot, absolutePaths, file, exclude, matcher, emit)
 	})
 	if errors.Is(err, errGrepLimitReached) {
 		return nil
@@ -361,7 +361,7 @@ func scanGrepMatches(ctx context.Context, resolvedRoot string, target string, gl
 	return err
 }
 
-func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, file string, matcher grepLineMatcher, emit func(grepMatch) bool) error {
+func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, file string, exclude readExcluder, matcher grepLineMatcher, emit func(grepMatch) bool) error {
 	// Re-confine at read time (defense-in-depth) AND to compute the clean
 	// workspace-relative path used in output.
 	relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
@@ -387,6 +387,17 @@ func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, 
 		return nil
 	}
 	defer handle.Close()
+
+	// The walk-time exclusion above inspected a PATHNAME; this open selects the
+	// object. A workspace writer can replace an ordinary candidate with a
+	// symlink or hard link to the protected credential in between, so the
+	// decision that actually authorizes the scan has to come from this handle's
+	// own metadata — the same binding protectedReadOpen and MCP resources/read
+	// use. The earlier check stays as a walk pruning optimization.
+	info, err := handle.Stat()
+	if err != nil || exclude.openedFileExcluded(resolvedPath, info) {
+		return nil
+	}
 
 	reader := bufio.NewReader(handle)
 	lineNumber := 1
