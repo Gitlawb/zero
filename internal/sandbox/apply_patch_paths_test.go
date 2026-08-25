@@ -65,25 +65,32 @@ func TestApplyPatchRequestPathsCarryAbsolutePathsToScopeValidation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, patch := range map[string]string{
-		"canonical": strings.Join([]string{"*** Begin Patch", "*** Update File: " + outside, "@@", "-a", "+b", "*** End Patch"}, "\n"),
-		"no-space":  strings.Join([]string{"***Begin Patch", "*** Update File: " + outside, "@@", "-a", "+b", "***End Patch"}, "\n"),
-	} {
-		// structuredPatchHeaderPaths normalises separators to "/", so compare the
-		// slash form; the absolute path itself must survive untouched.
-		paths := applyPatchRequestPaths(map[string]any{"patch": patch})
-		if len(paths) != 1 || paths[0] != filepath.ToSlash(outside) {
-			t.Fatalf("%s: absolute patch path must reach scope validation unchanged, got %v", name, paths)
-		}
-	}
 	scope, err := NewScope(root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if block := scope.validate(outside); block == nil || block.Code != BlockOutsideWorkspace {
-		t.Fatalf("scope must still deny an absolute path outside the workspace, got %+v", block)
+	inside := filepath.Join(root, "main.js")
+	structured := func(header, footer, path string) string {
+		return strings.Join([]string{header, "*** Update File: " + path, "@@", "-a", "+b", footer}, "\n")
 	}
-	if block := scope.validate(filepath.Join(root, "main.js")); block != nil {
-		t.Fatalf("scope must accept an absolute path inside the workspace, got %+v", block)
+	for name, spelling := range map[string][2]string{"canonical": {"*** Begin Patch", "*** End Patch"}, "no-space": {"***Begin Patch", "***End Patch"}} {
+		// Failure path: the exact path the boundary parsed must be denied by the
+		// scope. structuredPatchHeaderPaths normalises separators to "/", so the
+		// parsed form is compared in slash form and then validated as-is.
+		paths := applyPatchRequestPaths(map[string]any{"patch": structured(spelling[0], spelling[1], outside)})
+		if len(paths) != 1 || paths[0] != filepath.ToSlash(outside) {
+			t.Fatalf("%s: absolute patch path must reach scope validation unchanged, got %v", name, paths)
+		}
+		if block := scope.validate(paths[0]); block == nil || block.Code != BlockOutsideWorkspace {
+			t.Fatalf("%s: scope must deny the parsed outside path %q, got %+v", name, paths[0], block)
+		}
+		// Success path: the parsed inside path must be accepted by the scope.
+		paths = applyPatchRequestPaths(map[string]any{"patch": structured(spelling[0], spelling[1], inside)})
+		if len(paths) != 1 || paths[0] != filepath.ToSlash(inside) {
+			t.Fatalf("%s: inside patch path must reach scope validation unchanged, got %v", name, paths)
+		}
+		if block := scope.validate(paths[0]); block != nil {
+			t.Fatalf("%s: scope must accept the parsed inside path %q, got %+v", name, paths[0], block)
+		}
 	}
 }
