@@ -3,11 +3,11 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 type applyPatchTool struct {
@@ -20,11 +20,11 @@ func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
 			name:        "apply_patch",
-			description: "Apply a patch inside the workspace or an explicitly granted extra write root.",
+			description: "Apply a multi-hunk or multi-file patch inside the workspace (or a granted extra write root). Structured format:\n*** Begin Patch\n*** Update File: src/app.js\n@@\n unchanged context line\n-removed line\n+added line\n*** End Patch\nUse \"*** Add File: path\" with \"+\" lines to create a file and \"*** Delete File: path\" to remove one; several sections may follow each other. A unified diff (---/+++ headers with a/ b/ prefixes, @@ hunks) is also accepted and applied in-process. Paths are workspace-relative; absolute paths inside the workspace are fine. For a single targeted change, edit_file is simpler.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"patch": {Type: "string", Description: "A unified diff or a structured *** Begin Patch patch to apply."},
+					"patch": {Type: "string", Description: "The structured (*** Begin Patch) or unified-diff patch text."},
 					"cwd":   {Type: "string", Description: "Directory where the patch should be applied. Relative paths stay in the workspace; use an absolute path to target a granted extra write root. Defaults to workspace root.", Default: "."},
 				},
 				Required:             []string{"patch"},
@@ -59,177 +59,14 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	if isStructuredPatch(patch) {
 		return tool.runStructuredPatch(applyRoot, relativeRoot, patch, options)
 	}
-	if err := validatePatchPaths(applyRoot, patch); err != nil {
-		return errorResult("Error applying patch: " + err.Error())
-	}
-
-	tempFile, err := os.CreateTemp("", "zero-patch-*.patch")
+	// Unified diffs are translated into the same operations and applied by
+	// the same os.Root engine, so neither format opens a target by pathname
+	// after validation (no check-to-use window) and git is not needed.
+	operations, err := parseUnifiedPatch(patch)
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
-	patchPath := tempFile.Name()
-	defer func() {
-		_ = os.Remove(patchPath)
-	}()
-	if _, err := tempFile.WriteString(patch); err != nil {
-		_ = tempFile.Close()
-		return errorResult("Error applying patch: " + err.Error())
-	}
-	if err := tempFile.Close(); err != nil {
-		return errorResult("Error applying patch: " + err.Error())
-	}
-
-	if err := recheckPatchWriteTargets(applyRoot, patch); err != nil {
-		return errorResult("Error applying patch: " + err.Error())
-	}
-	var createdTargets []string
-	var fullySuppliedTargets []string
-	wholeBefore := map[string]bool{}
-	if options.FileTracker != nil {
-		createdTargets = missingPatchTargets(applyRoot, patch)
-		fullySuppliedTargets = completeCreatedPatchTargets(applyRoot, patch)
-		for _, path := range patchHeaderPaths(patch) {
-			if path == "" || path == "/dev/null" {
-				continue
-			}
-			if absolute, _, rerr := resolveWorkspaceTargetPath(applyRoot, path); rerr == nil {
-				wholeBefore[absolute] = options.FileTracker.SeenWhole(absolute)
-			}
-		}
-	}
-
-	command := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patchPath)
-	command.Dir = applyRoot
-	output, err := command.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return errorResult("Error applying patch: " + message)
-	}
-
-	summary := "Patch applied successfully."
-	if relativeRoot != "." {
-		summary = "Patch applied successfully in " + relativeRoot + "."
-	}
-	result := okResult(summary)
-	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
-	result.Display = Display{Summary: summary, Kind: "diff", Preview: capPreviewDiff(patch)}
-	fullySupplied := make(map[string]bool, len(fullySuppliedTargets))
-	for _, absolute := range fullySuppliedTargets {
-		fullySupplied[absolute] = true
-	}
-	// Re-baseline files changed by this tool. When the model had already seen the
-	// whole input (or supplied a complete new file), the exact patch plus that
-	// input determines the whole output, so a follow-up edit needs no wasted read.
-	// Partial observations remain conservative and are cleared by Record.
-	for _, changed := range result.ChangedFiles {
-		if absolute, _, rerr := resolveScopedPath(tool.workspaceRoot, tool.scope, changed); rerr == nil {
-			content, readErr := os.ReadFile(absolute)
-			if readErr != nil {
-				options.FileTracker.Forget(absolute)
-				continue
-			}
-			info, _ := os.Stat(absolute)
-			wasWhole := wholeBefore[absolute] || fullySupplied[absolute]
-			options.FileTracker.Record(absolute, content, info)
-			if wasWhole {
-				lines := lineCount(string(content))
-				options.FileTracker.RecordSeenRange(absolute, 1, lines, lines)
-			}
-		}
-	}
-	recordCreatedPatchTargets(options.FileTracker, createdTargets)
-	return result
-}
-
-func missingPatchTargets(root string, patch string) []string {
-	seen := map[string]bool{}
-	var missing []string
-	for _, path := range patchHeaderPaths(patch) {
-		if path == "" || path == "/dev/null" {
-			continue
-		}
-		absolute, _, err := resolveWorkspaceTargetPath(root, path)
-		if err != nil || seen[absolute] {
-			continue
-		}
-		seen[absolute] = true
-		if _, err := os.Stat(absolute); os.IsNotExist(err) {
-			missing = append(missing, absolute)
-		}
-	}
-	return missing
-}
-
-// completeCreatedPatchTargets returns only files whose full contents are
-// supplied by a /dev/null creation patch. A missing rename/copy destination is
-// created by git too, but its bytes come from an unread source and must not gain
-// whole-file observation credit.
-func completeCreatedPatchTargets(root string, patch string) []string {
-	seen := map[string]bool{}
-	var created []string
-	oldRemaining, newRemaining := 0, 0
-	inHunk := false
-	fromDevNull := false
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
-		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
-			switch {
-			case strings.HasPrefix(line, "-"):
-				oldRemaining--
-			case strings.HasPrefix(line, "+"):
-				newRemaining--
-			case strings.HasPrefix(line, "\\"):
-			default:
-				oldRemaining--
-				newRemaining--
-			}
-			continue
-		}
-		inHunk = false
-		switch {
-		case strings.HasPrefix(line, "diff --git "):
-			fromDevNull = false
-		case strings.HasPrefix(line, "@@"):
-			oldRemaining, newRemaining = parseHunkCounts(line)
-			inHunk = oldRemaining > 0 || newRemaining > 0
-		case strings.HasPrefix(line, "--- "):
-			fromDevNull = patchFileHeaderPath(line) == "/dev/null"
-		case strings.HasPrefix(line, "+++ "):
-			path := patchFileHeaderPath(line)
-			if !fromDevNull || path == "" || path == "/dev/null" {
-				fromDevNull = false
-				continue
-			}
-			fromDevNull = false
-			absolute, _, err := resolveWorkspaceTargetPath(root, stripPatchPrefix(path))
-			if err != nil || seen[absolute] {
-				continue
-			}
-			if _, err := os.Stat(absolute); !os.IsNotExist(err) {
-				continue
-			}
-			seen[absolute] = true
-			created = append(created, absolute)
-		}
-	}
-	return created
-}
-
-func recordCreatedPatchTargets(tracker *FileTracker, missingBefore []string) {
-	if tracker == nil {
-		return
-	}
-	for _, absolute := range missingBefore {
-		if _, err := os.Stat(absolute); err != nil {
-			continue
-		}
-		if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-			absolute = resolved
-		}
-		tracker.RecordCreated(absolute)
-	}
+	return applyPatchOperations(applyRoot, relativeRoot, operations, options)
 }
 
 // changedFilesFromPatch extracts the unique, WORKSPACE-relative paths a patch
@@ -260,27 +97,35 @@ func changedFilesFromPatch(relativeRoot string, patch string) []string {
 	return paths
 }
 
+// normalizePatchPathForRoot resolves platform-level symlinks (macOS /var ->
+// /private/var) in the prefix of an absolute patch path that lies outside the
+// apply root, so a path the model copied from read_file compares equal to the
+// symlink-resolved root. Relative paths are returned unchanged.
+func normalizePatchPathForRoot(root string, path string) string {
+	if !filepath.IsAbs(path) {
+		return path
+	}
+	resolvedRoot, err := filepath.Abs(root)
+	if err != nil {
+		return path
+	}
+	if evaluated, err := filepath.EvalSymlinks(resolvedRoot); err == nil {
+		resolvedRoot = evaluated
+	}
+	return sandbox.NormalizePrefixForRoot(path, resolvedRoot)
+}
+
 func validatePatchPaths(root string, patch string) error {
 	for _, path := range patchHeaderPaths(patch) {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
-		if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+		// Relative traversal is rejected here; an absolute path is checked by
+		// resolveWorkspaceTargetPath, which only accepts one inside the root.
+		if path == ".." || strings.HasPrefix(path, "../") {
 			return fmt.Errorf("patch path %q must stay inside the workspace", path)
 		}
-		if _, _, err := resolveWorkspaceTargetPath(root, path); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func recheckPatchWriteTargets(root string, patch string) error {
-	for _, path := range patchHeaderPaths(patch) {
-		if path == "" || path == "/dev/null" {
-			continue
-		}
-		if err := recheckWorkspaceWriteTarget(root, path); err != nil {
+		if _, _, err := resolveWorkspaceTargetPath(root, normalizePatchPathForRoot(root, path)); err != nil {
 			return err
 		}
 	}
@@ -351,7 +196,7 @@ func patchFileHeaderPath(line string) string {
 // tokens. Scanning the whole line would let a crafted heading like
 // "@@ -1,1 +1,1 @@ +1,999999" overwrite the real count, keep the parser stuck in
 // hunk mode, and swallow later "--- "/"+++ " file headers so they escape
-// validatePatchPaths / recheckPatchWriteTargets — a workspace-confinement bypass.
+// validatePatchPaths — a workspace-confinement bypass.
 func parseHunkCounts(line string) (int, int) {
 	_, rest, ok := strings.Cut(line, "@@")
 	if !ok {

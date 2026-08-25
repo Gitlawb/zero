@@ -60,14 +60,18 @@ const openAIPromptAddendum = `<model_guidance>
   longer answers, fenced code blocks for code, and ` + "`inline code`" + ` for paths,
   commands, and symbols.
 - Strongly prefer the native file tools (read_file, list_directory, grep, glob,
-  write_file, apply_patch) over shelling out to cat/sed/awk/python for
-  file work. Make one tool call per file; do not batch file writes into a script.
+  edit_file, apply_patch, write_file) over shelling out to cat/sed/awk/python
+  for file work. read_file, edit_file and write_file take one file per call;
+  a single apply_patch may span several files when they form one coherent
+  change. Do not batch file writes into a script. Independent tool calls
+  (several reads, several edit_file calls to different files) belong in the
+  same turn.
 - Persist until the task is fully handled this turn: gather context, implement,
   run the validators, and report — do not stop at a partial result.
 </model_guidance>`
 
 const geminiPromptAddendum = `<model_guidance>
-- Prefer the dedicated tools (read_file, grep, glob, apply_patch) over
+- Prefer the dedicated tools (read_file, grep, glob, edit_file, apply_patch) over
   equivalent shell commands; they are safer and produce cleaner diffs.
 - Be concise and concrete. When you run a shell command with side effects, state
   in one short clause why it is needed.
