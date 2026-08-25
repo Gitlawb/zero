@@ -207,14 +207,7 @@ func runSessionsImport(store *sessions.Store, ref string, options sessionCommand
 		return exitSuccess
 	}
 
-	lines := []string{
-		"Imported " + result.Source.Agent + " session " + agentsessions.DisplayField(result.Source.ID),
-		"",
-		"  zero session: " + result.Session.SessionID,
-		"  title:        " + displayOrNone(result.Session.Title),
-		"  cwd:          " + displayOrNone(result.Session.Cwd),
-		fmt.Sprintf("  events:       %d", result.Events),
-	}
+	lines := importSummaryLines(result)
 	if warning := importWorkspaceWarning(result.Session.Cwd); warning != "" {
 		lines = append(lines, "", warning)
 	}
@@ -226,6 +219,29 @@ func runSessionsImport(store *sessions.Store, ref string, options sessionCommand
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// importSummaryLines renders the human-readable block for one import. The
+// --json branch beside it is structurally escaped and redacted; this is the one
+// that writes another product's bytes to a terminal, so every foreign field goes
+// through DisplayField.
+//
+// A SEPARATE FUNCTION SO THE SANITIZING CAN BE PROVED. The title and cwd come
+// back from a store that Import now cleans on the way in, so reached only
+// through runSessionsImport these calls are unobservable — a test would pass
+// with or without them and pin nothing. They are not redundant: Import began
+// sanitizing at this change, so every session imported by an earlier build still
+// holds exactly what the foreign transcript said, and this block is what draws
+// it. Taking an ImportResult directly is what lets a test supply that record.
+func importSummaryLines(result agentsessions.ImportResult) []string {
+	return []string{
+		"Imported " + result.Source.Agent + " session " + agentsessions.DisplayField(result.Source.ID),
+		"",
+		"  zero session: " + result.Session.SessionID,
+		"  title:        " + displayOrNone(agentsessions.DisplayField(result.Session.Title)),
+		"  cwd:          " + displayOrNone(agentsessions.DisplayField(result.Session.Cwd)),
+		fmt.Sprintf("  events:       %d", result.Events),
+	}
 }
 
 // importWorkspaceWarning flags a session that ran somewhere else. Resuming it
@@ -244,7 +260,10 @@ func importWorkspaceWarning(sessionCwd string) string {
 	if filepath.Clean(working) == filepath.Clean(recorded) {
 		return ""
 	}
-	return "Note: this session ran in " + recorded + ", not the current directory.\n" +
+	// The comparison above runs on the recorded path because that is the
+	// functional question; the SENTENCE prints another agent's bytes, so it goes
+	// through the same sanitizer as every other displayed foreign field.
+	return "Note: this session ran in " + agentsessions.DisplayField(recorded) + ", not the current directory.\n" +
 		"      Paths mentioned in it refer to that tree."
 }
 

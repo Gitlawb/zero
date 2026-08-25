@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestScanHeadReadsFarLessThanTheWholeFile is the test that keeps `sessions
@@ -246,5 +247,49 @@ func TestStreamLinesRefusesAPathOutsideTheRoot(t *testing.T) {
 	}
 	if seen != 0 {
 		t.Errorf("streamLines handed the caller %d lines from outside the root", seen)
+	}
+}
+
+// THE LAST-ACTIVITY STAMP IS CONTAINED TOO — the third site of the same class,
+// and the one that is easiest to miss because it never reads a byte of content.
+// os.Stat resolves the path itself, so an entry swapped for a symlink after
+// globTranscripts took its verdict reported the mtime of whatever the link
+// pointed at. That stamp is what "last active" claims and what the picker sorts
+// on, so a session could be pushed to the top of the list by a file the user
+// never opened.
+func TestFileModTimeRefusesASymlinkOutOfTheRoot(t *testing.T) {
+	root := t.TempDir()
+	transcript := filepath.Join(root, "session.jsonl")
+	writeFile(t, transcript, `{"type":"user","cwd":"/w"}`+"\n")
+
+	// The control arm. Without it a fileModTime that always returned the zero
+	// time would satisfy the escape assertion below for the wrong reason.
+	inside := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(transcript, inside, inside); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileModTime(root, transcript); !got.UTC().Equal(inside) {
+		t.Fatalf("fileModTime on a contained transcript = %v, want %v", got.UTC(), inside)
+	}
+
+	outside := filepath.Join(t.TempDir(), "secret.jsonl")
+	writeFile(t, outside, `{"type":"user","cwd":"/w"}`+"\n")
+	elsewhere := time.Date(1999, 12, 31, 23, 59, 58, 0, time.UTC)
+	if err := os.Chtimes(outside, elsewhere, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(transcript); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, transcript); err != nil {
+		t.Skipf("this platform cannot create symlinks: %v", err)
+	}
+
+	got := fileModTime(root, transcript)
+	if got.UTC().Equal(elsewhere) {
+		t.Errorf("fileModTime followed the symlink out of %q and reported %v", root, got.UTC())
+	}
+	if !got.IsZero() {
+		t.Errorf("fileModTime = %v, want the zero time for a path it must not open", got.UTC())
 	}
 }

@@ -499,12 +499,30 @@ func (m model) importForeignSession(ref string) (string, string, error) {
 	// must go before the picker is rebuilt.
 	agentsessions.InvalidateDiscovery()
 
+	return result.Session.SessionID, importedSessionNote(result, m.cwd), nil
+}
+
+// importedSessionNote is the transcript row an import writes.
+//
+// IT IS A TRANSCRIPT ROW, drawn with the same trust as the picker row built
+// below — which already sanitizes. The foreign id is the transcript's FILE NAME
+// and the cwd a record inside it, and both reached appendRow raw, where an
+// escape repaints the rows around it. DisplayField strips controls and then
+// redacts, in that order. The agent name is this build's own adapter label and
+// the Zero id is Zero's, so neither is foreign input.
+//
+// Split from importForeignSession so the cwd half can be proved: agentsessions
+// .Import now sanitizes what it stores, so through the real entry point that
+// call is unobservable and a test would pass with or without it. It still earns
+// its place — a session imported by an earlier build holds whatever the foreign
+// transcript said, and this is what draws it.
+func importedSessionNote(result agentsessions.ImportResult, workspace string) string {
 	note := fmt.Sprintf("Imported %s session %s into Zero as %s (%d events).",
-		result.Source.Agent, result.Source.ID, result.Session.SessionID, result.Events)
-	if recorded := strings.TrimSpace(result.Session.Cwd); recorded != "" && !sessionMatchesWorkspace(recorded, m.cwd) {
-		note += "\nIt ran in " + recorded + ", so paths it mentions refer to that tree."
+		result.Source.Agent, agentsessions.DisplayField(result.Source.ID), result.Session.SessionID, result.Events)
+	if recorded := strings.TrimSpace(result.Session.Cwd); recorded != "" && !sessionMatchesWorkspace(recorded, workspace) {
+		note += "\nIt ran in " + agentsessions.DisplayField(recorded) + ", so paths it mentions refer to that tree."
 	}
-	return result.Session.SessionID, note, nil
+	return note
 }
 
 // foreignSessionItems lists sessions belonging to OTHER coding agents that have
@@ -516,15 +534,40 @@ func (m model) importForeignSession(ref string) (string, string, error) {
 // file (see internal/agentsessions). A store that is missing or has changed
 // shape contributes nothing rather than failing the picker — /resume must still
 // open on a machine where one vendor shipped a new format this morning.
-func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) []pickerItem {
-	// Anything already imported is skipped: listing a session twice, once as
-	// itself and once as its copy, is worse than not offering it at all.
+// importedSourceRefs is the set of foreign sessions that have actually been
+// imported, so the picker can skip offering them a second time — listing a
+// session twice, once as itself and once as its copy, is worse than not offering
+// it at all.
+//
+// A SESSION WITH NO EVENTS DOES NOT COUNT AS IMPORTED. Import creates the local
+// session and appends its transcript as two steps, so an append that fails
+// leaves a session carrying the import tag and nothing else. The tag alone used
+// to be enough to suppress the foreign source here, while the loop that builds
+// the local rows drops the same session for having EventCount == 0 — so the
+// work disappeared from the picker entirely: not offered as the original, not
+// listed as the copy, and a retry impossible because the source was hidden. The
+// two filters have to agree on what a real session is.
+//
+// This is the recoverable half of the answer rather than a rollback: nothing in
+// the store deletes a session, and inventing that primitive to serve an import
+// error would hand every caller a destructive operation. Leaving the empty
+// session on disk and refusing to treat it as provenance keeps the source
+// offered, which is what makes the retry work. Reported by @jatmn.
+func importedSourceRefs(existing []sessions.Metadata) map[string]bool {
 	imported := map[string]bool{}
 	for _, meta := range existing {
+		if meta.EventCount == 0 {
+			continue
+		}
 		if agent, sourceID, ok := agentsessions.ParseImportTag(meta.Tag); ok {
 			imported[agent+":"+sourceID] = true
 		}
 	}
+	return imported
+}
+
+func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) []pickerItem {
+	imported := importedSourceRefs(existing)
 
 	found, _ := agentsessions.DiscoverAllCached(agentsessions.OSEnv(), m.cwd)
 	items := make([]pickerItem, 0, len(found))

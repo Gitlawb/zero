@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agentsessions"
+	"github.com/Gitlawb/zero/internal/sessions"
 )
 
 func tabbedPicker(items ...pickerItem) *commandPicker {
@@ -306,5 +307,39 @@ func TestNewSessionPickerSurvivesAnEmptyLocalHistory(t *testing.T) {
 				t.Errorf("an empty local history produced a local row: %+v", item)
 			}
 		}
+	}
+}
+
+// A FAILED IMPORT MUST NOT HIDE THE WORK IT FAILED TO COPY. Import creates the
+// local session and appends its transcript separately, so an append that fails
+// leaves a session carrying the import tag and no events. That tag alone used to
+// mark the foreign source "already imported" and drop it from the picker — while
+// the local-row loop drops the same session for having no events. Both rows
+// vanished and the source could not be retried because it was no longer offered.
+func TestAnEmptyImportedSessionDoesNotHideItsForeignSource(t *testing.T) {
+	const ref = "claude-code:abc"
+	tag := agentsessions.ImportTag("claude-code", "abc")
+
+	failed := []sessions.Metadata{{SessionID: "s-empty", Tag: tag, EventCount: 0}}
+	if importedSourceRefs(failed)[ref] {
+		t.Error("a session with no transcript counted as imported; its foreign source is hidden and the import cannot be retried")
+	}
+
+	// The suppression itself still has to work, or the fix is just deletion: a
+	// session that really did import is offered once, not twice.
+	succeeded := []sessions.Metadata{{SessionID: "s-full", Tag: tag, EventCount: 12}}
+	if !importedSourceRefs(succeeded)[ref] {
+		t.Error("an imported session no longer suppresses its foreign source; the picker will list it twice")
+	}
+
+	// And the two filters agree: the local loop drops EventCount == 0, so this
+	// one must too, or exactly one of the two rows survives.
+	mixed := []sessions.Metadata{
+		{SessionID: "s-empty", Tag: tag, EventCount: 0},
+		{SessionID: "s-full", Tag: agentsessions.ImportTag("codex", "def"), EventCount: 3},
+	}
+	got := importedSourceRefs(mixed)
+	if got[ref] || !got["codex:def"] {
+		t.Errorf("imported set = %v, want only codex:def", got)
 	}
 }

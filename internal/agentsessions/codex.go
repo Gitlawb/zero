@@ -180,7 +180,7 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 	if strings.TrimSpace(session.Cwd) == "" {
 		return ForeignSession{}, false
 	}
-	session.UpdatedAt = fileModTime(path)
+	session.UpdatedAt = fileModTime(root, path)
 	if session.StartedAt.IsZero() {
 		session.StartedAt = session.UpdatedAt
 	}
