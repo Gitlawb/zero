@@ -169,19 +169,13 @@ func streamLines(root string, path string, maxLineBytes int, visit func(line []b
 	}
 }
 
-// readBoundedLine consumes through the next newline and returns at most keep
-// bytes of it.
+// readBoundedLineTruncated consumes through the next newline, returns at most
+// keep bytes of it, and reports whether anything was discarded.
 //
 // bufio.Scanner is deliberately not used: it fails the whole scan on a token
 // longer than its buffer, and these transcripts routinely contain lines far
 // past any sensible buffer size. Here an overlong line is consumed and
 // truncated, so one giant record costs a skip rather than the entire file.
-func readBoundedLine(reader *bufio.Reader, keep int) ([]byte, error) {
-	kept, _, err := readBoundedLineTruncated(reader, keep)
-	return kept, err
-}
-
-// readBoundedLineTruncated also reports whether anything was discarded.
 //
 // THE CALLER HAS TO BE ABLE TO TELL. A truncated record is returned as invalid
 // JSON, and every caller reacted by skipping it — which is right for the index,
@@ -230,8 +224,21 @@ func terminatorBytes(chunk []byte) int {
 // last-activity stamp. Reading the final record would be more precise and would
 // cost a seek plus a read at the end of a file that may be 73 MB — the mtime is
 // the same answer for free.
-func fileModTime(path string) time.Time {
-	info, err := os.Stat(path)
+//
+// CONTAINED FOR THE SAME REASON scanHead AND streamLines ARE, and it was the
+// third site of the one class. os.Stat resolves the path itself and follows a
+// symlink straight out of the store, so an entry swapped after globTranscripts
+// took its verdict reported the mtime of whatever the link pointed at — which
+// decides where the session sorts in the picker and what "last active" claims.
+// Stat on the handle openContained returned describes the file that was
+// actually opened inside the root, so there is no window between check and use.
+func fileModTime(root string, path string) time.Time {
+	file, err := openContained(root, path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return time.Time{}
 	}

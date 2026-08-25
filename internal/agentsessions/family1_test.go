@@ -343,3 +343,38 @@ func TestASymlinkedSlugDirectoryIsNotListedThenRefused(t *testing.T) {
 		}
 	}
 }
+
+// THE LAST-ACTIVITY STAMP MUST STILL ARRIVE THROUGH THE REAL ROOT. fileModTime
+// now opens the transcript through os.Root instead of calling os.Stat, so a root
+// shape it could not open would leave every session on the zero time — sorted
+// last, showing no age — and nothing in this suite would notice, because
+// UpdatedAt had no coverage at all. Discovery through the adapter's own root is
+// the arrangement production uses; the containment test in jsonl_test.go covers
+// the refusal, this covers the success.
+func TestDiscoveryStampsASessionWithItsTranscriptModTime(t *testing.T) {
+	root := writeClaudeStore(t, map[string][]string{
+		"-Users-someone-proj/aaa.jsonl": {
+			`{"type":"user","cwd":"/Users/someone/proj","sessionId":"aaa","message":{"role":"user","content":"go"}}`,
+		},
+	})
+	stamp := time.Date(2026, 5, 4, 3, 2, 1, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(root, "-Users-someone-proj", "aaa.jsonl"), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := discoverFamily1("claude-code", root, "/Users/someone/proj", indexFamily1Transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(got))
+	}
+	if !got[0].UpdatedAt.UTC().Equal(stamp) {
+		t.Errorf("UpdatedAt = %v, want the transcript's mtime %v", got[0].UpdatedAt.UTC(), stamp)
+	}
+	// No record in this fixture carries a timestamp, so StartedAt falls back to
+	// the same stamp rather than staying zero.
+	if !got[0].StartedAt.UTC().Equal(stamp) {
+		t.Errorf("StartedAt = %v, want the mtime fallback %v", got[0].StartedAt.UTC(), stamp)
+	}
+}
