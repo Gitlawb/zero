@@ -69,8 +69,10 @@ func TestApplyPatchRequestPathsCarryAbsolutePathsToScopeValidation(t *testing.T)
 		"canonical": strings.Join([]string{"*** Begin Patch", "*** Update File: " + outside, "@@", "-a", "+b", "*** End Patch"}, "\n"),
 		"no-space":  strings.Join([]string{"***Begin Patch", "*** Update File: " + outside, "@@", "-a", "+b", "***End Patch"}, "\n"),
 	} {
+		// structuredPatchHeaderPaths normalises separators to "/", so compare the
+		// slash form; the absolute path itself must survive untouched.
 		paths := applyPatchRequestPaths(map[string]any{"patch": patch})
-		if len(paths) != 1 || paths[0] != outside {
+		if len(paths) != 1 || paths[0] != filepath.ToSlash(outside) {
 			t.Fatalf("%s: absolute patch path must reach scope validation unchanged, got %v", name, paths)
 		}
 	}
