@@ -39,7 +39,7 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 		"inspect the target file",
 		"plan then act",
 		"choose the narrowest tool",
-		"for edits to existing files, prefer apply_patch",
+		"for edits to existing files, use edit_file",
 		"verify after edits",
 		"honor the active permission mode",
 		"avoid broad refactors",
@@ -47,13 +47,13 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 		"do not recognize",
 		"scaled to the work",
 		"comment density",
-		"skip update_plan for bounded changes in one component",
-		"do not read the same file first with read_minified_file and then again with read_file",
-		"combine compatible validators into one command",
-		"instead of inventing a parallel flow",
-		"do not reread files solely to confirm",
+		"skip it for bounded changes in one component",
+		"do not read both unless a new need for exact content appears",
+		"combine compatible commands when diagnostics stay useful",
+		"do not invent a parallel flow",
+		"a successful native patch confirms the edit",
 		"once the required behavior passes validation, stop",
-		"do not make extra tool calls solely to discover line numbers",
+		"do not look them up solely for the final summary",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected core system prompt to include %q, got:\n%s", want, buildSystemPrompt(Options{}))

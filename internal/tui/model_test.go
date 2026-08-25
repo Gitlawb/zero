@@ -2514,7 +2514,7 @@ func TestAssistantNarrationBeforeToolCardGetsBlankSeparator(t *testing.T) {
 	m.transcript = append(m.transcript,
 		transcriptRow{kind: rowUser, text: "run it"},
 		transcriptRow{kind: rowAssistant, text: "I'll inspect the existing file, then run it."},
-		transcriptRow{kind: rowToolResult, id: "t1", tool: "read_file", status: tools.StatusOK, detail: "File: time_test.py\n\n  1 | print('x')"},
+		transcriptRow{kind: rowToolResult, id: "t1", tool: "read_file", status: tools.StatusOK, detail: "File: time_test.py\n\n1→print('x')"},
 	)
 	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	toolIdx := -1
