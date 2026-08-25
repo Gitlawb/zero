@@ -171,14 +171,9 @@ func selectSourceLines(content []byte, offset, limit int) sourceSelection {
 }
 
 func sourceLineCount(content []byte) int {
-	if len(content) == 0 {
-		return 1
-	}
-	lines := strings.Count(string(content), "\n")
-	if content[len(content)-1] != '\n' {
-		lines++
-	}
-	return lines
+	// One implementation for reader and writer: the tracker contract lives on
+	// trackedLineTotal, and this must never drift from it.
+	return trackedLineTotal(string(content))
 }
 
 // lineCount reports the number of newline-separated lines in s (an empty string
