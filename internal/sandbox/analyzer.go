@@ -553,14 +553,20 @@ func parseGitInvocation(words []string) gitInvocation {
 // (`--exec-path=<path>`), and the bare spelling is terminal — see
 // gitTerminalGlobalOptions.
 func GitGlobalOptionConsumesValue(option string) bool {
+	// The comparison is on the NORMALIZED name, so every case below must be
+	// written lowercase — an uppercase case here would be unreachable rather
+	// than protective. -c (config override, `-c name=value`) and -C (run as if
+	// started in <path>) are different git options that both take a
+	// separate-token value, so folding them onto one case is correct today and
+	// `git -C repo push` consumes repo either way.
+	//
+	// If their value-taking behavior ever diverges, this cannot be fixed by
+	// re-adding a -C case: the callers normalize before calling, so the
+	// distinction has to be restored at the call site by passing the original
+	// token. TestGitGlobalOptionConsumesValueFoldsShortCaseDeliberately pins
+	// the fold so that change is a deliberate one.
 	switch strings.ToLower(option) {
-	// -c (config override, `-c name=value`) and -C (run as if started in
-	// <path>) are DIFFERENT git global options that happen to both take a
-	// separate-token value — they are listed explicitly rather than left to
-	// fold together under strings.ToLower, so this stays correct if the two
-	// options' value-taking behavior ever diverges, and so a reader does not
-	// have to notice the case-fold to see -C is covered at all.
-	case "-c", "-C", "--attr-source", "--config-env", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
+	case "-c", "--attr-source", "--config-env", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
 		return true
 	default:
 		return false

@@ -298,7 +298,10 @@ func fallbackTokenLooksDynamic(token string) bool {
 	if strings.ContainsAny(token, "$`") {
 		return true
 	}
-	return containsCMDVariableExpansion(token, '%') || containsCMDVariableExpansion(token, '!')
+	if containsCMDVariableExpansion(token, '%') || containsCMDVariableExpansion(token, '!') {
+		return true
+	}
+	return containsCMDSingleDelimiterExpansion(token)
 }
 
 func containsCMDVariableExpansion(token string, delimiter byte) bool {
@@ -336,6 +339,58 @@ func validCMDVariableName(name string) bool {
 		return false
 	}
 	return true
+}
+
+// containsCMDSingleDelimiterExpansion reports whether a token IS a CMD
+// expansion written with one leading percent rather than a matched pair: a FOR
+// metavariable (%i, the batch %%i spelling, and the ~-modified %~dpi forms) or
+// a batch parameter (%1). containsCMDVariableExpansion cannot see these,
+// because it looks for %NAME% and these have no closing delimiter.
+//
+// CMD substitutes them before launching the command, so in an EXECUTABLE
+// position the spelling says nothing about what runs: `for /f %i in (list.txt)
+// do %i https://host` executes whatever list.txt names. Reading %i as an
+// ordinary unknown program turned "cannot resolve" into "proven local" and
+// dropped the network gate.
+//
+// The reference must BE the token, not merely appear inside it, and the name
+// is a single character. A metavariable name is one char by CMD's grammar, so
+// `%local` is `%l` followed by literal text rather than a reference, and
+// `100%local` does not start with the sigil at all — both are ordinary program
+// spellings that keep their proven-local answer. Only executable and
+// interpreter-source positions consult this (see the callers of
+// fallbackTokenLooksDynamic), so literal FOR set data and an echo-style body's
+// arguments keep their precision too: `for %i in (*.txt) do echo %i` still
+// resolves through the literal program `echo`.
+func containsCMDSingleDelimiterExpansion(token string) bool {
+	if !strings.HasPrefix(token, "%") {
+		return false
+	}
+	rest := token[1:]
+	// A batch file doubles the sigil (%%i); both spellings reach the same
+	// substitution, so step over the second one and read the name.
+	rest = strings.TrimPrefix(rest, "%")
+	if rest == "" {
+		return false
+	}
+	// %~dpi and friends: the modifier run only ever introduces a metavariable
+	// reference, so the '~' alone is conclusive.
+	if rest[0] == '~' {
+		return true
+	}
+	if !isCMDMetavariableName(rest[0]) {
+		return false
+	}
+	// One character names the variable; anything else that could continue a
+	// name means this token is literal text, not a reference.
+	return len(rest) == 1 || !isCMDMetavariableName(rest[1])
+}
+
+// isCMDMetavariableName reports whether c can name a FOR metavariable or a
+// batch parameter. CMD accepts any single alphanumeric character here, and the
+// name is case-sensitive (%i and %I are different variables).
+func isCMDMetavariableName(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 // fallbackPayloadUsesNetwork classifies CMD payload text, so it reads the text
