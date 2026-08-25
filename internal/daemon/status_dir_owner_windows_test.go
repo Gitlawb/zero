@@ -41,9 +41,8 @@ func secureStatusTestDirPlatform(t *testing.T, dir string) {
 	}
 }
 
-func TestCheckStatusDirOwnerRejectsBroadDACL(t *testing.T) {
-	dir := t.TempDir()
-	secureStatusTestDirPlatform(t, dir)
+func broadenStatusTestDirPlatform(t *testing.T, dir string) {
+	t.Helper()
 	worldSID, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +74,12 @@ func TestCheckStatusDirOwnerRejectsBroadDACL(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestCheckStatusDirOwnerRejectsBroadDACL(t *testing.T) {
+	dir := t.TempDir()
+	secureStatusTestDirPlatform(t, dir)
+	broadenStatusTestDirPlatform(t, dir)
 
 	root, err := os.OpenRoot(dir)
 	if err != nil {

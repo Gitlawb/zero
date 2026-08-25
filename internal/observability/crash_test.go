@@ -3,6 +3,8 @@ package observability
 import (
 	"bytes"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,32 @@ func TestWriteAndFormatCrashReport(t *testing.T) {
 	for _, want := range []string{"boom", "cli", "2026-06-08T10:30:00Z", "goroutine 1"} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+func TestWriteCrashReportCreatesPrivateDefaultDirectories(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	dir := DefaultCrashDir()
+	if dir != filepath.Join(home, ".zero", "crashes") {
+		t.Fatalf("DefaultCrashDir = %q, want path beneath temporary home", dir)
+	}
+	if _, err := WriteCrashReport(dir, "cli", "boom", []byte("stack"), time.Now()); err != nil {
+		t.Fatalf("WriteCrashReport: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	for _, path := range []string{filepath.Join(home, ".zero"), dir} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got&0o077 != 0 {
+			t.Fatalf("directory %s permissions = %04o, want owner-only", path, got)
 		}
 	}
 }

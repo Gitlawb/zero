@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,10 +13,53 @@ import (
 // safe cross-platform ceiling.
 const maxUnixSocketPath = 103
 
-// secureSocketParent creates the socket's parent directory owner-only (0700 on
-// POSIX; on Windows the per-user profile directory is already ACL-restricted).
-func secureSocketParent(socketPath string) error {
-	return os.MkdirAll(filepath.Dir(socketPath), 0o700)
+// secureRuntimeParents creates and hardens every directory that can influence
+// daemon coordination. Existing directories are migrated only after ownership
+// is verified through a bound handle; directories owned by another user fail
+// closed.
+func secureRuntimeParents(paths Paths) error {
+	parents := []struct {
+		name string
+		path string
+	}{
+		{name: "socket", path: filepath.Dir(paths.Socket)},
+		{name: "lock", path: filepath.Dir(paths.Lock)},
+		{name: "status", path: filepath.Dir(paths.Status)},
+	}
+	seen := make(map[string]struct{}, len(parents))
+	for _, parent := range parents {
+		absolute, err := filepath.Abs(parent.path)
+		if err != nil {
+			return fmt.Errorf("daemon: resolve %s directory: %w", parent.name, err)
+		}
+		if _, ok := seen[absolute]; ok {
+			continue
+		}
+		seen[absolute] = struct{}{}
+		if err := os.MkdirAll(absolute, 0o700); err != nil {
+			return fmt.Errorf("daemon: create %s directory: %w", parent.name, err)
+		}
+		if err := secureRuntimeDirectory(absolute); err != nil {
+			return fmt.Errorf("daemon: secure %s directory: %w", parent.name, err)
+		}
+	}
+	return nil
+}
+
+func secureRuntimeDirectory(path string) (returnErr error) {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return fmt.Errorf("open runtime directory: %w", err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close runtime directory: %w", err))
+		}
+	}()
+	if err := secureStatusRoot(root); err != nil {
+		return err
+	}
+	return nil
 }
 
 // checkSocketPathLength rejects an over-long unix socket path before bind.

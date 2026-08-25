@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/observability"
 )
 
 func newTestServer(t *testing.T, launcher Launcher) (*Server, Paths) {
@@ -17,6 +19,11 @@ func newTestServer(t *testing.T, launcher Launcher) (*Server, Paths) {
 		Lock:   filepath.Join(dir, "d.lock"),
 		Status: filepath.Join(dir, "d.status"),
 	}
+	return newTestServerWithPaths(t, launcher, paths), paths
+}
+
+func newTestServerWithPaths(t *testing.T, launcher Launcher, paths Paths) *Server {
+	t.Helper()
 	pool, err := NewPool(PoolOptions{Size: 2, Launcher: launcher, KillTimeout: 200 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
@@ -29,7 +36,7 @@ func newTestServer(t *testing.T, launcher Launcher) (*Server, Paths) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	return srv, paths
+	return srv
 }
 
 func waitForFile(t *testing.T, path string) {
@@ -134,6 +141,64 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.Lock); err != nil {
 		t.Fatalf("stable lock file missing after shutdown: %v", err)
+	}
+}
+
+func TestServerPublishesDefaultStatusAfterCrashReportCreatesRuntimeDirectory(t *testing.T) {
+	home, err := os.MkdirTemp("", "zero-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	if _, err := observability.WriteCrashReport(
+		observability.DefaultCrashDir(),
+		"cli",
+		"boom",
+		[]byte("stack"),
+		time.Now(),
+	); err != nil {
+		t.Fatalf("WriteCrashReport: %v", err)
+	}
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths: %v", err)
+	}
+	if paths.Status != filepath.Join(home, ".zero", "daemon.status") {
+		t.Fatalf("default status path = %q, want path beneath temporary home", paths.Status)
+	}
+
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve() }()
+
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		if _, err := os.Stat(paths.Status); err == nil {
+			break
+		}
+		select {
+		case err := <-serveErr:
+			t.Fatalf("Serve returned before publishing status: %v", err)
+		case <-deadline.C:
+			t.Fatal("daemon did not publish its default status file")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+
+	srv.Shutdown()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after shutdown")
 	}
 }
 

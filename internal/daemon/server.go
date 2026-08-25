@@ -85,7 +85,7 @@ func (s *Server) Serve() error {
 	if err := checkSocketPathLength(s.opts.Paths.Socket); err != nil {
 		return err
 	}
-	if err := secureSocketParent(s.opts.Paths.Socket); err != nil {
+	if err := secureRuntimeParents(s.opts.Paths); err != nil {
 		return err
 	}
 	lock, err := acquireLock(s.opts.Paths.Lock, s.opts.isAlive)
