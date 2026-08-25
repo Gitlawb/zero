@@ -673,19 +673,37 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 }
 
 func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange, tracker *FileTracker) error {
-	mutated := false
+	// committed lists, in order, the paths whose change reached disk before a
+	// later change failed, so the caller (and the model) knows exactly which
+	// files now hold the patched content and which were never touched.
+	var committed []string
 	for _, change := range changes {
-		committed, err := applyStructuredPatchChange(root, change)
-		mutated = mutated || committed
+		done, err := applyStructuredPatchChange(root, change)
+		if done {
+			committed = append(committed, structuredPatchChangePaths(change)...)
+		}
 		if err != nil {
 			forgetStructuredPatchFiles(tracker, changes)
-			if mutated {
-				return fmt.Errorf("%w; structured patch was partially applied; re-read affected files before retrying", err)
+			if len(committed) > 0 {
+				return fmt.Errorf("%w; patch was partially applied — already committed: %s; the remaining files are unchanged; re-read the committed files before retrying", err, strings.Join(committed, ", "))
 			}
 			return err
 		}
 	}
 	return nil
+}
+
+// structuredPatchChangePaths names the workspace-relative paths a committed
+// change touched: the destination, plus the source of a move or copy.
+func structuredPatchChangePaths(change structuredPatchChange) []string {
+	if change.kind == structuredPatchDelete {
+		return []string{change.from.relative}
+	}
+	paths := []string{change.to.relative}
+	if change.from.absolute != change.to.absolute && change.from.relative != "" {
+		paths = append([]string{change.from.relative}, paths...)
+	}
+	return paths
 }
 
 func forgetStructuredPatchFiles(tracker *FileTracker, changes []structuredPatchChange) {

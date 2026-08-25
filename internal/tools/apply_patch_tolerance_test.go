@@ -666,3 +666,47 @@ func TestUnifiedPatchHeaderOnlyEmptyFileForms(t *testing.T) {
 		t.Fatalf("changed files = %v", result.ChangedFiles)
 	}
 }
+
+// When a later change fails, the error names exactly which files were already
+// committed so the caller knows what changed and what did not.
+func TestApplyPatchOperationsReportsCommittedPrefixOnFailure(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "first.txt"), "one\n")
+	writeTestFile(t, filepath.Join(root, "second.txt"), "two\n")
+	writeTestFile(t, filepath.Join(root, "third.txt"), "three\n")
+	// Make second.txt change after planning so its commit is refused.
+	structuredPatchBeforeCommit = func(change structuredPatchChange) {
+		if change.to.relative == "second.txt" {
+			writeTestFile(t, filepath.Join(root, "second.txt"), "changed\n")
+		}
+	}
+	defer func() { structuredPatchBeforeCommit = nil }()
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: first.txt", "@@", "-one", "+ONE",
+		"*** Update File: second.txt", "@@", "-two", "+TWO",
+		"*** Update File: third.txt", "@@", "-three", "+THREE",
+		"*** End Patch", "",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status == StatusOK {
+		t.Fatal("patch must fail when a later change is refused")
+	}
+	for _, want := range []string{"already committed: first.txt", "remaining files are unchanged"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("error must report the committed prefix, got: %s", result.Output)
+		}
+	}
+	if strings.Contains(result.Output, "committed: first.txt, second.txt") || strings.Contains(result.Output, "third.txt") {
+		t.Fatalf("error must not list uncommitted files as committed: %s", result.Output)
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "first.txt")); string(content) != "ONE\n" {
+		t.Fatalf("first.txt must hold the committed change, got %q", string(content))
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "second.txt")); string(content) != "changed\n" {
+		t.Fatalf("second.txt must be untouched by the patch, got %q", string(content))
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "third.txt")); string(content) != "three\n" {
+		t.Fatalf("third.txt must be untouched, got %q", string(content))
+	}
+}
