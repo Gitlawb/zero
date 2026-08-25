@@ -248,6 +248,20 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// a half-initialized session (registerSession sets history under the lock and
 	// reuses an already-live session rather than orphaning its in-flight turn).
 	history, messages, historyErr := a.loadHistory(meta.SessionID)
+	// RESUME PROMISES RESTORED CONTEXT, SO A FAILED RESTORATION IS A FAILED
+	// RESUME. historyErr used to do nothing but suppress replay and raise a
+	// warning: the session was registered and reported ready regardless, so a
+	// corrupt record or an unreadable events file left the caller holding a live,
+	// promptable session ID whose next prompt ran as a brand-new conversation
+	// under the old identity. Nothing in the response said so.
+	//
+	// Publication is now gated on restoration for resume. LOAD keeps the
+	// best-effort policy deliberately rather than by inheriting this helper: it
+	// replays what it has and warns about the rest, which is the right trade for
+	// a client rebuilding a transcript it can still scroll. Reported by @jatmn.
+	if !replay && historyErr != nil {
+		return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
+	}
 	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
@@ -262,6 +276,10 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	note := &notifier{conn: a.conn, sessionID: sess.id}
 	if replay && historyErr == nil {
 		for _, message := range messages {
+			if message.tool != nil {
+				note.send(*message.tool)
+				continue
+			}
 			note.send(replayMessageChunk(message.role, replayMessageID(message.eventID), message.content))
 		}
 	}
@@ -725,17 +743,40 @@ func (a *Agent) persistTurn(sess *acpSession, user, assistant string) error {
 	return err
 }
 
+// persistedMessage is one entry of the restored transcript in stored order. It
+// is either a message (role/content) or a tool-call notification (tool), never
+// both: keeping them in ONE ordered slice is what preserves the interleaving a
+// client needs to redraw the conversation as it originally happened.
 type persistedMessage struct {
 	eventID string
 	role    string
 	content string
+	// tool is set for a replayed tool call or its result, and is already in wire
+	// shape — it comes from the same toolCallStart/toolCallResult mapping the
+	// live turn uses, so a replayed tool call renders identically to a fresh one
+	// and there is no second mapping to drift out of sync.
+	tool *ToolCallUpdate
 }
 
 func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage, error) {
 	if a.deps.Store == nil {
 		return nil, nil, nil
 	}
-	events, err := a.deps.Store.ReadEvents(sessionID)
+	// THE EFFECTIVE CONVERSATION, NOT THE RAW LOG. A compacted session keeps its
+	// original prefix on disk alongside an EventCompaction that names the events
+	// it replaced and carries their durable summary. ReadEvents hands back both,
+	// so restoring from it replayed superseded turns AND dropped the summary that
+	// replaced them — resume then seeded the next turn with context the
+	// conversation had already moved past, and load visibly resurrected
+	// transcript entries the user had seen compacted away.
+	//
+	// ReadRehydratedEvents is the projection the TUI and exec paths already use
+	// (internal/tui/session.go, internal/sessions/exec_session.go), so all three
+	// now agree on what the conversation IS. Switching readers alone is not
+	// enough: rehydration substitutes the compaction event in place of the events
+	// it replaced, so a loop that skips everything but EventMessage would drop the
+	// summary exactly as before. It is projected below. Reported by @jatmn.
+	events, err := a.deps.Store.ReadRehydratedEvents(sessionID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -744,6 +785,47 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 	var pendingUser string
 	havePending := false
 	for _, e := range events {
+		if e.Type == sessions.EventCompaction {
+			// The summary stands in for the turns it replaced, so it enters the
+			// history as an assistant message: it is prior context the next turn
+			// must see, and the wire has no separate role for it.
+			raw, marshalErr := json.Marshal(e.Payload)
+			if marshalErr != nil {
+				continue
+			}
+			var payload struct {
+				Summary string `json:"summary"`
+			}
+			if json.Unmarshal(raw, &payload) != nil || strings.TrimSpace(payload.Summary) == "" {
+				continue
+			}
+			messages = append(messages, persistedMessage{
+				eventID: persistedMessageIdentity(sessionID, e),
+				role:    "assistant",
+				content: payload.Summary,
+			})
+			records = append(records, turnRecord{user: pendingUser, assistant: payload.Summary})
+			pendingUser = ""
+			havePending = false
+			continue
+		}
+		// TOOL ACTIVITY IS PART OF THE TRANSCRIPT, NOT DECORATION. A restored
+		// conversation that shows only the prose reads as if the agent asserted
+		// its edits and command output from nowhere: the user sees "I updated
+		// scope.go" with no record that any tool ran. These are collected for
+		// replay only. They deliberately do NOT enter turnRecord, so the prompt
+		// context a resumed turn receives stays byte-identical to what it was —
+		// load and resume continue to consume the SAME effective history, and
+		// only the wire rendering differs. Reported by @jatmn.
+		if e.Type == sessions.EventToolCall || e.Type == sessions.EventToolResult {
+			if upd := replayToolUpdate(e); upd != nil {
+				messages = append(messages, persistedMessage{
+					eventID: persistedMessageIdentity(sessionID, e),
+					tool:    upd,
+				})
+			}
+			continue
+		}
 		if e.Type != sessions.EventMessage {
 			continue
 		}
@@ -777,6 +859,55 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 		records = append(records, turnRecord{user: pendingUser})
 	}
 	return records, messages, nil
+}
+
+// replayToolUpdate rebuilds the ACP notification for one stored tool event.
+//
+// The stored toolCallId is reused verbatim rather than re-derived, because the
+// client pairs a result with its call by that id alone; minting a new one would
+// replay the result as an orphan update against a call the client never saw.
+// Older records wrote the field as "id", so both spellings are accepted — the
+// TUI projection already does the same (internal/tui/session.go).
+//
+// A record that carries no usable id is skipped rather than replayed under a
+// synthesized one: an unpairable update is worse than a missing row.
+func replayToolUpdate(event sessions.Event) *ToolCallUpdate {
+	raw, err := json.Marshal(event.Payload)
+	if err != nil {
+		return nil
+	}
+	var payload struct {
+		Name       string `json:"name"`
+		ToolCallID string `json:"toolCallId"`
+		ID         string `json:"id"`
+		Arguments  string `json:"arguments"`
+		Status     string `json:"status"`
+		Output     string `json:"output"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	id := payload.ToolCallID
+	if id == "" {
+		id = payload.ID
+	}
+	if id == "" {
+		return nil
+	}
+	if event.Type == sessions.EventToolCall {
+		upd := toolCallStart(agent.ToolCall{ID: id, Name: payload.Name, Arguments: payload.Arguments})
+		// The call already ran; replaying it as in_progress would leave a
+		// permanently spinning row when no result event follows it (a session
+		// killed mid-call). Its own result event supplies the real outcome.
+		upd.Status = ToolStatusCompleted
+		return &upd
+	}
+	status := tools.Status(payload.Status)
+	if status == "" {
+		status = tools.StatusOK
+	}
+	upd := toolCallResult(agent.ToolResult{ToolCallID: id, Name: payload.Name, Status: status, Output: payload.Output})
+	return &upd
 }
 
 func persistedMessageIdentity(sessionID string, event sessions.Event) string {

@@ -73,7 +73,11 @@ type clientHarness struct {
 	client        *Conn
 	updates       chan string
 	notifications chan ContentChunk
-	stop          func()
+	// tools carries replayed and live tool-call notifications. They are a
+	// different wire shape from a message chunk, so decoding them into
+	// ContentChunk would silently blank every field the assertions need.
+	tools chan ToolCallUpdate
+	stop  func()
 }
 
 func newHarness(t *testing.T, deps Deps) *clientHarness {
@@ -84,8 +88,30 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 	client := NewConn(br, bw)
 	a := NewAgent(agentConn, deps)
 
-	h := &clientHarness{client: client, updates: make(chan string, 128), notifications: make(chan ContentChunk, 128)}
+	h := &clientHarness{client: client, updates: make(chan string, 128), notifications: make(chan ContentChunk, 128), tools: make(chan ToolCallUpdate, 128)}
 	client.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
+		// Decode the discriminator ALONE first. ContentChunk and ToolCallUpdate
+		// disagree on the shape of "content" (a block vs an array of them), so
+		// decoding straight into ContentChunk makes every tool_call_update fail
+		// to unmarshal and vanish — which reads exactly like a notification that
+		// was never sent.
+		var kind struct {
+			Update struct {
+				SessionUpdate string `json:"sessionUpdate"`
+			} `json:"update"`
+		}
+		if json.Unmarshal(params, &kind) != nil {
+			return
+		}
+		if kind.Update.SessionUpdate == UpdateToolCall || kind.Update.SessionUpdate == UpdateToolCallUpdate {
+			var toolProbe struct {
+				Update ToolCallUpdate `json:"update"`
+			}
+			if json.Unmarshal(params, &toolProbe) == nil {
+				h.tools <- toolProbe.Update
+			}
+			return
+		}
 		var probe struct {
 			Update ContentChunk `json:"update"`
 		}
@@ -1299,5 +1325,231 @@ func TestSessionListRejectsARelativeCwdFilter(t *testing.T) {
 	}
 	if len(out.Sessions) != 1 || out.Sessions[0].SessionID != "persisted" {
 		t.Errorf("unfiltered session/list = %+v, want the one persisted session", out.Sessions)
+	}
+}
+
+// A COMPACTED SESSION MUST RESUME AS THE CONVERSATION IT BECAME, NOT THE ONE IT
+// WAS. This session's first three turns were compacted into one summary. Reading
+// the raw log would replay those superseded turns and drop the summary; reading
+// the rehydrated view without projecting EventCompaction would drop the summary
+// and the turns both. Load and resume must agree, so both are asserted.
+func TestACPCompactedHistoryReplacesCompactedTurnsWithTheirSummary(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "compacted-session", Title: "Compacted", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appended, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "compacted question"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "compacted answer"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "surviving question"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(appended) != 3 {
+		t.Fatalf("appended %d events, want 3", len(appended))
+	}
+	const summary = "Earlier: the user asked about scope roots and got an answer."
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{{
+		Type: sessions.EventCompaction,
+		Payload: map[string]any{
+			"summary":      summary,
+			"preserveLast": 1,
+			"compactableEvents": []map[string]any{
+				{"id": appended[0].ID, "sequence": appended[0].Sequence},
+				{"id": appended[1].ID, "sequence": appended[1].Sequence},
+			},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	loader := newHarness(t, deps)
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	wantKinds := []string{UpdateAgentMessageChunk, UpdateUserMessageChunk}
+	wantText := []string{summary, "surviving question"}
+	for i := range wantKinds {
+		select {
+		case update := <-loader.notifications:
+			if update.SessionUpdate != wantKinds[i] || update.Content.Text != wantText[i] {
+				t.Fatalf("replayed update %d = %+v, want %s %q", i, update, wantKinds[i], wantText[i])
+			}
+		case <-ctx.Done():
+			t.Fatalf("replayed update %d never arrived", i)
+		}
+	}
+	// The compacted-away turns must NOT also be replayed after the summary.
+	select {
+	case update := <-loader.notifications:
+		t.Fatalf("a compacted-away turn was replayed: %+v", update)
+	case <-time.After(150 * time.Millisecond):
+	}
+	loader.stop()
+
+	// Resume takes the same history. Its prompt context is what proves it: the
+	// summary must be in there and the compacted originals must not, so the
+	// prompt the agent loop actually receives is captured rather than inferred.
+	prompts := make(chan string, 4)
+	realRun := deps.RunAgent
+	deps.RunAgent = func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		prompts <- prompt
+		return realRun(ctx, prompt, provider, opts)
+	}
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	if err := resumer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID,
+		Prompt:    []ContentBlock{{Type: "text", Text: "carry on"}},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	prompt := <-prompts
+	if !strings.Contains(prompt, summary) {
+		t.Fatalf("resumed prompt lost the compaction summary:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "compacted answer") {
+		t.Fatalf("resumed prompt replayed a compacted-away turn:\n%s", prompt)
+	}
+}
+
+// Tool activity is part of the transcript a client redraws on session/load, and
+// a result is only renderable if it pairs with its call by the SAME id. Resume
+// stays replay-free.
+func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "tool-replay-session", Title: "Tools", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "read the file"}},
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "arguments": `{"path":"scope.go"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "status": "ok", "output": "package sandbox"}},
+		// An older record spells the id "id" rather than "toolCallId".
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "bash", "id": "call-88", "arguments": `{"command":"go build"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "bash", "id": "call-88", "status": "error", "output": "build failed"}},
+		// No id at all: unpairable, so it must be skipped rather than replayed.
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "orphan", "arguments": "{}"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	loader := newHarness(t, deps)
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	type want struct {
+		kind, id, status string
+	}
+	wants := []want{
+		{UpdateToolCall, "call-77", ToolStatusCompleted},
+		{UpdateToolCallUpdate, "call-77", ToolStatusCompleted},
+		{UpdateToolCall, "call-88", ToolStatusCompleted},
+		{UpdateToolCallUpdate, "call-88", ToolStatusFailed},
+	}
+	for i, w := range wants {
+		select {
+		case update := <-loader.tools:
+			if update.SessionUpdate != w.kind || update.ToolCallID != w.id || update.Status != w.status {
+				t.Fatalf("tool update %d = %+v, want %s/%s/%s", i, update, w.kind, w.id, w.status)
+			}
+		case <-ctx.Done():
+			t.Fatalf("tool update %d never arrived", i)
+		}
+	}
+	select {
+	case update := <-loader.tools:
+		t.Fatalf("an unpairable tool call was replayed: %+v", update)
+	case <-time.After(150 * time.Millisecond):
+	}
+	loader.stop()
+
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	select {
+	case update := <-resumer.tools:
+		t.Fatalf("session/resume replayed tool activity: %+v", update)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// sessionCapabilities is omitempty. The positive case is asserted above; this is
+// the other half — an agent that does NOT support list/resume must omit the key
+// entirely rather than send a null a client could read as "supported". Raised by
+// CodeRabbit.
+func TestSessionCapabilitiesAreOmittedWhenUnset(t *testing.T) {
+	encoded, err := json.Marshal(AgentCapabilities{LoadSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["sessionCapabilities"]; ok {
+		t.Fatalf("unset sessionCapabilities was still serialized: %s", encoded)
+	}
+}
+
+// A RESUME THAT CANNOT RESTORE ITS CONTEXT MUST FAIL, NOT SUCCEED QUIETLY.
+// Resume's entire contract is "carry on from where this left off". If the events
+// file is unreadable, the old behaviour registered the session anyway and
+// returned success: the client held a live session ID under the old identity
+// whose next prompt ran as a fresh conversation. Nothing on the wire said so.
+//
+// Load keeps the best-effort policy deliberately — it replays what it can and
+// warns — so both halves are asserted here to keep the two from being
+// accidentally unified again.
+func TestACPResumeFailsWhenHistoryCannotBeRestored(t *testing.T) {
+	deps := testDeps(t)
+	cwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: cwd})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	eventsPath := filepath.Join(deps.Store.RootDir, meta.SessionID, sessions.EventsFile)
+	if err := os.WriteFile(eventsPath, []byte("{bad json}\n"), 0o600); err != nil {
+		t.Fatalf("write corrupt events: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	err = resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	if err == nil {
+		t.Fatal("session/resume reported success despite unreadable history")
+	}
+	// And the session must not have been published: a prompt against it has to
+	// be refused, not silently answered with no context.
+	if err := resumer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: meta.SessionID,
+		Prompt:    []ContentBlock{TextBlock("carry on")},
+	}, &PromptResult{}); err == nil {
+		t.Fatal("a session whose resume failed was still promptable")
+	}
+
+	// Load is the deliberate exception and still opens.
+	loader := newHarness(t, deps)
+	defer loader.stop()
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load must stay best-effort, got: %v", err)
 	}
 }
