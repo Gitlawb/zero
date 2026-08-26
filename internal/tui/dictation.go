@@ -201,7 +201,7 @@ func (m model) toggleVoiceMode() (model, tea.Cmd) {
 	}
 	m.dictation.voiceModeEnabled = !m.dictation.voiceModeEnabled
 	if m.dictation.voiceModeEnabled {
-		return m.showTransientNoticeInline("Voice mode on — hold Ctrl+Space to dictate; run /voice again to turn it off.", transientNoticeSuccess), nil
+		return m.showTransientNoticeInline("Voice mode on — "+voiceCaptureUsage+". Run /voice again to turn it off.", transientNoticeSuccess), nil
 	}
 	// Turning voice off is the "done dictating" signal, so release the warm sherpa
 	// streaming server — otherwise a loaded model keeps idling in RAM (and holding
@@ -601,13 +601,12 @@ func (m model) handleRecTick() (model, tea.Cmd) {
 	return m, nil
 }
 
-// voiceModeIndicator renders the persistent "voice mode on" hint shown while
-// idle so the user knows Space is repurposed to hold-to-record (§10).
+// voiceModeIndicator renders the current voice gesture or transcription state.
 func (m model) voiceModeIndicator() string {
 	if !m.dictation.voiceModeEnabled {
 		return ""
 	}
-	return zeroTheme.accent.Render("🎙 voice") + zeroTheme.muted.Render(" · Ctrl+Space · "+m.dictation.currentModelLabel())
+	return zeroTheme.accent.Render("🎙 voice") + zeroTheme.muted.Render(" · "+m.voiceCaptureStatus()+" · "+m.dictation.currentModelLabel())
 }
 
 // dictationErrorText renders a dictation error for the transcript: a missing-

@@ -109,7 +109,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/voice",
 		usage:       "/voice",
 		group:       commandGroupRuntime,
-		description: "Toggle voice mode (hold Ctrl+Space to dictate).",
+		description: "Toggle voice mode (" + voiceCaptureUsage + ").",
 		kind:        commandVoice,
 	},
 	{

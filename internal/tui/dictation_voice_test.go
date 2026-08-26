@@ -37,7 +37,7 @@ func TestToggleVoiceModeFlips(t *testing.T) {
 	if !next.dictation.voiceModeEnabled {
 		t.Fatal("first /voice should enable voice mode")
 	}
-	if next.transientNotice.text != "Voice mode on — hold Ctrl+Space to dictate; run /voice again to turn it off." {
+	if next.transientNotice.text != "Voice mode on — hold Ctrl+Space to record; press it to toggle where key releases are unavailable. Run /voice again to turn it off." {
 		t.Errorf("voice-mode-on notice = %q", next.transientNotice.text)
 	}
 	if transcriptHasText(next, "Voice mode on") {
@@ -200,12 +200,45 @@ func TestVoiceModeCaptureStopsWhenEitherChordKeyIsReleased(t *testing.T) {
 	}
 }
 
-func TestVoiceModeIndicatorIncludesCaptureShortcut(t *testing.T) {
-	m := model{dictation: batchOnlyController()}
-	m.dictation.voiceModeEnabled = true
-	if got := m.voiceModeIndicator(); !strings.Contains(got, "Ctrl+Space") {
-		t.Fatalf("voice indicator = %q, want Ctrl+Space hint", got)
+func TestVoiceModeIndicatorDescribesTierAndPhase(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		releaseEvents bool
+		phase         dictationPhase
+		spaceHeld     bool
+		want          string
+	}{
+		{name: "toggle idle", want: "press Ctrl+Space to record"},
+		{name: "hold idle", releaseEvents: true, want: "hold Ctrl+Space to record"},
+		{name: "toggle recording", phase: dictRecording, want: "press Ctrl+Space to stop"},
+		{name: "hold recording", releaseEvents: true, phase: dictRecording, spaceHeld: true, want: "release Ctrl+Space to stop"},
+		{name: "transcribing", phase: dictTranscribing, want: "transcribing"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := model{dictation: batchOnlyController()}
+			m.dictation.voiceModeEnabled = true
+			m.dictation.eventTypesSupported = test.releaseEvents
+			m.dictation.phase = test.phase
+			m.dictation.spaceHeld = test.spaceHeld
+			if got := m.voiceModeIndicator(); !strings.Contains(strings.ToLower(got), strings.ToLower(test.want)) {
+				t.Fatalf("voice indicator = %q, want %q", got, test.want)
+			}
+		})
 	}
+}
+
+func TestVoiceCommandDescriptionExplainsBothTerminalTiers(t *testing.T) {
+	for _, command := range commandDefinitions {
+		if command.kind == commandVoice {
+			for _, want := range []string{"hold Ctrl+Space", "press it to toggle", "key releases"} {
+				if !strings.Contains(command.description, want) {
+					t.Fatalf("voice command description = %q, want %q", command.description, want)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("voice command definition not found")
 }
 
 func TestVoiceModePlainSpaceTypesNormally(t *testing.T) {

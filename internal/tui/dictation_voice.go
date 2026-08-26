@@ -4,6 +4,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+const voiceCaptureUsage = "hold Ctrl+Space to record; press it to toggle where key releases are unavailable"
+
 // Voice mode's Ctrl+Space gesture — the (only) dictation trigger. Two terminal
 // tiers:
 //
@@ -37,6 +39,23 @@ func voiceCaptureKey(msg tea.KeyMsg) bool {
 // without ModCtrl because Ctrl is no longer down.
 func voiceCaptureReleaseKey(msg tea.KeyMsg) bool {
 	return keyIs(msg, tea.KeySpace) || keyIs(msg, tea.KeyLeftCtrl) || keyIs(msg, tea.KeyRightCtrl)
+}
+
+func (m model) voiceCaptureStatus() string {
+	switch m.dictation.phase {
+	case dictStarting, dictRecording:
+		if m.dictation.eventTypesSupported {
+			return "release Ctrl+Space to stop"
+		}
+		return "press Ctrl+Space to stop"
+	case dictTranscribing:
+		return "transcribing…"
+	default:
+		if m.dictation.eventTypesSupported {
+			return "hold Ctrl+Space to record"
+		}
+		return "press Ctrl+Space to record"
+	}
 }
 
 // handleVoiceCapturePress handles Ctrl+Space while voice mode is on.

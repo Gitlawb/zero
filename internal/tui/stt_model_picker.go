@@ -226,7 +226,7 @@ func (m model) handleSTTModelSelection(value string) (model, string) {
 			// instead); this is the manual-setup path (e.g. Termux).
 			hint += " Set stt.localModelPath to a model directory (see docs/dictation.md)."
 		} else {
-			hint += " Run /voice, then hold Ctrl+Space to dictate."
+			hint += " Run /voice; " + voiceCaptureUsage + "."
 		}
 		return m, hint
 	}
