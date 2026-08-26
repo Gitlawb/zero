@@ -141,6 +141,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterInputTokens, int64(usage.InputTokens))
 			options.Trace.Counter(trace.CounterCachedInputTokens, int64(usage.CachedInputTokens))
+			options.Trace.Counter(trace.CounterCacheWriteTokens, int64(usage.CacheWriteTokens))
 			options.Trace.Counter(trace.CounterOutputTokens, int64(usage.OutputTokens))
 		}
 	}
@@ -697,11 +698,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				turnRequestedModel = toolResult.RequestedModel
 			}
 			messages = append(messages, zeroruntime.Message{
-				Role:         zeroruntime.MessageRoleTool,
-				Content:      toolResult.ModelOutput(),
-				ToolCallID:   toolResult.ToolCallID,
-				IsError:      toolResult.Status == tools.StatusError,
-				ChangedFiles: append([]string(nil), toolResult.ChangedFiles...),
+				Role:               zeroruntime.MessageRoleTool,
+				Content:            toolResult.ModelOutput(),
+				ToolCallID:         toolResult.ToolCallID,
+				ToolCallProviderID: call.ProviderCallID,
+				IsError:            toolResult.Status == tools.StatusError,
+				ChangedFiles:       append([]string(nil), toolResult.ChangedFiles...),
 			})
 			// Images ride a following USER message rather than the tool result
 			// above. Every provider drops images on a tool-role message —
@@ -1045,6 +1047,9 @@ func historySafeToolCalls(calls []ToolCall) []ToolCall {
 	safe := make([]ToolCall, len(calls))
 	for i, call := range calls {
 		safe[i] = call
+		if call.Freeform {
+			continue
+		}
 		args := strings.TrimSpace(call.Arguments)
 		switch {
 		case args == "":
@@ -1128,8 +1133,28 @@ func decodeToolArguments(arguments string, v any) error {
 }
 
 func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	tool, toolFound := registry.Get(call.Name)
 	args := map[string]any{}
-	if call.Arguments != "" {
+	if call.Freeform {
+		if !toolFound || !tools.IsBuiltInApplyPatch(tool) {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: Unsupported freeform tool call for " + call.Name + ".",
+			}, nil
+		}
+		prepared, err := tools.PrepareFreeformApplyPatchArguments(tool, call.Arguments)
+		if err != nil {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: Invalid freeform apply_patch input: " + err.Error(),
+			}, nil
+		}
+		args = prepared
+	} else if call.Arguments != "" {
 		if err := decodeToolArguments(call.Arguments, &args); err != nil {
 			return ToolResult{
 				ToolCallID: call.ID,
@@ -1157,7 +1182,6 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			DenialReason: DenialFiltered,
 		}, nil
 	}
-	tool, toolFound := registry.Get(call.Name)
 	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
 		modeName := string(permissionMode)
 		return ToolResult{
@@ -3220,11 +3244,15 @@ func cachedRuntimeToolDefinition(defCache map[string]zeroruntime.ToolDefinition,
 // runtimeToolDefinition renders a tool's advertised definition (name, description,
 // JSON-schema parameters) as sent to the provider.
 func runtimeToolDefinition(tool tools.Tool) zeroruntime.ToolDefinition {
-	return zeroruntime.ToolDefinition{
+	definition := zeroruntime.ToolDefinition{
 		Name:        tool.Name(),
 		Description: tool.Description(),
 		Parameters:  schemaToRuntimeMap(tool.Parameters()),
 	}
+	if tools.IsBuiltInApplyPatch(tool) {
+		definition.Type = zeroruntime.ToolDefinitionFreeform
+	}
+	return definition
 }
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {
@@ -3379,10 +3407,11 @@ func loadedToolsFromResult(meta map[string]string) []string {
 func appendAbortedToolResults(messages []Message, remaining []ToolCall) []Message {
 	for _, call := range remaining {
 		messages = append(messages, zeroruntime.Message{
-			Role:       zeroruntime.MessageRoleTool,
-			Content:    abortedToolResultNotice,
-			ToolCallID: call.ID,
-			IsError:    true,
+			Role:               zeroruntime.MessageRoleTool,
+			Content:            abortedToolResultNotice,
+			ToolCallID:         call.ID,
+			ToolCallProviderID: call.ProviderCallID,
+			IsError:            true,
 		})
 	}
 	return messages

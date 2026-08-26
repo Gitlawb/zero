@@ -839,18 +839,20 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		mcpTokenStore = nil
 		err = nil
 	}
+	criticalMCPConfig, optionalMCPConfig := splitMCPStartupConfig(mcpConfig)
 	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
-	if len(mcpConfig.Servers) > 0 {
-		mcpRuntime, err = deps.registerMCPTools(context.Background(), registry, mcpConfig, mcp.RegisterOptions{
+	if len(criticalMCPConfig.Servers) > 0 {
+		runtime, registerErr := deps.registerMCPTools(context.Background(), registry, criticalMCPConfig, mcp.RegisterOptions{
 			PermissionStore: mcpPermissionStore,
 			Autonomy:        mcp.AutonomyLow,
 			Execution:       executionRunner,
 			WorkspaceRoot:   workspaceRoot,
 		})
-	}
-	if err != nil {
-		closeMCPRuntime(stderr, mcpRuntime)
-		return writeAppError(stderr, err.Error(), 1)
+		if registerErr != nil {
+			closeMCPRuntime(stderr, runtime)
+			return writeAppError(stderr, redaction.ErrorMessage(registerErr, redaction.Options{}), 1)
+		}
+		mcpRuntime = runtime
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
 	// A server that could not be reached or validated is skipped, not fatal (one
@@ -909,11 +911,35 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 	// Activate deferred MCP-tool loading for the interactive run only when the
 	// VISIBLE deferred-eligible count meets the resolved threshold, matching exec.
-	// The registry is complete (core + specialist + MCP + plugins) here, so the
-	// count is accurate; below threshold this is a no-op and the surface is
-	// unchanged. The interactive surface applies no operator tool filters, so
-	// enabled/disabled are nil — matching the AgentOptions below.
+	// This first pass covers every prompt-critical tool. Optional built-in MCP
+	// defaults re-run the same gate after publishing their atomic batch, so a
+	// later catalog generation cannot miss its loader. The interactive surface
+	// applies no operator tool filters, so enabled/disabled are nil — matching the
+	// AgentOptions below.
 	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
+	var optionalMCPRuntime *optionalMCPStartup
+	var awaitToolReadiness func(context.Context)
+	if len(optionalMCPConfig.Servers) > 0 {
+		optionalMCPRuntime = startOptionalMCP(
+			context.Background(),
+			registry,
+			optionalMCPConfig,
+			mcp.RegisterOptions{
+				PermissionStore: mcpPermissionStore,
+				Autonomy:        mcp.AutonomyLow,
+				Execution:       executionRunner,
+				WorkspaceRoot:   workspaceRoot,
+			},
+			deps.registerMCPTools,
+			func() {
+				registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
+			},
+		)
+		defer closeMCPRuntime(stderr, optionalMCPRuntime)
+		awaitToolReadiness = func(ctx context.Context) {
+			optionalMCPRuntime.Await(ctx, optionalMCPPromptGrace)
+		}
+	}
 	lastKnownMCPConfig := mcpConfig
 	fileTracker := tools.NewFileTracker()
 	var scratchBaseline scratchFileBaseline
@@ -951,8 +977,17 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		CompactionModel:      resolved.Preferences.CompactionModel,
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
-		ProbeProviderHealth:  deps.probeProviderHealth,
-		UserAgent:            userAgent(),
+		NewTurnSessionProvider: func(profile config.ProviderProfile, provider zeroruntime.Provider) zeroruntime.TurnSessionProvider {
+			if provider == nil {
+				return nil
+			}
+			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+				return optimized
+			}
+			return providers.DefaultTurnSessions(profile, provider, providers.Options{})
+		},
+		ProbeProviderHealth: deps.probeProviderHealth,
+		UserAgent:           userAgent(),
 		PrepareRunCompletionWarning: func() {
 			scratchBaseline = scratchFileSnapshot(workspaceRoot)
 		},
@@ -960,6 +995,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			return scratchFileWarning(workspaceRoot, scratchBaseline)
 		},
 		Registry:           registry,
+		AwaitToolReadiness: awaitToolReadiness,
 		SessionStore:       sessionStore,
 		PeerService:        peerService,
 		SandboxStore:       sandboxStore,

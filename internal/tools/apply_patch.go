@@ -16,6 +16,101 @@ type applyPatchTool struct {
 	scope         PathScope
 }
 
+func (applyPatchTool) isBuiltInApplyPatch() {}
+
+// PrepareFreeformApplyPatchArguments converts native structured-patch input
+// into the ordinary apply_patch argument map used by permission checks and tool
+// execution. Absolute patch-header paths select a granted write root and are
+// rewritten relative to that root; relative-only patches keep workspace-root
+// behavior.
+func PrepareFreeformApplyPatchArguments(tool Tool, patch string) (map[string]any, error) {
+	preparer, ok := tool.(interface {
+		prepareFreeformArguments(string) (map[string]any, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("tool is not Zero's built-in apply_patch")
+	}
+	return preparer.prepareFreeformArguments(patch)
+}
+
+func (tool applyPatchTool) prepareFreeformArguments(patch string) (map[string]any, error) {
+	args := map[string]any{"patch": patch}
+	if !isStructuredPatch(patch) {
+		return args, nil
+	}
+
+	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	selectedRoot := ""
+	hasRelativeHeader := false
+	for index, line := range lines {
+		prefix := ""
+		switch {
+		case strings.HasPrefix(line, structuredAddFile):
+			prefix = structuredAddFile
+		case strings.HasPrefix(line, structuredDeleteFile):
+			prefix = structuredDeleteFile
+		case strings.HasPrefix(line, structuredUpdateFile):
+			prefix = structuredUpdateFile
+		case strings.HasPrefix(line, structuredMoveTo):
+			prefix = structuredMoveTo
+		default:
+			continue
+		}
+		path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		if !filepath.IsAbs(path) {
+			hasRelativeHeader = true
+			continue
+		}
+		root, relative, err := tool.freeformPatchRoot(path)
+		if err != nil {
+			return nil, err
+		}
+		if selectedRoot != "" && selectedRoot != root {
+			return nil, fmt.Errorf("freeform patch spans multiple write roots")
+		}
+		selectedRoot = root
+		lines[index] = prefix + filepath.ToSlash(relative)
+	}
+	if selectedRoot != "" {
+		roots, err := scopedRoots(tool.workspaceRoot, tool.scope)
+		if err != nil {
+			return nil, err
+		}
+		if hasRelativeHeader && selectedRoot != roots[0] {
+			return nil, fmt.Errorf("freeform patch mixes workspace-relative paths with an extra write root")
+		}
+		args["cwd"] = selectedRoot
+		args["patch"] = strings.Join(lines, "\n")
+	}
+	return args, nil
+}
+
+func (tool applyPatchTool) freeformPatchRoot(path string) (string, string, error) {
+	roots, err := scopedRoots(tool.workspaceRoot, tool.scope)
+	if err != nil {
+		return "", "", err
+	}
+	var firstErr error
+	for _, root := range roots {
+		candidate := sandbox.NormalizePrefixForRoot(path, root)
+		candidate, err = filepath.Abs(candidate)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		relative, err := filepath.Rel(root, candidate)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
+			return root, filepath.ToSlash(relative), nil
+		}
+		if firstErr == nil {
+			firstErr = outsideWorkspaceError(path)
+		}
+	}
+	return "", "", firstErr
+}
+
 func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
