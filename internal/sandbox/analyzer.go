@@ -712,18 +712,20 @@ func busyboxSourceDynamic(args []*syntax.Word) bool {
 	return !isLiteralWord(args[0])
 }
 
-// straceSourceDynamic is busyboxSourceDynamic's counterpart for strace: it
-// reports whether the operand straceCommandArgs would treat as the traced
-// child command comes from a word this scan cannot resolve statically.
-// straceChildIndex is shared with straceCommandArgs so this check walks
-// strace's option grammar exactly once, rather than duplicating it and
-// risking the two silently drifting apart.
+// straceSourceDynamic reports whether the delegated argv loses information in
+// the literal reconstruction passed to resolveCommandArgv. This includes both a
+// dynamic child executable and dynamic env -S source below a literal env child.
+// straceChildIndex is shared with straceCommandArgs so this check walks strace's
+// option grammar exactly once rather than duplicating it.
 func straceSourceDynamic(args []*syntax.Word) bool {
 	index, ok := straceChildIndex(wordTexts(args))
 	if !ok || index >= len(args) {
 		return false
 	}
-	return !isLiteralWord(args[index])
+	if !isLiteralWord(args[index]) {
+		return true
+	}
+	return envSplitSourceDynamic(args[index:])
 }
 
 // envArgumentStart returns the index just past an `env` program token, allowing
@@ -870,6 +872,9 @@ func classifyInterpreterSource(payload string, language interpreterSourceLanguag
 		if unreadable := powerShellSourceUnreadable(payload); unreadable != "" {
 			return commandUnresolved
 		}
+		if resolution, found := classifyPowerShellExpressionEvaluation(payload, depth); found {
+			return resolution
+		}
 	}
 	result := AnalysisResult{}
 	analyzeInto(payload, &result, map[string]bool{}, depth)
@@ -913,6 +918,66 @@ func powerShellSourceUnreadable(payload string) string {
 		return "script or statement block"
 	}
 	return ""
+}
+
+// classifyPowerShellExpressionEvaluation handles the PowerShell edge that
+// executes a string as a second PowerShell program. The shared POSIX reader can
+// locate a simple Invoke-Expression/iex call, but it cannot infer source from an
+// expression that constructs the argument. Only one literal single-quoted
+// operand is therefore recursively classified; every other evaluator shape is
+// unresolved and retains the network gate.
+func classifyPowerShellExpressionEvaluation(payload string, depth int) (commandResolution, bool) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(payload), "")
+	if err != nil {
+		return commandUnresolved, powerShellExpressionEvaluatorToken(payload)
+	}
+
+	found := false
+	resolution := commandKnownLocal
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || !isPowerShellExpressionEvaluator(wordText(call.Args[0])) {
+			return true
+		}
+		found = true
+		if len(call.Args) != 2 {
+			resolution = commandUnresolved
+			return true
+		}
+		parts := call.Args[1].Parts
+		if len(parts) != 1 {
+			resolution = commandUnresolved
+			return true
+		}
+		quoted, ok := parts[0].(*syntax.SglQuoted)
+		if !ok {
+			resolution = commandUnresolved
+			return true
+		}
+		nested := classifyInterpreterSource(quoted.Value, interpreterSourcePowerShell, depth+1)
+		if nested == commandKnownNetwork || resolution == commandKnownNetwork {
+			resolution = commandKnownNetwork
+		} else if nested == commandUnresolved {
+			resolution = commandUnresolved
+		}
+		return true
+	})
+	return resolution, found
+}
+
+func powerShellExpressionEvaluatorToken(payload string) bool {
+	for _, command := range fallbackCommandTokenInfo(payload) {
+		for _, token := range command {
+			if !token.quoted && isPowerShellExpressionEvaluator(token.value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isPowerShellExpressionEvaluator(token string) bool {
+	return strings.EqualFold(token, "Invoke-Expression") || strings.EqualFold(token, "iex")
 }
 
 func pythonModuleUsesNetwork(words []string) bool {
