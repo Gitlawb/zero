@@ -88,7 +88,7 @@ type dictationController struct {
 	waveBars []int
 	waveTick int
 
-	// voiceModeEnabled repurposes Space into hold-to-record (§13.9).
+	// voiceModeEnabled repurposes Ctrl+Space into hold-to-record (§13.9).
 	voiceModeEnabled bool
 	// eventTypesSupported records whether the terminal confirmed key-release
 	// reporting (Kitty protocol); eventTypesKnown gates it until the terminal has
@@ -173,7 +173,7 @@ func firstNonEmptyStr(a, b string) string {
 func (d dictationController) active() bool { return d.phase != dictIdle }
 
 // toggleDictation starts a recording when idle and stops-and-transcribes when
-// recording. Invoked by the voice-mode Space gesture; a call during
+// recording. Invoked by the voice-mode Ctrl+Space gesture; a call during
 // startup/transcription is ignored (the machine is mid-transition).
 func (m model) toggleDictation() (model, tea.Cmd) {
 	if !m.dictation.available() {
@@ -193,15 +193,15 @@ func (m model) toggleDictation() (model, tea.Cmd) {
 	}
 }
 
-// toggleVoiceMode flips the /voice hold-to-record gesture — the dictation
-// trigger. While on, Space records; run /voice again to type spaces normally.
+// toggleVoiceMode flips the /voice hold-to-record gesture. While on,
+// Ctrl+Space records and ordinary Space continues to type normally.
 func (m model) toggleVoiceMode() (model, tea.Cmd) {
 	if !m.dictation.available() {
 		return m.appendSystemNotice("Dictation is not configured. See docs/dictation.md to set up a local engine or a Groq/OpenAI key."), nil
 	}
 	m.dictation.voiceModeEnabled = !m.dictation.voiceModeEnabled
 	if m.dictation.voiceModeEnabled {
-		return m.showTransientNoticeInline("Voice mode on — hold Space to dictate; run /voice again to turn it off.", transientNoticeSuccess), nil
+		return m.showTransientNoticeInline("Voice mode on — hold Ctrl+Space to dictate; run /voice again to turn it off.", transientNoticeSuccess), nil
 	}
 	// Turning voice off is the "done dictating" signal, so release the warm sherpa
 	// streaming server — otherwise a loaded model keeps idling in RAM (and holding
@@ -374,7 +374,7 @@ func (m model) handleDictationStarted(msg dictationStartedMsg) (model, tea.Cmd) 
 	if m.dictation.phase == dictStarting {
 		m.dictation.phase = dictRecording
 	}
-	// A voice-mode Space release that arrived mid-startup asked us to stop as soon
+	// A voice-mode Ctrl+Space release that arrived mid-startup asked us to stop as soon
 	// as recording began.
 	if m.dictation.voiceStopPending && m.dictation.phase == dictRecording {
 		m.dictation.voiceStopPending = false
@@ -607,7 +607,7 @@ func (m model) voiceModeIndicator() string {
 	if !m.dictation.voiceModeEnabled {
 		return ""
 	}
-	return zeroTheme.accent.Render("🎙 voice") + zeroTheme.muted.Render(" · "+m.dictation.currentModelLabel())
+	return zeroTheme.accent.Render("🎙 voice") + zeroTheme.muted.Render(" · Ctrl+Space · "+m.dictation.currentModelLabel())
 }
 
 // dictationErrorText renders a dictation error for the transcript: a missing-

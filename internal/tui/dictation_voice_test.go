@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -36,7 +37,7 @@ func TestToggleVoiceModeFlips(t *testing.T) {
 	if !next.dictation.voiceModeEnabled {
 		t.Fatal("first /voice should enable voice mode")
 	}
-	if next.transientNotice.text != "Voice mode on — hold Space to dictate; run /voice again to turn it off." {
+	if next.transientNotice.text != "Voice mode on — hold Ctrl+Space to dictate; run /voice again to turn it off." {
 		t.Errorf("voice-mode-on notice = %q", next.transientNotice.text)
 	}
 	if transcriptHasText(next, "Voice mode on") {
@@ -68,15 +69,27 @@ func TestKeyboardEnhancementsRecorded(t *testing.T) {
 	}
 }
 
-func TestVoiceSpaceHoldStartsRecording(t *testing.T) {
+func TestVoiceCaptureKeyIgnoresLockModifiers(t *testing.T) {
+	for _, mod := range []tea.KeyMod{
+		tea.ModCtrl | tea.ModCapsLock,
+		tea.ModCtrl | tea.ModNumLock,
+		tea.ModCtrl | tea.ModCapsLock | tea.ModNumLock,
+	} {
+		if !voiceCaptureKey(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: mod})) {
+			t.Fatalf("Ctrl+Space with lock modifiers %v was not recognized", mod)
+		}
+	}
+}
+
+func TestVoiceCaptureHoldStartsRecording(t *testing.T) {
 	m := model{dictation: batchOnlyController()}
 	m.dictation.voiceModeEnabled = true
 	m.dictation.eventTypesSupported = true
 
-	press := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace})
-	next, cmd := m.handleVoiceSpacePress(press)
+	press := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl})
+	next, cmd := m.handleVoiceCapturePress(press)
 	if next.dictation.phase != dictStarting {
-		t.Fatalf("Space press should start recording (phase=%d)", next.dictation.phase)
+		t.Fatalf("Ctrl+Space press should start recording (phase=%d)", next.dictation.phase)
 	}
 	if !next.dictation.spaceHeld {
 		t.Error("spaceHeld should be set in hold mode")
@@ -86,28 +99,28 @@ func TestVoiceSpaceHoldStartsRecording(t *testing.T) {
 	}
 }
 
-func TestVoiceSpaceHoldIgnoresRepeat(t *testing.T) {
+func TestVoiceCaptureHoldIgnoresRepeat(t *testing.T) {
 	m := model{dictation: batchOnlyController()}
 	m.dictation.voiceModeEnabled = true
 	m.dictation.eventTypesSupported = true
 	m.dictation.phase = dictRecording
 	m.dictation.spaceHeld = true
 
-	repeat := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, IsRepeat: true})
-	next, _ := m.handleVoiceSpacePress(repeat)
+	repeat := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl, IsRepeat: true})
+	next, _ := m.handleVoiceCapturePress(repeat)
 	if next.dictation.phase != dictRecording {
 		t.Error("auto-repeat while held must not restart or change phase")
 	}
 }
 
-func TestVoiceSpaceReleaseStops(t *testing.T) {
+func TestVoiceCaptureReleaseStops(t *testing.T) {
 	m := model{dictation: batchOnlyController()}
 	m.dictation.voiceModeEnabled = true
 	m.dictation.eventTypesSupported = true
 	m.dictation.phase = dictRecording
 	m.dictation.spaceHeld = true
 
-	next, _ := m.handleVoiceSpaceRelease()
+	next, _ := m.handleVoiceCaptureRelease()
 	if next.dictation.phase != dictTranscribing {
 		t.Errorf("release should stop recording → transcribing (phase=%d)", next.dictation.phase)
 	}
@@ -123,7 +136,7 @@ func TestVoiceReleaseDuringStartupDefersStop(t *testing.T) {
 	m.dictation.phase = dictStarting
 	m.dictation.spaceHeld = true
 
-	next, _ := m.handleVoiceSpaceRelease()
+	next, _ := m.handleVoiceCaptureRelease()
 	if !next.dictation.voiceStopPending {
 		t.Error("a release during startup should defer the stop")
 	}
@@ -134,14 +147,132 @@ func TestVoiceReleaseDuringStartupDefersStop(t *testing.T) {
 	}
 }
 
-func TestVoiceSpaceToggleFallback(t *testing.T) {
+func TestVoiceCaptureToggleFallback(t *testing.T) {
 	m := model{dictation: batchOnlyController()}
 	m.dictation.voiceModeEnabled = true
 	m.dictation.eventTypesSupported = false // no release events → toggle fallback
 
-	press := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace})
-	next, _ := m.handleVoiceSpacePress(press)
+	press := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl})
+	next, _ := m.handleVoiceCapturePress(press)
 	if next.dictation.phase != dictStarting {
-		t.Errorf("toggle-mode Space should start recording (phase=%d)", next.dictation.phase)
+		t.Errorf("toggle-mode Ctrl+Space should start recording (phase=%d)", next.dictation.phase)
+	}
+}
+
+func TestVoiceModeCtrlSpaceReleaseStopsHoldRecording(t *testing.T) {
+	m := newModel(t.Context(), Options{})
+	m.dictation = batchOnlyController()
+	m.dictation.voiceModeEnabled = true
+	m.dictation.eventTypesSupported = true
+	m.dictation.phase = dictRecording
+	m.dictation.spaceHeld = true
+
+	updated, _ := m.Update(tea.KeyReleaseMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl}))
+	next := updated.(model)
+	if next.dictation.phase != dictTranscribing || next.dictation.spaceHeld {
+		t.Fatalf("Ctrl+Space release did not stop hold recording: phase=%d held=%v", next.dictation.phase, next.dictation.spaceHeld)
+	}
+}
+
+func TestVoiceModeCaptureStopsWhenEitherChordKeyIsReleased(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  tea.Key
+	}{
+		{name: "left Ctrl first", key: tea.Key{Code: tea.KeyLeftCtrl}},
+		{name: "right Ctrl first", key: tea.Key{Code: tea.KeyRightCtrl}},
+		{name: "Space after Ctrl", key: tea.Key{Code: tea.KeySpace}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newModel(t.Context(), Options{})
+			m.dictation = batchOnlyController()
+			m.dictation.voiceModeEnabled = true
+			m.dictation.eventTypesSupported = true
+			m.dictation.phase = dictRecording
+			m.dictation.spaceHeld = true
+
+			updated, _ := m.Update(tea.KeyReleaseMsg(test.key))
+			next := updated.(model)
+			if next.dictation.phase != dictTranscribing || next.dictation.spaceHeld {
+				t.Fatalf("release did not stop hold recording: phase=%d held=%v", next.dictation.phase, next.dictation.spaceHeld)
+			}
+		})
+	}
+}
+
+func TestVoiceModeIndicatorIncludesCaptureShortcut(t *testing.T) {
+	m := model{dictation: batchOnlyController()}
+	m.dictation.voiceModeEnabled = true
+	if got := m.voiceModeIndicator(); !strings.Contains(got, "Ctrl+Space") {
+		t.Fatalf("voice indicator = %q, want Ctrl+Space hint", got)
+	}
+}
+
+func TestVoiceModePlainSpaceTypesNormally(t *testing.T) {
+	for _, releaseEvents := range []bool{false, true} {
+		t.Run(map[bool]string{false: "toggle", true: "hold"}[releaseEvents], func(t *testing.T) {
+			m := newModel(t.Context(), Options{})
+			m.dictation = batchOnlyController()
+			m.dictation.voiceModeEnabled = true
+			m.dictation.eventTypesSupported = releaseEvents
+
+			updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace}))
+			next := updated.(model)
+			if got := next.composerValue(); got != " " {
+				t.Fatalf("plain Space composer = %q, want one space", got)
+			}
+			if next.dictation.phase != dictIdle || cmd != nil {
+				t.Fatalf("plain Space started dictation: phase=%d cmd=%v", next.dictation.phase, cmd != nil)
+			}
+		})
+	}
+}
+
+func TestVoiceModeCtrlSpaceStartsAcrossTerminalTiers(t *testing.T) {
+	for _, releaseEvents := range []bool{false, true} {
+		t.Run(map[bool]string{false: "toggle", true: "hold"}[releaseEvents], func(t *testing.T) {
+			m := newModel(t.Context(), Options{})
+			m.dictation = batchOnlyController()
+			m.dictation.voiceModeEnabled = true
+			m.dictation.eventTypesSupported = releaseEvents
+
+			updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl}))
+			next := updated.(model)
+			if next.dictation.phase != dictStarting || cmd == nil {
+				t.Fatalf("Ctrl+Space did not start dictation: phase=%d cmd=%v", next.dictation.phase, cmd != nil)
+			}
+			if got := next.composerValue(); got != "" {
+				t.Fatalf("Ctrl+Space typed into composer: %q", got)
+			}
+		})
+	}
+}
+
+func TestVoiceModeTypingPreservesSpacesAcrossTerminalTiers(t *testing.T) {
+	for _, releaseEvents := range []bool{false, true} {
+		t.Run(map[bool]string{false: "toggle", true: "hold"}[releaseEvents], func(t *testing.T) {
+			m := newModel(t.Context(), Options{})
+			m.dictation = batchOnlyController()
+			m.dictation.voiceModeEnabled = true
+			m.dictation.eventTypesSupported = releaseEvents
+			for _, key := range []tea.Key{
+				{Code: 'f', Text: "f"},
+				{Code: 'i', Text: "i"},
+				{Code: 'x', Text: "x"},
+				{Code: tea.KeySpace},
+				{Code: 't', Text: "t"},
+				{Code: 'h', Text: "h"},
+				{Code: 'e', Text: "e"},
+			} {
+				updated, _ := m.Update(tea.KeyPressMsg(key))
+				m = updated.(model)
+			}
+			if got := m.composerValue(); got != "fix the" {
+				t.Fatalf("composer = %q, want %q", got, "fix the")
+			}
+			if m.dictation.phase != dictIdle {
+				t.Fatalf("typing started dictation: phase=%d", m.dictation.phase)
+			}
+		})
 	}
 }

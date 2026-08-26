@@ -123,7 +123,7 @@ func (m model) finalizeSTTModelFromKey(p *sttKeyPromptState, prefix string) (tea
 	if modelID != "" {
 		label += " " + modelID
 	}
-	return m.showTransientNoticeInline(prefix+"Dictation model: "+label+". Run /voice, then hold Space to dictate.", transientNoticeSuccess), nil
+	return m.showTransientNoticeInline(prefix+"Dictation model: "+label+". Run /voice, then hold Ctrl+Space to dictate.", transientNoticeSuccess), nil
 }
 
 // sttKeyPromptOverlay renders the API-key prompt as a centered modal, matching
