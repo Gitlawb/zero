@@ -298,7 +298,7 @@ func fallbackSandboxRuntimeRoot(workspaceRoot string) (string, error) {
 	// and is not doing secrecy work; it removes the collision, and
 	// refuseAliasedRuntimeComponents handles somebody having got there first.
 	digest := sha256.Sum256([]byte(workspaceRoot + "\x00" + sandboxRuntimeUserScope()))
-	root := filepath.Join(append(append([]string{tempRoot}, windowsSandboxRuntimeOwnedNames...), hex.EncodeToString(digest[:8]))...)
+	root := filepath.Join(append(append([]string{tempRoot}, sandboxRuntimeFallbackOwnedNames()...), hex.EncodeToString(digest[:8]))...)
 	if runtimeRootWithinWorkspace(workspaceRoot, root) {
 		// Both candidates land inside the workspace, so there is nowhere left to
 		// put a runtime tree the workspace's own policy does not govern. Refused

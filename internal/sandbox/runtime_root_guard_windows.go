@@ -29,3 +29,13 @@ func sandboxRuntimeUserScope() string {
 	}
 	return "u" + strings.ToLower(name)
 }
+
+// sandboxRuntimeFallbackOwnedNames are the components the temp-derived runtime
+// root is built from. Unscoped on Windows: os.TempDir() already resolves inside
+// the user's own profile, so the shared-temp collision the Unix build guards
+// against cannot arise, and the fixed names keep windowsSandboxRuntimeOwnedTail
+// able to recognise a root built by an elevated setup running as another
+// account.
+func sandboxRuntimeFallbackOwnedNames() []string {
+	return windowsSandboxRuntimeOwnedNames
+}
