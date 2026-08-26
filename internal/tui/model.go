@@ -297,6 +297,10 @@ type model struct {
 	// hide the cursor for those users.
 	terminalFocused bool
 	queuedMessage   string
+	// voiceModeExitedByTyping is scoped to the current composer entry. It keeps
+	// a typed /voice command from undoing the voice-off transition caused by its
+	// leading slash while leaving ordinary /voice toggles unchanged.
+	voiceModeExitedByTyping bool
 	// loops holds the session's active /loop definitions (see loop.go). activeLoopID
 	// tags the in-flight run when it is a loop iteration (empty = a user turn), so the
 	// completion seam knows whether to advance a loop. loopSeq invalidates a stale
@@ -1676,12 +1680,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
 			return m.showTransientNoticeInline("Mouse interaction re-enabled.", transientNoticeSuccess), nil
-		case m.dictation.voiceModeEnabled && !m.dictation.active() && !m.transcriptDetailed && keyPrintable(msg) && !keyIs(msg, tea.KeySpace) && m.noBlockingModal():
+		case m.dictation.voiceModeEnabled && !m.dictation.active() && !m.transcriptDetailed && keyPrintable(msg) && !keyHasMod(msg, tea.ModSuper) && !keyIs(msg, tea.KeySpace) && m.noBlockingModal():
 			// Ordinary typing takes ownership from an idle voice mode immediately.
 			// Preserve this first character and release any warm dictation server so
 			// the next Space reaches the composer instead of starting a recording.
+			composerWasEmpty := m.composerValue() == ""
 			next, cmd := m.toggleVoiceMode()
 			if typed, ok := next.applyComposerKey(msg); ok {
+				if composerWasEmpty && keyText(msg) == "/" {
+					typed.voiceModeExitedByTyping = true
+				}
 				return typed, cmd
 			}
 			return next, cmd
@@ -4564,6 +4572,7 @@ func (m model) chooseSuggestion() (tea.Model, tea.Cmd) {
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	input := m.composerValue()
+	voiceModeExitedByTyping := m.voiceModeExitedByTyping
 	// A drag-dropped image/PDF path that reached the composer (e.g. inserted as
 	// text) attaches instead of being parsed as an unknown "/…" command.
 	if path, ok := droppedAttachmentPath(input, m.cwd); ok {
@@ -4604,6 +4613,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	// had scrolled without anything actually being submitted.
 	if command.kind != commandEmpty {
 		m.chatScrollOffset = 0
+	}
+	if command.kind == commandVoice && voiceModeExitedByTyping {
+		return m, nil
 	}
 
 	return m.dispatchCommand(command)

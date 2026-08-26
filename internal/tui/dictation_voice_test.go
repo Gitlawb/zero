@@ -36,7 +36,7 @@ func TestToggleVoiceModeFlips(t *testing.T) {
 	if !next.dictation.voiceModeEnabled {
 		t.Fatal("first /voice should enable voice mode")
 	}
-	if next.transientNotice.text != "Voice mode on — hold Space to dictate; start typing or run /voice again to turn it off." {
+	if next.transientNotice.text != "Voice mode on — use Space to dictate; start typing or run /voice again to turn it off." {
 		t.Errorf("voice-mode-on notice = %q", next.transientNotice.text)
 	}
 	if transcriptHasText(next, "Voice mode on") {
@@ -166,5 +166,91 @@ func TestVoiceModeYieldsToOrdinaryTyping(t *testing.T) {
 	}
 	if got := m.composerValue(); got != "fix " {
 		t.Fatalf("composer value = %q, want typed prompt with its space preserved", got)
+	}
+}
+
+func TestVoiceCommandTypedAfterExitStaysOff(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.dictation = batchOnlyController()
+	m.dictation.voiceModeEnabled = true
+
+	for _, key := range []tea.KeyPressMsg{
+		testKeyText("/"),
+		testKeyText("v"),
+		testKeyText("o"),
+		testKeyText("i"),
+		testKeyText("c"),
+		testKeyText("e"),
+	} {
+		updated, _ := m.Update(key)
+		m = updated.(model)
+	}
+	if got := m.composerValue(); got != "/voice" {
+		t.Fatalf("composer value = %q, want preserved /voice command", got)
+	}
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+
+	if m.dictation.voiceModeEnabled {
+		t.Fatal("/voice submitted after typing exited voice mode must leave it off")
+	}
+	if got := m.composerValue(); got != "" {
+		t.Fatalf("composer value = %q, want submitted command cleared", got)
+	}
+}
+
+func TestVoiceCommandStillEnablesNormally(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.dictation = batchOnlyController()
+
+	for _, key := range []tea.KeyPressMsg{
+		testKeyText("/"),
+		testKeyText("v"),
+		testKeyText("o"),
+		testKeyText("i"),
+		testKeyText("c"),
+		testKeyText("e"),
+		testKey(tea.KeyEnter),
+	} {
+		updated, _ := m.Update(key)
+		m = updated.(model)
+	}
+
+	if !m.dictation.voiceModeEnabled {
+		t.Fatal("an ordinary /voice command should still enable voice mode")
+	}
+}
+
+func TestVoiceModeCmdVStillProbesClipboardImage(t *testing.T) {
+	original := readClipboardImage
+	t.Cleanup(func() { readClipboardImage = original })
+	readClipboardImage = func() ([]byte, string, error) {
+		return []byte("png-bytes"), "image/png", nil
+	}
+
+	m := newModel(context.Background(), Options{})
+	m.dictation = batchOnlyController()
+	m.dictation.voiceModeEnabled = true
+
+	cmdV := testKeyText("v")
+	cmdVKey := cmdV.Key()
+	cmdVKey.Mod = tea.ModSuper
+	updated, cmd := m.Update(tea.KeyPressMsg(cmdVKey))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("Cmd+V did not issue the clipboard image probe")
+	}
+	image, ok := execCmd(cmd).(clipboardImageMsg)
+	if !ok {
+		t.Fatal("Cmd+V command was not the clipboard image probe")
+	}
+	if string(image.data) != "png-bytes" || image.mediaType != "image/png" {
+		t.Fatalf("unexpected image message: %+v", image)
+	}
+	if !next.dictation.voiceModeEnabled {
+		t.Fatal("Cmd+V must not exit voice mode")
+	}
+	if got := next.composerValue(); got != "" {
+		t.Fatalf("composer value after Cmd+V = %q, want unchanged", got)
 	}
 }

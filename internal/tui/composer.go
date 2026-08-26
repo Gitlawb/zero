@@ -158,6 +158,7 @@ func (m *model) clearComposer() {
 	m.composerActive = false
 	m.composerPastePreviews = nil
 	m.composerSelection = composerSelectionState{}
+	m.voiceModeExitedByTyping = false
 	m.input.SetValue("")
 }
 

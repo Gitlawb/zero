@@ -193,15 +193,17 @@ func (m model) toggleDictation() (model, tea.Cmd) {
 	}
 }
 
-// toggleVoiceMode flips the /voice hold-to-record gesture — the dictation
-// trigger. While on, Space records; ordinary typing or /voice turns it off.
+// toggleVoiceMode flips the /voice Space-to-record gesture — hold-to-record on
+// terminals with release events, press-to-toggle elsewhere. Ordinary typing or
+// /voice turns it off.
 func (m model) toggleVoiceMode() (model, tea.Cmd) {
+	m.voiceModeExitedByTyping = false
 	if !m.dictation.available() {
 		return m.appendSystemNotice("Dictation is not configured. See docs/dictation.md to set up a local engine or a Groq/OpenAI key."), nil
 	}
 	m.dictation.voiceModeEnabled = !m.dictation.voiceModeEnabled
 	if m.dictation.voiceModeEnabled {
-		return m.showTransientNoticeInline("Voice mode on — hold Space to dictate; start typing or run /voice again to turn it off.", transientNoticeSuccess), nil
+		return m.showTransientNoticeInline("Voice mode on — use Space to dictate; start typing or run /voice again to turn it off.", transientNoticeSuccess), nil
 	}
 	// Turning voice off is the "done dictating" signal, so release the warm sherpa
 	// streaming server — otherwise a loaded model keeps idling in RAM (and holding
