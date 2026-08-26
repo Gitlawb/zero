@@ -728,25 +728,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		},
 		OnToolResult: func(result agent.ToolResult) {
 			writer.toolResult(result)
-			payload := map[string]any{
-				"toolCallId": result.ToolCallID,
-				"name":       result.Name,
-				"status":     string(result.Status),
-				"output":     result.Output,
-			}
-			if len(result.Meta) > 0 {
-				payload["meta"] = result.Meta
-			}
-			if result.Truncated {
-				payload["truncated"] = true
-			}
-			if result.Redacted {
-				payload["redacted"] = true
-			}
-			if len(result.ChangedFiles) > 0 {
-				payload["changedFiles"] = result.ChangedFiles
-			}
-			sessionRecorder.append(sessions.EventToolResult, payload)
+			sessionRecorder.append(sessions.EventToolResult, persistedToolResultPayload(result))
 		},
 		OnUsage: func(u agent.Usage) {
 			writer.usage(u)
@@ -1495,4 +1477,39 @@ func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer
 	}
 	defer file.Close()
 	return trace.WriteNDJSON(file, snapshot)
+}
+
+// persistedToolResultPayload renders one tool result for the durable session
+// log.
+//
+// IT USES THE ACCESSOR, NOT THE RAW FIELD. agent.ToolResult stores the
+// undecorated model text alongside the typed enforcement notices, and
+// ModelOutput is what composes the two. Replay reads this payload straight back
+// into the transcript without reconstructing a ToolResult, so a disclosure that
+// is not rendered here is simply absent from resumed and compacted context even
+// though it was visible during the original run.
+//
+// Both headless writers go through this, because they previously spelled the
+// same payload separately and had already drifted: one persisted the raw field
+// while the stream writer used the accessor.
+func persistedToolResultPayload(result agent.ToolResult) map[string]any {
+	payload := map[string]any{
+		"toolCallId": result.ToolCallID,
+		"name":       result.Name,
+		"status":     string(result.Status),
+		"output":     result.ModelOutput(),
+	}
+	if len(result.Meta) > 0 {
+		payload["meta"] = result.Meta
+	}
+	if result.Truncated {
+		payload["truncated"] = true
+	}
+	if result.Redacted {
+		payload["redacted"] = true
+	}
+	if len(result.ChangedFiles) > 0 {
+		payload["changedFiles"] = result.ChangedFiles
+	}
+	return payload
 }
