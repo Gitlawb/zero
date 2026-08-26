@@ -4096,7 +4096,7 @@ func TestRunDoesNotFlagCleanToolOutput(t *testing.T) {
 // caller's callback AND stamps token counters, and the run completes.
 func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
-		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 40}},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{PromptTokens: 100, CachedInputTokens: 20, CacheWriteTokens: 10, CompletionTokens: 40}},
 		{Type: zeroruntime.StreamEventText, Content: "done"},
 		{Type: zeroruntime.StreamEventDone},
 	}}}
@@ -4134,6 +4134,9 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	}
 	if got := tr.Counter(trace.CounterCachedInputTokens); got != 20 {
 		t.Fatalf("cached input token counter = %d, want 20", got)
+	}
+	if got := tr.Counter(trace.CounterCacheWriteTokens); got != 10 {
+		t.Fatalf("cache-write token counter = %d, want 10", got)
 	}
 	if got := tr.Counter(trace.CounterOutputTokens); got != 40 {
 		t.Fatalf("output token counter = %d, want 40", got)
