@@ -480,12 +480,8 @@ func needsLeadingSpace(state composerState) bool {
 func (m model) dictationStatusChip() string {
 	switch m.dictation.phase {
 	case dictStarting, dictRecording:
-		stop := "release Space to stop"
-		if !m.dictation.eventTypesSupported {
-			stop = "press Space to stop" // press-to-toggle fallback
-		}
 		wave := zeroTheme.amber.Render("● " + renderWaveBars(m.dictation.waveBars) + " REC")
-		return wave + zeroTheme.muted.Render(" · "+stop+", Esc to cancel")
+		return wave + zeroTheme.muted.Render(" · "+m.voiceCaptureStatus()+", Esc to cancel")
 	case dictTranscribing:
 		return zeroTheme.accent.Render("●") + " " + zeroTheme.muted.Render("transcribing…")
 	}

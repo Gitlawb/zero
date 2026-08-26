@@ -227,6 +227,27 @@ func TestVoiceModeIndicatorDescribesTierAndPhase(t *testing.T) {
 	}
 }
 
+func TestDictationStatusChipUsesVoiceCaptureShortcut(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		releaseEvents bool
+		want          string
+	}{
+		{name: "toggle", want: "press Ctrl+Space to stop"},
+		{name: "hold", releaseEvents: true, want: "release Ctrl+Space to stop"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := model{dictation: batchOnlyController()}
+			m.dictation.voiceModeEnabled = true
+			m.dictation.eventTypesSupported = test.releaseEvents
+			m.dictation.phase = dictRecording
+			if got := m.dictationStatusChip(); !strings.Contains(got, test.want) {
+				t.Fatalf("dictation status = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestVoiceCommandDescriptionExplainsBothTerminalTiers(t *testing.T) {
 	for _, command := range commandDefinitions {
 		if command.kind == commandVoice {
