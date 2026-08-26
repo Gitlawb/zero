@@ -108,7 +108,11 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	if err != nil {
 		return err
 	}
-	if marker.contains(applied) {
+	// The marker says this plan was applied; the object has to agree. See
+	// windowsACLPlanStillApplied: a deterministic runtime root can be removed and
+	// recreated between commands under the same pathname, which leaves the plan
+	// hash identical and the capability grant gone.
+	if marker.contains(applied) && windowsACLPlanStillApplied(plan) {
 		return nil
 	}
 	if _, err := applyWindowsACLPlan(plan); err != nil {
