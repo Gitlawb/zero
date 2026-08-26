@@ -653,6 +653,55 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
 		precomputedStart, precomputedEnd := 0, 0
+		// closeOutRemaining terminates every advertised call from `from` onward
+		// TRUTHFULLY, and every early return in this loop goes through it.
+		//
+		// Read-ahead broke the assumption the abort placeholders were written
+		// under. executeParallelReadBatch runs an entire eligible run before the
+		// loop consumes any of it, so "not consumed yet" stopped meaning "not
+		// executed": a sibling can already have run, committed its side effects
+		// and any authorization credit they carry, and still sit past the index
+		// where a terminal branch fires. Recording it as aborted threw that result
+		// away, so the transcript disagreed with what had actually happened, and
+		// its callbacks, trace counter, task observation and images went with it.
+		//
+		// So each remaining call is put in the one state that is true of it:
+		// completed, and finalized exactly once with the same bookkeeping the main
+		// path performs, or unstarted, and aborted. The guard is deliberately NOT
+		// consulted for a drained sibling: these results cannot reverse a stop
+		// decision that has already been made, they are only owed an honest record.
+		closeOutRemaining := func(from int) {
+			for next := from; next < len(collected.ToolCalls); next++ {
+				sibling, ran := precomputedResultFor(precomputed, precomputedStart, precomputedEnd, next)
+				if !ran {
+					messages = appendAbortedToolResults(messages, collected.ToolCalls[next:next+1])
+					continue
+				}
+				nextCall := collected.ToolCalls[next]
+				if options.OnToolCall != nil {
+					options.OnToolCall(nextCall)
+				}
+				options.Trace.Counter(trace.CounterToolCalls, 1)
+				recordOutputBudgetTrace(options.Trace, sibling)
+				task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: nextCall.Arguments, toolResult: sibling})
+				if options.OnToolResult != nil {
+					options.OnToolResult(sibling)
+				}
+				for _, name := range sibling.LoadedTools {
+					loaded[name] = true
+				}
+				messages = append(messages, zeroruntime.Message{
+					Role:         zeroruntime.MessageRoleTool,
+					Content:      sibling.ModelOutput(),
+					ToolCallID:   sibling.ToolCallID,
+					IsError:      sibling.Status == tools.StatusError,
+					ChangedFiles: append([]string(nil), sibling.ChangedFiles...),
+				})
+				if imageMessage, ok := toolResultImageMessage(sibling); ok {
+					toolImageMessages = append(toolImageMessages, imageMessage)
+				}
+			}
+		}
 		for index, call := range collected.ToolCalls {
 			// When this call starts a consecutive run of >= 2 auto-allowed read-only
 			// calls, execute the whole run concurrently now (see parallel_tools.go).
@@ -724,13 +773,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				abortErr = ctx.Err()
 			}
 			if abortErr != nil {
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				closeOutRemaining(index + 1)
 				messages = append(messages, toolImageMessages...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				closeOutRemaining(index + 1)
 				messages = append(messages, toolImageMessages...)
 				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
@@ -775,7 +824,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// every tool_use has a matching tool_result and the recorded
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				closeOutRemaining(index + 1)
 				messages = append(messages, toolImageMessages...)
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Cause)
 				result.Messages = copyMessages(messages)
@@ -3596,4 +3645,18 @@ func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
 		Content: "Image output from " + label + ":",
 		Images:  images,
 	}, true
+}
+
+// precomputedResultFor reports the read-ahead result for call index, and whether
+// that call actually executed. A batch entry that aborted before running is
+// still unstarted as far as the transcript is concerned.
+func precomputedResultFor(precomputed []precomputedToolResult, start, end, index int) (ToolResult, bool) {
+	if index < start || index >= end {
+		return ToolResult{}, false
+	}
+	entry := precomputed[index-start]
+	if entry.abortErr != nil {
+		return ToolResult{}, false
+	}
+	return entry.result, true
 }
