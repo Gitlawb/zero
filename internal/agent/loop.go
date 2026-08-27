@@ -25,10 +25,12 @@ const maxTurnsAnswer = "Agent reached maximum number of turns without a final an
 const maxTurnsFinalAnswerPrompt = "You have reached the tool-turn limit. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
 
 // maxStreamStallRetries bounds how many times a turn that timed out (idle/stall)
-// OR hit a mid-stream transport abort (#973) WITH NO OUTPUT yet is re-issued on
-// a fresh connection before giving up. Only the no-output case is retried (a
-// partial turn would duplicate), so this is a safe recovery for a stalled/dead
-// pooled connection or a socket abort before tool dispatch.
+// OR hit a mid-stream transport abort (#973) with no answer text yet is re-issued
+// on a fresh connection before giving up. Incomplete tool-call previews are
+// allowed through the gate (they are never dispatched before the error return).
+// The safety claim is only that visible answer prose is not duplicated on retry —
+// not that every partial stream shape is excluded. Covers a stalled/dead pooled
+// connection or a socket abort before tool dispatch.
 //
 // Set to 1 (not 2): each attempt can itself idle for the full stream timeout
 // (~5min) before the stall is even detected, so 2 retries left an interactive
