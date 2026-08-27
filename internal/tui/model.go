@@ -109,23 +109,31 @@ type model struct {
 	// when mcpSkipped was captured, so a later render cannot re-derive a weaker
 	// redaction for the same retained error. See staleMCPObservation.
 	mcpSkippedCredentials string
-	mcpPermissionStore    *internalmcp.PermissionStore
-	mcpTokenStore         *internalmcp.TokenStore
-	mcpCommand            func(context.Context, []string) MCPCommandResult
-	sandboxSetupCommand   func(context.Context) SandboxSetupCommandResult
-	mcpViewStateCache     MCPViewState
-	mcpViewStateReady     bool
-	mcpCommandSeq         int
-	mcpCommandCancel      context.CancelFunc
-	sandboxSetupSeq       int
-	sandboxSetupInFlight  bool
-	doctorCommandSeq      int
-	doctorInFlight        bool
-	doctorFrame           int
-	activeSession         sessions.Metadata
-	pendingSessionTitle   string
-	sessionEvents         []sessions.Event
-	btw                   btwState
+	// mcpLateSkipped pulls failures that were recorded after this model was
+	// built, and mcpStartupConfig is the configuration they were observed
+	// against, so the same invalidation the startup snapshot gets can be applied
+	// to them. mcpLateSkippedCount is what the cached view state was built from,
+	// so a new arrival invalidates the cache without a config change.
+	mcpLateSkipped       func() []internalmcp.SkippedServer
+	mcpStartupConfig     config.MCPConfig
+	mcpLateSkippedCount  int
+	mcpPermissionStore   *internalmcp.PermissionStore
+	mcpTokenStore        *internalmcp.TokenStore
+	mcpCommand           func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
+	mcpViewStateCache    MCPViewState
+	mcpViewStateReady    bool
+	mcpCommandSeq        int
+	mcpCommandCancel     context.CancelFunc
+	sandboxSetupSeq      int
+	sandboxSetupInFlight bool
+	doctorCommandSeq     int
+	doctorInFlight       bool
+	doctorFrame          int
+	activeSession        sessions.Metadata
+	pendingSessionTitle  string
+	sessionEvents        []sessions.Event
+	btw                  btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
 	// surface. It survives returning to the parent so a late message from an old
 	// side run can never match a run in a later BTW conversation.
@@ -1000,6 +1008,8 @@ func newModel(ctx context.Context, options Options) model {
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
 		mcpSkipped:                  options.MCPSkipped,
+		mcpLateSkipped:              options.MCPLateSkipped,
+		mcpStartupConfig:            options.MCPConfig,
 		mcpSkippedCredentials:       mcpCredentialFingerprint(options.MCPTokenStore.SecretValues()),
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,

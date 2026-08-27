@@ -641,10 +641,33 @@ func (cfg *mcpWritableConfig) ensureRaw() {
 	}
 }
 
+// refuseColliding reports a configured server whose key differs from name but
+// resolves to the same runtime identity.
+func (cfg *mcpWritableConfig) refuseColliding(name string) error {
+	canonical := strings.TrimSpace(name)
+	for existing := range cfg.file.MCP.Servers {
+		if existing == name || strings.TrimSpace(existing) != canonical {
+			continue
+		}
+		return fmt.Errorf("MCP server %q is already configured as %q; rename one so each server has its own identity", name, existing)
+	}
+	return nil
+}
+
 func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerConfig) (bool, error) {
 	cfg.ensureRaw()
 	if cfg.file.MCP.Servers == nil {
 		cfg.file.MCP.Servers = map[string]config.MCPServerConfig{}
+	}
+	// One config key per runtime identity. Registration trims the key, so a new
+	// "docs" written next to an existing "  docs" produces two entries that are
+	// one server everywhere downstream: they share a tool count and a failure,
+	// map iteration decides which configuration survives, and each redacts that
+	// shared failure with its own credentials, so the one that did not fail can
+	// print the other's. Refusing at the write boundary keeps the collision out
+	// of the file rather than reporting it on every later load.
+	if err := cfg.refuseColliding(name); err != nil {
+		return false, err
 	}
 	existingRaw, updated := cfg.serverRaw[name]
 	existingServer := cfg.file.MCP.Servers[name]

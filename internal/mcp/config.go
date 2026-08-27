@@ -49,6 +49,24 @@ func NormalizeConfig(cfg config.MCPConfig) ([]Server, error) {
 	sort.Strings(names)
 
 	servers := make([]Server, 0, len(names))
+	// THE NORMALIZED NAME IS AN IDENTITY, so it has to be unique.
+	//
+	// Trimming means "docs" and " docs " are two config keys and one runtime
+	// server, and everything downstream keys on the runtime name: tool
+	// accounting, the skipped-server observations the panel renders, and
+	// invalidation. Two rows then share one failure, both report the same state,
+	// and Go map iteration decides which configuration survives.
+	//
+	// It is also a confidentiality problem rather than only a wrong status. Each
+	// row redacts that shared error with ITS OWN configuration, so if the server
+	// that actually failed echoed a credential, the other row does not have that
+	// value among its candidates and prints it.
+	//
+	// Rejecting is the honest answer: one of the two entries is unreachable
+	// whatever we do, and an error naming both spellings is something an
+	// operator can act on. A single padded name still works, because trimming is
+	// not the problem; two names trimming to one is.
+	claimed := make(map[string]string, len(names))
 	for _, name := range names {
 		raw := cfg.Servers[name]
 		if raw.Disabled {
@@ -58,6 +76,12 @@ func NormalizeConfig(cfg config.MCPConfig) ([]Server, error) {
 		if err != nil {
 			return nil, err
 		}
+		if previous, taken := claimed[server.Name]; taken {
+			return nil, fmt.Errorf(
+				"mcp: server names %q and %q both resolve to %q; rename one so each server has its own identity",
+				previous, name, server.Name)
+		}
+		claimed[server.Name] = name
 		servers = append(servers, server)
 	}
 	return servers, nil

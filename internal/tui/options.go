@@ -59,7 +59,13 @@ type Options struct {
 	// what is actually running rather than what is configured. Startup already
 	// records these; without them the panel derives state from config alone and
 	// shows a server that never connected as "enabled" with no explanation.
-	MCPSkipped          []mcp.SkippedServer
+	MCPSkipped []mcp.SkippedServer
+	// MCPLateSkipped reports failures that were not known when the model was
+	// built. Optional servers are registered on a background goroutine so a slow
+	// one cannot delay the first response, which means their failures land after
+	// this surface exists; MCPSkipped is a snapshot and cannot carry them.
+	// Optional: nil means every failure was already known.
+	MCPLateSkipped      func() []mcp.SkippedServer
 	MCPPermissionStore  *mcp.PermissionStore
 	MCPTokenStore       *mcp.TokenStore
 	MCPCommand          func(context.Context, []string) MCPCommandResult
