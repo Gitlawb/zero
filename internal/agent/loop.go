@@ -3648,14 +3648,27 @@ func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
 }
 
 // precomputedResultFor reports the read-ahead result for call index, and whether
-// that call actually executed. A batch entry that aborted before running is
-// still unstarted as far as the transcript is concerned.
+// that call actually produced one. A batch entry that never started is still
+// unstarted as far as the transcript is concerned.
+//
+// PRODUCING A RESULT AND ASKING THE RUN TO STOP ARE DIFFERENT FACTS. Treating a
+// non-nil abortErr as "unstarted" conflated them, and a cancelled permission
+// request is exactly the case where they disagree: executeToolCall builds the
+// cancellation result and returns it WITH ErrPermissionApprovalCanceled, so an
+// earlier sibling reaching a terminal branch discarded a real result and wrote
+// an aborted placeholder in its place. The transcript then denied that the call
+// had completed permission handling, and the cancellation was missing from
+// OnToolResult, the trace counters and the task observation even though the
+// permission event had already happened.
+//
+// The terminal decision is not affected: draining such a sibling only records
+// what occurred, it cannot reverse a stop already selected.
 func precomputedResultFor(precomputed []precomputedToolResult, start, end, index int) (ToolResult, bool) {
 	if index < start || index >= end {
 		return ToolResult{}, false
 	}
 	entry := precomputed[index-start]
-	if entry.abortErr != nil {
+	if !entry.completed {
 		return ToolResult{}, false
 	}
 	return entry.result, true

@@ -334,3 +334,40 @@ func promptSafety(sideEffect SideEffect, reason string) Safety {
 		Reason:     reason,
 	}
 }
+
+// executedToolResult strips the pre-execution refusal marker from a result the
+// tool produced by RUNNING.
+//
+// THE MARKER IS A CLAIM ABOUT THE REGISTRY, NOT ABOUT THE TOOL. It says this
+// call never executed, and the loop spends that claim: the retry hint is
+// withheld, the profile failure streak does not recover, the call is counted in
+// refusal-oriented guard accounting, and a recognized category can make the
+// final answer tell the user the tool was refused. A result that came back from
+// Run is proof the opposite happened, so a tool setting the key, by mistake, by
+// copying metadata forward from something it called, or deliberately, would
+// forge that claim one layer below the output text this branch stopped trusting.
+//
+// Stripping rather than validating the value keeps it unforgeable for future
+// implementations as well: there is no spelling a tool can return that survives
+// execution. Genuine pre-execution refusals are untouched, including
+// RejectBeforePermission, which decides before any of this and never runs the
+// tool. Ordinary metadata is preserved.
+func executedToolResult(result Result) Result {
+	if _, marked := result.Meta[PolicyRefusalMeta]; !marked {
+		return result
+	}
+	// Copied rather than deleted in place: the map belongs to the tool, and a
+	// tool that reuses one across calls would see this mutation.
+	meta := make(map[string]string, len(result.Meta))
+	for key, value := range result.Meta {
+		if key == PolicyRefusalMeta {
+			continue
+		}
+		meta[key] = value
+	}
+	if len(meta) == 0 {
+		meta = nil
+	}
+	result.Meta = meta
+	return result
+}

@@ -271,8 +271,12 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		return res
 	}
 
+	// Past this point the tool RUNS, so every result below is an executed one and
+	// passes through executedToolResult. See its comment: the refusal marker is a
+	// claim about the registry, and a result that came back from the tool is proof
+	// the opposite happened.
 	if optioned, ok := tool.(optionsAwareTool); ok {
-		res := optioned.RunWithOptions(ctx, args, options)
+		res := executedToolResult(optioned.RunWithOptions(ctx, args, options))
 		if res.SandboxDecision == nil {
 			res.SandboxDecision = sandboxDecision
 		}
@@ -281,12 +285,12 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 
 	if options.Sandbox != nil {
 		if sandboxed, ok := tool.(sandboxAwareTool); ok {
-			res := sandboxed.RunWithSandbox(ctx, args, options.Sandbox)
+			res := executedToolResult(sandboxed.RunWithSandbox(ctx, args, options.Sandbox))
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 	}
-	res := tool.Run(ctx, args)
+	res := executedToolResult(tool.Run(ctx, args))
 	res.SandboxDecision = sandboxDecision
 	return res
 }
