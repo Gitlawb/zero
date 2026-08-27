@@ -647,15 +647,16 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				detail = output
 			}
 			rows = append(rows, transcriptRow{
-				kind:            rowToolResult,
-				id:              effectiveToolRowID(id, callSeq[id]),
-				text:            fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
-				tool:            name,
-				status:          status,
-				detail:          detail,
-				meta:            payloadStringMap(payload, "meta"),
-				changedFiles:    payloadStringSlice(payload, "changedFiles"),
-				changeSummaries: payloadExecutionChanges(payload, "changeSummaries"),
+				kind:               rowToolResult,
+				id:                 effectiveToolRowID(id, callSeq[id]),
+				text:               fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
+				tool:               name,
+				status:             status,
+				detail:             detail,
+				meta:               payloadStringMap(payload, "meta"),
+				changedFiles:       payloadStringSlice(payload, "changedFiles"),
+				enforcementNotices: payloadStringSlice(payload, "enforcementNotices"),
+				changeSummaries:    payloadExecutionChanges(payload, "changeSummaries"),
 			})
 		case sessions.EventError:
 			if message := payloadString(payload, "message"); message != "" {
