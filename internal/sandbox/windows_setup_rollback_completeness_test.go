@@ -30,12 +30,12 @@ func TestRollbackRemovesTheStampItWroteAndThenTheRoot(t *testing.T) {
 	}
 
 	rollback := windowsRuntimeRootRollback{
-		created: []string{
+		created: createdRuntimeDirsForTest(
 			filepath.Join(parent, "zero"),
 			filepath.Join(parent, "zero", "runtime"),
 			filepath.Join(parent, "zero", "runtime", "v1"),
 			root,
-		},
+		),
 		stamp: snapshot,
 	}
 	if err := rollback.run(); err != nil {
@@ -85,7 +85,7 @@ func TestRollbackRefusesToRemoveWhatItDidNotCreate(t *testing.T) {
 		t.Fatalf("seed the pre-existing file: %v", err)
 	}
 
-	if err := (windowsRuntimeRootRollback{created: []string{root}}).run(); err == nil {
+	if err := (windowsRuntimeRootRollback{created: createdRuntimeDirsForTest(root)}).run(); err == nil {
 		t.Error("a non-empty directory was removed without complaint")
 	}
 	if _, err := os.Stat(theirs); err != nil {
@@ -109,7 +109,7 @@ func TestRollbackContinuesAfterACompensationFails(t *testing.T) {
 		t.Fatalf("seed the blocker: %v", err)
 	}
 	rollback := windowsRuntimeRootRollback{
-		created: []string{filepath.Join(parent, "zero"), root},
+		created: createdRuntimeDirsForTest(filepath.Join(parent, "zero"), root),
 		stamp:   windowsSandboxStampSnapshot{path: filepath.Join(broken, "stamp"), prior: []byte("x"), existed: true},
 	}
 
@@ -143,7 +143,7 @@ func TestEveryCompensationRunsWhenTheACLRollbackFails(t *testing.T) {
 	err := runWindowsSandboxSetupCompensations(
 		errors.New("the setup failure"),
 		func() error { aclCalled = true; return errors.New("acl restore exploded") },
-		windowsRuntimeRootRollback{created: []string{filepath.Join(parent, "zero"), root}},
+		windowsRuntimeRootRollback{created: createdRuntimeDirsForTest(filepath.Join(parent, "zero"), root)},
 	)
 	if !aclCalled {
 		t.Fatal("the ACL rollback was never attempted")

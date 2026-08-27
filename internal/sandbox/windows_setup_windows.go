@@ -18,6 +18,31 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": Administrator rights are required. Re-run `zero sandbox setup` from an elevated (Run as administrator) terminal.")
 		return 1
 	}
+	// HOLD THE SELECTED ROOT FOR THE WHOLE TRANSACTION.
+	//
+	// The unelevated caller took a lease only to learn which root wins and released
+	// it immediately, so nothing owned that root while this process provisions the
+	// tree, applies the ACL and stamp, installs network state and writes the
+	// marker. A command for another workspace scanning the same runtime parent
+	// excludes only ITS own current root, so it can take this root's cleanup lease
+	// and RemoveAll it. In the damaging ordering cleanup selects the root before
+	// setup refreshes its mtime and removes it after the stamp handle closes but
+	// before the marker is published, so setup reports success for a pathname that
+	// is gone or delete-pending and the next command finds no stamp on what it
+	// selected.
+	//
+	// A shared lease is what the cleanup's exclusive acquire fails against, and it
+	// is released when this function returns, which is after the marker write. If
+	// it cannot be taken, fail here: that is before any ACL, network or marker
+	// state is persisted, so a retry can still get the operator out.
+	if root := strings.TrimSpace(windowsSandboxSelectedRuntimeRoot(config.PermissionProfile)); root != "" {
+		lease, leaseErr := prepareSandboxRuntimeLease(root)
+		if leaseErr != nil {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": reserve the sandbox runtime root "+root+" for setup: "+leaseErr.Error())
+			return 1
+		}
+		defer lease.release()
+	}
 	// Provisions the runtime candidate roots, then builds the plan that grants
 	// them. One call because a granted-but-absent write root fails the whole apply.
 	plan, runtimeRollback, err := buildWindowsSandboxSetupACLPlan(config)

@@ -38,7 +38,7 @@ func TestRuntimeRootProvisioningRecordsOnlyWhatItCreated(t *testing.T) {
 		target,
 	}
 	for index := range want {
-		if created[index] != want[index] {
+		if created[index].path != want[index] {
 			t.Fatalf("recorded %v, want %v", created, want)
 		}
 	}

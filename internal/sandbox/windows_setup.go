@@ -595,7 +595,13 @@ func windowsSandboxProfileWithRuntime(profile PermissionProfile, workspaceRoots 
 // it had made.
 type windowsRuntimeRootRollback struct {
 	// created is in creation order, outermost first, so undo walks it backwards.
-	created []string
+	//
+	// Identity-bound, not pathname-bound. Compensation runs after the apply
+	// handles have closed, so resolving these names again can reach a different
+	// object: rename the original aside, drop an ordinary directory in its place,
+	// and a pathname-only undo removes the substitute while the original keeps
+	// this run's grant and stamp.
+	created []windowsCreatedRuntimeDir
 	// stamp is the runtime stamp's state before this run touched it.
 	//
 	// The stamp is the one artifact setup writes INSIDE the runtime root, and it
@@ -605,6 +611,13 @@ type windowsRuntimeRootRollback struct {
 	// kept its own residue forever. Owning the stamp is what makes the root empty
 	// again and the whole transaction complete.
 	stamp windowsSandboxStampSnapshot
+}
+
+// windowsCreatedRuntimeDir is one directory this run made, remembered by the
+// object it was rather than by the name it had.
+type windowsCreatedRuntimeDir struct {
+	path     string
+	identity string
 }
 
 // windowsSandboxStampSnapshot records the runtime stamp as it was before setup
@@ -619,6 +632,11 @@ type windowsSandboxStampSnapshot struct {
 	path    string
 	prior   []byte
 	existed bool
+	// root and rootIdentity identify the DIRECTORY the stamp lives in, captured
+	// when the snapshot was taken. The stamp file itself may not exist yet, so the
+	// directory is the object whose replacement this has to detect.
+	root         string
+	rootIdentity string
 }
 
 func snapshotWindowsSandboxRuntimeStamp(root string) windowsSandboxStampSnapshot {
@@ -627,17 +645,33 @@ func snapshotWindowsSandboxRuntimeStamp(root string) windowsSandboxStampSnapshot
 		return windowsSandboxStampSnapshot{}
 	}
 	path := windowsSandboxRuntimeStampPath(root)
+	rootIdentity, _ := runtimeDirIdentity(root)
 	prior, err := os.ReadFile(path)
 	if err != nil {
 		// Absent, or unreadable and therefore not something to put back.
-		return windowsSandboxStampSnapshot{path: path}
+		return windowsSandboxStampSnapshot{path: path, root: root, rootIdentity: rootIdentity}
 	}
-	return windowsSandboxStampSnapshot{path: path, prior: prior, existed: true}
+	return windowsSandboxStampSnapshot{path: path, prior: prior, existed: true, root: root, rootIdentity: rootIdentity}
 }
 
 func (snapshot windowsSandboxStampSnapshot) restore() error {
 	if snapshot.path == "" {
 		return nil
+	}
+	// THE NAME IS NOT THE OBJECT ONCE THE APPLY HANDLES HAVE CLOSED. Removing a
+	// stamp from, or writing one onto, whatever now answers to this path can
+	// mutate a directory this run never touched, while the original keeps the
+	// grant and the stamp. Leave the substitute alone and say what was left
+	// behind.
+	if snapshot.rootIdentity != "" {
+		current, ok := runtimeDirIdentity(snapshot.root)
+		if !ok {
+			return fmt.Errorf("identify the sandbox runtime root %s for stamp compensation", snapshot.root)
+		}
+		if current != snapshot.rootIdentity {
+			return fmt.Errorf("sandbox runtime root %s is no longer the directory this setup stamped; "+
+				"leaving the replacement untouched, and the original still carries this run's stamp", snapshot.root)
+		}
 	}
 	if !snapshot.existed {
 		if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
@@ -666,9 +700,23 @@ func (rollback windowsRuntimeRootRollback) run() error {
 		errs = append(errs, err)
 	}
 	for index := len(rollback.created) - 1; index >= 0; index-- {
-		path := rollback.created[index]
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("remove sandbox runtime root %s created by this run: %w", path, err))
+		entry := rollback.created[index]
+		// Same rule as the stamp: prove this is the directory we made before
+		// removing it. A substitute at the same name belongs to whoever put it
+		// there.
+		current, ok := runtimeDirIdentity(entry.path)
+		if !ok {
+			// Gone already, or unreadable: either way there is nothing here this
+			// run can prove it created.
+			continue
+		}
+		if entry.identity != "" && current != entry.identity {
+			errs = append(errs, fmt.Errorf("sandbox runtime root %s is no longer the directory this run created; "+
+				"leaving the replacement in place", entry.path))
+			continue
+		}
+		if err := os.Remove(entry.path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove sandbox runtime root %s created by this run: %w", entry.path, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -751,7 +799,7 @@ func refuseReparsedRuntimeAncestors(root string) error {
 	return nil
 }
 
-func createRuntimeDirRecording(root string) ([]string, error) {
+func createRuntimeDirRecording(root string) ([]windowsCreatedRuntimeDir, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, nil
 	}
@@ -788,7 +836,7 @@ func createRuntimeDirRecording(root string) ([]string, error) {
 		}
 		current = parent
 	}
-	var created []string
+	var created []windowsCreatedRuntimeDir
 	for index := len(missing) - 1; index >= 0; index-- {
 		if err := os.Mkdir(missing[index], 0o700); err != nil {
 			if os.IsExist(err) {
@@ -797,7 +845,10 @@ func createRuntimeDirRecording(root string) ([]string, error) {
 			}
 			return created, fmt.Errorf("create sandbox runtime root %s: %w", missing[index], err)
 		}
-		created = append(created, missing[index])
+		// Identified immediately after creating it, so compensation can prove it is
+		// still the same object rather than trusting the name.
+		identity, _ := runtimeDirIdentity(missing[index])
+		created = append(created, windowsCreatedRuntimeDir{path: missing[index], identity: identity})
 	}
 	// Re-checked after creation. If an ancestor was swapped for a junction while
 	// we were creating, the leaf we just made is in the wrong tree, and granting
