@@ -459,7 +459,10 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	display, ok := highlightCodeForPathWithTheme(readRes.lines, displayPath, 1<<20, nil, theme)
 	if !ok || len(display) != len(readRes.lines) {
-		display = readRes.lines
+		display = make([]string, len(readRes.lines))
+		for i, l := range readRes.lines {
+			display[i] = sanitizeRawFileLine(l)
+		}
 	}
 
 	rendered := formatFileViewLines(readRes.lines, display, changed, readRes.truncated, readRes.omittedLines, width, theme)
@@ -503,10 +506,31 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		backEntry := back.Value.(*fileViewCachedEntry)
 		delete(c.items, backEntry.targetPath)
 		c.lru.Remove(back)
+		c.statsData.Evictions++
 	}
 	c.mu.Unlock()
 
 	return rendered, nil
+}
+
+// sanitizeRawFileLine strips or transforms raw control characters and terminal escape sequences
+// when syntax highlighting is bypassed or unavailable, preventing terminal screen corruption.
+func sanitizeRawFileLine(s string) string {
+	var out strings.Builder
+	for _, r := range s {
+		if r == '\t' {
+			out.WriteString("    ")
+		} else if r == '\r' || r == '\n' {
+			continue
+		} else if r < 32 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			if r == '\x1b' {
+				out.WriteString("^[")
+			}
+		} else {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
 
 func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
