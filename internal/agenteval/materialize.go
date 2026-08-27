@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 type Materializer struct{}
@@ -188,6 +190,7 @@ func initGitBaseline(ctx context.Context, workspace string) error {
 	}
 	for _, args := range commands {
 		cmd := exec.CommandContext(ctx, "git", args...)
+		execution.HardenCommandContext(cmd)
 		cmd.Dir = workspace
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=Zero Eval",

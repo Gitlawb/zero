@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 // commandSpec describes one capture-process invocation. Argv is always
@@ -104,6 +106,7 @@ func (p *realProcess) Kill() error { return p.cmd.Process.Kill() }
 
 func runCommandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	execution.HardenCommandContext(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

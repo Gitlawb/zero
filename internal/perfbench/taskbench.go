@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 // TaskSchemaVersion is the schema version of a published task-benchmark result.
@@ -328,6 +330,7 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 	return func(ctx context.Context, task BenchTask, rc RunContext) TaskOutcome {
 		args := buildExecArgs(task, rc, extraArgs)
 		cmd := exec.CommandContext(ctx, binary, args...)
+		execution.HardenCommandContext(cmd)
 		cmd.Env = appendNoColor(os.Environ())
 		if dir := strings.TrimSpace(task.WorkspaceFixture); dir != "" {
 			cmd.Dir = dir
@@ -383,6 +386,7 @@ func buildExecArgs(task BenchTask, rc RunContext, extraArgs []string) []string {
 
 func runVerification(ctx context.Context, task BenchTask) TaskOutcome {
 	cmd := exec.CommandContext(ctx, task.VerificationCommand[0], task.VerificationCommand[1:]...)
+	execution.HardenCommandContext(cmd)
 	// Inherit the environment so the verifier sees PATH, HOME, language toolchain
 	// vars, etc. — the same surface a maintainer gets running the command by hand
 	// (matching the agent run above). NO_COLOR is appended for stable output.
