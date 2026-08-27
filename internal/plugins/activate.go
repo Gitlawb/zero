@@ -721,17 +721,6 @@ func execPluginCommand(ctx context.Context, command pluginCommand, timeout time.
 	return output
 }
 
-// pluginChildLaunched reports whether the outcome describes a process that
-// actually started. Only those can be described by an enforcement notice.
-func pluginChildLaunched(kind execution.OutcomeKind) bool {
-	switch kind {
-	case execution.OutcomeSandboxSetupFailure, execution.OutcomeExecutableNotFound:
-		return false
-	default:
-		return true
-	}
-}
-
 func execPluginCommandWithExecution(ctx context.Context, runner *execution.Runner, command pluginCommand, timeout time.Duration) commandOutput {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -761,9 +750,7 @@ func execPluginCommandWithExecution(ctx context.Context, runner *execution.Runne
 	// weakened token, so the disclosure is still true of it. A setup failure or a
 	// missing executable launched nothing, and claiming the write jail was traded
 	// away there would describe a trade nobody made.
-	if pluginChildLaunched(result.Outcome.Kind) {
-		output.Notices = append([]string(nil), result.Outcome.Enforcement.Notices...)
-	}
+	output.Notices = result.Outcome.AppliedEnforcementNotices()
 	switch result.Outcome.Kind {
 	case execution.OutcomeSandboxSetupFailure, execution.OutcomeExecutableNotFound, execution.OutcomeTimedOut, execution.OutcomeCancelled:
 		output.Err = result.Err

@@ -120,7 +120,7 @@ func TestAPluginThatNeverLaunchedCarriesNoNotice(t *testing.T) {
 		execution.OutcomeSandboxSetupFailure,
 		execution.OutcomeExecutableNotFound,
 	} {
-		if pluginChildLaunched(kind) {
+		if (execution.Outcome{Kind: kind}).ChildLaunched() {
 			t.Errorf("%v is treated as a launched child; a notice there would describe a process that never started", kind)
 		}
 	}
@@ -128,7 +128,7 @@ func TestAPluginThatNeverLaunchedCarriesNoNotice(t *testing.T) {
 		execution.OutcomeTimedOut,
 		execution.OutcomeCancelled,
 	} {
-		if !pluginChildLaunched(kind) {
+		if !(execution.Outcome{Kind: kind}).ChildLaunched() {
 			t.Errorf("%v is treated as never launched, so its disclosure would be dropped", kind)
 		}
 	}
