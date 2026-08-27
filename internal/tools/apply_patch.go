@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -246,36 +245,18 @@ func validatePatchPaths(root string, patchPaths []string) error {
 	return nil
 }
 
-func patchFileHeaderPath(line string) string {
-	if len(line) < len("--- ") {
-		return ""
-	}
-	rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
-	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
-		rest = rest[:tab]
-	}
-	return strings.TrimSpace(unquoteGitPath(rest))
+// patchFileHeaderPath reads a "--- "/"+++ " header through the same parser that
+// produced patchPaths above. The executor must not re-interpret these bytes: a
+// second reading that trims or unquotes differently would let the gate authorize
+// `bridge-token ` while the executor opens the protected `bridge-token` beside
+// it. Only the parser's own refusals are surfaced here.
+func patchFileHeaderPath(line string) (string, bool) {
+	return sandbox.PatchFileHeaderPath(line)
 }
 
-// unquoteGitPath undoes git's C-style quoting of a diff path. Git wraps a path in
-// double quotes and backslash-escapes special bytes (spaces, tabs, high bytes as
-// octal) when it contains anything unusual; an unquoted path is returned as-is.
-func unquoteGitPath(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		if unquoted, err := strconv.Unquote(s); err == nil {
-			return unquoted
-		}
-	}
-	return s
-}
-
+// stripPatchPrefix removes a single a/ or b/ prefix so a real directory named
+// "a" or "b" is preserved. It preserves every other byte, including surrounding
+// spaces, which are pathname data in an unquoted header operand.
 func stripPatchPrefix(path string) string {
-	path = strings.TrimSpace(path)
-	// A unified-diff path carries exactly one of the a/ or b/ prefixes; strip a
-	// single one so a real directory literally named "a" or "b" is preserved.
-	if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {
-		path = path[2:]
-	}
-	return filepath.ToSlash(path)
+	return sandbox.StripPatchPrefix(path)
 }

@@ -760,6 +760,9 @@ func consumeGitPath(input string) (string, string, bool) {
 // space is written verbatim; trimming here would make the token gate evaluate
 // `bridge-token` while git patches the live `bridge-token ` beside it.
 func patchFileHeaderPath(line string) (string, bool) {
+	if len(line) < len("--- ") {
+		return "", false
+	}
 	rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
 	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
 		rest = rest[:tab]
@@ -772,6 +775,50 @@ func patchFileHeaderPath(line string) (string, bool) {
 		return path, true
 	}
 	return rest, rest != ""
+}
+
+// The parser above defines the authorization target of a patch. The executor
+// that applies the patch must select its files from the same bytes, or a header
+// the gate reads as `bridge-token ` can reach `os.Root` as `bridge-token`. The
+// exported wrappers below are that shared surface, and they carry one contract:
+// every byte of a header's pathname operand is pathname data. Only structural
+// formatting is removed — the fixed header prefix, a tab-separated timestamp, a
+// C-quoted operand's quoting, and matching a/ b/ prefixes. Nothing is trimmed,
+// case-folded, or shell-split. A consumer that needs a different spelling must
+// derive it from these bytes rather than re-reading the header.
+
+// PatchFileHeaderPath returns the pathname named by a unified-diff "--- " or
+// "+++ " file header line, reporting false when the header is not a form this
+// parser can interpret exactly. An empty pathname is returned as ("", true):
+// the header carries no target, which is not the same as an unreadable one.
+func PatchFileHeaderPath(line string) (string, bool) {
+	return patchFileHeaderPath(line)
+}
+
+// ExtendedGitHeaderPath returns the pathname named by a git extended header —
+// "rename from ", "rename to ", "copy from ", "copy to " — given the operand
+// that follows the header's fixed prefix.
+func ExtendedGitHeaderPath(operand string) (string, bool) {
+	return parseExtendedGitPath(operand)
+}
+
+// DiffGitPaths returns the source and destination named by the operand section
+// of a "diff --git " line (the text after the prefix), with a matching a/ and
+// b/ prefix pair removed. It reports false for operands whose split between the
+// two pathnames is ambiguous, which is the same refusal PatchHeaderPaths makes.
+func DiffGitPaths(operands string) (string, string, bool) {
+	source, destination, ok := parseDiffGitPaths(operands)
+	if !ok {
+		return "", "", false
+	}
+	source, destination = normalizeDiffGitPaths(source, destination)
+	return source, destination, true
+}
+
+// StripPatchPrefix removes a single leading a/ or b/ from a unified-diff path
+// and normalizes separators to "/", preserving every other byte.
+func StripPatchPrefix(path string) string {
+	return stripPatchPrefix(path)
 }
 
 func parsePatchHunkCounts(line string) (int, int) {

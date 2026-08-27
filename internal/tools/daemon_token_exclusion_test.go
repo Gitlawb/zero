@@ -295,12 +295,11 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 				"copy to leading-space-copy\n",
 			destination:       "leading-space-copy",
 			wantControlSource: original,
+			// The rename/copy executor now reads its headers through the same
+			// byte-preserving parser as the credential gate, so a leading space
+			// is copied as pathname data instead of being trimmed away into a
+			// different file's name.
 			wantControlTarget: original,
-			// The in-process rename/copy header parser trims the extracted path,
-			// so a leading-space filename resolves to a name that does not exist.
-			// That costs fidelity for such a file; it cannot reach the token,
-			// whose exact spelling the credential gate refuses first.
-			controlUnsupported: "opening bridge-token",
 		},
 		{
 			name:      "binary modification",

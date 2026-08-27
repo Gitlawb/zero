@@ -2,7 +2,10 @@ package tools
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // parseUnifiedPatch converts a unified diff into the same operations a
@@ -216,7 +219,11 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 		case strings.HasPrefix(raw, "similarity index "), strings.HasPrefix(raw, "dissimilarity index "):
 			continue
 		case strings.HasPrefix(raw, "rename from "), strings.HasPrefix(raw, "copy from "):
-			pendingFrom = strings.TrimSpace(unquoteGitPath(strings.TrimPrefix(strings.TrimPrefix(raw, "rename from "), "copy from ")))
+			from, ok := sandbox.ExtendedGitHeaderPath(strings.TrimPrefix(strings.TrimPrefix(raw, "rename from "), "copy from "))
+			if !ok {
+				return nil, fmt.Errorf("invalid unified diff at line %d: source path cannot be interpreted exactly", lineNumber)
+			}
+			pendingFrom = from
 			pendingKind = structuredPatchUpdate
 			if strings.HasPrefix(raw, "copy from ") {
 				pendingKind = structuredPatchCopy
@@ -225,7 +232,10 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 				return nil, fmt.Errorf("invalid unified diff at line %d: missing source path", lineNumber)
 			}
 		case strings.HasPrefix(raw, "rename to "), strings.HasPrefix(raw, "copy to "):
-			to := strings.TrimSpace(unquoteGitPath(strings.TrimPrefix(strings.TrimPrefix(raw, "rename to "), "copy to ")))
+			to, ok := sandbox.ExtendedGitHeaderPath(strings.TrimPrefix(strings.TrimPrefix(raw, "rename to "), "copy to "))
+			if !ok {
+				return nil, fmt.Errorf("invalid unified diff at line %d: destination path cannot be interpreted exactly", lineNumber)
+			}
 			if pendingFrom == "" || to == "" {
 				return nil, fmt.Errorf("invalid unified diff at line %d: rename/copy destination without a source", lineNumber)
 			}
@@ -237,13 +247,21 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 		case strings.HasPrefix(raw, "Binary files "), strings.HasPrefix(raw, "GIT binary patch"):
 			return nil, fmt.Errorf("invalid unified diff at line %d: binary patches are not supported", lineNumber)
 		case strings.HasPrefix(raw, "--- "):
-			oldPath = stripPatchPrefix(patchFileHeaderPath(raw))
+			path, ok := patchFileHeaderPath(raw)
+			if !ok {
+				return nil, fmt.Errorf("invalid unified diff at line %d: path in --- header cannot be interpreted exactly", lineNumber)
+			}
+			oldPath = stripPatchPrefix(path)
 			newPath = ""
 			if oldPath == "" {
 				return nil, fmt.Errorf("invalid unified diff at line %d: missing path in --- header", lineNumber)
 			}
 		case strings.HasPrefix(raw, "+++ "):
-			newPath = stripPatchPrefix(patchFileHeaderPath(raw))
+			path, ok := patchFileHeaderPath(raw)
+			if !ok {
+				return nil, fmt.Errorf("invalid unified diff at line %d: path in +++ header cannot be interpreted exactly", lineNumber)
+			}
+			newPath = stripPatchPrefix(path)
 			if newPath == "" {
 				return nil, fmt.Errorf("invalid unified diff at line %d: missing path in +++ header", lineNumber)
 			}
@@ -305,34 +323,17 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 }
 
 // diffGitNewPath returns the post-image path named by a "diff --git a/X b/Y"
-// line, handling git's C-quoted form; "" when it cannot be determined.
+// line; "" when the operands cannot be split into two pathnames unambiguously.
+// The split is delegated to the parser that authorized the patch so a
+// header-only add or delete mutates exactly the file the gate inspected.
 func diffGitNewPath(line string) string {
-	rest := strings.TrimSpace(strings.TrimPrefix(line, "diff --git "))
-	if strings.HasPrefix(rest, "\"") {
-		// Two quoted tokens: skip the first, unquote the second.
-		end := strings.Index(rest[1:], "\"")
-		for end > 0 && rest[end] == '\\' {
-			next := strings.Index(rest[end+2:], "\"")
-			if next < 0 {
-				return ""
-			}
-			end += next + 2
-		}
-		if end < 0 || end+2 > len(rest) {
-			return ""
-		}
-		rest = strings.TrimSpace(rest[end+2:])
-		return stripPatchPrefix(unquoteGitPath(rest))
-	}
-	fields := strings.Fields(rest)
-	if len(fields) < 2 {
+	_, destination, ok := sandbox.DiffGitPaths(strings.TrimPrefix(line, "diff --git "))
+	if !ok {
 		return ""
 	}
-	last := fields[len(fields)-1]
-	if strings.HasPrefix(last, "\"") {
-		return stripPatchPrefix(unquoteGitPath(last))
-	}
-	return stripPatchPrefix(last)
+	// DiffGitPaths has already removed a matching a/ b/ pair; stripping a lone
+	// "b/" here would name a file the gate never saw among the patch's paths.
+	return filepath.ToSlash(destination)
 }
 
 // parseHunkRange reads "@@ -a[,b] +c[,d] @@" and returns a, b and d; a missing
