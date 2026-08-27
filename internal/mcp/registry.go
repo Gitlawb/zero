@@ -122,6 +122,12 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		remote []RemoteTool
 		cancel context.CancelFunc
 		err    error
+		// notices travels with the indexed result rather than being appended to
+		// shared state from inside the goroutine. The concurrent phase touches no
+		// shared state, which is the property the comment above promises and the
+		// reason the serial phase can be deterministic; appending here broke both,
+		// racing the slice header and ordering disclosures by completion time.
+		notices []string
 	}
 	results := make([]connectResult, len(servers))
 	var wg sync.WaitGroup
@@ -133,20 +139,11 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 			serverCtx, cancel := context.WithCancel(ctx)
 			done := make(chan connectResult, 1)
 			go func() {
-				client, remote, err := connectAndList(serverCtx, factory, server)
-				done <- connectResult{client: client, remote: remote, err: err}
+				client, remote, notices, err := connectAndList(serverCtx, factory, server)
+				done <- connectResult{client: client, remote: remote, notices: notices, err: err}
 			}()
 			select {
 			case res := <-done:
-				if client, ok := res.client.(startupDisclosing); ok && res.client != nil {
-					// Collected for any server whose PROCESS STARTED, including one whose
-					// tools are rejected below: the launch happened under that token either
-					// way, and a skip warning does not say what confinement the process ran
-					// with while it was alive.
-					if notices := client.StartupNotices(); len(notices) > 0 {
-						runtime.disclosures = append(runtime.disclosures, StartupDisclosure{Name: server.Name, Notices: notices})
-					}
-				}
 				if res.err != nil {
 					cancel() // failed: nothing to keep
 				} else {
@@ -178,6 +175,13 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 	stagedNames := make(map[string]struct{})
 	for index, server := range servers {
 		res := results[index]
+		// Recorded here, in server order, for any server whose PROCESS STARTED,
+		// including one whose tools are rejected below: the launch happened under
+		// that token either way, and a skip warning does not say what confinement
+		// the process ran with while it was alive.
+		if len(res.notices) > 0 {
+			runtime.disclosures = append(runtime.disclosures, StartupDisclosure{Name: server.Name, Notices: res.notices})
+		}
 		if res.err != nil {
 			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault})
 			continue
@@ -211,17 +215,40 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 // connectAndList connects to one server and lists its tools. It does ONLY I/O
 // (no registry, permission-store, or other shared state), so it is safe to run
 // concurrently for every server. On a list error it closes the client.
-func connectAndList(ctx context.Context, factory func(context.Context, Server) (ToolClient, error), server Server) (ToolClient, []RemoteTool, error) {
+// connectAndList returns the client, its tools, and the least-privilege
+// disclosures that applied to its LAUNCH.
+//
+// THE LAUNCH FACT OUTLIVES THE CONNECTION. A stdio server can start, and do
+// filesystem work, and then fail initialize or tools/list. Returning the notices
+// separately rather than leaving them on the client means the fact survives that
+// failure: the client is closed and discarded here, so anything reachable only
+// through it is gone by the time the caller sees the error, and the skip warning
+// on its own does not say the process already ran with reduced write
+// confinement.
+func connectAndList(ctx context.Context, factory func(context.Context, Server) (ToolClient, error), server Server) (ToolClient, []RemoteTool, []string, error) {
 	client, err := factory(ctx, server)
 	if err != nil {
-		return nil, nil, err
+		// Nothing launched, so there is nothing to disclose.
+		return nil, nil, nil, err
 	}
+	notices := startupNoticesOf(client)
 	remoteTools, err := client.ListTools(ctx)
 	if err != nil {
 		_ = client.Close()
-		return nil, nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
+		return nil, nil, notices, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
 	}
-	return client, remoteTools, nil
+	return client, remoteTools, notices, nil
+}
+
+// startupNoticesOf reads a client's launch disclosures, if it reports any.
+func startupNoticesOf(client ToolClient) []string {
+	if client == nil {
+		return nil
+	}
+	if disclosing, ok := client.(startupDisclosing); ok {
+		return disclosing.StartupNotices()
+	}
+	return nil
 }
 
 // buildServerTools validates a server's remote tools against the registry and the
