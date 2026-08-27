@@ -506,9 +506,26 @@ func redactedCommandArgs(values []string) []string {
 					continue
 				}
 			}
-			if flag, rest, ok := strings.Cut(value, " "); ok && isMCPHeaderFlag(flag) {
-				trimmed = append(trimmed, flag+" "+redactMCPHeaderValue(rest))
-				continue
+			// A FLAG AND ITS VALUE PACKED INTO ONE ELEMENT.
+			//
+			// The collector already splits this shape; the display did not, and
+			// classification without parsing is worse than neither. It recognised
+			// "--api-key sk-live-..." as sensitive further down, printed the whole
+			// element verbatim, and then redacted the NEXT argument, so the Target
+			// row showed the credential and blanked an unrelated "--verbose". That
+			// row sits directly under the reason this PR redacts, in both /mcp
+			// surfaces, and is persisted to the transcript.
+			if flag, rest, ok := strings.Cut(value, " "); ok {
+				switch {
+				case isMCPHeaderFlag(flag):
+					trimmed = append(trimmed, flag+" "+redactMCPHeaderValue(rest))
+					continue
+				case isSensitiveMCPDisplayFlag(flag):
+					// The flag name stays: it is what tells the operator which
+					// credential the child rejected.
+					trimmed = append(trimmed, flag+" "+mcpDisplayRedacted)
+					continue
+				}
 			}
 			if flag, carried, ok := mcpHeaderArgument(value); ok {
 				if carried != "" {
@@ -827,13 +844,32 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 		}
 		values = append(values, credentialCandidates(value)...)
 	}
-	for _, value := range raw.Headers {
+	// addClassified keeps a key/value pair together long enough to decide which
+	// of the two applies. A key the sensitive-name list recognises has already
+	// established what the value is, so the readability floor has nothing left
+	// to protect; an ordinary key leaves the value ambiguous and keeps it.
+	addClassified := func(key, value string) {
+		if isSensitiveMCPDisplayKey(key) {
+			addKnown(value)
+			return
+		}
 		add(value)
+	}
+	// CLASSIFIED BY THE KEY, because the key is what removes the ambiguity. A
+	// map value alone is just a string, and flattening it before deciding which
+	// heuristic applies meant "X-Api-Key: s3cr3t" contributed no exact
+	// candidate: the value went through the length floor that exists for
+	// ordinary configuration like "mode=sse". A six-byte credential under a key
+	// that names it as one then reached the panel and the transcript whenever a
+	// child echoed the value on its own, where generic shape matching has
+	// nothing left to recognise.
+	for key, value := range raw.Headers {
+		addClassified(key, value)
 	}
 	// Env carries the same risk for a stdio server: the child is launched with
 	// these, and a startup failure often reports the environment it was given.
-	for _, value := range raw.Env {
-		add(value)
+	for key, value := range raw.Env {
+		addClassified(key, value)
 	}
 	// Args carry it too, and more visibly: a stdio child that rejects its own
 	// invocation usually prints that invocation back, and connectStdio appends
@@ -852,10 +888,26 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	//
 	// Collected as exact values here rather than by widening the sensitive-key
 	// list, which would still only cover names somebody thought of.
-	for _, value := range mcpURLSecretValues(raw.URL) {
+	urlKnown, urlAmbiguous := mcpURLSecretValues(raw.URL)
+	for _, value := range urlKnown {
+		addKnown(value)
+	}
+	for _, value := range urlAmbiguous {
 		add(value)
 	}
-	addKnown(raw.Auth)
+	// raw.Auth is DELIBERATELY NOT a candidate. It is the public authentication
+	// MODE selector, and normalization accepts only the value "oauth", which the
+	// panel itself displays as ordinary metadata. Feeding it to the exact-value
+	// redactor classified the word by the security-sounding name of its field
+	// rather than by what it holds, so every failure from the OAuth stack lost
+	// the one token naming the subsystem that failed: "oauth: fetch
+	// authorization server metadata" rendered as "[REDACTED]: fetch
+	// authorization server metadata".
+	//
+	// It went unnoticed while ambiguous values ran through the length floor,
+	// which discarded a five-character string on its own. Removing that floor
+	// for known-provenance values is what surfaced it, which is the tell that
+	// the field was miscategorised rather than the floor being load-bearing.
 	if raw.OAuth != nil {
 		addKnown(raw.OAuth.ClientSecret)
 		// THE OAUTH ENDPOINTS ARE REACHED DURING STARTUP TOO, and they carry
@@ -872,7 +924,11 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 			raw.OAuth.RegistrationEndpoint,
 			raw.OAuth.IssuerURL,
 		} {
-			for _, value := range mcpURLSecretValues(endpoint) {
+			endpointKnown, endpointAmbiguous := mcpURLSecretValues(endpoint)
+			for _, value := range endpointKnown {
+				addKnown(value)
+			}
+			for _, value := range endpointAmbiguous {
 				add(value)
 			}
 		}
@@ -892,14 +948,21 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 // The path is deliberately NOT collected. It is the part an operator needs to
 // see to recognise which endpoint failed, and it is not where a credential is
 // configured.
-func mcpURLSecretValues(rawURL string) []string {
+// mcpURLSecretValues splits an endpoint's credential-bearing parts into those a
+// KEY has already classified as secret and those that are merely ambiguous. The
+// caller applies the readability floor only to the second group.
+//
+// Returning one flat list made a value under a key like `api_key`
+// indistinguishable from `v=1`, so a short credential was discarded by a
+// heuristic that exists for ordinary configuration.
+func mcpURLSecretValues(rawURL string) (known []string, ambiguous []string) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
-		return nil
+		return nil, nil
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed == nil {
-		return nil
+		return nil, nil
 	}
 	// BOTH REPRESENTATIONS, decoded and raw. url.Parse and url.ParseQuery hand
 	// back DECODED values, but the network client starts from the configured URL
@@ -932,8 +995,10 @@ func mcpURLSecretValues(rawURL string) []string {
 		}
 	}
 	if parsed.User != nil {
+		// The userinfo password is a credential by POSITION. No key names it and
+		// no length makes it ordinary.
 		if password, ok := parsed.User.Password(); ok {
-			values = append(values, password)
+			known = append(known, password)
 		}
 		// The username too: a token-as-username is a real shape, and the floor
 		// discards an ordinary short login.
@@ -954,13 +1019,20 @@ func mcpURLSecretValues(rawURL string) []string {
 		if pair == "" {
 			continue
 		}
-		if _, rawValue, found := strings.Cut(pair, "="); found {
+		if rawKey, rawValue, found := strings.Cut(pair, "="); found {
+			if isSensitiveMCPDisplayKey(rawKey) {
+				known = append(known, rawValue)
+				if decoded, derr := url.QueryUnescape(rawValue); derr == nil && decoded != rawValue {
+					known = append(known, decoded)
+				}
+				continue
+			}
 			values = append(values, rawValue)
 		}
 	}
 	query, err := url.ParseQuery(parsed.RawQuery)
 	if err != nil {
-		return values
+		return known, values
 	}
 	names := make([]string, 0, len(query))
 	for name := range query {
@@ -968,9 +1040,13 @@ func mcpURLSecretValues(rawURL string) []string {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if isSensitiveMCPDisplayKey(name) {
+			known = append(known, query[name]...)
+			continue
+		}
 		values = append(values, query[name]...)
 	}
-	return values
+	return known, values
 }
 
 // credentialCandidates returns the configured value plus the shorter strings a
