@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -70,20 +71,58 @@ func (m *model) mcpText() string {
 }
 
 func (m *model) refreshMCPViewState() {
+	late := m.lateMCPSkipped()
+	m.mcpLateSkippedCount = len(late)
 	m.mcpViewStateCache = BuildMCPViewState(MCPStateOptions{
 		Config:             m.mcpConfig,
 		Registry:           m.registry,
 		PermissionStore:    m.mcpPermissionStore,
 		PermissionMode:     string(m.permissionMode),
 		TokenStore:         m.mcpTokenStore,
-		Skipped:            m.mcpSkipped,
+		Skipped:            mergedMCPSkipped(m.mcpSkipped, late),
 		SkippedCredentials: m.mcpSkippedCredentials,
 	})
 	m.mcpViewStateReady = true
 }
 
+// lateMCPSkipped returns the background registration's failures, aged against
+// the current configuration exactly as the startup snapshot is. They were
+// observed against the configuration this session started with, so that is what
+// they are compared to.
+func (m *model) lateMCPSkipped() []internalmcp.SkippedServer {
+	if m.mcpLateSkipped == nil {
+		return nil
+	}
+	return retainedMCPSkipped(m.mcpLateSkipped(), m.mcpStartupConfig, m.mcpConfig)
+}
+
+// mergedMCPSkipped combines the two sources, preferring what startup already
+// knew. The critical and optional halves of the configuration are disjoint, so
+// an overlap means the same server was observed twice and the earlier
+// observation is the one whose credential context was recorded first.
+func mergedMCPSkipped(known, late []internalmcp.SkippedServer) []internalmcp.SkippedServer {
+	if len(late) == 0 {
+		return known
+	}
+	seen := make(map[string]struct{}, len(known))
+	for _, entry := range known {
+		seen[strings.TrimSpace(entry.Name)] = struct{}{}
+	}
+	merged := append([]internalmcp.SkippedServer(nil), known...)
+	for _, entry := range late {
+		if _, duplicate := seen[strings.TrimSpace(entry.Name)]; duplicate {
+			continue
+		}
+		merged = append(merged, entry)
+	}
+	return merged
+}
+
 func (m *model) mcpViewState() MCPViewState {
-	if m.mcpViewStateReady {
+	// A background registration finishes without any event this model observes,
+	// so the cache has to notice the new observation itself. Nothing else
+	// invalidates it: the configuration did not change.
+	if m.mcpViewStateReady && len(m.lateMCPSkipped()) == m.mcpLateSkippedCount {
 		return m.mcpViewStateCache
 	}
 	// Older tests may construct a zero-value model; keep that path useful, while

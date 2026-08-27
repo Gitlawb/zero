@@ -1,10 +1,7 @@
 package tui
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
@@ -69,9 +66,12 @@ func BuildMCPViewState(options MCPStateOptions) MCPViewState {
 }
 
 func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skipped []mcp.SkippedServer, tokenStore *mcp.TokenStore, capturedCredentials string) []MCPServerView {
-	failures := make(map[string]error, len(skipped))
+	// The whole observation, not just its error: each one carries the credential
+	// context that was sampled where its error was produced, and that is what the
+	// staleness check has to compare against.
+	failures := make(map[string]mcp.SkippedServer, len(skipped))
 	for _, entry := range skipped {
-		failures[entry.Name] = entry.Err
+		failures[entry.Name] = entry
 	}
 	// Read the stored bearers ONCE. Every load re-reads and re-parses the whole
 	// store file, and the material is the same for every row anyway. nil is the
@@ -103,10 +103,18 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 			// connect and reporting it as failed would be misleading.
 			state = "disabled"
 		default:
-			if err, ok := failures[name]; ok {
+			if failure, ok := failures[name]; ok {
 				state = "failed"
-				message = redactMCPFailureReason(err, raw, tokenSecrets)
-				if staleMCPObservation(capturedCredentials, tokenSecrets) {
+				message = redactMCPFailureReason(failure.Err, raw, tokenSecrets)
+				// The observation's OWN context wins. capturedCredentials is sampled
+				// when this surface is built, which is after registration and after
+				// anything that ran in between could have rotated the store, so it
+				// only stands in for observations that recorded nothing.
+				captured := failure.Credentials
+				if captured == "" {
+					captured = capturedCredentials
+				}
+				if staleMCPObservation(captured, tokenSecrets) {
 					message = mcpStaleObservationReason
 				}
 
@@ -1431,12 +1439,9 @@ func staleMCPObservation(captured string, current []string) bool {
 // mcpCredentialFingerprint identifies a set of credential values without
 // retaining them. Order-independent, because SecretValues enumerates a map.
 func mcpCredentialFingerprint(values []string) string {
-	sorted := append([]string(nil), values...)
-	sort.Strings(sorted)
-	digest := sha256.New()
-	for _, value := range sorted {
-		// Length-prefixed so ["ab","c"] and ["a","bc"] cannot collide.
-		fmt.Fprintf(digest, "%d:%s", len(value), value)
-	}
-	return hex.EncodeToString(digest.Sum(nil))
+	// One implementation, shared with the registration boundary that stamps
+	// SkippedServer.Credentials. Two copies of a digest are two chances for the
+	// captured value and the compared value to be computed differently, which
+	// would make every observation look stale.
+	return mcp.CredentialFingerprint(values)
 }

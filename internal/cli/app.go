@@ -848,6 +848,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Autonomy:        mcp.AutonomyLow,
 			Execution:       executionRunner,
 			WorkspaceRoot:   workspaceRoot,
+			SecretValues:    mcpTokenStore.SecretValues,
 		})
 		if registerErr != nil {
 			closeMCPRuntime(stderr, runtime)
@@ -930,6 +931,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 				Autonomy:        mcp.AutonomyLow,
 				Execution:       executionRunner,
 				WorkspaceRoot:   workspaceRoot,
+				SecretValues:    mcpTokenStore.SecretValues,
 			},
 			deps.registerMCPTools,
 			func() {
@@ -1005,7 +1007,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		// away behind the first screen of output, so /mcp is where a user goes
 		// to ask what is actually running — it should not answer from config
 		// alone and report a server that never connected as enabled.
-		MCPSkipped:         mcpRuntime.Skipped(),
+		MCPSkipped: mcpRuntime.Skipped(),
+		// Optional servers register on a background goroutine, so their failures
+		// are not known yet and a snapshot cannot carry them. Pulled instead, or
+		// they stay rendered from configuration alone: enabled, with no
+		// explanation, for a server that never connected.
+		MCPLateSkipped:     optionalMCPRuntime.Skipped,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
