@@ -92,7 +92,7 @@ func TestShouldReconnectClassification(t *testing.T) {
 	disconnects := []string{
 		"unexpected EOF", "connection reset by peer", "broken pipe",
 		"i/o timeout", "server closed the connection", "connection refused",
-		// Windows mid-stream aborts (#973).
+		// Windows socket aborts also remain reconnectable at connect time.
 		"wsarecv: An established connection was aborted by the software in your host machine",
 		"read: connection was aborted",
 		"An existing connection was forcibly closed by the remote host",

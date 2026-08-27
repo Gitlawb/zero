@@ -455,9 +455,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			return result, ctx.Err()
 		}
 		// A stream idle/stall timeout OR mid-stream transport abort (#973 — wsarecv /
-		// connection reset / forcibly closed) is safely re-issued when the turn
-		// committed NO answer text — no forwarded visible prose (forwardedVisibleText)
-		// and no collected final text (collected.Text). This covers three cases:
+		// connection reset / unexpected EOF / connection closed / broken pipe) is
+		// safely re-issued when the turn committed NO answer text — no forwarded
+		// visible prose (forwardedVisibleText) and no collected final text
+		// (collected.Text). The abort gate matches midStreamAbortNeedles only, not
+		// the full shouldReconnect list: connect-phase timeouts and connection
+		// refused are NOT retried here (a slow healthy server must not cost a
+		// second prefill). This covers three cases:
 		//   1. Nothing streamed at all before the connection died (the original
 		//      macOS stale-pooled-connection hang past the response-header timeout).
 		//   2. The model streamed transient reasoning and began a tool call (e.g. a
@@ -503,6 +507,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, forwardingOpts)
 			stallGenSpan.End()
 		}
+		// Recheck ctx after a retried CollectStream: helpers.go stores
+		// ctx.Err().Error() in collected.Error, and errors.New of that string
+		// drops the context.Canceled sentinel ACP branches on.
+		if ctx.Err() != nil {
+			result.Messages = copyMessages(messages)
+			return result, ctx.Err()
+		}
 		if collected.Error != "" {
 			// Route a reissued stream's non-stall error through the SAME recovery as
 			// the initial stream (image-rejection wrapping / context-limit compaction)
@@ -512,6 +523,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if stop != nil {
 				result.Messages = copyMessages(messages)
 				return result, stop
+			}
+			if ctx.Err() != nil {
+				result.Messages = copyMessages(messages)
+				return result, ctx.Err()
 			}
 			if collected.Error != "" {
 				result.Messages = copyMessages(messages)

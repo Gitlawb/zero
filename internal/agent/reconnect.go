@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -158,20 +157,47 @@ func shouldReconnect(ctx context.Context, err error) bool {
 	return false
 }
 
+// midStreamAbortNeedles are the transport-abort classes retried AFTER connect
+// succeeded and the stream body has started. This is a subset of shouldReconnect:
+// connect-phase signals (timeout, connection refused, "temporarily unavailable")
+// stay on the connect retry path, because matching them here would re-prefill a
+// healthy-but-slow server (ollama cloud header timeouts) and tell the user the
+// connection was lost. Issue #973 names WSAECONNABORTED / connection reset /
+// unexpected stream EOF.
+var midStreamAbortNeedles = []string{
+	"eof",
+	"unexpected end",
+	"connection reset",
+	"broken pipe",
+	"connection closed",
+	"server closed",
+	"wsarecv",
+	"connection was aborted",
+	"forcibly closed",
+}
+
 // isMidStreamTransportAbort reports whether a collected stream error string is a
-// retryable mid-stream transport abort (connection reset, Windows wsarecv /
-// WSAECONNABORTED, forcibly closed, etc.). Classification is single-sourced
-// through shouldReconnect so connect-time reconnect and post-connect CollectStream
-// retries stay in lockstep.
+// retryable mid-stream transport abort. It does NOT delegate to shouldReconnect:
+// that list is a connect-phase argument ("no response was received"). The stream
+// body has already started here, so only abort/reset/EOF/close classes retry.
 //
 // Used for failures DURING the stream body AFTER a successful connect and BEFORE
 // tool dispatch — the incomplete turn committed no answer text and executed no
 // tools, so a bounded re-issue is safe (same safety rules as the stall path).
 func isMidStreamTransportAbort(message string) bool {
-	if message == "" {
+	lowered := strings.ToLower(strings.TrimSpace(message))
+	if lowered == "" || isContextLimitError(lowered) {
 		return false
 	}
-	return shouldReconnect(context.Background(), errors.New(message))
+	if errhint.HasStatusCode(lowered, "500", "502", "503", "504") {
+		return false
+	}
+	for _, needle := range midStreamAbortNeedles {
+		if strings.Contains(lowered, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // backoffFor is the deterministic exponential base delay for a 1-based attempt,
