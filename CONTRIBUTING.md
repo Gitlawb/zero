@@ -126,6 +126,22 @@ not enough. Dependency changes need a clear project benefit, such as fixing a
 specific bug, addressing a security issue, improving compatibility, or supporting
 an approved feature.
 
+## Supported platforms
+
+Zero is released for the same five platforms that `scripts/install.sh`,
+`scripts/install.ps1`, and the npm wrapper resolve, and that
+`.github/workflows/release-artifacts.yml` packages:
+
+- `linux-x64` (`linux/amd64`)
+- `linux-arm64` (`linux/arm64`)
+- `macos-arm64` (`darwin/arm64`)
+- `macos-x64` (`darwin/amd64`)
+- `windows-x64` (`windows/amd64`)
+
+Other `GOOS`/`GOARCH` values, including Plan 9, are unsupported. They are not
+a review criterion. Do not block a pull request for failing to compile on an
+unsupported `GOOS`. Tests may use `plan9` as a fixture for an unsupported OS.
+
 ## What We Prioritize
 
 The core team will prioritize:
