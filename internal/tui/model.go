@@ -1362,6 +1362,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	switch msg := msg.(type) {
+	case fileViewLoadedMsg:
+		return m.handleFileViewLoaded(msg), nil
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
@@ -1659,9 +1661,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a
 			// permission prompt / ask-user / wizard keeps its own key handling).
 			if keyText(msg) == "f" {
-				return m.setFileViewMode(fileViewFull), nil
+				return m.setFileViewMode(fileViewFull)
 			}
-			return m.setFileViewMode(fileViewDiff), nil
+			return m.setFileViewMode(fileViewDiff)
 		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && canFireComposerGatedToggle(m.keyBindings.toggleMouse, defaultToggleMouseChord, m.composerValue() == ""):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection). The
@@ -2446,6 +2448,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A resumed/idle session may already hold agents; keep their short lifecycle
 		// fade alive. No-op when the loop is already running or nothing animates.
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+			return m, tea.Batch(m.ensureSpinnerTick(), cmd)
+		}
 		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
