@@ -1328,3 +1328,129 @@ func TestFileViewLifecycle_LateCompletionAcrossReopenDiscarded(t *testing.T) {
 		t.Fatalf("expected new session content, got: %s", rendered)
 	}
 }
+
+// TestFileViewLifecycle_ReverseOrderResizeCompletions verifies that when two resize events
+// schedule requests A (earlier) and B (later), and B completes before A, the subsequent
+// late arrival of A is discarded and does not overwrite B's width or rendered snapshot.
+func TestFileViewLifecycle_ReverseOrderResizeCompletions(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "resize_order.go")
+	if err := os.WriteFile(filePath, []byte("package resize_order\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "resize_order.go")
+
+	// Schedule Request A for width 60
+	m, cmdA := m.startFileViewLoadCmd(60)
+	if cmdA == nil {
+		t.Fatal("expected cmdA")
+	}
+
+	// Schedule Request B for width 100
+	m, cmdB := m.startFileViewLoadCmd(100)
+	if cmdB == nil {
+		t.Fatal("expected cmdB")
+	}
+
+	// Message B completes first
+	msgB := cmdB()
+	updated, _ := m.Update(msgB)
+	m = updated.(model)
+
+	if m.fileView.loadedWidth != 100 {
+		t.Fatalf("expected loadedWidth 100 after B completes, got %d", m.fileView.loadedWidth)
+	}
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(100)), "package resize_order") {
+		t.Fatalf("expected width 100 content rendered, got: %s", plainRender(t, m.renderFileViewFull(100)))
+	}
+
+	// Message A arrives late (reverse-order)
+	msgA := cmdA()
+	updated, _ = m.Update(msgA)
+	m = updated.(model)
+
+	// State MUST remain B (width 100), not overwritten by A (width 60)
+	if m.fileView.loadedWidth != 100 {
+		t.Fatalf("late completion A must NOT overwrite loadedWidth, got %d (want 100)", m.fileView.loadedWidth)
+	}
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(100)), "package resize_order") {
+		t.Fatalf("expected width 100 content still visible, got: %s", plainRender(t, m.renderFileViewFull(100)))
+	}
+}
+
+// TestFileViewLifecycle_ReverseOrderToolMutationCompletions verifies that when two tool
+// mutations trigger requests A (version 1) and B (version 2), and B completes before A,
+// the subsequent arrival of A cannot revert the visible snapshot back to version 1.
+func TestFileViewLifecycle_ReverseOrderToolMutationCompletions(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "tool_order.go")
+	if err := os.WriteFile(filePath, []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "tool_order.go")
+
+	// Mutation A modifies file to v1
+	if err := os.WriteFile(filePath, []byte("version 1 state\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rowA := transcriptRow{
+		kind:         rowToolResult,
+		tool:         "write_file",
+		changedFiles: []string{"tool_order.go"},
+		detail:       "+version 1 state",
+	}
+	updated, cmdA := m.Update(agentRowMsg{runID: m.activeRunID, row: rowA})
+	m = updated.(model)
+	if cmdA == nil {
+		t.Fatal("expected cmdA for mutation A")
+	}
+
+	// Mutation B immediately modifies file to v2 before A completes
+	if err := os.WriteFile(filePath, []byte("version 2 state\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rowB := transcriptRow{
+		kind:         rowToolResult,
+		tool:         "edit_file",
+		changedFiles: []string{"tool_order.go"},
+		detail:       "+version 2 state",
+	}
+	updated, cmdB := m.Update(agentRowMsg{runID: m.activeRunID, row: rowB})
+	m = updated.(model)
+	if cmdB == nil {
+		t.Fatal("expected cmdB for mutation B")
+	}
+
+	// B completes first
+	msgB := cmdB()
+	updated, _ = m.Update(msgB)
+	m = updated.(model)
+
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "version 2 state") {
+		t.Fatalf("expected version 2 state after B completes, got: %s", plainRender(t, m.renderFileViewFull(80)))
+	}
+
+	// A arrives late (reverse-order)
+	msgA := cmdA()
+	updated, _ = m.Update(msgA)
+	m = updated.(model)
+
+	// View MUST remain version 2, never reverted by A
+	rendered := plainRender(t, m.renderFileViewFull(80))
+	if strings.Contains(rendered, "version 1 state") {
+		t.Fatalf("stale version 1 completion must NOT overwrite version 2, got: %s", rendered)
+	}
+	if !strings.Contains(rendered, "version 2 state") {
+		t.Fatalf("expected version 2 state still visible, got: %s", rendered)
+	}
+}

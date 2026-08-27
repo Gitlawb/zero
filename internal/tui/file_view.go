@@ -518,6 +518,7 @@ func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string,
 // fileViewLoadedMsg delivers the result of an asynchronous file read & render.
 type fileViewLoadedMsg struct {
 	lifetimeToken [16]byte
+	seq           uint64
 	generation    int
 	targetPath    string
 	displayPath   string
@@ -527,11 +528,12 @@ type fileViewLoadedMsg struct {
 	err           error
 }
 
-func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, gen int, theme tuiTheme) tea.Cmd {
+func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, theme tuiTheme) tea.Cmd {
 	return func() tea.Msg {
 		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme)
 		return fileViewLoadedMsg{
 			lifetimeToken: token,
+			seq:           seq,
 			generation:    gen,
 			targetPath:    targetPath,
 			displayPath:   displayPath,
@@ -550,15 +552,26 @@ type fileViewState struct {
 	path               string // workspace-relative, as carried by changedFiles
 	mode               int    // fileViewDiff | fileViewFull
 	parentScrollOffset int
-	lifetimeToken      [16]byte // monotonic, time-ordered UUIDv7 token for this active session
-	renderedContent    string   // rendered full text when loaded
-	loadedPath         string   // path of loaded content
-	loadedWidth        int      // width of loaded content
-	loadedGen          int      // cache/theme generation of loaded content
-	loadedFingerprint  string   // changed lines fingerprint of loaded content
-	loadedToken        [16]byte // token matching the loaded content
-	loading            bool     // true while async load is in flight
-	hasError           bool     // true if the load failed
+
+	// View session lifetime identity (UUIDv7 RFC 9562 0-alloc)
+	lifetimeToken      [16]byte
+
+	// Monotonically advancing desired snapshot sequence & requested parameters
+	desiredSeq         uint64
+	desiredWidth       int
+	desiredFingerprint string
+	desiredGen         int
+
+	// Authoritative completed snapshot (only valid when loadedSeq == desiredSeq)
+	renderedContent    string
+	loadedPath         string
+	loadedWidth        int
+	loadedGen          int
+	loadedFingerprint  string
+	loadedToken        [16]byte
+	loadedSeq          uint64
+	loading            bool
+	hasError           bool
 }
 
 func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
@@ -569,13 +582,18 @@ func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
+	m.fileView.desiredSeq++
+	m.fileView.desiredWidth = width
 	m.fileView.loading = true
+	seq := m.fileView.desiredSeq
 	token := m.fileView.lifetimeToken
 	gen := defaultFileViewCache.generation()
 	changed := m.fileViewChangedLines()
 	fingerprint := changedLinesFingerprint(changed)
+	m.fileView.desiredFingerprint = fingerprint
+	m.fileView.desiredGen = gen
 	theme := zeroTheme
-	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, gen, theme)
+	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, seq, gen, theme)
 }
 
 // openFileView activates the drill-in for path in diff mode. Opening from an
@@ -597,6 +615,7 @@ func (m model) openFileView(path string) (model, tea.Cmd) {
 	m.fileView.lifetimeToken = nextFileViewLifetimeToken()
 	m.fileView.renderedContent = ""
 	m.fileView.loadedToken = [16]byte{}
+	m.fileView.loadedSeq = 0
 	m.fileView.hasError = false
 	// A file only the git sweep knows about (bash/subagent mutation) has no edit
 	// cards to stack — open straight on the full file instead of a placeholder.
@@ -640,13 +659,21 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode != fileViewFull {
 		return m, nil
 	}
+	// 1. Session lifetime identity match
 	if m.fileView.lifetimeToken != msg.lifetimeToken || m.fileView.path != msg.displayPath {
 		return m, nil
 	}
-	if msg.generation != defaultFileViewCache.generation() {
-		// Cache was invalidated (e.g. theme switch) while this request was in flight.
-		// Start a fresh request for the current generation.
-		return m.startFileViewLoadCmd(m.chatColumnWidth())
+	// 2. Exact desired snapshot match: reject superseded / out-of-order completions
+	if msg.seq != m.fileView.desiredSeq ||
+		msg.width != m.fileView.desiredWidth ||
+		msg.fingerprint != m.fileView.desiredFingerprint ||
+		msg.generation != defaultFileViewCache.generation() {
+		if msg.generation != defaultFileViewCache.generation() {
+			// Cache was invalidated (e.g. theme switch) while this request was in flight.
+			return m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
+		// Out-of-order or obsolete completion: drop without modifying state
+		return m, nil
 	}
 	m.fileView.loading = false
 	m.fileView.renderedContent = msg.rendered
@@ -655,6 +682,7 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	m.fileView.loadedGen = msg.generation
 	m.fileView.loadedFingerprint = msg.fingerprint
 	m.fileView.loadedToken = msg.lifetimeToken
+	m.fileView.loadedSeq = msg.seq
 	m.fileView.hasError = (msg.err != nil)
 	return m, nil
 }
@@ -740,25 +768,19 @@ func (m model) renderFileViewFull(width int) string {
 	if m.fileView.hasError {
 		return m.fileView.renderedContent
 	}
-	if m.fileView.renderedContent != "" &&
-		m.fileView.loadedPath == m.fileView.path &&
-		m.fileView.loadedGen == defaultFileViewCache.generation() &&
-		m.fileView.loadedToken == m.fileView.lifetimeToken {
-		target := m.fileView.path
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(m.cwd, target)
-		}
-		if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.loadedFingerprint); ok {
-			return cached
-		}
-		return m.fileView.renderedContent
-	}
 	target := m.fileView.path
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.loadedFingerprint); ok {
+	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint); ok {
 		return cached
+	}
+	if m.fileView.renderedContent != "" &&
+		m.fileView.loadedPath == m.fileView.path &&
+		m.fileView.loadedSeq == m.fileView.desiredSeq &&
+		m.fileView.loadedGen == defaultFileViewCache.generation() &&
+		m.fileView.loadedToken == m.fileView.lifetimeToken {
+		return m.fileView.renderedContent
 	}
 	return zeroTheme.faint.Render(fileViewLoadingPlaceholder)
 }
