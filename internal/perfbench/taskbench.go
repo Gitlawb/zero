@@ -330,7 +330,6 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 	return func(ctx context.Context, task BenchTask, rc RunContext) TaskOutcome {
 		args := buildExecArgs(task, rc, extraArgs)
 		cmd := exec.CommandContext(ctx, binary, args...)
-		execution.HardenCommandContext(cmd)
 		cmd.Env = appendNoColor(os.Environ())
 		if dir := strings.TrimSpace(task.WorkspaceFixture); dir != "" {
 			cmd.Dir = dir
@@ -338,7 +337,10 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		runErr := cmd.Run()
+		runErr := execution.RunCommand(ctx, cmd)
+		if errors.Is(runErr, exec.ErrWaitDelay) {
+			return TaskOutcome{Err: fmt.Errorf("zero exec output cleanup failed: %w", runErr)}
+		}
 
 		// The terminal run_end exit code is authoritative for pass/fail: a non-zero
 		// agent exit is a normal task failure, not a harness error, even though
@@ -386,7 +388,6 @@ func buildExecArgs(task BenchTask, rc RunContext, extraArgs []string) []string {
 
 func runVerification(ctx context.Context, task BenchTask) TaskOutcome {
 	cmd := exec.CommandContext(ctx, task.VerificationCommand[0], task.VerificationCommand[1:]...)
-	execution.HardenCommandContext(cmd)
 	// Inherit the environment so the verifier sees PATH, HOME, language toolchain
 	// vars, etc. — the same surface a maintainer gets running the command by hand
 	// (matching the agent run above). NO_COLOR is appended for stable output.
@@ -394,9 +395,12 @@ func runVerification(ctx context.Context, task BenchTask) TaskOutcome {
 	if dir := strings.TrimSpace(task.WorkspaceFixture); dir != "" {
 		cmd.Dir = dir
 	}
-	output, err := cmd.CombinedOutput()
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := execution.RunCommand(ctx, cmd)
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
+		detail := strings.TrimSpace(output.String())
 		if detail == "" {
 			detail = err.Error()
 		}

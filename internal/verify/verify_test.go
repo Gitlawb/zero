@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,41 @@ import (
 
 	"github.com/Gitlawb/zero/internal/testrunner"
 )
+
+func TestRunDefaultRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
+	switch os.Getenv("ZERO_VERIFY_TREE_HELPER") {
+	case "parent":
+		if err := os.Setenv("ZERO_VERIFY_TREE_HELPER", "grandchild"); err != nil {
+			os.Exit(2)
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestRunDefaultRunnerTimeoutKillsGrandchildHoldingOutput$")
+		child.Env = os.Environ()
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		select {}
+	case "grandchild":
+		time.Sleep(30 * time.Second)
+		return
+	}
+
+	t.Setenv("ZERO_VERIFY_TREE_HELPER", "parent")
+	plan := Plan{Root: t.TempDir(), Checks: []Check{{
+		ID:      "tree.timeout",
+		Name:    "process tree timeout",
+		Command: []string{os.Args[0], "-test.run=^TestRunDefaultRunnerTimeoutKillsGrandchildHoldingOutput$"},
+	}}}
+	started := time.Now()
+	report := Run(context.Background(), plan, RunOptions{TimeoutMS: 100})
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("defaultRunner remained blocked by grandchild output handles for %s", elapsed)
+	}
+	if report.OK || len(report.Results) != 1 || report.Results[0].Status == StatusPass {
+		t.Fatalf("timed-out defaultRunner command unexpectedly passed: %#v", report)
+	}
+}
 
 func TestDetectPlanFindsBunAndGoChecks(t *testing.T) {
 	root := t.TempDir()

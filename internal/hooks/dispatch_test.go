@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,29 +37,52 @@ func TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
+		if err := os.WriteFile(os.Getenv("ZERO_HOOK_TREE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			os.Exit(3)
+		}
 		select {}
 	case "grandchild":
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	}
 
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	result := execCommandRunner(
-		ctx,
-		os.Args[0],
-		[]string{"-test.run=^TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput$"},
-		nil,
-		"",
-		append(os.Environ(), "ZERO_HOOK_TREE_HELPER=parent"),
-	)
+	resultChannel := make(chan commandResult, 1)
+	go func() {
+		resultChannel <- execCommandRunner(
+			ctx,
+			os.Args[0],
+			[]string{"-test.run=^TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput$"},
+			nil,
+			"",
+			append(os.Environ(), "ZERO_HOOK_TREE_HELPER=parent", "ZERO_HOOK_TREE_PID_FILE="+pidFile),
+		)
+	}()
+	var result commandResult
+	select {
+	case result = <-resultChannel:
+	case <-time.After(4 * time.Second):
+		cancel()
+		t.Fatal("execCommandRunner did not return within four seconds after its timeout")
+	}
 	if elapsed := time.Since(started); elapsed > 4*time.Second {
 		t.Fatalf("command remained blocked by grandchild output handles for %s", elapsed)
 	}
 	if result.Err == nil && result.ExitCode == 0 {
 		t.Fatalf("timed-out command unexpectedly succeeded: %#v", result)
 	}
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read grandchild PID: %v", err)
+	}
+	pid, err := strconv.Atoi(string(pidData))
+	if err != nil {
+		t.Fatalf("parse grandchild PID %q: %v", pidData, err)
+	}
+	awaitHookProcessExit(t, pid)
 }
 
 func TestDispatchRunsMatchingHooksAndRecordsAudit(t *testing.T) {

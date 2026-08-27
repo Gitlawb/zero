@@ -298,7 +298,6 @@ func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInp
 // ExitCode (not Err); Err is reserved for commands that could not be launched.
 func execCommandRunner(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
 	cmd := exec.CommandContext(ctx, command, args...)
-	execution.HardenCommandContext(cmd)
 	cmd.Dir = cwd
 	cmd.Env = env
 	if len(stdin) > 0 {
@@ -307,7 +306,7 @@ func execCommandRunner(ctx context.Context, command string, args []string, stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := execution.RunCommand(ctx, cmd)
 	result := commandResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err == nil {
 		return result

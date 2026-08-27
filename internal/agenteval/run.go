@@ -141,13 +141,12 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 	}
 	args := trimCommand(command.Command)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	execution.HardenCommandContext(cmd)
 	cmd.Dir = workspace
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := execution.RunCommand(ctx, cmd)
 	result.Stdout = stdout.String()
 	result.Stderr = stderr.String()
 	if err == nil {
@@ -170,15 +169,16 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 func defaultRunGit(ctx context.Context, workspace string, args ...string) ([]byte, error) {
 	allArgs := append([]string{"-C", workspace}, args...)
 	cmd := exec.CommandContext(ctx, "git", allArgs...)
-	execution.HardenCommandContext(cmd)
-	output, err := cmd.Output()
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	err := execution.RunCommand(ctx, cmd)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
 		return nil, err
 	}
-	return output, nil
+	return output.Bytes(), nil
 }
 
 func parseGitStatusPorcelain(output []byte) []string {

@@ -106,11 +106,10 @@ func (p *realProcess) Kill() error { return p.cmd.Process.Kill() }
 
 func runCommandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	execution.HardenCommandContext(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	err := cmd.Run()
+	err := execution.RunCommand(ctx, cmd)
 	return out.Bytes(), err
 }
 
