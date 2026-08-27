@@ -112,24 +112,53 @@ func TestAPluginToolCarriesTheNoticeWhenItTimesOutOrIsCancelled(t *testing.T) {
 }
 
 // But a child that never launched must stay silent, or the notice describes a
-// trade nobody made. This is the distinction the launched-or-not check exists
-// for, and without it the assertion above would be satisfied by pasting the
-// notice onto every error.
-func TestAPluginThatNeverLaunchedCarriesNoNotice(t *testing.T) {
-	for _, kind := range []execution.OutcomeKind{
-		execution.OutcomeSandboxSetupFailure,
-		execution.OutcomeExecutableNotFound,
-	} {
-		if (execution.Outcome{Kind: kind}).ChildLaunched() {
-			t.Errorf("%v is treated as a launched child; a notice there would describe a process that never started", kind)
-		}
+// trade nobody made.
+//
+// KEYED ON THE RECORDED FACT, NOT ON THE OUTCOME KIND. Reading the kind as a
+// launch-state field is wrong in both directions: a child that ran and then
+// produced an unreadable adapter report is rewritten to a setup failure, so the
+// disclosure is dropped although it applied, and a context cancelled before
+// os.StartProcess yields a cancellation, so the disclosure is claimed for a
+// process that never existed. This is why the earlier version of this test,
+// which asserted that the kind decides, was encoding the defect.
+func TestAPluginNoticeFollowsRecordedLaunchState(t *testing.T) {
+	const notice = "denyRead is configured, so the write jail is not confining writes"
+	enforcement := execution.Enforcement{Notices: []string{notice}}
+
+	// The two directions the kind gets wrong, spelled out.
+	ranThenReportFailed := execution.Outcome{
+		Kind:        execution.OutcomeSandboxSetupFailure,
+		Launched:    true,
+		Enforcement: enforcement,
 	}
-	for _, kind := range []execution.OutcomeKind{
-		execution.OutcomeTimedOut,
-		execution.OutcomeCancelled,
+	if got := ranThenReportFailed.AppliedEnforcementNotices(); len(got) != 1 {
+		t.Errorf("a child that ran lost its disclosure because the report failed afterwards: %#v", got)
+	}
+
+	cancelledBeforeStart := execution.Outcome{
+		Kind:        execution.OutcomeCancelled,
+		Launched:    false,
+		Enforcement: enforcement,
+	}
+	if got := cancelledBeforeStart.AppliedEnforcementNotices(); len(got) != 0 {
+		t.Errorf("a process that never started claimed an enforcement trade: %#v", got)
+	}
+
+	// And the ordinary pairs still behave.
+	for _, testCase := range []struct {
+		name      string
+		outcome   execution.Outcome
+		discloses bool
+	}{
+		{"launched and succeeded", execution.Outcome{Kind: execution.OutcomeSuccess, Launched: true, Enforcement: enforcement}, true},
+		{"launched then timed out", execution.Outcome{Kind: execution.OutcomeTimedOut, Launched: true, Enforcement: enforcement}, true},
+		{"never launched, missing executable", execution.Outcome{Kind: execution.OutcomeExecutableNotFound, Launched: false, Enforcement: enforcement}, false},
+		{"never launched, setup failed", execution.Outcome{Kind: execution.OutcomeSandboxSetupFailure, Launched: false, Enforcement: enforcement}, false},
 	} {
-		if !(execution.Outcome{Kind: kind}).ChildLaunched() {
-			t.Errorf("%v is treated as never launched, so its disclosure would be dropped", kind)
-		}
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := len(testCase.outcome.AppliedEnforcementNotices()) > 0; got != testCase.discloses {
+				t.Errorf("discloses = %v, want %v", got, testCase.discloses)
+			}
+		})
 	}
 }
