@@ -1426,6 +1426,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasDarkBg = msg.IsDark()
 		if m.themeMode != themeSystem {
 			applyTheme(m.themeMode, m.hasDarkBg)
+			if m.fileView.active && m.fileView.mode == fileViewFull {
+				return m.startFileViewLoadCmd(m.chatColumnWidth())
+			}
 		}
 		return m, nil
 	case tea.MouseMsg:
@@ -2922,10 +2925,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A finished command tool may have mutated files git can see but no
 		// changedFiles reports (npm create, heredoc writes, subagent edits) —
 		// re-sweep so the FILES sidebar picks them up mid-turn.
-		if msg.row.kind == rowToolResult && isPlanCommandTool(msg.row.tool) {
-			var sweep tea.Cmd
-			m, sweep = m.maybeGitSweep()
-			return m, sweep
+		if msg.row.kind == rowToolResult {
+			if isPlanCommandTool(msg.row.tool) {
+				var sweep tea.Cmd
+				m, sweep = m.maybeGitSweep()
+				return m, sweep
+			}
+			if m.fileView.active && m.fileView.mode == fileViewFull {
+				for _, p := range msg.row.changedFiles {
+					if p == m.fileView.path {
+						var loadCmd tea.Cmd
+						m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+						return m, loadCmd
+					}
+				}
+			}
 		}
 		return m, nil
 	case swarmSessionsMsg:
@@ -4534,10 +4548,21 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// local preview and never changes the active palette.
 		text := ""
 		m, text = m.handleThemeCommand(item.Value)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
 		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
 	}
 	return m, cmd
 }
@@ -4941,10 +4966,21 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
 		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)

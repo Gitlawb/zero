@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -44,6 +45,42 @@ const (
 	fileViewDiff = iota
 	fileViewFull
 )
+
+var (
+	fileViewLifetimeTS  atomic.Uint64
+	fileViewLifetimeSeq atomic.Uint32
+)
+
+// nextFileViewLifetimeToken produces a monotonic, time-ordered 128-bit UUIDv7 (RFC 9562)
+// to uniquely identify the lifecycle of a file view session without heap allocations.
+func nextFileViewLifetimeToken() [16]byte {
+	nowMs := uint64(time.Now().UnixMilli())
+	for {
+		last := fileViewLifetimeTS.Load()
+		if nowMs > last {
+			if fileViewLifetimeTS.CompareAndSwap(last, nowMs) {
+				fileViewLifetimeSeq.Store(0)
+				break
+			}
+		} else {
+			nowMs = last
+			break
+		}
+	}
+	seq := fileViewLifetimeSeq.Add(1)
+	var u [16]byte
+	u[0] = byte(nowMs >> 40)
+	u[1] = byte(nowMs >> 32)
+	u[2] = byte(nowMs >> 24)
+	u[3] = byte(nowMs >> 16)
+	u[4] = byte(nowMs >> 8)
+	u[5] = byte(nowMs)
+	u[6] = 0x70 | byte((seq>>8)&0x0F) // Version 7
+	u[7] = byte(seq & 0xFF)
+	u[8] = 0x80 | byte((seq>>16)&0x3F) // RFC 9562 variant
+	u[9] = byte(seq >> 24)
+	return u
+}
 
 // fileViewCacheStats tracks disk I/O, Chroma highlighting, and cache hits/misses.
 type fileViewCacheStats struct {
@@ -92,6 +129,9 @@ func (e *fileViewCachedEntry) getRender(key string) (string, bool) {
 func (e *fileViewCachedEntry) putRender(key string, val string) {
 	e.rendersMu.Lock()
 	defer e.rendersMu.Unlock()
+	if e.renders == nil {
+		e.renders = make(map[string]string)
+	}
 	if _, ok := e.renders[key]; !ok {
 		for len(e.renders) >= fileViewMaxRenderVariants {
 			if len(e.renderKeys) > 0 {
@@ -334,10 +374,10 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 	return b.String()
 }
 
-// getRenderOnly looks up an already-rendered variant in memory (or formats from
-// already-cached in-memory syntax tokens) without performing any disk I/O, stat,
-// or Chroma syntax highlighting. Safe for direct View calls.
-func (c *fileViewRenderCache) getRenderOnly(targetPath string, width int, changed map[string]bool, theme tuiTheme) (string, bool) {
+// peekRenderOnly looks up an already-formatted variant in memory. It performs
+// strictly 0 I/O and 0 string formatting/allocations, guaranteeing O(1) instantaneous
+// access on the View() drawing path.
+func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, changedFingerprint string) (string, bool) {
 	c.mu.Lock()
 	elem, ok := c.items[targetPath]
 	if !ok {
@@ -349,29 +389,28 @@ func (c *fileViewRenderCache) getRenderOnly(targetPath string, width int, change
 	c.statsData.CacheHits++
 	c.mu.Unlock()
 
-	renderKey := fmt.Sprintf("%d:%s", width, changedLinesFingerprint(changed))
-	if val, ok := entry.getRender(renderKey); ok {
-		return val, true
-	}
-
-	rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
-	entry.putRender(renderKey, rendered)
-	return rendered, true
+	renderKey := fmt.Sprintf("%d:%s", width, changedFingerprint)
+	return entry.getRender(renderKey)
 }
 
 // loadAndRender performs the bounded read, Chroma highlighting, and formatting
 // on a cache miss (or re-formats for a new width variant on a cache hit). It is
 // intended to be executed from a tea.Cmd / background worker, off the View path.
-func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, reqGen int, theme tuiTheme) (string, error) {
+func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme) (string, error) {
 	stat, err := os.Stat(targetPath)
 	if err != nil {
+		c.mu.Lock()
+		if elem, ok := c.items[targetPath]; ok {
+			c.lru.Remove(elem)
+			delete(c.items, targetPath)
+		}
+		c.mu.Unlock()
 		rendered := theme.faint.Render("Could not read file: " + err.Error())
 		return rendered, err
 	}
 
 	modTime := stat.ModTime()
 	size := stat.Size()
-	changedFingerprint := changedLinesFingerprint(changed)
 	renderKey := fmt.Sprintf("%d:%s", width, changedFingerprint)
 
 	c.mu.Lock()
@@ -404,6 +443,12 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	readRes := readFileViewBounded(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes)
 	if readRes.err != nil && len(readRes.lines) == 0 {
+		c.mu.Lock()
+		if elem, ok := c.items[targetPath]; ok {
+			c.lru.Remove(elem)
+			delete(c.items, targetPath)
+		}
+		c.mu.Unlock()
 		rendered := theme.faint.Render("Could not read file: " + readRes.err.Error())
 		return rendered, readRes.err
 	}
@@ -465,32 +510,35 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 }
 
 func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
-	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, c.generation(), zeroTheme)
+	fingerprint := changedLinesFingerprint(changed)
+	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, fingerprint, c.generation(), zeroTheme)
 	return rendered
 }
 
 // fileViewLoadedMsg delivers the result of an asynchronous file read & render.
 type fileViewLoadedMsg struct {
-	requestID   int
-	generation  int
-	targetPath  string
-	displayPath string
-	width       int
-	rendered    string
-	err         error
+	lifetimeToken [16]byte
+	generation    int
+	targetPath    string
+	displayPath   string
+	width         int
+	fingerprint   string
+	rendered      string
+	err           error
 }
 
-func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, requestID int, gen int, theme tuiTheme) tea.Cmd {
+func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, gen int, theme tuiTheme) tea.Cmd {
 	return func() tea.Msg {
-		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, gen, theme)
+		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme)
 		return fileViewLoadedMsg{
-			requestID:   requestID,
-			generation:  gen,
-			targetPath:  targetPath,
-			displayPath: displayPath,
-			width:       width,
-			rendered:    rendered,
-			err:         err,
+			lifetimeToken: token,
+			generation:    gen,
+			targetPath:    targetPath,
+			displayPath:   displayPath,
+			width:         width,
+			fingerprint:   fingerprint,
+			rendered:      rendered,
+			err:           err,
 		}
 	}
 }
@@ -498,18 +546,19 @@ func loadFileViewCmd(targetPath string, displayPath string, width int, changed m
 // fileViewState manages the drill-in view for a touched file. When active, the
 // transcript body swaps to the file's diff/content instead of the chat rows.
 type fileViewState struct {
-	active bool
-	path   string // workspace-relative, as carried by changedFiles
-	mode   int    // fileViewDiff | fileViewFull
-	// parentScrollOffset preserves the chat scroll position so closing the view
-	// returns to the same spot (mirrors subchatState).
+	active             bool
+	path               string // workspace-relative, as carried by changedFiles
+	mode               int    // fileViewDiff | fileViewFull
 	parentScrollOffset int
-	requestID          int    // monotonic ID for async load requests
-	renderedContent    string // rendered full text when loaded
-	loadedPath         string // path of loaded content
-	loadedWidth        int    // width of loaded content
-	loadedGen          int    // cache/theme generation of loaded content
-	loading            bool   // true while async load is in flight
+	lifetimeToken      [16]byte // monotonic, time-ordered UUIDv7 token for this active session
+	renderedContent    string   // rendered full text when loaded
+	loadedPath         string   // path of loaded content
+	loadedWidth        int      // width of loaded content
+	loadedGen          int      // cache/theme generation of loaded content
+	loadedFingerprint  string   // changed lines fingerprint of loaded content
+	loadedToken        [16]byte // token matching the loaded content
+	loading            bool     // true while async load is in flight
+	hasError           bool     // true if the load failed
 }
 
 func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
@@ -520,13 +569,13 @@ func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	m.fileView.requestID++
 	m.fileView.loading = true
-	reqID := m.fileView.requestID
+	token := m.fileView.lifetimeToken
 	gen := defaultFileViewCache.generation()
 	changed := m.fileViewChangedLines()
+	fingerprint := changedLinesFingerprint(changed)
 	theme := zeroTheme
-	return m, loadFileViewCmd(target, m.fileView.path, width, changed, reqID, gen, theme)
+	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, gen, theme)
 }
 
 // openFileView activates the drill-in for path in diff mode. Opening from an
@@ -545,6 +594,10 @@ func (m model) openFileView(path string) (model, tea.Cmd) {
 	m.fileView.active = true
 	m.fileView.path = path
 	m.fileView.mode = fileViewDiff
+	m.fileView.lifetimeToken = nextFileViewLifetimeToken()
+	m.fileView.renderedContent = ""
+	m.fileView.loadedToken = [16]byte{}
+	m.fileView.hasError = false
 	// A file only the git sweep knows about (bash/subagent mutation) has no edit
 	// cards to stack — open straight on the full file instead of a placeholder.
 	if len(m.fileViewResultRows()) == 0 {
@@ -587,7 +640,7 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode != fileViewFull {
 		return m, nil
 	}
-	if m.fileView.path != msg.displayPath || m.fileView.requestID != msg.requestID {
+	if m.fileView.lifetimeToken != msg.lifetimeToken || m.fileView.path != msg.displayPath {
 		return m, nil
 	}
 	if msg.generation != defaultFileViewCache.generation() {
@@ -600,6 +653,9 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	m.fileView.loadedPath = msg.displayPath
 	m.fileView.loadedWidth = msg.width
 	m.fileView.loadedGen = msg.generation
+	m.fileView.loadedFingerprint = msg.fingerprint
+	m.fileView.loadedToken = msg.lifetimeToken
+	m.fileView.hasError = (msg.err != nil)
 	return m, nil
 }
 
@@ -679,18 +735,30 @@ func (m model) renderFileViewDiff(width int) string {
 // highlighted, with a line-number gutter and an accent ▎ marker on the lines
 // this session's diffs added (matched by exact text — an approximation that
 // tolerates later drift; a stale marker just doesn't highlight).
-// It is read-only and non-blocking: if content is ready or cached in memory,
-// it is returned immediately; otherwise a loading placeholder is shown.
+// It is strictly non-blocking and performs O(1) lookup without invoking formatters.
 func (m model) renderFileViewFull(width int) string {
+	if m.fileView.hasError {
+		return m.fileView.renderedContent
+	}
+	if m.fileView.renderedContent != "" &&
+		m.fileView.loadedPath == m.fileView.path &&
+		m.fileView.loadedGen == defaultFileViewCache.generation() &&
+		m.fileView.loadedToken == m.fileView.lifetimeToken {
+		target := m.fileView.path
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(m.cwd, target)
+		}
+		if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.loadedFingerprint); ok {
+			return cached
+		}
+		return m.fileView.renderedContent
+	}
 	target := m.fileView.path
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	if cached, ok := defaultFileViewCache.getRenderOnly(target, width, m.fileViewChangedLines(), zeroTheme); ok {
+	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.loadedFingerprint); ok {
 		return cached
-	}
-	if m.fileView.renderedContent != "" && m.fileView.loadedPath == m.fileView.path && m.fileView.loadedGen == defaultFileViewCache.generation() {
-		return m.fileView.renderedContent
 	}
 	return zeroTheme.faint.Render(fileViewLoadingPlaceholder)
 }

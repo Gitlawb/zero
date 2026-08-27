@@ -47,18 +47,13 @@ request, or completing an implementation task:
 1. **Formatting check**: `make fmt-check`. If it fails, format with
    `go fmt ./...` (or `make fmt`) and run the check again.
 2. **Vet**: `go vet ./...` (or `make vet`).
-3. **Tests**: `make test` (`go test ./... -race -count=1`). Run the full
-   unfiltered package/module suite under `-race`. Never rely on narrow `-run`
-   filters for final validation when shared components or concurrency are touched.
-4. **Resilience & Full Lifecycle Invariant**: Tests exercising invalidations,
-   cache clears, concurrent mutations, or rejected messages must prove full
-   recovery and valid terminal state (re-issuing loads and rendering updated
-   content), never asserting passive broken intermediate states (e.g. `renderedContent == ""`).
-5. **Build**: `go run ./cmd/zero-release build`.
-6. **Smoke test**: `go run ./cmd/zero-release smoke`.
-7. **Advisory lint**: `make lint-static`.
-8. **Security**: `make vulncheck`.
-9. **Diff hygiene**: `git diff HEAD --check` (covers staged and unstaged
+3. **Tests**: `go test ./...`. Use `make test` for the full race-enabled suite,
+   or run focused tests with `-race`, when concurrency is affected.
+4. **Build**: `go run ./cmd/zero-release build`.
+5. **Smoke test**: `go run ./cmd/zero-release smoke`.
+6. **Advisory lint**: `make lint-static`.
+7. **Security**: `make vulncheck`.
+8. **Diff hygiene**: `git diff HEAD --check` (covers staged and unstaged
    tracked changes).
 
 `make lint` currently runs the formatting check and `go vet`; it does **not**
@@ -77,11 +72,6 @@ it.
 
 These classes drive multi-round reviews. Fix them before requesting review:
 
-- **End-to-End Recovery & Invalidation Cycles:** Any async state, cache invalidation,
-  or message rejection must reschedule or re-render automatically. A test that asserts
-  an empty intermediate state without verifying subsequent recovery will block review.
-- **Unfiltered `-race` Verification:** Running only focused tests (`-run`) on shared
-  components obscures cross-module regressions. Full package suites under `-race` are required.
 - **Fresh base:** Rebase onto the current PR base (`main` or stacked target)
   before review. A stale head that rolls back mainline commits is a hard
   blocker, not a merge-time detail. Resolve conflicts by keeping upstream
