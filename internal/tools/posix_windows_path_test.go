@@ -217,3 +217,53 @@ func TestResolveWorkspacePathDoesNotRewriteForeignRepo(t *testing.T) {
 		t.Fatalf("foreign repo path was treated as workspace file x")
 	}
 }
+
+func TestResolveWorkspacePathRejectsMissingLexicalEscapeOnWindows(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	_, _, err := resolveWorkspacePathForGOOS("windows", root, "/home/alice/zero/../../missing")
+	if err == nil {
+		t.Fatal("expected confinement error for a missing escaped target")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "must stay inside the workspace") {
+		t.Fatalf("expected outsideWorkspaceError, got %q", msg)
+	}
+	if strings.Contains(msg, "host is Windows") {
+		t.Fatalf("missing lexical escape got a POSIX-path hint instead of confinement: %q", msg)
+	}
+}
+
+func TestResolveWorkspaceTargetPathRewritesMissingTmpFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	_, relative, err := resolveWorkspaceTargetPathForGOOS("windows", root, "/tmp/zero/new.txt")
+	if err != nil {
+		t.Fatalf("missing rewritten write target should resolve: %v", err)
+	}
+	if relative != "new.txt" {
+		t.Fatalf("relative = %q, want new.txt", relative)
+	}
+}
+
+func TestResolveWorkspaceTargetPathRejectsLexicalEscape(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	_, _, err := resolveWorkspaceTargetPathForGOOS("windows", root, "/home/alice/zero/../../new.txt")
+	if err == nil {
+		t.Fatal("expected confinement error for an escaped write target")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "must stay inside the workspace") {
+		t.Fatalf("expected outsideWorkspaceError, got %q", msg)
+	}
+}

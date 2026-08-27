@@ -69,17 +69,19 @@ func resolveWorkspacePathForGOOS(goos, workspaceRoot, requestedPath string) (str
 	if err != nil {
 		return fail(err)
 	}
+	// Reject lexical escapes before EvalSymlinks so a missing ../../target
+	// returns outsideWorkspaceError instead of a POSIX-path miss hint.
+	if _, err := workspaceRelative(root, target, requestedPath); err != nil {
+		return fail(err)
+	}
 	target, err = filepath.EvalSymlinks(target)
 	if err != nil {
 		return fail(err)
 	}
 
-	relative, err := filepath.Rel(root, target)
+	relative, err := workspaceRelative(root, target, requestedPath)
 	if err != nil {
-		return fail(outsideWorkspaceError(requestedPath))
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return fail(outsideWorkspaceError(requestedPath))
+		return fail(err)
 	}
 	if relative == "." {
 		return target, ".", nil
@@ -123,6 +125,9 @@ func resolveWorkspaceTargetPathForGOOS(goos, workspaceRoot, requestedPath string
 	if err != nil {
 		return fail(err)
 	}
+	if _, err := workspaceRelative(root, target, requestedPath); err != nil {
+		return fail(err)
+	}
 	if err := recheckWorkspaceWriteTarget(root, target); err != nil {
 		return fail(err)
 	}
@@ -153,12 +158,9 @@ func resolveWorkspaceTargetPathForGOOS(goos, workspaceRoot, requestedPath string
 		resolved = filepath.Join(resolved, segment)
 	}
 
-	relative, err := filepath.Rel(root, resolved)
+	relative, err := workspaceRelative(root, resolved, requestedPath)
 	if err != nil {
-		return fail(outsideWorkspaceError(requestedPath))
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return fail(outsideWorkspaceError(requestedPath))
+		return fail(err)
 	}
 	if relative == "." {
 		return resolved, ".", nil
@@ -228,6 +230,21 @@ func recheckWorkspaceWriteTarget(workspaceRoot string, requestedPath string) err
 
 func outsideWorkspaceError(requestedPath string) error {
 	return fmt.Errorf("%s must stay inside the workspace", requestedPath)
+}
+
+// workspaceRelative returns target relative to root, or outsideWorkspaceError
+// when target is lexically outside the workspace. Call this after filepath.Abs
+// (a missing ../../path must not skip confinement) and after EvalSymlinks
+// (symlink escapes).
+func workspaceRelative(root, target, requestedPath string) (string, error) {
+	relative, err := filepath.Rel(root, target)
+	if err != nil {
+		return "", outsideWorkspaceError(requestedPath)
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", outsideWorkspaceError(requestedPath)
+	}
+	return relative, nil
 }
 
 func shouldSkipDirectory(name string) bool {
