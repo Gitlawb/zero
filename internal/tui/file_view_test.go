@@ -18,6 +18,26 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
+func testOpenFile(m model, path string) model {
+	next, cmd := m.openFileView(path)
+	if cmd != nil {
+		msg := cmd()
+		updated, _ := next.Update(msg)
+		return updated.(model)
+	}
+	return next
+}
+
+func testSetMode(m model, mode int) model {
+	next, cmd := m.setFileViewMode(mode)
+	if cmd != nil {
+		msg := cmd()
+		updated, _ := next.Update(msg)
+		return updated.(model)
+	}
+	return next
+}
+
 // TestFileViewOpenExitRestoresScroll: opening saves the chat scroll position,
 // resets it for the file body, and Esc restores it; switching files while open
 // keeps the ORIGINAL saved position (not the file view's own).
@@ -25,7 +45,7 @@ func TestFileViewOpenExitRestoresScroll(t *testing.T) {
 	m := filesPanelTestModel()
 	m.chatScrollOffset = 12
 
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 	if !m.fileView.active || m.fileView.mode != fileViewDiff {
 		t.Fatalf("open should activate in diff mode: %+v", m.fileView)
 	}
@@ -34,7 +54,7 @@ func TestFileViewOpenExitRestoresScroll(t *testing.T) {
 	}
 
 	m.chatScrollOffset = 5 // scrolled within the file body
-	m = m.openFileView("internal/tui/sidebar.go")
+	m, _ = m.openFileView("internal/tui/sidebar.go")
 	if m.fileView.parentScrollOffset != 12 {
 		t.Fatalf("switching files must keep the original parent offset, got %d", m.fileView.parentScrollOffset)
 	}
@@ -49,15 +69,23 @@ func TestFileViewOpenExitRestoresScroll(t *testing.T) {
 // d/f switch modes while the composer is empty and never while typing.
 func TestFileViewEscAndModeKeys(t *testing.T) {
 	m := filesPanelTestModel()
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	m = updated.(model)
+	if cmd != nil {
+		updated, _ = m.Update(cmd())
+		m = updated.(model)
+	}
 	if m.fileView.mode != fileViewFull {
 		t.Fatal("f should switch to full mode")
 	}
-	updated, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	m = updated.(model)
+	if cmd != nil {
+		updated, _ = m.Update(cmd())
+		m = updated.(model)
+	}
 	if m.fileView.mode != fileViewDiff {
 		t.Fatal("d should switch back to diff mode")
 	}
@@ -83,7 +111,7 @@ func TestFileViewEscAndModeKeys(t *testing.T) {
 // placeholder.
 func TestFileViewDiffBody(t *testing.T) {
 	m := filesPanelTestModel()
-	m = m.openFileView("internal/tui/sidebar.go")
+	m, _ = m.openFileView("internal/tui/sidebar.go")
 	body := plainRender(t, m.renderFileViewDiff(78))
 	if !strings.Contains(body, "edit 1 of 2") || !strings.Contains(body, "edit 2 of 2") {
 		t.Fatalf("expected chronological edit labels:\n%s", body)
@@ -113,8 +141,8 @@ func TestFileViewFullBody(t *testing.T) {
 		detail:       "+let a = 1",
 		changedFiles: []string{"app.js"},
 	})
-	m = m.openFileView("app.js")
-	m = m.setFileViewMode(fileViewFull)
+	m = testOpenFile(m, "app.js")
+	m = testSetMode(m, fileViewFull)
 
 	body := m.renderFileViewFull(78)
 	plain := plainRender(t, body)
@@ -133,6 +161,11 @@ func TestFileViewFullBody(t *testing.T) {
 	}
 
 	m.fileView.path = "gone.js"
+	m, cmd := m.startFileViewLoadCmd(78)
+	if cmd != nil {
+		updated, _ := m.Update(cmd())
+		m = updated.(model)
+	}
 	if got := plainRender(t, m.renderFileViewFull(78)); !strings.Contains(got, "Could not read file") {
 		t.Errorf("missing file should degrade to an error line, got:\n%s", got)
 	}
@@ -144,7 +177,7 @@ func TestFileViewFullBody(t *testing.T) {
 // relies on.
 func TestFileViewSwapsTranscriptBody(t *testing.T) {
 	m := filesPanelTestModel()
-	m = m.openFileView("internal/tui/sidebar.go")
+	m, _ = m.openFileView("internal/tui/sidebar.go")
 
 	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	if len(items) != 1 {
@@ -179,7 +212,7 @@ func TestSidebarAgentClickIsIgnoredWithoutRail(t *testing.T) {
 		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-1 on team default.", runID: 1},
 	)
 	m.activeRunID = 1
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 
 	width := sidebarWidth(m.width)
 	agents := m.sidebarAgentSelectables(width)
@@ -248,11 +281,11 @@ func TestResumedFileEditUsesPersistedDisplayPreview(t *testing.T) {
 // unconditional openFileView bounced full mode back to diff and reset scroll.
 func TestOpenFileViewSamePathIsNoOp(t *testing.T) {
 	m := filesPanelTestModel()
-	m = m.openFileView("web/app.js")
-	m = m.setFileViewMode(fileViewFull)
+	m = testOpenFile(m, "web/app.js")
+	m = testSetMode(m, fileViewFull)
 	m.chatScrollOffset = 7 // scrolled within the file body
 
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 	if m.fileView.mode != fileViewFull {
 		t.Fatal("re-opening the same file must keep full mode")
 	}
@@ -260,7 +293,7 @@ func TestOpenFileViewSamePathIsNoOp(t *testing.T) {
 		t.Fatalf("re-opening the same file must keep the scroll, got %d", m.chatScrollOffset)
 	}
 	// A DIFFERENT file still switches (and resets to diff mode as documented).
-	m = m.openFileView("internal/tui/sidebar.go")
+	m, _ = m.openFileView("internal/tui/sidebar.go")
 	if m.fileView.path != "internal/tui/sidebar.go" || m.fileView.mode != fileViewDiff {
 		t.Fatalf("opening another file should switch views: %+v", m.fileView)
 	}
@@ -281,7 +314,7 @@ func TestFileViewFullBodyTruncatesLongFile(t *testing.T) {
 	m := filesPanelTestModel()
 	m.cwd = dir
 	m.gitTouched = []gitSweepFile{{path: "big.txt"}}
-	m = m.openFileView("big.txt")
+	m = testOpenFile(m, "big.txt")
 
 	plain := plainRender(t, m.renderFileViewFull(80))
 	lines := strings.Split(plain, "\n")
@@ -299,7 +332,7 @@ func TestFileViewFullBodyTruncatesLongFile(t *testing.T) {
 func TestDetailedTranscriptClosesFileView(t *testing.T) {
 	m := filesPanelTestModel()
 	m.altScreen = true
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 
 	if !m.fileView.active {
 		t.Fatal("sanity check: openFileView should activate the file view")
@@ -326,7 +359,7 @@ func TestDetailedTranscriptClosesFileView(t *testing.T) {
 func TestDetailedTranscriptStaysClosedOnSecondToggle(t *testing.T) {
 	m := filesPanelTestModel()
 	m.altScreen = true
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 
 	updated, _ := m.Update(testKeyCtrl('o'))
 	m = updated.(model)
@@ -347,7 +380,7 @@ func TestDetailedTranscriptStaysClosedOnSecondToggle(t *testing.T) {
 // (Esc exiting the view instead of reaching the prompt's deny handling).
 func TestFileViewKeysDeferToBlockingModal(t *testing.T) {
 	m := filesPanelTestModel()
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 	m.pendingPermission = &pendingPermissionPrompt{
 		request: agent.PermissionRequest{ToolName: "write_file"},
 		decide:  func(agent.PermissionDecision) {},
@@ -381,10 +414,10 @@ func TestFileViewRepeatedViewNoDiskIOOrHighlighting(t *testing.T) {
 
 	m := filesPanelTestModel()
 	m.cwd = dir
-	m = m.openFileView("sample.go")
-	m = m.setFileViewMode(fileViewFull)
+	m = testOpenFile(m, "sample.go")
+	m = testSetMode(m, fileViewFull)
 
-	// First render: Misses cache, performs 1 disk read and 1 highlight call
+	// First render: Misses cache during testSetMode cmd execution, performed 1 disk read and 1 highlight call
 	firstRender := m.renderFileViewFull(80)
 	if !strings.Contains(firstRender, "hello world") {
 		t.Fatalf("first render missing content: %s", firstRender)
@@ -413,8 +446,8 @@ func TestFileViewRepeatedViewNoDiskIOOrHighlighting(t *testing.T) {
 	if statsAfterRepeated.HighlightCalls != 1 {
 		t.Fatalf("repeated View calls must not trigger Chroma highlighting, got %d", statsAfterRepeated.HighlightCalls)
 	}
-	if statsAfterRepeated.CacheHits != 10 {
-		t.Fatalf("expected 10 cache hits, got %d", statsAfterRepeated.CacheHits)
+	if statsAfterRepeated.CacheHits != statsAfterFirst.CacheHits+10 {
+		t.Fatalf("expected 10 additional cache hits, got %d (before: %d)", statsAfterRepeated.CacheHits, statsAfterFirst.CacheHits)
 	}
 
 	// Same byte length as `content`, so only mtime can invalidate the entry.
@@ -428,6 +461,13 @@ func TestFileViewRepeatedViewNoDiskIOOrHighlighting(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 	if err := os.Chtimes(filePath, future, future); err != nil {
 		t.Fatal(err)
+	}
+
+	// Re-trigger load command after file update
+	m, cmd := m.startFileViewLoadCmd(80)
+	if cmd != nil {
+		updated, _ := m.Update(cmd())
+		m = updated.(model)
 	}
 
 	updatedRender := m.renderFileViewFull(80)
@@ -465,8 +505,8 @@ func TestFileViewMaxBytesBudgetTruncation(t *testing.T) {
 
 	m := filesPanelTestModel()
 	m.cwd = dir
-	m = m.openFileView("giant_bytes.txt")
-	m = m.setFileViewMode(fileViewFull)
+	m = testOpenFile(m, "giant_bytes.txt")
+	m = testSetMode(m, fileViewFull)
 
 	body := m.renderFileViewFull(80)
 	plain := plainRender(t, body)
@@ -497,8 +537,8 @@ func TestFileViewMaxLineBytesBudgetTruncation(t *testing.T) {
 
 	m := filesPanelTestModel()
 	m.cwd = dir
-	m = m.openFileView("giant_line.js")
-	m = m.setFileViewMode(fileViewFull)
+	m = testOpenFile(m, "giant_line.js")
+	m = testSetMode(m, fileViewFull)
 
 	body := m.renderFileViewFull(80)
 	plain := plainRender(t, body)
@@ -529,8 +569,8 @@ func TestFileViewCacheEviction(t *testing.T) {
 	m.cwd = dir
 	for i := 0; i < numFiles; i++ {
 		fname := fmt.Sprintf("file_%d.txt", i)
-		m = m.openFileView(fname)
-		m = m.setFileViewMode(fileViewFull)
+		m = testOpenFile(m, fname)
+		m = testSetMode(m, fileViewFull)
 		_ = m.renderFileViewFull(80)
 	}
 
@@ -557,8 +597,8 @@ func TestFileViewClearOnThemeChange(t *testing.T) {
 
 	m := filesPanelTestModel()
 	m.cwd = dir
-	m = m.openFileView("code.go")
-	m = m.setFileViewMode(fileViewFull)
+	m = testOpenFile(m, "code.go")
+	m = testSetMode(m, fileViewFull)
 	_ = m.renderFileViewFull(80)
 
 	defaultFileViewCache.mu.Lock()
@@ -715,8 +755,8 @@ func TestFileViewCache_RenderVariantsBoundedUnderResize(t *testing.T) {
 
 	m := filesPanelTestModel()
 	m.cwd = dir
-	m = m.openFileView("resize_test.go")
-	m = m.setFileViewMode(fileViewFull)
+	m = testOpenFile(m, "resize_test.go")
+	m = testSetMode(m, fileViewFull)
 
 	// Execute mixed-width getOrRender calls concurrently from multiple goroutines
 	var wg sync.WaitGroup
@@ -758,5 +798,210 @@ func TestFileViewCache_RenderVariantsBoundedUnderResize(t *testing.T) {
 	}
 	if keyCount > fileViewMaxRenderVariants {
 		t.Fatalf("renderKeys count %d exceeded maximum limit %d", keyCount, fileViewMaxRenderVariants)
+	}
+}
+
+// TestFileViewAsyncCacheMissLifecycle exercises the cache-miss lifecycle through
+// the actual View/Update boundary:
+//  1. Initial full-mode activation returns a command while View() renders the
+//     loading placeholder without performing disk I/O or Chroma work.
+//  2. The command executes asynchronously and returns fileViewLoadedMsg.
+//  3. Update() applies the message to the model.
+//  4. View() renders the loaded, formatted content.
+func TestFileViewAsyncCacheMissLifecycle(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "async_sample.go")
+	content := "package main\n\nfunc AsyncWork() string {\n\treturn \"done\"\n}\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+
+	// Step 1: Open file with no edit rows (opens in full mode directly with async cmd)
+	m, cmd := m.openFileView("async_sample.go")
+	if cmd == nil {
+		t.Fatal("expected async load command on cache miss")
+	}
+
+	// View before cmd completes must render loading placeholder with 0 disk I/O or highlighting
+	initialView := m.renderFileViewFull(80)
+	if !strings.Contains(initialView, "Loading…") {
+		t.Fatalf("expected loading placeholder before command completes, got:\n%s", initialView)
+	}
+	statsBefore := fileViewCacheStatsForTest()
+	if statsBefore.DiskReads != 0 || statsBefore.HighlightCalls != 0 {
+		t.Fatalf("View() must not stat/read/highlight directly: %+v", statsBefore)
+	}
+
+	// Step 2: Execute command asynchronously
+	msg := cmd()
+	loadedMsg, ok := msg.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("expected fileViewLoadedMsg, got %T", msg)
+	}
+	if loadedMsg.err != nil {
+		t.Fatalf("unexpected load error: %v", loadedMsg.err)
+	}
+
+	// Step 3: Update model with loaded message
+	updated, _ := m.Update(loadedMsg)
+	m = updated.(model)
+
+	// Step 4: View now renders the loaded content
+	loadedView := m.renderFileViewFull(80)
+	if !strings.Contains(loadedView, "AsyncWork") {
+		t.Fatalf("expected loaded content in view, got:\n%s", loadedView)
+	}
+	statsAfter := fileViewCacheStatsForTest()
+	if statsAfter.DiskReads != 1 || statsAfter.HighlightCalls != 1 {
+		t.Fatalf("expected exactly 1 disk read and 1 highlight call, got: %+v", statsAfter)
+	}
+
+	// Also verify switching from diff mode to full mode triggers the cmd
+	appFile := filepath.Join(dir, "web", "app.js")
+	if err := os.MkdirAll(filepath.Join(dir, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(appFile, []byte("let webApp = true;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mDiff, cmdDiff := m.openFileView("web/app.js")
+	if cmdDiff != nil || mDiff.fileView.mode != fileViewDiff {
+		t.Fatalf("file with edit cards must open in diff mode with nil cmd: mode=%d, cmd=%v", mDiff.fileView.mode, cmdDiff)
+	}
+	mFull, cmdFull := mDiff.setFileViewMode(fileViewFull)
+	if cmdFull == nil || mFull.fileView.mode != fileViewFull {
+		t.Fatal("switching to full mode must return load command")
+	}
+	updated, _ = mFull.Update(cmdFull())
+	mFull = updated.(model)
+	if !strings.Contains(mFull.renderFileViewFull(80), "webApp") {
+		t.Fatalf("expected loaded webApp content, got: %s", mFull.renderFileViewFull(80))
+	}
+}
+
+// TestFileViewAsyncDiscardSupersededResult verifies that if a user switches files
+// or exits the view while an async load is in flight, the completed message from
+// the old file is safely discarded and does not overwrite the active view.
+func TestFileViewAsyncDiscardSupersededResult(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	fileA := filepath.Join(dir, "fileA.txt")
+	fileB := filepath.Join(dir, "fileB.txt")
+	if err := os.WriteFile(fileA, []byte("Content of File A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileB, []byte("Content of File B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+
+	// Start loading File A
+	m, cmdA := m.openFileView("fileA.txt")
+	if cmdA == nil {
+		t.Fatal("expected cmd for fileA")
+	}
+
+	// User switches to File B before cmdA returns
+	m, cmdB := m.openFileView("fileB.txt")
+	if cmdB == nil {
+		t.Fatal("expected cmd for fileB")
+	}
+
+	// Now cmdA completes and its message is dispatched
+	msgA := cmdA()
+	updated, _ := m.Update(msgA)
+	m = updated.(model)
+
+	// File A's result must be discarded because active file is File B
+	viewWhileB := m.renderFileViewFull(80)
+	if strings.Contains(viewWhileB, "Content of File A") {
+		t.Fatalf("stale File A result must not paint over File B: %s", viewWhileB)
+	}
+
+	// Now cmdB completes and is dispatched
+	msgB := cmdB()
+	updated, _ = m.Update(msgB)
+	m = updated.(model)
+
+	viewFinal := m.renderFileViewFull(80)
+	if !strings.Contains(viewFinal, "Content of File B") {
+		t.Fatalf("expected File B content, got: %s", viewFinal)
+	}
+}
+
+// TestFileViewAsyncDiscardOnModeSwitchOrExit verifies that if a view exits or
+// switches back to diff mode, completed async loads are safely ignored.
+func TestFileViewAsyncDiscardOnModeSwitchOrExit(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	fileA := filepath.Join(dir, "discard_mode.txt")
+	if err := os.WriteFile(fileA, []byte("Some content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+
+	m, cmdA := m.openFileView("discard_mode.txt")
+	if cmdA == nil {
+		t.Fatal("expected cmd")
+	}
+
+	// Exit file view before command returns
+	m = m.exitFileView()
+	if m.fileView.active {
+		t.Fatal("view should be inactive")
+	}
+
+	// Now deliver the message
+	msgA := cmdA()
+	updated, _ := m.Update(msgA)
+	m = updated.(model)
+
+	if m.fileView.active {
+		t.Fatal("discarded message must not re-activate file view")
+	}
+}
+
+// TestFileViewAsyncDiscardOnThemeInvalidation verifies that if a theme switch occurs
+// while an async load is in flight, the old theme's completion message is discarded.
+func TestFileViewAsyncDiscardOnThemeInvalidation(t *testing.T) {
+	defer applyTheme(themeDark, true)
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	fileA := filepath.Join(dir, "theme_test.go")
+	if err := os.WriteFile(fileA, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+
+	m, cmd := m.openFileView("theme_test.go")
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+
+	// Invalidate cache by switching theme before cmd completes
+	applyTheme(themeLight, false)
+
+	// Now old cmd completes
+	msg := cmd()
+	updated, _ := m.Update(msg)
+	m = updated.(model)
+
+	// The message must have been rejected due to generation mismatch
+	if m.fileView.renderedContent != "" {
+		t.Fatalf("expected empty renderedContent after invalidation, got %q", m.fileView.renderedContent)
 	}
 }
