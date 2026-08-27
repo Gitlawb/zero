@@ -1063,3 +1063,268 @@ func TestFileViewThemeSwitchWhileLoaded(t *testing.T) {
 		t.Fatalf("expected reloaded content for new theme, got: %s", m.renderFileViewFull(80))
 	}
 }
+
+// TestFileViewLifecycle_OpenToLoad tests the full model update flow from open to async load completion.
+func TestFileViewLifecycle_OpenToLoad(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "app.go")
+	if err := os.WriteFile(filePath, []byte("package app\nfunc Run() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+
+	// Open file via model action
+	m, cmd := m.openFileView("app.go")
+	if !m.fileView.active || m.fileView.mode != fileViewFull {
+		t.Fatal("file view should be active in full mode for new file")
+	}
+	if cmd == nil {
+		t.Fatal("expected async load command on open")
+	}
+
+	// View displays loading placeholder before completion
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), fileViewLoadingPlaceholder) {
+		t.Fatalf("expected loading placeholder, got: %s", plainRender(t, m.renderFileViewFull(80)))
+	}
+
+	// Process load completion
+	updated, _ := m.Update(cmd())
+	m = updated.(model)
+
+	rendered := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(rendered, "package app") || !strings.Contains(rendered, "func Run()") {
+		t.Fatalf("expected loaded content, got: %s", rendered)
+	}
+	if m.fileView.hasError {
+		t.Fatal("expected no error")
+	}
+}
+
+// TestFileViewLifecycle_RapidResizeCoalesced verifies that repeated resize events
+// do not cause race conditions or synchronous render spikes, and the latest resize wins.
+func TestFileViewLifecycle_RapidResizeCoalesced(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "resize.go")
+	if err := os.WriteFile(filePath, []byte("package resize\nconst BigWidth = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "resize.go")
+
+	var cmds []tea.Cmd
+	for w := 40; w <= 120; w += 10 {
+		var cmd tea.Cmd
+		m, cmd = m.startFileViewLoadCmd(w)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	// Deliver the latest resize command completion
+	lastCmd := cmds[len(cmds)-1]
+	updated, _ := m.Update(lastCmd())
+	m = updated.(model)
+
+	if m.fileView.loadedWidth != 120 {
+		t.Fatalf("expected loadedWidth 120, got %d", m.fileView.loadedWidth)
+	}
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(120)), "package resize") {
+		t.Fatalf("expected content for width 120, got: %s", plainRender(t, m.renderFileViewFull(120)))
+	}
+}
+
+// TestFileViewLifecycle_ThemeSwitchReloadsActiveView tests that selecting a theme
+// in production immediately triggers a reload command for the active file view.
+func TestFileViewLifecycle_ThemeSwitchReloadsActiveView(t *testing.T) {
+	defer applyTheme(themeDark, true)
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "theme_active.go")
+	if err := os.WriteFile(filePath, []byte("package theme\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "theme_active.go")
+
+	// Trigger /theme light via command handling
+	cmdAction := parsedCommand{kind: commandTheme, text: "light"}
+	updated, reloadCmd := m.dispatchCommand(cmdAction)
+	m = updated.(model)
+
+	if reloadCmd == nil {
+		t.Fatal("expected reload command on active file view after theme change")
+	}
+
+	// Complete the reload
+	updated, _ = m.Update(reloadCmd())
+	m = updated.(model)
+
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package theme") {
+		t.Fatalf("expected reloaded theme content, got: %s", plainRender(t, m.renderFileViewFull(80)))
+	}
+	if m.fileView.loadedGen != defaultFileViewCache.generation() {
+		t.Fatalf("expected loadedGen %d, got %d", defaultFileViewCache.generation(), m.fileView.loadedGen)
+	}
+}
+
+// TestFileViewLifecycle_DirectToolMutationTriggersRefresh tests that tool result
+// rows from write_file or edit_file directly refresh an active file view snapshot.
+func TestFileViewLifecycle_DirectToolMutationTriggersRefresh(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "live_edit.go")
+	if err := os.WriteFile(filePath, []byte("version 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "live_edit.go")
+
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "version 1") {
+		t.Fatal("initial load should have version 1")
+	}
+
+	// Directly modify file on disk
+	if err := os.WriteFile(filePath, []byte("version 2 modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dispatch tool result for write_file affecting live_edit.go
+	toolRow := transcriptRow{
+		kind:         rowToolResult,
+		tool:         "write_file",
+		changedFiles: []string{"live_edit.go"},
+		detail:       "+version 2 modified",
+	}
+	updated, reloadCmd := m.Update(agentRowMsg{runID: m.activeRunID, row: toolRow})
+	m = updated.(model)
+
+	if reloadCmd == nil {
+		t.Fatal("expected reload command on direct tool mutation for active file")
+	}
+
+	// Execute reload
+	updated, _ = m.Update(reloadCmd())
+	m = updated.(model)
+
+	rendered := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(rendered, "version 2 modified") {
+		t.Fatalf("expected version 2 after tool mutation reload, got: %s", rendered)
+	}
+}
+
+// TestFileViewLifecycle_DeletionOverrulesStaleCache tests that when a file is deleted,
+// the reload failure evicts the former cache entry and immediately displays the error.
+func TestFileViewLifecycle_DeletionOverrulesStaleCache(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "deleted.go")
+	if err := os.WriteFile(filePath, []byte("package deleted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "deleted.go")
+
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package deleted") {
+		t.Fatal("initial load failed")
+	}
+
+	// Delete the file
+	if err := os.Remove(filePath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force reload
+	m, reloadCmd := m.startFileViewLoadCmd(80)
+	if reloadCmd == nil {
+		t.Fatal("expected reload command")
+	}
+
+	updated, _ := m.Update(reloadCmd())
+	m = updated.(model)
+
+	if !m.fileView.hasError {
+		t.Fatal("expected hasError to be true after deletion")
+	}
+
+	rendered := plainRender(t, m.renderFileViewFull(80))
+	if strings.Contains(rendered, "package deleted") {
+		t.Fatalf("stale cache must not be shown after deletion, got: %s", rendered)
+	}
+	if !strings.Contains(rendered, "Could not read file") {
+		t.Fatalf("expected error message in view, got: %s", rendered)
+	}
+}
+
+// TestFileViewLifecycle_LateCompletionAcrossReopenDiscarded tests that if a file view
+// is exited and the same path is reopened, any late-arriving completion from the first
+// session is discarded and cannot populate the new session.
+func TestFileViewLifecycle_LateCompletionAcrossReopenDiscarded(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "reopen.go")
+	if err := os.WriteFile(filePath, []byte("original content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+
+	// Session 1: open and get command
+	m, cmd1 := m.openFileView("reopen.go")
+	if cmd1 == nil {
+		t.Fatal("expected cmd1")
+	}
+
+	// Exit session 1
+	m = m.exitFileView()
+	if m.fileView.active {
+		t.Fatal("view should be inactive")
+	}
+
+	// Modify file on disk before session 2
+	if err := os.WriteFile(filePath, []byte("new session content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Session 2: reopen same path
+	m, cmd2 := m.openFileView("reopen.go")
+	if cmd2 == nil {
+		t.Fatal("expected cmd2")
+	}
+
+	// Late completion from session 1 arrives
+	msg1 := cmd1()
+	updated, _ := m.Update(msg1)
+	m = updated.(model)
+
+	// Session 1 message must have been discarded: view is still waiting on session 2
+	if m.fileView.renderedContent != "" {
+		t.Fatalf("late completion from session 1 must be discarded, got: %s", m.fileView.renderedContent)
+	}
+
+	// Session 2 completion arrives
+	msg2 := cmd2()
+	updated, _ = m.Update(msg2)
+	m = updated.(model)
+
+	rendered := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(rendered, "new session content") {
+		t.Fatalf("expected new session content, got: %s", rendered)
+	}
+}
