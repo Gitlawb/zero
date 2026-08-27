@@ -151,6 +151,16 @@ func (startup *optionalMCPStartup) closeRuntime() {
 // Discarding their failures here left every one of them rendered from
 // configuration alone, which reports a server that never connected as enabled --
 // the single thing that panel exists to prevent.
+// completed exposes the completion signal so an already-open surface can be
+// told to rebuild. Nil when there is no background registration, which is what
+// the consumer treats as "nothing to wait for".
+func (startup *optionalMCPStartup) completed() <-chan struct{} {
+	if startup == nil {
+		return nil
+	}
+	return startup.done
+}
+
 func (startup *optionalMCPStartup) Skipped() []mcp.SkippedServer {
 	if startup == nil {
 		return nil
