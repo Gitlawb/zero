@@ -5774,16 +5774,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			row := transcriptRow{
-				kind:            rowToolResult,
-				id:              effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
-				text:            toolResultRowText(result),
-				tool:            result.Name,
-				status:          result.Status,
-				detail:          toolResultDetail(result),
-				meta:            result.Meta,
-				runID:           runID,
-				changedFiles:    result.ChangedFiles,
-				changeSummaries: result.ChangeSummaries,
+				kind:               rowToolResult,
+				id:                 effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+				text:               toolResultRowText(result),
+				tool:               result.Name,
+				status:             result.Status,
+				detail:             toolResultDetail(result),
+				meta:               result.Meta,
+				runID:              runID,
+				changedFiles:       result.ChangedFiles,
+				changeSummaries:    result.ChangeSummaries,
+				enforcementNotices: result.EnforcementNotices,
 			}
 			// A successful Task/TaskOutput result is represented by a specialist card.
 			// update_plan stays in the transcript as a rendered checklist; failures
@@ -6045,6 +6046,9 @@ func toolResultSessionPayload(result agent.ToolResult) map[string]any {
 	}
 	if len(result.Meta) > 0 {
 		payload["meta"] = result.Meta
+	}
+	if len(result.EnforcementNotices) > 0 {
+		payload["enforcementNotices"] = result.EnforcementNotices
 	}
 	if len(result.ChangedFiles) > 0 {
 		payload["changedFiles"] = result.ChangedFiles
