@@ -345,6 +345,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
 		}
 		defer closeMCPRuntime(stderr, mcpRuntime)
+		// Said HERE, before --list-tools and before the first result, because both
+		// return early and the process this describes is already running by now. On
+		// stderr, so text, JSON and stream-JSON framing on stdout are untouched:
+		// this is the same channel the skipped-server and trust notices use.
+		reportMCPStartupDisclosures(stderr, mcpRuntime)
 	}
 	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
