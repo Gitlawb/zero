@@ -49,19 +49,29 @@ type Client struct {
 	stdin   io.WriteCloser
 	reader  *messageReader
 	writer  *messageWriter
-	mu      sync.Mutex
 	closeMu sync.Mutex
+	idMu    sync.Mutex
 	nextID  int
 	cleanup func()
 
+	writeQueue chan writeOp
+	writerOnce sync.Once
+
 	// dispatchMu guards the response-dispatch state shared with the single
-	// reader goroutine. It is never held across a blocking read.
+	// reader goroutine. It is never held across a blocking read or write.
 	dispatchMu sync.Mutex
 	readerOnce sync.Once
 	pending    map[int]chan dispatchResult
 	readErr    error
 	readDone   bool
 }
+
+type writeOp struct {
+	message rpcMessage
+	done    chan error
+}
+
+const writeQueueCapacity = 32
 
 // dispatchResult carries one matched JSON-RPC response (or a terminal reader
 // error) to a waiting caller.
@@ -307,20 +317,20 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 		return err
 	}
 
-	// Allocate an id, register a response channel, and write the request while
-	// holding client.mu. The mutex serializes writes and id allocation but is
-	// released before the (potentially unbounded) wait for the response, so a
-	// hung server never holds the lock and blocks other callers/Close.
-	client.mu.Lock()
+	// Allocate an id and register a response channel. ID allocation and dispatch
+	// registrations are fast non-blocking operations. Message transmission is
+	// handled via writeMessage, ensuring a hung server never blocks other callers
+	// or prevents a caller with a deadline from giving up.
+	client.idMu.Lock()
 	id := client.nextID
 	client.nextID++
+	client.idMu.Unlock()
 
 	responses := make(chan dispatchResult, 1)
 	client.dispatchMu.Lock()
 	if client.readDone {
 		readErr := client.readErr
 		client.dispatchMu.Unlock()
-		client.mu.Unlock()
 		if readErr != nil {
 			return readErr
 		}
@@ -329,16 +339,14 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 	client.pending[id] = responses
 	client.dispatchMu.Unlock()
 
-	if err := client.writer.write(rpcMessage{
+	if err := client.writeMessage(ctx, rpcMessage{
 		ID:     id,
 		Method: method,
 		Params: rawParams,
 	}); err != nil {
 		client.removePending(id)
-		client.mu.Unlock()
 		return err
 	}
-	client.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
@@ -358,6 +366,43 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 			}
 		}
 		return nil
+	}
+}
+
+// ensureWriter lazily starts the single writer goroutine.
+func (client *Client) ensureWriter() {
+	client.writerOnce.Do(func() {
+		if client.writeQueue == nil {
+			client.writeQueue = make(chan writeOp, writeQueueCapacity)
+		}
+		go client.writeLoop()
+	})
+}
+
+func (client *Client) writeLoop() {
+	for op := range client.writeQueue {
+		err := client.writer.write(op.message)
+		if op.done != nil {
+			op.done <- err
+		}
+	}
+}
+
+func (client *Client) writeMessage(ctx context.Context, message rpcMessage) error {
+	client.ensureWriter()
+	done := make(chan error, 1)
+	op := writeOp{message: message, done: done}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case client.writeQueue <- op:
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
 	}
 }
 
@@ -389,21 +434,25 @@ func (client *Client) readLoop() {
 		// It must never be routed as a response to a pending client request.
 		if message.Method != "" {
 			if message.ID != nil && jsonRPCIDEchoable(message.ID) {
-				// Send the courtesy -32601 reply asynchronously off the read loop so
-				// an undrained server stdin pipe never stalls readLoop or holds client.mu.
+				// Send the courtesy -32601 reply via the bounded writer queue. If the
+				// queue is saturated (e.g. an undrained server pipe), drop the reply
+				// immediately so it never stalls readLoop, holds a mutex, or blocks callers.
+				client.ensureWriter()
 				id := message.ID
 				method := message.Method
-				go func() {
-					client.mu.Lock()
-					defer client.mu.Unlock()
-					_ = client.writer.write(rpcMessage{
+				courtesy := writeOp{
+					message: rpcMessage{
 						ID: id,
 						Error: &rpcError{
 							Code:    -32601,
 							Message: fmt.Sprintf("Method %q not supported", method),
 						},
-					})
-				}()
+					},
+				}
+				select {
+				case client.writeQueue <- courtesy:
+				default:
+				}
 			}
 			continue
 		}
@@ -519,7 +568,7 @@ func (client *Client) notify(method string, params any) error {
 	if err != nil {
 		return err
 	}
-	return client.writer.write(rpcMessage{
+	return client.writeMessage(context.Background(), rpcMessage{
 		Method: method,
 		Params: rawParams,
 	})

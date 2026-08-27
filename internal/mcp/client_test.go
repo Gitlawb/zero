@@ -987,3 +987,48 @@ func TestStdioClientDropsInvalidServerRequestIDs(t *testing.T) {
 		// Expected: dropped cleanly
 	}
 }
+
+// TestStdioClientUndrainedServerDoesNotBlockCallerWithDeadline verifies that
+// when the server's input pipe is completely blocked and courtesy replies are
+// queued/dropped, a caller invoking request() with a deadline aborts cleanly
+// when the context expires rather than hanging indefinitely on a write or mutex.
+func TestStdioClientUndrainedServerDoesNotBlockCallerWithDeadline(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	client.ensureReader()
+
+	// Flood server requests to saturate write queue while outReader is NOT drained.
+	for i := 1; i <= 50; i++ {
+		serverReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"roots/list","params":{}}`+"\n", i+100)
+		_, err := inWriter.Write([]byte(serverReq))
+		if err != nil {
+			t.Fatalf("failed to write server request: %v", err)
+		}
+	}
+
+	// Caller with short deadline invokes request()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.request(ctx, "tools/list", map[string]any{}, nil)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected deadline exceeded, got: %v", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("request took too long to abort on deadline: %v", elapsed)
+	}
+}
