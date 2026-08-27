@@ -38,4 +38,4 @@ func (tree *commandTree) cancel() error {
 	return nil
 }
 
-func (tree *commandTree) close() error { return tree.cancel() }
+func (*commandTree) close() error { return nil }

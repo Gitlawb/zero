@@ -320,7 +320,7 @@ exit 0
 }
 
 func TestNewExecRunnerWaitDelayCannotPassWithRunEnd(t *testing.T) {
-	stub := writeExecStub(t, `sleep 30 &
+	stub := writeExecStub(t, `sleep 3 &
 echo '{"type":"run_end","exitCode":0}'
 exit 0
 `)
