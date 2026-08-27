@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 // defaultCommandTimeout bounds a single verification command so a hung command
@@ -139,6 +141,7 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 	}
 	args := trimCommand(command.Command)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	execution.HardenCommandContext(cmd)
 	cmd.Dir = workspace
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -167,6 +170,7 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 func defaultRunGit(ctx context.Context, workspace string, args ...string) ([]byte, error) {
 	allArgs := append([]string{"-C", workspace}, args...)
 	cmd := exec.CommandContext(ctx, "git", allArgs...)
+	execution.HardenCommandContext(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

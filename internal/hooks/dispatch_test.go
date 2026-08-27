@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -23,6 +24,41 @@ func (preparer *hookExecutionPreparer) PrepareExecution(_ context.Context, reque
 
 func beforeToolConfig(hooks ...Definition) Config {
 	return Config{Enabled: true, Hooks: hooks}
+}
+
+func TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
+	switch os.Getenv("ZERO_HOOK_TREE_HELPER") {
+	case "parent":
+		child := exec.Command(os.Args[0], "-test.run=^TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput$")
+		child.Env = append(os.Environ(), "ZERO_HOOK_TREE_HELPER=grandchild")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		select {}
+	case "grandchild":
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	result := execCommandRunner(
+		ctx,
+		os.Args[0],
+		[]string{"-test.run=^TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput$"},
+		nil,
+		"",
+		append(os.Environ(), "ZERO_HOOK_TREE_HELPER=parent"),
+	)
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("command remained blocked by grandchild output handles for %s", elapsed)
+	}
+	if result.Err == nil && result.ExitCode == 0 {
+		t.Fatalf("timed-out command unexpectedly succeeded: %#v", result)
+	}
 }
 
 func TestDispatchRunsMatchingHooksAndRecordsAudit(t *testing.T) {

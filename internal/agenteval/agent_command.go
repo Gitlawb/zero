@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os/exec"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 type AgentRunInput struct {
@@ -61,6 +63,7 @@ func (runner CommandAgentRunner) Run(ctx context.Context, input AgentRunInput) A
 	}
 	command := expandAgentCommand(runner.Command, input)
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	execution.HardenCommandContext(cmd)
 	cmd.Dir = input.WorkspacePath
 	stdout := &capWriter{limit: limit}
 	stderr := &capWriter{limit: limit}

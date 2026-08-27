@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execprofile"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/trace"
 )
 
@@ -657,6 +658,7 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 
 		args := buildTurnExecArgs(task, rc, tracePath, extraArgs)
 		cmd := exec.CommandContext(ctx, binary, args...)
+		execution.HardenCommandContext(cmd)
 		cmd.Env = appendNoColor(os.Environ())
 		if dir := strings.TrimSpace(task.WorkspaceFixture); dir != "" {
 			cmd.Dir = dir

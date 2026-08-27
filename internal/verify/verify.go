@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/testrunner"
 )
@@ -299,6 +300,7 @@ func defaultRunner(ctx context.Context, dir string, command []string, timeout ti
 	defer cancel()
 
 	cmd := exec.CommandContext(commandCtx, command[0], command[1:]...)
+	execution.HardenCommandContext(cmd)
 	cmd.Dir = dir
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
