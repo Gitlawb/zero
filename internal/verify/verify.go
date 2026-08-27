@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -300,17 +301,17 @@ func defaultRunner(ctx context.Context, dir string, command []string, timeout ti
 	defer cancel()
 
 	cmd := exec.CommandContext(commandCtx, command[0], command[1:]...)
-	execution.HardenCommandContext(cmd)
 	cmd.Dir = dir
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := execution.RunCommand(commandCtx, cmd)
 	exitCode := 0
 	if err != nil {
 		exitCode = -1
-		if exitError, ok := err.(*exec.ExitError); ok {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
 			exitCode = exitError.ExitCode()
 			err = nil
 		}

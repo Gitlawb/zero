@@ -267,12 +267,14 @@ func MeasureColdStart(ctx context.Context, command []string) (float64, error) {
 	}
 	startedAt := time.Now()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	execution.HardenCommandContext(cmd)
 	cmd.Env = appendNoColor(os.Environ())
-	output, err := cmd.CombinedOutput()
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := execution.RunCommand(ctx, cmd)
 	durationMs := RoundMetric(float64(time.Since(startedAt).Microseconds()) / 1000)
 	if err != nil {
-		return 0, commandError(command, err, string(output), "")
+		return 0, commandError(command, err, output.String(), "")
 	}
 	return durationMs, nil
 }
@@ -284,7 +286,6 @@ func MeasureFirstOutput(ctx context.Context, command []string) (firstOutputSampl
 	rssBefore := readHarnessMemoryMb()
 	startedAt := time.Now()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	execution.HardenCommandContext(cmd)
 	cmd.Env = offlineBenchmarkEnv(os.Environ())
 
 	var once sync.Once
@@ -298,7 +299,7 @@ func MeasureFirstOutput(ctx context.Context, command []string) (firstOutputSampl
 	stderr := &timedBuffer{onFirstWrite: markFirstOutput}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	waitErr := cmd.Run()
+	waitErr := execution.RunCommand(ctx, cmd)
 	finishedAt := time.Now()
 
 	if firstOutputAt.IsZero() {

@@ -319,6 +319,21 @@ exit 0
 	}
 }
 
+func TestNewExecRunnerWaitDelayCannotPassWithRunEnd(t *testing.T) {
+	stub := writeExecStub(t, `sleep 30 &
+echo '{"type":"run_end","exitCode":0}'
+exit 0
+`)
+	runner := NewExecRunner(stub)
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err == nil || !strings.Contains(outcome.Err.Error(), "output cleanup failed") {
+		t.Fatalf("inherited output pipe must be a harness error, got %#v", outcome)
+	}
+	if outcome.Passed {
+		t.Fatal("run_end must not bypass an output cleanup failure")
+	}
+}
+
 func TestNewExecRunnerLaunchFailureIsHarnessError(t *testing.T) {
 	// A binary that cannot be launched (no terminal event, process error) is a
 	// genuine harness error.

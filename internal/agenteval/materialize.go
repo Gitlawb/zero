@@ -190,7 +190,6 @@ func initGitBaseline(ctx context.Context, workspace string) error {
 	}
 	for _, args := range commands {
 		cmd := exec.CommandContext(ctx, "git", args...)
-		execution.HardenCommandContext(cmd)
 		cmd.Dir = workspace
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=Zero Eval",
@@ -201,7 +200,7 @@ func initGitBaseline(ctx context.Context, workspace string) error {
 		var output bytes.Buffer
 		cmd.Stdout = &output
 		cmd.Stderr = &output
-		if err := cmd.Run(); err != nil {
+		if err := execution.RunCommand(ctx, cmd); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}

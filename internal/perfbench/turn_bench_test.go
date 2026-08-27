@@ -643,6 +643,20 @@ func runTurnStub(t *testing.T, task BenchTask, stubBody string) TurnTaskOutcome 
 	return NewTurnExecRunner(stub)(context.Background(), task, RunContext{Model: "fake-model"})
 }
 
+func TestNewTurnExecRunnerWaitDelayCannotPassWithRunEnd(t *testing.T) {
+	task := BenchTask{ID: "wait-delay", Prompt: "p", WorkspaceFixture: t.TempDir()}
+	outcome := runTurnStub(t, task, `sleep 30 &
+echo '{"type":"run_end","exitCode":0}'
+exit 0
+`)
+	if outcome.Err == nil || !strings.Contains(outcome.Err.Error(), "output cleanup failed") {
+		t.Fatalf("inherited output pipe must be a harness error, got %#v", outcome)
+	}
+	if outcome.Passed {
+		t.Fatal("run_end must not bypass an output cleanup failure")
+	}
+}
+
 // assertVerifyFailed asserts an outcome failed specifically because the oracle
 // rejected the work — Passed is false, there is no harness error (Err nil), and
 // VerifyErr carries the surfaced failure detail. This is stronger than merely

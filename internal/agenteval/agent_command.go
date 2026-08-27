@@ -63,14 +63,13 @@ func (runner CommandAgentRunner) Run(ctx context.Context, input AgentRunInput) A
 	}
 	command := expandAgentCommand(runner.Command, input)
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	execution.HardenCommandContext(cmd)
 	cmd.Dir = input.WorkspacePath
 	stdout := &capWriter{limit: limit}
 	stderr := &capWriter{limit: limit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err := execution.RunCommand(ctx, cmd)
 	result.Stdout = stdout.buf.String()
 	result.Stderr = stderr.buf.String()
 	result.Truncated = stdout.truncated || stderr.truncated

@@ -658,7 +658,6 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 
 		args := buildTurnExecArgs(task, rc, tracePath, extraArgs)
 		cmd := exec.CommandContext(ctx, binary, args...)
-		execution.HardenCommandContext(cmd)
 		cmd.Env = appendNoColor(os.Environ())
 		if dir := strings.TrimSpace(task.WorkspaceFixture); dir != "" {
 			cmd.Dir = dir
@@ -667,12 +666,15 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		cmd.Stdout = &outBuf
 		cmd.Stderr = &errBuf
 		start := time.Now()
-		runErr := cmd.Run()
+		runErr := execution.RunCommand(ctx, cmd)
 		wallMs := float64(time.Since(start).Microseconds()) / 1000
 
 		exitCode, haveExit := streamJSONExitCode(outBuf.Bytes())
 		outcome := TurnTaskOutcome{WallMs: wallMs}
-		if haveExit && exitCode != 0 {
+		if errors.Is(runErr, exec.ErrWaitDelay) {
+			outcome.Err = fmt.Errorf("zero exec output cleanup failed: %w", runErr)
+			return outcome
+		} else if haveExit && exitCode != 0 {
 			outcome.VerifyErr = fmt.Sprintf("agent run_end exit code %d", exitCode)
 		} else if !haveExit {
 			detail := strings.TrimSpace(errBuf.String())
