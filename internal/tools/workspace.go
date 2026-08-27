@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -32,17 +33,31 @@ func normalizeWorkspaceRoot(workspaceRoot string) string {
 }
 
 func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, string, error) {
+	return resolveWorkspacePathForGOOS(runtime.GOOS, workspaceRoot, requestedPath)
+}
+
+func resolveWorkspacePathForGOOS(goos, workspaceRoot, requestedPath string) (string, string, error) {
+	original := requestedPath
+	// Windows-only rewrite of synthetic POSIX prefixes that include the
+	// workspace basename. Real Windows absolute paths are left unchanged;
+	// missing files are not invented.
+	requestedPath = rewritePosixWorkspacePath(goos, workspaceRoot, requestedPath)
+
+	fail := func(err error) (string, string, error) {
+		return "", "", annotatePosixWindowsPathError(goos, workspaceRoot, original, err)
+	}
+
 	if requestedPath == "" {
 		requestedPath = "."
 	}
 
 	root, err := filepath.Abs(workspaceRoot)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 
 	target := requestedPath
@@ -52,19 +67,19 @@ func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, s
 
 	target, err = filepath.Abs(target)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	target, err = filepath.EvalSymlinks(target)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 
 	relative, err := filepath.Rel(root, target)
 	if err != nil {
-		return "", "", outsideWorkspaceError(requestedPath)
+		return fail(outsideWorkspaceError(requestedPath))
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", "", outsideWorkspaceError(requestedPath)
+		return fail(outsideWorkspaceError(requestedPath))
 	}
 	if relative == "." {
 		return target, ".", nil
@@ -73,17 +88,31 @@ func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, s
 }
 
 func resolveWorkspaceTargetPath(workspaceRoot string, requestedPath string) (string, string, error) {
+	return resolveWorkspaceTargetPathForGOOS(runtime.GOOS, workspaceRoot, requestedPath)
+}
+
+func resolveWorkspaceTargetPathForGOOS(goos, workspaceRoot, requestedPath string) (string, string, error) {
+	original := requestedPath
+	// Windows-only rewrite of synthetic POSIX prefixes that include the
+	// workspace basename. Real Windows absolute paths are left unchanged;
+	// missing files are not invented.
+	requestedPath = rewritePosixWorkspacePath(goos, workspaceRoot, requestedPath)
+
+	fail := func(err error) (string, string, error) {
+		return "", "", annotatePosixWindowsPathError(goos, workspaceRoot, original, err)
+	}
+
 	if requestedPath == "" {
 		requestedPath = "."
 	}
 
 	root, err := filepath.Abs(workspaceRoot)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 
 	target := requestedPath
@@ -92,10 +121,10 @@ func resolveWorkspaceTargetPath(workspaceRoot string, requestedPath string) (str
 	}
 	target, err = filepath.Abs(target)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	if err := recheckWorkspaceWriteTarget(root, target); err != nil {
-		return "", "", err
+		return fail(err)
 	}
 
 	existing := target
@@ -106,19 +135,19 @@ func resolveWorkspaceTargetPath(workspaceRoot string, requestedPath string) (str
 		} else if os.IsNotExist(err) {
 			parent := filepath.Dir(existing)
 			if parent == existing {
-				return "", "", err
+				return fail(err)
 			}
 			missingSegments = append([]string{filepath.Base(existing)}, missingSegments...)
 			existing = parent
 			continue
 		} else {
-			return "", "", err
+			return fail(err)
 		}
 	}
 
 	resolved, err := filepath.EvalSymlinks(existing)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	for _, segment := range missingSegments {
 		resolved = filepath.Join(resolved, segment)
@@ -126,10 +155,10 @@ func resolveWorkspaceTargetPath(workspaceRoot string, requestedPath string) (str
 
 	relative, err := filepath.Rel(root, resolved)
 	if err != nil {
-		return "", "", outsideWorkspaceError(requestedPath)
+		return fail(outsideWorkspaceError(requestedPath))
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", "", outsideWorkspaceError(requestedPath)
+		return fail(outsideWorkspaceError(requestedPath))
 	}
 	if relative == "." {
 		return resolved, ".", nil
