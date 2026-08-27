@@ -25,14 +25,16 @@ const maxTurnsAnswer = "Agent reached maximum number of turns without a final an
 const maxTurnsFinalAnswerPrompt = "You have reached the tool-turn limit. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
 
 // maxStreamStallRetries bounds how many times a turn that timed out (idle/stall)
-// WITH NO OUTPUT yet is re-issued on a fresh connection before giving up. Only
-// the no-output case is retried (a partial turn would duplicate), so this is a
-// safe recovery for a stalled/dead pooled connection.
+// OR hit a mid-stream transport abort (#973) WITH NO OUTPUT yet is re-issued on
+// a fresh connection before giving up. Only the no-output case is retried (a
+// partial turn would duplicate), so this is a safe recovery for a stalled/dead
+// pooled connection or a socket abort before tool dispatch.
 //
 // Set to 1 (not 2): each attempt can itself idle for the full stream timeout
 // (~5min) before the stall is even detected, so 2 retries left an interactive
 // session frozen for ~15min. One retry keeps the common single-hiccup recovery
-// while bounding the worst case to ~2× the idle timeout.
+// while bounding the worst case to ~2× the idle timeout. Mid-stream transport
+// aborts share this bound (do not raise it for #973).
 const maxStreamStallRetries = 1
 
 const (
@@ -450,9 +452,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			result.Messages = copyMessages(messages)
 			return result, ctx.Err()
 		}
-		// A stream idle/stall timeout is safely re-issued when the turn committed NO
-		// answer text — no forwarded visible prose (forwardedVisibleText) and no
-		// collected final text (collected.Text). This covers two cases:
+		// A stream idle/stall timeout OR mid-stream transport abort (#973 — wsarecv /
+		// connection reset / forcibly closed) is safely re-issued when the turn
+		// committed NO answer text — no forwarded visible prose (forwardedVisibleText)
+		// and no collected final text (collected.Text). This covers three cases:
 		//   1. Nothing streamed at all before the connection died (the original
 		//      macOS stale-pooled-connection hang past the response-header timeout).
 		//   2. The model streamed transient reasoning and began a tool call (e.g. a
@@ -463,13 +466,23 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		//      re-render is transient previews, not duplicated answer text. This is
 		//      why the gate no longer excludes collected.ToolCalls: an incomplete
 		//      tool call from a timed-out stream is discard-and-retry, not output.
+		//   3. Mid-stream socket abort after connect succeeded (Windows WSAECONNABORTED /
+		//      wsarecv, connection reset by peer). Same no-tool-executed safety: the
+		//      error returns before tool dispatch, so a bounded retry is safe.
 		// A turn that forwarded real prose is NOT retried (it would duplicate visible
 		// answer text) and falls through to the error return below. Capped +
 		// exponential backoff, with a user-visible notice per attempt.
 		for attempt := 1; attempt <= maxStreamStallRetries &&
-			isStreamTimeoutError(collected.Error) && !forwardedVisibleText &&
+			(isStreamTimeoutError(collected.Error) || isMidStreamTransportAbort(collected.Error)) &&
+			!forwardedVisibleText &&
 			collected.Text == ""; attempt++ {
-			if notify := stallRetryNoticeFor(options); notify != nil {
+			var notify reconnectNotifier
+			if isStreamTimeoutError(collected.Error) {
+				notify = stallRetryNoticeFor(options)
+			} else {
+				notify = reconnectNoticeFor(options)
+			}
+			if notify != nil {
 				notify(attempt, maxStreamStallRetries)
 			}
 			if err := sleepWithContext(ctx, backoffFor(attempt)); err != nil {

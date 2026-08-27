@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -144,12 +145,33 @@ func shouldReconnect(ctx context.Context, err error) bool {
 		"i/o timeout",
 		"server closed",
 		"unexpected end",
+		// Windows mid-stream aborts (WSAECONNABORTED / wsarecv) — host or AV
+		// forcibly closes an established socket during CollectStream.
+		"wsarecv",
+		"connection was aborted",
+		"forcibly closed",
 	} {
 		if strings.Contains(msg, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+// isMidStreamTransportAbort reports whether a collected stream error string is a
+// retryable mid-stream transport abort (connection reset, Windows wsarecv /
+// WSAECONNABORTED, forcibly closed, etc.). Classification is single-sourced
+// through shouldReconnect so connect-time reconnect and post-connect CollectStream
+// retries stay in lockstep.
+//
+// Used for failures DURING the stream body AFTER a successful connect and BEFORE
+// tool dispatch — the incomplete turn committed no answer text and executed no
+// tools, so a bounded re-issue is safe (same safety rules as the stall path).
+func isMidStreamTransportAbort(message string) bool {
+	if message == "" {
+		return false
+	}
+	return shouldReconnect(context.Background(), errors.New(message))
 }
 
 // backoffFor is the deterministic exponential base delay for a 1-based attempt,
