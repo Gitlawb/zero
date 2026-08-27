@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+// runtimeRootUnderTest builds a root with the shape production uses, so the
+// components refuseAliasedRuntimeComponents walks stay inside test-owned
+// storage.
+//
+// Owned depth is the fixed names plus the digest, so a root placed directly in
+// t.TempDir() puts an owned component on /tmp, which the Unix ownership guard
+// correctly refuses because /tmp belongs to root. That is the guard working, not
+// a test environment problem, and it only shows up off Windows.
+func runtimeRootUnderTest(t *testing.T, leaf string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "zero", "runtime", "v1", leaf)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // A LEASE IS OWNERSHIP FOR A TRANSACTION, NOT A SELECTION PROBE.
 //
 // Setup took a lease only to learn which root won and released it at once, so
@@ -19,11 +36,7 @@ import (
 // This pins the mechanism the fix relies on: a held lease is what makes the
 // cleanup's exclusive acquire fail.
 func TestAHeldRuntimeLeaseStopsConcurrentCleanup(t *testing.T) {
-	parent := t.TempDir()
-	root := filepath.Join(parent, "deadbeefdeadbeef")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root := runtimeRootUnderTest(t, "deadbeefdeadbeef")
 
 	lease, err := prepareSandboxRuntimeLease(root)
 	if err != nil {
@@ -47,13 +60,10 @@ func TestAHeldRuntimeLeaseStopsConcurrentCleanup(t *testing.T) {
 // protect a sibling: setup reserving its own selection must not stop the
 // cleanup doing its work elsewhere.
 func TestAHeldLeaseDoesNotProtectASiblingRoot(t *testing.T) {
-	parent := t.TempDir()
-	held := filepath.Join(parent, "aaaaaaaaaaaaaaaa")
-	sibling := filepath.Join(parent, "bbbbbbbbbbbbbbbb")
-	for _, dir := range []string{held, sibling} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	held := runtimeRootUnderTest(t, "aaaaaaaaaaaaaaaa")
+	sibling := filepath.Join(filepath.Dir(held), "bbbbbbbbbbbbbbbb")
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	lease, err := prepareSandboxRuntimeLease(held)
 	if err != nil {
