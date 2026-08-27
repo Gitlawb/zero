@@ -349,6 +349,46 @@ func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// SessionsConfig is the on-disk session retention policy in config.json.
+// Unset or 0 values disable pruning so existing users are not surprised:
+// Zero never deletes session directories unless a positive retentionDays
+// and/or maxCount is configured (or a CLI flag overrides).
+type SessionsConfig struct {
+	// RetentionDays deletes unprotected session directories whose UpdatedAt
+	// is older than this many days. 0 / omitted means off.
+	RetentionDays int `json:"retentionDays,omitempty"`
+	// MaxCount keeps at most this many sessions (newest UpdatedAt first) and
+	// prunes the rest. Protected (locked, active, named) sessions are never
+	// deleted, so the on-disk count may exceed MaxCount. 0 / omitted means off.
+	MaxCount int `json:"maxCount,omitempty"`
+}
+
+func (cfg SessionsConfig) Enabled() bool {
+	return cfg.RetentionDays > 0 || cfg.MaxCount > 0
+}
+
+func (cfg *SessionsConfig) UnmarshalJSON(data []byte) error {
+	type rawSessions struct {
+		RetentionDays      int `json:"retentionDays"`
+		RetentionDaysSnake int `json:"retention_days"`
+		MaxCount           int `json:"maxCount"`
+		MaxCountSnake      int `json:"max_count"`
+	}
+	var raw rawSessions
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	cfg.RetentionDays = raw.RetentionDays
+	if raw.RetentionDaysSnake != 0 && cfg.RetentionDays == 0 {
+		cfg.RetentionDays = raw.RetentionDaysSnake
+	}
+	cfg.MaxCount = raw.MaxCount
+	if raw.MaxCountSnake != 0 && cfg.MaxCount == 0 {
+		cfg.MaxCount = raw.MaxCountSnake
+	}
+	return nil
+}
+
 type FileConfig struct {
 	ActiveProvider      string             `json:"activeProvider,omitempty"`
 	Providers           []ProviderProfile  `json:"providers,omitempty"`
@@ -363,6 +403,7 @@ type FileConfig struct {
 	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
 	STT                 STTConfig          `json:"stt,omitempty"`
 	CrossSessionInbound string             `json:"crossSessionInbound,omitempty"`
+	Sessions            SessionsConfig     `json:"sessions,omitempty"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
@@ -380,6 +421,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
 		STT                 *STTConfig          `json:"stt,omitempty"`
 		CrossSessionInbound string              `json:"crossSessionInbound,omitempty"`
+		Sessions            SessionsConfig      `json:"sessions,omitempty"`
 	}
 	raw := rawConfig{
 		ActiveProvider:      cfg.ActiveProvider,
@@ -393,6 +435,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
 		CrossSessionInbound: cfg.CrossSessionInbound,
+		Sessions:            cfg.Sessions,
 	}
 	if !cfg.LocalControl.Empty() {
 		raw.LocalControl = &cfg.LocalControl
@@ -429,6 +472,7 @@ type Overrides struct {
 	LocalControl        LocalControlConfig
 	STT                 STTConfig
 	CrossSessionInbound string
+	Sessions            SessionsConfig
 }
 
 type ResolvedConfig struct {
@@ -446,6 +490,7 @@ type ResolvedConfig struct {
 	LocalControl        LocalControlConfig
 	STT                 STTConfig
 	CrossSessionInbound string
+	Sessions            SessionsConfig
 }
 
 type MCPConfig struct {
@@ -508,6 +553,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		LocalControl        LocalControlConfig         `json:"localControl"`
 		STT                 STTConfig                  `json:"stt"`
 		CrossSessionInbound string                     `json:"crossSessionInbound"`
+		Sessions            SessionsConfig             `json:"sessions"`
 		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -537,6 +583,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.LocalControl = raw.LocalControl
 	cfg.STT = raw.STT
 	cfg.CrossSessionInbound = raw.CrossSessionInbound
+	cfg.Sessions = raw.Sessions
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

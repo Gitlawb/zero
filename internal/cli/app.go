@@ -1348,7 +1348,7 @@ Commands:
   repo-map   Build a deterministic repository map for agent context
   search     Search persisted local Zero session events
   find       Alias for search
-  sessions   Inspect local Zero session lineage
+  sessions   Inspect local Zero session lineage and prune old session directories
   spec       Review and approve saved spec-mode drafts
   specialist Manage local Zero specialist profiles
   plugins    Inspect, install, and remove local Zero plugins

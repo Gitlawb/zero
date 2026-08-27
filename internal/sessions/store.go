@@ -228,9 +228,9 @@ type Store struct {
 	// it, which would break mutual exclusion). The cost of leaving them is a
 	// single *sync.Mutex per distinct session id touched by this Store's
 	// lifetime, which is small and bounded in practice — the CLI process is
-	// short-lived and the TUI works with a bounded set of sessions. There is no
-	// session-close/delete lifecycle hook to prune against, so unbounded growth
-	// is accepted deliberately rather than risk an unsafe eviction.
+	// short-lived and the TUI works with a bounded set of sessions. Prune
+	// deletes session directories on disk but leaves these mutexes in the map;
+	// unbounded growth is accepted rather than risk an unsafe eviction.
 	sessionLocks map[string]*sync.Mutex
 	idCounter    atomic.Uint64
 }
@@ -899,6 +899,25 @@ func (store *Store) lockSession(sessionID string) (func(), error) {
 		release()
 		mu.Unlock()
 	}, nil
+}
+
+// tryLockSession is the non-blocking counterpart of lockSession. ok is false
+// when the session is already locked in-process or by another process holding
+// session.lock. The caller must invoke the returned unlock function when ok.
+func (store *Store) tryLockSession(sessionID string) (func(), bool, error) {
+	mu := store.sessionLock(sessionID)
+	if !mu.TryLock() {
+		return nil, false, nil
+	}
+	release, ok, err := store.tryAcquireFileLock(sessionID)
+	if err != nil || !ok {
+		mu.Unlock()
+		return nil, false, err
+	}
+	return func() {
+		release()
+		mu.Unlock()
+	}, true, nil
 }
 
 func (store *Store) lockPath(sessionID string) string {

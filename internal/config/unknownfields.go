@@ -89,6 +89,9 @@ var legacyJSONAliases = map[string][]string{
 		"api_key_stored", "api_format", "auth_header", "auth_scheme",
 		"auth_header_value", "custom_headers", "model_id", "parse_think_tags",
 	},
+	"config.SessionsConfig": {
+		"retention_days", "max_count",
+	},
 }
 
 // knownJSONFields returns the JSON field names of a struct (and their Go

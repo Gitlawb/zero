@@ -259,3 +259,24 @@ func TestValidateFileAllowsLegacyProviderKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateFileRejectsNegativeSessionRetention(t *testing.T) {
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [
+			{"name": "main", "provider_kind": "openai", "model": "gpt-4.1"}
+		],
+		"sessions": {"retentionDays": -1}
+	}`)
+	_, issues := ValidateFile(path)
+	found := false
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "sessions.retentionDays") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected sessions.retentionDays issue, got %#v", issues)
+	}
+}

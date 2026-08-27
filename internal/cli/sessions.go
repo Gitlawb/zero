@@ -3,8 +3,11 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/zerocommands"
@@ -18,6 +21,11 @@ type sessionCommandOptions struct {
 	excludeTarget  bool
 	preserveLast   int
 	maxPromptChars int
+	dryRun         bool
+	olderThan      time.Duration
+	olderThanSet   bool
+	maxCount       int
+	maxCountSet    bool
 }
 
 func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -72,6 +80,11 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeExecUsageError(stderr, "sessions compact-plan requires a session id")
 		}
 		return runSessionsCompactPlan(store, remaining[0], options, stdout, stderr)
+	case "prune", "clean":
+		if len(remaining) != 0 {
+			return writeExecUsageError(stderr, "sessions prune does not accept positional arguments")
+		}
+		return runSessionsPrune(store, options, stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown sessions command %q", command))
 	}
@@ -89,6 +102,8 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 			return command, remaining, options, true, nil
 		case "--json":
 			options.json = true
+		case "--dry-run":
+			options.dryRun = true
 		case "--exclude-target":
 			options.excludeTarget = true
 		case "--kind":
@@ -187,6 +202,48 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 				}
 				options.maxPromptChars = maxPromptChars
 				continue
+			case arg == "--older-than":
+				value, next, err := nextFlagValue(args, index, arg)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				olderThan, err := parseOlderThanDuration(value)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.olderThan = olderThan
+				options.olderThanSet = true
+				index = next
+				continue
+			case strings.HasPrefix(arg, "--older-than="):
+				olderThan, err := parseOlderThanDuration(strings.TrimPrefix(arg, "--older-than="))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.olderThan = olderThan
+				options.olderThanSet = true
+				continue
+			case arg == "--max-count":
+				value, next, err := nextFlagValue(args, index, arg)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				maxCount, err := parsePositiveIntFlag(arg, value)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.maxCount = maxCount
+				options.maxCountSet = true
+				index = next
+				continue
+			case strings.HasPrefix(arg, "--max-count="):
+				maxCount, err := parsePositiveIntFlag("--max-count", strings.TrimSpace(strings.TrimPrefix(arg, "--max-count=")))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.maxCount = maxCount
+				options.maxCountSet = true
+				continue
 			}
 			if strings.HasPrefix(arg, "-") {
 				return command, remaining, options, false, execUsageError{fmt.Sprintf("unknown sessions flag %q", arg)}
@@ -225,7 +282,7 @@ func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
 
 func isSessionsCommand(command string) bool {
 	switch command {
-	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan":
+	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "prune", "clean":
 		return true
 	default:
 		return false
@@ -243,6 +300,10 @@ func validateSessionCommandFlags(command string, options sessionCommandOptions) 
 	hasCompactionFlag := options.preserveLast > 0 || options.maxPromptChars > 0
 	if hasCompactionFlag && command != "compact-plan" {
 		return execUsageError{"--preserve-last and --max-prompt-chars are only valid for sessions compact-plan"}
+	}
+	hasPruneFlag := options.dryRun || options.olderThanSet || options.maxCountSet
+	if hasPruneFlag && command != "prune" && command != "clean" {
+		return execUsageError{"--dry-run, --older-than, and --max-count are only valid for sessions prune"}
 	}
 	return nil
 }
@@ -532,6 +593,7 @@ Commands:
   rewind-plan <id>      Preview events kept and dropped by a rewind
   rewind <id>           Restore workspace files and truncate the log to a checkpoint
   compact-plan <id>     Preview events compacted and preserved by compaction
+  prune                 Apply the configured session retention policy (alias: clean)
 
 Flags:
       --json            Print JSON output
@@ -541,7 +603,118 @@ Flags:
       --exclude-target  Drop the target event (rewind-plan, rewind)
       --preserve-last <n> Keep recent events in compact-plan
       --max-prompt-chars <n> Limit compact-plan summary prompt
+      --dry-run         Print sessions prune would delete without removing them
+      --older-than <dur> Age cutoff for prune (e.g. 7d, 24h); overrides sessions.retentionDays
+      --max-count <n>   Keep at most n sessions during prune; overrides sessions.maxCount
   -h, --help            Show this help
 `)
 	return err
+}
+
+func parseOlderThanDuration(value string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, execUsageError{"--older-than requires a value"}
+	}
+	if strings.HasSuffix(trimmed, "d") {
+		days, err := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(trimmed, "d")))
+		if err != nil || days <= 0 {
+			return 0, execUsageError{fmt.Sprintf("invalid --older-than %q", value)}
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil || d <= 0 {
+		return 0, execUsageError{fmt.Sprintf("invalid --older-than %q; expected a duration like 7d or 24h", value)}
+	}
+	return d, nil
+}
+
+func runSessionsPrune(store *sessions.Store, options sessionCommandOptions, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	policy, err := sessionsPrunePolicy(options, deps)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if !policy.Enabled() {
+		msg := "Session pruning is off: sessions.retentionDays and sessions.maxCount are unset or 0, so existing sessions are kept.\nSet a policy in config.json or pass --older-than / --max-count."
+		if options.json {
+			if err := writePrettyJSON(stdout, map[string]any{"deleted": []any{}, "skipped": []any{}, "dryRun": options.dryRun, "enabled": false, "message": msg}); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		}
+		if _, err := fmt.Fprintln(stdout, msg); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	result, err := store.Prune(policy)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, redaction.RedactValue(result, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, formatPruneResult(result)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func sessionsPrunePolicy(options sessionCommandOptions, deps appDeps) (sessions.PrunePolicy, error) {
+	cfg, err := loadSessionsConfig(deps)
+	if err != nil {
+		return sessions.PrunePolicy{}, err
+	}
+	policy := sessions.PrunePolicy{
+		RetentionDays: cfg.RetentionDays,
+		MaxCount:      cfg.MaxCount,
+		DryRun:        options.dryRun,
+	}
+	if options.olderThanSet {
+		policy.OlderThan = options.olderThan
+		policy.RetentionDays = 0
+	}
+	if options.maxCountSet {
+		policy.MaxCount = options.maxCount
+	}
+	return policy, nil
+}
+
+func loadSessionsConfig(deps appDeps) (config.SessionsConfig, error) {
+	if deps.resolveConfig == nil {
+		return config.SessionsConfig{}, nil
+	}
+	workspace := ""
+	if deps.getwd != nil {
+		if cwd, err := deps.getwd(); err == nil {
+			workspace = cwd
+		}
+	}
+	resolved, err := deps.resolveConfig(workspace, config.Overrides{})
+	if err != nil {
+		return config.SessionsConfig{}, err
+	}
+	return resolved.Sessions, nil
+}
+
+func formatPruneResult(result sessions.PruneResult) string {
+	if len(result.Deleted) == 0 && len(result.Skipped) == 0 {
+		return "No sessions to prune."
+	}
+	lines := []string{sessions.FormatPruneSummary(result)}
+	for _, item := range result.Deleted {
+		label := "deleted"
+		if result.DryRun {
+			label = "would delete"
+		}
+		lines = append(lines, fmt.Sprintf("  - %s %s (%s, updated %s)", label, redact(item.SessionID), item.Reason, item.UpdatedAt))
+	}
+	for _, item := range result.Skipped {
+		lines = append(lines, fmt.Sprintf("  - kept %s (%s)", redact(item.SessionID), item.Reason))
+	}
+	return strings.Join(lines, "\n")
 }

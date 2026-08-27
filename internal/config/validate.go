@@ -36,5 +36,18 @@ func validateSemantics(cfg FileConfig) []Issue {
 	if err := validateSTTConfig(cfg.STT); err != nil {
 		return []Issue{{FieldPath: "stt", Message: err.Error()}}
 	}
+	if err := validateSessionsConfig(cfg.Sessions); err != nil {
+		return []Issue{{FieldPath: "sessions", Message: err.Error()}}
+	}
+	return nil
+}
+
+func validateSessionsConfig(cfg SessionsConfig) error {
+	if cfg.RetentionDays < 0 {
+		return fmt.Errorf("invalid sessions.retentionDays %d: must be >= 0 (0 disables age-based pruning)", cfg.RetentionDays)
+	}
+	if cfg.MaxCount < 0 {
+		return fmt.Errorf("invalid sessions.maxCount %d: must be >= 0 (0 disables count-based pruning)", cfg.MaxCount)
+	}
 	return nil
 }

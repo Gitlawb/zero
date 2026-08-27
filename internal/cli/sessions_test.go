@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
@@ -284,5 +285,103 @@ func sequenceClockCLI(values []time.Time) func() time.Time {
 		value := values[index]
 		index++
 		return value
+	}
+}
+
+func TestRunSessionsPruneDryRunDeletesNothing(t *testing.T) {
+	now := time.Date(2026, 8, 27, 18, 0, 0, 0, time.UTC)
+	old := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	clock := old
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: func() time.Time { return clock }})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "stale", Title: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	clock = now
+	if _, err := store.Create(sessions.CreateInput{SessionID: "fresh", Title: "current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sessions", "prune", "--older-than", "7d", "--dry-run"}, &stdout, &stderr, appDeps{
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		newSessionStore: func() *sessions.Store { return store },
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions prune --dry-run exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "stale") {
+		t.Fatalf("dry-run output = %q, want stale listed", stdout.String())
+	}
+	if _, err := store.Get("stale"); err != nil {
+		t.Fatalf("dry-run must not delete stale: %v", err)
+	}
+	got, err := store.Get("stale")
+	if err != nil || got == nil {
+		t.Fatalf("dry-run deleted stale session: err=%v got=%v", err, got)
+	}
+}
+
+func TestRunSessionsPruneAppliesOlderThan(t *testing.T) {
+	now := time.Date(2026, 8, 27, 18, 0, 0, 0, time.UTC)
+	old := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	clock := old
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: func() time.Time { return clock }})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "stale", Title: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	clock = now
+	if _, err := store.Create(sessions.CreateInput{SessionID: "fresh", Title: "current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sessions", "prune", "--older-than", "7d"}, &stdout, &stderr, appDeps{
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		newSessionStore: func() *sessions.Store { return store },
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions prune exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	got, err := store.Get("stale")
+	if err != nil {
+		t.Fatalf("Get stale: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("stale session still present: %#v", got)
+	}
+	fresh, err := store.Get("fresh")
+	if err != nil || fresh == nil {
+		t.Fatalf("fresh session missing: err=%v", err)
+	}
+}
+
+func TestRunSessionsPruneOffWithoutPolicy(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T19:30:00Z")})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "keep", Title: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sessions", "prune"}, &stdout, &stderr, appDeps{
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		newSessionStore: func() *sessions.Store { return store },
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions prune exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Session pruning is off") {
+		t.Fatalf("output = %q, want off message", stdout.String())
+	}
+	got, err := store.Get("keep")
+	if err != nil || got == nil {
+		t.Fatalf("unset policy deleted session")
 	}
 }

@@ -43,3 +43,43 @@ func TestToolsConfigPresentOnOverridesAndResolved(t *testing.T) {
 		t.Fatalf("ResolvedConfig.Tools.DeferThreshold = %d, want 4", resolved.Tools.DeferThreshold)
 	}
 }
+
+func TestSessionsConfigJSONRoundTrip(t *testing.T) {
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(`{"sessions":{"retentionDays":30,"maxCount":100}}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if cfg.Sessions.RetentionDays != 30 || cfg.Sessions.MaxCount != 100 {
+		t.Fatalf("Sessions = %#v, want retentionDays=30 maxCount=100", cfg.Sessions)
+	}
+
+	var snake FileConfig
+	if err := json.Unmarshal([]byte(`{"sessions":{"retention_days":14,"max_count":20}}`), &snake); err != nil {
+		t.Fatalf("Unmarshal(snake) error = %v", err)
+	}
+	if snake.Sessions.RetentionDays != 14 || snake.Sessions.MaxCount != 20 {
+		t.Fatalf("Sessions snake = %#v, want 14/20", snake.Sessions)
+	}
+
+	emptyEncoded, err := json.Marshal(SessionsConfig{})
+	if err != nil {
+		t.Fatalf("Marshal(empty) error = %v", err)
+	}
+	if string(emptyEncoded) != `{}` {
+		t.Fatalf("Marshal(empty) = %s, want {}", emptyEncoded)
+	}
+	if (SessionsConfig{}).Enabled() {
+		t.Fatalf("zero SessionsConfig must be disabled so existing users are not pruned")
+	}
+}
+
+func TestSessionsConfigPresentOnOverridesAndResolved(t *testing.T) {
+	overrides := Overrides{Sessions: SessionsConfig{RetentionDays: 7}}
+	resolved := ResolvedConfig{Sessions: SessionsConfig{MaxCount: 12}}
+	if overrides.Sessions.RetentionDays != 7 {
+		t.Fatalf("Overrides.Sessions.RetentionDays = %d, want 7", overrides.Sessions.RetentionDays)
+	}
+	if resolved.Sessions.MaxCount != 12 {
+		t.Fatalf("ResolvedConfig.Sessions.MaxCount = %d, want 12", resolved.Sessions.MaxCount)
+	}
+}

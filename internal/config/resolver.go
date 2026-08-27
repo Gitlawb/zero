@@ -119,6 +119,9 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	if cfg.Swarm.MaxTeamSize < 0 {
 		return ResolvedConfig{}, fmt.Errorf("invalid swarm.maxTeamSize %d: must be >= 0 (0 uses the default)", cfg.Swarm.MaxTeamSize)
 	}
+	if err := validateSessionsConfig(cfg.Sessions); err != nil {
+		return ResolvedConfig{}, err
+	}
 
 	if network := strings.TrimSpace(cfg.Sandbox.Network); network != "" {
 		switch sandbox.NetworkMode(network) {
@@ -176,6 +179,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		LocalControl:        cfg.LocalControl,
 		STT:                 cfg.STT,
 		CrossSessionInbound: cfg.CrossSessionInbound,
+		Sessions:            cfg.Sessions,
 	}, nil
 }
 
@@ -286,6 +290,12 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if inbound := strings.TrimSpace(src.CrossSessionInbound); inbound != "" {
 		dst.CrossSessionInbound = inbound
 	}
+	if src.Sessions.RetentionDays != 0 {
+		dst.Sessions.RetentionDays = src.Sessions.RetentionDays
+	}
+	if src.Sessions.MaxCount != 0 {
+		dst.Sessions.MaxCount = src.Sessions.MaxCount
+	}
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -351,6 +361,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	// Local control is intentionally user-config/override only. A cloned project
 	// must not be able to make browser, desktop, or terminal automation tools
 	// appear in the model's tool surface.
+	//
+	// Sessions retention is user-config/override only. The session store lives
+	// in the user data directory; a cloned project's .zero/config.json must
+	// not prune the user's sessions.
 	return nil
 }
 
@@ -751,6 +765,12 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	mergeSTTConfig(&cfg.STT, overrides.STT)
 	if inbound := strings.TrimSpace(overrides.CrossSessionInbound); inbound != "" {
 		cfg.CrossSessionInbound = inbound
+	}
+	if overrides.Sessions.RetentionDays != 0 {
+		cfg.Sessions.RetentionDays = overrides.Sessions.RetentionDays
+	}
+	if overrides.Sessions.MaxCount != 0 {
+		cfg.Sessions.MaxCount = overrides.Sessions.MaxCount
 	}
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)

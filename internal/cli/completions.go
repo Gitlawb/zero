@@ -52,7 +52,7 @@ var completionRoot = completionNode{
 		{names: []string{"context"}},
 		{names: []string{"repo-map", "repomap"}},
 		{names: []string{"search", "find"}},
-		{names: []string{"sessions", "session"}, children: leafNodes("list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan")},
+		{names: []string{"sessions", "session"}, children: leafNodes("list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "prune", "clean")},
 		{names: []string{"spec"}, children: leafNodes("show", "approve", "reject")},
 		{names: []string{"init"}},
 		{names: []string{"specialists", "specialist"}, children: []completionNode{
