@@ -1363,7 +1363,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch msg := msg.(type) {
 	case fileViewLoadedMsg:
-		return m.handleFileViewLoaded(msg), nil
+		return m.handleFileViewLoaded(msg)
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
