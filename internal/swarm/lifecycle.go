@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Spawn registers a task and launches a member of agentType to run it under the
@@ -283,7 +284,16 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 	if err != nil {
 		return "", err
 	}
+	run := s.taskRun(taskID)
+	if run == nil {
+		s.coord.AbortHandoff(taskID)
+		return "", fmt.Errorf("swarm: task %s has no local execution boundary; refusing handoff", taskID)
+	}
 	newID := s.nextID(toAgentType)
+	if err := s.coord.ReserveHandoffSuccessor(taskID, newID); err != nil {
+		s.coord.AbortHandoff(taskID)
+		return "", fmt.Errorf("swarm: reserve handoff successor: %w", err)
+	}
 	handoffTask := task.Description
 	if note != "" {
 		handoffTask += "\n\nHandoff note: " + note
@@ -303,25 +313,62 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 	// Stop a running member, remove a queued one, or cancel a launch currently
 	// between slot reservation and handle adoption. The completion barrier closes
 	// only after no source member can execute further side effects.
-	run := s.taskRun(taskID)
-	if run != nil {
-		run.stop()
-		if s.team(team).removeQueuedTask(taskID) {
-			run.finish()
+	run.stop()
+	if s.team(team).removeQueuedTask(taskID) {
+		run.finish()
+	}
+	if err := s.waitForHandoffSource(taskID, run); err != nil {
+		s.coord.AbortHandoff(taskID)
+		// If the execution barrier raced the cancellation/timeout, its watcher may
+		// have tried to finish while the claim was still held. Fail the stopped
+		// source rather than leave a permanently-running coordinator record.
+		if run.finished() {
+			_ = s.coord.Fail(taskID, "handoff aborted after source stopped: "+err.Error())
 		}
-		<-run.done
-	}
-	if err := s.coord.FinishHandoff(taskID); err != nil {
 		return "", err
 	}
-	if _, err := s.coord.Register(newID, newID, team, handoffTask); err != nil {
-		return "", err
+	if _, err := s.coord.CommitHandoff(taskID, newID, newID, team, handoffTask); err != nil {
+		s.coord.AbortHandoff(taskID)
+		failErr := s.coord.Fail(taskID, "handoff successor registration failed after source stopped: "+err.Error())
+		if failErr != nil {
+			return "", fmt.Errorf("swarm: register handoff successor: %w (source recovery failed: %v)", err, failErr)
+		}
+		return "", fmt.Errorf("swarm: register handoff successor: %w", err)
 	}
 	s.rememberCwd(newID, cwd)
 	s.startTaskRun(newID)
 	spec := s.buildSpec(pol, newID, newID, team, def, handoffTask, cwd)
 	s.dispatchAdmitted(spec)
 	return newID, nil
+}
+
+// waitForHandoffSource waits for the task-specific execution barrier without
+// letting a cancellation-insensitive member wedge a model tool forever. Close
+// cancels baseCtx before waiting for lifecycle admissions, so that path also
+// releases Handoff's admission ticket and avoids a shutdown wait cycle.
+func (s *Swarm) waitForHandoffSource(taskID string, run *taskRun) error {
+	timeout := s.handoffStopTimeout
+	if timeout <= 0 {
+		timeout = defaultHandoffStopTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-run.done:
+		return nil
+	case <-s.baseCtx.Done():
+		// Prefer a completed barrier if cancellation and member exit became ready
+		// together; a stopped source can still commit safely.
+		if run.finished() {
+			return nil
+		}
+		return fmt.Errorf("swarm: stop handoff source %s: %w", taskID, s.baseCtx.Err())
+	case <-timer.C:
+		if run.finished() {
+			return nil
+		}
+		return fmt.Errorf("%w: task %s after %s", ErrHandoffStopTimeout, taskID, timeout)
+	}
 }
 
 // AdoptOrphans re-parents tasks in a team whose owning member is no longer live

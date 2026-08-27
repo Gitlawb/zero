@@ -67,11 +67,12 @@ var agentColors = []string{"cyan", "magenta", "green", "yellow", "blue", "red"}
 // Coordinator is the in-memory task registry + team color assigner shared by an
 // orchestrator and its members. It is safe for concurrent use.
 type Coordinator struct {
-	mu         sync.RWMutex
-	tasks      map[string]*Task
-	colors     map[string]string // agentID -> color
-	colorIndex int
-	now        func() time.Time // injectable clock for tests
+	mu                  sync.RWMutex
+	tasks               map[string]*Task
+	handoffReservations map[string]string // successor task id -> claimed source task id
+	colors              map[string]string // agentID -> color
+	colorIndex          int
+	now                 func() time.Time // injectable clock for tests
 	// changed is closed (and replaced) on every task state change so WaitSettled
 	// can block for a transition without polling. Always non-nil after construction.
 	changed chan struct{}
@@ -80,10 +81,11 @@ type Coordinator struct {
 // NewCoordinator returns an empty coordinator using the wall clock.
 func NewCoordinator() *Coordinator {
 	return &Coordinator{
-		tasks:   map[string]*Task{},
-		colors:  map[string]string{},
-		now:     time.Now,
-		changed: make(chan struct{}),
+		tasks:               map[string]*Task{},
+		handoffReservations: map[string]string{},
+		colors:              map[string]string{},
+		now:                 time.Now,
+		changed:             make(chan struct{}),
 	}
 }
 
@@ -112,6 +114,9 @@ func (c *Coordinator) Register(id, agentID, team, description string) (Task, err
 	defer c.mu.Unlock()
 	if _, ok := c.tasks[id]; ok {
 		return Task{}, fmt.Errorf("%w: %s", ErrTaskExists, id)
+	}
+	if _, reserved := c.handoffReservations[id]; reserved {
+		return Task{}, fmt.Errorf("%w: %s is reserved for handoff", ErrTaskExists, id)
 	}
 	now := c.now()
 	t := &Task{
@@ -175,14 +180,49 @@ func (c *Coordinator) BeginHandoff(id string) (Task, error) {
 	return *t, nil
 }
 
-// AbortHandoff releases a claim before the source member is cancelled. It is
-// used when preparing the successor (for example, delivering its note) fails.
+// AbortHandoff releases a claim and any successor reservation when handoff
+// preparation fails or a stopped source does not reach its completion barrier.
 func (c *Coordinator) AbortHandoff(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if t, ok := c.tasks[id]; ok && t.handoff && !t.Status.terminal() {
 		t.handoff = false
 	}
+	for successorID, sourceID := range c.handoffReservations {
+		if sourceID == id {
+			delete(c.handoffReservations, successorID)
+		}
+	}
+}
+
+// ReserveHandoffSuccessor claims successorID for sourceID before any mailbox or
+// cancellation side effect. Register rejects reserved IDs, so another Swarm
+// sharing this Coordinator cannot steal the id between note delivery and the
+// atomic handoff commit.
+func (c *Coordinator) ReserveHandoffSuccessor(sourceID, successorID string) error {
+	if successorID == "" {
+		return errors.New("swarm: successor task id is required")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	source, ok := c.tasks[sourceID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownTask, sourceID)
+	}
+	if !source.handoff || source.Status.terminal() {
+		return fmt.Errorf("swarm: task %s has no active handoff claim", sourceID)
+	}
+	if _, exists := c.tasks[successorID]; exists {
+		return fmt.Errorf("%w: %s", ErrTaskExists, successorID)
+	}
+	if _, reserved := c.handoffReservations[successorID]; reserved {
+		return fmt.Errorf("%w: %s is reserved for handoff", ErrTaskExists, successorID)
+	}
+	if c.handoffReservations == nil {
+		c.handoffReservations = map[string]string{}
+	}
+	c.handoffReservations[successorID] = sourceID
+	return nil
 }
 
 // FinishHandoff publishes the terminal state only after the source execution
@@ -200,11 +240,67 @@ func (c *Coordinator) FinishHandoff(id string) error {
 	if t.Status.terminal() {
 		return fmt.Errorf("swarm: task %s already %s", id, t.Status)
 	}
+	for _, sourceID := range c.handoffReservations {
+		if sourceID == id {
+			return fmt.Errorf("swarm: task %s has a reserved successor; commit the handoff atomically", id)
+		}
+	}
 	t.handoff = false
 	t.Status = StatusHandedOff
 	t.UpdatedAt = c.now()
 	c.notifyChangeLocked()
 	return nil
+}
+
+// CommitHandoff atomically registers the successor and publishes the source's
+// handed-off terminal state. The successor is inserted first while c.mu keeps
+// the intermediate state invisible, so an ID collision cannot retire the
+// source and orphan adoption cannot observe a successor without its source
+// transition committed.
+func (c *Coordinator) CommitHandoff(sourceID, successorID, successorAgentID, team, description string) (Task, error) {
+	if successorID == "" {
+		return Task{}, errors.New("swarm: successor task id is required")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	source, ok := c.tasks[sourceID]
+	if !ok {
+		return Task{}, fmt.Errorf("%w: %s", ErrUnknownTask, sourceID)
+	}
+	if !source.handoff {
+		return Task{}, fmt.Errorf("swarm: task %s has no handoff in progress", sourceID)
+	}
+	if source.Status.terminal() {
+		return Task{}, fmt.Errorf("swarm: task %s already %s", sourceID, source.Status)
+	}
+	if reservedFor, ok := c.handoffReservations[successorID]; !ok || reservedFor != sourceID {
+		return Task{}, fmt.Errorf("swarm: successor task %s is not reserved for handoff from %s", successorID, sourceID)
+	}
+	if _, exists := c.tasks[successorID]; exists {
+		return Task{}, fmt.Errorf("%w: %s", ErrTaskExists, successorID)
+	}
+
+	now := c.now()
+	successor := &Task{
+		ID:          successorID,
+		AgentID:     successorAgentID,
+		Team:        team,
+		Description: description,
+		Status:      StatusPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	// Registration precedes retirement under the same lock. No reader can see
+	// either half until both ownership records are valid.
+	c.tasks[successorID] = successor
+	delete(c.handoffReservations, successorID)
+	c.assignColorLocked(successorAgentID)
+	source.handoff = false
+	source.Status = StatusHandedOff
+	source.UpdatedAt = now
+	c.notifyChangeLocked()
+	return *successor, nil
 }
 
 // Complete marks a task done with its result.
