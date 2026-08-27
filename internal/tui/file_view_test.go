@@ -973,7 +973,8 @@ func TestFileViewAsyncDiscardOnModeSwitchOrExit(t *testing.T) {
 }
 
 // TestFileViewAsyncDiscardOnThemeInvalidation verifies that if a theme switch occurs
-// while an async load is in flight, the old theme's completion message is discarded.
+// while an async load is in flight, the old theme's completion message is discarded
+// and a fresh load command for the new theme generation is triggered.
 func TestFileViewAsyncDiscardOnThemeInvalidation(t *testing.T) {
 	defer applyTheme(themeDark, true)
 	resetFileViewCacheForTest()
@@ -995,13 +996,70 @@ func TestFileViewAsyncDiscardOnThemeInvalidation(t *testing.T) {
 	// Invalidate cache by switching theme before cmd completes
 	applyTheme(themeLight, false)
 
-	// Now old cmd completes
+	// Now old cmd completes with stale generation
 	msg := cmd()
-	updated, _ := m.Update(msg)
+	updated, retryCmd := m.Update(msg)
 	m = updated.(model)
 
 	// The message must have been rejected due to generation mismatch
 	if m.fileView.renderedContent != "" {
 		t.Fatalf("expected empty renderedContent after invalidation, got %q", m.fileView.renderedContent)
+	}
+	if retryCmd == nil {
+		t.Fatal("expected retry command for new generation after invalidation")
+	}
+
+	// Executing the retry command loads the file under the new generation
+	retryMsg := retryCmd()
+	updated, _ = m.Update(retryMsg)
+	m = updated.(model)
+
+	if !strings.Contains(m.renderFileViewFull(80), "package") {
+		t.Fatalf("expected file content loaded after retry, got: %s", m.renderFileViewFull(80))
+	}
+	if m.fileView.loadedGen != defaultFileViewCache.generation() {
+		t.Fatalf("loadedGen %d != cache generation %d", m.fileView.loadedGen, defaultFileViewCache.generation())
+	}
+}
+
+// TestFileViewThemeSwitchWhileLoaded verifies that switching themes invalidates
+// the loaded generation and allows immediate reloading for the new palette.
+func TestFileViewThemeSwitchWhileLoaded(t *testing.T) {
+	defer applyTheme(themeDark, true)
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	fileA := filepath.Join(dir, "switch_test.go")
+	if err := os.WriteFile(fileA, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+
+	m = testOpenFile(m, "switch_test.go")
+	if !strings.Contains(m.renderFileViewFull(80), "package") {
+		t.Fatal("file should be loaded initially")
+	}
+
+	// Switch theme: generation advances, cache is cleared
+	applyTheme(themeLight, false)
+
+	// renderFileViewFull must not return the stale dark-theme content
+	staleCheck := m.renderFileViewFull(80)
+	if strings.Contains(staleCheck, "package") {
+		t.Fatalf("stale renderedContent must not be rendered after generation increment: %s", staleCheck)
+	}
+
+	// Starting a new load command re-populates for the new theme
+	m, reloadCmd := m.startFileViewLoadCmd(80)
+	if reloadCmd == nil {
+		t.Fatal("expected reload command")
+	}
+	updated, _ := m.Update(reloadCmd())
+	m = updated.(model)
+
+	if !strings.Contains(m.renderFileViewFull(80), "package") {
+		t.Fatalf("expected reloaded content for new theme, got: %s", m.renderFileViewFull(80))
 	}
 }
