@@ -65,7 +65,16 @@ type Options struct {
 	// one cannot delay the first response, which means their failures land after
 	// this surface exists; MCPSkipped is a snapshot and cannot carry them.
 	// Optional: nil means every failure was already known.
-	MCPLateSkipped      func() []mcp.SkippedServer
+	MCPLateSkipped func() []mcp.SkippedServer
+	// MCPStartupCompleted closes when the background MCP registration has
+	// finished, so an ALREADY-OPEN manager can be told to rebuild.
+	//
+	// A getter that reports late failures is not enough on its own: nothing
+	// schedules another render, so an overlay opened while an optional server was
+	// still connecting keeps showing the configuration-derived enabled state until
+	// unrelated input or a resize happens to redraw it. Optional: nil means there
+	// is no background registration to wait for.
+	MCPStartupCompleted <-chan struct{}
 	MCPPermissionStore  *mcp.PermissionStore
 	MCPTokenStore       *mcp.TokenStore
 	MCPCommand          func(context.Context, []string) MCPCommandResult

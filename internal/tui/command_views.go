@@ -774,3 +774,20 @@ func (m model) skillsText() string {
 		},
 	})
 }
+
+// mcpStartupCompletedMsg reports that the background MCP registration finished.
+type mcpStartupCompletedMsg struct{}
+
+// waitForMCPStartupCompletion turns the completion channel into one message.
+//
+// Optional MCP registration runs on its own goroutine so a slow server cannot
+// delay the first response. That means its result arrives with no user input
+// behind it, and Bubble Tea renders only in response to a message, so without
+// this the manager an operator already has open keeps showing what the
+// configuration said until they happen to type something or resize the terminal.
+func waitForMCPStartupCompletion(done <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		<-done
+		return mcpStartupCompletedMsg{}
+	}
+}

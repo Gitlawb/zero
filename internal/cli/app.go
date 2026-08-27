@@ -1020,9 +1020,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		// are not known yet and a snapshot cannot carry them. Pulled instead, or
 		// they stay rendered from configuration alone: enabled, with no
 		// explanation, for a server that never connected.
-		MCPLateSkipped:     optionalMCPRuntime.Skipped,
-		MCPPermissionStore: mcpPermissionStore,
-		MCPTokenStore:      mcpTokenStore,
+		MCPLateSkipped: optionalMCPRuntime.Skipped,
+		// And a signal to rebuild when it finishes. Pulling alone leaves an
+		// already-open manager showing the configuration-derived state, because a
+		// background completion schedules no render of its own.
+		MCPStartupCompleted: optionalMCPRuntime.completed(),
+		MCPPermissionStore:  mcpPermissionStore,
+		MCPTokenStore:       mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
 			if ctx == nil {
 				ctx = context.Background()

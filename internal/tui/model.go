@@ -114,7 +114,10 @@ type model struct {
 	// against, so the same invalidation the startup snapshot gets can be applied
 	// to them. mcpLateSkippedCount is what the cached view state was built from,
 	// so a new arrival invalidates the cache without a config change.
-	mcpLateSkipped       func() []internalmcp.SkippedServer
+	mcpLateSkipped func() []internalmcp.SkippedServer
+	// mcpStartupCompleted closes when the background registration finishes, so an
+	// already-open manager can be told to rebuild rather than waiting for input.
+	mcpStartupCompleted  <-chan struct{}
 	mcpStartupConfig     config.MCPConfig
 	mcpLateSkippedCount  int
 	mcpPermissionStore   *internalmcp.PermissionStore
@@ -1009,6 +1012,7 @@ func newModel(ctx context.Context, options Options) model {
 		mcpConfig:                   options.MCPConfig,
 		mcpSkipped:                  options.MCPSkipped,
 		mcpLateSkipped:              options.MCPLateSkipped,
+		mcpStartupCompleted:         options.MCPStartupCompleted,
 		mcpStartupConfig:            options.MCPConfig,
 		mcpSkippedCredentials:       mcpCredentialFingerprint(options.MCPTokenStore.SecretValues()),
 		mcpPermissionStore:          options.MCPPermissionStore,
@@ -1161,6 +1165,9 @@ func (m model) armComposerBlink() (model, tea.Cmd) {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd(m.composerBlinkSeq)}
+	if m.mcpStartupCompleted != nil {
+		cmds = append(cmds, waitForMCPStartupCompletion(m.mcpStartupCompleted))
+	}
 	if m.petAnimation != nil && !m.reducedMotion {
 		cmds = append(cmds, petTickCmd(m.petTickSeq, m.petFrameDelay()))
 	}
@@ -1494,6 +1501,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
 	case providerWizardOAuthMsg:
 		return m.applyProviderWizardOAuth(msg)
+	case mcpStartupCompletedMsg:
+		// The background registration is done, so the observations it produced are
+		// available now. Rebuilding HERE is what makes an already-open manager show
+		// them: nothing else schedules a render once Bubble Tea is idle, so a getter
+		// that reports late failures is not on its own enough.
+		m.refreshMCPViewState()
+		return m, nil
 	case aimlapiOnboardMsg:
 		return m.applyAimlapiOnboard(msg)
 	case aimlapiExistingBalanceMsg:
