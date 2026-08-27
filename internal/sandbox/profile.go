@@ -169,6 +169,9 @@ func resolveGitDir(root string) string {
 	if err != nil || !info.IsDir() {
 		return ""
 	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	return dir
 }
 
@@ -192,6 +195,9 @@ func resolveGitCommonDir(gitDir string) string {
 	info, err := os.Stat(common)
 	if err != nil || !info.IsDir() {
 		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(common); err == nil {
+		common = resolved
 	}
 	return common
 }

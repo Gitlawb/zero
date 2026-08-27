@@ -167,3 +167,17 @@ func TestGitMetadataWriteCarveoutsRejectsNonDirectoryTarget(t *testing.T) {
 		t.Fatalf("non-directory gitdir carveouts = %v, want none", got)
 	}
 }
+
+func TestGitMetadataWriteCarveoutsRejectsSymlinkGitdir(t *testing.T) {
+	outside := t.TempDir()
+	root := t.TempDir()
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(outside, alias); err != nil {
+		t.Fatal(err)
+	}
+	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+alias+"\n")
+	got := gitMetadataWriteCarveouts(root)
+	if len(got) != 0 {
+		t.Fatalf("symlink gitdir carveouts = %v, want none", got)
+	}
+}
