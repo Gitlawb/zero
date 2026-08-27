@@ -566,10 +566,15 @@ func TestHandoffSuccessorCollisionDoesNotStopSource(t *testing.T) {
 func TestCloseReleasesBlockedHandoffBeforeMemberExit(t *testing.T) {
 	releaseOriginal := make(chan struct{})
 	originalStarted := make(chan struct{})
+	originalCanceled := make(chan struct{})
 	successorStarted := make(chan struct{}, 1)
-	launcher := FuncLauncher{Run: func(_ context.Context, spec MemberSpec) (MemberResult, error) {
+	launcher := FuncLauncher{Run: func(ctx context.Context, spec MemberSpec) (MemberResult, error) {
 		if spec.AgentType == "teammate" {
 			close(originalStarted)
+			go func() {
+				<-ctx.Done()
+				close(originalCanceled)
+			}()
 			<-releaseOriginal
 			return MemberResult{Result: "source finished"}, nil
 		}
@@ -603,7 +608,11 @@ func TestCloseReleasesBlockedHandoffBeforeMemberExit(t *testing.T) {
 		_, err := sw.Handoff(Policy{Model: "m"}, "team", origID, "subagent", "")
 		handoffDone <- err
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-originalCanceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Handoff never canceled the source run")
+	}
 	closeDone := make(chan struct{})
 	go func() {
 		sw.Close()
