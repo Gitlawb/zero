@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // fileViewMaxLines caps the full-file mode so a giant generated file can't
@@ -35,6 +37,7 @@ const (
 	fileViewMaxLineBytes           = 4096    // 4 KiB max line length budget
 	defaultFileViewCacheMaxEntries = 64
 	fileViewMaxRenderVariants      = 4 // max rendered variants (width/fingerprint) per cached file entry
+	fileViewLoadingPlaceholder     = "Loading…"
 )
 
 const (
@@ -112,6 +115,7 @@ type fileViewRenderCache struct {
 	maxEntries int
 	items      map[string]*list.Element // targetPath -> *list.Element containing *fileViewCachedEntry
 	lru        *list.List
+	gen        int
 	statsData  fileViewCacheStats
 }
 
@@ -128,8 +132,16 @@ func newFileViewRenderCache(maxEntries int) *fileViewRenderCache {
 func (c *fileViewRenderCache) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.gen++
 	c.items = make(map[string]*list.Element)
 	c.lru.Init()
+	c.statsData.ThemeClears++
+}
+
+func (c *fileViewRenderCache) generation() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gen
 }
 
 func (c *fileViewRenderCache) resetStats() {
@@ -322,10 +334,39 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 	return b.String()
 }
 
-func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
+// getRenderOnly looks up an already-rendered variant in memory (or formats from
+// already-cached in-memory syntax tokens) without performing any disk I/O, stat,
+// or Chroma syntax highlighting. Safe for direct View calls.
+func (c *fileViewRenderCache) getRenderOnly(targetPath string, width int, changed map[string]bool) (string, bool) {
+	c.mu.Lock()
+	elem, ok := c.items[targetPath]
+	if !ok {
+		c.mu.Unlock()
+		return "", false
+	}
+	entry := elem.Value.(*fileViewCachedEntry)
+	c.lru.MoveToFront(elem)
+	c.statsData.CacheHits++
+	c.mu.Unlock()
+
+	renderKey := fmt.Sprintf("%d:%s", width, changedLinesFingerprint(changed))
+	if val, ok := entry.getRender(renderKey); ok {
+		return val, true
+	}
+
+	rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width)
+	entry.putRender(renderKey, rendered)
+	return rendered, true
+}
+
+// loadAndRender performs the bounded read, Chroma highlighting, and formatting
+// on a cache miss (or re-formats for a new width variant on a cache hit). It is
+// intended to be executed from a tea.Cmd / background worker, off the View path.
+func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, reqGen int) (string, error) {
 	stat, err := os.Stat(targetPath)
 	if err != nil {
-		return zeroTheme.faint.Render("Could not read file: " + err.Error())
+		rendered := zeroTheme.faint.Render("Could not read file: " + err.Error())
+		return rendered, err
 	}
 
 	modTime := stat.ModTime()
@@ -334,6 +375,11 @@ func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string,
 	renderKey := fmt.Sprintf("%d:%s", width, changedFingerprint)
 
 	c.mu.Lock()
+	if c.gen != reqGen {
+		c.mu.Unlock()
+		return "", errors.New("request superseded by cache invalidation")
+	}
+
 	if elem, ok := c.items[targetPath]; ok {
 		entry := elem.Value.(*fileViewCachedEntry)
 		if entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
@@ -342,13 +388,13 @@ func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string,
 			c.mu.Unlock()
 
 			if rendered, ok := entry.getRender(renderKey); ok {
-				return rendered
+				return rendered, nil
 			}
 
 			// Re-format for the new width or changed markers using cached display and lines
 			rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width)
 			entry.putRender(renderKey, rendered)
-			return rendered
+			return rendered, nil
 		}
 	}
 
@@ -358,7 +404,8 @@ func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string,
 
 	readRes := readFileViewBounded(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes)
 	if readRes.err != nil && len(readRes.lines) == 0 {
-		return zeroTheme.faint.Render("Could not read file: " + readRes.err.Error())
+		rendered := zeroTheme.faint.Render("Could not read file: " + readRes.err.Error())
+		return rendered, readRes.err
 	}
 
 	c.mu.Lock()
@@ -386,6 +433,11 @@ func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string,
 	}
 
 	c.mu.Lock()
+	if c.gen != reqGen {
+		c.mu.Unlock()
+		return "", errors.New("request superseded by cache invalidation")
+	}
+
 	if elem, ok := c.items[targetPath]; ok {
 		c.lru.Remove(elem)
 		delete(c.items, targetPath)
@@ -404,7 +456,38 @@ func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string,
 	}
 	c.mu.Unlock()
 
+	return rendered, nil
+}
+
+func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
+	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, c.generation())
 	return rendered
+}
+
+// fileViewLoadedMsg delivers the result of an asynchronous file read & render.
+type fileViewLoadedMsg struct {
+	requestID   int
+	generation  int
+	targetPath  string
+	displayPath string
+	width       int
+	rendered    string
+	err         error
+}
+
+func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, requestID int, gen int) tea.Cmd {
+	return func() tea.Msg {
+		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, gen)
+		return fileViewLoadedMsg{
+			requestID:   requestID,
+			generation:  gen,
+			targetPath:  targetPath,
+			displayPath: displayPath,
+			width:       width,
+			rendered:    rendered,
+			err:         err,
+		}
+	}
 }
 
 // fileViewState manages the drill-in view for a touched file. When active, the
@@ -416,6 +499,27 @@ type fileViewState struct {
 	// parentScrollOffset preserves the chat scroll position so closing the view
 	// returns to the same spot (mirrors subchatState).
 	parentScrollOffset int
+	requestID          int    // monotonic ID for async load requests
+	renderedContent    string // rendered full text when loaded
+	loadedPath         string // path of loaded content
+	loadedWidth        int    // width of loaded content
+	loading            bool   // true while async load is in flight
+}
+
+func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
+	if !m.fileView.active || m.fileView.mode != fileViewFull || m.fileView.path == "" {
+		return m, nil
+	}
+	target := m.fileView.path
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.cwd, target)
+	}
+	m.fileView.requestID++
+	m.fileView.loading = true
+	reqID := m.fileView.requestID
+	gen := defaultFileViewCache.generation()
+	changed := m.fileViewChangedLines()
+	return m, loadFileViewCmd(target, m.fileView.path, width, changed, reqID, gen)
 }
 
 // openFileView activates the drill-in for path in diff mode. Opening from an
@@ -424,9 +528,9 @@ type fileViewState struct {
 // Re-opening the file that is ALREADY being viewed is a no-op: a stray
 // re-click must not bounce the user from full mode back to diff or reset
 // their scroll position.
-func (m model) openFileView(path string) model {
+func (m model) openFileView(path string) (model, tea.Cmd) {
 	if m.fileView.active && m.fileView.path == path {
-		return m
+		return m, nil
 	}
 	if !m.fileView.active {
 		m.fileView.parentScrollOffset = m.chatScrollOffset
@@ -441,7 +545,10 @@ func (m model) openFileView(path string) model {
 	}
 	m.chatScrollOffset = 0
 	m = m.clearHover() // bodyY numbering differs between the file body and the chat
-	return m
+	if m.fileView.mode == fileViewFull {
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
+	}
+	return m, nil
 }
 
 // exitFileView deactivates the view and restores the chat scroll position.
@@ -457,12 +564,32 @@ func (m model) exitFileView() model {
 
 // setFileViewMode switches diff/full, resetting the scroll to the bottom-anchored
 // start since the two bodies have unrelated heights.
-func (m model) setFileViewMode(mode int) model {
+func (m model) setFileViewMode(mode int) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode == mode {
-		return m
+		return m, nil
 	}
 	m.fileView.mode = mode
 	m.chatScrollOffset = 0
+	if mode == fileViewFull {
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
+	}
+	return m, nil
+}
+
+func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) model {
+	if !m.fileView.active || m.fileView.mode != fileViewFull {
+		return m
+	}
+	if m.fileView.path != msg.displayPath || m.fileView.requestID != msg.requestID {
+		return m
+	}
+	if msg.generation != defaultFileViewCache.generation() {
+		return m
+	}
+	m.fileView.loading = false
+	m.fileView.renderedContent = msg.rendered
+	m.fileView.loadedPath = msg.displayPath
+	m.fileView.loadedWidth = msg.width
 	return m
 }
 
@@ -542,12 +669,20 @@ func (m model) renderFileViewDiff(width int) string {
 // highlighted, with a line-number gutter and an accent ▎ marker on the lines
 // this session's diffs added (matched by exact text — an approximation that
 // tolerates later drift; a stale marker just doesn't highlight).
+// It is read-only and non-blocking: if content is ready or cached in memory,
+// it is returned immediately; otherwise a loading placeholder is shown.
 func (m model) renderFileViewFull(width int) string {
 	target := m.fileView.path
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	return defaultFileViewCache.getOrRender(target, m.fileView.path, width, m.fileViewChangedLines())
+	if cached, ok := defaultFileViewCache.getRenderOnly(target, width, m.fileViewChangedLines()); ok {
+		return cached
+	}
+	if m.fileView.renderedContent != "" && m.fileView.loadedPath == m.fileView.path {
+		return m.fileView.renderedContent
+	}
+	return zeroTheme.faint.Render(fileViewLoadingPlaceholder)
 }
 
 // fileViewChangedLines collects the trimmed text of every line the session's
