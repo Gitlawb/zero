@@ -95,11 +95,13 @@ func TestRunDoesNotRetryMidStreamAbortAfterPartialOutput(t *testing.T) {
 // incomplete call is never executed or committed before the error return.
 func TestRunRetriesMidStreamAbortAfterIncompleteToolCall(t *testing.T) {
 	starts := 0
+	dispatched := 0
 	p := &midStreamAbortProvider{abortBefore: 1, partialToolCall: "write_file"}
 	result, err := Run(context.Background(), "go", p, Options{
 		Registry:        tools.NewRegistry(),
 		OnToolCallStart: func(string, string) { starts++ },
 		OnToolCallDelta: func(string, string) {},
+		OnToolCall:      func(ToolCall) { dispatched++ },
 	})
 	if err != nil {
 		t.Fatalf("a mid-stream abort mid-incomplete-tool-call should retry to success, got %v", err)
@@ -112,6 +114,22 @@ func TestRunRetriesMidStreamAbortAfterIncompleteToolCall(t *testing.T) {
 	}
 	if starts != 1 {
 		t.Fatalf("the incomplete tool call should have been forwarded once before the abort, got %d starts", starts)
+	}
+	if dispatched != 0 {
+		t.Fatalf("OnToolCall must never fire for an incomplete aborted tool call (no dispatch), got %d", dispatched)
+	}
+}
+
+// A persistent mid-stream transport abort surfaces an error after exhausting the
+// capped retries (1 initial stream + maxStreamStallRetries retries = 2 attempts).
+func TestRunGivesUpAfterMaxMidStreamAbortRetries(t *testing.T) {
+	p := &midStreamAbortProvider{abortBefore: 99}
+	_, err := Run(context.Background(), "go", p, Options{Registry: tools.NewRegistry()})
+	if err == nil {
+		t.Fatal("a persistent mid-stream abort must surface an error after exhausting retries")
+	}
+	if got := atomic.LoadInt32(&p.calls); got != int32(1+maxStreamStallRetries) {
+		t.Fatalf("want %d calls (1 + %d retries), got %d", 1+maxStreamStallRetries, maxStreamStallRetries, got)
 	}
 }
 
