@@ -895,11 +895,18 @@ func CommitCatalogProviderKey(path, catalogID, key string) (EnsuredProvider, err
 	}
 	result := EnsuredProvider{}
 	_, err = runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
-		owner, owned, err := catalogProviderOwner(op.config.Providers, descriptor.ID)
+		ownerIndex, ownership, err := catalogProviderOwner(op.config.Providers, descriptor.ID)
 		if err != nil {
 			return err
 		}
-		if !owned {
+		owner := ProviderProfile{}
+		switch ownership {
+		case catalogOwnershipOwned:
+			owner = op.config.Providers[ownerIndex]
+		case catalogOwnershipAdoptable:
+			op.config.Providers[ownerIndex].CatalogID = descriptor.ID
+			owner = op.config.Providers[ownerIndex]
+		case catalogOwnershipNone:
 			owner = ProviderProfile{Name: descriptor.ID, ProviderKind: providerKindForCatalogTransport(descriptor.Transport), CatalogID: descriptor.ID, BaseURL: descriptor.DefaultBaseURL, Model: descriptor.DefaultModel}
 			if err := upsertProviderConfig(&op.config, owner, false); err != nil {
 				return err

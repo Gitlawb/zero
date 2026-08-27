@@ -1452,7 +1452,7 @@ func TestRepairUnnamedProviderSerializesWithConcurrentMutation(t *testing.T) {
 
 	repairDone := make(chan error, 1)
 	go func() {
-		_, err := RepairUnnamedProvider(path, "work")
+		_, _, err := RepairUnnamedProvider(path, "work")
 		repairDone <- err
 	}()
 	<-acquired
