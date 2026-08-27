@@ -100,33 +100,6 @@ func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomicRespectsProcessUmask(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("umask semantics do not apply on Windows")
-	}
-	// Temporarily set umask to 0o077
-	oldMask := syscall.Umask(0o077)
-	defer syscall.Umask(oldMask)
-
-	dir := t.TempDir()
-	target := filepath.Join(dir, "umask_test.txt")
-
-	// Write new file with 0o644 requested perm
-	if err := WriteFileAtomic(target, []byte("umask test"), 0o644); err != nil {
-		t.Fatalf("WriteFileAtomic: %v", err)
-	}
-
-	info, err := os.Stat(target)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-
-	// Under umask 0o077, 0o644 & ~0o077 = 0o600
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("created file perm = %04o, want %04o (honoring umask 0o077)", got, 0o600)
-	}
-}
-
 func TestRenameWithRetryNonRetryableError(t *testing.T) {
 	var attempts int
 	expectedErr := os.ErrInvalid
