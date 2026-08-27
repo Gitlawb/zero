@@ -526,29 +526,35 @@ func execExecutionRequest(command *exec.Cmd, plan zeroSandbox.CommandPlan, cwd s
 
 func execExecutionOutcome(input execToolResultInput) execution.Outcome {
 	enforcement := input.enforcement
+	// EVERY OUTCOME BUILT HERE DESCRIBES A PROCESS THAT STARTED. A command that
+	// could not be started returns an error result before this point, so there is
+	// no path in without a process behind it. Stated rather than inferred, so the
+	// disclosure derived from it does not rest on the terminal outcome kind.
+	const launched = true
 	if !input.exited {
 		return execution.Outcome{
 			State:       execution.StateRetained,
 			Kind:        execution.OutcomeRunning,
+			Launched:    launched,
 			ProcessID:   strconv.Itoa(input.sessionID),
 			Enforcement: enforcement,
 		}
 	}
 	exit := &execution.Exit{Code: input.exitCode}
 	if input.reportErr != nil {
-		return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeSandboxSetupFailure, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeSandboxSetupFailure, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 	}
 	if input.report.Denial != nil {
 		denial := *input.report.Denial
-		return execution.Outcome{State: execution.StateDenied, Kind: execution.OutcomeEnforcementDenied, Exit: exit, Denial: &denial, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateDenied, Kind: execution.OutcomeEnforcementDenied, Launched: launched, Exit: exit, Denial: &denial, Enforcement: enforcement, Changes: input.changes}
 	}
 	if input.interrupted {
-		return execution.Outcome{State: execution.StateCancelled, Kind: execution.OutcomeCancelled, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateCancelled, Kind: execution.OutcomeCancelled, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 	}
 	if input.exitCode == 0 {
-		return execution.Outcome{State: execution.StateCompleted, Kind: execution.OutcomeSuccess, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateCompleted, Kind: execution.OutcomeSuccess, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 	}
-	return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeApplicationFailure, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+	return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeApplicationFailure, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 }
 
 func executionChangedFiles(changes []execution.Change) []string {
