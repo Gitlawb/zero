@@ -43,6 +43,16 @@ func TestRunPassesSkippedMCPServersToTheTUI(t *testing.T) {
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{MaxTurns: 12}, nil
 		},
+		// A CONFIGURED server, so it lands in the critical half startup registers
+		// synchronously. Startup splits MCP into a critical set registered before
+		// the TUI launches and an optional set (unconfigured built-in defaults)
+		// registered on a background goroutine; with no servers configured at all,
+		// the registration this test stubs is never reached.
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {URL: "https://host.invalid/mcp"},
+			}}, nil
+		},
 		userConfigPath: func() (string, error) {
 			return filepath.Join(t.TempDir(), "zero", "config.json"), nil
 		},
