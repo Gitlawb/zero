@@ -1251,7 +1251,29 @@ func windowsRestrictedTokenWillRun(plan CommandPlan, request SandboxExecutionReq
 	// plan.Wrapped is the resulting execution state and cannot be read backwards:
 	// directCommandPlan sets it false, the restricted-token plan sets it true, and
 	// both arrive here through the same funnel.
-	if !plan.Wrapped || !request.RequiresPlatformSandbox {
+	if !plan.Wrapped {
+		return false
+	}
+	return request.willBuildWindowsRestrictedToken()
+}
+
+// willBuildWindowsRestrictedToken reports whether the RESOLVED PLAN creates the
+// restricted token, from the request alone.
+//
+// Split out because the diagnostics had no such gate. BackendPlan asked only
+// about the available backend and the requested profile, so `zero sandbox policy`
+// and `zero sandbox check` described a token trade on a plan that builds no
+// token: with deny_read configured and --sandbox forbid, enforcement resolves to
+// disabled and the target to none, and the warning still claimed "reads are
+// denied as requested". Nothing was denied and no token existed, so the half that
+// reassures was the false one.
+//
+// plan.Wrapped stays with the caller above rather than moving in here. It is the
+// produced execution state and the request cannot speak for it, so folding it in
+// would let an unwrapped plan through on the execution path to buy symmetry with
+// the diagnostic one.
+func (request SandboxExecutionRequest) willBuildWindowsRestrictedToken() bool {
+	if !request.RequiresPlatformSandbox {
 		return false
 	}
 	if request.EnforcementLevel == EnforcementDisabled || request.EnforcementLevel == EnforcementDegraded {
