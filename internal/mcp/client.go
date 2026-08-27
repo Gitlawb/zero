@@ -43,6 +43,22 @@ type ToolClient interface {
 	Close() error
 }
 
+// startupDisclosing is the optional interface a client implements when its
+// LAUNCH carried a least-privilege disclosure. A network server launches no
+// local process, so it does not implement this and reports nothing, which is the
+// correct answer rather than an empty one.
+type startupDisclosing interface {
+	StartupNotices() []string
+}
+
+// StartupNotices reports the disclosures that applied to this server's launch.
+func (client *Client) StartupNotices() []string {
+	if client == nil || len(client.startupNotices) == 0 {
+		return nil
+	}
+	return append([]string(nil), client.startupNotices...)
+}
+
 type Client struct {
 	server  Server
 	cmd     *exec.Cmd
@@ -53,6 +69,16 @@ type Client struct {
 	closeMu sync.Mutex
 	nextID  int
 	cleanup func()
+	// startupNotices are the least-privilege disclosures that applied to THIS
+	// server's launch.
+	//
+	// THE FACT DESCRIBES STARTUP, SO IT CANNOT BE RECOVERED FROM A TOOL RESULT.
+	// A stdio server prepared under the weakened token runs for the whole session,
+	// and connectStdio used to keep only the command and its cleanup, so nothing
+	// downstream could tell the operator that the process serving these tools had
+	// reduced write confinement. Kept typed here and rendered exactly once at
+	// registration rather than pasted onto every later tool result.
+	startupNotices []string
 
 	// dispatchMu guards the response-dispatch state shared with the single
 	// reader goroutine. It is never held across a blocking read.
@@ -139,6 +165,7 @@ func (b *boundedBuffer) String() string {
 func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*Client, error) {
 	var cmd *exec.Cmd
 	var cleanup func()
+	var plannedEnforcement execution.Enforcement
 	cleanupTransferred := false
 	defer func() {
 		if cleanup != nil && !cleanupTransferred {
@@ -163,6 +190,7 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		}
 		cmd = prepared.Command
 		cleanup = prepared.Cleanup
+		plannedEnforcement = prepared.Enforcement
 	} else {
 		cmd = exec.CommandContext(ctx, server.Command, server.Args...)
 		cmd.Env = mergeProcessEnv(server.Env)
@@ -189,6 +217,11 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		writer:  newMessageWriter(stdin),
 		nextID:  1,
 		cleanup: cleanup,
+		// Recorded only now, AFTER Start returned. Everything above returns early,
+		// so a prepare failure or an executable that could not be launched records
+		// nothing: same launch-state rule hooks and plugins use, expressed by where
+		// this assignment sits rather than by another outcome-kind switch.
+		startupNotices: append([]string(nil), plannedEnforcement.Notices...),
 	}
 	cleanupTransferred = true
 	if err := client.initialize(ctx); err != nil {

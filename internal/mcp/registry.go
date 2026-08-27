@@ -44,6 +44,18 @@ type SkippedServer struct {
 	UnconfiguredDefault bool
 }
 
+// StartupDisclosure is a least-privilege statement about one MCP server's
+// LAUNCH, as opposed to anything a later tool call does.
+//
+// A stdio server prepared under a weakened token serves the whole session from
+// that process, so the fact describes startup and cannot be recovered from an
+// individual tool result afterwards. It is reported once, here, rather than
+// appended to every response the server produces.
+type StartupDisclosure struct {
+	Name    string
+	Notices []string
+}
+
 type Runtime struct {
 	clients []ToolClient
 	// cancels releases the per-server connect contexts of the clients we KEPT.
@@ -52,8 +64,11 @@ type Runtime struct {
 	// is closed). Same length/order as clients is not required.
 	cancels []context.CancelFunc
 	skipped []SkippedServer
-	once    sync.Once
-	err     error
+	// disclosures are the least-privilege statements that applied to each server
+	// process this registration LAUNCHED. See StartupDisclosures.
+	disclosures []StartupDisclosure
+	once        sync.Once
+	err         error
 }
 
 // Skipped returns the servers that were skipped during registration (unreachable
@@ -123,6 +138,15 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 			}()
 			select {
 			case res := <-done:
+				if client, ok := res.client.(startupDisclosing); ok && res.client != nil {
+					// Collected for any server whose PROCESS STARTED, including one whose
+					// tools are rejected below: the launch happened under that token either
+					// way, and a skip warning does not say what confinement the process ran
+					// with while it was alive.
+					if notices := client.StartupNotices(); len(notices) > 0 {
+						runtime.disclosures = append(runtime.disclosures, StartupDisclosure{Name: server.Name, Notices: notices})
+					}
+				}
 				if res.err != nil {
 					cancel() // failed: nothing to keep
 				} else {
@@ -394,4 +418,15 @@ func isPersistentlyApproved(store *PermissionStore, server Server, toolName stri
 		RequestedAutonomy: autonomy,
 	})
 	return err == nil && approved
+}
+
+// StartupDisclosures returns the least-privilege statements that applied to the
+// MCP server processes this registration launched, so a caller can report them
+// once. Empty when no server was launched under reduced enforcement, and always
+// empty for network servers, which launch no local process.
+func (runtime *Runtime) StartupDisclosures() []StartupDisclosure {
+	if runtime == nil {
+		return nil
+	}
+	return append([]StartupDisclosure(nil), runtime.disclosures...)
 }

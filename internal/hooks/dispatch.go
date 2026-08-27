@@ -325,7 +325,14 @@ func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInp
 		Matcher:    hook.Matcher,
 		ToolCallID: input.ToolCallID,
 		Status:     status,
-		Results:    []AuditResult{{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}},
+		Results: []AuditResult{{
+			ExitCode: result.ExitCode,
+			Stdout:   result.Stdout,
+			Stderr:   result.Stderr,
+			// The notice is not in stdout or stderr by design, so the durable record
+			// has to carry it or the fact ends with the dispatch result.
+			EnforcementNotices: append([]string(nil), result.Notices...),
+		}},
 		DurationMs: durationMs,
 	})
 }
