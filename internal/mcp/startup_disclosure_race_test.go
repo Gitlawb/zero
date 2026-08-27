@@ -136,3 +136,58 @@ func TestAFactoryFailureDisclosesNothing(t *testing.T) {
 		t.Errorf("StartupDisclosures() = %#v, want none for a process that never started", disclosures)
 	}
 }
+
+// A launched process that fails its HANDSHAKE keeps its disclosure too.
+//
+// connectStdio records the notices once cmd.Start returns, which is the right
+// moment, but the initialize failure path closes and discards the client. The
+// client was the only carrier, so the fact died with the connection unless the
+// failure carries it out itself.
+func TestADisclosureSurvivesAnInitializeFailure(t *testing.T) {
+	const notice = "denyRead is configured, so the write jail is not confining writes"
+	registry := tools.NewRegistry()
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{
+		ClientFactory: func(context.Context, Server) (ToolClient, error) {
+			// What connectStdio does once Start has succeeded and the handshake
+			// then fails: the client is gone, the fact rides the error.
+			return nil, &startupDisclosureError{
+				err:     fmt.Errorf("initialize MCP server docs: handshake timed out"),
+				notices: []string{notice},
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+
+	if skipped := runtime.Skipped(); len(skipped) != 1 {
+		t.Fatalf("Skipped() = %#v, want the failure recorded", skipped)
+	}
+	disclosures := runtime.StartupDisclosures()
+	if len(disclosures) != 1 || len(disclosures[0].Notices) != 1 || disclosures[0].Notices[0] != notice {
+		t.Fatalf("StartupDisclosures() = %#v, want the launch disclosure kept through the handshake failure", disclosures)
+	}
+}
+
+// And a plain failure with no launch behind it still discloses nothing, so the
+// error path is not just attaching notices to everything.
+func TestAPlainConnectFailureDisclosesNothing(t *testing.T) {
+	registry := tools.NewRegistry()
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{
+		ClientFactory: func(context.Context, Server) (ToolClient, error) {
+			return nil, fmt.Errorf("could not start the process")
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+	if disclosures := runtime.StartupDisclosures(); len(disclosures) != 0 {
+		t.Errorf("StartupDisclosures() = %#v, want none", disclosures)
+	}
+}

@@ -228,8 +228,10 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 func connectAndList(ctx context.Context, factory func(context.Context, Server) (ToolClient, error), server Server) (ToolClient, []RemoteTool, []string, error) {
 	client, err := factory(ctx, server)
 	if err != nil {
-		// Nothing launched, so there is nothing to disclose.
-		return nil, nil, nil, err
+		// A failure BEFORE the process started discloses nothing. A failure after it
+		// started carries the fact out through the error, because the client that
+		// held it has already been closed and discarded by then.
+		return nil, nil, startupNoticesFromError(err), err
 	}
 	notices := startupNoticesOf(client)
 	remoteTools, err := client.ListTools(ctx)

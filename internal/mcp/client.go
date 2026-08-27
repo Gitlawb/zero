@@ -43,6 +43,29 @@ type ToolClient interface {
 	Close() error
 }
 
+// startupDisclosureError carries a launch disclosure out through a failure.
+//
+// A launched process is a fact about the past: once Start has succeeded the
+// disclosure is true whatever the handshake does next. The client is the only
+// thing that holds it, and the failure paths close and discard the client, so
+// without this the fact dies with the connection it was attached to.
+type startupDisclosureError struct {
+	err     error
+	notices []string
+}
+
+func (e *startupDisclosureError) Error() string { return e.err.Error() }
+func (e *startupDisclosureError) Unwrap() error { return e.err }
+
+// startupNoticesFromError recovers a launch disclosure from a failed connect.
+func startupNoticesFromError(err error) []string {
+	var disclosure *startupDisclosureError
+	if errors.As(err, &disclosure) {
+		return disclosure.notices
+	}
+	return nil
+}
+
 // startupDisclosing is the optional interface a client implements when its
 // LAUNCH carried a least-privilege disclosure. A network server launches no
 // local process, so it does not implement this and reports nothing, which is the
@@ -225,12 +248,19 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 	}
 	cleanupTransferred = true
 	if err := client.initialize(ctx); err != nil {
+		// THE LAUNCH ALREADY HAPPENED, so the fact has to leave through the error.
+		// Start succeeded above, which means the process ran under the planned token
+		// and may have done filesystem work before the handshake failed. Returning a
+		// bare error discards the client, and with it the only carrier the notices
+		// had, so the operator was told the server was unavailable and not that it
+		// had already run without the write jail.
 		_ = client.Close()
 		message := strings.TrimSpace(stderr.String())
+		failure := fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
 		if message != "" {
-			return nil, fmt.Errorf("initialize MCP server %s: %w: %s", server.Name, err, message)
+			failure = fmt.Errorf("initialize MCP server %s: %w: %s", server.Name, err, message)
 		}
-		return nil, fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
+		return nil, &startupDisclosureError{err: failure, notices: client.StartupNotices()}
 	}
 	return client, nil
 }
