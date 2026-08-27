@@ -15,7 +15,7 @@ Read only what the Task prompt names, plus these defaults when the prompt does n
 - `internal/agent/loop.go` (where `maybeCompact` is called)
 - the `events.jsonl` path given in the prompt
 
-Session files: open only a path or session id the parent named. Default roots if you must resolve a relative id: `$XDG_DATA_HOME/zero/sessions`, else `%USERPROFILE%\.local\share\zero\sessions`. Do not search the whole disk.
+Session files: open only a path or session id the parent named. Resolve a relative id with `internal/sessions.DefaultRoot`: `$XDG_DATA_HOME/zero/sessions` when `XDG_DATA_HOME` is set; otherwise `$HOME/.local/share/zero/sessions` on Unix-like systems, and `%USERPROFILE%\.local\share\zero\sessions` on Windows (`os.UserHomeDir` when `HOME` is unset). Do not search the whole disk.
 
 Look for:
 - edits that change the system+tools prefix bytes that prompt-cache hashing pins

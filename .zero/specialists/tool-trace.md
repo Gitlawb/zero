@@ -14,10 +14,10 @@ Read only what the Task prompt names, plus these defaults when the prompt does n
 - permission / sandbox policy the prompt points at
 - `tool_call`, `tool_result`, `permission_request`, and `permission_decision` events in the named `events.jsonl`
 
-Session files: open only a path or session id the parent named. Default roots if you must resolve a relative id: `$XDG_DATA_HOME/zero/sessions`, else `%USERPROFILE%\.local\share\zero\sessions`. Do not search the whole disk.
+Session files: open only a path or session id the parent named. Resolve a relative id with `internal/sessions.DefaultRoot`: `$XDG_DATA_HOME/zero/sessions` when `XDG_DATA_HOME` is set; otherwise `$HOME/.local/share/zero/sessions` on Unix-like systems, and `%USERPROFILE%\.local\share\zero\sessions` on Windows (`os.UserHomeDir` when `HOME` is unset). Do not search the whole disk.
 
 Look for:
-- `tool_call` with no matching `tool_result`
+- `tool_call` with no matching `tool_result` for the same call ID (`tool_call.id` ↔ `tool_result.toolCallId`). Permission denials and cancellations still emit `tool_result` (error status, often `meta.permission_action=deny`). Remaining calls after an abort are not written as `tool_call` events — `appendAbortedToolResults` only pairs provider messages, not session events. Before reporting a missing result, check for a later `error` event (interrupted / run ended) after that `tool_call`; that is an incomplete trace, not a missing result.
 - retries or loops on the same call with no new information
 - args that do not match the tool schema
 - permission allow that skips a deny or sandbox control the code still claims
