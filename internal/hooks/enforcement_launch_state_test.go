@@ -161,3 +161,9 @@ func TestALaunchedHookCarriesTheNoticeIntoTheDispatchOutcome(t *testing.T) {
 		t.Errorf("a hook that really ran under the weakened token disclosed nothing:\n%s", outcome.Reason)
 	}
 }
+
+// newRunnerFor keeps the audit tests readable without importing the execution
+// package into every file that needs one.
+func newRunnerFor(preparer *noticePreparer) *execution.Runner {
+	return execution.NewRunner(preparer)
+}

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"sort"
 	"strings"
@@ -187,4 +188,26 @@ func isSensitiveMCPDisplayKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// mcpStartupDisclosing is the optional interface a runtime implements when it
+// can report what its launched server processes ran under. Optional rather than
+// part of mcpToolRuntime so a runtime that launches nothing, and every test
+// double, stays unchanged.
+type mcpStartupDisclosing interface {
+	StartupDisclosures() []mcp.StartupDisclosure
+}
+
+// reportMCPStartupDisclosures states once what enforcement applied to the MCP
+// server processes this run launched.
+func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) {
+	disclosing, ok := runtime.(mcpStartupDisclosing)
+	if !ok {
+		return
+	}
+	for _, disclosure := range disclosing.StartupDisclosures() {
+		for _, notice := range disclosure.Notices {
+			fmt.Fprintf(stderr, "notice: MCP server %s started with reduced enforcement: %s\n", disclosure.Name, notice)
+		}
+	}
 }

@@ -867,6 +867,15 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		}
 		fmt.Fprintf(stderr, "warning: MCP server %s unavailable, skipped: %s\n", skipped.Name, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
 	}
+	// AND WHAT THE SERVERS THAT DID START RAN UNDER. A stdio MCP server prepared
+	// with a weakened write jail serves the whole session from that process, so
+	// the disclosure is about startup and no later tool result can carry it. Said
+	// once, here, next to the skip warnings, rather than pasted onto every
+	// response the server produces. Network servers launch no local process and
+	// report nothing, which is why the optional background registration is not
+	// asked: its only member is the built-in HTTP default, which starts no local
+	// process. A stdio default would need this statement from that path too.
+	reportMCPStartupDisclosures(stderr, mcpRuntime)
 	// Make local plugins live: register their declared tools into the registry and
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
