@@ -161,7 +161,7 @@ func (c *Coordinator) SetStatus(id string, status TaskStatus) error {
 
 // BeginHandoff atomically claims a non-terminal task for one handoff caller
 // without reporting it terminal. The visible status remains pending/running
-// until FinishHandoff, so collectors cannot observe settled state while the
+// until CommitHandoff, so collectors cannot observe settled state while the
 // source member is still unwinding.
 func (c *Coordinator) BeginHandoff(id string) (Task, error) {
 	c.mu.Lock()
@@ -222,33 +222,6 @@ func (c *Coordinator) ReserveHandoffSuccessor(sourceID, successorID string) erro
 		c.handoffReservations = map[string]string{}
 	}
 	c.handoffReservations[successorID] = sourceID
-	return nil
-}
-
-// FinishHandoff publishes the terminal state only after the source execution
-// barrier has closed.
-func (c *Coordinator) FinishHandoff(id string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	t, ok := c.tasks[id]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrUnknownTask, id)
-	}
-	if !t.handoff {
-		return fmt.Errorf("swarm: task %s has no handoff in progress", id)
-	}
-	if t.Status.terminal() {
-		return fmt.Errorf("swarm: task %s already %s", id, t.Status)
-	}
-	for _, sourceID := range c.handoffReservations {
-		if sourceID == id {
-			return fmt.Errorf("swarm: task %s has a reserved successor; commit the handoff atomically", id)
-		}
-	}
-	t.handoff = false
-	t.Status = StatusHandedOff
-	t.UpdatedAt = c.now()
-	c.notifyChangeLocked()
 	return nil
 }
 

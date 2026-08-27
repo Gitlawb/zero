@@ -103,7 +103,7 @@ func TestCoordinatorReassign(t *testing.T) {
 	}
 }
 
-func TestCoordinatorHandoffClaimKeepsTaskNonTerminalUntilFinished(t *testing.T) {
+func TestCoordinatorHandoffClaimBlocksCompetingTransitions(t *testing.T) {
 	c := NewCoordinator()
 	_, _ = c.Register("t1", "a1", "team", "desc")
 	_ = c.SetStatus("t1", StatusRunning)
@@ -122,12 +122,7 @@ func TestCoordinatorHandoffClaimKeepsTaskNonTerminalUntilFinished(t *testing.T) 
 	if err := c.Reassign("t1", "a2"); err == nil {
 		t.Fatal("orphan adoption must not race a claimed handoff")
 	}
-	if err := c.FinishHandoff("t1"); err != nil {
-		t.Fatalf("FinishHandoff: %v", err)
-	}
-	if task, _ := c.Get("t1"); task.Status != StatusHandedOff {
-		t.Fatalf("status after FinishHandoff = %v, want handed-off", task.Status)
-	}
+	c.AbortHandoff("t1")
 }
 
 func TestCoordinatorAbortHandoffRestoresNormalCompletion(t *testing.T) {
@@ -154,10 +149,6 @@ func TestCoordinatorHandoffReservationBlocksRegistrationUntilAbort(t *testing.T)
 	if _, err := c.Register("successor", "other", "team", "collision"); !errors.Is(err, ErrTaskExists) {
 		t.Fatalf("Register reserved id error = %v, want ErrTaskExists", err)
 	}
-	if err := c.FinishHandoff("source"); err == nil {
-		t.Fatal("FinishHandoff must not bypass a reserved successor")
-	}
-
 	c.AbortHandoff("source")
 	if _, err := c.Register("successor", "other", "team", "available again"); err != nil {
 		t.Fatalf("reservation was not released by AbortHandoff: %v", err)
