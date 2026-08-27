@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -363,6 +364,9 @@ type FileConfig struct {
 	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
 	STT                 STTConfig          `json:"stt,omitempty"`
 	CrossSessionInbound string             `json:"crossSessionInbound,omitempty"`
+	// Extra preserves top-level fields written by newer Zero versions or
+	// extensions so a read-modify-write through this version is non-destructive.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
@@ -400,7 +404,29 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	if !cfg.STT.Empty() {
 		raw.STT = &cfg.STT
 	}
-	return json.Marshal(raw)
+	known, err := json.Marshal(raw)
+	if err != nil || len(cfg.Extra) == 0 {
+		return known, err
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(known, &merged); err != nil {
+		return nil, err
+	}
+	for key, value := range cfg.Extra {
+		if !fileConfigKnownJSONKey(key) {
+			merged[key] = value
+		}
+	}
+	return json.Marshal(merged)
+}
+
+func fileConfigKnownJSONKey(key string) bool {
+	key = strings.ToLower(key)
+	if key == "mcpservers" || key == "mcp_servers" {
+		return true
+	}
+	_, known := knownJSONFields(reflect.TypeOf(FileConfig{}))[key]
+	return known
 }
 
 type ResolveOptions struct {
@@ -516,6 +542,18 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(data, &extra); err != nil {
+		return err
+	}
+	for key := range extra {
+		if fileConfigKnownJSONKey(key) {
+			delete(extra, key)
+		}
+	}
+	if len(extra) == 0 {
+		extra = nil
+	}
 	cfg.ActiveProvider = raw.ActiveProvider
 	cfg.Providers = raw.Providers
 	// A negative maxTurns is unambiguously invalid; without this it would be
@@ -537,6 +575,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.LocalControl = raw.LocalControl
 	cfg.STT = raw.STT
 	cfg.CrossSessionInbound = raw.CrossSessionInbound
+	cfg.Extra = extra
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

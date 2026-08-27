@@ -369,6 +369,37 @@ func TestSetThemePersistsUserPreference(t *testing.T) {
 	}
 }
 
+func TestSetThemePreservesUnknownTopLevelFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	if err := os.WriteFile(path, []byte(`{
+  "preferences": {"theme": "default"},
+  "futureSetting": {"a": 1}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetTheme(path, "dracula"); err != nil {
+		t.Fatalf("SetTheme() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]json.RawMessage
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	var futureSetting struct {
+		A int `json:"a"`
+	}
+	if err := json.Unmarshal(persisted["futureSetting"], &futureSetting); err != nil {
+		t.Fatalf("unknown field was not preserved: %v\nconfig: %s", err, data)
+	}
+	if futureSetting.A != 1 {
+		t.Fatalf("futureSetting = %s, want {\"a\":1}", persisted["futureSetting"])
+	}
+}
+
 func TestRecapsPreferenceRoundTrips(t *testing.T) {
 	// Default (unset) is ON.
 	if !(PreferencesConfig{}).RecapsEnabled() {
