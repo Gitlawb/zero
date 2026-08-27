@@ -29,6 +29,8 @@ type mcpWritableConfig struct {
 	serverRaw map[string]json.RawMessage
 }
 
+var lockMCPConfigFile = config.LockFile
+
 // projectMCPConfigExists reports whether the workspace's project ./.zero/config.json
 // declares any MCP servers, so the trust notice fires only when project MCP config was
 // actually skipped (mirroring projectHooksFileExists / projectPluginsDirExists). A
@@ -68,13 +70,17 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	}
 	// This edits the same user config document the config package mutates, with
 	// the same read-modify-write + rename shape, so it takes the same
-	// cross-process lock. Without it, `zero mcp add` racing a provider or
+	// cross-process lock. Without it, an MCP config edit racing a provider or
 	// preference write would silently drop whichever landed first (issue #832).
-	unlock, err := config.LockFile(configPath)
+	unlock, err := lockMCPConfigFile(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	released := false
 	defer func() {
+		if released {
+			return
+		}
 		// A failed release leaves the lock held for the rest of the process, so
 		// exiting success here would claim a state the next config write cannot
 		// reproduce. It must not mask a failure this command already reported.
@@ -96,6 +102,10 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if err := writeMCPWritableConfig(configPath, cfg); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	if err := unlock(); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released = true
 
 	if options.json {
 		payload := struct {
@@ -150,13 +160,17 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	// This edits the same user config document the config package mutates, with
 	// the same read-modify-write + rename shape, so it takes the same
-	// cross-process lock. Without it, `zero mcp add` racing a provider or
+	// cross-process lock. Without it, an MCP config edit racing a provider or
 	// preference write would silently drop whichever landed first (issue #832).
-	unlock, err := config.LockFile(configPath)
+	unlock, err := lockMCPConfigFile(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	released := false
 	defer func() {
+		if released {
+			return
+		}
 		// A failed release leaves the lock held for the rest of the process, so
 		// exiting success here would claim a state the next config write cannot
 		// reproduce. It must not mask a failure this command already reported.
@@ -177,6 +191,10 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 	}
+	if err := unlock(); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released = true
 
 	if options.json {
 		payload := struct {
@@ -228,13 +246,17 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	// This edits the same user config document the config package mutates, with
 	// the same read-modify-write + rename shape, so it takes the same
-	// cross-process lock. Without it, `zero mcp add` racing a provider or
+	// cross-process lock. Without it, an MCP config edit racing a provider or
 	// preference write would silently drop whichever landed first (issue #832).
-	unlock, err := config.LockFile(configPath)
+	unlock, err := lockMCPConfigFile(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	released := false
 	defer func() {
+		if released {
+			return
+		}
 		// A failed release leaves the lock held for the rest of the process, so
 		// exiting success here would claim a state the next config write cannot
 		// reproduce. It must not mask a failure this command already reported.
@@ -258,6 +280,10 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 	}
+	if err := unlock(); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released = true
 
 	if options.json {
 		payload := struct {
