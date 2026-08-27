@@ -190,7 +190,7 @@ func TestPreparingTheRuntimeRefusesALinkedRoot(t *testing.T) {
 	}
 	linkRuntimeComponent(t, root, target)
 
-	runtimeState, cleanup, err := prepareSandboxRuntime(canonical)
+	runtimeState, cleanup, err := prepareSandboxRuntime(canonical, "")
 	if cleanup != nil {
 		cleanup()
 	}

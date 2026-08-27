@@ -16,7 +16,7 @@ func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
-	runtimeState, release, err := prepareSandboxRuntime(workspace)
+	runtimeState, release, err := prepareSandboxRuntime(workspace, "")
 	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
 	if err := os.Chtimes(expired, old, old); err != nil {
 		t.Fatal(err)
 	}
-	_, release, err := prepareSandboxRuntime(workspace)
+	_, release, err := prepareSandboxRuntime(workspace, "")
 	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing
 	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
-	runtimeState, release, err := prepareSandboxRuntime(workspace)
+	runtimeState, release, err := prepareSandboxRuntime(workspace, "")
 	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestCleanupSandboxRuntimeSkipsActiveLease(t *testing.T) {
 		sandboxRuntimeNow = originalNow
 	})
 
-	runtimeState, release, err := prepareSandboxRuntime(workspace)
+	runtimeState, release, err := prepareSandboxRuntime(workspace, "")
 	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}

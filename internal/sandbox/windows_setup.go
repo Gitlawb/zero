@@ -123,7 +123,7 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	// Failing now is failing before any ACL or marker state is persisted, so the
 	// operator is left in a state a retry can get out of, and the message names
 	// the step that actually failed.
-	selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...), false)
+	selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...), false, sandboxHome)
 	if selectErr != nil {
 		return nil, fmt.Errorf("select the sandbox runtime root for setup: %w", selectErr)
 	}

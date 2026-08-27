@@ -63,7 +63,7 @@ func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
 	// at validation, which was compensating for a disagreement rather than
 	// removing it: whichever root the command selected, only one of them had ever
 	// been provisioned or carried the capability ACE.
-	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true)
+	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true, "")
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot: %v", err)
 	}

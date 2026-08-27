@@ -58,7 +58,7 @@ func TestTheCommandHonoursTheRootSetupActuallyProvisioned(t *testing.T) {
 
 	// Setup, with the cache root unusable. honorRecorded is false because setup
 	// is the one making the choice.
-	setupRoot, setupLease, err := selectSandboxRuntimeRoot(workspace, false)
+	setupRoot, setupLease, err := selectSandboxRuntimeRoot(workspace, false, "")
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot (setup): %v", err)
 	}
@@ -80,7 +80,7 @@ func TestTheCommandHonoursTheRootSetupActuallyProvisioned(t *testing.T) {
 	// diverged.
 	unblock()
 
-	commandRoot, commandLease, err := selectSandboxRuntimeRoot(workspace, true)
+	commandRoot, commandLease, err := selectSandboxRuntimeRoot(workspace, true, "")
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot (command): %v", err)
 	}
@@ -114,7 +114,7 @@ func TestARootRecordedForAnotherWorkspaceIsNotHonoured(t *testing.T) {
 		t.Fatalf("WriteWindowsSandboxSetupMarker: %v", err)
 	}
 
-	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true)
+	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true, "")
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestAnUnusableRecordedRootFailsInsteadOfRelocating(t *testing.T) {
 	workspace := config.WorkspaceRoots[0]
 	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", config.SandboxHome)
 
-	recorded, lease, err := selectSandboxRuntimeRoot(workspace, false)
+	recorded, lease, err := selectSandboxRuntimeRoot(workspace, false, "")
 	if err != nil {
 		t.Fatalf("selectSandboxRuntimeRoot (setup): %v", err)
 	}
@@ -159,7 +159,7 @@ func TestAnUnusableRecordedRootFailsInsteadOfRelocating(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(blocker) })
 
-	selected, selectedLease, err := selectSandboxRuntimeRoot(workspace, true)
+	selected, selectedLease, err := selectSandboxRuntimeRoot(workspace, true, "")
 	if err == nil {
 		selectedLease.release()
 		t.Fatalf("selection relocated to %s instead of reporting that the provisioned root is unusable", selected)

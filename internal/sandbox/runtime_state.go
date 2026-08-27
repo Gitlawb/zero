@@ -118,9 +118,9 @@ func runtimeRootWithinWorkspace(workspaceRoot string, root string) bool {
 	}
 }
 
-func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
+func prepareSandboxRuntime(workspaceRoot string, sandboxHome string) (SandboxRuntime, func(), error) {
 	// One selection function, shared with setup. See selectSandboxRuntimeRoot.
-	root, lease, err := selectSandboxRuntimeRoot(workspaceRoot, true)
+	root, lease, err := selectSandboxRuntimeRoot(workspaceRoot, true, sandboxHome)
 	if err != nil {
 		return SandboxRuntime{}, nil, err
 	}
@@ -427,14 +427,33 @@ func canonicalSandboxWorkspaceRoot(root string) string {
 // runtime at another workspace's tree. A recorded root is only honoured when it
 // matches one of the two roots THIS workspace derives, which is also the only
 // pair the selections could ever have disagreed about.
-func pinnedSandboxRuntimeRoot(preferred, fallback string) string {
+// sandboxHome is the home THIS command asked for, not the one the parent
+// process happens to be pointed at.
+//
+// TWO ENVIRONMENT AUTHORITIES IS ONE TOO MANY. Runtime preparation ran before
+// Windows platform planning and resolved the home from the ambient environment,
+// while the planner resolves ZERO_WINDOWS_SANDBOX_HOME out of the command's own
+// spec.Env and hands THAT to the runner for marker validation. A request that
+// selects home B while the parent still points at home A pinned A's recorded
+// root into the profile, and the runner then loaded B's marker and rejected the
+// command as out of date even though setup for B was perfectly valid. The two
+// homes do not need different derivation rules to disagree, only different valid
+// selections from the same preferred/fallback pair.
+//
+// Empty means no command context, so the ambient environment is the only
+// authority there is and resolving it here is correct.
+func pinnedSandboxRuntimeRoot(preferred, fallback, sandboxHome string) string {
 	// No GOOS gate. The marker only exists where setup wrote one, so this is
 	// already Windows-only in practice, and keeping the code path platform-neutral
 	// means the setup-to-command contract is exercised on every CI runner instead
 	// of only the Windows one.
-	home, err := ResolveWindowsSandboxHome(nil)
-	if err != nil {
-		return ""
+	home := strings.TrimSpace(sandboxHome)
+	if home == "" {
+		resolved, err := ResolveWindowsSandboxHome(nil)
+		if err != nil {
+			return ""
+		}
+		home = resolved
 	}
 	recorded := WindowsSandboxRecordedRuntimeRoot(home)
 	if recorded == "" {
@@ -452,7 +471,7 @@ func pinnedSandboxRuntimeRoot(preferred, fallback string) string {
 // on the command side and false during setup: setup is making the choice, so it
 // must not consult a record it is about to overwrite, or a single unlucky
 // relocation to the temp fallback would pin every future setup to temp.
-func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool) (string, *sandboxRuntimeLease, error) {
+func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxHome string) (string, *sandboxRuntimeLease, error) {
 	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
 	if workspaceRoot == "" || workspaceRoot == "." {
 		return "", nil, errors.New("sandbox runtime requires a workspace root")
@@ -477,7 +496,7 @@ func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool) (string,
 	// setup fixes it.
 	if honorRecorded {
 		fallbackRoot, _ := fallbackSandboxRuntimeRoot(workspaceRoot)
-		if pinned := pinnedSandboxRuntimeRoot(root, fallbackRoot); pinned != "" {
+		if pinned := pinnedSandboxRuntimeRoot(root, fallbackRoot, sandboxHome); pinned != "" {
 			lease, leaseErr := prepareSandboxRuntimeLease(pinned)
 			if leaseErr != nil {
 				// NOT relocated. Relocating is what produced the permanent brick:
