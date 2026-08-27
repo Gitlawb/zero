@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // A PLAN HASH ATTESTS A PATHNAME, NOT THE DIRECTORY THAT ANSWERS TO IT.
@@ -75,5 +77,74 @@ func TestPlanAttestationIgnoresDenyEntries(t *testing.T) {
 	}}
 	if !windowsACLPlanStillApplied(plan) {
 		t.Error("a plan of deny entries alone reported as unapplied, which would re-apply on every command")
+	}
+}
+
+// setCapabilityACE replaces path's DACL with a single allow entry for trustee,
+// so a test can weaken a grant without removing the SID that names it.
+func setCapabilityACE(t *testing.T, path, trustee string, mask windows.ACCESS_MASK, inheritance uint32) {
+	t.Helper()
+	sid, err := windows.StringToSid(trustee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: mask,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       inheritance,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// PRESENCE OF THE SID IS NOT THE CONTRACT.
+//
+// What the restricted child needs is the grant windowsACLAccess creates, and on
+// a directory it needs to reach descendants. An ACE that still names the
+// capability but has been reduced to a read-only mask, or that no longer
+// propagates, leaves a runtime root that attests as healthy and then returns
+// ACCESS_DENIED on the first write into TMP or a cache: exactly the silent
+// unusable runtime the attestation exists to eliminate.
+func TestPlanAttestationRejectsAWeakenedCapabilityACE(t *testing.T) {
+	const capability = "S-1-5-32-546"
+	full := windows.ACCESS_MASK(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.FILE_GENERIC_EXECUTE)
+
+	for _, testCase := range []struct {
+		name        string
+		mask        windows.ACCESS_MASK
+		inheritance uint32
+		want        bool
+	}{
+		{"the grant the plan describes", full, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT, true},
+		{"reduced to read and execute", windows.ACCESS_MASK(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE), windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT, false},
+		{"reduced to metadata only", windows.FILE_READ_ATTRIBUTES, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT, false},
+		{"full mask that does not propagate", full, windows.NO_INHERITANCE, false},
+		{"containers only, so files are ungranted", full, windows.SUB_CONTAINERS_ONLY_INHERIT, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "runtime")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			plan := WindowsACLPlan{Entries: []WindowsACLEntry{
+				{Action: WindowsACLAllowWrite, Path: root, Capability: capability},
+			}}
+			setCapabilityACE(t, root, capability, testCase.mask, testCase.inheritance)
+
+			if got := windowsACLPlanStillApplied(plan); got != testCase.want {
+				t.Errorf("attestation = %v, want %v; a capability SID is present either way, so only the effective grant separates these",
+					got, testCase.want)
+			}
+		})
 	}
 }
