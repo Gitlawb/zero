@@ -207,7 +207,11 @@ func highlightCodeForPath(code []string, path string, measure int, bg color.Colo
 }
 
 func highlightCodeForPathWithTheme(code []string, path string, measure int, bg color.Color, theme tuiTheme) ([]string, bool) {
-	return highlightCodeWithLexerThemeAndLineBackgrounds(cachedLexerForPath(path), code, measure, theme, nil, nil)
+	backgrounds := make([]color.Color, len(code))
+	for index := range backgrounds {
+		backgrounds[index] = bg
+	}
+	return highlightCodeWithLexerThemeAndLineBackgrounds(cachedLexerForPath(path), code, measure, theme, backgrounds, nil)
 }
 
 // highlightShellCommand styles a one-line command for a tool-card heading.
