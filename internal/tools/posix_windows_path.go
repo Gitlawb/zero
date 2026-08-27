@@ -25,6 +25,48 @@ func looksLikePosixAbsolute(path string) bool {
 	return true
 }
 
+func isDriveLetter(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
+// isAbsForGOOS reports whether path is absolute on goos. On Windows a POSIX
+// leading "/" is not absolute (no volume or UNC), matching Windows
+// filepath.IsAbs, so those paths join onto the workspace.
+func isAbsForGOOS(goos, path string) bool {
+	if goos != "windows" {
+		return filepath.IsAbs(path)
+	}
+	if path == "" {
+		return false
+	}
+	n := filepath.ToSlash(path)
+	if strings.HasPrefix(n, "//") {
+		return true
+	}
+	if len(path) >= 2 && path[1] == ':' && isDriveLetter(path[0]) {
+		return true
+	}
+	// Volume-relative Windows abs uses a leading backslash, not POSIX "/".
+	return path[0] == '\\'
+}
+
+// joinAgainstRoot joins target onto root using goos path rules. Windows
+// POSIX-absolute paths are joined as relative (trim leading "/"), because
+// host filepath.Join on Unix would treat them as absolute and drop root.
+func joinAgainstRoot(goos, root, target string) string {
+	if isAbsForGOOS(goos, target) {
+		return target
+	}
+	if goos == "windows" && looksLikePosixAbsolute(target) {
+		rel := strings.Trim(filepath.ToSlash(target), "/")
+		if rel == "" {
+			return root
+		}
+		return filepath.Join(root, filepath.FromSlash(rel))
+	}
+	return filepath.Join(root, target)
+}
+
 func workspaceBasename(workspaceRoot string) string {
 	repo := filepath.Base(filepath.Clean(workspaceRoot))
 	switch repo {

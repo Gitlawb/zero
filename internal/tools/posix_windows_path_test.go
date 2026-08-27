@@ -195,6 +195,9 @@ func TestResolveWorkspacePathAnnotatesPosixMissOnWindows(t *testing.T) {
 	if !strings.Contains(msg, root) {
 		t.Fatalf("error missing workspace root %q: %q", root, msg)
 	}
+	if strings.Contains(msg, "must stay inside the workspace") {
+		t.Fatalf("POSIX miss used confinement instead of a missing-path hint: %q", msg)
+	}
 }
 
 func TestResolveWorkspacePathDoesNotRewriteForeignRepo(t *testing.T) {
@@ -265,5 +268,39 @@ func TestResolveWorkspaceTargetPathRejectsLexicalEscape(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "must stay inside the workspace") {
 		t.Fatalf("expected outsideWorkspaceError, got %q", msg)
+	}
+}
+
+func TestIsAbsForGOOS(t *testing.T) {
+	tests := []struct {
+		goos string
+		path string
+		want bool
+	}{
+		{goos: "windows", path: "/tmp/x", want: false},
+		{goos: "linux", path: "/tmp/x", want: true},
+		{goos: "windows", path: "C:/foo", want: true},
+		{goos: "windows", path: "C:\\foo", want: true},
+		{goos: "windows", path: "//unc/share", want: true},
+		{goos: "windows", path: "relative/path", want: false},
+		{goos: "windows", path: "\\Windows\\System32", want: true},
+	}
+	for _, tt := range tests {
+		if got := isAbsForGOOS(tt.goos, tt.path); got != tt.want {
+			t.Fatalf("isAbsForGOOS(%q, %q) = %v, want %v", tt.goos, tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestJoinAgainstRootWindowsPosix(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	got := joinAgainstRoot("windows", root, "/tmp/does-not-exist-xyz")
+	want := filepath.Join(root, "tmp", "does-not-exist-xyz")
+	if got != want {
+		t.Fatalf("joinAgainstRoot(windows, root, /tmp/does-not-exist-xyz) = %q, want %q", got, want)
+	}
+	got = joinAgainstRoot("linux", root, "/tmp/does-not-exist-xyz")
+	if got != filepath.Clean("/tmp/does-not-exist-xyz") && got != "/tmp/does-not-exist-xyz" {
+		t.Fatalf("joinAgainstRoot(linux, ...) should keep POSIX abs, got %q", got)
 	}
 }

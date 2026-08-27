@@ -60,10 +60,7 @@ func resolveWorkspacePathForGOOS(goos, workspaceRoot, requestedPath string) (str
 		return fail(err)
 	}
 
-	target := requestedPath
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(root, target)
-	}
+	target := joinAgainstRoot(goos, root, requestedPath)
 
 	target, err = filepath.Abs(target)
 	if err != nil {
@@ -117,10 +114,7 @@ func resolveWorkspaceTargetPathForGOOS(goos, workspaceRoot, requestedPath string
 		return fail(err)
 	}
 
-	target := requestedPath
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(root, target)
-	}
+	target := joinAgainstRoot(goos, root, requestedPath)
 	target, err = filepath.Abs(target)
 	if err != nil {
 		return fail(err)
