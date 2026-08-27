@@ -177,7 +177,7 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
-	before := tempDirEntryCount(t)
+	before := tempDirEntryNames(t)
 
 	// Drive the PRODUCTION teardown path, not the helper. Calling the resolver
 	// directly passes just as happily with the call site reverted to the one
@@ -198,9 +198,7 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 	if len(paths) == 0 {
 		t.Error("teardown named no paths at all; the workspace root should still be revoked")
 	}
-	if after := tempDirEntryCount(t); after != before {
-		t.Errorf("temp directory gained %d entries; naming the paths must not create one", after-before)
-	}
+	assertCreatedNothing(t, before, "teardown path derivation")
 
 	// Setup's resolver must agree with teardown's, and create nothing either.
 	//
@@ -217,7 +215,7 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 	// TMP, GOCACHE and the package caches into it, while setup granting nothing
 	// left both principals without an ACE on the one tree those writes land in.
 	// Reporting none is no longer the safe answer; it is the ACCESS_DENIED.
-	beforeSetup := tempDirEntryCount(t)
+	beforeSetup := tempDirEntryNames(t)
 	setupRoots, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
 		WorkspaceRoots: []string{workspace},
 		CommandCWD:     workspace,
@@ -239,9 +237,7 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 	if !grantedRuntimeRootsCover(setupRoots, commandState.Root) {
 		t.Errorf("setup granted %q but commands write to %q", setupRoots, commandState.Root)
 	}
-	if after := tempDirEntryCount(t); after != beforeSetup {
-		t.Errorf("setup's resolver created %d temp entries; it must create nothing", after-beforeSetup)
-	}
+	assertCreatedNothing(t, beforeSetup, "setup path derivation")
 }
 
 // Setup and teardown must derive the SAME root in the ordinary case, since one
@@ -278,11 +274,33 @@ func TestSetupAndTeardownDeriveTheSameRuntimeRoot(t *testing.T) {
 	}
 }
 
-func tempDirEntryCount(t *testing.T) int {
+// tempDirEntryNames snapshots what the shared temp directory holds.
+//
+// NAMES, NOT A COUNT. The assertion is that deriving a path CREATES nothing,
+// and a count cannot tell creation from removal: the shared temp root is also
+// used by every other test binary running at the same time and by the OS, so a
+// concurrent cleanup made the count fall and the test reported that naming the
+// paths had "gained -1 entries". Comparing the sets answers the question that
+// was actually being asked and is indifferent to anything disappearing.
+func tempDirEntryNames(t *testing.T) map[string]struct{} {
 	t.Helper()
 	entries, err := os.ReadDir(os.TempDir())
 	if err != nil {
 		t.Fatalf("read temp dir: %v", err)
 	}
-	return len(entries)
+	names := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		names[entry.Name()] = struct{}{}
+	}
+	return names
+}
+
+// assertCreatedNothing reports entries that appeared since the snapshot.
+func assertCreatedNothing(t *testing.T, before map[string]struct{}, what string) {
+	t.Helper()
+	for name := range tempDirEntryNames(t) {
+		if _, existed := before[name]; !existed {
+			t.Errorf("%s created %q in the temp directory; naming the paths must not create one", what, name)
+		}
+	}
 }
