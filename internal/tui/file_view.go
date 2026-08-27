@@ -554,7 +554,7 @@ type fileViewState struct {
 	parentScrollOffset int
 
 	// View session lifetime identity (UUIDv7 RFC 9562 0-alloc)
-	lifetimeToken      [16]byte
+	lifetimeToken [16]byte
 
 	// Monotonically advancing desired snapshot sequence & requested parameters
 	desiredSeq         uint64
@@ -563,15 +563,15 @@ type fileViewState struct {
 	desiredGen         int
 
 	// Authoritative completed snapshot (only valid when loadedSeq == desiredSeq)
-	renderedContent    string
-	loadedPath         string
-	loadedWidth        int
-	loadedGen          int
-	loadedFingerprint  string
-	loadedToken        [16]byte
-	loadedSeq          uint64
-	loading            bool
-	hasError           bool
+	renderedContent   string
+	loadedPath        string
+	loadedWidth       int
+	loadedGen         int
+	loadedFingerprint string
+	loadedToken       [16]byte
+	loadedSeq         uint64
+	loading           bool
+	hasError          bool
 }
 
 func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
