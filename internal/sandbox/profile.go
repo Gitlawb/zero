@@ -116,20 +116,25 @@ func gitMetadataWriteCarveouts(root string) []string {
 	}
 
 	// .git is a file. Following gitdir/commondir is only safe when the
-	// resolved directory stays inside this write root. An escaping pointer is
-	// untrusted input: do not carve outside the workspace, and do not fall
-	// back to <root>/.git/{hooks,config} (that path has no mkdir-able parent
-	// under a .git file and would crash bwrap). Missing carveouts drop git
-	// metadata protection; unbounded carveouts drop confinement.
+	// real resolved directory stays inside this write root. An escaping
+	// pointer is untrusted input: do not carve outside the workspace, and
+	// do not fall back to <root>/.git/{hooks,config} (that path has no
+	// mkdir-able parent under a .git file and would crash bwrap). Missing
+	// carveouts drop git metadata protection; unbounded carveouts drop
+	// confinement.
+	//
+	// Always write-deny the .git pointer file itself so a sandboxed command
+	// cannot rewrite gitdir: between PermissionProfileFromPolicy calls.
 	gitDir := resolveGitDir(root)
 	if gitDir == "" || !pathContainedInRoot(root, gitDir) {
-		return nil
+		return []string{gitPath}
 	}
 	common := resolveGitCommonDir(gitDir)
 	if common == "" || !pathContainedInRoot(root, common) {
-		return nil
+		return []string{gitPath}
 	}
 	return []string{
+		gitPath,
 		filepath.Join(common, "hooks"),
 		filepath.Join(common, "config"),
 	}
@@ -169,10 +174,11 @@ func resolveGitDir(root string) string {
 	if err != nil || !info.IsDir() {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return ""
 	}
-	return dir
+	return resolved
 }
 
 // resolveGitCommonDir returns the shared git dir for a (possibly worktree)
@@ -196,15 +202,22 @@ func resolveGitCommonDir(gitDir string) string {
 	if err != nil || !info.IsDir() {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(common); err == nil {
-		common = resolved
+	resolved, err := filepath.EvalSymlinks(common)
+	if err != nil {
+		return ""
 	}
-	return common
+	return resolved
 }
 
 func pathContainedInRoot(root, target string) bool {
 	root = filepath.Clean(root)
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	target = filepath.Clean(target)
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		target = resolved
+	}
 	rel, err := filepath.Rel(root, target)
 	if err != nil {
 		return false

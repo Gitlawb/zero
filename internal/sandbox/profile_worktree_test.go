@@ -44,6 +44,7 @@ func TestGitMetadataWriteCarveoutsResolvesWorktree(t *testing.T) {
 
 	got := gitMetadataWriteCarveouts(root)
 	want := []string{
+		filepath.Join(root, ".git"),
 		filepath.Join(commonGit, "hooks"),
 		filepath.Join(commonGit, "config"),
 	}
@@ -67,9 +68,8 @@ func TestGitMetadataWriteCarveoutsOutsideWorktreeGitdirReturnsNone(t *testing.T)
 	worktree := t.TempDir()
 	writeGitFile(t, filepath.Join(worktree, ".git"), "gitdir: "+worktreeGit+"\n")
 	got := gitMetadataWriteCarveouts(worktree)
-	if len(got) != 0 {
-		t.Fatalf("outside-workspace gitdir carveouts = %v, want none", got)
-	}
+	want := []string{filepath.Join(worktree, ".git")}
+	mustEqualCarveouts(t, got, want)
 }
 
 func TestGitMetadataWriteCarveoutsPlainCheckout(t *testing.T) {
@@ -96,9 +96,7 @@ func TestGitMetadataWriteCarveoutsRejectsEscapingGitdir(t *testing.T) {
 	root := t.TempDir()
 	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+filepath.Join(outside, "git")+"\n")
 	got := gitMetadataWriteCarveouts(root)
-	if len(got) != 0 {
-		t.Fatalf("escaping absolute gitdir carveouts = %v, want none", got)
-	}
+	mustEqualCarveouts(t, got, []string{filepath.Join(root, ".git")})
 }
 
 func TestGitMetadataWriteCarveoutsRejectsRelativeEscapingGitdir(t *testing.T) {
@@ -113,9 +111,7 @@ func TestGitMetadataWriteCarveoutsRejectsRelativeEscapingGitdir(t *testing.T) {
 	}
 	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: ../elsewhere\n")
 	got := gitMetadataWriteCarveouts(root)
-	if len(got) != 0 {
-		t.Fatalf("escaping relative gitdir carveouts = %v, want none", got)
-	}
+	mustEqualCarveouts(t, got, []string{filepath.Join(root, ".git")})
 }
 
 func TestGitMetadataWriteCarveoutsRejectsEscapingCommondir(t *testing.T) {
@@ -128,9 +124,7 @@ func TestGitMetadataWriteCarveoutsRejectsEscapingCommondir(t *testing.T) {
 	writeGitFile(t, filepath.Join(gitDir, "commondir"), outside+"\n")
 	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+gitDir+"\n")
 	got := gitMetadataWriteCarveouts(root)
-	if len(got) != 0 {
-		t.Fatalf("escaping commondir carveouts = %v, want none", got)
-	}
+	mustEqualCarveouts(t, got, []string{filepath.Join(root, ".git")})
 }
 
 func TestGitMetadataWriteCarveoutsCommondirReadFailureKeepsGitDir(t *testing.T) {
@@ -142,6 +136,7 @@ func TestGitMetadataWriteCarveoutsCommondirReadFailureKeepsGitDir(t *testing.T) 
 	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+gitDir+"\n")
 	got := gitMetadataWriteCarveouts(root)
 	want := []string{
+		filepath.Join(root, ".git"),
 		filepath.Join(gitDir, "hooks"),
 		filepath.Join(gitDir, "config"),
 	}
@@ -152,9 +147,7 @@ func TestGitMetadataWriteCarveoutsStaleGitdirReturnsNone(t *testing.T) {
 	root := t.TempDir()
 	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: missing-target\n")
 	got := gitMetadataWriteCarveouts(root)
-	if len(got) != 0 {
-		t.Fatalf("stale gitdir carveouts = %v, want none", got)
-	}
+	mustEqualCarveouts(t, got, []string{filepath.Join(root, ".git")})
 }
 
 func TestGitMetadataWriteCarveoutsRejectsNonDirectoryTarget(t *testing.T) {
@@ -163,9 +156,7 @@ func TestGitMetadataWriteCarveoutsRejectsNonDirectoryTarget(t *testing.T) {
 	writeGitFile(t, target, "nope\n")
 	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+target+"\n")
 	got := gitMetadataWriteCarveouts(root)
-	if len(got) != 0 {
-		t.Fatalf("non-directory gitdir carveouts = %v, want none", got)
-	}
+	mustEqualCarveouts(t, got, []string{filepath.Join(root, ".git")})
 }
 
 func TestGitMetadataWriteCarveoutsRejectsSymlinkGitdir(t *testing.T) {
@@ -177,7 +168,31 @@ func TestGitMetadataWriteCarveoutsRejectsSymlinkGitdir(t *testing.T) {
 	}
 	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+alias+"\n")
 	got := gitMetadataWriteCarveouts(root)
-	if len(got) != 0 {
-		t.Fatalf("symlink gitdir carveouts = %v, want none", got)
+	mustEqualCarveouts(t, got, []string{filepath.Join(root, ".git")})
+}
+
+func TestGitMetadataWriteCarveoutsResolvesWorktreeUnderSymlinkRoot(t *testing.T) {
+	realRoot := t.TempDir()
+	commonGit := filepath.Join(realRoot, ".git-common")
+	worktreeGit := filepath.Join(realRoot, ".git-wt")
+	if err := os.MkdirAll(worktreeGit, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.MkdirAll(commonGit, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGitFile(t, filepath.Join(worktreeGit, "commondir"), filepath.Join("..", ".git-common")+"\n")
+	writeGitFile(t, filepath.Join(realRoot, ".git"), "gitdir: "+worktreeGit+"\n")
+	parent := t.TempDir()
+	alias := filepath.Join(parent, "ws")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	got := gitMetadataWriteCarveouts(alias)
+	want := []string{
+		filepath.Join(alias, ".git"),
+		filepath.Join(commonGit, "hooks"),
+		filepath.Join(commonGit, "config"),
+	}
+	mustEqualCarveouts(t, got, want)
 }
