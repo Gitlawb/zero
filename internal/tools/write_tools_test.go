@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -136,6 +137,65 @@ func TestWriteFileToolCreatesAndProtectsExistingFiles(t *testing.T) {
 	}
 	if string(content) != "second" {
 		t.Fatalf("expected overwritten content, got %q", string(content))
+	}
+}
+
+func TestWriteFileToolOverwritePreservesExistingEncoding(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing []byte
+		content  string
+		want     []byte
+	}{
+		{name: "LF", existing: []byte("old\ntext\n"), content: "new\ntext\n", want: []byte("new\ntext\n")},
+		{name: "CRLF", existing: []byte("old\r\ntext\r\n"), content: "new\ntext\n", want: []byte("new\r\ntext\r\n")},
+		{name: "BOM and CRLF", existing: []byte("\xef\xbb\xbfold\r\ntext\r\n"), content: "new\ntext\n", want: []byte("\xef\xbb\xbfnew\r\ntext\r\n")},
+		{name: "explicit CRLF", existing: []byte("old\ntext\n"), content: "new\r\ntext\r\n", want: []byte("new\r\ntext\r\n")},
+		{name: "mixed content follows existing CRLF", existing: []byte("old\r\ntext\r\n"), content: "new\r\ntext\nmore\n", want: []byte("new\r\ntext\r\nmore\r\n")},
+		{name: "mixed content follows existing LF", existing: []byte("old\ntext\n"), content: "new\r\ntext\nmore\n", want: []byte("new\ntext\nmore\n")},
+		{name: "explicit BOM", existing: []byte("old\n"), content: "\xef\xbb\xbfnew\n", want: []byte("\xef\xbb\xbfnew\n")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "example.txt")
+			if err := os.WriteFile(path, tt.existing, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+				"path": "example.txt", "content": tt.content, "overwrite": true,
+			})
+			if result.Status != StatusOK {
+				t.Fatalf("overwrite failed: %s", result.Output)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("written bytes = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteFileToolNewFileRetainsCallerBytes(t *testing.T) {
+	root := t.TempDir()
+	want := []byte("\xef\xbb\xbfnew\r\ntext\n")
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "example.txt", "content": string(want),
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("write failed: %s", result.Output)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "example.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("written bytes = %q, want %q", got, want)
 	}
 }
 

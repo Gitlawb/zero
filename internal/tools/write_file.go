@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -95,10 +96,16 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Capture the prior content (before we replace it) so an overwrite can show a
 	// real diff; a fresh create stays "" and previews as all-additions.
 	priorContent := ""
+	var priorBytes []byte
 	if existed {
 		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
+			priorBytes = prev
 			priorContent = string(prev)
 		}
+	}
+	modelKnownContent := content
+	if priorBytes != nil {
+		content = preserveWriteFileEncoding(priorBytes, content)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
@@ -110,7 +117,6 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
@@ -145,6 +151,38 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// re-reads the file — the rich preview costs zero model tokens.
 	result.Display = Display{Summary: summary, Kind: "file", Preview: boundedUnifiedDiff(relativePath, priorContent, content)}
 	return result
+}
+
+var utf8BOM = []byte{0xef, 0xbb, 0xbf}
+
+// preserveWriteFileEncoding restores byte-level features hidden by read_file's
+// normalized text view. It keeps line endings consistent with the existing
+// file, while still allowing an LF file to be explicitly replaced with
+// consistently CRLF content.
+func preserveWriteFileEncoding(existing []byte, content string) string {
+	updated := []byte(content)
+	if bytes.HasPrefix(existing, utf8BOM) && !bytes.HasPrefix(updated, utf8BOM) {
+		updated = append(append([]byte(nil), utf8BOM...), updated...)
+	}
+
+	existingCRLF, existingLF := lineEndingCounts(existing)
+	updatedCRLF, updatedLF := lineEndingCounts(updated)
+	useCRLF := existingCRLF > existingLF
+	if !useCRLF && updatedCRLF > updatedLF {
+		// Unlike LF returned by read_file, caller-supplied dominant CRLF is an
+		// unambiguous request to change an LF file's convention.
+		useCRLF = true
+	}
+	updated = bytes.ReplaceAll(updated, []byte("\r\n"), []byte("\n"))
+	if useCRLF {
+		updated = bytes.ReplaceAll(updated, []byte("\n"), []byte("\r\n"))
+	}
+	return string(updated)
+}
+
+func lineEndingCounts(content []byte) (crlf, loneLF int) {
+	crlf = bytes.Count(content, []byte("\r\n"))
+	return crlf, bytes.Count(content, []byte("\n")) - crlf
 }
 
 // fileContentArg reads the file body from "content" or a common alias that weaker
