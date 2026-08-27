@@ -739,6 +739,15 @@ func (m model) activeProviderRowName() string {
 // long-s "ſ" together while the credential store keeps them separate, so folding
 // here could hand back a different provider's profile and reach its secret.
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
+	name = strings.TrimSpace(name)
+	for _, profile := range m.savedProviders {
+		if strings.TrimSpace(profile.Name) == name {
+			return profile, true
+		}
+	}
+	if strings.TrimSpace(m.providerProfile.Name) == name {
+		return m.providerProfile, true
+	}
 	resolved, lookup := config.LookupProviderName(config.ProviderProfileNames(m.savedProviders), name)
 	if lookup.Resolved() {
 		for _, profile := range m.savedProviders {
