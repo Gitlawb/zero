@@ -839,6 +839,15 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		mcpTokenStore = nil
 		err = nil
 	}
+	// Checked on the WHOLE configuration, before the split. The two halves
+	// normalize separately, so a collision that straddles them is invisible to
+	// either call: a user-configured "  exa" is critical while the built-in
+	// default "exa" is optional, and they are one runtime server. Ambiguous
+	// identity is worth refusing to start over, because every downstream join is
+	// keyed on that name and one of the two entries is unreachable regardless.
+	if err := mcp.ValidateUniqueNames(mcpConfig); err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
 	criticalMCPConfig, optionalMCPConfig := splitMCPStartupConfig(mcpConfig)
 	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
 	if len(criticalMCPConfig.Servers) > 0 {
