@@ -92,6 +92,13 @@ func (m model) handleDictationPartial(msg sttPartialMsg) model {
 
 func (m *model) applyStreamingText(text string) {
 	state := m.currentComposerState()
+	stateRunes := []rune(state.text)
+	if m.dictation.regionActive {
+		// The composer may have changed between partials. Keep the tracked range
+		// valid before using regionStart as a slice bound.
+		m.dictation.regionStart = clamp(m.dictation.regionStart, 0, len(stateRunes))
+		m.dictation.regionEnd = clamp(m.dictation.regionEnd, m.dictation.regionStart, len(stateRunes))
+	}
 	if !m.dictation.regionActive {
 		m.dictation.regionActive = true
 		m.dictation.regionStart = state.cursor
@@ -100,7 +107,7 @@ func (m *model) applyStreamingText(text string) {
 		// Anchor the prefix text BEFORE the live region. If the user types or
 		// pastes outside the region, the next partial can detect the change in
 		// this prefix and shift [start,end) to stay aligned.
-		m.dictation.regionAnchor = state.text
+		m.dictation.regionAnchor = string(stateRunes[:state.cursor])
 		if needsLeadingSpace(state) {
 			// Fold the separator into the region so a cancel removes it too.
 			m.dictation.regionPrefix = " "
@@ -112,7 +119,7 @@ func (m *model) applyStreamingText(text string) {
 		// INSIDE the region, drop the live region and re-anchor at the
 		// current cursor — we can't tell the partial from the user's text
 		// after that point.
-		prefix := string([]rune(state.text)[:m.dictation.regionStart])
+		prefix := string(stateRunes[:m.dictation.regionStart])
 		anchor := m.dictation.regionAnchor
 		switch {
 		case prefix == anchor:
@@ -137,9 +144,13 @@ func (m *model) applyStreamingText(text string) {
 			m.dictation.regionStart = state.cursor
 			m.dictation.regionEnd = state.cursor
 			m.dictation.regionPrefix = ""
-			m.dictation.regionAnchor = string([]rune(state.text)[:state.cursor])
+			m.dictation.regionAnchor = string(stateRunes[:state.cursor])
 		}
 	}
+	// A prefix adjustment can move the region outside the current composer.
+	// Clamp again before deletion and before comparing the cursor to the range.
+	m.dictation.regionStart = clamp(m.dictation.regionStart, 0, len(stateRunes))
+	m.dictation.regionEnd = clamp(m.dictation.regionEnd, m.dictation.regionStart, len(stateRunes))
 	// Replace [regionStart, regionEnd) with prefix + the new cumulative text.
 	rendered := m.dictation.regionPrefix + text
 	cleared := deleteComposerRange(state, m.dictation.regionStart, m.dictation.regionEnd)

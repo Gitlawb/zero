@@ -175,6 +175,39 @@ func TestDictationStreamingPartialReplacesRegion(t *testing.T) {
 	}
 }
 
+func TestDictationStreamingPartialWithCaretInsideExistingText(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "hello world", cursor: 5})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+
+	m = m.handleDictationPartial(sttPartialMsg{text: "there"})
+	if m.composer.text != "hello there world" {
+		t.Fatalf("after first partial: %q", m.composer.text)
+	}
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend"})
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend again"})
+	if m.composer.text != "hello there friend again world" {
+		t.Fatalf("after third partial: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingPartialClampsRegionAfterComposerShrink(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "hello world", cursor: 11})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "there"})
+
+	// Simulate the user replacing the composer while a later partial is in
+	// flight. The old live-region bounds now exceed the new composer length.
+	m.setComposerState(composerState{text: "hi ", cursor: 3})
+	m = m.handleDictationPartial(sttPartialMsg{text: "again"})
+	if m.composer.text != "hi again" {
+		t.Fatalf("partial after composer shrink: %q", m.composer.text)
+	}
+}
+
 func TestDictationCanceledStreamRaceDoesNotAutoSubmit(t *testing.T) {
 	// Esc can race an already-buffered realtime event: cancelDictation discards
 	// the live region and resets state synchronously, but the streaming
