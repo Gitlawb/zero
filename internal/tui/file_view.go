@@ -303,7 +303,7 @@ func changedLinesFingerprint(changed map[string]bool) string {
 	return strings.Join(keys, "\x00")
 }
 
-func formatFileViewLines(lines []string, display []string, changed map[string]bool, truncated bool, omittedLines bool, width int) string {
+func formatFileViewLines(lines []string, display []string, changed map[string]bool, truncated bool, omittedLines bool, width int, theme tuiTheme) string {
 	gutterW := len(fmt.Sprintf("%d", len(lines)))
 	textBudget := maxInt(8, width-gutterW-3) // gutter + space + marker column
 
@@ -315,9 +315,9 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 		}
 		marker := " "
 		if changed != nil && len(lines) > i && changed[strings.TrimSpace(lines[i])] {
-			marker = zeroTheme.accent.Render("▎")
+			marker = theme.accent.Render("▎")
 		}
-		b.WriteString(zeroTheme.faintest.Render(fmt.Sprintf("%*d ", gutterW, i+1)))
+		b.WriteString(theme.faintest.Render(fmt.Sprintf("%*d ", gutterW, i+1)))
 		b.WriteString(marker)
 		b.WriteString(line)
 	}
@@ -326,9 +326,9 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 		// rest of the file, defeating the bounded read above.
 		b.WriteString("\n")
 		if omittedLines {
-			b.WriteString(zeroTheme.faint.Render(fmt.Sprintf("… more lines (file truncated at %d for display)", len(lines))))
+			b.WriteString(theme.faint.Render(fmt.Sprintf("… more lines (file truncated at %d for display)", len(lines))))
 		} else {
-			b.WriteString(zeroTheme.faint.Render("… (line content truncated at display limit)"))
+			b.WriteString(theme.faint.Render("… (line content truncated at display limit)"))
 		}
 	}
 	return b.String()
@@ -337,7 +337,7 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 // getRenderOnly looks up an already-rendered variant in memory (or formats from
 // already-cached in-memory syntax tokens) without performing any disk I/O, stat,
 // or Chroma syntax highlighting. Safe for direct View calls.
-func (c *fileViewRenderCache) getRenderOnly(targetPath string, width int, changed map[string]bool) (string, bool) {
+func (c *fileViewRenderCache) getRenderOnly(targetPath string, width int, changed map[string]bool, theme tuiTheme) (string, bool) {
 	c.mu.Lock()
 	elem, ok := c.items[targetPath]
 	if !ok {
@@ -354,7 +354,7 @@ func (c *fileViewRenderCache) getRenderOnly(targetPath string, width int, change
 		return val, true
 	}
 
-	rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width)
+	rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
 	entry.putRender(renderKey, rendered)
 	return rendered, true
 }
@@ -362,10 +362,10 @@ func (c *fileViewRenderCache) getRenderOnly(targetPath string, width int, change
 // loadAndRender performs the bounded read, Chroma highlighting, and formatting
 // on a cache miss (or re-formats for a new width variant on a cache hit). It is
 // intended to be executed from a tea.Cmd / background worker, off the View path.
-func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, reqGen int) (string, error) {
+func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, reqGen int, theme tuiTheme) (string, error) {
 	stat, err := os.Stat(targetPath)
 	if err != nil {
-		rendered := zeroTheme.faint.Render("Could not read file: " + err.Error())
+		rendered := theme.faint.Render("Could not read file: " + err.Error())
 		return rendered, err
 	}
 
@@ -392,7 +392,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 			}
 
 			// Re-format for the new width or changed markers using cached display and lines
-			rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width)
+			rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
 			entry.putRender(renderKey, rendered)
 			return rendered, nil
 		}
@@ -404,7 +404,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	readRes := readFileViewBounded(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes)
 	if readRes.err != nil && len(readRes.lines) == 0 {
-		rendered := zeroTheme.faint.Render("Could not read file: " + readRes.err.Error())
+		rendered := theme.faint.Render("Could not read file: " + readRes.err.Error())
 		return rendered, readRes.err
 	}
 
@@ -412,12 +412,12 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	c.statsData.HighlightCalls++
 	c.mu.Unlock()
 
-	display, ok := highlightCodeForPath(readRes.lines, displayPath, 1<<20, nil)
+	display, ok := highlightCodeForPathWithTheme(readRes.lines, displayPath, 1<<20, nil, theme)
 	if !ok || len(display) != len(readRes.lines) {
 		display = readRes.lines
 	}
 
-	rendered := formatFileViewLines(readRes.lines, display, changed, readRes.truncated, readRes.omittedLines, width)
+	rendered := formatFileViewLines(readRes.lines, display, changed, readRes.truncated, readRes.omittedLines, width, theme)
 
 	entry := &fileViewCachedEntry{
 		targetPath:   targetPath,
@@ -439,6 +439,11 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	}
 
 	if elem, ok := c.items[targetPath]; ok {
+		existing := elem.Value.(*fileViewCachedEntry)
+		if existing.modTime.After(modTime) {
+			c.mu.Unlock()
+			return rendered, nil
+		}
 		c.lru.Remove(elem)
 		delete(c.items, targetPath)
 	}
@@ -460,7 +465,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 }
 
 func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
-	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, c.generation())
+	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, c.generation(), zeroTheme)
 	return rendered
 }
 
@@ -475,9 +480,9 @@ type fileViewLoadedMsg struct {
 	err         error
 }
 
-func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, requestID int, gen int) tea.Cmd {
+func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, requestID int, gen int, theme tuiTheme) tea.Cmd {
 	return func() tea.Msg {
-		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, gen)
+		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, gen, theme)
 		return fileViewLoadedMsg{
 			requestID:   requestID,
 			generation:  gen,
@@ -503,6 +508,7 @@ type fileViewState struct {
 	renderedContent    string // rendered full text when loaded
 	loadedPath         string // path of loaded content
 	loadedWidth        int    // width of loaded content
+	loadedGen          int    // cache/theme generation of loaded content
 	loading            bool   // true while async load is in flight
 }
 
@@ -519,7 +525,8 @@ func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
 	reqID := m.fileView.requestID
 	gen := defaultFileViewCache.generation()
 	changed := m.fileViewChangedLines()
-	return m, loadFileViewCmd(target, m.fileView.path, width, changed, reqID, gen)
+	theme := zeroTheme
+	return m, loadFileViewCmd(target, m.fileView.path, width, changed, reqID, gen, theme)
 }
 
 // openFileView activates the drill-in for path in diff mode. Opening from an
@@ -576,21 +583,24 @@ func (m model) setFileViewMode(mode int) (model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) model {
+func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode != fileViewFull {
-		return m
+		return m, nil
 	}
 	if m.fileView.path != msg.displayPath || m.fileView.requestID != msg.requestID {
-		return m
+		return m, nil
 	}
 	if msg.generation != defaultFileViewCache.generation() {
-		return m
+		// Cache was invalidated (e.g. theme switch) while this request was in flight.
+		// Start a fresh request for the current generation.
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
 	}
 	m.fileView.loading = false
 	m.fileView.renderedContent = msg.rendered
 	m.fileView.loadedPath = msg.displayPath
 	m.fileView.loadedWidth = msg.width
-	return m
+	m.fileView.loadedGen = msg.generation
+	return m, nil
 }
 
 // fileViewNavBar renders the single-line header shown in place of the pinned
@@ -676,10 +686,10 @@ func (m model) renderFileViewFull(width int) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	if cached, ok := defaultFileViewCache.getRenderOnly(target, width, m.fileViewChangedLines()); ok {
+	if cached, ok := defaultFileViewCache.getRenderOnly(target, width, m.fileViewChangedLines(), zeroTheme); ok {
 		return cached
 	}
-	if m.fileView.renderedContent != "" && m.fileView.loadedPath == m.fileView.path {
+	if m.fileView.renderedContent != "" && m.fileView.loadedPath == m.fileView.path && m.fileView.loadedGen == defaultFileViewCache.generation() {
 		return m.fileView.renderedContent
 	}
 	return zeroTheme.faint.Render(fileViewLoadingPlaceholder)
