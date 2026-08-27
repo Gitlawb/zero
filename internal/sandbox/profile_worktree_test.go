@@ -47,6 +47,8 @@ func TestGitMetadataWriteCarveoutsResolvesWorktree(t *testing.T) {
 		filepath.Join(root, ".git"),
 		filepath.Join(commonGit, "hooks"),
 		filepath.Join(commonGit, "config"),
+		filepath.Join(worktreeGit, "hooks"),
+		filepath.Join(worktreeGit, "config"),
 	}
 	mustEqualCarveouts(t, got, want)
 	bogus := filepath.Join(root, ".git", "hooks")
@@ -191,8 +193,26 @@ func TestGitMetadataWriteCarveoutsResolvesWorktreeUnderSymlinkRoot(t *testing.T)
 	got := gitMetadataWriteCarveouts(alias)
 	want := []string{
 		filepath.Join(alias, ".git"),
-		filepath.Join(commonGit, "hooks"),
-		filepath.Join(commonGit, "config"),
+		filepath.Join(alias, ".git-common", "hooks"),
+		filepath.Join(alias, ".git-common", "config"),
+		filepath.Join(alias, ".git-wt", "hooks"),
+		filepath.Join(alias, ".git-wt", "config"),
+	}
+	mustEqualCarveouts(t, got, want)
+}
+
+func TestGitMetadataWriteCarveoutsParsesFirstGitdirLine(t *testing.T) {
+	root := t.TempDir()
+	gitDir := filepath.Join(root, ".git-real")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+gitDir+"\n# comment\n")
+	got := gitMetadataWriteCarveouts(root)
+	want := []string{
+		filepath.Join(root, ".git"),
+		filepath.Join(gitDir, "hooks"),
+		filepath.Join(gitDir, "config"),
 	}
 	mustEqualCarveouts(t, got, want)
 }

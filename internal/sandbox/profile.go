@@ -133,11 +133,25 @@ func gitMetadataWriteCarveouts(root string) []string {
 	if common == "" || !pathContainedInRoot(root, common) {
 		return []string{gitPath}
 	}
-	return []string{
+	// Emit carveouts under the caller's lexical write root so a symlink
+	// workspace still matches the path the sandbox binds.
+	gitDir = pathUnderRoot(root, gitDir)
+	common = pathUnderRoot(root, common)
+	if gitDir == "" || common == "" {
+		return []string{gitPath}
+	}
+	carveouts := []string{
 		gitPath,
 		filepath.Join(common, "hooks"),
 		filepath.Join(common, "config"),
 	}
+	if gitDir != common {
+		carveouts = append(carveouts,
+			filepath.Join(gitDir, "hooks"),
+			filepath.Join(gitDir, "config"),
+		)
+	}
+	return carveouts
 }
 
 // resolveGitDir returns the real git directory for a workspace root when .git
@@ -156,7 +170,14 @@ func resolveGitDir(root string) string {
 	if err != nil {
 		return ""
 	}
-	line := strings.TrimSpace(string(data))
+	line := ""
+	for _, candidate := range strings.Split(string(data), "\n") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			line = candidate
+			break
+		}
+	}
 	const prefix = "gitdir:"
 	if !strings.HasPrefix(strings.ToLower(line), prefix) {
 		return ""
@@ -210,22 +231,31 @@ func resolveGitCommonDir(gitDir string) string {
 }
 
 func pathContainedInRoot(root, target string) bool {
+	return pathUnderRoot(root, target) != ""
+}
+
+func pathUnderRoot(root, target string) string {
 	root = filepath.Clean(root)
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
 	target = filepath.Clean(target)
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
-		target = resolved
+	evalRoot := root
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		evalRoot = resolved
 	}
-	rel, err := filepath.Rel(root, target)
+	evalTarget := target
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		evalTarget = resolved
+	}
+	rel, err := filepath.Rel(evalRoot, evalTarget)
 	if err != nil {
-		return false
+		return ""
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
 	}
 	if rel == "." {
-		return true
+		return root
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return filepath.Join(root, rel)
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
