@@ -421,12 +421,15 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 }
 
 func fileConfigKnownJSONKey(key string) bool {
-	key = strings.ToLower(key)
-	if key == "mcpservers" || key == "mcp_servers" {
+	if strings.EqualFold(key, "mcpServers") || strings.EqualFold(key, "mcp_servers") {
 		return true
 	}
-	_, known := knownJSONFields(reflect.TypeOf(FileConfig{}))[key]
-	return known
+	for _, field := range knownJSONFields(reflect.TypeOf(FileConfig{})) {
+		if strings.EqualFold(key, field.canonical) {
+			return true
+		}
+	}
+	return false
 }
 
 type ResolveOptions struct {

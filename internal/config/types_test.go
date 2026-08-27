@@ -71,3 +71,30 @@ func TestFileConfigExtraCannotOverrideKnownFields(t *testing.T) {
 		t.Fatalf("future = %s, want preserved object", got)
 	}
 }
+
+func TestFileConfigUnicodeFoldedKnownFieldRoundTrip(t *testing.T) {
+	const data = `{"mcpſervers":{"docs":{"url":"https://example.com/mcp"}}}`
+
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := cfg.MCP.Servers["docs"]; !exists {
+		t.Fatalf("MCP.Servers = %#v, want docs server", cfg.MCP.Servers)
+	}
+	if cfg.Extra != nil {
+		t.Fatalf("Extra = %#v, want Unicode-folded known field excluded", cfg.Extra)
+	}
+
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped FileConfig
+	if err := json.Unmarshal(encoded, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := roundTripped.MCP.Servers["docs"]; !exists {
+		t.Fatalf("round-tripped MCP.Servers = %#v, want docs server", roundTripped.MCP.Servers)
+	}
+}
