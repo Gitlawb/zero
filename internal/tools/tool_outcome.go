@@ -54,7 +54,17 @@ func finalizeToolOutcome(result Result, boundaryOutput string) Result {
 	// of the same fact, which is exactly how the disclosure went missing from the
 	// generic execution adapter in the first place.
 	if len(result.EnforcementNotices) == 0 {
-		if notices := strings.TrimSpace(result.Meta[sandboxNoticesMeta]); notices != "" {
+		// DERIVED FROM APPLIED STATE, NOT FROM THE PLAN. addSandboxMeta writes the
+		// plan's notices at plan time, before anything runs, so promoting them
+		// unconditionally claims a token trade for a command that may never have
+		// started. The execution outcome is the thing that knows, and it applies
+		// the same launched-and-planned rule hooks and plugins use.
+		//
+		// The metadata stays as diagnostics either way: it records what was
+		// planned, which is still worth having.
+		if result.ExecutionOutcome != nil {
+			result.EnforcementNotices = result.ExecutionOutcome.AppliedEnforcementNotices()
+		} else if notices := strings.TrimSpace(result.Meta[sandboxNoticesMeta]); notices != "" {
 			result.EnforcementNotices = strings.Split(notices, "\n")
 		}
 	}
