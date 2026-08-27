@@ -373,6 +373,22 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	if err := validateWindowsSandboxRuntimeStamp(config.PermissionProfile, expected.ACLPlanHash); err != nil {
 		return err
 	}
+	// AND THE STAMP IS NOT THE GRANT EITHER. It proves the directory was not
+	// removed and recreated under the same pathname, and that setup provisioned it
+	// for this configuration. It says nothing about whether the capability ACE
+	// still carries the permissions windowsACLAccess created or still reaches
+	// descendants: an ordinary file survives an ACL edit untouched, so `icacls
+	// /reset`, an inheritance change on a parent, or a security product
+	// rewriting the DACL all leave a valid stamp over a runtime root the
+	// WRITE_RESTRICTED child cannot write.
+	//
+	// The unelevated tier already answers this by reading the descriptors. This
+	// tier is the one that runs under the restricted token after an ELEVATED
+	// provisioning it cannot repeat, so it refuses and names the action instead of
+	// re-applying.
+	if err := validateWindowsSandboxACLGrants(config); err != nil {
+		return err
+	}
 	if actual.NetworkFilters != expected.NetworkFilters {
 		return errors.New("windows sandbox setup is out of date: network enforcement plan changed")
 	}
@@ -989,4 +1005,24 @@ func windowsSandboxSelectedRuntimeRoot(profile PermissionProfile) string {
 		return ""
 	}
 	return strings.TrimSpace(profile.Runtime.Root)
+}
+
+// validateWindowsSandboxACLGrants reports whether the objects this command's ACL
+// plan names still carry its allow grants.
+//
+// Separate from the marker comparisons above because it asks a different kind of
+// question. Those compare what setup INTENDED with what this command wants, and
+// both sides can agree perfectly while the filesystem has moved on underneath
+// them. This one reads the security descriptors.
+func validateWindowsSandboxACLGrants(config WindowsSandboxSetupConfig) error {
+	plan, err := BuildWindowsACLPlan(config.commandConfig())
+	if err != nil {
+		return err
+	}
+	if windowsACLPlanApplied(plan) {
+		return nil
+	}
+	return errors.New("the sandbox directories for this workspace no longer carry the permissions setup granted them, " +
+		"so the sandboxed command would be unable to write its temp and cache directories — " +
+		"run `zero sandbox setup` from an elevated (Administrator) terminal")
 }

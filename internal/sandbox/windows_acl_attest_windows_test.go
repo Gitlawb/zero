@@ -130,6 +130,10 @@ func TestPlanAttestationRejectsAWeakenedCapabilityACE(t *testing.T) {
 		{"reduced to metadata only", windows.FILE_READ_ATTRIBUTES, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT, false},
 		{"full mask that does not propagate", full, windows.NO_INHERITANCE, false},
 		{"containers only, so files are ungranted", full, windows.SUB_CONTAINERS_ONLY_INHERIT, false},
+		// INHERIT_ONLY grants descendants and grants the directory nothing, so the
+		// child is refused FILE_ADD_FILE on the runtime root while every inherit
+		// flag the check looks for is present.
+		{"granted to descendants but not to the directory", full, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT | windows.INHERIT_ONLY_ACE, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "runtime")

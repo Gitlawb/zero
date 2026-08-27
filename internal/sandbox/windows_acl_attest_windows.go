@@ -107,7 +107,16 @@ func windowsPathCarriesGrant(path, trustee string, required windows.ACCESS_MASK)
 				return false
 			}
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
-			// Only ACEs that propagate count towards a directory's grant, since a
+			// INHERIT_ONLY DOES NOT APPLY TO THE OBJECT ITSELF. An ACE carrying it
+			// grants descendants and grants the directory nothing, so the child can
+			// still be refused FILE_ADD_FILE on the runtime root while every other
+			// bit here looks satisfied. Checking the inherit flags alone would take
+			// the propagation half of the grant as evidence for the whole of it,
+			// which is the substitution this attestation exists to stop making.
+			if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+				continue
+			}
+			// And only ACEs that propagate count towards a directory's grant, since a
 			// non-inheriting one leaves descendants ungranted.
 			if ace.Header.AceFlags&needInherit != needInherit {
 				continue

@@ -52,6 +52,7 @@ func TestSetupAndCommandSelectTheSameRuntimeRoot(t *testing.T) {
 // no capability ACE at all: a WRITE_RESTRICTED token could not write TMP,
 // GOCACHE or anything else beneath it, with nothing saying why.
 func TestAnEvictedRuntimeRootInvalidatesTheMarker(t *testing.T) {
+	assumeWindowsACLGrantsApplied(t)
 	config := runtimeRootTestConfig(t)
 
 	selected, lease, err := selectSandboxRuntimeRoot(config.WorkspaceRoots[0], true)

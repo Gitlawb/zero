@@ -405,12 +405,21 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 			}
 			continue
 		}
-		current, err := windowsSnapshotIdentityNow(snapshot.Path)
+		// ONE OPEN, AND THE IDENTITY COMES FROM THE HANDLE THAT GETS MUTATED.
+		//
+		// Checking identity through a separate open and then resolving the name
+		// again for the restore proves nothing about the second handle: the two
+		// opens are a check-then-use, and the fact established (this NAME resolved
+		// to the object we changed) is not the fact the write depends on (this
+		// HANDLE is that object). Opening once and asking the handle who it is
+		// removes the window rather than narrowing it.
+		handle, _, err := openWindowsACLTarget(snapshot.Path)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("identify windows ACL target %s for rollback: %w", snapshot.Path, err))
+			errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
 			continue
 		}
-		if !snapshot.Identity.matches(current) {
+		if !snapshot.Identity.matches(windowsIdentityFromHandle(handle)) {
+			_ = windows.CloseHandle(handle)
 			errs = append(errs, fmt.Errorf(
 				"windows ACL target %s is no longer the object this setup modified; "+
 					"leaving the replacement untouched, and the original still carries this run's grant",
@@ -419,17 +428,8 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 		}
 		dacl, _, err := snapshot.Descriptor.DACL()
 		if err != nil {
+			_ = windows.CloseHandle(handle)
 			errs = append(errs, fmt.Errorf("read rollback windows DACL for %s: %w", snapshot.Path, err))
-			continue
-		}
-		// Re-open no-follow rather than restoring by pathname: the restore must
-		// land on the real object, not a reparse point swapped in since apply. The
-		// residual window is small because the target is ACL-restricted by now, but
-		// a handle keeps the restore honest. On a materialized-target rollback we
-		// remove it above, so only the restore-existing path opens here.
-		handle, _, err := openWindowsACLTarget(snapshot.Path)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
 			continue
 		}
 		if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
@@ -438,35 +438,4 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 		_ = windows.CloseHandle(handle)
 	}
 	return errors.Join(errs...)
-}
-
-// windowsSnapshotIdentityNow opens the recorded path no-follow and reports which
-// object currently answers to it.
-//
-// MINIMAL ACCESS, deliberately. openWindowsACLTarget asks for WRITE_DAC because
-// it is about to rewrite a descriptor, and that is not available on every target
-// the forward apply materialized once its own grants are in place: asking for it
-// here turned an identity CHECK into an access failure and broke rollback for
-// materialized directories. Identity only needs the attributes, so this asks for
-// nothing more, and keeps FILE_FLAG_OPEN_REPARSE_POINT so a link substituted at
-// the final component is opened as the link it is rather than followed.
-func windowsSnapshotIdentityNow(path string) (windowsObjectIdentity, error) {
-	utf16Path, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return windowsObjectIdentity{}, err
-	}
-	handle, err := windows.CreateFile(
-		utf16Path,
-		windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return windowsObjectIdentity{}, err
-	}
-	defer windows.CloseHandle(handle)
-	return windowsIdentityFromHandle(handle), nil
 }
