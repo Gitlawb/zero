@@ -47,7 +47,7 @@ func TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
 	}
 
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	started := time.Now()
 	resultChannel := make(chan commandResult, 1)

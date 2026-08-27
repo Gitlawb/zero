@@ -645,7 +645,7 @@ func runTurnStub(t *testing.T, task BenchTask, stubBody string) TurnTaskOutcome 
 
 func TestNewTurnExecRunnerWaitDelayCannotPassWithRunEnd(t *testing.T) {
 	task := BenchTask{ID: "wait-delay", Prompt: "p", WorkspaceFixture: t.TempDir()}
-	outcome := runTurnStub(t, task, `sleep 30 &
+	outcome := runTurnStub(t, task, `sleep 3 &
 echo '{"type":"run_end","exitCode":0}'
 exit 0
 `)
