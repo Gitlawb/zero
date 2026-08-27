@@ -114,6 +114,22 @@ func TestReclaimStaleLockDropsSidelinedWhenNewHolderWins(t *testing.T) {
 	}
 }
 
+func TestReclaimStaleLockBenignRestoreLostRace(t *testing.T) {
+	// An os.ErrNotExist restore failure means a competing racer already moved
+	// or restored the file; that is a benign lost race and should return false, nil.
+	restoreLockFile = func(reclaimed, path string) error { return os.ErrNotExist }
+	defer func() { restoreLockFile = RestoreLockFile }()
+
+	lockPath := filepath.Join(t.TempDir(), "lock")
+	if err := os.WriteFile(lockPath, []byte("live-holder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := ReclaimStaleLock(lockPath, "tok", func(string) bool { return true })
+	if err != nil || ok {
+		t.Fatalf("losing race during restore is not an error (ok=%v err=%v)", ok, err)
+	}
+}
+
 func TestReclaimStaleLockConcurrentDeadReclaim(t *testing.T) {
 	const goroutines = 24
 	dir := t.TempDir()

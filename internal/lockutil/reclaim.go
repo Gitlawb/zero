@@ -49,7 +49,7 @@ func ReclaimStaleLock(lockPath, suffix string, isLive func(reclaimedPath string)
 		// Put the live lock back instead of stealing it, and let the caller wait.
 		if rerr := restoreLockFile(reclaimed, lockPath); rerr != nil {
 			_ = RemoveLockFile(reclaimed)
-			if !errors.Is(rerr, os.ErrExist) {
+			if !errors.Is(rerr, os.ErrExist) && !errors.Is(rerr, os.ErrNotExist) && !isReclaimContended(rerr) {
 				return false, rerr
 			}
 		}
