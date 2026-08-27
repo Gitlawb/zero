@@ -173,6 +173,12 @@ func safeExtractPath(destDir string, name string) (string, error) {
 	return target, nil
 }
 
+// verifyNoSymlinkEscape ensures that intermediate path segments do not traverse
+// symlinks that escape destDir.
+//
+// Note: This is a POSIX-only control covering os.ModeSymlink. Windows NTFS
+// directory junctions (reparse points reported as ModeIrregular rather than
+// ModeSymlink) are not covered.
 func verifyNoSymlinkEscape(destDirClean string, target string) error {
 	rel, err := filepath.Rel(destDirClean, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
