@@ -66,7 +66,7 @@ func SecureProviderProfile(profile ProviderProfile, configPath string) ProviderP
 	return secured
 }
 
-// PublishProviderCredential captures key into the user-scoped credential store
+// PublishProviderCredential captures key into the credential store beside path
 // and publishes the matching APIKeyStored marker for exactName as ONE operation,
 // so a rejected publication cannot leave the user worse off than before the call.
 //
@@ -94,7 +94,7 @@ func PublishProviderCredential(path string, exactName string, key string) error 
 	if err := PreflightUserConfig(path); err != nil {
 		return err
 	}
-	store, err := ProviderKeyStore()
+	store, err := ProviderKeyStoreAt(filepath.Dir(path))
 	if err != nil {
 		return err
 	}

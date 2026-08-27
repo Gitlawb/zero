@@ -782,7 +782,7 @@ func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testin
 		t.Fatalf("survivor = %+v, want credentialed work row", cfg.Providers)
 	}
 	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
-		t.Fatalf("shared key = %q,%v,%v; want sk-shared,true,nil", key, ok, getErr)
+		t.Fatalf("shared key present=%v matched=%v err=%v; want present, matching, nil", ok, key == "sk-shared", getErr)
 	}
 	var payload struct {
 		KeyRemoved bool `json:"keyRemoved"`

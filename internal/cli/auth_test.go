@@ -185,7 +185,7 @@ func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
 	if profile.Name != "openrouter" || profile.CatalogID != "openrouter" || !profile.APIKeyStored || profile.APIKey != "" || profile.APIKeyEnv != "" {
 		t.Fatalf("provider not stored-key sanitized: %#v", profile)
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
