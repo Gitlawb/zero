@@ -106,24 +106,38 @@ func gitMetadataWriteCarveouts(root string) []string {
 	// ("Can't mkdir parents ... Not a directory") and blocks every sandboxed
 	// tool. Resolve the real (common) git dir in that case; otherwise keep the
 	// plain-checkout paths (harmless no-ops when .git is absent).
-	gitDir := filepath.Join(root, ".git")
-	if info, err := os.Stat(gitDir); err == nil && !info.IsDir() {
-		if real := resolveGitDir(root); real != "" {
-			gitDir = resolveGitCommonDir(real)
+	gitPath := filepath.Join(root, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil || info.IsDir() {
+		return []string{
+			filepath.Join(gitPath, "hooks"),
+			filepath.Join(gitPath, "config"),
 		}
 	}
+
+	// .git is a file. Following gitdir/commondir is only safe when the
+	// resolved directory stays inside this write root. An escaping pointer is
+	// untrusted input: do not carve outside the workspace, and do not fall
+	// back to <root>/.git/{hooks,config} (that path has no mkdir-able parent
+	// under a .git file and would crash bwrap). Missing carveouts drop git
+	// metadata protection; unbounded carveouts drop confinement.
+	gitDir := resolveGitDir(root)
+	if gitDir == "" || !pathContainedInRoot(root, gitDir) {
+		return nil
+	}
+	common := resolveGitCommonDir(gitDir)
+	if common == "" || !pathContainedInRoot(root, common) {
+		return nil
+	}
 	return []string{
-		filepath.Join(gitDir, "hooks"),
-		filepath.Join(gitDir, "config"),
+		filepath.Join(common, "hooks"),
+		filepath.Join(common, "config"),
 	}
 }
 
-// resolveGitDir returns the real git directory for a workspace root, handling
-// both regular checkouts (.git is a directory) and worktrees/submodules (.git
-// is a file containing "gitdir: <path>"). Returns "" when .git is absent, so
-// carveouts collapse to no-ops instead of pointing at a bogus path — a bogus
-// path under a .git *file* makes bwrap fail ("Can't mkdir parents ... Not a
-// directory") and blocks every sandboxed tool.
+// resolveGitDir returns the real git directory for a workspace root when .git
+// is a gitdir: pointer file. Returns "" for absent, malformed, or unreadable
+// pointers so callers can refuse carveouts instead of pointing at a bogus path.
 func resolveGitDir(root string) string {
 	gitPath := filepath.Join(root, ".git")
 	info, err := os.Stat(gitPath)
@@ -137,7 +151,12 @@ func resolveGitDir(root string) string {
 	if err != nil {
 		return ""
 	}
-	dir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+	line := strings.TrimSpace(string(data))
+	const prefix = "gitdir:"
+	if !strings.HasPrefix(strings.ToLower(line), prefix) {
+		return ""
+	}
+	dir := strings.TrimSpace(line[len(prefix):])
 	if dir == "" {
 		return ""
 	}
@@ -145,7 +164,9 @@ func resolveGitDir(root string) string {
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(root, dir)
 	}
-	if _, err := os.Stat(dir); err != nil {
+	dir = filepath.Clean(dir)
+	info, err = os.Stat(dir)
+	if err != nil || !info.IsDir() {
 		return ""
 	}
 	return dir
@@ -153,7 +174,8 @@ func resolveGitDir(root string) string {
 
 // resolveGitCommonDir returns the shared git dir for a (possibly worktree)
 // gitDir. Worktree gitdirs carry a "commondir" pointer (usually "../.."); plain
-// checkouts have none and are their own common dir.
+// checkouts have none and are their own common dir. An unreadable or empty
+// commondir keeps gitDir. A present but non-directory commondir is refused.
 func resolveGitCommonDir(gitDir string) string {
 	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
 	if err != nil {
@@ -166,7 +188,25 @@ func resolveGitCommonDir(gitDir string) string {
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(gitDir, common)
 	}
-	return filepath.Clean(common)
+	common = filepath.Clean(common)
+	info, err := os.Stat(common)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return common
+}
+
+func pathContainedInRoot(root, target string) bool {
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
