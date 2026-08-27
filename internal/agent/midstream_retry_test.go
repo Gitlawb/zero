@@ -137,20 +137,22 @@ func TestRunDoesNotRetryMidStreamAbortAfterPartialOutput(t *testing.T) {
 	}
 }
 
-// Empty StreamEventText still invokes OnText, so forwardedVisibleText is true
-// while collected.Text stays empty. Neutralising !forwardedVisibleText in the
-// gate would retry this; collected.Text == "" would not catch it.
-func TestRunDoesNotRetryMidStreamAbortAfterForwardedEmptyText(t *testing.T) {
+// A zero-length OnText chunk is not committed answer prose, so an eligible
+// transport abort still retries.
+func TestRunRetriesMidStreamAbortAfterEmptyTextEvent(t *testing.T) {
 	p := &midStreamAbortProvider{abortBefore: 1, emptyTextEvent: true}
-	_, err := Run(context.Background(), "go", p, Options{
+	result, err := Run(context.Background(), "go", p, Options{
 		Registry: tools.NewRegistry(),
 		OnText:   func(string) {},
 	})
-	if err == nil {
-		t.Fatal("forwarded visible text (even empty chunk) must block retry")
+	if err != nil {
+		t.Fatalf("empty OnText must not block mid-stream abort retry, got %v", err)
 	}
-	if got := atomic.LoadInt32(&p.calls); got != 1 {
-		t.Fatalf("forwardedVisibleText must block retry, got %d calls", got)
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q, want %q", result.FinalAnswer, "done")
+	}
+	if got := atomic.LoadInt32(&p.calls); got != 2 {
+		t.Fatalf("want 2 calls (1 abort + 1 retry), got %d", got)
 	}
 }
 

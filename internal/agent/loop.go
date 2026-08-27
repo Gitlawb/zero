@@ -378,7 +378,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					rec.StampFirstToken()
 				}
 				if onText != nil {
-					forwardedVisibleText = true
+					// Zero-length chunks are not committed answer prose; counting
+					// them would block an eligible mid-stream abort retry.
+					if s != "" {
+						forwardedVisibleText = true
+					}
 					onText(s)
 				}
 			}
