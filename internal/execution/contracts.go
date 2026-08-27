@@ -187,7 +187,18 @@ type Outcome struct {
 	Exit        *Exit       `json:"exit,omitempty"`
 	Denial      *Denial     `json:"denial,omitempty"`
 	Enforcement Enforcement `json:"enforcement"`
-	Changes     []Change    `json:"changes,omitempty"`
+	// Launched records whether an OS process was actually created, observed at
+	// the boundary that calls Run rather than inferred afterwards.
+	//
+	// OutcomeKind is not a launch-state field, and reading it as one is wrong in
+	// both directions. A child that ran and then produced an unreadable adapter
+	// report is rewritten to a setup failure, so inference drops a disclosure that
+	// did apply; a context already cancelled before os.StartProcess yields a
+	// cancellation, so inference claims reduced enforcement for a child that never
+	// existed. Report decoding can fail after launch without rewriting history,
+	// and cancellation happens on either side of Start.
+	Launched bool     `json:"launched,omitempty"`
+	Changes  []Change `json:"changes,omitempty"`
 }
 
 // AdapterReport is the structured, machine-readable result emitted by a
@@ -198,19 +209,9 @@ type AdapterReport struct {
 }
 
 // ChildLaunched reports whether this outcome describes a process that actually
-// started.
-//
-// A setup failure and a missing executable are decided BEFORE the child exists.
-// Everything else, including a nonzero exit, a timeout and a cancellation,
-// happened to a process that was already running under whatever enforcement was
-// applied to it.
+// started, from the recorded fact rather than from the terminal outcome kind.
 func (outcome Outcome) ChildLaunched() bool {
-	switch outcome.Kind {
-	case OutcomeSandboxSetupFailure, OutcomeExecutableNotFound:
-		return false
-	default:
-		return true
-	}
+	return outcome.Launched
 }
 
 // AppliedEnforcementNotices returns the least-privilege disclosures that are

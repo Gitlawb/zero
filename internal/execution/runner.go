@@ -90,6 +90,11 @@ func (runner *Runner) ExecuteCaptured(ctx context.Context, input CapturedRequest
 	prepared.Command.Stdout = stdout
 	prepared.Command.Stderr = stderr
 	runErr := prepared.Command.Run()
+	// Observed HERE, from the only thing that knows: exec.Cmd sets Process only
+	// once os.StartProcess has succeeded, so this is false for a missing
+	// executable and for a context cancelled before Start, and true for anything
+	// that ran, including a later timeout or cancellation.
+	launched := prepared.Command.Process != nil
 	report, reportErr := AdapterReport{}, error(nil)
 	if prepared.Report != nil {
 		report, reportErr = prepared.Report()
@@ -101,6 +106,7 @@ func (runner *Runner) ExecuteCaptured(ctx context.Context, input CapturedRequest
 		Err:       runErr,
 		Outcome: Outcome{
 			Enforcement: prepared.Enforcement,
+			Launched:    launched,
 		},
 	}
 	exitCode := commandExitCode(runErr)
