@@ -108,11 +108,27 @@ func gitMetadataWriteCarveouts(root string) []string {
 	// plain-checkout paths (harmless no-ops when .git is absent).
 	gitPath := filepath.Join(root, ".git")
 	info, err := os.Lstat(gitPath)
-	if err != nil || info.IsDir() {
+	if err != nil {
 		return []string{
 			filepath.Join(gitPath, "hooks"),
 			filepath.Join(gitPath, "config"),
 		}
+	}
+	if info.IsDir() {
+		return []string{
+			filepath.Join(gitPath, "hooks"),
+			filepath.Join(gitPath, "config"),
+		}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, statErr := os.Stat(gitPath)
+		if statErr == nil && target.IsDir() {
+			return []string{
+				filepath.Join(gitPath, "hooks"),
+				filepath.Join(gitPath, "config"),
+			}
+		}
+		return []string{gitPath}
 	}
 	if !info.Mode().IsRegular() {
 		return []string{gitPath}
@@ -168,6 +184,13 @@ func resolveGitDir(root string) string {
 	}
 	if info.IsDir() {
 		return gitPath
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, statErr := os.Stat(gitPath)
+		if statErr == nil && target.IsDir() {
+			return gitPath
+		}
+		return ""
 	}
 	if !info.Mode().IsRegular() {
 		return ""

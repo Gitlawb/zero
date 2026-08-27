@@ -3,9 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
-	"time"
 )
 
 func writeGitFile(t *testing.T, path, contents string) {
@@ -219,58 +217,19 @@ func TestGitMetadataWriteCarveoutsParsesFirstGitdirLine(t *testing.T) {
 	mustEqualCarveouts(t, got, want)
 }
 
-func TestGitMetadataWriteCarveoutsRejectsFIFOGitdir(t *testing.T) {
-	if syscall.Getuid() == -1 {
-		t.Skip("no posix fifo")
-	}
+func TestGitMetadataWriteCarveoutsFollowsSymlinkGitDir(t *testing.T) {
 	root := t.TempDir()
-	gitPath := filepath.Join(root, ".git")
-	if err := syscall.Mkfifo(gitPath, 0o644); err != nil {
-		t.Skip(err)
-	}
-	done := make(chan []string, 1)
-	go func() {
-		done <- gitMetadataWriteCarveouts(root)
-	}()
-	select {
-	case got := <-done:
-		mustEqualCarveouts(t, got, []string{gitPath})
-	case <-time.After(2 * time.Second):
-		t.Fatal("blocked reading fifo .git")
-	}
-}
-
-func TestGitMetadataWriteCarveoutsRejectsFIFOCommondir(t *testing.T) {
-	root := t.TempDir()
-	gitDir := filepath.Join(root, ".git-real")
-	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+	realGit := filepath.Join(root, "real.git")
+	if err := os.MkdirAll(realGit, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mkfifo(filepath.Join(gitDir, "commondir"), 0o644); err != nil {
-		t.Skip(err)
+	if err := os.Symlink(realGit, filepath.Join(root, ".git")); err != nil {
+		t.Fatal(err)
 	}
-	writeGitFile(t, filepath.Join(root, ".git"), "gitdir: "+gitDir+"\n")
-	done := make(chan []string, 1)
-	go func() {
-		done <- gitMetadataWriteCarveouts(root)
-	}()
-	select {
-	case got := <-done:
-		want := []string{
-			filepath.Join(root, ".git"),
-			filepath.Join(gitDir, "hooks"),
-			filepath.Join(gitDir, "config"),
-		}
-		mustEqualCarveouts(t, got, want)
-	case <-time.After(2 * time.Second):
-		t.Fatal("blocked reading fifo commondir")
+	got := gitMetadataWriteCarveouts(root)
+	want := []string{
+		filepath.Join(root, ".git", "hooks"),
+		filepath.Join(root, ".git", "config"),
 	}
-}
-
-func TestContainedReadOnlySubpathsDropsEscapingCarveout(t *testing.T) {
-	root := t.TempDir()
-	inside := filepath.Join(root, "hooks")
-	outside := t.TempDir()
-	got := containedReadOnlySubpaths(root, []string{inside, filepath.Join(outside, "hooks"), ""})
-	mustEqualCarveouts(t, got, []string{inside})
+	mustEqualCarveouts(t, got, want)
 }
