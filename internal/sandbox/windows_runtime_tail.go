@@ -49,8 +49,8 @@ func windowsSandboxRuntimeOwnedTail(root string) (string, []string, bool) {
 		current = parent
 	}
 	// components came off the tail, deepest first.
-	for index, name := range windowsSandboxRuntimeOwnedNames {
-		if !strings.EqualFold(components[len(components)-1-index], name) {
+	for index := range windowsSandboxRuntimeOwnedNames {
+		if !windowsRuntimeOwnedNameMatches(index, components[len(components)-1-index]) {
 			return "", nil, false
 		}
 	}
@@ -82,3 +82,32 @@ func windowsSameRuntimeRootPath(left, right string) bool {
 func runtimeTailNotOwned(root string) error {
 	return fmt.Errorf("%w: %s", errRuntimeTailNotOwned, root)
 }
+
+// windowsRuntimeOwnedNameMatches reports whether one component of a candidate
+// tail is a name Zero owns at that position.
+//
+// The FIRST position has two accepted spellings. The cache-derived root uses the
+// fixed name; the temp-derived fallback scopes that component to the user on
+// platforms where the temp root is shared between accounts, because every
+// private ownership-checked ancestor has to sit inside one user's namespace.
+// Both spellings are Zero's own and everything below them is fixed.
+//
+// Accepting only the fixed name silently cost the fallback BOTH protections it
+// depends on: the rooted no-follow traversal fell back to opening the tree by
+// name, and the shape guard stopped recognising it. Neither failure is visible
+// at the point it happens, which is why the shape has a test of its own.
+func windowsRuntimeOwnedNameMatches(index int, component string) bool {
+	if strings.EqualFold(component, windowsSandboxRuntimeOwnedNames[index]) {
+		return true
+	}
+	if index != 0 {
+		return false
+	}
+	return strings.EqualFold(component, fallbackOwnedNamesForMatch()[0])
+}
+
+// fallbackOwnedNamesForMatch is the seam the shape tests use. The scoped
+// spelling only exists on platforms whose temp root is shared, so without it the
+// accepting branch cannot be exercised at all on Windows, and a break there
+// would only surface on another platform's CI.
+var fallbackOwnedNamesForMatch = sandboxRuntimeFallbackOwnedNames
