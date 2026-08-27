@@ -331,7 +331,7 @@ func (request SandboxExecutionRequest) BackendPlan(policy Policy) BackendPlan {
 		RequiresPlatformSandbox: request.RequiresPlatformSandbox,
 		Capabilities:            request.Backend.Capabilities(policy),
 		Restrictions:            request.Backend.restrictions(policy),
-		Warnings:                append(request.Backend.Warnings(), windowsDenyReadWarnings(request.Backend, request.PermissionProfile)...),
+		Warnings:                append(request.Backend.Warnings(), request.denyReadDiagnosticWarnings()...),
 	}
 }
 
@@ -379,6 +379,26 @@ func windowsDenyReadWarnings(backend Backend, profile PermissionProfile) []strin
 	return []string{
 		"denyRead is configured, so the Windows sandbox uses the token shape without WRITE_RESTRICTED: reads are denied as requested, but writes outside the workspace are not confined by the token (#869)",
 	}
+}
+
+// denyReadDiagnosticWarnings is the diagnostic half of the DenyRead disclosure,
+// gated on the plan this request resolves to rather than on the backend that
+// happens to be installed.
+//
+// request.Backend is always the AVAILABLE backend, so on a Windows host it stays
+// the restricted-token backend with NativeIsolation set even when nothing will be
+// sandboxed. Keying the warning off it meant --sandbox forbid with deny_read
+// configured reported a token trade on a plan whose enforcement is disabled and
+// whose target is none.
+//
+// CommandWrapped is the forward reading of "this plan will be wrapped", which is
+// what BuildExecutionRequest sets it to; there is no CommandPlan on this path to
+// read plan.Wrapped from.
+func (request SandboxExecutionRequest) denyReadDiagnosticWarnings() []string {
+	if !request.CommandWrapped || !request.willBuildWindowsRestrictedToken() {
+		return nil
+	}
+	return windowsDenyReadWarnings(request.Backend, request.PermissionProfile)
 }
 
 func permissionProfileUnset(profile PermissionProfile) bool {
