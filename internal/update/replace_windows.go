@@ -278,6 +278,11 @@ type recoveryCleanupRecord struct {
 	VolumeSerial  uint32 `json:"volumeSerial"`
 	FileIndexHigh uint32 `json:"fileIndexHigh"`
 	FileIndexLow  uint32 `json:"fileIndexLow"`
+	// Unresolved marks a failed restore. Preflight consults these records
+	// alongside the sibling .keep marker so deleting that marker cannot
+	// silence the next run's tamper refusal (#868). Cleanup records from a
+	// successful promotion leave this false.
+	Unresolved bool `json:"unresolved,omitempty"`
 }
 
 type recoveryCleanupQueue struct {
@@ -373,7 +378,7 @@ func prepareRecoveryCleanup(targetPath string) []recoveryCleanupCandidate {
 			continue
 		}
 		retained = append(retained, record)
-		if oldBinaryPreserved(record.Path) {
+		if oldBinaryPreserved(record.Path) || record.Unresolved {
 			continue
 		}
 		file, err := openRecoveryCopy(record.Path)
@@ -419,6 +424,18 @@ func recoveryFileIdentity(file *os.File) (recoveryIdentity, error) {
 // recorded as updater-owned: the next run reopens recoveryPath and only deletes
 // it if it is still that same object.
 func appendRecoveryCleanupRecord(targetPath string, recoveryPath string, identity recoveryIdentity) error {
+	return appendRecoveryCleanupRecordWithState(targetPath, recoveryPath, identity, false)
+}
+
+// appendUnresolvedRecoveryRecord records that a failed restore left recoveryPath
+// as the last verified binary. Unlike the sibling .keep marker in the
+// installation directory, this lives in per-user state an install-directory
+// writer cannot delete. Preflight consults it alongside the marker (#868).
+func appendUnresolvedRecoveryRecord(targetPath string, recoveryPath string, identity recoveryIdentity) error {
+	return appendRecoveryCleanupRecordWithState(targetPath, recoveryPath, identity, true)
+}
+
+func appendRecoveryCleanupRecordWithState(targetPath string, recoveryPath string, identity recoveryIdentity, unresolved bool) error {
 	if !validUpdaterRecoveryPath(targetPath, recoveryPath) {
 		return fmt.Errorf("invalid updater recovery path %s", recoveryPath)
 	}
@@ -427,10 +444,28 @@ func appendRecoveryCleanupRecord(targetPath string, recoveryPath string, identit
 		VolumeSerial:  identity.VolumeSerial,
 		FileIndexHigh: identity.FileIndexHigh,
 		FileIndexLow:  identity.FileIndexLow,
+		Unresolved:    unresolved,
 	}
 	queue := loadRecoveryCleanupQueue(targetPath)
 	queue.Records = append(queue.Records, record)
 	return writeRecoveryCleanupQueue(targetPath, queue)
+}
+
+// unresolvedRecordedRecoveryPaths returns live recovery copies vouched for by
+// per-user unresolved-state records. Absence of the sibling .keep marker does
+// not drop them: that marker is attacker-deletable in the install directory.
+func unresolvedRecordedRecoveryPaths(targetPath string) []string {
+	var paths []string
+	for _, record := range loadRecoveryCleanupQueue(targetPath).Records {
+		if !record.Unresolved || !validUpdaterRecoveryPath(targetPath, record.Path) {
+			continue
+		}
+		if _, err := os.Lstat(record.Path); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		paths = append(paths, record.Path)
+	}
+	return paths
 }
 
 func writeRecoveryCleanupQueue(targetPath string, queue recoveryCleanupQueue) error {

@@ -268,6 +268,161 @@ func TestPromoteRefusesWhileRecoveryCopyIsMarked(t *testing.T) {
 	}
 }
 
+// TestPreflightRefusesWhenRecoveryMarkerIsDeletedButTrustedRecordRemains is the
+// #868 regression: after a failed restore, the sibling .keep marker is the
+// only on-disk signal in the install directory that the aside copy is the last
+// verified binary. A writer in that directory can delete it. The identity-bound
+// per-user record written on the same failure path must still cause refusal.
+func TestPreflightRefusesWhenRecoveryMarkerIsDeletedButTrustedRecordRemains(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	const suffix = "cafecafecafecafecafecafecafecafe"
+	stubRandomStagingSuffix(t, suffix)
+	original := renameFileByHandle
+	var conflicting windows.Handle
+	renameFileByHandle = func(_ *os.File, target string) error {
+		pathPtr, err := windows.UTF16PtrFromString(target)
+		if err != nil {
+			return err
+		}
+		conflicting, err = windows.CreateFile(pathPtr, windows.GENERIC_WRITE, 0, nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			return fmt.Errorf("create conflicting target: %w", err)
+		}
+		return errors.New("injected promotion failure")
+	}
+	t.Cleanup(func() {
+		renameFileByHandle = original
+		if conflicting != 0 {
+			_ = windows.CloseHandle(conflicting)
+		}
+	})
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if conflicting != 0 {
+		_ = windows.CloseHandle(conflicting)
+		conflicting = 0
+	}
+	// Restore the production rename so a missed preflight refusal would
+	// actually install, rather than fail for the injected reason.
+	renameFileByHandle = original
+
+	recoveryPath := targetPath + ".zero-update-" + suffix + ".old"
+	if got, readErr := os.ReadFile(recoveryPath); readErr != nil || string(got) != "old-binary" {
+		t.Fatalf("recovery copy = %q err=%v, want the last verified binary", got, readErr)
+	}
+	if !oldBinaryPreserved(recoveryPath) {
+		t.Fatal("failed restore must still write the sibling marker")
+	}
+	queue := loadRecoveryCleanupQueue(targetPath)
+	if len(queue.Records) != 1 || !queue.Records[0].Unresolved {
+		t.Fatalf("trusted records = %+v, want one unresolved entry", queue.Records)
+	}
+
+	clearOldBinaryPreserved(recoveryPath)
+	if oldBinaryPreserved(recoveryPath) {
+		t.Fatal("marker deletion did not take effect")
+	}
+
+	err = installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("retry after marker deletion = %v, want refusal from the trusted record", err)
+	}
+	if !strings.Contains(err.Error(), recoveryPath) {
+		t.Fatalf("error = %v, want it to name recovery path %s", err, recoveryPath)
+	}
+	if got, readErr := os.ReadFile(recoveryPath); readErr != nil || string(got) != "old-binary" {
+		t.Fatalf("recovery copy after refusal = %q err=%v, want it left intact", got, readErr)
+	}
+}
+
+// TestSuccessfulPromoteCleanupRecordDoesNotBlockLaterUpdate pins the success
+// path for #868: a verified promotion still writes a cleanup record, that
+// record is not unresolved, and the next update proceeds.
+func TestSuccessfulPromoteCleanupRecordDoesNotBlockLaterUpdate(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	if err := installBinary(sourcePath, targetPath); err != nil {
+		t.Fatalf("installBinary: %v", err)
+	}
+	queue := loadRecoveryCleanupQueue(targetPath)
+	if len(queue.Records) != 1 {
+		t.Fatalf("cleanup records after success = %d, want 1", len(queue.Records))
+	}
+	if queue.Records[0].Unresolved {
+		t.Fatal("successful promotion must not record unresolved recovery state")
+	}
+	if err := preflightRecoveryState(targetPath); err != nil {
+		t.Fatalf("preflight after successful promotion: %v", err)
+	}
+
+	nextSource := filepath.Join(t.TempDir(), "newer-binary")
+	if err := os.WriteFile(nextSource, []byte("next-verified"), 0o755); err != nil {
+		t.Fatalf("WriteFile next source: %v", err)
+	}
+	if err := installBinary(nextSource, targetPath); err != nil {
+		t.Fatalf("second installBinary after success: %v", err)
+	}
+	installed, err := os.ReadFile(targetPath)
+	if err != nil || string(installed) != "next-verified" {
+		t.Fatalf("installed binary = %q err=%v, want next-verified", installed, err)
+	}
+}
+
+// TestPrepareRecoveryCleanupSkipsUnresolvedRecords keeps a failed-restore copy
+// out of destructive cleanup even if the sibling marker is already gone.
+func TestPrepareRecoveryCleanupSkipsUnresolvedRecords(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	recoveryPath := targetPath + ".zero-update-0123456789abcdef0123456789abcdef.old"
+	if err := os.WriteFile(recoveryPath, []byte("last-verified"), 0o755); err != nil {
+		t.Fatalf("WriteFile recovery: %v", err)
+	}
+	original, err := openRecoveryCopy(recoveryPath)
+	if err != nil {
+		t.Fatalf("openRecoveryCopy: %v", err)
+	}
+	identity, err := recoveryFileIdentity(original)
+	_ = original.Close()
+	if err != nil {
+		t.Fatalf("recoveryFileIdentity: %v", err)
+	}
+	if err := appendUnresolvedRecoveryRecord(targetPath, recoveryPath, identity); err != nil {
+		t.Fatalf("appendUnresolvedRecoveryRecord: %v", err)
+	}
+
+	candidates := prepareRecoveryCleanup(targetPath)
+	if len(candidates) != 0 {
+		t.Fatalf("cleanup candidates = %d, want unresolved copies skipped", len(candidates))
+	}
+	closeRecoveryCleanupCandidates(candidates)
+	if got, err := os.ReadFile(recoveryPath); err != nil || string(got) != "last-verified" {
+		t.Fatalf("unresolved recovery copy = %q err=%v, want it left untouched", got, err)
+	}
+	if got := recordedRecoveryCleanupCount(t, targetPath); got != 1 {
+		t.Fatalf("recorded entries = %d, want the unresolved record retained", got)
+	}
+}
+
 func TestPromoteRefusesRetryAfterInterruptedAside(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero.exe")

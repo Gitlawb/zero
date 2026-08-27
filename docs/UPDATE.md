@@ -93,14 +93,17 @@ binary:
 
 | State on disk | Meaning |
 |---|---|
-| `<binary>.old` (or `<binary>.<suffix>.old`) plus a `.keep` marker | A previous update could not restore the original binary. The `.old` file may be the last binary the updater verified; the installed one may be unverified. |
+| `<binary>.old` (or `<binary>.<suffix>.old`) plus a `.keep` marker, or a per-user update-recovery record naming that copy | A previous update could not restore the original binary. The `.old` file may be the last binary the updater verified; the installed one may be unverified. The `.keep` marker is in the installation directory and can be deleted; the identity-bound record is not, so deleting the marker alone does not end the refusal. |
 | `<binary>.…old.<suffix>.recovery` | A previous update could not even write the marker, so it moved the last verified binary to that name. |
 | The binary is missing and one or more `*.old` files exist | The previous attempt was interrupted between moves. |
 
 The refusal names the paths involved and the two moves that end the state:
 either move the recovery binary back over the executable path, or — if the
-installed binary is the one you want — delete the `.keep` marker (or the
-`.recovery` copy, once you have verified the installed binary) and update again.
+installed binary is the one you want — delete the recovery copy itself (not
+only the `.keep` marker) after verifying the installed binary, then update
+again. Deleting the marker alone is not enough: a failed restore also records
+that copy in per-user state outside the installation directory, and the next
+update consults that record even if the marker is gone.
 
 This is deliberately fail-closed and differs from older releases, which deleted
 `<binary>.old` and proceeded. The trade-off is that anyone who can write in the
