@@ -197,6 +197,46 @@ type AdapterReport struct {
 	Denial *Denial `json:"denial,omitempty"`
 }
 
+// ChildLaunched reports whether this outcome describes a process that actually
+// started.
+//
+// A setup failure and a missing executable are decided BEFORE the child exists.
+// Everything else, including a nonzero exit, a timeout and a cancellation,
+// happened to a process that was already running under whatever enforcement was
+// applied to it.
+func (outcome Outcome) ChildLaunched() bool {
+	switch outcome.Kind {
+	case OutcomeSandboxSetupFailure, OutcomeExecutableNotFound:
+		return false
+	default:
+		return true
+	}
+}
+
+// AppliedEnforcementNotices returns the least-privilege disclosures that are
+// true of what actually happened.
+//
+// ONE DECISION, AT THE BOUNDARY WHERE THE OUTCOME IS KNOWN. Enforcement.Notices
+// is planned: it describes the shape the command was PREPARED to run under, and
+// planning is not proof that anything ran. Every consumer that copied the field
+// straight out therefore made the completed-enforcement claim for commands that
+// never launched, telling an operator the write jail had been traded away for a
+// child that failed before it existed.
+//
+// Keeping this on Outcome rather than repeating an outcome-kind switch in hooks,
+// plugins and tools is the point: a new pre-launch outcome kind has to be
+// classified once, here, instead of being silently disclosed by whichever
+// consumer was not updated.
+func (outcome Outcome) AppliedEnforcementNotices() []string {
+	if !outcome.ChildLaunched() {
+		return nil
+	}
+	if len(outcome.Enforcement.Notices) == 0 {
+		return nil
+	}
+	return append([]string(nil), outcome.Enforcement.Notices...)
+}
+
 func (outcome Outcome) Validate() error {
 	if outcome.State == "" || outcome.Kind == "" {
 		return errors.New("execution outcome requires state and kind")

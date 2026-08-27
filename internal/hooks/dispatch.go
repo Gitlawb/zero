@@ -146,7 +146,10 @@ func executionCommandRunner(runner *execution.Runner) commandRunner {
 			Stderr:   stderr,
 			Err:      commandErr,
 			TimedOut: result.Outcome.Kind == execution.OutcomeTimedOut,
-			Notices:  append([]string(nil), result.Outcome.Enforcement.Notices...),
+			// One shared decision: see Outcome.AppliedEnforcementNotices. A setup
+			// failure or a missing executable launched no hook child, so the notice
+			// would describe a token trade nobody made.
+			Notices: result.Outcome.AppliedEnforcementNotices(),
 		}
 	}
 }
