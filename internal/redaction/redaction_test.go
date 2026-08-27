@@ -141,3 +141,38 @@ func containsCircular(v any) bool {
 	}
 	return false
 }
+
+func TestRedactStringCatchesSecretsSplitByControlBytes(t *testing.T) {
+	// Unsplit passing is not coverage: a NUL/ESC/C1 in the body splits the
+	// shape so the patterns miss it unless controls are stripped first.
+	const prefix = "sk-ant-api03-"
+	const body = "abcdefghijklmnopqrstuvwxyz"
+	unsplit := prefix + body
+	if got := RedactString(unsplit, Options{}); strings.Contains(got, body) {
+		t.Fatalf("unsplit secret not redacted (test setup): %q", got)
+	}
+
+	cases := []struct {
+		name  string
+		split string
+	}{
+		{name: "NUL", split: "\x00"},
+		{name: "ESC", split: "\x1b"},
+		{name: "C1", split: "\x9b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := prefix + tc.split + body
+			got := RedactString(input, Options{})
+			if strings.Contains(got, body) {
+				t.Fatalf("secret split by %s leaked in %q", tc.name, got)
+			}
+			if strings.Contains(got, prefix) {
+				t.Fatalf("secret prefix split by %s leaked in %q", tc.name, got)
+			}
+			if !strings.Contains(got, RedactedSecret) {
+				t.Fatalf("expected %q after %s split, got %q", RedactedSecret, tc.name, got)
+			}
+		})
+	}
+}

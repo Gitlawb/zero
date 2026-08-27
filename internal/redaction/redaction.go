@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -170,9 +171,69 @@ func keyLooksSensitive(normalized string) bool {
 	return false
 }
 
+// stripControlBytes removes C0/C1 controls (Cc other than tab, LF, and CR) so
+// shape matching sees a secret that was split by an embedded NUL, ESC, or C1
+// byte. Tab/LF/CR stay so log line structure is preserved. Lone Latin-1 C1
+// bytes (0x80–0x9F, invalid UTF-8) are stripped too; UTF-8 continuation bytes
+// are not, because they are not controls. Must run before any pattern match.
+func stripControlBytes(s string) string {
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < 0x80 {
+			if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c == 0x7F) {
+				return stripControlBytesFrom(s, i)
+			}
+			i++
+			continue
+		}
+		if c <= 0x9F {
+			// 0x80–0x9F at a rune boundary is a lone C1 byte, not UTF-8.
+			return stripControlBytesFrom(s, i)
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if unicode.IsControl(r) {
+			return stripControlBytesFrom(s, i)
+		}
+		i += size
+	}
+	return s
+}
+
+func stripControlBytesFrom(s string, start int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:start])
+	for i := start; i < len(s); {
+		c := s[i]
+		if c < 0x80 {
+			if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c == 0x7F) {
+				i++
+				continue
+			}
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		if c <= 0x9F {
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if unicode.IsControl(r) {
+			i += size
+			continue
+		}
+		b.WriteString(s[i : i+size])
+		i += size
+	}
+	return b.String()
+}
+
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
-	redacted := value
+	// Strip C0/C1 first: a NUL, ESC, or C1 byte inside a key body splits the
+	// shape so the patterns miss it, and a later strip would rejoin the secret.
+	redacted := stripControlBytes(value)
 	if len(options.ExtraSecretValues) > 0 {
 		secrets := append([]string{}, options.ExtraSecretValues...)
 		sort.SliceStable(secrets, func(i, j int) bool {
