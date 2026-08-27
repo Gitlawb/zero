@@ -2958,7 +2958,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prState = msg.state
 		return m, nil
 	case gitSweepMsg:
-		return m.handleGitSweepMsg(msg), nil
+		m = m.handleGitSweepMsg(msg)
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+			return m, cmd
+		}
+		return m, nil
 	case prWatcherStartedMsg:
 		if msg.stop == nil {
 			return m, nil
