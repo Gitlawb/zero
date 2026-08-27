@@ -26,10 +26,13 @@ func TerminateProcess(pid int) error {
 // have exclusive ownership of cmd: it must not have previously called Wait or
 // Process.Release, and no goroutine may call either concurrently. On POSIX it
 // stops the whole group when the command was configured as its leader; ordinary
-// commands safely fall back to PID/tree discovery. On Windows, success for a
-// leader that was already dead confirms only that the leader was reaped;
-// descendants may survive because Windows cannot rediscover a tree from a dead
-// root. `zero daemon start` needs this operation when readiness times out: it
+// commands safely fall back to PID/tree discovery. If the platform observed that
+// the leader had already exited before signalling (Windows: GetExitCodeProcess
+// not STILL_ACTIVE; POSIX: the leader is a waitable zombie), a termination
+// error is discarded after a successful reap — that is a statement about the
+// leader, not descendants. POSIX still signals the launch-time process group.
+// Windows cannot rediscover a tree from a dead root, so descendants may survive
+// there. `zero daemon start` needs this operation when readiness times out: it
 // launched the child, so it must both stop the tree and collect the leader.
 //
 // The order matters: the tree is signalled first, because Wait releases the

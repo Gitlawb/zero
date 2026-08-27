@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"errors"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -217,6 +218,50 @@ func TestTerminateCommandKillsChildAfterLeaderExits(t *testing.T) {
 			t.Fatalf("forked child %d survived TerminateCommand", childPID)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestTerminateCommandZombieLeaderWithoutPS(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("waitable-exited leader probe is implemented on linux and darwin")
+	}
+
+	grace, poll := terminationGracePeriod, terminationPollInterval
+	terminationGracePeriod, terminationPollInterval = 150*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { terminationGracePeriod, terminationPollInterval = grace, poll })
+
+	// Issue #862: a zombie group leader with ps unresolvable used to burn both
+	// grace periods (kill(0) succeeds against a zombie) and return
+	// "did not exit after SIGKILL" even though cmd.Wait reaped exit status 0.
+	// The already-exited probe must answer without ps so TerminateCommand can
+	// discard that spurious timeout after a successful reap.
+	cmd := exec.Command("sh", "-c", "exit 0")
+	ConfigureChildProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !leaderWaitableExited(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("leader %d did not become waitable-exited within 5s", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Setenv("PATH", "")
+	if err := TerminateCommand(cmd); err != nil {
+		t.Fatalf("TerminateCommand: %v, want nil (zombie leader with ps unavailable must not report SIGKILL timeout)", err)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("zombie leader was not reaped")
 	}
 }
 
