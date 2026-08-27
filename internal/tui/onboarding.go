@@ -665,7 +665,7 @@ func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
 		// threading contract) so quitting setup after the login doesn't lose it;
 		// do not advance when that write fails or the stored token would have no
 		// reachable provider profile after setup exits.
-		if err := persistOAuthLoginProvider(m.setup.configPath, msg.providerID); err != nil {
+		if _, err := persistOAuthLoginProvider(m.setup.configPath, msg.providerID); err != nil {
 			m.setup.oauthErr = "Signed in, but the provider profile could not be saved: " + redaction.ErrorMessage(err, redaction.Options{})
 			return m, nil
 		}

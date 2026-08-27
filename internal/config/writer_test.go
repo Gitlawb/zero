@@ -1381,9 +1381,12 @@ func TestRepairUnnamedProviderPreservesLegacyNameResolution(t *testing.T) {
 	t.Run("openai fallback", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
 		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Model: "gpt-4o"}}}, 0o600)
-		cfg, _, err := RepairUnnamedProvider(path, "")
+		cfg, chosen, err := RepairUnnamedProvider(path, "")
 		if err != nil {
 			t.Fatal(err)
+		}
+		if chosen != "openai" {
+			t.Fatalf("chosen name = %q, want openai", chosen)
 		}
 		if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" {
 			t.Fatalf("repaired config = %+v, want openai", cfg)

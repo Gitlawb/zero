@@ -1201,6 +1201,13 @@ func TestWizardProviderStoredKey(t *testing.T) {
 	if name, ok, err := exact.wizardProviderStoredKey(providercatalog.Descriptor{ID: "xai"}); err != nil || !ok || name != "xai" {
 		t.Fatalf("exact catalog owner must win: name=%q ok=%v err=%v", name, ok, err)
 	}
+	caseSibling := model{savedProviders: []config.ProviderProfile{
+		{Name: "ChatGPT"},
+		{Name: "chatgpt", APIKeyStored: true},
+	}}
+	if name, ok, err := caseSibling.wizardProviderStoredKey(providercatalog.Descriptor{ID: "chatgpt"}); err != nil || !ok || name != "chatgpt" {
+		t.Fatalf("later exact-name owner must beat an earlier legacy case sibling: name=%q ok=%v err=%v", name, ok, err)
+	}
 	ambiguous := model{savedProviders: []config.ProviderProfile{
 		{Name: "work-xai", CatalogID: "xai", APIKeyStored: true},
 		{Name: "personal-xai", CatalogID: "xai", APIKeyStored: true},
@@ -1226,7 +1233,7 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		store, err := config.ProviderKeyStore()
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 		if err != nil {
 			t.Fatal(err)
 		}

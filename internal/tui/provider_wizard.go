@@ -58,11 +58,12 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 		// it into the in-memory saved list when the write succeeded — a mirror of
 		// a profile that never reached disk shows a phantom provider that works
 		// this session and silently vanishes on restart.
-		if err := persistOAuthLoginProvider(m.userConfigPath, msg.providerID); err != nil {
+		ensured, err := persistOAuthLoginProvider(m.userConfigPath, msg.providerID)
+		if err != nil {
 			m.providerWizard.oauthErr = "Signed in, but the provider profile could not be saved: " + redaction.ErrorMessage(err, redaction.Options{})
 			return m, nil
 		}
-		m.savedProviders = appendOAuthLoginProfile(m.savedProviders, msg.providerID)
+		m.savedProviders = appendOAuthLoginProfile(m.savedProviders, msg.providerID, ensured)
 	}
 	// OAuth succeeded (key minted, or a refreshable token stored for the runtime
 	// resolver). Skip the endpoint/credential steps and go straight to model
@@ -225,15 +226,32 @@ func preflightOAuthProviderConfig(path string, providerID string) error {
 // appendOAuthLoginProfile mirrors the profile persistOAuthLoginProvider wrote to
 // config into an in-memory saved-provider list, skipping when a profile already
 // positively owns the catalog entry.
-func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) []config.ProviderProfile {
+func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string, ensured config.EnsuredProvider) []config.ProviderProfile {
 	descriptor, ok := providercatalog.Get(providerID)
 	if !ok {
 		return saved
 	}
-	for _, profile := range saved {
-		if strings.TrimSpace(profile.CatalogID) != "" &&
-			config.SameProviderIdentity(profile.CatalogID, descriptor.ID) {
+	if ensured.Name != "" {
+		for index := range saved {
+			if strings.TrimSpace(saved[index].Name) != strings.TrimSpace(ensured.Name) {
+				continue
+			}
+			if strings.TrimSpace(saved[index].CatalogID) == "" {
+				updated := append([]config.ProviderProfile(nil), saved...)
+				updated[index].CatalogID = descriptor.ID
+				return updated
+			}
 			return saved
+		}
+		if !ensured.Created {
+			return saved
+		}
+	} else {
+		for _, profile := range saved {
+			if strings.TrimSpace(profile.CatalogID) != "" &&
+				config.SameProviderIdentity(profile.CatalogID, descriptor.ID) {
+				return saved
+			}
 		}
 	}
 	return append(saved, config.ProviderProfile{
@@ -256,12 +274,11 @@ func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) 
 // UI-thread write would silently clobber it (lost update). The returned error
 // lets the caller surface a failed write instead of showing a provider that
 // never reached disk.
-func persistOAuthLoginProvider(configPath string, catalogID string) error {
+func persistOAuthLoginProvider(configPath string, catalogID string) (config.EnsuredProvider, error) {
 	if strings.TrimSpace(configPath) == "" {
-		return nil
+		return config.EnsuredProvider{}, nil
 	}
-	_, err := config.EnsureCatalogProvider(configPath, catalogID)
-	return err
+	return config.EnsureCatalogProvider(configPath, catalogID)
 }
 
 // buildOAuthPresetEnv layers the process env with the preset opt-in so a
@@ -1349,8 +1366,6 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 // winner among shared catalog profiles.
 func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (string, bool, error) {
 	providerID := strings.TrimSpace(provider.ID)
-	var owner config.ProviderProfile
-	owners := 0
 	for _, profile := range m.savedProviders {
 		if strings.TrimSpace(profile.Name) == providerID {
 			if profile.APIKeyStored {
@@ -1358,10 +1373,14 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 			}
 			return "", false, nil
 		}
+	}
+	var owner config.ProviderProfile
+	owners := 0
+	for _, profile := range m.savedProviders {
 		profileCatalogID := strings.TrimSpace(profile.CatalogID)
 		if profileCatalogID == "" || !config.SameProviderIdentity(profileCatalogID, providerID) {
 			if config.SameProviderIdentity(profile.Name, providerID) {
-				return "", false, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogId is %q)", strings.TrimSpace(profile.Name), providerID, profileCatalogID)
+				return "", false, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogID is %q)", strings.TrimSpace(profile.Name), providerID, profileCatalogID)
 			}
 			continue
 		}
@@ -1460,7 +1479,7 @@ func deleteProviderKey(configPath, provider string) (bool, error) {
 		}
 		candidates = resolved
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreForConfigPath(configPath)
 	if err != nil {
 		return false, err
 	}

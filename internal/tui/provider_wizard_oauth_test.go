@@ -397,7 +397,9 @@ func TestPersistOAuthLoginProviderWritesKeylessProfileWithoutStealingActive(t *t
 		t.Fatalf("seed config: %v", err)
 	}
 
-	persistOAuthLoginProvider(configPath, "chatgpt")
+	if _, err := persistOAuthLoginProvider(configPath, "chatgpt"); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -418,7 +420,35 @@ func TestPersistOAuthLoginProviderWritesKeylessProfileWithoutStealingActive(t *t
 	}
 
 	// Blank path (no user config, e.g. tests/ephemeral runs) must be a no-op.
-	persistOAuthLoginProvider("", "chatgpt")
+	if _, err := persistOAuthLoginProvider("", "chatgpt"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyProviderWizardOAuthReconcilesAdoptedLegacyProfile(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"chatgpt","model":"legacy-model"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := wizardModelAt(t, "chatgpt", providerWizardStepCredential)
+	m.userConfigPath = configPath
+	m.savedProviders = []config.ProviderProfile{{Name: "chatgpt", Model: "legacy-model"}}
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
+
+	next, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true})
+	if next.providerWizard.oauthErr != "" {
+		t.Fatalf("OAuth result failed: %s", next.providerWizard.oauthErr)
+	}
+	if len(next.savedProviders) != 1 {
+		t.Fatalf("adopted legacy profile was duplicated: %+v", next.savedProviders)
+	}
+	if next.savedProviders[0].CatalogID != "chatgpt" || next.savedProviders[0].Model != "legacy-model" {
+		t.Fatalf("legacy profile was not reconciled in memory: %+v", next.savedProviders[0])
+	}
+	cfg := readProviderWizardConfigFixture(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].CatalogID != "chatgpt" || cfg.Providers[0].Model != "legacy-model" {
+		t.Fatalf("legacy profile was not adopted on disk: %+v", cfg.Providers)
+	}
 }
 
 func TestOAuthCommandsRejectInvalidConfigBeforeCredentialSideEffects(t *testing.T) {
@@ -469,7 +499,7 @@ func TestOAuthCommandsRejectInvalidConfigBeforeCredentialSideEffects(t *testing.
 func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
 	saved := []config.ProviderProfile{{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible}}
 
-	saved = appendOAuthLoginProfile(saved, "chatgpt")
+	saved = appendOAuthLoginProfile(saved, "chatgpt", config.EnsuredProvider{})
 	if len(saved) != 2 || saved[1].Name != "chatgpt" || saved[1].CatalogID != "chatgpt" {
 		t.Fatalf("expected chatgpt appended, got %+v", saved)
 	}
@@ -478,20 +508,20 @@ func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
 	}
 
 	// Idempotent: a second login must not duplicate.
-	saved = appendOAuthLoginProfile(saved, "chatgpt")
+	saved = appendOAuthLoginProfile(saved, "chatgpt", config.EnsuredProvider{})
 	if len(saved) != 2 {
 		t.Fatalf("duplicate appended: %+v", saved)
 	}
 
 	// A renamed profile serving the same catalog entry blocks the append too.
 	renamed := []config.ProviderProfile{{Name: "codex", CatalogID: "chatgpt"}}
-	renamed = appendOAuthLoginProfile(renamed, "chatgpt")
+	renamed = appendOAuthLoginProfile(renamed, "chatgpt", config.EnsuredProvider{})
 	if len(renamed) != 1 {
 		t.Fatalf("renamed profile not respected: %+v", renamed)
 	}
 
 	// Unknown catalog id: no-op.
-	if got := appendOAuthLoginProfile(nil, "no-such-provider"); got != nil {
+	if got := appendOAuthLoginProfile(nil, "no-such-provider", config.EnsuredProvider{}); got != nil {
 		t.Fatalf("unknown provider must not append, got %+v", got)
 	}
 }

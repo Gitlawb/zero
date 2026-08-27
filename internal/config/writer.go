@@ -259,9 +259,9 @@ func PreflightUserConfig(path string) error {
 
 // PreflightCatalogProviderLogin is the preflight for a credential login against
 // a catalog provider. A login does not mint a new spelling, so a case-variant
-// persisted row may be reused only when its catalogId positively proves that it
+// persisted row may be reused only when its catalogID positively proves that it
 // owns the requested catalog identity, or when it claims no catalog identity at
-// all and the login can backfill one. A matching display name over a catalogId
+// all and the login can backfill one. A matching display name over a catalogID
 // pointing somewhere ELSE is not ownership: custom profiles may use
 // catalog-like names for unrelated endpoints.
 //
@@ -312,10 +312,10 @@ type catalogOwnership int
 const (
 	// catalogOwnershipNone: no row claims the identity, so a login creates one.
 	catalogOwnershipNone catalogOwnership = iota
-	// catalogOwnershipOwned: exactly one row proves ownership through its catalogId.
+	// catalogOwnershipOwned: exactly one row proves ownership through its catalogID.
 	catalogOwnershipOwned
 	// catalogOwnershipAdoptable: exactly one row carries the catalog spelling as
-	// its NAME and claims no catalog id at all. An empty catalogId is an absent
+	// its NAME and claims no catalog id at all. An empty catalogID is an absent
 	// claim, not a competing one, so that row is the answer once the id is
 	// backfilled onto it — the same self-healing `zero providers add <id>`
 	// performs for configs written before catalog ids existed.
@@ -339,12 +339,12 @@ func catalogProviderOwner(providers []ProviderProfile, catalogID string) (int, c
 		}
 	}
 	if owners > 1 {
-		return -1, catalogOwnershipNone, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id; remove one with `zero providers remove <name>`", catalogID, owners)
+		return -1, catalogOwnershipNone, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalogID; remove one with `zero providers remove <name>`", catalogID, owners)
 	}
 	if owners == 1 {
 		for index, provider := range providers {
 			if index != ownerIndex && sameProviderIdentity(provider.Name, catalogID) {
-				return -1, catalogOwnershipNone, fmt.Errorf("provider identity %q is ambiguous: saved profile %q uses it as a name while %q uses it as a catalog id; rename or remove one with `zero providers remove %s`", catalogID, strings.TrimSpace(provider.Name), strings.TrimSpace(providers[ownerIndex].Name), strings.TrimSpace(provider.Name))
+				return -1, catalogOwnershipNone, fmt.Errorf("provider identity %q is ambiguous: saved profile %q uses it as a name while %q uses it as a catalogID; rename or remove one with `zero providers remove %s`", catalogID, strings.TrimSpace(provider.Name), strings.TrimSpace(providers[ownerIndex].Name), strings.TrimSpace(provider.Name))
 			}
 		}
 		return ownerIndex, catalogOwnershipOwned, nil
@@ -369,12 +369,12 @@ func catalogProviderOwner(providers []ProviderProfile, catalogID string) (int, c
 	if strings.TrimSpace(providers[namedIndex].CatalogID) == "" {
 		return namedIndex, catalogOwnershipAdoptable, nil
 	}
-	// The row names itself for this catalog provider while its catalogId claims
+	// The row names itself for this catalog provider while its catalogID claims
 	// a different one. That is a competing claim, not an absent one, so it is
 	// refused — but the refusal carries the way out, because this path is
 	// reached from `zero auth login`, where a user with an old config arrives.
 	name := strings.TrimSpace(providers[namedIndex].Name)
-	return -1, catalogOwnershipNone, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogId is %q); rename or remove that row with `zero providers remove %s`, then run `zero providers add %s`", name, catalogID, strings.TrimSpace(providers[namedIndex].CatalogID), name, catalogID)
+	return -1, catalogOwnershipNone, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogID is %q); rename or remove that row with `zero providers remove %s`, then run `zero providers add %s`", name, catalogID, strings.TrimSpace(providers[namedIndex].CatalogID), name, catalogID)
 }
 
 // ResolvePersistedProviderName maps a user- or session-supplied provider

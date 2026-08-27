@@ -613,7 +613,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 			} else {
 				// Reconcile the in-memory list the manager and picker read from,
 				// or those surfaces keep showing the previous model until restart.
-				m.savedProviders = syncSavedProviderModel(m.savedProviders, cfg.ActiveProvider, target.Model)
+				m.savedProviders = syncSavedProviderModel(m.savedProviders, target.Name, target.Model)
 			}
 		case owner.Lookup == config.ProviderNameNotFound:
 			// The ordinary case: an environment-derived provider has no

@@ -548,11 +548,9 @@ func TestRunAuthOpenRouterRejectsInvalidConfigBeforeAuthorizing(t *testing.T) {
 }
 
 // The second check is not redundant with the first: the config can change while
-// the browser flow is open. A legacy duplicate-row config that appears during
-// authorization must still be rejected, and the rejection must not cost the user
-// the OpenRouter key they were already working with — the capture is validated
-// first, and a rejected publication restores the previous secret rather than
-// deleting the shared entry.
+// the browser flow is open. A valid pre-authorization config can become a legacy
+// duplicate-row config during authorization; that edit must be rejected without
+// writing the newly minted secret over the existing key.
 func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
@@ -563,7 +561,7 @@ func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +621,7 @@ func TestRunAuthLogoutClearsMarkerForCaseVariantSpelling(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1001,7 +999,7 @@ func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-xai","catalogId":"xai","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStore()
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1101,7 +1099,7 @@ func TestRunAuthLogoutRejectsUnrelatedAmbiguousConfigBeforeCredentialDeletion(t 
 	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "stored"}); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStore()
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1143,7 +1141,7 @@ func TestRunAuthLogoutPreservesCredentialsWhenConfigIsAmbiguous(t *testing.T) {
 	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "stored"}); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStore()
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1277,7 +1275,7 @@ func TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone(t *testing.T) {
 	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "shared"}); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStore()
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1360,7 +1358,7 @@ func TestRunAuthLogoutPrefersTheExactlyNamedProfile(t *testing.T) {
 	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	keyStore, err := config.ProviderKeyStore()
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}

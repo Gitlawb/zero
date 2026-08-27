@@ -522,7 +522,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, configProvider); clearErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 	}
-	keyStore, keyErr := config.ProviderKeyStore()
+	keyStore, keyErr := config.ProviderKeyStoreForConfigPath(configPath)
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}

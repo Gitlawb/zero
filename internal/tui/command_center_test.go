@@ -128,6 +128,23 @@ func TestModelSwitchSyncsSavedProviders(t *testing.T) {
 		}
 	})
 
+	t.Run("switchProviderModel syncs the selected resolved spelling", func(t *testing.T) {
+		m := newSession(t)
+		m.savedProviders[0].Name = "openai"
+
+		next, status, ok, _ := m.switchProviderModel("openai", "gpt-5.5")
+		if !ok {
+			t.Fatalf("switch failed: %s", status)
+		}
+		if next.savedProviders[0].Model != "gpt-5.5" {
+			t.Fatalf("savedProviders model = %q, want the switched model on selected row %q", next.savedProviders[0].Model, next.savedProviders[0].Name)
+		}
+		cfg := readTUIConfigFixture(t, next.userConfigPath)
+		if cfg.Providers[0].Name != "OpenAI" || cfg.Providers[0].Model != "gpt-5.5" {
+			t.Fatalf("persisted row = %+v, want model updated while preserving disk spelling", cfg.Providers[0])
+		}
+	})
+
 	t.Run("handleModelCommand", func(t *testing.T) {
 		m := newSession(t)
 		// Exercise the production caller that owns both persistence and the
