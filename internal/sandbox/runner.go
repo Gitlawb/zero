@@ -873,11 +873,7 @@ func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {
 	}
 	var out []string
 	for _, root := range fs.WriteRoots {
-		for _, subpath := range root.ReadOnlySubpaths {
-			subpath = strings.TrimSpace(subpath)
-			if subpath == "" {
-				continue
-			}
+		for _, subpath := range containedReadOnlySubpaths(root.Root, root.ReadOnlySubpaths) {
 			escaped := sandboxProfileString(subpath)
 			out = append(out,
 				`(deny file-write* (literal "`+escaped+`"))`,

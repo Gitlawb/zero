@@ -107,12 +107,15 @@ func gitMetadataWriteCarveouts(root string) []string {
 	// tool. Resolve the real (common) git dir in that case; otherwise keep the
 	// plain-checkout paths (harmless no-ops when .git is absent).
 	gitPath := filepath.Join(root, ".git")
-	info, err := os.Stat(gitPath)
+	info, err := os.Lstat(gitPath)
 	if err != nil || info.IsDir() {
 		return []string{
 			filepath.Join(gitPath, "hooks"),
 			filepath.Join(gitPath, "config"),
 		}
+	}
+	if !info.Mode().IsRegular() {
+		return []string{gitPath}
 	}
 
 	// .git is a file. Following gitdir/commondir is only safe when the
@@ -159,14 +162,17 @@ func gitMetadataWriteCarveouts(root string) []string {
 // pointers so callers can refuse carveouts instead of pointing at a bogus path.
 func resolveGitDir(root string) string {
 	gitPath := filepath.Join(root, ".git")
-	info, err := os.Stat(gitPath)
+	info, err := os.Lstat(gitPath)
 	if err != nil {
 		return ""
 	}
 	if info.IsDir() {
 		return gitPath
 	}
-	data, err := os.ReadFile(gitPath)
+	if !info.Mode().IsRegular() {
+		return ""
+	}
+	data, err := readRegularFile(gitPath)
 	if err != nil {
 		return ""
 	}
@@ -207,7 +213,7 @@ func resolveGitDir(root string) string {
 // checkouts have none and are their own common dir. An unreadable or empty
 // commondir keeps gitDir. A present but non-directory commondir is refused.
 func resolveGitCommonDir(gitDir string) string {
-	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	data, err := readRegularFile(filepath.Join(gitDir, "commondir"))
 	if err != nil {
 		return gitDir
 	}
@@ -228,6 +234,32 @@ func resolveGitCommonDir(gitDir string) string {
 		return ""
 	}
 	return resolved
+}
+
+func readRegularFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, os.ErrInvalid
+	}
+	return os.ReadFile(path)
+}
+
+func containedReadOnlySubpaths(root string, subpaths []string) []string {
+	out := make([]string, 0, len(subpaths))
+	for _, subpath := range subpaths {
+		subpath = strings.TrimSpace(subpath)
+		if subpath == "" {
+			continue
+		}
+		if !pathContainedInRoot(root, subpath) {
+			continue
+		}
+		out = append(out, subpath)
+	}
+	return out
 }
 
 func pathContainedInRoot(root, target string) bool {

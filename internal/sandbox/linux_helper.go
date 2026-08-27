@@ -288,7 +288,7 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 			continue
 		}
 		args = append(args, "--bind", root.Root, root.Root)
-		for _, subpath := range root.ReadOnlySubpaths {
+		for _, subpath := range containedReadOnlySubpaths(root.Root, root.ReadOnlySubpaths) {
 			args = appendReadOnlyLinuxPathArgs(args, subpath)
 		}
 		for _, name := range root.ProtectedMetadataNames {
