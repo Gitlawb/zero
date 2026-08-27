@@ -72,9 +72,12 @@ func (w *execWorker) Kill() error {
 	if w.cmd.Process == nil {
 		return nil
 	}
-	// background.TerminateProcess is the cross-platform terminate (kills the
-	// process group on POSIX, taskkill /T on Windows).
-	return background.TerminateProcess(w.cmd.Process.Pid)
+	// TerminateOwnedProcess uses the launch-time group identity from
+	// ConfigureChildProcessGroup rather than TerminateProcess's Getpgid
+	// rediscovery. On Darwin, Getpgid of an unreaped group leader can return
+	// ESRCH and leave descendants running (#861, #774). TerminateCommand is
+	// the wrong helper here: it Wait()s, and the pool still owns the reap.
+	return background.TerminateOwnedProcess(w.cmd)
 }
 
 // readerLines adapts a bufio.Reader to the Lines interface. Unlike a capped
@@ -154,13 +157,13 @@ func NewExecLauncher(cfg ExecLauncherConfig) (Launcher, error) {
 		background.ConfigureChildProcessGroup(cmd)
 		// CommandContext's default cancel sends os.Process.Kill to the LEADER only,
 		// orphaning the process group we just configured (a stuck worker's children
-		// would survive ctx cancellation). Terminate the whole group instead — the
-		// same cross-platform group terminate Kill() uses (D11).
+		// would survive ctx cancellation). Terminate the whole group instead via
+		// the launch-time identity — the same primitive Kill() uses (D11, #861).
 		cmd.Cancel = func() error {
 			if cmd.Process == nil {
 				return nil
 			}
-			return background.TerminateProcess(cmd.Process.Pid)
+			return background.TerminateOwnedProcess(cmd)
 		}
 
 		stdout, err := cmd.StdoutPipe()

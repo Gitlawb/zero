@@ -49,8 +49,9 @@ func terminateProcess(pid int) error {
 // own convention. A command made its own session leader via Setsid (as opposed
 // to Setpgid) is also its own process-group leader in practice, but takes the
 // slower rediscovery path here since Setsid isn't checked. Harmless today
-// because TerminateCommand has exactly one caller in this codebase; worth
-// covering explicitly if Setsid-configured commands start using this path too.
+// because both TerminateOwnedProcess and TerminateCommand require
+// ConfigureChildProcessGroup's Setpgid convention; worth covering explicitly
+// if Setsid-configured commands start using this path too.
 func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
 		return false, execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)

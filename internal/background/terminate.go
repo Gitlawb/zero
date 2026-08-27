@@ -22,6 +22,21 @@ func TerminateProcess(pid int) error {
 	return terminateProcess(pid)
 }
 
+// TerminateOwnedProcess stops a started command using the launch-time process
+// group identity established by ConfigureChildProcessGroup, without reaping.
+// Unlike TerminateProcess, this does not rediscover the group via Getpgid, so
+// Darwin ESRCH on an unreaped group leader cannot leave descendants running
+// (see execution.TerminateProcessGroup). Unlike TerminateCommand, this does
+// not Wait: callers such as execWorker.Kill and CommandContext Cancel still
+// own the subsequent reap.
+func TerminateOwnedProcess(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return errors.New("terminate owned process: process was never started")
+	}
+	_, err := terminateOwnedProcess(cmd)
+	return err
+}
+
 // TerminateCommand stops a started command and reaps its leader. The caller must
 // have exclusive ownership of cmd: it must not have previously called Wait or
 // Process.Release, and no goroutine may call either concurrently. On POSIX it
