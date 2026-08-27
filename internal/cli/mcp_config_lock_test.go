@@ -109,6 +109,14 @@ func TestRunMCPConfigCommandsParticipateInConfigLock(t *testing.T) {
 			}
 			defer release()
 
+			original := lockMCPConfigFile
+			lockAttempted := make(chan struct{})
+			lockMCPConfigFile = func(path string) (func() error, error) {
+				close(lockAttempted)
+				return original(path)
+			}
+			t.Cleanup(func() { lockMCPConfigFile = original })
+
 			var stdout, stderr bytes.Buffer
 			done := make(chan int, 1)
 			go func() {
@@ -116,6 +124,12 @@ func TestRunMCPConfigCommandsParticipateInConfigLock(t *testing.T) {
 					userConfigPath: func() (string, error) { return configPath, nil },
 				})
 			}()
+
+			select {
+			case <-lockAttempted:
+			case <-time.After(30 * time.Second):
+				t.Fatalf("mcp %s did not attempt config lock acquisition", testCase.name)
+			}
 
 			for range 20 {
 				after, err := os.ReadFile(configPath)
