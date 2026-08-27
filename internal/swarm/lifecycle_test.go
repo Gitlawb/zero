@@ -72,8 +72,12 @@ func (l *controllableLauncher) attemptCount(id string) int {
 }
 
 func newSwarmFor(t *testing.T, l MemberLauncher) *Swarm {
+	return newSwarmForWithSize(t, l, 2)
+}
+
+func newSwarmForWithSize(t *testing.T, l MemberLauncher, maxTeamSize int) *Swarm {
 	t.Helper()
-	sw, err := New(Options{BaseDir: t.TempDir(), Launcher: l, MaxTeamSize: 2})
+	sw, err := New(Options{BaseDir: t.TempDir(), Launcher: l, MaxTeamSize: maxTeamSize})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -456,6 +460,247 @@ func TestHandoffStopsOriginalBeforeSuccessorStarts(t *testing.T) {
 	}
 }
 
+func TestHandoffMailboxFailureRestoresSourceCompletion(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate
+	sw := newSwarmFor(t, l)
+	pol := Policy{Model: "m"}
+	origID, err := sw.Spawn(pol, "team", "teammate", "original task", "/w")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	waitFor(t, "original running", func() bool {
+		task, ok := sw.Coordinator().Get(origID)
+		return ok && task.Status == StatusRunning
+	})
+
+	// The successor id is deterministic: the original consumed sequence 1.
+	sw.Mailbox().MaxMessages = 1
+	if err := sw.Mailbox().Send("team", "subagent-2", Message{From: "test", Body: "occupy inbox"}); err != nil {
+		t.Fatalf("prefill successor inbox: %v", err)
+	}
+	if _, err := sw.Handoff(pol, "team", origID, "subagent", "continue safely"); !errors.Is(err, ErrMailboxFull) {
+		t.Fatalf("Handoff error = %v, want ErrMailboxFull", err)
+	}
+
+	close(gate)
+	waitFor(t, "source completion after aborted handoff", func() bool {
+		task, ok := sw.Coordinator().Get(origID)
+		return ok && task.Status == StatusDone
+	})
+}
+
+func TestHandoffFailsClosedWithoutLocalTaskRun(t *testing.T) {
+	coord := NewCoordinator()
+	if _, err := coord.Register("external-task", "external-agent", "team", "external work"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := coord.SetStatus("external-task", StatusRunning); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	l := newLauncher(okFor)
+	sw, err := New(Options{BaseDir: t.TempDir(), Launcher: l, Coordinator: coord})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(sw.Close)
+
+	if _, err := sw.Handoff(Policy{Model: "m"}, "team", "external-task", "subagent", ""); err == nil {
+		t.Fatal("Handoff without a local task run must fail")
+	}
+	if err := coord.Complete("external-task", "external owner finished"); err != nil {
+		t.Fatalf("handoff claim was not aborted: %v", err)
+	}
+	if got := len(l.recorded()); got != 0 {
+		t.Fatalf("unexpected successor launches = %d", got)
+	}
+}
+
+func TestHandoffSuccessorCollisionDoesNotStopSource(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate
+	coord := NewCoordinator()
+	sw, err := New(Options{BaseDir: t.TempDir(), Launcher: l, Coordinator: coord, MaxTeamSize: 2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(sw.Close)
+	pol := Policy{Model: "m"}
+	origID, err := sw.Spawn(pol, "team", "teammate", "original task", "/w")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	waitFor(t, "original running", func() bool {
+		task, ok := coord.Get(origID)
+		return ok && task.Status == StatusRunning
+	})
+	// Handoff will mint subagent-2. A shared coordinator can already contain it
+	// because each Swarm has an independent id sequence.
+	if _, err := coord.Register("subagent-2", "other-agent", "other-team", "existing task"); err != nil {
+		t.Fatalf("register collision: %v", err)
+	}
+
+	if _, err := sw.Handoff(pol, "team", origID, "subagent", "do not misdeliver"); !errors.Is(err, ErrTaskExists) {
+		t.Fatalf("Handoff error = %v, want ErrTaskExists", err)
+	}
+	task, _ := coord.Get(origID)
+	if task.Status != StatusRunning {
+		t.Fatalf("source status = %s, want running because collision was detected before stop", task.Status)
+	}
+	msgs, err := sw.Mailbox().ReadAndConsume("team", "subagent-2")
+	if err != nil {
+		t.Fatalf("read colliding inbox: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("collision misdelivered %d handoff notes to the existing task", len(msgs))
+	}
+	close(gate)
+	waitFor(t, "source completion after rejected collision", func() bool {
+		task, ok := coord.Get(origID)
+		return ok && task.Status == StatusDone
+	})
+}
+
+func TestCloseReleasesBlockedHandoffBeforeMemberExit(t *testing.T) {
+	releaseOriginal := make(chan struct{})
+	originalStarted := make(chan struct{})
+	successorStarted := make(chan struct{}, 1)
+	launcher := FuncLauncher{Run: func(_ context.Context, spec MemberSpec) (MemberResult, error) {
+		if spec.AgentType == "teammate" {
+			close(originalStarted)
+			<-releaseOriginal
+			return MemberResult{Result: "source finished"}, nil
+		}
+		successorStarted <- struct{}{}
+		return MemberResult{Result: "successor finished"}, nil
+	}}
+	sw, err := New(Options{BaseDir: t.TempDir(), Launcher: launcher})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(sw.Close)
+	defer func() {
+		select {
+		case <-releaseOriginal:
+		default:
+			close(releaseOriginal)
+		}
+	}()
+	origID, err := sw.Spawn(Policy{Model: "m"}, "team", "teammate", "original task", "/w")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	select {
+	case <-originalStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("original member never started")
+	}
+
+	handoffDone := make(chan error, 1)
+	go func() {
+		_, err := sw.Handoff(Policy{Model: "m"}, "team", origID, "subagent", "")
+		handoffDone <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	closeDone := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closeDone)
+	}()
+	select {
+	case err := <-handoffDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Handoff error = %v, want Close cancellation", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Handoff stayed blocked after Close canceled the swarm")
+	}
+	select {
+	case <-successorStarted:
+		t.Fatal("successor started while the source member was still running")
+	default:
+	}
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned before the cancellation-insensitive member exited")
+	default:
+	}
+
+	close(releaseOriginal)
+	select {
+	case <-closeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the source member exited")
+	}
+	waitFor(t, "source completion after handoff cancellation", func() bool {
+		task, ok := sw.Coordinator().Get(origID)
+		return ok && task.Status == StatusDone
+	})
+}
+
+func TestHandoffTimesOutWithoutStartingSuccessor(t *testing.T) {
+	releaseOriginal := make(chan struct{})
+	originalStarted := make(chan struct{})
+	successorStarted := make(chan struct{}, 1)
+	launcher := FuncLauncher{Run: func(_ context.Context, spec MemberSpec) (MemberResult, error) {
+		if spec.AgentType == "teammate" {
+			close(originalStarted)
+			<-releaseOriginal
+			return MemberResult{Result: "source finished"}, nil
+		}
+		successorStarted <- struct{}{}
+		return MemberResult{Result: "successor finished"}, nil
+	}}
+	sw := newSwarmFor(t, launcher)
+	sw.handoffStopTimeout = 50 * time.Millisecond
+	defer func() {
+		select {
+		case <-releaseOriginal:
+		default:
+			close(releaseOriginal)
+		}
+	}()
+	origID, err := sw.Spawn(Policy{Model: "m"}, "team", "teammate", "original task", "/w")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	select {
+	case <-originalStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("original member never started")
+	}
+
+	handoffDone := make(chan error, 1)
+	go func() {
+		_, err := sw.Handoff(Policy{Model: "m"}, "team", origID, "subagent", "")
+		handoffDone <- err
+	}()
+	select {
+	case err := <-handoffDone:
+		if !errors.Is(err, ErrHandoffStopTimeout) {
+			t.Fatalf("Handoff error = %v, want ErrHandoffStopTimeout", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Handoff exceeded its source-stop deadline")
+	}
+	select {
+	case <-successorStarted:
+		t.Fatal("successor started after the source-stop deadline expired")
+	default:
+	}
+	if task, ok := sw.Coordinator().Get(origID); !ok || task.Status != StatusRunning {
+		t.Fatalf("source status after timeout = %+v, want running until its member exits", task)
+	}
+
+	close(releaseOriginal)
+	waitFor(t, "source completion after handoff timeout", func() bool {
+		task, ok := sw.Coordinator().Get(origID)
+		return ok && task.Status == StatusDone
+	})
+}
+
 func TestHandoffWaitsForOriginalThatIgnoresCancellation(t *testing.T) {
 	originalStarted := make(chan struct{})
 	releaseOriginal := make(chan struct{})
@@ -539,8 +784,7 @@ func TestHandoffDoesNotWaitForUnrelatedQueuedLaunch(t *testing.T) {
 		queuedLaunchStarted: queuedLaunchStarted,
 		releaseQueuedLaunch: releaseQueuedLaunch,
 	}
-	sw := newSwarmFor(t, launcher)
-	sw.maxTeamSize = 1
+	sw := newSwarmForWithSize(t, launcher, 1)
 	pol := Policy{Model: "m"}
 	origID, err := sw.Spawn(pol, "team", "teammate", "original task", "/w")
 	if err != nil {
@@ -553,6 +797,9 @@ func TestHandoffDoesNotWaitForUnrelatedQueuedLaunch(t *testing.T) {
 	}
 	if _, err := sw.Spawn(pol, "team", "teammate", "queued task", "/w"); err != nil {
 		t.Fatalf("Spawn queued: %v", err)
+	}
+	if got := sw.team("team").QueueDepth(); got != 1 {
+		t.Fatalf("queue depth = %d, want one queued task before handoff", got)
 	}
 
 	handoffDone := make(chan error, 1)
@@ -614,8 +861,7 @@ func TestHandoffRemovesQueuedOriginalBeforeDispatchingSuccessor(t *testing.T) {
 	}()
 	l := newLauncher(okFor)
 	l.gate = gate
-	sw := newSwarmFor(t, l)
-	sw.maxTeamSize = 1
+	sw := newSwarmForWithSize(t, l, 1)
 	pol := Policy{Model: "m"}
 
 	if _, err := sw.Spawn(pol, "team", "teammate", "slot blocker", "/w"); err != nil {

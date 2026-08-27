@@ -142,6 +142,57 @@ func TestCoordinatorAbortHandoffRestoresNormalCompletion(t *testing.T) {
 	}
 }
 
+func TestCoordinatorHandoffReservationBlocksRegistrationUntilAbort(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("source", "a1", "team", "desc")
+	if _, err := c.BeginHandoff("source"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	if err := c.ReserveHandoffSuccessor("source", "successor"); err != nil {
+		t.Fatalf("ReserveHandoffSuccessor: %v", err)
+	}
+	if _, err := c.Register("successor", "other", "team", "collision"); !errors.Is(err, ErrTaskExists) {
+		t.Fatalf("Register reserved id error = %v, want ErrTaskExists", err)
+	}
+	if err := c.FinishHandoff("source"); err == nil {
+		t.Fatal("FinishHandoff must not bypass a reserved successor")
+	}
+
+	c.AbortHandoff("source")
+	if _, err := c.Register("successor", "other", "team", "available again"); err != nil {
+		t.Fatalf("reservation was not released by AbortHandoff: %v", err)
+	}
+	if err := c.Complete("source", "source continued"); err != nil {
+		t.Fatalf("source claim was not released by AbortHandoff: %v", err)
+	}
+}
+
+func TestCoordinatorCommitHandoffPublishesBothSides(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("source", "a1", "team", "desc")
+	_ = c.SetStatus("source", StatusRunning)
+	if _, err := c.BeginHandoff("source"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	if err := c.ReserveHandoffSuccessor("source", "successor"); err != nil {
+		t.Fatalf("ReserveHandoffSuccessor: %v", err)
+	}
+	successor, err := c.CommitHandoff("source", "successor", "a2", "team", "continued")
+	if err != nil {
+		t.Fatalf("CommitHandoff: %v", err)
+	}
+	if successor.Status != StatusPending || successor.AgentID != "a2" {
+		t.Fatalf("successor = %+v, want pending ownership by a2", successor)
+	}
+	source, _ := c.Get("source")
+	if source.Status != StatusHandedOff {
+		t.Fatalf("source status = %s, want handed-off", source.Status)
+	}
+	if _, err := c.Register("successor", "other", "team", "duplicate"); !errors.Is(err, ErrTaskExists) {
+		t.Fatalf("committed successor was not registered: %v", err)
+	}
+}
+
 func TestCoordinatorColorStability(t *testing.T) {
 	c := NewCoordinator()
 	first := c.Color("a1")

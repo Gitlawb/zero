@@ -16,6 +16,11 @@ import (
 // on-demand worker model).
 const defaultMaxTeamSize = 8
 
+// defaultHandoffStopTimeout bounds the model-facing handoff tool while it waits
+// for a cancellation-insensitive source member. Timing out never starts the
+// successor, so the single-owner guarantee remains fail closed.
+const defaultHandoffStopTimeout = 30 * time.Second
+
 // maxMemberRestarts bounds automatic relaunches of a member that exits with a
 // temporary error, mirroring daemon.Pool's bounded backoff retries.
 const maxMemberRestarts = 2
@@ -60,6 +65,9 @@ type Swarm struct {
 	mailbox     *Mailbox
 	launcher    MemberLauncher
 	maxTeamSize int
+	// handoffStopTimeout is fixed to the default in production and kept on the
+	// instance so lifecycle tests can exercise the deadline without a global race.
+	handoffStopTimeout time.Duration
 
 	baseCtx context.Context
 	cancel  context.CancelFunc
@@ -138,6 +146,15 @@ func (r *taskRun) finish() {
 	})
 }
 
+func (r *taskRun) finished() bool {
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // New validates options and returns a Swarm.
 func New(opts Options) (*Swarm, error) {
 	if opts.Launcher == nil {
@@ -170,16 +187,17 @@ func New(opts Options) (*Swarm, error) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &Swarm{
-		registry:    registry,
-		coord:       coord,
-		mailbox:     mb,
-		launcher:    opts.Launcher,
-		maxTeamSize: maxTeam,
-		baseCtx:     ctx,
-		cancel:      cancel,
-		teams:       map[string]*Team{},
-		taskCwd:     map[string]string{},
-		taskRuns:    map[string]*taskRun{},
+		registry:           registry,
+		coord:              coord,
+		mailbox:            mb,
+		launcher:           opts.Launcher,
+		maxTeamSize:        maxTeam,
+		handoffStopTimeout: defaultHandoffStopTimeout,
+		baseCtx:            ctx,
+		cancel:             cancel,
+		teams:              map[string]*Team{},
+		taskCwd:            map[string]string{},
+		taskRuns:           map[string]*taskRun{},
 	}, nil
 }
 
@@ -271,6 +289,10 @@ func (s *Swarm) Scheduler() *Scheduler {
 
 // ErrSwarmClosed reports lifecycle work submitted after shutdown begins.
 var ErrSwarmClosed = errors.New("swarm: closed")
+
+// ErrHandoffStopTimeout means the source member ignored cancellation long
+// enough that the handoff declined to start a successor.
+var ErrHandoffStopTimeout = errors.New("swarm: handoff source did not stop before timeout")
 
 // rememberCwd records a task's working dir so a handoff/adoption relaunch keeps it.
 func (s *Swarm) rememberCwd(taskID, cwd string) {
