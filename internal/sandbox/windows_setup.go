@@ -373,22 +373,6 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	if err := validateWindowsSandboxRuntimeStamp(config.PermissionProfile, expected.ACLPlanHash); err != nil {
 		return err
 	}
-	// AND THE STAMP IS NOT THE GRANT EITHER. It proves the directory was not
-	// removed and recreated under the same pathname, and that setup provisioned it
-	// for this configuration. It says nothing about whether the capability ACE
-	// still carries the permissions windowsACLAccess created or still reaches
-	// descendants: an ordinary file survives an ACL edit untouched, so `icacls
-	// /reset`, an inheritance change on a parent, or a security product
-	// rewriting the DACL all leave a valid stamp over a runtime root the
-	// WRITE_RESTRICTED child cannot write.
-	//
-	// The unelevated tier already answers this by reading the descriptors. This
-	// tier is the one that runs under the restricted token after an ELEVATED
-	// provisioning it cannot repeat, so it refuses and names the action instead of
-	// re-applying.
-	if err := validateWindowsSandboxACLGrants(config); err != nil {
-		return err
-	}
 	if actual.NetworkFilters != expected.NetworkFilters {
 		return errors.New("windows sandbox setup is out of date: network enforcement plan changed")
 	}
@@ -1007,14 +991,23 @@ func windowsSandboxSelectedRuntimeRoot(profile PermissionProfile) string {
 	return strings.TrimSpace(profile.Runtime.Root)
 }
 
-// validateWindowsSandboxACLGrants reports whether the objects this command's ACL
-// plan names still carry its allow grants.
+// ValidateWindowsSandboxLaunchGrants reports whether the objects this command's
+// ACL plan names still carry its allow grants.
 //
-// Separate from the marker comparisons above because it asks a different kind of
-// question. Those compare what setup INTENDED with what this command wants, and
-// both sides can agree perfectly while the filesystem has moved on underneath
-// them. This one reads the security descriptors.
-func validateWindowsSandboxACLGrants(config WindowsSandboxSetupConfig) error {
+// SEPARATE FROM THE MARKER, BECAUSE IT IS A DIFFERENT KIND OF QUESTION. The
+// marker comparisons ask whether setup's intent matches this command's, and both
+// sides can agree perfectly while the filesystem has moved on underneath them.
+// The runtime stamp narrows it to "the directory was not removed and recreated
+// under this pathname", which an ordinary file answers by existing: it survives
+// an ACL edit untouched, so an `icacls /reset`, an inheritance change on a
+// parent, or a security product rewriting the DACL all leave a valid stamp over
+// a runtime root the WRITE_RESTRICTED child cannot write.
+//
+// This one reads the security descriptors, and it is a LAUNCH decision rather
+// than a report: the elevated tier calls it beside its marker validation, which
+// puts both tiers' attestation in the same place, one refusing because it cannot
+// repeat an elevated provisioning and one re-applying because it can.
+func ValidateWindowsSandboxLaunchGrants(config WindowsSandboxSetupConfig) error {
 	plan, err := BuildWindowsACLPlan(config.commandConfig())
 	if err != nil {
 		return err

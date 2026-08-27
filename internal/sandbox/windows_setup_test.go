@@ -64,7 +64,6 @@ func TestRunWindowsSandboxSetupRejectsInvalidArgs(t *testing.T) {
 }
 
 func TestWindowsSandboxSetupMarkerRefreshesWhenProfileChanges(t *testing.T) {
-	assumeWindowsACLGrantsApplied(t)
 	config := WindowsSandboxSetupConfig{
 		SandboxHome:    t.TempDir(),
 		CommandCWD:     `C:\workspace`,
@@ -99,7 +98,6 @@ func TestWindowsSandboxSetupMarkerRefreshesWhenProfileChanges(t *testing.T) {
 // approved network command (curl, git push, …). The per-command mode is enforced
 // at runtime by the token's SID set, not by which marker exists.
 func TestWindowsSandboxSetupMarkerValidatesBothNetworkModes(t *testing.T) {
-	assumeWindowsACLGrantsApplied(t)
 	deny := WindowsSandboxSetupConfig{
 		SandboxHome:    t.TempDir(),
 		CommandCWD:     `C:\workspace`,

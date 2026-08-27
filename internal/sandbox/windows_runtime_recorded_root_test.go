@@ -50,7 +50,6 @@ func blockCacheRuntimeRoot(t *testing.T, workspaceRoot string) (string, func()) 
 // Setup's choice is recorded now and the command consumes it, so the two cannot
 // disagree no matter what changes in between.
 func TestTheCommandHonoursTheRootSetupActuallyProvisioned(t *testing.T) {
-	assumeWindowsACLGrantsApplied(t)
 	config := runtimeRootTestConfig(t)
 	workspace := config.WorkspaceRoots[0]
 	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", config.SandboxHome)

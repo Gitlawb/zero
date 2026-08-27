@@ -54,7 +54,6 @@ func runtimeRootTestConfig(t *testing.T) WindowsSandboxCommandConfig {
 // temp-derived one, and a marker that only accepts the preferred root bricks
 // every machine that falls back.
 func TestWindowsSandboxSetupMarkerAcceptsRuntimeAugmentedCommand(t *testing.T) {
-	assumeWindowsACLGrantsApplied(t)
 	config := runtimeRootTestConfig(t)
 	// The setup half, as BuildWindowsSandboxSetupArgs prepares it in the
 	// operator's shell before the elevated helper ever runs.
