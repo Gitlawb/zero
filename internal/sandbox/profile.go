@@ -618,6 +618,14 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		if credentialPathReincluded(allowRoots, path) {
 			continue
 		}
+		for _, nested := range credentialNestedAllowReads(allowRoots, path) {
+			if normalizeCredentialCarveoutPath(nested) != "" {
+				carveouts = append(carveouts, nested)
+			}
+		}
+		if credentialDirDenyHidesNestedAllow(allowRoots, path) {
+			continue
+		}
 		out = append(out, path)
 	}
 	out = appendLexicalCredentialDenyPaths(out, allowRoots, lexicalCandidates)
@@ -656,6 +664,9 @@ func appendLexicalCredentialDenyPaths(out, allowRoots, candidates []string) []st
 			continue
 		}
 		if credentialPathReincluded(allowRoots, lexical) {
+			continue
+		}
+		if credentialDirDenyHidesNestedAllow(allowRoots, lexical) {
 			continue
 		}
 		resolved := normalizeProfilePath(path)
@@ -754,6 +765,37 @@ func pathsOutsideOverlappingRoots(paths []string, roots []string) []string {
 func credentialPathReincluded(allowRoots []string, path string) bool {
 	for _, allow := range allowRoots {
 		if pathWithinRoot(allow, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialNestedAllowReads returns allowRead paths that sit strictly inside
+// path — a nested grant under a credential directory.
+func credentialNestedAllowReads(allowRoots []string, path string) []string {
+	if path == "" || len(allowRoots) == 0 {
+		return nil
+	}
+	var out []string
+	for _, allow := range allowRoots {
+		if allow != path && pathWithinRoot(path, allow) {
+			out = append(out, allow)
+		}
+	}
+	return out
+}
+
+// credentialDirDenyHidesNestedAllow reports that some allowRead sits under
+// path and cannot be expressed as a directory DenyReadCarveout. Existing
+// carveouts only re-bind directories (Zero's plugins/specialists/commands).
+// A nested file grant such as $HOME/.gnupg/private-keys-v1.d/keygrip.key
+// would stay unreadable if path were still emitted as a directory deny:
+// bubblewrap masks the dir and Seatbelt denies the subtree after the read
+// rule. In that case the parent dir deny is omitted.
+func credentialDirDenyHidesNestedAllow(allowRoots []string, path string) bool {
+	for _, allow := range credentialNestedAllowReads(allowRoots, path) {
+		if normalizeCredentialCarveoutPath(allow) == "" {
 			return true
 		}
 	}

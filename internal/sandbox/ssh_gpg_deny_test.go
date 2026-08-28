@@ -49,6 +49,14 @@ func mustSymlink(t *testing.T, target, link string) {
 	}
 }
 
+func sshPrivateKeyFixture() string {
+	return strings.Join([]string{"-----BEGIN OPENSSH", " PRIVATE KEY-----\nfixture\n"}, "")
+}
+
+func puttyPrivateKeyFixture() string {
+	return strings.Join([]string{"PuTTY-User-Key", "-File-2: ssh-rsa\nEncryption: none\n"}, "")
+}
+
 func sshGPGDenied(t *testing.T, home string, allowRead []string) []string {
 	t.Helper()
 	return credentialDenyReadPathsIn(credentialPathOptions{
@@ -328,7 +336,7 @@ func TestCredentialDenyReadPathsDeniesNestedSSHPrivateKeys(t *testing.T) {
 	nestedPub := filepath.Join(sshDir, "keys", "work.pub")
 	nestedConfig := filepath.Join(sshDir, "keys", "config")
 	nestedKnown := filepath.Join(sshDir, "keys", "known_hosts")
-	mustWriteFile(t, nestedKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n")
+	mustWriteFile(t, nestedKey, sshPrivateKeyFixture())
 	mustWriteFile(t, nestedID, "")
 	mustWriteFile(t, nestedPub, "ssh-ed25519 AAAA nested\n")
 	mustWriteFile(t, nestedConfig, "Host *\n")
@@ -558,6 +566,9 @@ func TestSSHShouldDenyReferencedPathExemptsKnownHostsFamilyAndDevNull(t *testing
 	if !sshShouldDenyReferencedPath(filepath.Join(sshDir, "custom-key"), home, sshDir) {
 		t.Fatalf("non-exempt referenced path was not a deny candidate")
 	}
+	if !sshShouldDenyReferencedPath(filepath.Join(sshDir, "known_hosts.private"), home, sshDir) {
+		t.Fatalf("known_hosts.private must not be treated as a known-hosts family name")
+	}
 }
 
 func TestCredentialDenyReadPathsKeepsKnownHostsFamilyFromConfig(t *testing.T) {
@@ -598,7 +609,7 @@ func TestWalkSSHPrivateKeyFilesFindsKeyAfterCrowdedSiblingDir(t *testing.T) {
 		mustWriteFile(t, filepath.Join(junkDir, fmt.Sprintf("host-%04d", i)), "ssh-ed25519 AAAA\n")
 	}
 	nestedKey := filepath.Join(sshDir, "keys", "work_ed25519")
-	mustWriteFile(t, nestedKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n")
+	mustWriteFile(t, nestedKey, sshPrivateKeyFixture())
 
 	denied := sshGPGDenied(t, home, nil)
 	if !denyCovered(denied, nestedKey) {
@@ -614,7 +625,7 @@ func TestCredentialDenyReadPathsDeniesPuttyPPK(t *testing.T) {
 	ppk := filepath.Join(home, ".ssh", "putty-key.ppk")
 	custom := filepath.Join(home, ".ssh", "custom-putty")
 	mustWriteFile(t, ppk, "")
-	mustWriteFile(t, custom, "PuTTY-User-Key-File-2: ssh-rsa\nEncryption: none\n")
+	mustWriteFile(t, custom, puttyPrivateKeyFixture())
 
 	denied := sshGPGDenied(t, home, nil)
 	if !denyCovered(denied, ppk) {
@@ -689,5 +700,115 @@ func TestUnreadableEnforcementPathsSkipsNonSymlinkSpellingRewrite(t *testing.T) 
 	}
 	if !denyListedExact(denied, shortName) {
 		t.Fatalf("canonical ssh key missing after 8.3-style rewrite: %v", denied)
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesKnownHostsPrivateNamedKey(t *testing.T) {
+	home := t.TempDir()
+	key := filepath.Join(home, ".ssh", "known_hosts.private")
+	mustWriteFile(t, key, sshPrivateKeyFixture())
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, key) {
+		t.Fatalf("known_hosts.private with a private-key payload is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh", "known_hosts")) {
+		t.Fatalf("supported known_hosts was denied")
+	}
+}
+
+func TestWalkSSHPrivateKeyFilesDeniesCustomNamedSymlinkToPrivateKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	target := filepath.Join(t.TempDir(), "real-key")
+	mustWriteFile(t, target, sshPrivateKeyFixture())
+	link := filepath.Join(home, ".ssh", "work")
+	mustSymlink(t, target, link)
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, link) {
+		t.Fatalf("custom-named symlink to a private key is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsNestedGPGAllowReadOmitsParentDir(t *testing.T) {
+	home := t.TempDir()
+	key := filepath.Join(home, ".gnupg", "private-keys-v1.d", "keygrip.key")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, filepath.Join(home, ".gnupg", "secring.gpg"), "fake-secring")
+	mustWriteFile(t, filepath.Join(home, ".git-credentials"), "https://user:token@github.com")
+
+	allow := []string{key}
+	denied := sshGPGDenied(t, home, allow)
+	gnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	if denyListedExact(denied, gnupg) {
+		t.Fatalf("nested allowRead left parent ~/.gnupg in DenyReadIfExists: %v", denied)
+	}
+	if denyCovered(denied, key) {
+		t.Fatalf("nested allowRead key is still denied: %v", denied)
+	}
+	if !denyCovered(denied, filepath.Join(home, ".git-credentials")) {
+		t.Fatalf("git-credentials must stay denied when only a nested GPG key is allowed: %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowRead(t *testing.T) {
+	home := t.TempDir()
+	key := filepath.Join(home, ".gnupg", "private-keys-v1.d", "keygrip.key")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, filepath.Join(home, ".gnupg", "secring.gpg"), "fake-secring")
+
+	allow := []string{key}
+	creds := credentialDenyReadPathsIn(credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}, allow)
+	gnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	if denyListedExact(creds.Paths, gnupg) {
+		t.Fatalf("nested allowRead left parent ~/.gnupg in DenyReadIfExists: %v", creds.Paths)
+	}
+	if denyCovered(creds.Paths, key) {
+		t.Fatalf("nested allowRead key is still denied: %v", creds.Paths)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator), normalizeProfilePath(key)},
+			DenyReadIfExists:  creds.Paths,
+			DenyReadCarveouts: creds.Carveouts,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	if argsContainSequence(args, "--perms", "000", "--tmpfs", gnupg) ||
+		argsContainSequence(args, "--perms", "111", "--tmpfs", gnupg) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", gnupg) {
+		t.Fatalf("bwrap masked ~/.gnupg despite nested allowRead: %#v", args)
+	}
+
+	sbpl := strings.Join(denyReadRules(profile.FileSystem), "\n")
+	if strings.Contains(sbpl, sandboxProfileString(gnupg)) {
+		t.Fatalf("Seatbelt deny rules still cover ~/.gnupg after nested allowRead:\n%s", sbpl)
+	}
+	keyLit := sandboxProfileString(normalizeProfilePath(key))
+	if strings.Contains(sbpl, `(deny file-read* (literal "`+keyLit+`"))`) ||
+		strings.Contains(sbpl, `(deny file-read* (subpath "`+keyLit+`"))`) {
+		t.Fatalf("Seatbelt still denies the nested allowRead key:\n%s", sbpl)
+	}
+	full := seatbeltProfileFromPermissionProfile(profile, Policy{}, "")
+	denyIdx := strings.LastIndex(full, `(deny file-read* (subpath "`+sandboxProfileString(gnupg)+`"))`)
+	if denyIdx >= 0 {
+		t.Fatalf("full Seatbelt profile still denies ~/.gnupg subtree:\n%s", full)
 	}
 }
