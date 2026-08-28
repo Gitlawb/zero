@@ -507,18 +507,22 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		homeDirs := []string{
 			filepath.Join(home, ".aws"),
 			filepath.Join(home, ".azure"),
+			// GPG secret keyring (secring.gpg, private-keys-v1.d). Directory-
+			// shaped like ~/.aws so a mount-based backend masks the whole
+			// store, including files created later in the session (#815).
+			filepath.Join(home, ".gnupg"),
 		}
 		candidates = append(candidates, homeDirs...)
 		dirs = append(dirs, homeDirs...)
 		// git's credential store backend, which holds host passwords and
-		// personal access tokens in cleartext. Denied rather than the whole
-		// of ~/.ssh, because these cost nothing functionally: git reads them
-		// through a credential helper for authentication, not for identity,
-		// so a sandboxed git still works and simply cannot authenticate as
-		// the user. SSH key material is a harder trade and is tracked
-		// separately (#815). A file, so it joins candidates only — dirs
-		// drives directory-shaped handling (bwrap binds, carveouts).
+		// personal access tokens in cleartext (#816). A file, so it joins
+		// candidates only — dirs drives directory-shaped handling (bwrap
+		// binds, carveouts). SSH private keys are denied separately as key
+		// material (id_*, *.pem, IdentityFile paths) rather than the whole
+		// of ~/.ssh, so config and known_hosts stay readable for git host
+		// resolution (#815).
 		candidates = append(candidates, filepath.Join(home, ".git-credentials"))
+		candidates = append(candidates, sshPrivateKeyDenyCandidates(home)...)
 	}
 	candidates = append(candidates, options.GoogleCredentials...)
 	candidates = append(candidates, options.NPMUserConfigs...)
