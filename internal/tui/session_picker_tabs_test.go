@@ -122,6 +122,16 @@ func TestForeignSessionItemsSuppressAnImportedSource(t *testing.T) {
 	}
 }
 
+func TestZeroForeignSessionTimestampHasNoYearOneLabel(t *testing.T) {
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	if got := sessionWhenTime(time.Time{}, now); got != "" {
+		t.Fatalf("zero foreign-session timestamp rendered as %q", got)
+	}
+	if got := sessionWhenTime(now, now); got != now.Local().Format("15:04:05") {
+		t.Fatalf("populated foreign-session timestamp rendered as %q", got)
+	}
+}
+
 // TestAllShowsEverythingAndTabNarrows is the behaviour asked for: All lists
 // every session labelled by agent, Tab moves to one agent at a time.
 func TestAllShowsEverythingAndTabNarrows(t *testing.T) {

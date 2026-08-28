@@ -401,6 +401,13 @@ func sessionWhen(timestamp string, now time.Time) string {
 	if err != nil {
 		return ""
 	}
+	return sessionWhenTime(parsed, now)
+}
+
+func sessionWhenTime(parsed time.Time, now time.Time) string {
+	if parsed.IsZero() {
+		return ""
+	}
 	parsed, now = parsed.Local(), now.Local()
 	switch {
 	case parsed.Year() == now.Year() && parsed.YearDay() == now.YearDay():
@@ -611,7 +618,7 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 		// pin — controls first, so a secret split by an escape byte is reassembled
 		// before the shape match runs.
 		label := displayValue(agentsessions.DisplayField(session.Title), "untitled")
-		if when := sessionWhen(session.UpdatedAt.Format(time.RFC3339), now); when != "" {
+		if when := sessionWhenTime(session.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
 		items = append(items, pickerItem{
