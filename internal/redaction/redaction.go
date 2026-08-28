@@ -69,12 +69,36 @@ var sensitiveKeys = map[string]struct{}{
 	"zero_api_key":          {},
 }
 
+// ctrlGap matches C0/C1 bytes (Cc other than tab/LF/CR, plus lone Latin-1 C1)
+// between characters of a secret shape. Matching stays on the original string:
+// a deleted control is never a join, so \b still treats wordchar+control as a
+// boundary and tokens that were never adjacent stay that way. Tab/LF/CR are
+// excluded so log line structure is unchanged. \x{FFFD} is how Go's regexp
+// engine reports a lone invalid UTF-8 C1 byte such as 0x9B.
+const ctrlGap = `[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f\x{FFFD}]*`
+
+// ctrlLit quotes s as a regexp literal with ctrlGap after every rune, so a
+// NUL/ESC/C1 may split the literal without breaking the match.
+func ctrlLit(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) * (1 + len(ctrlGap)))
+	for _, r := range s {
+		b.WriteString(regexp.QuoteMeta(string(r)))
+		b.WriteString(ctrlGap)
+	}
+	return b.String()
+}
+
+func secretBody(class, quant string) string {
+	return `(?:` + class + ctrlGap + `)` + quant
+}
+
 // openaiKeyPattern mirrors secrets.Scan's broad sk- body. Known OpenAI
 // prefixes (sk-proj-/sk-svcacct-/sk-admin-) are always redacted; other sk-
 // digit-free matches with an interior hyphen are left alone (kebab-case false
 // positives), while digit-free legacy sk- credentials are still redacted.
 // Applied via ReplaceAllStringFunc rather than the plain list below.
-var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
+var openaiKeyPattern = regexp.MustCompile(`\b` + ctrlLit("sk-") + secretBody(`[A-Za-z0-9_-]`, `{20,}`))
 
 // textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
 // shared high-confidence shapes. A leading \b keeps each pattern from firing
@@ -85,16 +109,18 @@ var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 // (not in secrets.Scan); ASIA temporary access keys are kept alongside AKIA.
 // openai keys are handled separately (digit filter). JWT has a strict form
 // (both segments start with eyJ) and a looser three-segment form.
+// ctrlGap between shape characters keeps NUL/ESC/C1 split secrets matching
+// without stripping those bytes out of the subject first.
 var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
-	regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`),
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+	regexp.MustCompile(`\b` + ctrlLit("sk-ant-") + `(?:` + ctrlLit("api") + `\d` + ctrlGap + `\d` + ctrlGap + ctrlLit("-") + `)?` + secretBody(`[A-Za-z0-9_-]`, `{20,}`)),
+	regexp.MustCompile(`\b` + ctrlLit("github_pat_") + secretBody(`[A-Za-z0-9_]`, `{22,}`)),
+	regexp.MustCompile(`\b` + ctrlLit("gh") + `[pousr]` + ctrlGap + `_` + ctrlGap + secretBody(`[A-Za-z0-9]`, `{36,}`)),
+	regexp.MustCompile(`\b` + ctrlLit("glpat-") + secretBody(`[A-Za-z0-9_-]`, `{12,}`)),
+	regexp.MustCompile(`\b` + ctrlLit("AIza") + secretBody(`[0-9A-Za-z\-_]`, `{35,}`)),
+	regexp.MustCompile(`\b` + ctrlLit("xox") + `[baprs]` + ctrlGap + `-` + ctrlGap + secretBody(`[A-Za-z0-9-]`, `{10,}`)),
+	regexp.MustCompile(`\b(?:` + ctrlLit("AKIA") + `|` + ctrlLit("ASIA") + `)` + secretBody(`[A-Z0-9]`, `{16}`)),
+	regexp.MustCompile(`\b` + ctrlLit("eyJ") + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + ctrlLit("eyJ") + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + secretBody(`[A-Za-z0-9_-]`, `{10,}`)),
+	regexp.MustCompile(`\b` + ctrlLit("eyJ") + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + secretBody(`[A-Za-z0-9_-]`, `{10,}`)),
 }
 
 var (
@@ -171,11 +197,12 @@ func keyLooksSensitive(normalized string) bool {
 	return false
 }
 
-// stripControlBytes removes C0/C1 controls (Cc other than tab, LF, and CR) so
-// shape matching sees a secret that was split by an embedded NUL, ESC, or C1
-// byte. Tab/LF/CR stay so log line structure is preserved. Lone Latin-1 C1
-// bytes (0x80–0x9F, invalid UTF-8) are stripped too; UTF-8 continuation bytes
-// are not, because they are not controls. Must run before any pattern match.
+// stripControlBytes removes C0/C1 controls (Cc other than tab, LF, and CR).
+// Used to normalize an already-matched secret so prefix/digit checks see the
+// rejoined shape. It is matching-time only and must not be applied to
+// RedactString's input or return value. Tab/LF/CR stay. Lone Latin-1 C1 bytes
+// (0x80–0x9F, invalid UTF-8) are stripped too; UTF-8 continuation bytes are
+// not, because they are not controls.
 func stripControlBytes(s string) string {
 	for i := 0; i < len(s); {
 		c := s[i]
@@ -231,9 +258,10 @@ func stripControlBytesFrom(s string, start int) string {
 
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
-	// Strip C0/C1 first: a NUL, ESC, or C1 byte inside a key body splits the
-	// shape so the patterns miss it, and a later strip would rejoin the secret.
-	redacted := stripControlBytes(value)
+	// Match on the original string. Shape patterns allow C0/C1 gaps between
+	// characters so a split secret still matches; stripping first would join
+	// tokens that were never adjacent and make \b miss a leading wordchar.
+	redacted := value
 	if len(options.ExtraSecretValues) > 0 {
 		secrets := append([]string{}, options.ExtraSecretValues...)
 		sort.SliceStable(secrets, func(i, j int) bool {
@@ -288,8 +316,9 @@ func RedactString(value string, options Options) string {
 	// openai keys first so the filter can drop kebab-case false positives
 	// before any other pattern rewrites nearby text.
 	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) &&
-			strings.Contains(strings.TrimPrefix(match, "sk-"), "-") {
+		normalized := stripControlBytes(match)
+		if !knownOpenAIKeyPrefix(normalized) && !secretMatchHasDigit(normalized) &&
+			strings.Contains(strings.TrimPrefix(normalized, "sk-"), "-") {
 			return match
 		}
 		return replacement
