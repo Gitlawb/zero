@@ -59,6 +59,10 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	if result.Session.Cwd != wantCwd {
 		t.Errorf("stored cwd = %q, want %q", result.Session.Cwd, wantCwd)
 	}
+	const wantWorkspaceKey = "/w/\x1b[2Kmoved\rhidden/proj"
+	if result.Session.WorkspaceKey != filepath.Clean(wantWorkspaceKey) {
+		t.Errorf("workspace key = %q, want %q", result.Session.WorkspaceKey, filepath.Clean(wantWorkspaceKey))
+	}
 	const wantModel = "claude[2K-opus [REDACTED]"
 	if result.Session.ModelID != wantModel {
 		t.Errorf("stored model = %q, want %q", result.Session.ModelID, wantModel)
@@ -70,9 +74,15 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	if err != nil || reloaded == nil {
 		t.Fatalf("reloading the imported session: %v", err)
 	}
-	if reloaded.Title != wantTitle || reloaded.Cwd != wantCwd || reloaded.ModelID != wantModel {
+	if reloaded.Title != wantTitle || reloaded.Cwd != wantCwd || reloaded.WorkspaceKey != filepath.Clean(wantWorkspaceKey) || reloaded.ModelID != wantModel {
 		t.Errorf("reloaded title/cwd/model = %q / %q / %q, want %q / %q / %q",
 			reloaded.Title, reloaded.Cwd, reloaded.ModelID, wantTitle, wantCwd, wantModel)
+	}
+	if got := sessions.OperationalCwd(*reloaded); got != filepath.Clean(wantWorkspaceKey) {
+		t.Errorf("operational cwd = %q, want canonical key %q", got, filepath.Clean(wantWorkspaceKey))
+	}
+	if got := sessions.OperationalCwd(sessions.Metadata{Cwd: "/legacy/workspace"}); got != "/legacy/workspace" {
+		t.Errorf("older metadata operational cwd = %q", got)
 	}
 }
 

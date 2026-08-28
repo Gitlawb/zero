@@ -154,7 +154,7 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	}
 
 	created, discardCreated, err := store.CreateDiscardable(sessions.CreateInput{
-		// THE STORE IS THE CHOKEPOINT, NOT EACH CONSUMER. These two fields are
+		// THE STORE IS THE CHOKEPOINT FOR DISPLAY VALUES. These fields are
 		// another product's bytes and every reader draws them: `zero sessions
 		// list`, the /resume picker, the import summary, the workspace warning.
 		// stripControl was not enough for a stored value — it deliberately keeps
@@ -164,10 +164,11 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 		// the store for every consumer to leak independently. Two of them did.
 		// DisplayField is the one helper that strips controls FIRST and then
 		// redacts, the order redaction_order_test.go pins.
-		Title:   DisplayField(source.Title),
-		Cwd:     DisplayField(source.Cwd),
-		ModelID: DisplayField(source.ModelID),
-		Tag:     ImportTag(adapter.Name(), id),
+		Title:        DisplayField(source.Title),
+		Cwd:          DisplayField(source.Cwd),
+		WorkspaceKey: normalizeDir(source.Cwd),
+		ModelID:      DisplayField(source.ModelID),
+		Tag:          ImportTag(adapter.Name(), id),
 	})
 	if err != nil {
 		return ImportResult{}, err
