@@ -9,10 +9,16 @@ import (
 )
 
 // looksLikePosixAbsolute reports whether path looks like a POSIX absolute
-// path (leading "/") rather than a UNC path ("//...") or a Windows volume
-// ("C:/..."). Backslashes are normalized with ToSlash first.
+// path (leading "/") rather than a UNC path ("//..."), a Windows volume
+// ("C:/..."), or a rooted Windows path (leading backslash). A leading
+// backslash is rejected before ToSlash so a path like \tmp\zero\file is
+// not treated as POSIX.
 func looksLikePosixAbsolute(path string) bool {
-	normalized := strings.TrimSpace(filepath.ToSlash(path))
+	raw := strings.TrimSpace(path)
+	if strings.HasPrefix(raw, `\`) {
+		return false
+	}
+	normalized := filepath.ToSlash(raw)
 	if normalized == "" {
 		return false
 	}

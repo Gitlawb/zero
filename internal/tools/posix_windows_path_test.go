@@ -20,6 +20,9 @@ func TestLooksLikePosixAbsolute(t *testing.T) {
 		{path: "relative/path", want: false},
 		{path: "", want: false},
 		{path: " /tmp/x ", want: true},
+		{path: "/tmp/zero/file", want: true},
+		{path: `\Windows\System32`, want: false},
+		{path: `\tmp\zero\file`, want: false},
 	}
 	for _, tt := range tests {
 		if got := looksLikePosixAbsolute(tt.path); got != tt.want {
@@ -113,6 +116,27 @@ func TestRewritePosixWorkspacePath(t *testing.T) {
 			workspace: filepath.Join("workspaces", "Zero"),
 			requested: "/tmp/zero/foo.txt",
 			want:      "foo.txt",
+		},
+		{
+			name:      "windows posix tmp file still rewrites",
+			goos:      "windows",
+			workspace: workspace,
+			requested: "/tmp/zero/file",
+			want:      "file",
+		},
+		{
+			name:      "windows rooted backslash system32 stays",
+			goos:      "windows",
+			workspace: workspace,
+			requested: `\Windows\System32`,
+			want:      `\Windows\System32`,
+		},
+		{
+			name:      "windows rooted tmp backslash stays",
+			goos:      "windows",
+			workspace: workspace,
+			requested: `\tmp\zero\file`,
+			want:      `\tmp\zero\file`,
 		},
 	}
 	for _, tt := range tests {
@@ -303,6 +327,46 @@ func TestIsAbsForGOOS(t *testing.T) {
 		if got := isAbsForGOOS(tt.goos, tt.path); got != tt.want {
 			t.Fatalf("isAbsForGOOS(%q, %q) = %v, want %v", tt.goos, tt.path, got, tt.want)
 		}
+	}
+}
+
+func TestResolveWorkspacePathRejectsRootedWindowsBackslash(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "file"), "workspace file")
+
+	for _, requested := range []string{`\Windows\System32`, `\tmp\zero\file`} {
+		if got := rewritePosixWorkspacePath("windows", root, requested); got != requested {
+			t.Fatalf("rooted Windows path %q rewrote to %q", requested, got)
+		}
+
+		_, relative, err := resolveWorkspacePathForGOOS("windows", root, requested)
+		if relative == "file" {
+			t.Fatalf("rooted Windows path %q resolved as workspace-relative file (err=%v)", requested, err)
+		}
+		if err == nil {
+			t.Fatalf("rooted Windows path %q should not resolve inside the workspace (relative=%q)", requested, relative)
+		}
+		if !strings.Contains(err.Error(), "must stay inside the workspace") {
+			t.Fatalf("rooted Windows path %q: expected confinement, got %q", requested, err)
+		}
+
+		_, relative, err = resolveWorkspaceTargetPathForGOOS("windows", root, requested)
+		if relative == "file" {
+			t.Fatalf("write resolver treated %q as workspace-relative file (err=%v)", requested, err)
+		}
+		if err == nil {
+			t.Fatalf("write resolver accepted rooted Windows path %q (relative=%q)", requested, relative)
+		}
+		if !strings.Contains(err.Error(), "must stay inside the workspace") {
+			t.Fatalf("write resolver for %q: expected confinement, got %q", requested, err)
+		}
+	}
+
+	if got := rewritePosixWorkspacePath("windows", root, "/tmp/zero/file"); got != "file" {
+		t.Fatalf("POSIX /tmp/zero/file should still rewrite to file, got %q", got)
 	}
 }
 
