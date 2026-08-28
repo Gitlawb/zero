@@ -6,9 +6,6 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-
-	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
 )
 
 // completedHideAfter keeps a finished orchestration visible briefly unless the
@@ -606,32 +603,6 @@ func orchestratePlainGlyph(status orchestrateTaskStatus) string {
 	default:
 		return "·"
 	}
-}
-
-// orchestrateHeaderMarker identifies the panel's header line inside the footer.
-// Both affordance glyphs are checked so the line is findable in either state.
-const orchestrateHeaderMarker = "PLAN"
-
-// clickedOrchestrateHeader reports whether a left-click landed on the plan
-// panel's header line.
-//
-// Located by CONTENT rather than by a remembered row index: the footer's height
-// varies with the composer, the pinned update_plan panel and the status line, so
-// an index captured at render time is stale by the time a click arrives. The
-// arrow glyph is what distinguishes this header from update_plan's.
-func (m model) clickedOrchestrateHeader(msg tea.MouseMsg) bool {
-	if m.orchestrate.isEmpty() || !m.altScreen || m.subchat.active {
-		return false
-	}
-	width := m.chatColumnWidth()
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	_, row, ok := frame.footerRect.local(mouseX(msg), mouseY(msg))
-	if !ok || row < 0 || row >= len(frame.footerLines) {
-		return false
-	}
-	line := ansi.Strip(frame.footerLines[row])
-	return strings.HasPrefix(strings.TrimSpace(line), "▸ "+orchestrateHeaderMarker) ||
-		strings.HasPrefix(strings.TrimSpace(line), "▾ "+orchestrateHeaderMarker)
 }
 
 // maxSidebarOrchestrateLines caps the sidebar's plan list. The column is 26-40

@@ -184,7 +184,10 @@ func TestPostureOffRunCarriesNoPostureText(t *testing.T) {
 // environment (no cwd, no OS), so unlike the whole prefix this IS portable and
 // a moved hash means a real schema change in the fixture's tools.
 //
-// MOVED AGAIN WHEN main's #867 RESHAPED read_file's SCHEMA (the canonical
+// MOVED AGAIN AFTER THE CURRENT MAIN REFRESH. Main's tool descriptions now
+// distinguish exact reads from minified exploratory reads while keeping the
+// same posture-off exposure contract. Before that, #867 reshaped read_file's
+// schema (the canonical
 // path/offset/limit contract) and reworded its description; before that, #838
 // reworded glob, grep, list_directory and read_file. Both are schema changes on
 // main's side rather than posture leaks from this branch, and the distinction was
@@ -194,7 +197,7 @@ func TestPostureOffRunCarriesNoPostureText(t *testing.T) {
 // The absolute byte counts moved with main's new wording (33549 -> 31851 on
 // --auto low); the DIFFERENCE between the two binaries stayed zero, which is
 // the thing this guard exists to hold.
-const postureOffDefinitionsFingerprint = "ea7b4e64c1e651e610e7b9ab4a1dc901d786d11f119fa6c4f9c6bb12ec98ae1f"
+const postureOffDefinitionsFingerprint = "35a12ffe0079ffb18a3342df5e0c3499836d2f2811b94707ae6c337cf5087197"
 
 func TestPostureOffToolDefinitionsMatchGolden(t *testing.T) {
 	registry := baseFixtureRegistry()

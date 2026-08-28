@@ -84,41 +84,13 @@ func (m model) sidebarOrchestrateRows() []int {
 	return rows
 }
 
-// orchestrateTaskAtMouse maps a left-click in the sidebar to a plan task,
-// mirroring planStepAtMouse's column and x gate.
-func (m model) orchestrateTaskAtMouse(msg tea.MouseMsg) (int, bool) {
-	if !m.sidebarActive() || m.orchestrate.isEmpty() {
-		return 0, false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
-		return 0, false
-	}
-	sidebarW := sidebarWidth(m.width)
-	if sidebarW <= 0 {
-		return 0, false
-	}
-	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
-	x, y := mouseX(msg), mouseY(msg)
-	if x < x0 || x >= x0+sidebarW {
-		return 0, false
-	}
-	for _, hit := range m.sidebarOrchestrateSelectables(sidebarW) {
-		if hit.lineOffset == y {
-			return hit.taskIndex, true
-		}
-	}
-	return 0, false
-}
-
 // orchestrateHeaderAtMouse reports a click on the sidebar's PLAN header, which
 // collapses and expands the whole section.
 func (m model) orchestrateHeaderAtMouse(msg tea.MouseMsg) bool {
 	if !m.sidebarActive() || m.orchestrate.isEmpty() {
 		return false
 	}
-	// Same modal guard orchestrateTaskAtMouse carries directly above. sidebar.go
-	// notes that each hit-tester supplies its own suggestionsActive() guard
+	// Each hit-tester supplies its own suggestionsActive() guard
 	// because sidebarActive() deliberately does not exclude the palette; without
 	// it, clicking the PLAN header while the / palette is open toggles the
 	// section behind the overlay.

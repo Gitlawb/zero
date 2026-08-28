@@ -9,7 +9,6 @@ package tui
 
 import (
 	"fmt"
-	"github.com/Gitlawb/zero/internal/config"
 	"strconv"
 	"strings"
 	"time"
@@ -638,14 +637,4 @@ func renderSpecialistSummary(specialists []specialistInfo, spinnerView string) s
 	// rune and losing the indent.
 	tailStart := 2 + len(spinnerView)
 	return zeroTheme.accent.Render(spinnerView) + zeroTheme.muted.Render(summary[tailStart:])
-}
-
-// persistKeepFinishedAgents writes the finished-agents preference to user
-// config, mirroring persistRecapsEnabled: a UI toggle that survives restart.
-func (m model) persistKeepFinishedAgents() error {
-	if strings.TrimSpace(m.userConfigPath) == "" {
-		return nil
-	}
-	_, err := config.SetKeepFinishedAgents(m.userConfigPath, m.showDoneAgents)
-	return err
 }
