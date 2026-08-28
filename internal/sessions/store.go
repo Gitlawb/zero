@@ -93,36 +93,39 @@ type Goal struct {
 }
 
 type Metadata struct {
-	SessionID           string      `json:"sessionId"`
-	SessionKind         SessionKind `json:"sessionKind,omitempty"`
-	Title               string      `json:"title,omitempty"`
-	Cwd                 string      `json:"cwd,omitempty"`
-	ModelID             string      `json:"modelId,omitempty"`
-	Provider            string      `json:"provider,omitempty"`
-	Tag                 string      `json:"tag,omitempty"`
-	Depth               int         `json:"depth,omitempty"`
-	ParentSessionID     string      `json:"parentSessionId,omitempty"`
-	RootSessionID       string      `json:"rootSessionId,omitempty"`
-	AgentName           string      `json:"agentName,omitempty"`
-	TaskID              string      `json:"taskId,omitempty"`
-	ForkedFromEventID   string      `json:"forkedFromEventId,omitempty"`
-	ForkedFromSequence  int         `json:"forkedFromSequence,omitempty"`
-	SpawnedFromEventID  string      `json:"spawnedFromEventId,omitempty"`
-	SpawnedFromSequence int         `json:"spawnedFromSequence,omitempty"`
-	SpecID              string      `json:"specId,omitempty"`
-	SpecFilePath        string      `json:"specFilePath,omitempty"`
-	SpecStatus          SpecStatus  `json:"specStatus,omitempty"`
-	SpecDraftModelID    string      `json:"specDraftModelId,omitempty"`
-	SpecDraftReasoning  string      `json:"specDraftReasoning,omitempty"`
-	SpecUserComment     string      `json:"specUserComment,omitempty"`
-	SpecRejectReason    string      `json:"specRejectReason,omitempty"`
-	SpecSourceSessionID string      `json:"specSourceSessionId,omitempty"`
-	SpecImplSessionID   string      `json:"specImplSessionId,omitempty"`
-	Goal                *Goal       `json:"goal,omitempty"`
-	CreatedAt           string      `json:"createdAt"`
-	UpdatedAt           string      `json:"updatedAt"`
-	EventCount          int         `json:"eventCount"`
-	LastEventType       EventType   `json:"lastEventType,omitempty"`
+	SessionID   string      `json:"sessionId"`
+	SessionKind SessionKind `json:"sessionKind,omitempty"`
+	Title       string      `json:"title,omitempty"`
+	Cwd         string      `json:"cwd,omitempty"`
+	// WorkspaceKey is the operational workspace identity when Cwd is a
+	// display-safe, lossy representation. Never render this field directly.
+	WorkspaceKey        string     `json:"workspaceKey,omitempty"`
+	ModelID             string     `json:"modelId,omitempty"`
+	Provider            string     `json:"provider,omitempty"`
+	Tag                 string     `json:"tag,omitempty"`
+	Depth               int        `json:"depth,omitempty"`
+	ParentSessionID     string     `json:"parentSessionId,omitempty"`
+	RootSessionID       string     `json:"rootSessionId,omitempty"`
+	AgentName           string     `json:"agentName,omitempty"`
+	TaskID              string     `json:"taskId,omitempty"`
+	ForkedFromEventID   string     `json:"forkedFromEventId,omitempty"`
+	ForkedFromSequence  int        `json:"forkedFromSequence,omitempty"`
+	SpawnedFromEventID  string     `json:"spawnedFromEventId,omitempty"`
+	SpawnedFromSequence int        `json:"spawnedFromSequence,omitempty"`
+	SpecID              string     `json:"specId,omitempty"`
+	SpecFilePath        string     `json:"specFilePath,omitempty"`
+	SpecStatus          SpecStatus `json:"specStatus,omitempty"`
+	SpecDraftModelID    string     `json:"specDraftModelId,omitempty"`
+	SpecDraftReasoning  string     `json:"specDraftReasoning,omitempty"`
+	SpecUserComment     string     `json:"specUserComment,omitempty"`
+	SpecRejectReason    string     `json:"specRejectReason,omitempty"`
+	SpecSourceSessionID string     `json:"specSourceSessionId,omitempty"`
+	SpecImplSessionID   string     `json:"specImplSessionId,omitempty"`
+	Goal                *Goal      `json:"goal,omitempty"`
+	CreatedAt           string     `json:"createdAt"`
+	UpdatedAt           string     `json:"updatedAt"`
+	EventCount          int        `json:"eventCount"`
+	LastEventType       EventType  `json:"lastEventType,omitempty"`
 }
 
 type CreateInput struct {
@@ -130,6 +133,7 @@ type CreateInput struct {
 	SessionKind         SessionKind
 	Title               string
 	Cwd                 string
+	WorkspaceKey        string
 	ModelID             string
 	Provider            string
 	Tag                 string
@@ -287,6 +291,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		SessionKind:         input.SessionKind,
 		Title:               strings.TrimSpace(input.Title),
 		Cwd:                 strings.TrimSpace(input.Cwd),
+		WorkspaceKey:        strings.TrimSpace(input.WorkspaceKey),
 		ModelID:             strings.TrimSpace(input.ModelID),
 		Provider:            strings.TrimSpace(input.Provider),
 		Tag:                 strings.TrimSpace(input.Tag),
@@ -525,6 +530,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		SessionKind:        kind,
 		Title:              title,
 		Cwd:                firstNonEmpty(input.Cwd, parent.Cwd),
+		WorkspaceKey:       derivedWorkspaceKey(input.Cwd, parent.WorkspaceKey),
 		ModelID:            firstNonEmpty(input.ModelID, parent.ModelID),
 		Provider:           firstNonEmpty(input.Provider, parent.Provider),
 		Tag:                input.Tag,
@@ -1204,6 +1210,20 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// OperationalCwd returns the canonical workspace used for matching and file
+// operations. Cwd remains the display-safe value exposed by existing session
+// surfaces; imported foreign sessions may therefore carry a separate key.
+func OperationalCwd(session Metadata) string {
+	return firstNonEmpty(session.WorkspaceKey, session.Cwd)
+}
+
+func derivedWorkspaceKey(explicitCwd, inheritedKey string) string {
+	if strings.TrimSpace(explicitCwd) != "" {
+		return ""
+	}
+	return strings.TrimSpace(inheritedKey)
 }
 
 func normalizeSpecStatus(status SpecStatus) SpecStatus {

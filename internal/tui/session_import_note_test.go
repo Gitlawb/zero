@@ -1,14 +1,39 @@
 package tui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
+
+func TestForeignImportErrorIsSanitizedAtTranscriptBoundary(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
+	agent := "bad\x1b[2J\u009b" + secret
+	m := model{sessionStore: testSessionStore(t)}
+	started, text, cmd := m.startResumeCommand(agent + ":session")
+	if text != "" || cmd == nil || !started.sessionImportInFlight {
+		t.Fatalf("malformed foreign ref did not start asynchronously: text=%q cmd=%v", text, cmd != nil)
+	}
+	msg, ok := cmd().(foreignSessionImportedMsg)
+	if !ok || msg.err == nil {
+		t.Fatalf("malformed foreign ref returned %#v", msg)
+	}
+	updated, _ := started.updateModel(msg)
+	next := updated.(model)
+	rendered := transcriptText(next.transcript)
+	if strings.Contains(rendered, "\x1b") || strings.ContainsRune(rendered, '\u009b') {
+		t.Fatalf("live terminal controls reached the transcript: %q", rendered)
+	}
+	if strings.Contains(rendered, secret) || !strings.Contains(rendered, "[REDACTED]") {
+		t.Fatalf("foreign error leaked or dropped the redaction evidence: %q", rendered)
+	}
+}
 
 // THE IMPORT NOTE IS A TRANSCRIPT ROW, and it was the one foreign-bytes path in
 // /resume still drawn raw. The picker row directly beside it already runs every
@@ -73,6 +98,85 @@ func TestTheImportNoteSanitizesTheForeignIdAndCwd(t *testing.T) {
 	const wantCwd = "\nIt ran in /elsewhere/[31mred/proj, so paths it mentions refer to that tree."
 	if !strings.HasSuffix(note, wantCwd) {
 		t.Errorf("note = %q, want it to end %q", note, wantCwd)
+	}
+}
+
+func TestImportedWorkspaceIdentitySurvivesDisplayRedaction(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("B", 24)
+	workspace := filepath.Join(t.TempDir(), secret, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	transcript := filepath.Join(home, ".claude", "projects", "-w", "identity.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record, err := json.Marshal(map[string]any{
+		"type": "user", "cwd": workspace, "sessionId": "identity",
+		"message": map[string]any{"role": "user", "content": "inspect this workspace"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, append(record, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := agentsessions.Env{Home: home, Getenv: func(name string) string {
+		if name == "CLAUDE_CONFIG_DIR" {
+			return filepath.Join(home, ".claude")
+		}
+		return ""
+	}}
+	store := testSessionStore(t)
+	result, err := agentsessions.Import(store, agentsessions.ClaudeCode(env), "identity", agentsessions.ReadOptions{})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if strings.Contains(result.Session.Cwd, secret) || !strings.Contains(result.Session.Cwd, "[REDACTED]") {
+		t.Fatalf("display cwd is not redacted: %q", result.Session.Cwd)
+	}
+	wantWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session.WorkspaceKey != wantWorkspace {
+		t.Fatalf("workspace key = %q, want %q", result.Session.WorkspaceKey, wantWorkspace)
+	}
+	if _, err := store.AppendEvent(result.Session.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "done"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	agentsessions.InvalidateDiscovery()
+	m := model{sessionStore: store, agentSessionsEnv: env, cwd: workspace, now: time.Now}
+	picker := m.newSessionPicker()
+	if picker == nil {
+		t.Fatal("imported session disappeared from its real workspace")
+	}
+	foundImported := false
+	for _, item := range picker.items {
+		if strings.Contains(item.Label, secret) || strings.Contains(item.Meta, secret) {
+			t.Fatalf("picker leaked the canonical workspace: %+v", item)
+		}
+		if item.Value == result.Session.SessionID {
+			foundImported = true
+		}
+		if strings.HasPrefix(item.Value, "claude-code:") {
+			t.Fatalf("imported source was not suppressed: %+v", item)
+		}
+	}
+	if !foundImported {
+		t.Fatalf("picker did not contain imported session %s: %+v", result.Session.SessionID, picker.items)
+	}
+	latest, err := m.latestResumableInWorkspace()
+	if err != nil || latest == nil || latest.SessionID != result.Session.SessionID {
+		t.Fatalf("resume latest = %+v, err=%v", latest, err)
+	}
+	if note := importedSessionNote(result, workspace); strings.Contains(note, secret) {
+		t.Fatalf("import note leaked the canonical workspace: %q", note)
 	}
 }
 

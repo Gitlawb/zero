@@ -432,7 +432,7 @@ func runSessionsRewind(store *sessions.Store, sessionID string, options sessionC
 	if session == nil {
 		return writeExecUsageError(stderr, "Zero session not found: "+redact(sessionID))
 	}
-	workspaceRoot := strings.TrimSpace(session.Cwd)
+	workspaceRoot := strings.TrimSpace(sessions.OperationalCwd(*session))
 	if workspaceRoot == "" {
 		return writeExecUsageError(stderr, "session has no recorded workspace (cwd); cannot restore files")
 	}

@@ -252,11 +252,11 @@ func (m model) resumeZeroSession(args string, importNote string) (model, string)
 
 	session, err := m.resolveResumeSession(args)
 	if err != nil {
-		return m, "Sessions\n" + err.Error()
+		return m, "Sessions\n" + agentsessions.DisplayField(err.Error())
 	}
 	events, err := m.resumeEvents(session.SessionID)
 	if err != nil {
-		return m, "Sessions\nerror: " + err.Error()
+		return m, "Sessions\nerror: " + agentsessions.DisplayField(err.Error())
 	}
 
 	// Capture the current session id before switching so loops are only torn down
@@ -371,7 +371,7 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	}
 	lines := []string{
 		"id: " + session.SessionID,
-		"title: " + displayValue(session.Title, "untitled"),
+		"title: " + displayValue(agentsessions.DisplayField(session.Title), "untitled"),
 		modelLine,
 		providerLine,
 		fmt.Sprintf("events: %d", eventCount),
@@ -445,7 +445,7 @@ func (m model) newSessionPicker() *commandPicker {
 		// per-session event read below, so a large global history doesn't pay 50
 		// full file reads to build one workspace's list. Sessions with no recorded
 		// Cwd (older runs) stay visible rather than vanishing.
-		if !sessionMatchesWorkspace(meta.Cwd, m.cwd) {
+		if !sessionMatchesWorkspace(sessions.OperationalCwd(meta), m.cwd) {
 			continue
 		}
 		// A zero-event session has nothing to resume — skip it without a file read.
@@ -461,7 +461,7 @@ func (m model) newSessionPicker() *commandPicker {
 		// Lead with a fixed-width timestamp so titles form one scannable column.
 		// The raw id remains the selection/search value but stays out of the row:
 		// rendering it consumed half the picker and truncated the useful title.
-		label := displayValue(meta.Title, "untitled")
+		label := displayValue(agentsessions.DisplayField(meta.Title), "untitled")
 		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
@@ -527,7 +527,7 @@ func (m model) importForeignSessionCmd(ref string) tea.Cmd {
 func (m model) finishForeignSessionImport(msg foreignSessionImportedMsg) (model, string) {
 	m.sessionImportInFlight = false
 	if msg.err != nil {
-		return m, "Sessions\n" + msg.err.Error()
+		return m, "Sessions\n" + agentsessions.DisplayField(msg.err.Error())
 	}
 	// This session is no longer un-imported, so the memo that says otherwise
 	// must go before the picker is rebuilt.
@@ -697,7 +697,7 @@ func (m model) latestResumableInWorkspace() (*sessions.Metadata, error) {
 		return nil, err
 	}
 	for i := range metas {
-		if !sessionMatchesWorkspace(metas[i].Cwd, m.cwd) {
+		if !sessionMatchesWorkspace(sessions.OperationalCwd(metas[i]), m.cwd) {
 			continue
 		}
 		if metas[i].EventCount == 0 {
@@ -725,6 +725,12 @@ func sessionMatchesWorkspace(sessionCwd, workspaceCwd string) bool {
 	}
 	a := filepath.Clean(sessionCwd)
 	b := filepath.Clean(workspaceCwd)
+	if resolved, err := filepath.EvalSymlinks(a); err == nil {
+		a = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(b); err == nil {
+		b = resolved
+	}
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(a, b)
 	}
