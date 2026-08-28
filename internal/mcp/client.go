@@ -67,6 +67,7 @@ type Client struct {
 }
 
 type writeOp struct {
+	ctx     context.Context
 	message rpcMessage
 	done    chan error
 }
@@ -319,8 +320,8 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 
 	// Allocate an id and register a response channel. ID allocation and dispatch
 	// registrations are fast non-blocking operations. Message transmission is
-	// handled via writeMessage, ensuring a hung server never blocks other callers
-	// or prevents a caller with a deadline from giving up.
+	// handled via writeMessage so a caller with a canceled context can stop
+	// waiting even when the peer is not draining its input.
 	client.idMu.Lock()
 	id := client.nextID
 	client.nextID++
@@ -381,6 +382,16 @@ func (client *Client) ensureWriter() {
 
 func (client *Client) writeLoop() {
 	for op := range client.writeQueue {
+		if op.ctx != nil {
+			select {
+			case <-op.ctx.Done():
+				if op.done != nil {
+					op.done <- op.ctx.Err()
+				}
+				continue
+			default:
+			}
+		}
 		err := client.writer.write(op.message)
 		if op.done != nil {
 			op.done <- err
@@ -391,7 +402,7 @@ func (client *Client) writeLoop() {
 func (client *Client) writeMessage(ctx context.Context, message rpcMessage) error {
 	client.ensureWriter()
 	done := make(chan error, 1)
-	op := writeOp{message: message, done: done}
+	op := writeOp{ctx: ctx, message: message, done: done}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

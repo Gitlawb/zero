@@ -82,7 +82,7 @@ func (reader *blockingReader) Close() error {
 
 // A hung stdio server must not block Client.request forever: a cancelled
 // per-call context must unblock the wait and surface ctx.Err(), and it must
-// not hold client.mu (a second caller must still be able to proceed).
+// not hold shared client state that prevents a second caller from proceeding.
 func TestClientRequestUnblocksOnContextCancel(t *testing.T) {
 	reader := newBlockingReader()
 	defer reader.Close()
@@ -125,7 +125,7 @@ func TestClientRequestUnblocksOnContextCancel(t *testing.T) {
 			t.Fatalf("second request() error = %v, want context.Canceled", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("second request() blocked — client.mu was held across the hung read")
+		t.Fatal("second request() blocked behind the hung read")
 	}
 }
 
