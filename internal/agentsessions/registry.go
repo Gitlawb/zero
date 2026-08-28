@@ -153,7 +153,7 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 		return ImportResult{}, err
 	}
 
-	created, err := store.Create(sessions.CreateInput{
+	created, discardCreated, err := store.CreateDiscardable(sessions.CreateInput{
 		// THE STORE IS THE CHOKEPOINT, NOT EACH CONSUMER. These two fields are
 		// another product's bytes and every reader draws them: `zero sessions
 		// list`, the /resume picker, the import summary, the workspace warning.
@@ -174,7 +174,7 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	}
 	if len(events) > 0 {
 		if _, err := store.AppendEvents(created.SessionID, events); err != nil {
-			cleanupErr := store.DiscardCreated(created)
+			cleanupErr := discardCreated()
 			if cleanupErr != nil {
 				return ImportResult{}, errors.Join(
 					fmt.Errorf("import %s into zero session %s: %w", id, created.SessionID, err),

@@ -14,7 +14,7 @@ import (
 
 func TestDiscardCreatedRemovesOnlyTheOwnedUncommittedSession(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
-	created, err := store.Create(CreateInput{Title: "failed import", Tag: "imported:test:id"})
+	created, discard, err := store.CreateDiscardable(CreateInput{Title: "failed import", Tag: "imported:test:id"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,8 +24,8 @@ func TestDiscardCreatedRemovesOnlyTheOwnedUncommittedSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(store.RootDir, created.SessionID, EventsFile), []byte("partial append\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DiscardCreated(created); err != nil {
-		t.Fatalf("DiscardCreated: %v", err)
+	if err := discard(); err != nil {
+		t.Fatalf("discard created session: %v", err)
 	}
 	if session, err := store.Get(created.SessionID); err != nil || session != nil {
 		t.Fatalf("discarded session still resolves: session=%+v err=%v", session, err)
@@ -40,14 +40,14 @@ func TestDiscardCreatedRefusesChangedOrCommittedSession(t *testing.T) {
 	}
 	wrongReceipt := created
 	wrongReceipt.Title = "different"
-	if err := store.DiscardCreated(wrongReceipt); err == nil {
-		t.Fatal("DiscardCreated accepted a mismatched ownership receipt")
+	if err := store.discardCreated(wrongReceipt); err == nil {
+		t.Fatal("discardCreated accepted a mismatched ownership receipt")
 	}
 	if _, err := store.AppendEvent(created.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "kept"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DiscardCreated(created); err == nil {
-		t.Fatal("DiscardCreated removed a session with committed events")
+	if err := store.discardCreated(created); err == nil {
+		t.Fatal("discardCreated removed a session with committed events")
 	}
 	if session, err := store.Get(created.SessionID); err != nil || session == nil || session.EventCount != 1 {
 		t.Fatalf("committed session was damaged: session=%+v err=%v", session, err)
