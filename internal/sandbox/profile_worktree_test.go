@@ -80,7 +80,7 @@ func TestGitMetadataWriteCarveoutsPreservesDirectorySymlinkBehavior(t *testing.T
 		t.Fatal(err)
 	}
 	if err := os.Symlink(realGit, filepath.Join(root, ".git")); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 	want := []string{
 		filepath.Join(root, ".git", "hooks"),
