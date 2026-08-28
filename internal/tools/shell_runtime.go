@@ -193,10 +193,6 @@ func NewHostShellCommandContext(ctx context.Context, commandText string) *exec.C
 	return command
 }
 
-func shellGuidanceForGOOS(goos string) string {
-	return shellGuidanceForRuntime(detectShellRuntime(goos))
-}
-
 func shellGuidanceForRuntime(shell shellRuntime) string {
 	if shell.GOOS == "windows" && shell.Kind == shellKindPowerShell {
 		guidance := "Uses PowerShell syntax on Windows; prefer cwd/workdir over Set-Location when changing directories. Examples: Get-ChildItem -Force; Get-ChildItem -Recurse -Filter *.go; Get-ChildItem -Recurse | Select-String -Pattern 'TODO'; Get-Process | Where-Object { $_.ProcessName -like '*node*' }; $env:NAME='value'; @'\nprint('hello')\n'@ | python -. Do not invoke Git-for-Windows MSYS/Cygwin executables (bash, sh, grep.exe, sed.exe, head.exe, and similar) inside the restricted sandbox; prefer PowerShell cmdlets or native Zero tools."
