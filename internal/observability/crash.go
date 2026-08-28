@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/privatedir"
@@ -25,9 +26,28 @@ const crashExitCode = 1
 
 const crashTempPrefix = ".crash-report-"
 
+// ErrCrashReportCommitted marks an error that happened after a complete crash
+// report was published. Callers may still use the returned path and should
+// surface the error as a cleanup warning rather than as a failed publication.
+var ErrCrashReportCommitted = errors.New("crash report publication committed")
+
+type crashReportCommittedError struct {
+	cause error
+}
+
+func (err *crashReportCommittedError) Error() string {
+	return fmt.Sprintf("%v with warning: %v", ErrCrashReportCommitted, err.cause)
+}
+
+func (err *crashReportCommittedError) Unwrap() []error {
+	return []error{ErrCrashReportCommitted, err.cause}
+}
+
 type crashReportHooks struct {
 	beforePublish func()
 	write         func(*os.File, []byte) (int, error)
+	link          func(*os.Root, string, string) error
+	remove        func(*os.Root, string) error
 }
 
 // FormatCrashReport renders a human-readable crash report.
@@ -50,10 +70,16 @@ func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 	if err != nil {
 		return "", err
 	}
+	committed := false
 	defer func() {
 		if err := root.Close(); err != nil {
-			path = ""
 			returnErr = errors.Join(returnErr, fmt.Errorf("close crash report directory: %w", err))
+		}
+		if committed && returnErr != nil && !errors.Is(returnErr, ErrCrashReportCommitted) {
+			returnErr = &crashReportCommittedError{cause: returnErr}
+		}
+		if !committed && returnErr != nil {
+			path = ""
 		}
 	}()
 
@@ -67,8 +93,7 @@ func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 		if tempName == "" {
 			return
 		}
-		if err := root.Remove(tempName); err != nil && !errors.Is(err, os.ErrNotExist) {
-			path = ""
+		if err := removeCrashTemp(hooks, root, tempName); err != nil && !errors.Is(err, os.ErrNotExist) {
 			returnErr = errors.Join(returnErr, fmt.Errorf("remove temporary crash report: %w", err))
 		}
 	}()
@@ -102,17 +127,74 @@ func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 	if hooks.beforePublish != nil {
 		hooks.beforePublish()
 	}
-	if err := root.Link(tempName, name); err != nil {
-		return "", fmt.Errorf("publish crash report: %w", err)
+	publishName := name
+	link := root.Link
+	if hooks.link != nil {
+		link = func(oldname, newname string) error { return hooks.link(root, oldname, newname) }
 	}
-	if err := root.Remove(tempName); err != nil {
-		return "", fmt.Errorf("remove temporary crash report: %w", err)
+	if linkErr := link(tempName, name); linkErr != nil {
+		if errors.Is(linkErr, os.ErrExist) {
+			return "", fmt.Errorf("publish crash report: %w", linkErr)
+		}
+		publishName, err = fallbackCrashName(root, name, tempName)
+		if err != nil {
+			return "", errors.Join(fmt.Errorf("publish crash report with hard link: %w", linkErr), err)
+		}
+		if err := root.Rename(tempName, publishName); err != nil {
+			return "", errors.Join(fmt.Errorf("publish crash report with hard link: %w", linkErr), fmt.Errorf("publish crash report with atomic rename: %w", err))
+		}
+		committed = true
+		tempName = ""
+	} else {
+		committed = true
+		if err := removeCrashTemp(hooks, root, tempName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			tempName = ""
+			return path, fmt.Errorf("remove temporary crash report: %w", err)
+		}
+		tempName = ""
 	}
-	tempName = ""
+	path = filepath.Join(dir, publishName)
 	if !crashPathUsesRoot(root, absoluteDir) {
 		return "", nil
 	}
 	return path, nil
+}
+
+// fallbackCrashName selects an unpredictable vacant name for filesystems that
+// cannot create hard links. Rename then publishes the already-synced staging
+// file atomically without replacing the timestamp-only name or any other
+// crash report that was present when the fallback name was selected. The
+// directory is private to the current user, which excludes cross-user races.
+func fallbackCrashName(root *os.Root, timestampName, tempName string) (string, error) {
+	base := strings.TrimSuffix(timestampName, filepath.Ext(timestampName))
+	if suffix := strings.TrimPrefix(tempName, crashTempPrefix); suffix != "" && suffix != tempName {
+		candidate := base + "-" + suffix + filepath.Ext(timestampName)
+		if _, err := root.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		} else if err != nil {
+			return "", fmt.Errorf("inspect fallback crash report path: %w", err)
+		}
+	}
+	for range 100 {
+		var suffix [16]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", fmt.Errorf("generate fallback crash report name: %w", err)
+		}
+		candidate := base + "-" + hex.EncodeToString(suffix[:]) + filepath.Ext(timestampName)
+		if _, err := root.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		} else if err != nil {
+			return "", fmt.Errorf("inspect fallback crash report path: %w", err)
+		}
+	}
+	return "", fmt.Errorf("generate fallback crash report name: exhausted unique names")
+}
+
+func removeCrashTemp(hooks crashReportHooks, root *os.Root, name string) error {
+	if hooks.remove != nil {
+		return hooks.remove(root, name)
+	}
+	return root.Remove(name)
 }
 
 func createCrashTemp(root *os.Root) (*os.File, string, error) {
@@ -180,11 +262,21 @@ func Recover(dir, label string, stderr io.Writer, code *int) {
 		return
 	}
 	stack := debug.Stack()
-	if path, err := WriteCrashReport(dir, label, recovered, stack, time.Now()); err == nil {
+	reportRecoveredCrash(stderr, code, recovered, stack, func() (string, error) {
+		return WriteCrashReport(dir, label, recovered, stack, time.Now())
+	})
+}
+
+func reportRecoveredCrash(stderr io.Writer, code *int, recovered any, stack []byte, write func() (string, error)) {
+	path, err := write()
+	if err == nil || errors.Is(err, ErrCrashReportCommitted) {
 		if path != "" {
 			fmt.Fprintf(stderr, "zero crashed: %v\nA crash report was saved to %s\n", recovered, path)
 		} else {
 			fmt.Fprintf(stderr, "zero crashed: %v\nA crash report was saved, but its current path could not be determined\n", recovered)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "Warning: %v\n", err)
 		}
 	} else {
 		fmt.Fprintf(stderr, "zero crashed: %v\n%s\n", recovered, stack)
