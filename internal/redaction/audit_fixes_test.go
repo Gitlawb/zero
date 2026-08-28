@@ -316,6 +316,7 @@ func TestIsSensitiveKey_CamelCaseCredentials(t *testing.T) {
 	notSensitive := []string{
 		"promptTokens", "maxTokens", "completionTokens",
 		"tokenCount", "prompt_tokens", "max_tokens",
+		"authConfigured",
 	}
 	for _, k := range notSensitive {
 		if IsSensitiveKey(k, o) {
