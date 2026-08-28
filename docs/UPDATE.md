@@ -105,6 +105,13 @@ again. Deleting the marker alone is not enough: a failed restore also records
 that copy in per-user state outside the installation directory, and the next
 update consults that record even if the marker is gone.
 
+That trusted record lives under `%AppData%\zero\update-recovery` (per-user).
+The recovery copy and its `.keep` marker sit in the installation directory
+(per-machine). A second Windows account on the same machine does not see the
+first account's unresolved record; the sibling marker is the machine-visible
+signal for every account. There is no separate machine-wide store: writing one
+would need a shared writable location and ACL rules the updater does not own.
+
 This is deliberately fail-closed and differs from older releases, which deleted
 `<binary>.old` and proceeded. The trade-off is that anyone who can write in the
 installation directory can plant `<binary>.old` and `<binary>.old.keep` there

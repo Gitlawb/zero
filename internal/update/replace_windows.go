@@ -289,6 +289,13 @@ type recoveryCleanupQueue struct {
 	Records []recoveryCleanupRecord `json:"records"`
 }
 
+// recoveryCleanupStateDir is per-user (%AppData% via UserConfigDir). The
+// recovery copy and its .keep marker live in the installation directory, which
+// is per-machine. A second Windows account therefore does not see the first
+// account's unresolved record; the sibling marker is the machine-visible
+// signal. A machine-wide store would need a writable shared location and ACL
+// rules this updater does not own, so the record stays in the existing
+// per-user update-recovery directory.
 var recoveryCleanupStateDir = func() (string, error) {
 	root, err := config.UserConfigDir()
 	if err != nil {
@@ -340,27 +347,36 @@ type recoveryCleanupCandidate struct {
 	record recoveryCleanupRecord
 }
 
-func loadRecoveryCleanupQueue(targetPath string) recoveryCleanupQueue {
+func loadRecoveryCleanupQueue(targetPath string) (recoveryCleanupQueue, error) {
 	recordPath, err := recoveryCleanupRecordPath(targetPath)
 	if err != nil {
-		return recoveryCleanupQueue{}
+		return recoveryCleanupQueue{}, err
 	}
 	data, err := os.ReadFile(recordPath)
 	if err != nil {
-		return recoveryCleanupQueue{}
+		if errors.Is(err, os.ErrNotExist) {
+			return recoveryCleanupQueue{}, nil
+		}
+		return recoveryCleanupQueue{}, fmt.Errorf("read recovery cleanup record %s: %w", recordPath, err)
 	}
 	var queue recoveryCleanupQueue
-	if json.Unmarshal(data, &queue) != nil || queue.Records == nil {
-		var legacy recoveryCleanupRecord
-		if json.Unmarshal(data, &legacy) == nil && legacy.Path != "" {
-			queue.Records = []recoveryCleanupRecord{legacy}
-		}
+	if err := json.Unmarshal(data, &queue); err == nil && queue.Records != nil {
+		return queue, nil
 	}
-	return queue
+	var legacy recoveryCleanupRecord
+	if json.Unmarshal(data, &legacy) == nil && legacy.Path != "" {
+		return recoveryCleanupQueue{Records: []recoveryCleanupRecord{legacy}}, nil
+	}
+	return recoveryCleanupQueue{}, fmt.Errorf("parse recovery cleanup record %s", recordPath)
 }
 
 func prepareRecoveryCleanup(targetPath string) []recoveryCleanupCandidate {
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		// Unreadable trusted state is not "nothing to clean": skip destructive
+		// cleanup rather than treat the queue as empty.
+		return nil
+	}
 	var candidates []recoveryCleanupCandidate
 	// Records outlive a single attempt so a temporarily locked copy is still
 	// deleted on a later run, but a record that can never become actionable has
@@ -444,9 +460,19 @@ var appendUnresolvedRecoveryRecord = func(targetPath string, recoveryPath string
 // marker is the only remaining protection and an install-directory writer can
 // delete it; relocate the last verified copy to a .recovery name so the next
 // preflight still refuses (#868).
+//
+// Relocation is bound to the object still named by asidePath. restoreOriginalBinary
+// may already have moved the verified bytes back onto targetPath (the live
+// binary) or to a .recovery name; keepUnmarkedRecoveryCopy renames through the
+// handle without re-checking that path, so compensation must not run unless
+// verifyPromotedTarget says the handle still is the aside copy. Making a failed
+// record write worse by pulling the restored executable out of targetPath is
+// not an acceptable fallback.
 func persistFailedRestoreSignal(file *os.File, targetPath string, asidePath string, identity recoveryIdentity, restoreErr error) error {
 	if err := appendUnresolvedRecoveryRecord(targetPath, asidePath, identity); err == nil {
 		return restoreErr
+	} else if verifyPromotedTarget(file, asidePath) != nil {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v)", restoreErr, err)
 	} else if kept, keepErr := keepUnmarkedRecoveryCopy(file, asidePath); keepErr == nil {
 		return fmt.Errorf("%w (unresolved recovery record could not be written: %v; the last binary this updater verified was moved to the distinct recovery path %s)", restoreErr, err, kept)
 	} else if kept != "" {
@@ -467,7 +493,10 @@ func appendRecoveryCleanupRecordWithState(targetPath string, recoveryPath string
 		FileIndexLow:  identity.FileIndexLow,
 		Unresolved:    unresolved,
 	}
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		return err
+	}
 	queue.Records = append(queue.Records, record)
 	return writeRecoveryCleanupQueue(targetPath, queue)
 }
@@ -475,9 +504,13 @@ func appendRecoveryCleanupRecordWithState(targetPath string, recoveryPath string
 // unresolvedRecordedRecoveryPaths returns live recovery copies vouched for by
 // per-user unresolved-state records. Absence of the sibling .keep marker does
 // not drop them: that marker is attacker-deletable in the install directory.
-func unresolvedRecordedRecoveryPaths(targetPath string) []string {
+func unresolvedRecordedRecoveryPaths(targetPath string) ([]string, error) {
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		return nil, err
+	}
 	var paths []string
-	for _, record := range loadRecoveryCleanupQueue(targetPath).Records {
+	for _, record := range queue.Records {
 		if !record.Unresolved || !validUpdaterRecoveryPath(targetPath, record.Path) {
 			continue
 		}
@@ -486,7 +519,7 @@ func unresolvedRecordedRecoveryPaths(targetPath string) []string {
 		}
 		paths = append(paths, record.Path)
 	}
-	return paths
+	return paths, nil
 }
 
 func writeRecoveryCleanupQueue(targetPath string, queue recoveryCleanupQueue) error {
@@ -559,7 +592,10 @@ func closeRecoveryCleanupCandidates(candidates []recoveryCleanupCandidate) {
 // full binaries.
 func cleanupSupersededRecoveryCopies(targetPath string, candidates []recoveryCleanupCandidate) {
 	defer closeRecoveryCleanupCandidates(candidates)
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		return
+	}
 	deleted := make(map[recoveryCleanupRecord]bool)
 	for index := range candidates {
 		candidate := &candidates[index]

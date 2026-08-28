@@ -325,7 +325,10 @@ func TestPreflightRefusesWhenRecoveryMarkerIsDeletedButTrustedRecordRemains(t *t
 	if !oldBinaryPreserved(recoveryPath) {
 		t.Fatal("failed restore must still write the sibling marker")
 	}
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, loadErr := loadRecoveryCleanupQueue(targetPath)
+	if loadErr != nil {
+		t.Fatalf("loadRecoveryCleanupQueue: %v", loadErr)
+	}
 	if len(queue.Records) != 1 || !queue.Records[0].Unresolved {
 		t.Fatalf("trusted records = %+v, want one unresolved entry", queue.Records)
 	}
@@ -414,7 +417,11 @@ func TestPreflightRefusesWhenRecordWriteFailsAndRecoveryMarkerIsDeleted(t *testi
 	if _, statErr := os.Lstat(asidePath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("aside path %s still occupied after relocation: %v", asidePath, statErr)
 	}
-	for _, record := range loadRecoveryCleanupQueue(targetPath).Records {
+	queue, loadErr := loadRecoveryCleanupQueue(targetPath)
+	if loadErr != nil {
+		t.Fatalf("loadRecoveryCleanupQueue: %v", loadErr)
+	}
+	for _, record := range queue.Records {
 		if record.Unresolved {
 			t.Fatalf("unresolved record was written despite injected failure: %+v", record)
 		}
@@ -437,6 +444,120 @@ func TestPreflightRefusesWhenRecordWriteFailsAndRecoveryMarkerIsDeleted(t *testi
 	}
 }
 
+// TestPersistFailedRestoreSignalDoesNotRelocateLiveBinary is the compensation
+// identity check: when the per-user record write fails, persistFailedRestoreSignal
+// must not rename through the handle unless that object is still the aside copy.
+// If restore already put the verified bytes back at targetPath, relocating would
+// remove the binary the user is running.
+func TestPersistFailedRestoreSignalDoesNotRelocateLiveBinary(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	asidePath := targetPath + ".zero-update-0123456789abcdef0123456789abcdef.old"
+	if err := os.WriteFile(targetPath, []byte("restored-live-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(asidePath, []byte("not-the-handle"), 0o755); err != nil {
+		t.Fatalf("WriteFile aside: %v", err)
+	}
+
+	live, err := openRecoveryCopy(targetPath)
+	if err != nil {
+		t.Fatalf("open live binary: %v", err)
+	}
+	defer func() { _ = live.Close() }()
+	identity, err := recoveryFileIdentity(live)
+	if err != nil {
+		t.Fatalf("recoveryFileIdentity: %v", err)
+	}
+
+	originalAppend := appendUnresolvedRecoveryRecord
+	appendUnresolvedRecoveryRecord = func(string, string, recoveryIdentity) error {
+		return errors.New("injected record write failure")
+	}
+	t.Cleanup(func() { appendUnresolvedRecoveryRecord = originalAppend })
+
+	restoreErr := fmt.Errorf("%w: restore blocked", ErrTargetPossiblyTampered)
+	err = persistFailedRestoreSignal(live, targetPath, asidePath, identity, restoreErr)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("error = %v, want the wrapped restore error", err)
+	}
+	if strings.Contains(err.Error(), ".recovery") {
+		t.Fatalf("error = %v, compensation must not claim a relocation", err)
+	}
+
+	got, readErr := os.ReadFile(targetPath)
+	if readErr != nil || string(got) != "restored-live-binary" {
+		t.Fatalf("target = %q err=%v, want the live binary left in place", got, readErr)
+	}
+	if got, readErr := os.ReadFile(asidePath); readErr != nil || string(got) != "not-the-handle" {
+		t.Fatalf("aside = %q err=%v, want the unrelated aside left in place", got, readErr)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(strings.ToLower(entry.Name()), ".recovery") {
+			t.Fatalf("compensation relocated an object to %s", entry.Name())
+		}
+	}
+}
+
+// TestPreflightFailsClosedWhenRecoveryRecordIsUnreadable: a truncated or
+// unparseable per-user state file is not "nothing to report". The file exists
+// to remember that something went wrong; refusing to parse it must refuse the
+// next promotion rather than silently switch the refusal off.
+func TestPreflightFailsClosedWhenRecoveryRecordIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("installed"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	recordPath, err := recoveryCleanupRecordPath(targetPath)
+	if err != nil {
+		t.Fatalf("recoveryCleanupRecordPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(recordPath, []byte("{truncated"), 0o600); err != nil {
+		t.Fatalf("WriteFile truncated record: %v", err)
+	}
+
+	if _, err := loadRecoveryCleanupQueue(targetPath); err == nil {
+		t.Fatal("loadRecoveryCleanupQueue accepted truncated JSON, want a parse error")
+	}
+	if err := preflightRecoveryState(targetPath); !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("preflight = %v, want fail-closed ErrTargetPossiblyTampered", err)
+	}
+
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	err = installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary = %v, want refusal when recovery state is unreadable", err)
+	}
+	if got, readErr := os.ReadFile(targetPath); readErr != nil || string(got) != "installed" {
+		t.Fatalf("target = %q err=%v, want the installed binary left in place", got, readErr)
+	}
+}
+
+// TestLoadRecoveryCleanupQueueMissingIsEmpty keeps a missing state file as
+// "nothing to report", distinct from an unreadable file that must fail closed.
+func TestLoadRecoveryCleanupQueueMissingIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		t.Fatalf("missing record: %v, want empty queue not an error", err)
+	}
+	if len(queue.Records) != 0 {
+		t.Fatalf("records = %+v, want none", queue.Records)
+	}
+}
+
 // TestSuccessfulPromoteCleanupRecordDoesNotBlockLaterUpdate pins the success
 // path for #868: a verified promotion still writes a cleanup record, that
 // record is not unresolved, and the next update proceeds.
@@ -454,7 +575,10 @@ func TestSuccessfulPromoteCleanupRecordDoesNotBlockLaterUpdate(t *testing.T) {
 	if err := installBinary(sourcePath, targetPath); err != nil {
 		t.Fatalf("installBinary: %v", err)
 	}
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, loadErr := loadRecoveryCleanupQueue(targetPath)
+	if loadErr != nil {
+		t.Fatalf("loadRecoveryCleanupQueue: %v", loadErr)
+	}
 	if len(queue.Records) != 1 {
 		t.Fatalf("cleanup records after success = %d, want 1", len(queue.Records))
 	}
@@ -860,7 +984,11 @@ func TestRecoveryCleanupRetiresRecordsForVanishedCopies(t *testing.T) {
 
 func recordedRecoveryCleanupCount(t *testing.T, targetPath string) int {
 	t.Helper()
-	return len(loadRecoveryCleanupQueue(targetPath).Records)
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		t.Fatalf("loadRecoveryCleanupQueue: %v", err)
+	}
+	return len(queue.Records)
 }
 
 func TestInstallBinaryBoundsRecoveryCopiesAcrossRepeatedUpgrades(t *testing.T) {

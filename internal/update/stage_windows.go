@@ -366,7 +366,11 @@ func markedRecoveryPaths(targetPath string) ([]string, error) {
 			seen[strings.ToLower(recoveryPath)] = true
 		}
 	}
-	for _, recorded := range unresolvedRecordedRecoveryPaths(targetPath) {
+	recordedPaths, err := unresolvedRecordedRecoveryPaths(targetPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, recorded := range recordedPaths {
 		key := strings.ToLower(recorded)
 		if seen[key] {
 			continue
