@@ -745,10 +745,9 @@ func TestValidateAccount(t *testing.T) {
 }
 
 func TestCodexProviderStreamIdleTimeoutPropagates(t *testing.T) {
-	t.Parallel()
-	// Sanity check: the wrapped openai provider's StreamIdleTimeout flows
-	// through. The default is 90s; we override to a small value so a real
-	// hang surfaces in the test.
+	// Serial: StreamIdleTimeout arms a real wall-clock idle timer. Under
+	// t.Parallel() the 50ms watchdog can fire before response.completed is
+	// consumed. This test only checks that the option is accepted.
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
