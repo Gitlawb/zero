@@ -157,9 +157,9 @@ This builds from source, so it needs Go 1.26.6+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 
 - On Linux, Bubblewrap is still required for native sandboxing. The installed
-  `zero` binary re-executes itself as the helper when `zero-linux-sandbox` is
-  not on `PATH`. A colocated or PATH `zero-linux-sandbox` remains optional and
-  takes precedence. See
+  `zero` binary re-executes itself as the helper when no standalone
+  `zero-linux-sandbox` is available next to `zero` or on `PATH`. A colocated or
+  PATH helper remains optional and takes precedence. See
   [Sandbox Helpers For Source Builds](#sandbox-helpers-for-source-builds).
 - `zero upgrade` treats the result as a standalone install and will replace the
   binary with a release build rather than rebuilding from source. If you chose
@@ -187,8 +187,8 @@ Source builds require Go 1.26.6+.
 
 Release archives include the platform sandbox helpers. A source build of the
 main `zero` binary is enough for Linux native sandboxing: Zero re-executes
-itself as the helper when `zero-linux-sandbox` is not on `PATH`. Bubblewrap
-must still be installed.
+itself as the helper when no standalone `zero-linux-sandbox` is available next
+to `zero` or on `PATH`. Bubblewrap must still be installed.
 
 A separate helper remains supported if it sits next to `zero` or on `PATH`:
 
