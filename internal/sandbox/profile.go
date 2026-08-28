@@ -712,7 +712,7 @@ func pathsOutsideRoots(paths []string, roots []string) []string {
 	}
 	out := make([]string, 0, len(paths))
 	for _, path := range paths {
-		if credentialPathReincluded(roots, path) {
+		if credentialPathCoveredByCanonicalRoots(roots, path) {
 			continue
 		}
 		out = append(out, path)
@@ -731,7 +731,7 @@ func pathsOutsideOverlappingRoots(paths []string, roots []string) []string {
 	for _, path := range paths {
 		overlaps := false
 		for _, root := range roots {
-			if pathWithinRoot(root, path) || pathWithinRoot(path, root) {
+			if pathWithinRootCanonical(root, path) || pathWithinRootCanonical(path, root) {
 				overlaps = true
 				break
 			}
@@ -746,6 +746,31 @@ func pathsOutsideOverlappingRoots(paths []string, roots []string) []string {
 func credentialPathReincluded(allowRoots []string, path string) bool {
 	for _, allow := range allowRoots {
 		if pathWithinRoot(allow, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathWithinRootCanonical compares after EvalSymlinks so a lexical /var/...
+// candidate is recognized as lying under a canonical /private/var/... root.
+// Overlap and allow checks use this identity; backends emit lexical symlink
+// dests separately via unreadableEnforcementPath.
+func pathWithinRootCanonical(root, candidate string) bool {
+	nr := normalizeProfilePath(root)
+	if nr == "" {
+		nr = root
+	}
+	nc := normalizeProfilePath(candidate)
+	if nc == "" {
+		nc = candidate
+	}
+	return pathWithinRoot(nr, nc)
+}
+
+func credentialPathCoveredByCanonicalRoots(roots []string, path string) bool {
+	for _, root := range roots {
+		if pathWithinRootCanonical(root, path) {
 			return true
 		}
 	}
@@ -1056,6 +1081,57 @@ func normalizeCredentialFinalPath(path string) string {
 		return ""
 	}
 	return filepath.Join(parent, filepath.Base(filepath.Clean(path)))
+}
+
+// unreadableEnforcementPath is the dest a bwrap bind or Seatbelt rule should
+// use for path. Symlinks keep their lexical spelling so a later atomic retarget
+// still hits the same pathname; other paths keep EvalSymlinks so aliases such
+// as macOS /var -> /private/var continue to match existing roots. Overlap and
+// allow checks use canonical identity via pathWithinRootCanonical, not this.
+func unreadableEnforcementPath(path string) string {
+	lexical := normalizeProfilePathLexically(path)
+	if lexical == "" {
+		return ""
+	}
+	if info, err := os.Lstat(lexical); err == nil && info.Mode().Type() == os.ModeSymlink {
+		return lexical
+	}
+	if resolved := normalizeProfilePath(path); resolved != "" {
+		return resolved
+	}
+	return lexical
+}
+
+// unreadableEnforcementPaths preserves lexical symlink identity alongside any
+// resolved target so Seatbelt emits both spellings. Non-symlink paths stay
+// canonical, matching normalizeProfilePaths.
+func unreadableEnforcementPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths)*2)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	for _, path := range paths {
+		lexical := normalizeProfilePathLexically(path)
+		if lexical == "" {
+			continue
+		}
+		if info, err := os.Lstat(lexical); err == nil && info.Mode().Type() == os.ModeSymlink {
+			add(lexical)
+		}
+		add(normalizeProfilePath(path))
+	}
+	return out
 }
 
 // normalizeProfilePathLexically expands and absolutizes a profile path without

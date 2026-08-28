@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,15 @@ const sshConfigMaxIncludeDepth = 16
 const sshConfigMaxBytes = 1 << 20
 
 const sshIncludeMatchCap = 64
+
+// sshPrivateKeyWalkMaxDepth bounds recursive discovery under ~/.ssh. Nested
+// directories such as ~/.ssh/keys are walked; directory symlinks are not
+// followed, so a cycle cannot hang profile construction.
+const sshPrivateKeyWalkMaxDepth = 8
+
+const sshPrivateKeyWalkMaxEntries = 256
+
+const sshPrivateKeySniffBytes = 128
 
 // sshWellKnownPrivateKeyNames are the OpenSSH default private-key basenames.
 // They are emitted even when ~/.ssh is absent so pathname-policy backends can
@@ -56,21 +66,60 @@ func sshPrivateKeyDenyCandidates(home string) []string {
 	for _, name := range sshWellKnownPrivateKeyNames {
 		candidates = append(candidates, filepath.Join(sshDir, name))
 	}
-	entries, err := os.ReadDir(sshDir)
-	if err == nil {
+	candidates = append(candidates, walkSSHPrivateKeyFiles(sshDir)...)
+	candidates = append(candidates, sshConfigReferencedPaths(home, sshDir)...)
+	return candidates
+}
+
+func walkSSHPrivateKeyFiles(sshDir string) []string {
+	var out []string
+	n := 0
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if depth > sshPrivateKeyWalkMaxDepth || n >= sshPrivateKeyWalkMaxEntries {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
 		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
+			if n >= sshPrivateKeyWalkMaxEntries {
+				return
 			}
 			name := entry.Name()
-			path := filepath.Join(sshDir, name)
+			if name == "." || name == ".." {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			n++
+			info, err := os.Lstat(path)
+			if err != nil {
+				continue
+			}
+			mode := info.Mode()
+			if mode.Type() == os.ModeSymlink {
+				// Name-based only: do not follow, so a FIFO or cycle behind
+				// the link cannot block profile construction.
+				if isSSHPrivateKeyFileName(name) {
+					out = append(out, path)
+				}
+				continue
+			}
+			if info.IsDir() {
+				walk(path, depth+1)
+				continue
+			}
+			if !mode.IsRegular() {
+				continue
+			}
 			if isSSHPrivateKeyFileName(name) || sshFileLooksLikePrivateKey(path) {
-				candidates = append(candidates, path)
+				out = append(out, path)
 			}
 		}
 	}
-	candidates = append(candidates, sshConfigReferencedPaths(home, sshDir)...)
-	return candidates
+	walk(sshDir, 0)
+	return out
 }
 
 func isSSHPrivateKeyFileName(name string) bool {
@@ -95,21 +144,38 @@ func sshFileLooksLikePrivateKey(path string) bool {
 	if sshPublicOrConfigName(filepath.Base(path)) {
 		return false
 	}
-	f, err := os.Open(path)
-	if err != nil {
+	data, ok := readRegularFileBounded(path, sshPrivateKeySniffBytes)
+	if !ok {
 		return false
 	}
-	defer f.Close()
-	buf := make([]byte, 128)
-	n, err := f.Read(buf)
-	if n == 0 && err != nil {
-		return false
-	}
-	s := strings.TrimSpace(string(buf[:n]))
+	s := strings.TrimSpace(string(data))
 	if !strings.HasPrefix(s, "-----BEGIN ") {
 		return false
 	}
 	return strings.Contains(s, "PRIVATE KEY")
+}
+
+// readRegularFileBounded Lstats first and refuses FIFOs, devices, sockets,
+// and symlinks so profile construction cannot block on a special file. The
+// subsequent read is capped with LimitReader.
+func readRegularFileBounded(path string, maxBytes int) ([]byte, bool) {
+	if maxBytes <= 0 {
+		return nil, false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxBytes)))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 func sshConfigReferencedPaths(home, sshDir string) []string {
@@ -126,12 +192,9 @@ func collectSSHConfigPaths(path, home, sshDir string, seen map[string]bool, dept
 	}
 	seen[identity] = true
 
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := readRegularFileBounded(path, sshConfigMaxBytes)
+	if !ok {
 		return nil
-	}
-	if len(data) > sshConfigMaxBytes {
-		data = data[:sshConfigMaxBytes]
 	}
 
 	var out []string
