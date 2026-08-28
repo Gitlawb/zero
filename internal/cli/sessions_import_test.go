@@ -23,6 +23,20 @@ func writeImportFixture(t *testing.T, path string, content string) {
 	}
 }
 
+func importUserRecord(t *testing.T, cwd, sessionID string) string {
+	t.Helper()
+	record, err := json.Marshal(map[string]any{
+		"type":      "user",
+		"cwd":       cwd,
+		"sessionId": sessionID,
+		"message":   map[string]any{"role": "user", "content": "hello"},
+	})
+	if err != nil {
+		t.Fatalf("marshal import fixture: %v", err)
+	}
+	return string(record) + "\n"
+}
+
 func TestSessionListSanitizesPersistedModelMetadata(t *testing.T) {
 	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
 	line := formatSessionSnapshotLine(zerocommands.SessionSnapshot{
@@ -122,7 +136,7 @@ func TestRunSessionsDiscoverFiltersAgentAndWritesJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-workspace", "claude.jsonl"),
-		`{"type":"user","cwd":"`+workspace+`","sessionId":"claude","message":{"role":"user","content":"hello"}}`+"\n")
+		importUserRecord(t, workspace, "claude"))
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	previous, err := os.Getwd()
