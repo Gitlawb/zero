@@ -16,6 +16,11 @@ import (
 // flushes and syncs it to disk, and replaces filename atomically via ReplaceWithRetry.
 // For new files, it honors the process umask by creating the temporary file with
 // os.OpenFile(..., perm). For existing regular files, it preserves the existing file mode.
+//
+// Platform differences on symlink destinations: On Unix (Linux/macOS), replacing a
+// symlink destination replaces the symlink itself with the new regular file. On Windows,
+// ReplaceFileW refuses symlink destinations outright and returns an error.
+// Hard links to destination files are broken by design (temp-and-rename publishes a new inode).
 func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(filename)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
