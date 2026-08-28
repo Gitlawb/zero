@@ -136,7 +136,11 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		go func(index int) {
 			defer wg.Done()
 			server := servers[index]
-			serverCtx, cancel := context.WithCancel(ctx)
+			// The sink hears about Start as it happens, so an attempt abandoned below
+			// can still report the confinement its process ran under. The connect
+			// result cannot supply that: it does not arrive until after this phase.
+			sink := &launchSink{}
+			serverCtx, cancel := context.WithCancel(withLaunchSink(ctx, sink))
 			done := make(chan connectResult, 1)
 			go func() {
 				client, remote, notices, err := connectAndList(serverCtx, factory, server)
@@ -153,13 +157,24 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 			case <-time.After(timeout):
 				cancel() // abandon the slow connect: tears down the conn/subprocess
 				// Reap the goroutine + any partial client in the background so a
-				// slow server never blocks startup.
+				// slow server never blocks startup. The reaper cannot contribute the
+				// disclosure: it returns after the serial commit phase below has
+				// already run, which is why the launch fact is published at Start
+				// instead of being read off the late result here.
 				go func() {
 					if res := <-done; res.client != nil {
 						_ = res.client.Close()
 					}
 				}()
-				results[index] = connectResult{err: fmt.Errorf("connect timed out after %s", timeout)}
+				timedOut := connectResult{err: fmt.Errorf("connect timed out after %s", timeout)}
+				// A server that reached Start ran under the planned enforcement even
+				// though its connection never became usable. One that timed out
+				// before Start discloses nothing, so the sink stays empty and this
+				// adds nothing.
+				if launched, notices := sink.observe(); launched {
+					timedOut.notices = notices
+				}
+				results[index] = timedOut
 			}
 		}(index)
 	}

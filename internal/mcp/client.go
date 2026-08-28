@@ -232,6 +232,13 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		return nil, fmt.Errorf("start MCP server %s: %w", server.Name, err)
 	}
 
+	// PUBLISHED AT START, not at return. Registration abandons a server that
+	// exceeds the connect timeout, and everything below this line (initialize, and
+	// tools/list above it in the caller) can hang past that. Announcing the launch
+	// here is what lets an abandoned attempt still disclose the confinement its
+	// process ran under.
+	publishLaunch(ctx, plannedEnforcement.Notices)
+
 	client := &Client{
 		server:  server,
 		cmd:     cmd,
