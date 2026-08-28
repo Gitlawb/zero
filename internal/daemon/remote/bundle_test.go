@@ -2,11 +2,17 @@ package remote
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // initTestRepo creates a temp git work tree with one committed file and returns
@@ -189,5 +195,207 @@ func TestBridgeBundleRejectsBadToken(t *testing.T) {
 	_, err := UploadRepoBundle(RemoteConfig{Address: addr, Token: "wrong", CACertFile: ca}, repo, "p")
 	if err == nil {
 		t.Fatal("bundle upload with a bad token must be refused")
+	}
+}
+
+// testBundle commits content to a throwaway repo and returns a bundle of it.
+func testBundle(t *testing.T, file, content string) string {
+	t.Helper()
+	repo := initTestRepo(t, file, content)
+	out := filepath.Join(t.TempDir(), "b.bundle")
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	if err := gitBundleCreate(ctx, repo, out); err != nil {
+		t.Fatalf("bundle create: %v", err)
+	}
+	return out
+}
+
+// An extract that cannot clear the live tree must leave that tree alone. The old
+// code removed dest before it had anything to publish, so a partial removal --
+// here a subdirectory the daemon cannot delete -- destroyed the prior extraction
+// and the deferred staging cleanup then deleted the replacement.
+func TestExtractBundleKeepsPriorTreeWhenLiveTreeCannotBeCleared(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions")
+	}
+	ctx := context.Background()
+	dest := filepath.Join(t.TempDir(), "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+	locked := filepath.Join(dest, "locked")
+	if err := os.MkdirAll(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "keep.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	// The publish moves the old tree (locked subdir included) into staging, so
+	// restore write permission wherever it ended up or TempDir cleanup fails.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(filepath.Dir(dest), func(path string, d os.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
+	})
+
+	var logged []string
+	logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, logf); err != nil {
+		t.Fatalf("extract over an undeletable subtree: %v", err)
+	}
+	// The prior tree moved into staging, so the cleanup cannot delete it either.
+	// That strands a whole copy of the repo and must not pass silently.
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "staging dir") }) {
+		t.Errorf("a staging dir that could not be removed was not reported: %v", logged)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil {
+		t.Fatalf("dest holds neither the old tree nor the new one: %v", err)
+	}
+	if string(got) != "v1" {
+		t.Fatalf("a.txt = %q, want the newly published %q", got, "v1")
+	}
+}
+
+// Every bundle upload is handled in its own goroutine, so two uploads of one
+// link id can extract at the same time. The old code let them delete and rename
+// over each other: extracts failed with "directory not empty" and one call's
+// removal could wipe a tree another had already published.
+func TestExtractBundleConcurrentSameDestAlwaysLeavesATree(t *testing.T) {
+	ctx := context.Background()
+	dest := filepath.Join(t.TempDir(), "proj-1")
+	first := testBundle(t, "a.txt", "v0")
+	second := testBundle(t, "a.txt", "v1")
+	if err := extractBundle(ctx, first, dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	// The unsafe window is the two back-to-back renames after the clone. Without
+	// this delay it is narrow enough that the test still passes a good fraction
+	// of the time with the lock removed, which would make it a guard in name only.
+	real := renameDir
+	renameDir = func(from, to string) error {
+		time.Sleep(2 * time.Millisecond)
+		return real(from, to)
+	}
+	t.Cleanup(func() { renameDir = real })
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []error
+	for round := 0; round < 15; round++ {
+		for _, src := range []string{first, second} {
+			wg.Add(1)
+			go func(src string) {
+				defer wg.Done()
+				if err := extractBundle(ctx, src, dest, nil); err != nil {
+					mu.Lock()
+					failures = append(failures, err)
+					mu.Unlock()
+				}
+			}(src)
+		}
+		wg.Wait()
+	}
+
+	if len(failures) > 0 {
+		t.Errorf("concurrent extracts of one link id failed: %v", failures)
+	}
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {
+		t.Errorf("dest is not a work tree after concurrent extracts: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil {
+		t.Fatalf("dest holds no extraction: %v", err)
+	}
+	if string(got) != "v0" && string(got) != "v1" {
+		t.Fatalf("a.txt = %q, want one of the uploaded trees", got)
+	}
+}
+
+// The publish rename is the one step whose failure the old code could not come
+// back from: dest was already deleted. It must now put the prior tree back.
+func TestExtractBundleRestoresPriorTreeWhenPublishFails(t *testing.T) {
+	ctx := context.Background()
+	dest := filepath.Join(t.TempDir(), "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	// Fail only the publish, so the restore rename that follows it still runs.
+	real := renameDir
+	calls := 0
+	renameDir = func(from, to string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected publish failure")
+		}
+		return real(from, to)
+	}
+	t.Cleanup(func() { renameDir = real })
+
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, nil); err == nil {
+		t.Fatal("a failed publish must be reported")
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil {
+		t.Fatalf("prior extraction was not restored: %v", err)
+	}
+	if string(got) != "v0" {
+		t.Fatalf("a.txt = %q, want the prior %q", got, "v0")
+	}
+}
+
+// If the publish fails and the prior tree cannot be put back either, dest is
+// empty and the backup is the only copy left. It must survive the cleanup so an
+// operator can recover it by hand.
+func TestExtractBundleKeepsBackupWhenRestoreAlsoFails(t *testing.T) {
+	ctx := context.Background()
+	bundleDir := t.TempDir()
+	dest := filepath.Join(bundleDir, "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	real := renameDir
+	renameDir = func(string, string) error { return errors.New("injected rename failure") }
+	t.Cleanup(func() { renameDir = real })
+
+	err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, nil)
+	if err == nil {
+		t.Fatal("a failed publish must be reported")
+	}
+	if !strings.Contains(err.Error(), "prior tree left in") {
+		t.Errorf("error should point at the retained backup, got: %v", err)
+	}
+
+	entries, readErr := os.ReadDir(bundleDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	found := ""
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), stagingPrefix) {
+			if _, statErr := os.Stat(filepath.Join(bundleDir, e.Name(), "backup", "a.txt")); statErr == nil {
+				found = e.Name()
+			}
+		}
+	}
+	if found == "" {
+		t.Fatal("the prior tree was deleted along with the staging dir")
+	}
+	got, readErr := os.ReadFile(filepath.Join(bundleDir, found, "backup", "a.txt"))
+	if readErr != nil || string(got) != "v0" {
+		t.Fatalf("retained backup = %q, err %v, want %q", got, readErr, "v0")
 	}
 }

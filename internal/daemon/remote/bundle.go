@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/daemon"
@@ -129,16 +130,18 @@ func (b *Bridge) receiveBundle(conn net.Conn) bundleResult {
 		return bundleResult{Message: "stage bundle: " + err.Error()}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	if err := gitBundleVerify(ctx, tmpName); err != nil {
+	verifyCtx, cancelVerify := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancelVerify()
+	if err := gitBundleVerify(verifyCtx, tmpName); err != nil {
 		return bundleResult{Message: "bundle verify: " + err.Error()}
 	}
 	dest := filepath.Join(b.bundleDir, id)
 	if !withinDir(b.bundleDir, dest) {
 		return bundleResult{Message: "invalid link id"}
 	}
-	if err := extractBundle(ctx, tmpName, dest); err != nil {
+	// extractBundle starts the clone's own gitTimeout once it holds the lock for
+	// dest, so an upload queued behind another does not spend that budget waiting.
+	if err := extractBundle(context.Background(), tmpName, dest, b.logf); err != nil {
 		return bundleResult{Message: "extract bundle: " + err.Error()}
 	}
 	return bundleResult{OK: true, Path: dest}
@@ -168,27 +171,112 @@ func streamFramesToFile(r io.Reader, w io.Writer, size int64) error {
 	return nil
 }
 
-// extractBundle clones bundleFile into a staging dir, then atomically renames it
-// over dest (replacing any prior extraction for this link id). git clone needs a
-// non-existent target, so the staging+rename keeps the live dest intact on error.
-func extractBundle(ctx context.Context, bundleFile, dest string) error {
+// stagingPrefix names the per-extract staging directories created beside dest.
+const stagingPrefix = ".staging-"
+
+// renameDir moves a directory into its published location. It is a var so tests
+// can force a failure at the steps whose errors would otherwise be unrecoverable.
+var renameDir = os.Rename
+
+// extractLocks serializes extracts per destination. Each bundle upload runs in
+// its own connection goroutine, so two uploads of one link id would otherwise
+// interleave their swap steps and clobber each other.
+var extractLocks = struct {
+	mu    sync.Mutex
+	locks map[string]*extractLock
+}{locks: map[string]*extractLock{}}
+
+type extractLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockExtract blocks until dest is free and returns its release func. Entries
+// are refcounted so the map cannot grow with every link id ever uploaded.
+func lockExtract(dest string) func() {
+	extractLocks.mu.Lock()
+	entry := extractLocks.locks[dest]
+	if entry == nil {
+		entry = &extractLock{}
+		extractLocks.locks[dest] = entry
+	}
+	entry.refs++
+	extractLocks.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		extractLocks.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(extractLocks.locks, dest)
+		}
+		extractLocks.mu.Unlock()
+	}
+}
+
+// extractBundle clones bundleFile into a staging dir beside dest, then swaps the
+// clone into place (replacing any prior extraction for this link id). git clone
+// needs a non-existent target, hence the staging dir. The live tree is moved
+// aside rather than deleted and is put back if the publish fails, so on every
+// error return dest holds either the prior extraction or the new one, never
+// neither. Swapping a directory is two renames and cannot be made atomic, so a
+// crash between them leaves dest absent with the prior tree in staging/backup;
+// nothing reaps that on restart. logf may be nil.
+func extractBundle(ctx context.Context, bundleFile, dest string, logf func(string, ...any)) error {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	parent := filepath.Dir(dest)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return err
 	}
-	staging, err := os.MkdirTemp(parent, ".staging-*")
+	unlock := lockExtract(dest)
+	defer unlock()
+
+	staging, err := os.MkdirTemp(parent, stagingPrefix+"*")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(staging) }()
+	// Staging also holds the prior tree while the swap is in flight, so it is
+	// only cleaned up once dest is known to hold one of the two trees.
+	cleanupStaging := true
+	defer func() {
+		if !cleanupStaging {
+			return
+		}
+		// A failure here strands a whole copy of the prior tree under a
+		// dot-prefixed dir nothing else enumerates, so say so rather than
+		// leaking it silently.
+		if err := os.RemoveAll(staging); err != nil {
+			logf("remote: could not remove bundle staging dir %s: %v", staging, err)
+		}
+	}()
+	cloneCtx, cancelClone := context.WithTimeout(ctx, gitTimeout)
+	defer cancelClone()
 	cloneDest := filepath.Join(staging, "repo")
-	if err := gitClone(ctx, bundleFile, cloneDest); err != nil {
+	if err := gitClone(cloneCtx, bundleFile, cloneDest); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(dest); err != nil {
+
+	// Every rename stays inside parent, so none of them crosses a filesystem.
+	backup := filepath.Join(staging, "backup")
+	restore := func() error { return nil }
+	if err := os.Rename(dest, backup); err == nil {
+		restore = func() error { return renameDir(backup, dest) }
+	} else if !os.IsNotExist(err) {
 		return err
 	}
-	return os.Rename(cloneDest, dest)
+	if err := renameDir(cloneDest, dest); err != nil {
+		if restoreErr := restore(); restoreErr != nil {
+			// dest is empty and the only copy of the prior tree is the backup,
+			// so keep staging rather than deleting the tree on the way out.
+			cleanupStaging = false
+			return fmt.Errorf("publish extraction: %w (prior tree left in %s: %v)", err, backup, restoreErr)
+		}
+		return err
+	}
+	return nil
 }
 
 // ---- client side -----------------------------------------------------------
