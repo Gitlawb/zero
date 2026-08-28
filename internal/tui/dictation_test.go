@@ -208,6 +208,58 @@ func TestDictationStreamingPartialClampsRegionAfterComposerShrink(t *testing.T) 
 	}
 }
 
+func TestDictationStreamingBackspaceAcrossRegionPreservesUserTextOnCancel(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "hello world", cursor: 11})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "there"})
+
+	// The user backspaces through the live transcript and into their original
+	// text while newer cumulative partials are still in flight.
+	m.setComposerState(composerState{text: "hello wor", cursor: 9})
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend"})
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend again"})
+	if m.composer.text != "hello worthere friend again" {
+		t.Fatalf("partials replaced user text after backspace: %q", m.composer.text)
+	}
+
+	m, _ = m.cancelDictation()
+	if m.composer.text != "hello wor" {
+		t.Fatalf("cancel did not restore the user's edited text: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingInvalidRegionBoundsReanchorOrClamp(t *testing.T) {
+	tests := []struct {
+		name   string
+		start  int
+		end    int
+		anchor string
+		want   string
+	}{
+		{name: "start past end", start: 40, end: 60, anchor: "a much longer previous composer", want: "abpartial text"},
+		{name: "negative start", start: -3, end: 1, anchor: "", want: "abpartial text"},
+		{name: "end past end", start: 1, end: 40, anchor: "a", want: "apartial text"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{}
+			m.setComposerState(composerState{text: "ab", cursor: 2})
+			m.dictation.regionActive = true
+			m.dictation.regionStart = tt.start
+			m.dictation.regionEnd = tt.end
+			m.dictation.regionAnchor = tt.anchor
+
+			m.applyStreamingText("partial text")
+			if m.composer.text != tt.want {
+				t.Fatalf("composer = %q, want %q", m.composer.text, tt.want)
+			}
+		})
+	}
+}
+
 func TestDictationCanceledStreamRaceDoesNotAutoSubmit(t *testing.T) {
 	// Esc can race an already-buffered realtime event: cancelDictation discards
 	// the live region and resets state synchronously, but the streaming

@@ -93,12 +93,6 @@ func (m model) handleDictationPartial(msg sttPartialMsg) model {
 func (m *model) applyStreamingText(text string) {
 	state := m.currentComposerState()
 	stateRunes := []rune(state.text)
-	if m.dictation.regionActive {
-		// The composer may have changed between partials. Keep the tracked range
-		// valid before using regionStart as a slice bound.
-		m.dictation.regionStart = clamp(m.dictation.regionStart, 0, len(stateRunes))
-		m.dictation.regionEnd = clamp(m.dictation.regionEnd, m.dictation.regionStart, len(stateRunes))
-	}
 	if !m.dictation.regionActive {
 		m.dictation.regionActive = true
 		m.dictation.regionStart = state.cursor
@@ -112,6 +106,14 @@ func (m *model) applyStreamingText(text string) {
 			// Fold the separator into the region so a cancel removes it too.
 			m.dictation.regionPrefix = " "
 		}
+	} else if m.dictation.regionStart < 0 || m.dictation.regionStart > len(stateRunes) {
+		// The user edited across the old region start, so its prefix can no
+		// longer be compared safely. Preserve their text and insert the next
+		// partial as a fresh live region at the current cursor.
+		m.dictation.regionStart = state.cursor
+		m.dictation.regionEnd = state.cursor
+		m.dictation.regionPrefix = ""
+		m.dictation.regionAnchor = string(stateRunes[:state.cursor])
 	} else {
 		// Compare the prefix before the live region. If it changed (the user
 		// typed/pasted there) shift [start,end) by the length delta so the
