@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -193,6 +194,82 @@ func TestAFailedAppendIsLatched(t *testing.T) {
 	bridge.PlanAdmitted(samplePlan(t))
 	if bridge.RecordingError() == nil {
 		t.Fatal("a failed append must be latched so it can be reported once")
+	}
+}
+
+func TestPersistenceFailureIsShownOnTheTerminalResult(t *testing.T) {
+	var messages []tea.Msg
+	bridge := NewPlanProgressBridge()
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	bridge.Attach(func(msg tea.Msg) { messages = append(messages, msg) }, 1, store,
+		"zero_00000000000000000000000000000000_1")
+	plan := samplePlan(t)
+	bridge.PlanAdmitted(plan)
+	bridge.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 2})
+
+	for _, message := range messages {
+		if completed, ok := message.(planCompletedMsg); ok {
+			line := planCompletedLine(completed)
+			if !strings.Contains(line, "not fully saved") || !strings.Contains(line, "not safely resumable") {
+				t.Fatalf("terminal result hid persistence loss: %q", line)
+			}
+			return
+		}
+	}
+	t.Fatal("no terminal plan message was emitted")
+}
+
+func TestBackgroundPlanKeepsItsOriginSessionAcrossReattach(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	first, err := store.Create(sessions.CreateInput{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(sessions.CreateInput{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, store, first.SessionID)
+	bridge.SetBackground(true)
+	plan := samplePlan(t)
+	bridge.PlanAdmitted(plan)
+
+	// A later run may rebind display state. Durable plan ownership must not move.
+	bridge.Attach(func(tea.Msg) {}, 2, store, second.SessionID)
+	bridge.TaskDispatched(specialist.Task{ID: "a"})
+	bridge.TaskCompleted(specialist.TaskResult{ID: "a", Outcome: specialist.TaskSucceeded})
+	bridge.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 1})
+
+	if got := recordedTypes(t, store, first.SessionID); len(got) != 4 {
+		t.Fatalf("origin session recorded %v, want the complete lifecycle", got)
+	}
+	if got := recordedTypes(t, store, second.SessionID); len(got) != 0 {
+		t.Fatalf("reattached session received foreign plan events: %v", got)
+	}
+	if got := bridge.DrainCompletedPlans(); got != "" {
+		t.Fatalf("foreign session drained the origin's completion: %q", got)
+	}
+	bridge.SelectSession(first.SessionID)
+	if got := bridge.DrainCompletedPlans(); !strings.Contains(got, plan.Name()) {
+		t.Fatalf("origin session did not receive its completion: %q", got)
+	}
+}
+
+func TestLastPlanIsScopedToTheSelectedSession(t *testing.T) {
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, nil, "session-a")
+	bridge.PlanAdmitted(mustPlan(t, "plan-a"))
+	bridge.PlanCompleted(mustPlan(t, "plan-a"), specialist.PlanReport{Status: specialist.PlanCompleted})
+	bridge.SelectSession("session-b")
+	if _, _, ok := bridge.LastPlan(); ok {
+		t.Fatal("session B inherited session A's last plan")
+	}
+	bridge.PlanAdmitted(mustPlan(t, "plan-b"))
+	bridge.PlanCompleted(mustPlan(t, "plan-b"), specialist.PlanReport{Status: specialist.PlanCompleted})
+	bridge.SelectSession("session-a")
+	if _, name, ok := bridge.LastPlan(); !ok || name != "plan-a" {
+		t.Fatalf("session A last plan = %q, %v", name, ok)
 	}
 }
 

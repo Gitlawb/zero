@@ -448,7 +448,11 @@ func TestWriteStdinReturnsAReapedSessionThroughTheCompletedStore(t *testing.T) {
 	if late.Meta["exit_code"] != "0" || late.Meta["cwd"] != "." || late.Meta["tty"] != "false" {
 		t.Fatalf("late result lost terminal metadata: %#v", late.Meta)
 	}
-	if late.ExecutionRequest == nil || late.ExecutionRequest.WorkingDirectory != root || len(late.ExecutionRequest.WorkspaceRoots) != 1 || late.ExecutionRequest.WorkspaceRoots[0] != root {
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if late.ExecutionRequest == nil || late.ExecutionRequest.WorkingDirectory != canonicalRoot || len(late.ExecutionRequest.WorkspaceRoots) != 1 || late.ExecutionRequest.WorkspaceRoots[0] != canonicalRoot {
 		t.Fatalf("late result lost its execution request: %#v", late.ExecutionRequest)
 	}
 }

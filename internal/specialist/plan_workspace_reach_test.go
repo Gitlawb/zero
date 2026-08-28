@@ -209,7 +209,7 @@ func TestTheTriggeringTaskAndToolAreNamed(t *testing.T) {
 
 // END TO END through resolvePlanWorkspace: the refusal must arrive from the one
 // function both call sites use, and the worktree must not be left on disk.
-func TestResolvePlanWorkspaceRefusesAndReleasesTheWorktree(t *testing.T) {
+func TestResolvePlanWorkspaceRefusesAndAbortsTheWorktree(t *testing.T) {
 	realTree := t.TempDir()
 	target := filepath.Join(realTree, "tools.go")
 	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
@@ -217,11 +217,12 @@ func TestResolvePlanWorkspaceRefusesAndReleasesTheWorktree(t *testing.T) {
 	}
 	worktree := t.TempDir()
 
-	released := false
+	released, aborted := false, false
 	isolate := func(context.Context, string) (PlanWorkspace, error) {
 		return PlanWorkspace{
 			Path: worktree, Isolated: true, Describe: "worktree",
 			Release: func() { released = true },
+			Abort:   func() { aborted = true },
 		}, nil
 	}
 	plan := reachPlan(t, "Read "+target+" and report.", []string{"read_file"})
@@ -233,8 +234,11 @@ func TestResolvePlanWorkspaceRefusesAndReleasesTheWorktree(t *testing.T) {
 	if got.Path != "" {
 		t.Fatalf("a refused resolution still handed back a workspace: %+v", got)
 	}
-	if !released {
-		t.Fatal("the worktree was left on disk: one leaked directory per attempt")
+	if released {
+		t.Fatal("admission failure used successful-retention cleanup")
+	}
+	if !aborted {
+		t.Fatal("the aborted worktree lease was not released: one locked directory per attempt")
 	}
 	if !strings.Contains(err.Error(), target) {
 		t.Fatalf("the refusal does not name the unreachable path: %v", err)

@@ -147,6 +147,36 @@ func TestAProjectPlanShadowsAUserPlanOfTheSameName(t *testing.T) {
 	}
 }
 
+func TestAnUnreadableHigherPriorityPlanBlocksTheLowerPlanOfTheSameName(t *testing.T) {
+	root := t.TempDir()
+	userRoot := t.TempDir()
+	paths := PlanPaths{
+		ProjectRoot: root, ProjectDir: filepath.Join(root, ".zero", "plans"),
+		UserRoot: userRoot, UserDir: filepath.Join(userRoot, "zero", "plans"),
+	}
+	if _, err := SavePlan(paths.UserRoot, paths.UserDir, "sweep", savedPlanFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "sweep.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := FindSavedPlan(paths, "sweep"); err == nil || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("lookup degraded to the user plan instead of reporting the broken project plan: %v", err)
+	}
+}
+
+func TestAMissingSavedPlanDirectoryIsNotAProblem(t *testing.T) {
+	root := t.TempDir()
+	_, problems := LoadPlans(PlanPaths{ProjectRoot: root, ProjectDir: filepath.Join(root, ".zero", "plans")})
+	if len(problems) != 0 {
+		t.Fatalf("an optional missing directory was reported as broken: %v", problems)
+	}
+}
+
 // THE NAME IS THE PATH GUARD. It is an allow-list, so no traversal component
 // can be spelled at all — the pattern this repo has watched leak three times
 // when written as a deny-list.

@@ -49,6 +49,33 @@ func TestSavingRefusesToWriteThroughALinkedAncestor(t *testing.T) {
 	}
 }
 
+func TestLoadingRefusesToReadThroughALinkedAncestor(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	workspace := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(filepath.Join(outside, "plans"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "plans", "escaped.json"), []byte(`{"name":"escaped","tasks":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	planLinkDir(t, outside, filepath.Join(workspace, ".zero"))
+
+	paths := DefaultPlanPaths(workspace, "")
+	plans, problems := LoadPlans(paths)
+	for _, plan := range plans {
+		if plan.Name == "escaped" {
+			t.Fatal("LoadPlans followed a linked ancestor outside the declared project root")
+		}
+	}
+	if len(problems) == 0 {
+		t.Fatal("the linked project scope was silently treated as an absent directory")
+	}
+}
+
 // The ordinary path still saves, or the test above would pass against a store
 // that refused everything.
 func TestSavingAnOrdinaryWorkspacePlanStillWorks(t *testing.T) {

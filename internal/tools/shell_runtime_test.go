@@ -492,4 +492,11 @@ func TestWindowsShellFallsBackToCmdWhenPowerShellCannotStartSandboxed(t *testing
 	if sandboxed.Kind != shellKindCmd || !strings.EqualFold(sandboxed.Executable, "cmd.exe") {
 		t.Fatalf("sandboxed shell = %#v, want cmd.exe fallback", sandboxed)
 	}
+	guidance := hostShellEnvironmentGuidanceForRuntime(sandboxed)
+	if !strings.Contains(guidance, "Windows cmd.exe") || strings.Contains(guidance, "PowerShell cmdlets") {
+		t.Fatalf("guidance describes a different shell than the sandbox selected: %q", guidance)
+	}
+	if args := sandboxed.arguments("echo ok"); len(args) == 0 || args[0] != "/d" {
+		t.Fatalf("selected runtime does not construct cmd.exe arguments: %v", args)
+	}
 }

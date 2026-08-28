@@ -267,7 +267,7 @@ func loadPlanDir(root, dir string, scope PlanScope) (plans []SavedPlan, problems
 		}
 		relativePath := filepath.Join(relative, entry.Name())
 		if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
-			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
+			problems = append(problems, fmt.Sprintf("%s: symlink or reparse point refused: %v", path, err))
 			blocked = append(blocked, name)
 			continue
 		}

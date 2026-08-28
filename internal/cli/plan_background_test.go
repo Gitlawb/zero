@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,21 +95,28 @@ func TestLaunchingAfterCloseIsRefused(t *testing.T) {
 // free the slot — a crashed plan that held the slot forever would block every
 // later one with "already running".
 func TestAPanickingBackgroundPlanIsContainedAndFreesTheSlot(t *testing.T) {
-	launcher := newPlanLauncher(context.Background(), tui.NewPlanProgressBridge())
+	bridge := tui.NewPlanProgressBridge()
+	launcher := newPlanLauncher(context.Background(), bridge)
 	if !launcher.Launch(func(context.Context) { panic("boom") }) {
 		t.Fatal("Launch refused")
 	}
 
 	deadline := time.After(3 * time.Second)
 	for {
-		if launcher.Launch(func(context.Context) {}) {
-			return
+		if !bridge.BackgroundPlanLive() {
+			break
 		}
 		select {
 		case <-deadline:
-			t.Fatal("a panicking plan held the slot forever")
+			t.Fatal("a panicking plan left the bridge busy")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+	if completion := bridge.DrainCompletedPlans(); !strings.Contains(completion, "failed") || !strings.Contains(completion, "panicked") {
+		t.Fatalf("panic produced no explicit failed completion: %q", completion)
+	}
+	if !launcher.Launch(func(context.Context) {}) {
+		t.Fatal("a panicking plan held the launcher slot forever")
 	}
 }
 
