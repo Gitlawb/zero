@@ -368,3 +368,95 @@ func TestAggregateImageBudgetForwardsTheFirstAndNamesTheRest(t *testing.T) {
 		t.Errorf("the dropped second image is not described as unforwardable:\n%s", result.Output)
 	}
 }
+
+func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
+	orig := decodeImageBase64
+	t.Cleanup(func() { decodeImageBase64 = orig })
+	var n int
+	decodeImageBase64 = func(s string) ([]byte, error) {
+		n++
+		return orig(s)
+	}
+
+	// Two images fill the 10 MiB aggregate exactly, so remaining hits 0 and
+	// the later candidates must not be decoded at all.
+	half := imageinput.MaxImageBytes / 2
+	payload := paddedPNGBase64(half)
+	content := []Content{
+		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "audio", MimeType: "audio/wav"},
+	}
+
+	n = 0
+	images := ImageBlocks(content)
+	if n != 2 {
+		t.Fatalf("ImageBlocks decoded %d payloads, want 2 (budget fills after two %d-byte images)", n, half)
+	}
+	if len(images) != 2 {
+		t.Fatalf("ImageBlocks len = %d, want 2", len(images))
+	}
+	n = 0
+	if got := DroppedContentSummary(content); got != "2 image/png blocks, 1 audio/wav block" {
+		t.Fatalf("DroppedContentSummary() = %q, want the two skipped images and the audio", got)
+	}
+	if n != 2 {
+		t.Fatalf("DroppedContentSummary decoded %d payloads, want 2 (same single pass as ImageBlocks)", n)
+	}
+
+	n = 0
+	result := registryTool{
+		client: &nonTextClient{content: content},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}.Run(context.Background(), map[string]any{})
+	if n != 2 {
+		t.Fatalf("Run decoded %d payloads, want 2 (one pass; drop note must not decode again)", n)
+	}
+	if len(result.Images) != 2 {
+		t.Fatalf("Images len = %d, want 2", len(result.Images))
+	}
+	if !strings.Contains(result.Output, "image/png") {
+		t.Errorf("skipped images were not named:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "audio/wav") {
+		t.Errorf("audio was not named:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "(empty MCP tool result)") {
+		t.Errorf("forwarded images still reported as empty:\n%s", result.Output)
+	}
+
+	n = 0
+	one := []Content{{Type: "image", MimeType: "image/png", Data: payload}}
+	oneResult := registryTool{
+		client: &nonTextClient{content: one},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}.Run(context.Background(), map[string]any{})
+	if n != 1 {
+		t.Fatalf("one image decoded %d times, want 1", n)
+	}
+	if len(oneResult.Images) != 1 {
+		t.Fatalf("one-image Images len = %d, want 1", len(oneResult.Images))
+	}
+	if strings.Contains(oneResult.Output, "cannot forward") {
+		t.Fatalf("a forwarded image is still described as unforwardable:\n%s", oneResult.Output)
+	}
+}
+
+func BenchmarkForwardImagesFourHalfBudget(b *testing.B) {
+	payload := paddedPNGBase64(imageinput.MaxImageBytes / 2)
+	content := []Content{
+		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "image", MimeType: "image/png", Data: payload},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = forwardImages(content)
+	}
+}

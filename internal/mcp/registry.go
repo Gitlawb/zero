@@ -327,11 +327,15 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 		status = tools.StatusError
 	}
 	output := TextContent(result.Content)
-	images := ImageBlocks(result.Content)
+	images, disp := forwardImages(result.Content)
 	// Image blocks with valid data ride Result.Images, the same channel capture
 	// tools already use. Everything else non-text is still named rather than
 	// silently dropped, because Zero still has nowhere to put audio, embedded
 	// resources, or a block whose payload could not be decoded (#823).
+	//
+	// Conversion happens once: the drop note is built from the same pass's
+	// per-item disposition, so a valid image is not decoded again just to
+	// decide whether it was forwarded.
 	//
 	// The note is appended only when something was actually dropped, so a
 	// text-only result is byte-for-byte what it was before, and a successfully
@@ -342,7 +346,7 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 	// answer differently; what cannot change is that Zero still has nowhere to
 	// put the remaining non-text block. Claiming the response would be identical
 	// would be a promise this code is in no position to make.
-	if dropped := DroppedContentSummary(result.Content); dropped != "" {
+	if dropped := droppedContentNote(result.Content, disp); dropped != "" {
 		note := "[zero] this server also returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
 		if output == "" {
 			note = "[zero] this server returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."

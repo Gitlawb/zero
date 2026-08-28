@@ -529,21 +529,71 @@ func TextContent(content []Content) string {
 // Counts are grouped by mime type and ordered by first appearance, so the same
 // result always produces the same sentence.
 func DroppedContentSummary(content []Content) string {
-	forwarded := ImageBlocks(content)
-	next := 0
-	labels := make([]string, 0, len(content))
-	counts := make(map[string]int, len(content))
-	for _, item := range content {
+	_, disp := forwardImages(content)
+	return droppedContentNote(content, disp)
+}
+
+// ImageBlocks converts MCP image content into the same ImageBlock channel
+// capture tools already use. Blocks that cannot be decoded, exceed
+// imageinput.MaxImageBytes individually, sniff to a type outside the provider
+// allow-list, or would push the result over an aggregate
+// imageinput.MaxImageBytes budget, are left for DroppedContentSummary to name.
+//
+// The aggregate cap is the same 10 MiB as the per-image cap: a server that
+// returns many individually valid images must not retain all of them in
+// Result.Images. Once the next valid image would exceed the remaining
+// budget it is skipped; a later smaller image may still fit. Once no
+// budget remains, later image payloads are not decoded — the cap is a
+// work limit, not only a retention limit.
+func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
+	images, _ := forwardImages(content)
+	return images
+}
+
+// itemDisp is the per-item forwarding/drop disposition produced by the
+// single-pass conversion. DroppedContentSummary is built from this so a
+// valid image is never base64-decoded a second time just to name what was
+// kept versus dropped.
+type itemDisp uint8
+
+const (
+	dispText itemDisp = iota
+	dispForwarded
+	dispDropped
+)
+
+// decodeImageBase64 is the MCP image payload decoder. Tests replace it to
+// count decode attempts; production uses standard base64.
+var decodeImageBase64 = base64.StdEncoding.DecodeString
+
+func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
+	disp := make([]itemDisp, len(content))
+	var images []zeroruntime.ImageBlock
+	remaining := imageinput.MaxImageBytes
+	for i, item := range content {
 		if item.Type == "text" {
+			disp[i] = dispText
 			continue
 		}
-		if image, ok := imageBlockFromContent(item); ok {
-			if next < len(forwarded) &&
-				image.MediaType == forwarded[next].MediaType &&
-				bytes.Equal(image.Data, forwarded[next].Data) {
-				next++
+		if item.Type == "image" && remaining > 0 {
+			if image, ok := imageBlockFromContent(item); ok && len(image.Data) <= remaining {
+				images = append(images, image)
+				remaining -= len(image.Data)
+				disp[i] = dispForwarded
 				continue
 			}
+		}
+		disp[i] = dispDropped
+	}
+	return images, disp
+}
+
+func droppedContentNote(content []Content, disp []itemDisp) string {
+	labels := make([]string, 0, len(content))
+	counts := make(map[string]int, len(content))
+	for i, item := range content {
+		if i >= len(disp) || disp[i] != dispDropped {
+			continue
 		}
 		// Prefer the mime type: "image/png" tells the reader more than "image".
 		// A server may omit it, so fall back to the block type rather than
@@ -574,33 +624,6 @@ func DroppedContentSummary(content []Content) string {
 	return strings.Join(parts, ", ")
 }
 
-// ImageBlocks converts MCP image content into the same ImageBlock channel
-// capture tools already use. Blocks that cannot be decoded, exceed
-// imageinput.MaxImageBytes individually, sniff to a type outside the provider
-// allow-list, or would push the result over an aggregate
-// imageinput.MaxImageBytes budget, are left for DroppedContentSummary to name.
-//
-// The aggregate cap is the same 10 MiB as the per-image cap: a server that
-// returns many individually valid images must not retain all of them in
-// Result.Images. Once the next valid image would exceed the remaining
-// budget it is skipped; a later smaller image may still fit.
-func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
-	var images []zeroruntime.ImageBlock
-	remaining := imageinput.MaxImageBytes
-	for _, item := range content {
-		image, ok := imageBlockFromContent(item)
-		if !ok {
-			continue
-		}
-		if len(image.Data) > remaining {
-			continue
-		}
-		images = append(images, image)
-		remaining -= len(image.Data)
-	}
-	return images
-}
-
 func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {
 	if item.Type != "image" {
 		return zeroruntime.ImageBlock{}, false
@@ -612,7 +635,7 @@ func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {
 	if base64.StdEncoding.DecodedLen(len(raw)) > imageinput.MaxImageBytes {
 		return zeroruntime.ImageBlock{}, false
 	}
-	data, err := base64.StdEncoding.DecodeString(raw)
+	data, err := decodeImageBase64(raw)
 	if err != nil {
 		return zeroruntime.ImageBlock{}, false
 	}
