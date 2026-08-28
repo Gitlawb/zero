@@ -257,6 +257,36 @@ func TestExtractTarGzAllowsSafeSymlink(t *testing.T) {
 		t.Fatalf("Write target: %v", err)
 	}
 
+	// Couvre le cas d'un sous-dossier lié avec extraction d'un fichier traversant le lien
+	h3 := &tar.Header{
+		Name:     "sublink",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "subdir",
+	}
+	if err := tw.WriteHeader(h3); err != nil {
+		t.Fatalf("WriteHeader sublink: %v", err)
+	}
+	h4 := &tar.Header{
+		Name:     "subdir",
+		Typeflag: tar.TypeDir,
+		Mode:     0o755,
+	}
+	if err := tw.WriteHeader(h4); err != nil {
+		t.Fatalf("WriteHeader subdir: %v", err)
+	}
+	h5 := &tar.Header{
+		Name:     "sublink/nested.txt",
+		Typeflag: tar.TypeReg,
+		Mode:     0o644,
+		Size:     6,
+	}
+	if err := tw.WriteHeader(h5); err != nil {
+		t.Fatalf("WriteHeader nested: %v", err)
+	}
+	if _, err := tw.Write([]byte("nested")); err != nil {
+		t.Fatalf("Write nested: %v", err)
+	}
+
 	tw.Close()
 	gw.Close()
 	file.Close()
@@ -273,6 +303,14 @@ func TestExtractTarGzAllowsSafeSymlink(t *testing.T) {
 	}
 	if gotLink != "target.txt" {
 		t.Fatalf("link target = %q, want %q", gotLink, "target.txt")
+	}
+
+	nestedData, err := os.ReadFile(filepath.Join(destDir, "subdir", "nested.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile nested: %v", err)
+	}
+	if string(nestedData) != "nested" {
+		t.Fatalf("nestedData = %q, want %q", string(nestedData), "nested")
 	}
 }
 
