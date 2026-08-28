@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -335,6 +336,17 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	return session, nil
 }
 
+// CreateDiscardable creates a session and returns a cleanup function scoped to
+// that exact creation. It is intended for multi-step setup flows that must roll
+// back when a later step fails, without exposing a general session-deletion API.
+func (store *Store) CreateDiscardable(input CreateInput) (Metadata, func() error, error) {
+	created, err := store.Create(input)
+	if err != nil {
+		return Metadata{}, nil, err
+	}
+	return created, func() error { return store.discardCreated(created) }, nil
+}
+
 func (store *Store) Get(sessionID string) (*Metadata, error) {
 	if !ValidSessionID(sessionID) {
 		return nil, fmt.Errorf("invalid zero session id %q", sessionID)
@@ -349,14 +361,14 @@ func (store *Store) Get(sessionID string) (*Metadata, error) {
 	return &session, nil
 }
 
-// DiscardCreated removes a session created by the current operation when that
+// discardCreated removes a session created by the current operation when that
 // operation failed before it could commit any events to metadata. The complete Metadata
 // returned by Create acts as the ownership receipt: a caller cannot use this
 // helper to remove an unrelated session with only a guessed id. A session whose
 // metadata committed any event is never removed. The events file may contain an
 // uncommitted append when AppendEvents failed during sync or metadata update;
 // that partial batch belongs to the failed operation and is removed too.
-func (store *Store) DiscardCreated(created Metadata) error {
+func (store *Store) discardCreated(created Metadata) error {
 	if !ValidSessionID(created.SessionID) {
 		return fmt.Errorf("invalid zero session id %q", created.SessionID)
 	}
@@ -375,7 +387,7 @@ func (store *Store) DiscardCreated(created Metadata) error {
 	if err != nil {
 		return fmt.Errorf("read zero session before cleanup: %w", err)
 	}
-	if current.CreatedAt != created.CreatedAt || current.Tag != created.Tag || current.Title != created.Title || current.Cwd != created.Cwd {
+	if !reflect.DeepEqual(current, created) {
 		return fmt.Errorf("zero session %s no longer matches the session created by this operation", created.SessionID)
 	}
 	if current.EventCount != 0 {
