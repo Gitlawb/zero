@@ -63,8 +63,9 @@ func tokenToStored(t oauth.Token) StoredToken {
 }
 
 // OAuthConfig describes how to authenticate to a remote MCP server using OAuth.
-// Endpoints may be discovered from the server's metadata document; explicit
-// values here override or fill in anything discovery cannot provide.
+// Endpoints may be discovered through RFC 9728 protected-resource metadata and
+// RFC 8414 authorization-server metadata; explicit values override or fill in
+// anything discovery cannot provide.
 type OAuthConfig struct {
 	ClientID              string
 	ClientSecret          string
@@ -153,9 +154,9 @@ func validateResolvedEndpoints(metadata authServerMetadata) error {
 	return nil
 }
 
-// resolveAuthorizationServer discovers metadata and applies explicit config
-// overrides. Configured endpoints take precedence over discovered ones, and act
-// as a fallback when discovery fails or omits a value.
+// resolveAuthorizationServer follows protected-resource metadata when the MCP
+// endpoint advertises it, falls back to direct authorization-server discovery
+// for legacy providers, then applies explicit config overrides.
 func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseURL string, cfg OAuthConfig) (authServerMetadata, error) {
 	// When the config supplies both the authorization and token endpoints
 	// directly, skip network discovery entirely: there is nothing to discover,
@@ -175,8 +176,18 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 	}
 
 	discoveryBase := strings.TrimSpace(cfg.IssuerURL)
+	protectedResourceDiscovery := false
 	if discoveryBase == "" {
-		discoveryBase = baseURL
+		issuer, found, protectedErr := discoverProtectedResourceAuthorizationServer(ctx, client, baseURL)
+		if protectedErr != nil {
+			return authServerMetadata{}, protectedErr
+		}
+		if found {
+			discoveryBase = issuer
+			protectedResourceDiscovery = true
+		} else {
+			discoveryBase = baseURL
+		}
 	}
 
 	metadata, err := discoverAuthorizationServer(ctx, client, discoveryBase)
@@ -184,6 +195,9 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 		// Discovery failures are non-fatal when the config supplies the endpoints
 		// directly; otherwise surface the discovery error.
 		metadata = authServerMetadata{}
+	}
+	if protectedResourceDiscovery && strings.TrimSpace(metadata.Issuer) != "" && strings.TrimSpace(metadata.Issuer) != strings.TrimSpace(discoveryBase) {
+		return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata issuer does not match protected resource metadata")
 	}
 
 	if endpoint := strings.TrimSpace(cfg.AuthorizationEndpoint); endpoint != "" {
