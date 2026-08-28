@@ -67,10 +67,38 @@ func retainedMCPSkipped(skipped []mcp.SkippedServer, previous config.MCPConfig, 
 // canonicalMCPServers keys the configured servers the way registration does, so
 // a padded config key and the trimmed name recorded in a SkippedServer refer to
 // the same entry.
+//
+// DISABLED ENTRIES ARE EXCLUDED, because registration excludes them
+// (NormalizeConfig skips raw.Disabled) and an observation is about a server that
+// actually ran. ValidateUniqueNames deliberately accepts an enabled "docs"
+// alongside a disabled " docs" for that reason. Copying both into a map keyed by
+// the trimmed name made them collide, and Go randomises map iteration, so the
+// before and after snapshots each picked a winner independently. An unrelated
+// /mcp operation that left the enabled entry untouched could then compare it
+// against the disabled alias, find them different, and discard the failure: a
+// server that is still unavailable reported as fine, on some runs and not others.
+// Measured at 20% of runs on an unchanged config before this.
+//
+// A canonical name claimed by two ENABLED entries is ambiguous rather than
+// arbitrary. ValidateUniqueNames rejects that config so it should not arrive
+// here, but if it does there is no way to say which entry an observation was
+// about, so the name is dropped and the observation ages out with it.
 func canonicalMCPServers(cfg config.MCPConfig) map[string]config.MCPServerConfig {
 	servers := make(map[string]config.MCPServerConfig, len(cfg.Servers))
+	ambiguous := make(map[string]struct{})
 	for name, server := range cfg.Servers {
-		servers[strings.TrimSpace(name)] = server
+		if server.Disabled {
+			continue
+		}
+		canonical := strings.TrimSpace(name)
+		if _, clash := servers[canonical]; clash {
+			ambiguous[canonical] = struct{}{}
+			continue
+		}
+		servers[canonical] = server
+	}
+	for canonical := range ambiguous {
+		delete(servers, canonical)
 	}
 	return servers
 }
