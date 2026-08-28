@@ -38,7 +38,11 @@ func NewBashTool(workspaceRoot string) Tool {
 }
 
 func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
-	shellGuidance := shellGuidanceForGOOS(runtime.GOOS)
+	// The effective Windows shell depends on whether PowerShell can start inside
+	// the run's sandbox, which is unknown when this static schema is built. Keep
+	// the schema grammar-neutral; the run-specific <environment> block is built
+	// with the sandbox engine and is the single source of shell syntax truth.
+	shellGuidance := "Use the effective shell syntax stated in the run's <environment> block."
 	return bashTool{
 		baseTool: baseTool{
 			name:        "bash",
@@ -107,9 +111,6 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	// unsandboxed) can actually bypass the MSYS guard instead of being
 	// hard-blocked by the same check it was meant to escalate past.
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtime.GOOS)); issue != nil && !msysGuardBypassed(issue, commandEngine) {
-		return shellIssueBlockResult(*issue)
-	}
 
 	// Pre-execution safety: refuse interactive commands (editors, pagers, REPLs,
 	// remote shells, etc.) that would hang the non-interactive agent until the
@@ -122,18 +123,23 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	if err != nil {
 		return errorResult("Error running bash: " + err.Error())
 	}
+	effectiveShell := shellRuntimeForEngine(commandEngine, absoluteCwd)
+	if issue := detectShellCommandIssueForRuntime(commandText, effectiveShell); issue != nil && !msysGuardBypassed(issue, commandEngine) {
+		return shellIssueBlockResult(*issue)
+	}
 
 	commandCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 
 	meta := map[string]string{
 		"cwd":        relativeCwd,
+		"shell_kind": string(effectiveShell.Kind),
 		"timeout_ms": strconv.Itoa(timeoutMS),
 	}
 	if commandEngine == nil && sandboxPermissions == SandboxPermissionsRequireEscalated {
 		meta["sandbox_permissions"] = string(SandboxPermissionsRequireEscalated)
 	}
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommandWithRuntime(commandCtx, commandText, absoluteCwd, commandEngine, effectiveShell)
 	if err != nil {
 		meta["exit_code"] = "-1"
 		return Result{
@@ -197,7 +203,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		outText, errText, truncated := prepareBashOutput(stdoutText, stdout.total, stderrText, stderrTotal, meta, directBudget)
 		result := Result{
 			Status:    StatusError,
-			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
+			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta, effectiveShell),
 			Truncated: truncated,
 			Meta:      meta,
 		}
@@ -298,6 +304,10 @@ func shellIssueBlockResult(issue shellIssue) Result {
 // the fallback. Only cmd.exe needs the raw command-line override.
 func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
 	hostShell := shellRuntimeForEngine(engine, absoluteCwd)
+	return buildBashCommandWithRuntime(ctx, commandText, absoluteCwd, engine, hostShell)
+}
+
+func buildBashCommandWithRuntime(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine, hostShell shellRuntime) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
 	spec := zeroSandbox.CommandSpec{
 		Name: hostShell.Executable,
 		Args: hostShell.arguments(commandText),
@@ -635,9 +645,9 @@ func truncateHeadTailWithTotal(value string, total, maxBytes int) (string, int, 
 	return utf8Prefix(value, head) + marker + utf8Suffix(value, tail), total, true
 }
 
-func formatBashOutputWithShellHint(stdout string, stderr string, exitCode int, meta map[string]string) string {
+func formatBashOutputWithShellHint(stdout string, stderr string, exitCode int, meta map[string]string, shell shellRuntime) string {
 	output := formatBashOutput(stdout, stderr, exitCode)
-	if issue := detectShellOutputIssueForRuntime(stdout+"\n"+stderr, detectShellRuntime(runtime.GOOS)); issue != nil {
+	if issue := detectShellOutputIssueForRuntime(stdout+"\n"+stderr, shell); issue != nil {
 		meta["shell_issue"] = issue.Kind
 		output = appendShellIssueHint(output, *issue)
 	}
