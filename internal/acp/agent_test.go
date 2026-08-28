@@ -1435,10 +1435,12 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
 	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
 		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "read the file"}},
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "arguments": `{"path":"scope.go"}`}},
-		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "status": "ok", "output": "package sandbox"}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "status": "ok", "output": "package sandbox", "changedFiles": []string{"scope.go", "scope_test.go"}}},
 		// An older record spells the id "id" rather than "toolCallId".
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "bash", "id": "call-88", "arguments": `{"command":"go build"}`}},
 		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "bash", "id": "call-88", "status": "error", "output": "build failed"}},
+		// A start with no result is an interrupted call, not a completed one.
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "grep", "toolCallId": "call-99", "arguments": `{"pattern":"TODO"}`}},
 		// No id at all: unpairable, so it must be skipped rather than replayed.
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "orphan", "arguments": "{}"}},
 	}); err != nil {
@@ -1453,18 +1455,28 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
 	}
 	type want struct {
 		kind, id, status string
+		locations        []string
 	}
 	wants := []want{
-		{UpdateToolCall, "call-77", ToolStatusCompleted},
-		{UpdateToolCallUpdate, "call-77", ToolStatusCompleted},
-		{UpdateToolCall, "call-88", ToolStatusCompleted},
-		{UpdateToolCallUpdate, "call-88", ToolStatusFailed},
+		{UpdateToolCall, "call-77", ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, "call-77", ToolStatusCompleted, []string{"scope.go", "scope_test.go"}},
+		{UpdateToolCall, "call-88", ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, "call-88", ToolStatusFailed, nil},
+		{UpdateToolCall, "call-99", ToolStatusInProgress, nil},
 	}
 	for i, w := range wants {
 		select {
 		case update := <-loader.tools:
 			if update.SessionUpdate != w.kind || update.ToolCallID != w.id || update.Status != w.status {
 				t.Fatalf("tool update %d = %+v, want %s/%s/%s", i, update, w.kind, w.id, w.status)
+			}
+			if len(update.Locations) != len(w.locations) {
+				t.Fatalf("tool update %d locations = %+v, want %v", i, update.Locations, w.locations)
+			}
+			for j, path := range w.locations {
+				if update.Locations[j].Path != path {
+					t.Fatalf("tool update %d location %d = %+v, want %q", i, j, update.Locations[j], path)
+				}
 			}
 		case <-ctx.Done():
 			t.Fatalf("tool update %d never arrived", i)
@@ -1486,6 +1498,92 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
 	case update := <-resumer.tools:
 		t.Fatalf("session/resume replayed tool activity: %+v", update)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// Drive the callback-to-store boundary through session/prompt rather than
+// seeding replay-shaped events by hand. A fresh agent must then reconstruct the
+// same call/result pair and changed-file locations from the durable log.
+func TestACPPromptPersistsToolActivityForFreshLoad(t *testing.T) {
+	deps := testDeps(t)
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		call := agent.ToolCall{ID: "call-live", Name: "edit_file", Arguments: `{"path":"a.go"}`}
+		result := agent.ToolResult{
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusOK,
+			Output:       "updated",
+			ChangedFiles: []string{"a.go", "b.go"},
+		}
+		opts.OnToolCall(call)
+		opts.OnToolResult(result)
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workspace := t.TempDir()
+	writer := newHarness(t, deps)
+	var created NewSessionResult
+	if err := writer.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := writer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID,
+		Prompt:    []ContentBlock{{Type: "text", Text: "edit the files"}},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	writer.stop()
+
+	events, err := deps.Store.ReadEvents(created.SessionID)
+	if err != nil {
+		t.Fatalf("read persisted prompt events: %v", err)
+	}
+	wantTypes := []sessions.EventType{
+		sessions.EventMessage,
+		sessions.EventToolCall,
+		sessions.EventToolResult,
+		sessions.EventMessage,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("persisted %d events, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for i, want := range wantTypes {
+		if events[i].Type != want {
+			t.Fatalf("event %d type = %s, want %s", i, events[i].Type, want)
+		}
+	}
+	rawResult, err := json.Marshal(events[2].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedResult struct {
+		ToolCallID   string   `json:"toolCallId"`
+		ChangedFiles []string `json:"changedFiles"`
+	}
+	if err := json.Unmarshal(rawResult, &storedResult); err != nil {
+		t.Fatal(err)
+	}
+	if storedResult.ToolCallID != "call-live" || strings.Join(storedResult.ChangedFiles, ",") != "a.go,b.go" {
+		t.Fatalf("stored tool result = %+v", storedResult)
+	}
+
+	loader := newHarness(t, deps)
+	defer loader.stop()
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	start := <-loader.tools
+	result := <-loader.tools
+	if start.SessionUpdate != UpdateToolCall || start.ToolCallID != "call-live" || start.Status != ToolStatusInProgress {
+		t.Fatalf("replayed tool start = %+v", start)
+	}
+	if result.SessionUpdate != UpdateToolCallUpdate || result.ToolCallID != "call-live" || result.Status != ToolStatusCompleted {
+		t.Fatalf("replayed tool result = %+v", result)
+	}
+	if len(result.Locations) != 2 || result.Locations[0].Path != "a.go" || result.Locations[1].Path != "b.go" {
+		t.Fatalf("replayed tool locations = %+v", result.Locations)
 	}
 }
 

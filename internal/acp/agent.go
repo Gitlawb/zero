@@ -424,6 +424,15 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		return "", RPCError(codeInternalError, "workspace: "+err.Error())
 	}
 	note := &notifier{conn: a.conn, sessionID: sess.id}
+	// Persist the user message before the agent can emit tool callbacks. Tool
+	// starts and results are appended synchronously from those callbacks, so the
+	// durable log has the same order the client observed and an interrupted call
+	// remains visible after a fresh-process load.
+	var persistenceErr error
+	persist := func(input sessions.AppendEventInput) {
+		persistenceErr = errors.Join(persistenceErr, a.persistEvent(sess.id, input))
+	}
+	persist(messageEvent("user", userText))
 
 	opts := agent.Options{
 		Cwd:            sess.cwd,
@@ -437,8 +446,12 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		Images:         images,
 		OnText:         note.text,
 		OnReasoning:    note.thought,
-		OnToolCall:     note.toolCall,
+		OnToolCall: func(call agent.ToolCall) {
+			persist(toolCallEvent(call))
+			note.toolCall(call)
+		},
 		OnToolResult: func(result agent.ToolResult) {
+			persist(toolResultEvent(result))
 			note.toolResult(result)
 			if result.Name == "update_plan" {
 				a.emitPlan(registry, note)
@@ -451,18 +464,20 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 
 	agentPrompt := buildPrompt(sess.snapshotHistory(), userText)
 	result, runErr := a.deps.RunAgent(ctx, agentPrompt, provider, opts)
+	if result.FinalAnswer != "" {
+		persist(messageEvent("assistant", result.FinalAnswer))
+	}
+	sess.appendHistory(turnRecord{user: userText, assistant: result.FinalAnswer})
+	a.warnPersistence(
+		note,
+		"save session history",
+		"Could not save session history. This turn is available in memory, but future resume may miss it until storage recovers.",
+		persistenceErr,
+	)
 
 	reason, stopErr := stopReasonFor(result, runErr)
 	if stopErr != nil {
 		return "", RPCError(codeInternalError, stopErr.Error())
-	}
-	if err := a.persistTurn(sess, userText, result.FinalAnswer); err != nil {
-		a.warnPersistence(
-			note,
-			"save session history",
-			"Could not save session history. This turn is available in memory, but future resume may miss it until storage recovers.",
-			err,
-		)
 	}
 	return reason, nil
 }
@@ -722,25 +737,43 @@ func (a *Agent) configOptions(s *acpSession) []SessionConfigOption {
 
 // ---- persistence + continuity ----
 
-func (a *Agent) persistTurn(sess *acpSession, user, assistant string) error {
-	defer sess.appendHistory(turnRecord{user: user, assistant: assistant})
+func (a *Agent) persistEvent(sessionID string, input sessions.AppendEventInput) error {
 	if a.deps.Store == nil {
 		return nil
 	}
-	events := []sessions.AppendEventInput{
-		{
-			Type:    sessions.EventMessage,
-			Payload: map[string]any{"role": "user", "content": user},
+	_, err := a.deps.Store.AppendEvents(sessionID, []sessions.AppendEventInput{input})
+	return err
+}
+
+func messageEvent(role, content string) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": role, "content": content},
+	}
+}
+
+func toolCallEvent(call agent.ToolCall) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventToolCall,
+		Payload: map[string]any{
+			"toolCallId": call.ID,
+			"name":       call.Name,
+			"arguments":  call.Arguments,
 		},
 	}
-	if assistant != "" {
-		events = append(events, sessions.AppendEventInput{
-			Type:    sessions.EventMessage,
-			Payload: map[string]any{"role": "assistant", "content": assistant},
-		})
+}
+
+func toolResultEvent(result agent.ToolResult) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventToolResult,
+		Payload: map[string]any{
+			"toolCallId":   result.ToolCallID,
+			"name":         result.Name,
+			"status":       result.Status,
+			"output":       result.Output,
+			"changedFiles": append([]string(nil), result.ChangedFiles...),
+		},
 	}
-	_, err := a.deps.Store.AppendEvents(sess.id, events)
-	return err
 }
 
 // persistedMessage is one entry of the restored transcript in stored order. It
@@ -877,12 +910,13 @@ func replayToolUpdate(event sessions.Event) *ToolCallUpdate {
 		return nil
 	}
 	var payload struct {
-		Name       string `json:"name"`
-		ToolCallID string `json:"toolCallId"`
-		ID         string `json:"id"`
-		Arguments  string `json:"arguments"`
-		Status     string `json:"status"`
-		Output     string `json:"output"`
+		Name         string   `json:"name"`
+		ToolCallID   string   `json:"toolCallId"`
+		ID           string   `json:"id"`
+		Arguments    string   `json:"arguments"`
+		Status       string   `json:"status"`
+		Output       string   `json:"output"`
+		ChangedFiles []string `json:"changedFiles"`
 	}
 	if json.Unmarshal(raw, &payload) != nil {
 		return nil
@@ -896,17 +930,19 @@ func replayToolUpdate(event sessions.Event) *ToolCallUpdate {
 	}
 	if event.Type == sessions.EventToolCall {
 		upd := toolCallStart(agent.ToolCall{ID: id, Name: payload.Name, Arguments: payload.Arguments})
-		// The call already ran; replaying it as in_progress would leave a
-		// permanently spinning row when no result event follows it (a session
-		// killed mid-call). Its own result event supplies the real outcome.
-		upd.Status = ToolStatusCompleted
 		return &upd
 	}
 	status := tools.Status(payload.Status)
 	if status == "" {
 		status = tools.StatusOK
 	}
-	upd := toolCallResult(agent.ToolResult{ToolCallID: id, Name: payload.Name, Status: status, Output: payload.Output})
+	upd := toolCallResult(agent.ToolResult{
+		ToolCallID:   id,
+		Name:         payload.Name,
+		Status:       status,
+		Output:       payload.Output,
+		ChangedFiles: append([]string(nil), payload.ChangedFiles...),
+	})
 	return &upd
 }
 
