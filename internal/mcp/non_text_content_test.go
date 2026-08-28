@@ -201,8 +201,8 @@ func TestAnImageWithPayloadIsForwarded(t *testing.T) {
 
 	result := tool.Run(context.Background(), map[string]any{})
 
-	if strings.Contains(result.Output, "(empty MCP tool result)") {
-		t.Fatalf("image payload still reported as empty:\n%s", result.Output)
+	if result.Output != "[image forwarded]" {
+		t.Fatalf("image-only Output = %q, want [image forwarded] so the tool_result is not an empty body", result.Output)
 	}
 	if strings.Contains(result.Output, "cannot forward") {
 		t.Fatalf("a forwarded image is still described as unforwardable:\n%s", result.Output)
@@ -263,6 +263,9 @@ func TestTextAndImageKeepsTextAndForwardsImage(t *testing.T) {
 	}
 	if strings.Contains(result.Output, "cannot forward") {
 		t.Errorf("a forwarded image is still described as unforwardable:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "[image forwarded]") {
+		t.Errorf("text+image result substituted a placeholder over the text:\n%s", result.Output)
 	}
 	if len(result.Images) != 1 {
 		t.Fatalf("Images len = %d, want 1", len(result.Images))
@@ -336,6 +339,12 @@ func TestAnOversizedImageIsDroppedAndNamed(t *testing.T) {
 	if !strings.Contains(result.Output, "image/png") {
 		t.Errorf("oversized image was not named in the drop summary:\n%s", result.Output)
 	}
+	if !strings.Contains(result.Output, "cannot forward yet") {
+		t.Errorf("individually oversized image should stay unforwardable, not a budget skip:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "image budget") {
+		t.Errorf("individually oversized image was described as a budget skip:\n%s", result.Output)
+	}
 }
 
 func TestAggregateImageBudgetForwardsTheFirstAndNamesTheRest(t *testing.T) {
@@ -361,11 +370,23 @@ func TestAggregateImageBudgetForwardsTheFirstAndNamesTheRest(t *testing.T) {
 	if got := len(result.Images[0].Data); got != imageinput.MaxImageBytes/2+1 {
 		t.Errorf("forwarded image size = %d, want %d", got, imageinput.MaxImageBytes/2+1)
 	}
+	if !strings.Contains(result.Output, "[image forwarded]") {
+		t.Errorf("the forwarded first image has no placeholder:\n%s", result.Output)
+	}
 	if !strings.Contains(result.Output, "image/png") {
 		t.Errorf("the dropped second image was not named:\n%s", result.Output)
 	}
-	if !strings.Contains(result.Output, "cannot forward") {
-		t.Errorf("the dropped second image is not described as unforwardable:\n%s", result.Output)
+	if !strings.Contains(result.Output, "which exceeded this result's image budget") {
+		t.Errorf("the dropped second image is not described as a budget skip:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Retrying with fewer images can recover this payload.") {
+		t.Errorf("the output does not tell the model a retry can recover the payload:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "cannot forward yet") {
+		t.Errorf("a budget-skipped image is described as unforwardable:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "Retrying cannot recover this payload.") {
+		t.Errorf("a budget-skipped image is described as unrecoverable:\n%s", result.Output)
 	}
 }
 
@@ -418,11 +439,23 @@ func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
 	if len(result.Images) != 2 {
 		t.Fatalf("Images len = %d, want 2", len(result.Images))
 	}
+	if !strings.Contains(result.Output, "[image forwarded]") {
+		t.Errorf("forwarded images have no placeholder:\n%s", result.Output)
+	}
 	if !strings.Contains(result.Output, "image/png") {
 		t.Errorf("skipped images were not named:\n%s", result.Output)
 	}
+	if !strings.Contains(result.Output, "which exceeded this result's image budget") {
+		t.Errorf("budget-skipped images are not described as a budget drop:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Retrying with fewer images can recover this payload.") {
+		t.Errorf("budget-skipped images do not say a retry can recover them:\n%s", result.Output)
+	}
 	if !strings.Contains(result.Output, "audio/wav") {
 		t.Errorf("audio was not named:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "cannot forward yet") {
+		t.Errorf("audio is not described as unforwardable:\n%s", result.Output)
 	}
 	if strings.Contains(result.Output, "(empty MCP tool result)") {
 		t.Errorf("forwarded images still reported as empty:\n%s", result.Output)
@@ -440,6 +473,9 @@ func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
 	}
 	if len(oneResult.Images) != 1 {
 		t.Fatalf("one-image Images len = %d, want 1", len(oneResult.Images))
+	}
+	if oneResult.Output != "[image forwarded]" {
+		t.Fatalf("one-image Output = %q, want [image forwarded]", oneResult.Output)
 	}
 	if strings.Contains(oneResult.Output, "cannot forward") {
 		t.Fatalf("a forwarded image is still described as unforwardable:\n%s", oneResult.Output)
