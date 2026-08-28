@@ -87,8 +87,18 @@ func finalizeToolOutcome(result Result, boundaryOutput string) Result {
 		originalBytes = previous.Diagnostics.OriginalBytes
 		originalTokens = previous.Diagnostics.EstimatedOriginalTokens
 	}
-	modelBytes := len(result.Output)
-	modelTokens := estimateOutputTokens(result.Output)
+	// MEASURE WHAT THE MODEL ACTUALLY RECEIVES.
+	//
+	// The enforcement notices are prepended to the model view on the way out
+	// (agent.ToolResult.ModelOutput), so a result carrying them costs more context
+	// than result.Output alone. Measuring the bare output undercounts every
+	// disclosed call and hands the budget a figure the model never saw.
+	//
+	// ModelView below stays the bare output on purpose: ModelOutput prepends the
+	// notices itself, so storing them here would send them twice.
+	canonicalModelOutput := WithEnforcementNotices(result.Output, result.EnforcementNotices)
+	modelBytes := len(canonicalModelOutput)
+	modelTokens := estimateOutputTokens(canonicalModelOutput)
 
 	var artifact *ToolArtifact
 	if previous.Finalized() {
