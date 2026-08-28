@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -257,7 +259,11 @@ func importWorkspaceWarning(sessionCwd string) string {
 	if err != nil {
 		return ""
 	}
-	if filepath.Clean(working) == filepath.Clean(recorded) {
+	return importWorkspaceWarningForOS(recorded, working, runtime.GOOS)
+}
+
+func importWorkspaceWarningForOS(recorded string, working string, goos string) string {
+	if pathsEqualForOS(working, recorded, goos) {
 		return ""
 	}
 	// The comparison above runs on the recorded path because that is the
@@ -265,6 +271,26 @@ func importWorkspaceWarning(sessionCwd string) string {
 	// through the same sanitizer as every other displayed foreign field.
 	return "Note: this session ran in " + agentsessions.DisplayField(recorded) + ", not the current directory.\n" +
 		"      Paths mentioned in it refer to that tree."
+}
+
+func pathsEqualForOS(left string, right string, goos string) bool {
+	left = cleanPathForOS(left, goos)
+	right = cleanPathForOS(right, goos)
+	if left == "." || right == "." {
+		return false
+	}
+	if goos == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func cleanPathForOS(value string, goos string) string {
+	value = strings.TrimSpace(value)
+	if goos == "windows" {
+		return path.Clean(strings.ReplaceAll(value, `\`, "/"))
+	}
+	return filepath.Clean(value)
 }
 
 func displayOrNone(value string) string {

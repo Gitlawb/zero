@@ -129,7 +129,7 @@ func TestDiscoveryGlobsNeverMatchACredentialFile(t *testing.T) {
 	}
 
 	env := testEnv(home, nil)
-	matches := globTranscripts(filepath.Join(piRoot(env), "*", "*"+transcriptExt))
+	matches := globTranscripts(piRoot(env), filepath.Join(piRoot(env), "*", "*"+transcriptExt))
 
 	if len(matches) != 1 || matches[0] != transcript {
 		t.Fatalf("glob = %v, want exactly [%s] — anything extra means discovery "+
@@ -182,9 +182,31 @@ func TestGlobRejectsASymlinkWearingATranscriptExtension(t *testing.T) {
 	real := filepath.Join(dir, "real.jsonl")
 	writeFile(t, real, `{"type":"session"}`)
 
-	matches := globTranscripts(filepath.Join(root, "*", "*"+transcriptExt))
+	matches := globTranscripts(root, filepath.Join(root, "*", "*"+transcriptExt))
 	if len(matches) != 1 || matches[0] != real {
 		t.Fatalf("glob = %v, want exactly [%s] — the symlink must be rejected", matches, real)
+	}
+}
+
+func TestGlobRejectsTranscriptBelowSymlinkedDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on Windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideTranscript := filepath.Join(outside, "escaped.jsonl")
+	writeFile(t, outsideTranscript, `{"type":"session"}`)
+	linkedDir := filepath.Join(root, "project")
+	if err := os.Symlink(outside, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+
+	matches := globTranscripts(root, filepath.Join(root, "*", "*"+transcriptExt))
+	if len(matches) != 0 {
+		t.Fatalf("glob followed a symlinked directory outside the store: %v", matches)
+	}
+	if _, err := openContained(root, filepath.Join(linkedDir, "escaped.jsonl")); err == nil {
+		t.Fatal("rooted open followed a symlink outside the store")
 	}
 }
 
@@ -192,13 +214,14 @@ func TestGlobDegradesToEmptyRatherThanFailing(t *testing.T) {
 	// A store that was never created, and a pattern that cannot compile. Both
 	// mean "this adapter has nothing", never an error that fails the command
 	// for the other six agents.
-	if got := globTranscripts(filepath.Join(t.TempDir(), "absent", "*", "*.jsonl")); len(got) != 0 {
+	root := t.TempDir()
+	if got := globTranscripts(root, filepath.Join(root, "absent", "*", "*.jsonl")); len(got) != 0 {
 		t.Errorf("missing root = %v, want empty", got)
 	}
-	if got := globTranscripts(filepath.Join(t.TempDir(), "[", "*.jsonl")); len(got) != 0 {
+	if got := globTranscripts(root, filepath.Join(root, "[", "*.jsonl")); len(got) != 0 {
 		t.Errorf("malformed pattern = %v, want empty", got)
 	}
-	if got := globTranscripts(""); len(got) != 0 {
+	if got := globTranscripts("", ""); len(got) != 0 {
 		t.Errorf("empty pattern = %v, want empty", got)
 	}
 }
@@ -212,7 +235,7 @@ func TestGlobIgnoresNonTranscriptExtensions(t *testing.T) {
 	for _, name := range []string{"a.json", "b.db", "c.jsonl.bak", "d.txt", "keep.jsonl"} {
 		writeFile(t, filepath.Join(dir, name), "{}")
 	}
-	matches := globTranscripts(filepath.Join(root, "*", "*"))
+	matches := globTranscripts(root, filepath.Join(root, "*", "*"))
 	if len(matches) != 1 || filepath.Base(matches[0]) != "keep.jsonl" {
 		t.Fatalf("glob = %v, want only keep.jsonl", matches)
 	}

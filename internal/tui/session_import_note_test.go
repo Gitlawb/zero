@@ -35,10 +35,25 @@ func TestTheImportNoteSanitizesTheForeignIdAndCwd(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 
-	m := model{sessionStore: testSessionStore(t), cwd: t.TempDir()}
-	zeroID, note, err := m.importForeignSession("claude-code:" + id)
-	if err != nil {
-		t.Fatalf("importing a foreign session: %v", err)
+	env := agentsessions.Env{Home: home, Getenv: func(name string) string {
+		if name == "CLAUDE_CONFIG_DIR" {
+			return filepath.Join(home, ".claude")
+		}
+		return ""
+	}}
+	m := model{sessionStore: testSessionStore(t), agentSessionsEnv: env, cwd: t.TempDir()}
+	started, text, cmd := m.startResumeCommand("claude-code:" + id)
+	if text != "" || cmd == nil || !started.sessionImportInFlight || started.activeSession.SessionID != "" {
+		t.Fatalf("foreign resume did not start asynchronously: text=%q cmd=%v inFlight=%v active=%q", text, cmd != nil, started.sessionImportInFlight, started.activeSession.SessionID)
+	}
+	msg, ok := cmd().(foreignSessionImportedMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("importing a foreign session: %v", msg.err)
+	}
+	zeroID := msg.result.Session.SessionID
+	note := importedSessionNote(msg.result, m.cwd)
+	if resumed, text := started.finishForeignSessionImport(msg); text != "" || resumed.activeSession.SessionID != zeroID {
+		t.Fatalf("async import result was not resumed: text=%q active=%q", text, resumed.activeSession.SessionID)
 	}
 	if zeroID == "" {
 		t.Fatal("import returned no Zero session id")
@@ -92,5 +107,27 @@ func TestTheImportNoteOmitsTheWorkspaceSentenceInTheSameTree(t *testing.T) {
 	}, here)
 	if strings.Contains(got, "It ran in") {
 		t.Errorf("a session imported from the current workspace was called foreign: %q", got)
+	}
+}
+
+func TestCompletedForeignImportDoesNotReplaceAChangedActiveSession(t *testing.T) {
+	m := model{
+		activeSession:         sessions.Metadata{SessionID: "current"},
+		sessionImportInFlight: true,
+		cwd:                   t.TempDir(),
+	}
+	msg := foreignSessionImportedMsg{
+		originSession: "previous",
+		result: agentsessions.ImportResult{
+			Session: sessions.Metadata{SessionID: "imported"},
+			Source:  agentsessions.ForeignSession{Agent: "codex", ID: "foreign"},
+		},
+	}
+	next, note := m.finishForeignSessionImport(msg)
+	if next.activeSession.SessionID != "current" {
+		t.Fatalf("completed background import replaced the active session: %q", next.activeSession.SessionID)
+	}
+	if next.sessionImportInFlight || !strings.Contains(note, "did not resume") {
+		t.Fatalf("completion state/note = inFlight:%v note:%q", next.sessionImportInFlight, note)
 	}
 }

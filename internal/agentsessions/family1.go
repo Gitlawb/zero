@@ -135,7 +135,7 @@ func discoverFamily1(
 		}
 		for _, dir := range sessionDirs {
 			if wanted[filepath.Base(dir)] &&
-				len(globTranscripts(filepath.Join(dir, "*"+transcriptExt))) > 0 {
+				len(globTranscripts(root, filepath.Join(dir, "*"+transcriptExt))) > 0 {
 				dirs = append(dirs, dir)
 			}
 		}
@@ -146,7 +146,7 @@ func discoverFamily1(
 
 	found := []ForeignSession{}
 	for _, dir := range dirs {
-		for _, path := range globTranscripts(filepath.Join(dir, "*"+transcriptExt)) {
+		for _, path := range globTranscripts(root, filepath.Join(dir, "*"+transcriptExt)) {
 			session, ok := index(agent, root, path)
 			if !ok {
 				continue
@@ -290,7 +290,7 @@ func findTranscript(root string, id string) (string, error) {
 		return "", errors.New("agentsessions: no such session: " + id)
 	}
 	for _, dir := range globSessionDirs(root) {
-		for _, path := range globTranscripts(filepath.Join(dir, "*"+transcriptExt)) {
+		for _, path := range globTranscripts(root, filepath.Join(dir, "*"+transcriptExt)) {
 			if transcriptID(path) == wanted {
 				return path, nil
 			}

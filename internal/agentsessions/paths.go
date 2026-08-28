@@ -95,8 +95,8 @@ const transcriptExt = ".jsonl"
 //
 // A malformed pattern or an unreadable directory yields no results rather than
 // an error: discovery is fail-soft by design (see Adapter).
-func globTranscripts(pattern string) []string {
-	if strings.TrimSpace(pattern) == "" {
+func globTranscripts(root string, pattern string) []string {
+	if strings.TrimSpace(root) == "" || strings.TrimSpace(pattern) == "" {
 		return nil
 	}
 	matches, err := filepath.Glob(pattern)
@@ -108,6 +108,9 @@ func globTranscripts(pattern string) []string {
 		if !strings.EqualFold(filepath.Ext(match), transcriptExt) {
 			continue
 		}
+		if pathHasSymlink(root, match) {
+			continue
+		}
 		info, err := os.Lstat(match)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
@@ -115,6 +118,30 @@ func globTranscripts(pattern string) []string {
 		safe = append(safe, match)
 	}
 	return safe
+}
+
+// pathHasSymlink rejects a match when any component beneath the trusted store
+// root is a symlink. The eventual read also goes through os.Root (openContained),
+// which binds containment at open time and closes the check/open race; this
+// discovery-time check prevents a symlinked project/date directory from being
+// indexed in the first place.
+func pathHasSymlink(root string, match string) bool {
+	relative, err := filepath.Rel(root, match)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return true
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // globSessionDirs lists the immediate subdirectories of root — one fixed level,

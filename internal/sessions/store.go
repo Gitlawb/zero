@@ -349,6 +349,58 @@ func (store *Store) Get(sessionID string) (*Metadata, error) {
 	return &session, nil
 }
 
+// DiscardCreated removes a session created by the current operation when that
+// operation failed before it could commit any events to metadata. The complete Metadata
+// returned by Create acts as the ownership receipt: a caller cannot use this
+// helper to remove an unrelated session with only a guessed id. A session whose
+// metadata committed any event is never removed. The events file may contain an
+// uncommitted append when AppendEvents failed during sync or metadata update;
+// that partial batch belongs to the failed operation and is removed too.
+func (store *Store) DiscardCreated(created Metadata) error {
+	if !ValidSessionID(created.SessionID) {
+		return fmt.Errorf("invalid zero session id %q", created.SessionID)
+	}
+	unlock, err := store.lockSession(created.SessionID)
+	if err != nil {
+		return err
+	}
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+
+	current, err := store.readMetadata(created.SessionID)
+	if err != nil {
+		return fmt.Errorf("read zero session before cleanup: %w", err)
+	}
+	if current.CreatedAt != created.CreatedAt || current.Tag != created.Tag || current.Title != created.Title || current.Cwd != created.Cwd {
+		return fmt.Errorf("zero session %s no longer matches the session created by this operation", created.SessionID)
+	}
+	if current.EventCount != 0 {
+		return fmt.Errorf("zero session %s has committed events", created.SessionID)
+	}
+
+	var cleanupErr error
+	for _, path := range []string{store.eventsPath(created.SessionID), store.metadataPath(created.SessionID)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	unlock()
+	locked = false
+	for _, path := range []string{store.lockPath(created.SessionID), store.sessionPath(created.SessionID)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if cleanupErr != nil {
+		return fmt.Errorf("discard created zero session %s: %w", created.SessionID, cleanupErr)
+	}
+	return nil
+}
+
 func (store *Store) List() ([]Metadata, error) {
 	if err := os.MkdirAll(store.RootDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create zero session root: %w", err)
