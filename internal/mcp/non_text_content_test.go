@@ -2,15 +2,26 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // tinyPNGBase64 is a 1x1 PNG. http.DetectContentType sniffs it as image/png.
 const tinyPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+// paddedPNGBase64 is a decodable image/png of decoded length n. The 8-byte
+// PNG magic is enough for http.DetectContentType; the rest is padding so
+// tests can hit size caps without committing a multi-mebibyte fixture.
+func paddedPNGBase64(n int) string {
+	raw := make([]byte, n)
+	copy(raw, "\x89PNG\r\n\x1a\n")
+	return base64.StdEncoding.EncodeToString(raw)
+}
 
 // A server that returns an image WITHOUT payload still cannot be forwarded, so
 // the delivered result must name the block rather than report "(empty MCP tool
@@ -305,5 +316,55 @@ func TestImageContentJSONDecodesDataAndStaysCompatibleWithoutIt(t *testing.T) {
 	}
 	if withoutData.Content[0].Data != "" {
 		t.Fatalf("absent data decoded as %q, want empty", withoutData.Content[0].Data)
+	}
+}
+
+func TestAnOversizedImageIsDroppedAndNamed(t *testing.T) {
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "image", MimeType: "image/png", Data: paddedPNGBase64(imageinput.MaxImageBytes + 1)},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+
+	if len(result.Images) != 0 {
+		t.Fatalf("oversized image was forwarded: %#v", result.Images)
+	}
+	if !strings.Contains(result.Output, "image/png") {
+		t.Errorf("oversized image was not named in the drop summary:\n%s", result.Output)
+	}
+}
+
+func TestAggregateImageBudgetForwardsTheFirstAndNamesTheRest(t *testing.T) {
+	// Each payload is under the per-image cap; together they exceed the
+	// aggregate MaxImageBytes budget for one result. Identical bytes are
+	// deliberate: DroppedContentSummary must name the second even though
+	// imageBlockFromContent would accept it in isolation.
+	payload := paddedPNGBase64(imageinput.MaxImageBytes/2 + 1)
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "image", MimeType: "image/png", Data: payload},
+			{Type: "image", MimeType: "image/png", Data: payload},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+
+	if len(result.Images) != 1 {
+		t.Fatalf("Images len = %d, want 1 (first fits the aggregate budget)", len(result.Images))
+	}
+	if got := len(result.Images[0].Data); got != imageinput.MaxImageBytes/2+1 {
+		t.Errorf("forwarded image size = %d, want %d", got, imageinput.MaxImageBytes/2+1)
+	}
+	if !strings.Contains(result.Output, "image/png") {
+		t.Errorf("the dropped second image was not named:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "cannot forward") {
+		t.Errorf("the dropped second image is not described as unforwardable:\n%s", result.Output)
 	}
 }
