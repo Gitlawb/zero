@@ -274,16 +274,24 @@ func protectWindowsRuntimeStamp(handle windows.Handle, reader *windows.SID) erro
 	// undo its own work. The write below still succeeds either way: the handle was
 	// opened GENERIC_WRITE before this DACL was applied, and Windows checks access
 	// at open time.
-	entries := []windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.FILE_GENERIC_READ | windows.DELETE,
-		AccessMode:        windows.SET_ACCESS,
-		Inheritance:       windows.NO_INHERITANCE,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  windows.TRUSTEE_IS_USER,
-			TrusteeValue: windows.TrusteeValueFromSID(reader),
-		},
-	}}
+	// The reader can BE one of the repair identities. A runtime root created by
+	// an elevated process is commonly owned by BUILTINAdministrators rather than
+	// by the invoking user, which is what CI runners do. Naming the same SID
+	// twice let the narrower read-only entry win and left repair unable to rewrite
+	// the stamp, so skip the reader entry when the broader grant already covers it.
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)
+	if !reader.Equals(system) && !reader.Equals(administrators) {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: windows.FILE_GENERIC_READ | windows.DELETE,
+			AccessMode:        windows.SET_ACCESS,
+			Inheritance:       windows.NO_INHERITANCE,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(reader),
+			},
+		})
+	}
 	for _, sid := range []*windows.SID{system, administrators} {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,

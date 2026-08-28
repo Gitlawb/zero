@@ -89,11 +89,17 @@ func TestStampGrantsTheRuntimeRootOwnerReadOnly(t *testing.T) {
 	if mask&readBits == 0 {
 		t.Errorf("the runtime root owner cannot read the stamp (mask 0x%08x)", mask)
 	}
-	// Not write. This is the half that fails against the old GENERIC_ALL grant:
-	// an ordinary user able to rewrite the attestation about their own sandbox
-	// setup defeats the point of protecting it.
+	// Not write, UNLESS the owner is itself a repair identity. A runtime root
+	// created by an elevated process is commonly owned by BUILTINAdministrators
+	// rather than by the invoking user, which is what CI runners do, and repair
+	// has to keep write there. Asserting no-write unconditionally failed on every
+	// runner while passing on an unelevated box.
 	const writeBits = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.WRITE_DAC | windows.WRITE_OWNER
-	if mask&writeBits != 0 {
+	if isRepairIdentity(t, owner) {
+		if mask&windows.FILE_WRITE_DATA == 0 {
+			t.Errorf("the runtime root is owned by a repair identity that cannot rewrite the stamp (mask 0x%08x)", mask)
+		}
+	} else if mask&writeBits != 0 {
 		t.Errorf("the runtime root owner can rewrite the stamp (mask 0x%08x, write bits 0x%08x)", mask, mask&writeBits)
 	}
 
@@ -139,5 +145,57 @@ func TestProtectRefusesWithoutAResolvedReader(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no identity was supplied") {
 		t.Fatalf("refused for the wrong reason, so this does not pin the guard: %v", err)
+	}
+}
+
+func isRepairIdentity(t *testing.T, sid *windows.SID) bool {
+	t.Helper()
+	for _, wellKnown := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
+		known, err := windows.CreateWellKnownSid(wellKnown)
+		if err != nil {
+			t.Fatalf("resolve well-known SID: %v", err)
+		}
+		if sid.Equals(known) {
+			return true
+		}
+	}
+	return false
+}
+
+// A READER THAT IS ALSO A REPAIR IDENTITY MUST NOT LOSE WRITE.
+//
+// The reader entry and the repair entries can name the same SID, because an
+// elevated create commonly leaves BUILTINAdministrators as the owner. Naming it
+// twice let the narrower read-only entry win, and repair could no longer rewrite
+// the stamp: setup succeeded and left an attestation nothing could replace. My
+// own regression caught this on CI and not here, since an unelevated box owns
+// the directory as the ordinary user.
+func TestReaderThatIsARepairIdentityKeepsWrite(t *testing.T) {
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatalf("resolve the Administrators SID: %v", err)
+	}
+	stamp := filepath.Join(t.TempDir(), "stamp.json")
+	if err := os.WriteFile(stamp, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(stamp),
+		windows.READ_CONTROL|windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatalf("open the stamp: %v", err)
+	}
+	if err := protectWindowsRuntimeStamp(handle, administrators); err != nil {
+		windows.CloseHandle(handle)
+		t.Fatalf("protect the stamp: %v", err)
+	}
+	windows.CloseHandle(handle)
+
+	mask, present := stampACEMask(t, stamp, administrators)
+	if !present {
+		t.Fatal("Administrators has no ACE at all")
+	}
+	if mask&windows.FILE_WRITE_DATA == 0 {
+		t.Errorf("Administrators lost write when it was also the resolved reader (mask 0x%08x)", mask)
 	}
 }
