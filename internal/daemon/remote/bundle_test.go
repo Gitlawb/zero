@@ -323,6 +323,21 @@ func TestExtractBundleConcurrentSameDestAlwaysLeavesATree(t *testing.T) {
 	}
 }
 
+// Staging directories live beside dest under a reserved dot prefix, so a link id
+// must never be able to name one.
+func TestSanitizeLinkIDRejectsDotPrefixedIDs(t *testing.T) {
+	for _, id := range []string{".", "..", ".staging-1", ".staging-abc", ".git", "..foo", ".hidden"} {
+		if _, err := sanitizeLinkID(id); err == nil {
+			t.Errorf("sanitizeLinkID(%q) was accepted; it can collide with a staging dir", id)
+		}
+	}
+	for _, id := range []string{"proj-1", "a.b", "x_1", "A1", "repo.git"} {
+		if _, err := sanitizeLinkID(id); err != nil {
+			t.Errorf("sanitizeLinkID(%q) = %v, want accepted", id, err)
+		}
+	}
+}
+
 // The publish rename is the one step whose failure the old code could not come
 // back from: dest was already deleted. It must now put the prior tree back.
 func TestExtractBundleRestoresPriorTreeWhenPublishFails(t *testing.T) {
