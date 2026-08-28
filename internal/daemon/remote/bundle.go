@@ -232,20 +232,15 @@ func lockExtract(dest string) func() {
 // ctx is done or the wait budget runs out. The in-process lock already excludes
 // this daemon's own goroutines; this excludes a second daemon sharing the dir.
 func lockExtractFile(ctx context.Context, bundleDir, dest string) (func(), error) {
-	lockDir := filepath.Join(bundleDir, lockDirName)
-	if err := os.MkdirAll(lockDir, 0o700); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(lockDir, filepath.Base(dest)+".lock")
 	deadline := time.NewTimer(gitTimeout)
 	defer deadline.Stop()
 	for {
-		lock, err := lockutil.TryAcquireFileLockAt(bundleDir, path)
-		if err == nil {
-			return func() { _ = lock.Release() }, nil
-		}
-		if !errors.Is(err, lockutil.ErrLockHeld) {
+		release, held, err := tryLockExtractFile(bundleDir, dest)
+		if err != nil {
 			return nil, err
+		}
+		if !held {
+			return release, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -255,6 +250,24 @@ func lockExtractFile(ctx context.Context, bundleDir, dest string) (func(), error
 		case <-time.After(extractLockPoll):
 		}
 	}
+}
+
+// tryLockExtractFile takes the per-link advisory lock without waiting. It
+// reports held when a live extract owns the link, which is never an error: the
+// caller either waits or leaves that link alone.
+func tryLockExtractFile(bundleDir, dest string) (release func(), held bool, err error) {
+	lockDir := filepath.Join(bundleDir, lockDirName)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		return nil, false, err
+	}
+	lock, err := lockutil.TryAcquireFileLockAt(bundleDir, filepath.Join(lockDir, filepath.Base(dest)+".lock"))
+	if err != nil {
+		if errors.Is(err, lockutil.ErrLockHeld) {
+			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	return func() { _ = lock.Release() }, false, nil
 }
 
 // recoverBundleDir repairs what a crash left behind in dir. A staging dir whose
@@ -314,6 +327,18 @@ func restoreStagedBackup(dir, staging string, logf func(string, ...any)) bool {
 		logf("remote: staged tree in %s names a link outside the bundle dir; leaving it in place", staging)
 		return true
 	}
+	// A live extract mid-swap looks exactly like a crashed one: its backup is
+	// aside and dest is briefly absent. Only the lock tells them apart, so skip
+	// any link something still owns rather than taking its tree.
+	release, held, err := tryLockExtractFile(dir, dest)
+	if err != nil {
+		logf("remote: could not lock %s while recovering %s: %v", id, staging, err)
+		return true
+	}
+	if held {
+		return true
+	}
+	defer release()
 	if _, err := os.Stat(dest); err == nil {
 		// The link already has a tree, so the backup is a stale copy.
 		if err := os.RemoveAll(staging); err != nil {

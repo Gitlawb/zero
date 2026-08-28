@@ -697,3 +697,51 @@ func TestBridgeRecoversInterruptedExtractOnStart(t *testing.T) {
 		t.Fatalf("after re-upload a.txt = %q, err %v, want %q", got, err, "v2")
 	}
 }
+
+// A crashed extract and a live one look identical on disk: the backup is aside
+// and dest is briefly absent. A second daemon starting in that window must not
+// take the running extract's tree.
+func TestRecoverBundleDirLeavesALiveExtractAlone(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(context.Background(), testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	inPublish := make(chan struct{})
+	real := renameDir
+	var once sync.Once
+	renameDir = func(from, to string) error {
+		// Stall only the publish (clone into dest), not the restore.
+		if filepath.Base(from) == "repo" {
+			once.Do(func() { close(inPublish) })
+			time.Sleep(300 * time.Millisecond)
+		}
+		return real(from, to)
+	}
+	t.Cleanup(func() { renameDir = real })
+
+	var wg sync.WaitGroup
+	var extractErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		extractErr = extractBundle(context.Background(), testBundle(t, "a.txt", "v1"), dest, nil)
+	}()
+
+	<-inPublish
+	time.Sleep(20 * time.Millisecond) // the second daemon starts mid-swap
+	recoverBundleDir(dir, nil)
+	wg.Wait()
+
+	if extractErr != nil {
+		t.Errorf("recovery interfered with a live extract: %v", extractErr)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil {
+		t.Fatalf("dest holds no tree after the live extract: %v", err)
+	}
+	if string(got) != "v1" {
+		t.Fatalf("a.txt = %q, want the published %q", got, "v1")
+	}
+}
