@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -138,6 +139,58 @@ func TestProtectedResourceProbeSendsNoCredentials(t *testing.T) {
 	}
 }
 
+func TestProtectedResourceProbeDoesNotFollowRedirects(t *testing.T) {
+	var redirectedHits atomic.Int64
+	redirected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectedHits.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer redirected.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirected.URL+"/mcp", http.StatusFound)
+	}))
+	defer source.Close()
+
+	_, found, err := discoverProtectedResourceAuthorizationServer(context.Background(), source.Client(), source.URL+"/mcp")
+	if err != nil || found {
+		t.Fatalf("redirected probe found=%v err=%v", found, err)
+	}
+	if redirectedHits.Load() != 0 {
+		t.Fatalf("probe followed redirect %d time(s)", redirectedHits.Load())
+	}
+}
+
+func TestProtectedResourceMetadataDoesNotFollowRedirects(t *testing.T) {
+	var redirectedHits atomic.Int64
+	redirected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectedHits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              "https://attacker.example/mcp",
+			"authorization_servers": []string{"https://attacker.example"},
+		})
+	}))
+	defer redirected.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch r.URL.Path {
+		case "/mcp":
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+base+`/metadata"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/metadata":
+			http.Redirect(w, r, redirected.URL+"/metadata", http.StatusFound)
+		}
+	}))
+	defer source.Close()
+
+	_, _, err := discoverProtectedResourceAuthorizationServer(context.Background(), source.Client(), source.URL+"/mcp")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("error = %v, want redirect refusal", err)
+	}
+	if redirectedHits.Load() != 0 {
+		t.Fatalf("metadata fetch followed redirect %d time(s)", redirectedHits.Load())
+	}
+}
+
 func TestResolveAuthorizationServerRejectsProtectedIssuerMismatch(t *testing.T) {
 	authorizationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := "http://" + r.Host
@@ -166,5 +219,75 @@ func TestResolveAuthorizationServerRejectsProtectedIssuerMismatch(t *testing.T) 
 	_, err := resolveAuthorizationServer(context.Background(), resourceServer.Client(), resourceServer.URL+"/mcp", OAuthConfig{})
 	if err == nil || !strings.Contains(err.Error(), "issuer does not match") {
 		t.Fatalf("error = %v, want issuer mismatch", err)
+	}
+}
+
+func TestResolveAuthorizationServerRejectsMissingProtectedIssuer(t *testing.T) {
+	authorizationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"authorization_endpoint": base + "/authorize",
+			"token_endpoint":         base + "/token",
+		})
+	}))
+	defer authorizationServer.Close()
+	resourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch r.URL.Path {
+		case "/mcp":
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+base+`/metadata"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/metadata":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":              base + "/mcp",
+				"authorization_servers": []string{authorizationServer.URL},
+			})
+		}
+	}))
+	defer resourceServer.Close()
+
+	_, err := resolveAuthorizationServer(context.Background(), resourceServer.Client(), resourceServer.URL+"/mcp", OAuthConfig{})
+	if err == nil || !strings.Contains(err.Error(), "issuer") {
+		t.Fatalf("error = %v, want missing issuer rejection", err)
+	}
+}
+
+func TestAuthorizationServerMetadataDoesNotFollowRedirects(t *testing.T) {
+	var redirectedHits atomic.Int64
+	redirected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedHits.Add(1)
+		base := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 base,
+			"authorization_endpoint": base + "/authorize",
+			"token_endpoint":         base + "/token",
+		})
+	}))
+	defer redirected.Close()
+	authorizationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirected.URL+"/.well-known/oauth-authorization-server", http.StatusFound)
+	}))
+	defer authorizationServer.Close()
+	resourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch r.URL.Path {
+		case "/mcp":
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+base+`/metadata"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/metadata":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":              base + "/mcp",
+				"authorization_servers": []string{authorizationServer.URL},
+			})
+		}
+	}))
+	defer resourceServer.Close()
+
+	_, err := resolveAuthorizationServer(context.Background(), resourceServer.Client(), resourceServer.URL+"/mcp", OAuthConfig{})
+	if err == nil {
+		t.Fatal("authorization metadata redirect should fail")
+	}
+	if redirectedHits.Load() != 0 {
+		t.Fatalf("authorization metadata fetch followed redirect %d time(s)", redirectedHits.Load())
 	}
 }

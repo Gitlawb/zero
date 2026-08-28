@@ -121,7 +121,7 @@ type authorizationFlow struct {
 // discoverAuthorizationServer fetches the RFC 8414 authorization server metadata
 // at the well-known path under baseURL, via the shared engine.
 func discoverAuthorizationServer(ctx context.Context, client *http.Client, baseURL string) (authServerMetadata, error) {
-	meta, err := oauth.DiscoverAuthorizationServer(ctx, client, baseURL)
+	meta, err := oauth.DiscoverAuthorizationServer(ctx, withoutDiscoveryRedirects(client), baseURL)
 	if err != nil {
 		return authServerMetadata{}, err
 	}
@@ -196,8 +196,14 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 		// directly; otherwise surface the discovery error.
 		metadata = authServerMetadata{}
 	}
-	if protectedResourceDiscovery && strings.TrimSpace(metadata.Issuer) != "" && strings.TrimSpace(metadata.Issuer) != strings.TrimSpace(discoveryBase) {
-		return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata issuer does not match protected resource metadata")
+	if protectedResourceDiscovery {
+		issuer := strings.TrimSpace(metadata.Issuer)
+		if issuer == "" {
+			return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata is missing its required issuer")
+		}
+		if issuer != strings.TrimSpace(discoveryBase) {
+			return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata issuer does not match protected resource metadata")
+		}
 	}
 
 	if endpoint := strings.TrimSpace(cfg.AuthorizationEndpoint); endpoint != "" {

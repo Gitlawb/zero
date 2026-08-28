@@ -19,10 +19,25 @@ type protectedResourceMetadata struct {
 	AuthorizationServers []string `json:"authorization_servers"`
 }
 
+// withoutDiscoveryRedirects returns a shallow client copy that exposes 3xx
+// responses to the caller. Every discovered URL is validated before use, so a
+// redirect must never replace that validated target with an unchecked one.
+func withoutDiscoveryRedirects(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	copied := *client
+	copied.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &copied
+}
+
 // discoverProtectedResourceAuthorizationServer follows the RFC 9728 URL
 // advertised by a protected MCP resource. found is false when the endpoint does
 // not advertise protected-resource metadata, allowing legacy direct discovery.
 func discoverProtectedResourceAuthorizationServer(ctx context.Context, client *http.Client, resourceURL string) (issuer string, found bool, err error) {
+	client = withoutDiscoveryRedirects(client)
 	metadataURL, found, err := probeProtectedResourceMetadataURL(ctx, client, resourceURL)
 	if err != nil || !found {
 		return "", found, err
