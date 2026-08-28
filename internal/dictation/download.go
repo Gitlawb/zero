@@ -695,13 +695,8 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, asset resol
 	if err := extractTarBz2(tmpPath, stageDir, "Extracting "+label, progress); err != nil {
 		return err
 	}
-	// Remove any pre-existing destDir so Rename is atomic on the same
-	// filesystem (os.Rename refuses to overwrite a non-empty dir).
-	if err := os.RemoveAll(destDir); err != nil {
-		return fmt.Errorf("clearing previous %s install: %w", label, err)
-	}
-	if err := os.Rename(stageDir, destDir); err != nil {
-		return fmt.Errorf("promoting staged %s: %w", label, err)
+	if err := promoteStagedDir(stageDir, destDir, label); err != nil {
+		return err
 	}
 	cleanupStage = false
 	return nil
@@ -756,6 +751,49 @@ func resolveEnginePaths(engineDir string, targetWindows bool) (bin, server strin
 	}
 	return bin, server
 }
+
+// promoteStagedDir moves stageDir into place at destDir. os.Rename refuses to
+// overwrite a non-empty directory, so any previous install has to move out of
+// the way first; it is set aside rather than deleted, and put back if the
+// promotion fails, so destDir is never left holding no install at all. If the
+// restore fails too, the set-aside copy is kept and named in the error.
+func promoteStagedDir(stageDir, destDir, label string) error {
+	holder := ""
+	cleanupHolder := true
+	defer func() {
+		if holder != "" && cleanupHolder {
+			_ = os.RemoveAll(holder)
+		}
+	}()
+
+	restore := func() error { return nil }
+	if _, err := os.Lstat(destDir); err == nil {
+		holder, err = os.MkdirTemp(filepath.Dir(destDir), filepath.Base(destDir)+".previous-*")
+		if err != nil {
+			return fmt.Errorf("setting aside previous %s install: %w", label, err)
+		}
+		previous := filepath.Join(holder, "install")
+		if err := os.Rename(destDir, previous); err != nil {
+			return fmt.Errorf("setting aside previous %s install: %w", label, err)
+		}
+		restore = func() error { return renameStagedDir(previous, destDir) }
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking previous %s install: %w", label, err)
+	}
+
+	if err := renameStagedDir(stageDir, destDir); err != nil {
+		if restoreErr := restore(); restoreErr != nil {
+			cleanupHolder = false
+			return fmt.Errorf("promoting staged %s: %w (previous install left in %s: %v)", label, err, holder, restoreErr)
+		}
+		return fmt.Errorf("promoting staged %s: %w", label, err)
+	}
+	return nil
+}
+
+// renameStagedDir moves a directory into its published location. It is a var so
+// tests can force the failures the restore path above exists for.
+var renameStagedDir = os.Rename
 
 // extractTarBz2 unpacks a bzip2-compressed tar into destDir, guarding against
 // path-traversal entries. It reports extraction progress by how much of the
