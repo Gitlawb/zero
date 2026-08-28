@@ -2,20 +2,24 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
-// A server that returns only an image currently reports "(empty MCP tool
-// result)": TextContent keeps text blocks and drops the rest, so a successful
-// call looks like it produced nothing. The model then usually retries, which is
-// the worst outcome, and the user is never told an image existed (#823).
+// tinyPNGBase64 is a 1x1 PNG. http.DetectContentType sniffs it as image/png.
+const tinyPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+// A server that returns an image WITHOUT payload still cannot be forwarded, so
+// the delivered result must name the block rather than report "(empty MCP tool
+// result)". The model then usually retries, which is the worst outcome (#823).
 //
-// Carrying the payload is a separate change. Naming what was dropped is what
-// stops the retry loop, and it has to be true of the DELIVERED result, so this
-// drives registryTool.Run rather than the helper alone.
+// Image blocks that DO carry data are forwarded on Result.Images (see the
+// payload tests below). This case is the remaining drop path, and it has to be
+// true of the DELIVERED result, so this drives registryTool.Run rather than
+// the helper alone.
 func TestAnImageOnlyResultSaysWhatItReturned(t *testing.T) {
 	tool := registryTool{
 		client: &nonTextClient{content: []Content{
@@ -134,6 +138,24 @@ func TestDroppedContentSummaryNamesTheBlocks(t *testing.T) {
 			},
 			want: "2 resource blocks, 1 audio/wav block",
 		},
+		{
+			name:    "successfully forwarded image is not named as dropped",
+			content: []Content{{Type: "image", MimeType: "image/png", Data: tinyPNGBase64}},
+			want:    "",
+		},
+		{
+			name:    "malformed image data is still named",
+			content: []Content{{Type: "image", MimeType: "image/png", Data: "%%%not-base64%%%"}},
+			want:    "1 image/png block",
+		},
+		{
+			name: "forwarded image plus audio names only the audio",
+			content: []Content{
+				{Type: "image", MimeType: "image/png", Data: tinyPNGBase64},
+				{Type: "audio", MimeType: "audio/wav"},
+			},
+			want: "1 audio/wav block",
+		},
 	}
 
 	for _, test := range tests {
@@ -156,3 +178,132 @@ func (client *nonTextClient) CallTool(context.Context, string, map[string]any) (
 }
 
 func (client *nonTextClient) Close() error { return nil }
+
+func TestAnImageWithPayloadIsForwarded(t *testing.T) {
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "image", MimeType: "image/png", Data: tinyPNGBase64},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+
+	if strings.Contains(result.Output, "(empty MCP tool result)") {
+		t.Fatalf("image payload still reported as empty:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "cannot forward") {
+		t.Fatalf("a forwarded image is still described as unforwardable:\n%s", result.Output)
+	}
+	if len(result.Images) != 1 {
+		t.Fatalf("Images len = %d, want 1", len(result.Images))
+	}
+	if result.Images[0].MediaType != "image/png" {
+		t.Errorf("MediaType = %q, want image/png", result.Images[0].MediaType)
+	}
+	if len(result.Images[0].Data) == 0 {
+		t.Fatal("forwarded image has empty Data")
+	}
+	if DroppedContentSummary([]Content{{Type: "image", MimeType: "image/png", Data: tinyPNGBase64}}) != "" {
+		t.Fatal("drop summary named a successfully forwarded image")
+	}
+	if result.Status != tools.StatusOK {
+		t.Errorf("status = %v, want OK", result.Status)
+	}
+}
+
+func TestAudioIsStillDroppedAndNamed(t *testing.T) {
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "audio", MimeType: "audio/wav"},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "clip"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+
+	if len(result.Images) != 0 {
+		t.Fatalf("audio was forwarded as an image: %#v", result.Images)
+	}
+	if !strings.Contains(result.Output, "audio/wav") {
+		t.Errorf("the output does not name the dropped audio:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "cannot forward yet") {
+		t.Errorf("the output does not say the audio cannot be forwarded:\n%s", result.Output)
+	}
+}
+
+func TestTextAndImageKeepsTextAndForwardsImage(t *testing.T) {
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "text", Text: "captured the page"},
+			{Type: "image", MimeType: "image/png", Data: tinyPNGBase64},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+
+	if !strings.Contains(result.Output, "captured the page") {
+		t.Errorf("the text block was lost:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "cannot forward") {
+		t.Errorf("a forwarded image is still described as unforwardable:\n%s", result.Output)
+	}
+	if len(result.Images) != 1 {
+		t.Fatalf("Images len = %d, want 1", len(result.Images))
+	}
+	if result.Images[0].MediaType != "image/png" {
+		t.Errorf("MediaType = %q, want image/png", result.Images[0].MediaType)
+	}
+}
+
+func TestMalformedImageDataDoesNotPanic(t *testing.T) {
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "image", MimeType: "image/png", Data: "%%%not-base64%%%"},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+
+	if len(result.Images) != 0 {
+		t.Fatalf("malformed image was forwarded: %#v", result.Images)
+	}
+	if !strings.Contains(result.Output, "image/png") {
+		t.Errorf("malformed image was not named in the drop summary:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "(empty MCP tool result)") {
+		t.Errorf("malformed image still reported as empty:\n%s", result.Output)
+	}
+}
+
+func TestImageContentJSONDecodesDataAndStaysCompatibleWithoutIt(t *testing.T) {
+	var withData CallToolResult
+	raw := []byte(`{"content":[{"type":"image","mimeType":"image/png","data":"` + tinyPNGBase64 + `"}]}`)
+	if err := json.Unmarshal(raw, &withData); err != nil {
+		t.Fatalf("unmarshal image content: %v", err)
+	}
+	if len(withData.Content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(withData.Content))
+	}
+	if withData.Content[0].Type != "image" || withData.Content[0].MimeType != "image/png" {
+		t.Fatalf("decoded fields = %+v", withData.Content[0])
+	}
+	if withData.Content[0].Data != tinyPNGBase64 {
+		t.Fatalf("data = %q, want tiny PNG base64", withData.Content[0].Data)
+	}
+
+	var withoutData CallToolResult
+	if err := json.Unmarshal([]byte(`{"content":[{"type":"image","mimeType":"image/png"}]}`), &withoutData); err != nil {
+		t.Fatalf("unmarshal image content without data: %v", err)
+	}
+	if withoutData.Content[0].Data != "" {
+		t.Fatalf("absent data decoded as %q, want empty", withoutData.Content[0].Data)
+	}
+}
