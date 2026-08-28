@@ -3,8 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -78,6 +81,22 @@ func TestProtectedResourceDiscoveryRejectsInvalidMetadata(t *testing.T) {
 			wantError: "does not match",
 		},
 		{
+			name:      "resource leading whitespace mismatch",
+			challenge: func(base string) string { return `Bearer resource_metadata="` + base + `/metadata"` },
+			metadata: func(base string) string {
+				return `{"resource":" ` + base + `/mcp","authorization_servers":["https://auth.example"]}`
+			},
+			wantError: "does not match",
+		},
+		{
+			name:      "resource trailing whitespace mismatch",
+			challenge: func(base string) string { return `Bearer resource_metadata="` + base + `/metadata"` },
+			metadata: func(base string) string {
+				return `{"resource":"` + base + `/mcp ","authorization_servers":["https://auth.example"]}`
+			},
+			wantError: "does not match",
+		},
+		{
 			name:      "authorization servers missing",
 			challenge: func(base string) string { return `Bearer resource_metadata="` + base + `/metadata"` },
 			metadata: func(base string) string {
@@ -129,13 +148,181 @@ func TestProtectedResourceProbeSendsNoCredentials(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	jar.SetCookies(serverURL, []*http.Cookie{{Name: "session", Value: "secret"}})
+	client := server.Client()
+	client.Jar = jar
 
-	_, found, err := discoverProtectedResourceAuthorizationServer(context.Background(), server.Client(), server.URL+"/mcp")
+	_, found, err := discoverProtectedResourceAuthorizationServer(context.Background(), client, server.URL+"/mcp")
 	if err != nil || found {
 		t.Fatalf("discovery found=%v err=%v", found, err)
 	}
 	if authorization != "" || cookie != "" {
 		t.Fatalf("probe sent credentials: authorization=%q cookie=%q", authorization, cookie)
+	}
+}
+
+func TestDirectAuthorizationServerDiscoverySendsNoCookies(t *testing.T) {
+	var cookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie = r.Header.Get("Cookie")
+		base := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 base,
+			"authorization_endpoint": base + "/authorize",
+			"token_endpoint":         base + "/token",
+		})
+	}))
+	defer server.Close()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	jar.SetCookies(serverURL, []*http.Cookie{{Name: "session", Value: "secret"}})
+	client := server.Client()
+	client.Jar = jar
+
+	if _, err := resolveAuthorizationServer(context.Background(), client, server.URL, OAuthConfig{}); err != nil {
+		t.Fatalf("resolveAuthorizationServer() error = %v", err)
+	}
+	if cookie != "" {
+		t.Fatalf("direct discovery sent cookie %q", cookie)
+	}
+}
+
+func TestProtectedResourceDiscoveryRejectsAdvertisedLoopbackMetadata(t *testing.T) {
+	var metadataHits atomic.Int64
+	client := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		response := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    request,
+		}
+		switch request.URL.String() {
+		case "https://mcp.example/mcp":
+			response.StatusCode = http.StatusUnauthorized
+			response.Header.Set("WWW-Authenticate", `Bearer resource_metadata="http://127.0.0.1/metadata"`)
+		case "http://127.0.0.1/metadata":
+			metadataHits.Add(1)
+			response.Body = io.NopCloser(strings.NewReader(`{"resource":"https://mcp.example/mcp","authorization_servers":["https://auth.example"]}`))
+		default:
+			response.StatusCode = http.StatusNotFound
+		}
+		return response, nil
+	})}
+
+	_, _, err := discoverProtectedResourceAuthorizationServer(context.Background(), client, "https://mcp.example/mcp")
+	if err == nil {
+		t.Fatal("advertised loopback metadata URL should be rejected")
+	}
+	if metadataHits.Load() != 0 {
+		t.Fatalf("loopback metadata target was fetched %d time(s)", metadataHits.Load())
+	}
+}
+
+func TestProtectedResourceDiscoveryRejectsAdvertisedLoopbackIssuer(t *testing.T) {
+	var issuerHits atomic.Int64
+	client := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		response := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    request,
+		}
+		switch request.URL.String() {
+		case "https://mcp.example/mcp":
+			response.StatusCode = http.StatusUnauthorized
+			response.Header.Set("WWW-Authenticate", `Bearer resource_metadata="https://mcp.example/metadata"`)
+		case "https://mcp.example/metadata":
+			response.Body = io.NopCloser(strings.NewReader(`{"resource":"https://mcp.example/mcp","authorization_servers":["http://127.0.0.1"]}`))
+		case "http://127.0.0.1/.well-known/oauth-authorization-server":
+			issuerHits.Add(1)
+			response.Body = io.NopCloser(strings.NewReader(`{"issuer":"http://127.0.0.1","authorization_endpoint":"http://127.0.0.1/authorize","token_endpoint":"http://127.0.0.1/token"}`))
+		default:
+			response.StatusCode = http.StatusNotFound
+		}
+		return response, nil
+	})}
+
+	_, err := resolveAuthorizationServer(context.Background(), client, "https://mcp.example/mcp", OAuthConfig{})
+	if err == nil {
+		t.Fatal("advertised loopback issuer should be rejected")
+	}
+	if issuerHits.Load() != 0 {
+		t.Fatalf("loopback issuer target was fetched %d time(s)", issuerHits.Load())
+	}
+}
+
+func TestProtectedResourceDiscoveryRejectsAdvertisedPrivateTargets(t *testing.T) {
+	for _, target := range []string{
+		"http://10.0.0.8/metadata",
+		"https://169.254.169.254/metadata",
+		"https://metadata.google.internal/metadata",
+	} {
+		t.Run(target, func(t *testing.T) {
+			if err := validateAdvertisedOAuthDiscoveryURL("https://mcp.example/mcp", target); err == nil {
+				t.Fatalf("advertised target %q should be rejected", target)
+			}
+		})
+	}
+}
+
+func TestProtectedDiscoveryPathsSendNoCookies(t *testing.T) {
+	var probeCookie, resourceCookie, issuerCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch r.URL.Path {
+		case "/mcp":
+			probeCookie = r.Header.Get("Cookie")
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+base+`/metadata"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/metadata":
+			resourceCookie = r.Header.Get("Cookie")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":              base + "/mcp",
+				"authorization_servers": []string{base},
+			})
+		case "/.well-known/oauth-authorization-server":
+			issuerCookie = r.Header.Get("Cookie")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"issuer":                 base,
+				"authorization_endpoint": base + "/authorize",
+				"token_endpoint":         base + "/token",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	jar.SetCookies(serverURL, []*http.Cookie{{Name: "session", Value: "secret"}})
+	client := server.Client()
+	client.Jar = jar
+
+	if _, err := resolveAuthorizationServer(context.Background(), client, server.URL+"/mcp", OAuthConfig{}); err != nil {
+		t.Fatalf("resolveAuthorizationServer() error = %v", err)
+	}
+	if probeCookie != "" || resourceCookie != "" || issuerCookie != "" {
+		t.Fatalf("discovery sent cookies: probe=%q resource=%q issuer=%q", probeCookie, resourceCookie, issuerCookie)
 	}
 }
 
@@ -249,6 +436,47 @@ func TestResolveAuthorizationServerRejectsMissingProtectedIssuer(t *testing.T) {
 	_, err := resolveAuthorizationServer(context.Background(), resourceServer.Client(), resourceServer.URL+"/mcp", OAuthConfig{})
 	if err == nil || !strings.Contains(err.Error(), "issuer") {
 		t.Fatalf("error = %v, want missing issuer rejection", err)
+	}
+}
+
+func TestResolveAuthorizationServerRejectsWhitespaceAlteredProtectedIssuer(t *testing.T) {
+	for _, alter := range []struct {
+		name  string
+		apply func(string) string
+	}{
+		{name: "leading", apply: func(value string) string { return " " + value }},
+		{name: "trailing", apply: func(value string) string { return value + " " }},
+	} {
+		t.Run(alter.name, func(t *testing.T) {
+			authorizationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				base := "http://" + r.Host
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"issuer":                 alter.apply(base),
+					"authorization_endpoint": base + "/authorize",
+					"token_endpoint":         base + "/token",
+				})
+			}))
+			defer authorizationServer.Close()
+			resourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				base := "http://" + r.Host
+				switch r.URL.Path {
+				case "/mcp":
+					w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+base+`/metadata"`)
+					w.WriteHeader(http.StatusUnauthorized)
+				case "/metadata":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"resource":              base + "/mcp",
+						"authorization_servers": []string{authorizationServer.URL},
+					})
+				}
+			}))
+			defer resourceServer.Close()
+
+			_, err := resolveAuthorizationServer(context.Background(), resourceServer.Client(), resourceServer.URL+"/mcp", OAuthConfig{})
+			if err == nil || !strings.Contains(err.Error(), "issuer does not match") {
+				t.Fatalf("error = %v, want whitespace issuer mismatch", err)
+			}
+		})
 	}
 }
 

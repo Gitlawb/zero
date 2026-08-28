@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/oauth"
@@ -27,6 +28,9 @@ func withoutDiscoveryRedirects(client *http.Client) *http.Client {
 		client = http.DefaultClient
 	}
 	copied := *client
+	// Discovery requests are deliberately unauthenticated. A caller-supplied
+	// jar must not turn a plain metadata GET into a credential-bearing request.
+	copied.Jar = nil
 	copied.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -37,29 +41,52 @@ func withoutDiscoveryRedirects(client *http.Client) *http.Client {
 // advertised by a protected MCP resource. found is false when the endpoint does
 // not advertise protected-resource metadata, allowing legacy direct discovery.
 func discoverProtectedResourceAuthorizationServer(ctx context.Context, client *http.Client, resourceURL string) (issuer string, found bool, err error) {
+	resourceURL = strings.TrimSpace(resourceURL)
 	client = withoutDiscoveryRedirects(client)
 	metadataURL, found, err := probeProtectedResourceMetadataURL(ctx, client, resourceURL)
 	if err != nil || !found {
 		return "", found, err
 	}
+	if err := validateResourceMetadataOrigin(resourceURL, metadataURL); err != nil {
+		return "", true, err
+	}
+	client, err = newAdvertisedOAuthDiscoveryClient(client, resourceURL)
+	if err != nil {
+		return "", true, err
+	}
 	metadata, err := fetchProtectedResourceMetadata(ctx, client, metadataURL)
 	if err != nil {
 		return "", true, err
 	}
-	if strings.TrimSpace(metadata.Resource) != strings.TrimSpace(resourceURL) {
+	if metadata.Resource != resourceURL {
 		return "", true, errors.New("mcp oauth: protected resource metadata resource does not match the MCP server URL")
 	}
 	if len(metadata.AuthorizationServers) == 0 {
 		return "", true, errors.New("mcp oauth: protected resource metadata has no authorization_servers")
 	}
-	issuer = strings.TrimSpace(metadata.AuthorizationServers[0])
-	if issuer == "" {
+	issuer = metadata.AuthorizationServers[0]
+	if strings.TrimSpace(issuer) == "" {
 		return "", true, errors.New("mcp oauth: protected resource metadata has an empty authorization server")
+	}
+	if issuer != strings.TrimSpace(issuer) {
+		return "", true, errors.New("mcp oauth: protected resource authorization server must not contain surrounding whitespace")
 	}
 	if err := oauth.ValidateEndpointURL(issuer); err != nil {
 		return "", true, fmt.Errorf("mcp oauth: protected resource authorization server: %w", err)
 	}
+	if err := validateAdvertisedOAuthDiscoveryURL(resourceURL, issuer); err != nil {
+		return "", true, err
+	}
 	return issuer, true, nil
+}
+
+func validateResourceMetadataOrigin(resourceURL string, metadataURL string) error {
+	resource, resourceErr := url.Parse(resourceURL)
+	metadata, metadataErr := url.Parse(metadataURL)
+	if resourceErr != nil || metadataErr != nil || !sameMCPOrigin(resource, metadata) {
+		return errors.New("mcp oauth: protected resource metadata URL must be same-origin with the MCP server URL")
+	}
+	return nil
 }
 
 func probeProtectedResourceMetadataURL(ctx context.Context, client *http.Client, resourceURL string) (string, bool, error) {

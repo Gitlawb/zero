@@ -175,33 +175,37 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 		return metadata, nil
 	}
 
+	discoveryClient := withoutDiscoveryRedirects(client)
 	discoveryBase := strings.TrimSpace(cfg.IssuerURL)
 	protectedResourceDiscovery := false
 	if discoveryBase == "" {
-		issuer, found, protectedErr := discoverProtectedResourceAuthorizationServer(ctx, client, baseURL)
+		issuer, found, protectedErr := discoverProtectedResourceAuthorizationServer(ctx, discoveryClient, baseURL)
 		if protectedErr != nil {
 			return authServerMetadata{}, protectedErr
 		}
 		if found {
 			discoveryBase = issuer
 			protectedResourceDiscovery = true
+			discoveryClient, protectedErr = newAdvertisedOAuthDiscoveryClient(discoveryClient, baseURL)
+			if protectedErr != nil {
+				return authServerMetadata{}, protectedErr
+			}
 		} else {
 			discoveryBase = baseURL
 		}
 	}
 
-	metadata, err := discoverAuthorizationServer(ctx, client, discoveryBase)
+	metadata, err := discoverAuthorizationServer(ctx, discoveryClient, discoveryBase)
 	if err != nil {
 		// Discovery failures are non-fatal when the config supplies the endpoints
 		// directly; otherwise surface the discovery error.
 		metadata = authServerMetadata{}
 	}
 	if protectedResourceDiscovery {
-		issuer := strings.TrimSpace(metadata.Issuer)
-		if issuer == "" {
+		if strings.TrimSpace(metadata.Issuer) == "" {
 			return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata is missing its required issuer")
 		}
-		if issuer != strings.TrimSpace(discoveryBase) {
+		if metadata.Issuer != discoveryBase {
 			return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata issuer does not match protected resource metadata")
 		}
 	}
