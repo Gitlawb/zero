@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,4 +99,17 @@ func TestGitMetadataWriteCarveoutsPreservesSymlinkBehavior(t *testing.T) {
 			mustEqualCarveouts(t, gitMetadataWriteCarveouts(root), want)
 		})
 	}
+}
+
+func TestGitMetadataWriteCarveoutsPreservesInspectionErrorBehavior(t *testing.T) {
+	root := t.TempDir()
+	gitPath := filepath.Join(root, ".git")
+	want := []string{
+		filepath.Join(gitPath, "hooks"),
+		filepath.Join(gitPath, "config"),
+	}
+	got := gitMetadataWriteCarveoutsWithLstat(root, func(string) (os.FileInfo, error) {
+		return nil, errors.New("inspection failed")
+	})
+	mustEqualCarveouts(t, got, want)
 }
