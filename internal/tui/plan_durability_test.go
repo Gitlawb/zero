@@ -205,6 +205,7 @@ func TestPersistenceFailureIsShownOnTheTerminalResult(t *testing.T) {
 		"zero_00000000000000000000000000000000_1")
 	plan := samplePlan(t)
 	bridge.PlanAdmitted(plan)
+	bridge.PlanRunning(func() {})
 	bridge.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 2})
 
 	for _, message := range messages {

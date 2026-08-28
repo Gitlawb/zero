@@ -206,8 +206,6 @@ func (bridge *PlanProgressBridge) PlanRunning(cancel context.CancelFunc) {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	bridge.capturePlanOwnerLocked()
-	bridge.recordErr = nil
-	bridge.planFinalized = false
 	bridge.cancelPlan = cancel
 	bridge.clearPauseLocked()
 }
@@ -523,6 +521,10 @@ func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 		// accepts and never as an object that could reach execution unvalidated.
 		bridge.mu.Lock()
 		bridge.capturePlanOwnerLocked()
+		// Admission starts the durable lifecycle. Clear an error from a previous
+		// finished plan before this plan's first append, never later in
+		// PlanRunning where it would erase an admission failure.
+		bridge.recordErr = nil
 		bridge.planFinalized = false
 		if bridge.lastPlans == nil {
 			bridge.lastPlans = map[string]lastPlanRecord{}
