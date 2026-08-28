@@ -70,7 +70,7 @@ func joinAgainstRoot(goos, root, target string) string {
 func workspaceBasename(workspaceRoot string) string {
 	repo := filepath.Base(filepath.Clean(workspaceRoot))
 	switch repo {
-	case "", ".", "..", string(filepath.Separator), "/":
+	case "", ".", "..", string(filepath.Separator):
 		return ""
 	default:
 		return repo
@@ -117,7 +117,7 @@ func matchSyntheticHomePrefix(parts []string, lead, repo string) (string, bool) 
 	if user == "" || user == "." || user == ".." {
 		return "", false
 	}
-	if parts[2] != repo {
+	if !strings.EqualFold(parts[2], repo) {
 		return "", false
 	}
 	return restAfterPrefix(parts, 3)
@@ -133,7 +133,7 @@ func matchSyntheticDirPrefix(parts []string, lead []string, repo string) (string
 			return "", false
 		}
 	}
-	if parts[len(lead)] != repo {
+	if !strings.EqualFold(parts[len(lead)], repo) {
 		return "", false
 	}
 	return restAfterPrefix(parts, len(lead)+1)

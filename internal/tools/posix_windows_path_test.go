@@ -100,6 +100,20 @@ func TestRewritePosixWorkspacePath(t *testing.T) {
 			requested: "/home/user/file",
 			want:      "/home/user/file",
 		},
+		{
+			name:      "windows home repo basename case differs",
+			goos:      "windows",
+			workspace: filepath.Join("workspaces", "Zero"),
+			requested: "/home/alice/zero/go.mod",
+			want:      "go.mod",
+		},
+		{
+			name:      "windows tmp repo basename case differs",
+			goos:      "windows",
+			workspace: filepath.Join("workspaces", "Zero"),
+			requested: "/tmp/zero/foo.txt",
+			want:      "foo.txt",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
