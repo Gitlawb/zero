@@ -262,12 +262,20 @@ func protectWindowsRuntimeStamp(handle windows.Handle, reader *windows.SID) erro
 	// runtime root the stamp lives in binds it to the install rather than to the
 	// elevation.
 	//
-	// Read only, because nothing outside setup and repair should be able to
-	// rewrite an attestation about the tree. The write below still succeeds: the
-	// handle was opened GENERIC_WRITE before this DACL was applied, and Windows
-	// checks access at open time.
+	// Read and DELETE, not write. Withholding write from the SANDBOX is the real
+	// boundary and the capability SID has no ACE here at all. Withholding it from
+	// the root owner is not: they own the parent directory, so delete-then-create
+	// forges a stamp exactly as well as an overwrite would. What read-only would
+	// actually cost is rollback, which has to remove a stamp this run wrote under
+	// the same token that wrote it.
+	//
+	// So: no FILE_WRITE_DATA, no WRITE_DAC, no WRITE_OWNER, which keeps an
+	// accidental in-place rewrite off the table, and DELETE so compensation can
+	// undo its own work. The write below still succeeds either way: the handle was
+	// opened GENERIC_WRITE before this DACL was applied, and Windows checks access
+	// at open time.
 	entries := []windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.FILE_GENERIC_READ,
+		AccessPermissions: windows.FILE_GENERIC_READ | windows.DELETE,
 		AccessMode:        windows.SET_ACCESS,
 		Inheritance:       windows.NO_INHERITANCE,
 		Trustee: windows.TRUSTEE{

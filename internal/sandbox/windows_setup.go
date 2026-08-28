@@ -686,26 +686,9 @@ func (snapshot windowsSandboxStampSnapshot) restore() error {
 		}
 		return nil
 	}
-	{
-		current, ok := runtimeDirIdentity(snapshot.root)
-		if !ok {
-			return fmt.Errorf("identify the sandbox runtime root %s for stamp compensation", snapshot.root)
-		}
-		if current != snapshot.rootIdentity {
-			return fmt.Errorf("sandbox runtime root %s is no longer the directory this setup stamped; "+
-				"leaving the replacement untouched, and the original still carries this run's stamp", snapshot.root)
-		}
-	}
-	if !snapshot.existed {
-		if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove sandbox runtime setup stamp written by this run: %w", err)
-		}
-		return nil
-	}
-	if err := os.WriteFile(snapshot.path, snapshot.prior, 0o600); err != nil {
-		return fmt.Errorf("restore the previous sandbox runtime setup stamp: %w", err)
-	}
-	return nil
+	// BOUND TO THE OBJECT, not to the name. The identity check and the mutation
+	// now share one handle, so a rename and replacement cannot land between them.
+	return compensateRuntimeStampBound(snapshot.root, snapshot.rootIdentity, snapshot.prior, snapshot.existed)
 }
 
 // run removes what was created, innermost first.
@@ -727,12 +710,6 @@ func (rollback windowsRuntimeRootRollback) run() error {
 		// Same rule as the stamp: prove this is the directory we made before
 		// removing it. A substitute at the same name belongs to whoever put it
 		// there.
-		current, ok := runtimeDirIdentity(entry.path)
-		if !ok {
-			// Gone already, or unreadable: either way there is nothing here this
-			// run can prove it created.
-			continue
-		}
 		if !entry.identified {
 			// Created, but never identified. Removing whatever is here now would be
 			// a pathname-authoritative delete of an object this run cannot prove it
@@ -740,13 +717,8 @@ func (rollback windowsRuntimeRootRollback) run() error {
 			errs = append(errs, fmt.Errorf("sandbox runtime root %s was created by this run but could not be identified, so it cannot be removed safely; leaving it in place", entry.path))
 			continue
 		}
-		if current != entry.identity {
-			errs = append(errs, fmt.Errorf("sandbox runtime root %s is no longer the directory this run created; "+
-				"leaving the replacement in place", entry.path))
-			continue
-		}
-		if err := os.Remove(entry.path); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("remove sandbox runtime root %s created by this run: %w", entry.path, err))
+		if err := removeCreatedRuntimeDirBound(entry.path, entry.identity); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
