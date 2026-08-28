@@ -28,15 +28,18 @@ func TestTransientNoticeReplacesAndExpiresSafely(t *testing.T) {
 	}
 }
 
-func TestInlineTransientNoticeExpiresOnComposerTick(t *testing.T) {
-	now := time.Unix(100, 0)
-	m := model{now: func() time.Time { return now }}
+func TestInlineTransientNoticeSchedulesIndependentExpiry(t *testing.T) {
+	m := model{}
 	m = m.showTransientNoticeInline("Voice mode on", transientNoticeSuccess)
 	if m.transientNotice.text != "Voice mode on" {
 		t.Fatalf("notice = %q", m.transientNotice.text)
 	}
-	now = now.Add(transientNoticeDuration)
-	next, _ := m.updateModel(composerBlinkMsg{})
+	next, cmd := m.Update(struct{}{})
+	m = next.(model)
+	if cmd == nil || m.transientNoticeTimerSeq != m.transientNoticeSeq {
+		t.Fatal("inline notice did not schedule its independent expiry")
+	}
+	next, _ = m.updateModel(transientNoticeExpiredMsg{seq: m.transientNoticeSeq})
 	if got := next.(model).transientNotice.text; got != "" {
 		t.Fatalf("expired inline notice = %q", got)
 	}

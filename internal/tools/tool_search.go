@@ -58,6 +58,11 @@ func NewToolSearchTool(registry *Registry) Tool {
 	}
 }
 
+func (tool toolSearchTool) cloneForRegistry(registry *Registry) Tool {
+	tool.registry = registry
+	return tool
+}
+
 // Run satisfies the Tool interface; actual dispatch goes through RunWithOptions.
 func (tool toolSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	return tool.RunWithOptions(ctx, args, RunOptions{})
