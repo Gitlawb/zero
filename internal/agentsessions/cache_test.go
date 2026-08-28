@@ -105,3 +105,53 @@ func TestCallersCannotReorderEachOthersResults(t *testing.T) {
 		}
 	}
 }
+
+func TestSlowMissDoesNotBlockAnotherWorkspacesCacheHit(t *testing.T) {
+	withFakeClock(t)
+	discoveryMu.Lock()
+	discoveryCache["/cached"] = discoveryEntry{
+		sessions: []ForeignSession{{ID: "cached"}},
+		at:       discoveryNow(),
+	}
+	discoveryMu.Unlock()
+
+	previous := discoverAll
+	started := make(chan struct{})
+	release := make(chan struct{})
+	discoverAll = func(Env, string) ([]ForeignSession, []error) {
+		close(started)
+		<-release
+		return []ForeignSession{{ID: "slow"}}, nil
+	}
+	t.Cleanup(func() {
+		discoverAll = previous
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		DiscoverAllCached(Env{}, "/slow")
+	}()
+	<-started
+
+	hit := make(chan []ForeignSession, 1)
+	go func() {
+		found, _ := DiscoverAllCached(Env{}, "/cached")
+		hit <- found
+	}()
+	select {
+	case found := <-hit:
+		if len(found) != 1 || found[0].ID != "cached" {
+			t.Fatalf("cache hit = %+v, want cached session", found)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("a slow miss held the global cache lock and blocked an unrelated hit")
+	}
+	close(release)
+	<-done
+}

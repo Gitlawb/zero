@@ -148,6 +148,9 @@ func TestCodexDiscoveryIsFixedDepth(t *testing.T) {
 }
 
 func TestTheRealCodexCorpusStillParses(t *testing.T) {
+	if os.Getenv("ZERO_TEST_LIVE_AGENT_SESSIONS") != "1" {
+		t.Skip("set ZERO_TEST_LIVE_AGENT_SESSIONS=1 to inspect the local Codex store")
+	}
 	env := OSEnv()
 	root := codexRoot(env)
 	if root == "" {

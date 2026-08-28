@@ -166,7 +166,7 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 		// redacts, the order redaction_order_test.go pins.
 		Title:   DisplayField(source.Title),
 		Cwd:     DisplayField(source.Cwd),
-		ModelID: source.ModelID,
+		ModelID: DisplayField(source.ModelID),
 		Tag:     ImportTag(adapter.Name(), id),
 	})
 	if err != nil {

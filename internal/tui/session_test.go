@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -24,6 +25,22 @@ type scriptedProvider struct {
 	requests   []zeroruntime.CompletionRequest
 	beforeCall func(int)
 	calls      int
+}
+
+func TestResumeSummarySanitizesPersistedModelMetadata(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
+	m := model{modelName: "active-model", providerName: "provider"}
+	summary := m.formatResumeSummary(sessions.Metadata{
+		SessionID: "session-1",
+		ModelID:   "claude\x1b[2K-opus\n" + secret,
+	}, 3)
+	if strings.Contains(summary, "\x1b") || strings.Contains(summary, secret) {
+		t.Fatalf("unsafe model metadata reached the resume summary: %q", summary)
+	}
+	want := "recorded: " + agentsessions.DisplayField("claude\x1b[2K-opus\n"+secret)
+	if !strings.Contains(summary, want) {
+		t.Fatalf("resume summary lost safe model text: %q", summary)
+	}
 }
 
 func (provider *scriptedProvider) StreamCompletion(
