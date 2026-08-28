@@ -176,9 +176,11 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 			staged = append(staged, tool)
 		}
 	}
-	for _, tool := range staged {
-		registry.Register(tool)
+	registered := make([]tools.Tool, 0, len(staged))
+	for index := range staged {
+		registered = append(registered, staged[index])
 	}
+	registry.RegisterBatch(registered)
 	return runtime, nil
 }
 

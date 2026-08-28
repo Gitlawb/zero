@@ -46,10 +46,10 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	}
 
 	next.input.SetValue("/effort high")
-	updated, cmd = next.Update(testKey(tea.KeyEnter))
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /effort high to be handled without starting an agent run")
 	}
 	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
@@ -153,10 +153,10 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	}
 
 	next.input.SetValue("/style explanatory")
-	updated, cmd = next.Update(testKey(tea.KeyEnter))
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /style explanatory to be handled without starting an agent run")
 	}
 	if next.responseStyle != "explanatory" {
@@ -915,10 +915,10 @@ func TestModelSwitchClearsUnsupportedEffortPreference(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.reasoningEffort != "" {
