@@ -68,7 +68,7 @@ func TestEagerToolSchemaTokenBudget(t *testing.T) {
 	}
 }
 
-func TestAgentAdvertisesPatchInsteadOfAmbiguousStringReplacement(t *testing.T) {
+func TestAgentAdvertisesBothEditTools(t *testing.T) {
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreToolsScoped(t.TempDir(), nil) {
 		registry.Register(tool)
@@ -79,9 +79,9 @@ func TestAgentAdvertisesPatchInsteadOfAmbiguousStringReplacement(t *testing.T) {
 		names[definition.Name] = true
 	}
 	if !names["apply_patch"] {
-		t.Fatal("agent must retain apply_patch for existing-file changes")
+		t.Fatal("agent must retain apply_patch for multi-hunk changes")
 	}
-	if names["edit_file"] {
-		t.Fatal("agent must not receive the ambiguous string-replacement tool")
+	if !names["edit_file"] {
+		t.Fatal("agent must receive edit_file for targeted exact replacements")
 	}
 }
