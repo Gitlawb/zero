@@ -113,7 +113,7 @@ func TestRestrictedSIDListNeverCarriesABroadGroup(t *testing.T) {
 		}
 		// The user's own SID is the boundary this token exists to be stricter
 		// than, so it must never be its own key.
-		if user := currentUserSIDForTest(t); user != "" && containsSID(values, user) {
+		if user := currentUserSIDForTest(t); containsSID(values, user) {
 			t.Errorf("writeRestricted=%v: the current user SID is a restricting SID, which defeats the token entirely", writeRestricted)
 		}
 	}
@@ -165,12 +165,23 @@ func TestNonWriteRestrictedTokenStillCarriesTheWorldSID(t *testing.T) {
 	t.Log("known gap (#869): the DenyRead token shape carries the World SID, so its write jail does not hold")
 }
 
+// currentUserSIDForTest FAILS rather than returning empty.
+//
+// It used to swallow the error, and its one caller guarded on the result being
+// non-empty, so a machine where GetTokenUser fails ran the assertion on nothing
+// and reported a pass. The check exists to catch the token keying itself to the
+// very SID it must be stricter than, which is the whole point of the shape, so
+// not being able to read the prerequisite is a failure and not a skip.
 func currentUserSIDForTest(t *testing.T) string {
 	t.Helper()
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
 	if err != nil {
-		return ""
+		t.Fatalf("read the current user SID, which this assertion depends on: %v", err)
 	}
-	return user.User.Sid.String()
+	sid := user.User.Sid.String()
+	if strings.TrimSpace(sid) == "" {
+		t.Fatal("the current user SID came back empty, so the assertion below would check nothing")
+	}
+	return sid
 }
