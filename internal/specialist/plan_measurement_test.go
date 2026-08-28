@@ -38,7 +38,9 @@ func childRunner(t *testing.T, toolOutput, answer string) PlanRunner {
 	return NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"})
 }
 
-const taskSuiteOutput = "ok  \tgithub.com/x/y\t0.86s\n--- PASS: TestChattyChild (0.86s)\n"
+const taskSuiteOutput = `{"Action":"pass","Package":"github.com/x/y","Test":"TestChattyChild","Elapsed":0.86}
+{"Action":"pass","Package":"github.com/x/y","Elapsed":0.86}
+`
 
 // A PLAN TASK'S OWN COMMANDS ARE THE CHECK ON ITS OWN NUMBERS.
 //

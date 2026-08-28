@@ -39,7 +39,9 @@ func callThenAnswer(finalAnswer, corrected string) *mockProvider {
 	}}
 }
 
-const suiteOutput = "ok  \tgithub.com/x/y\t0.86s\n--- PASS: TestChattyChild (0.86s)\n"
+const suiteOutput = `{"Action":"pass","Package":"github.com/x/y","Test":"TestChattyChild","Elapsed":0.86}
+{"Action":"pass","Package":"github.com/x/y","Elapsed":0.86}
+`
 
 // A FINAL ANSWER THAT REPORTS A NUMBER THE RUN NEVER PRODUCED IS SENT BACK.
 //
