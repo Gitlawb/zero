@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -554,7 +555,7 @@ func rpcIDMatches(value any, id int) bool {
 }
 
 // jsonRPCIDEchoable reports whether id is a valid JSON-RPC 2.0 identifier type
-// (string, integer, or float with no fractional part) that is safe to echo back.
+// (string or finite number) that is safe to echo back.
 func jsonRPCIDEchoable(id any) bool {
 	if id == nil {
 		return false
@@ -565,9 +566,13 @@ func jsonRPCIDEchoable(id any) bool {
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 		return true
 	case float64:
-		return v == float64(int64(v))
+		return !math.IsNaN(v) && !math.IsInf(v, 0)
 	case json.Number:
-		_, err := v.Int64()
+		parsed, err := v.Float64()
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return false
+		}
+		_, err = json.Marshal(v)
 		return err == nil
 	default:
 		return false

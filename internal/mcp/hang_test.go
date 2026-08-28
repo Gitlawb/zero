@@ -62,6 +62,15 @@ type blockingReader struct {
 	release chan struct{}
 }
 
+type signalingWriter struct {
+	writes chan struct{}
+}
+
+func (writer *signalingWriter) Write(p []byte) (int, error) {
+	writer.writes <- struct{}{}
+	return len(p), nil
+}
+
 func newBlockingReader() *blockingReader {
 	return &blockingReader{release: make(chan struct{})}
 }
@@ -86,10 +95,11 @@ func (reader *blockingReader) Close() error {
 func TestClientRequestUnblocksOnContextCancel(t *testing.T) {
 	reader := newBlockingReader()
 	defer reader.Close()
+	writes := make(chan struct{}, 2)
 
 	client := &Client{
 		reader: newMessageReader(reader),
-		writer: newMessageWriter(io.Discard),
+		writer: newMessageWriter(&signalingWriter{writes: writes}),
 		nextID: 1,
 	}
 
@@ -99,6 +109,11 @@ func TestClientRequestUnblocksOnContextCancel(t *testing.T) {
 		done <- client.request(ctx, "tools/list", map[string]any{}, nil)
 	}()
 
+	select {
+	case <-writes:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not reach the transport")
+	}
 	// The request is now parked waiting for a response that never comes.
 	cancel()
 
@@ -111,14 +126,20 @@ func TestClientRequestUnblocksOnContextCancel(t *testing.T) {
 		t.Fatal("request() hung on a non-responsive server")
 	}
 
-	// The lock must be free: a second request under an already-cancelled
-	// context must return immediately rather than block.
-	cancelled, cancel2 := context.WithCancel(context.Background())
-	cancel2()
+	// The shared state must be free: prove a second live request reaches the
+	// transport, then cancel it and verify cancellation releases the caller.
+	secondCtx, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
 	second := make(chan error, 1)
 	go func() {
-		second <- client.request(cancelled, "tools/list", map[string]any{}, nil)
+		second <- client.request(secondCtx, "tools/list", map[string]any{}, nil)
 	}()
+	select {
+	case <-writes:
+	case <-time.After(time.Second):
+		t.Fatal("second request did not reach the transport")
+	}
+	cancel2()
 	select {
 	case err := <-second:
 		if !errors.Is(err, context.Canceled) {

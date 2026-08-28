@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1002,6 +1003,72 @@ func TestStdioClientDropsInvalidServerRequestIDs(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for valid request response")
+	}
+}
+
+func TestStdioClientRepliesToValidNonIntegerServerRequestIDs(t *testing.T) {
+	requests := []struct {
+		wire string
+		want float64
+	}{
+		{wire: `{"jsonrpc":"2.0","id":1.5,"method":"roots/list","params":{}}` + "\n", want: 1.5},
+		{wire: `{"jsonrpc":"2.0","id":2e2,"method":"roots/list","params":{}}` + "\n", want: 200},
+	}
+	for _, request := range requests {
+		t.Run(fmt.Sprint(request.want), func(t *testing.T) {
+			inReader, inWriter := io.Pipe()
+			outReader, outWriter := io.Pipe()
+			client := &Client{
+				reader:  newMessageReader(inReader),
+				writer:  newMessageWriter(outWriter),
+				pending: make(map[int]chan dispatchResult),
+			}
+			t.Cleanup(func() {
+				_ = inWriter.Close()
+				_ = outReader.Close()
+			})
+			client.ensureReader()
+			if _, err := inWriter.Write([]byte(request.wire)); err != nil {
+				t.Fatalf("write server request: %v", err)
+			}
+			result := make(chan dispatchResult, 1)
+			go func() {
+				response, err := newMessageReader(outReader).read()
+				result <- dispatchResult{message: response, err: err}
+			}()
+			select {
+			case response := <-result:
+				if response.err != nil {
+					t.Fatalf("read method-not-found response: %v", response.err)
+				}
+				id, ok := response.message.ID.(float64)
+				if !ok || id != request.want || response.message.Error == nil || response.message.Error.Code != -32601 {
+					t.Fatalf("response = %#v, want id %v and error -32601", response.message, request.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for method-not-found response")
+			}
+		})
+	}
+}
+
+func TestJSONRPCIDEchoableAcceptsFiniteJSONNumbers(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		id   any
+		want bool
+	}{
+		{name: "fractional float", id: 1.5, want: true},
+		{name: "exponent json number", id: json.Number("2e2"), want: true},
+		{name: "not a number", id: math.NaN(), want: false},
+		{name: "positive infinity", id: math.Inf(1), want: false},
+		{name: "invalid json number", id: json.Number("not-a-number"), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jsonRPCIDEchoable(test.id); got != test.want {
+				t.Fatalf("jsonRPCIDEchoable(%v) = %v, want %v", test.id, got, test.want)
+			}
+		})
 	}
 }
 
