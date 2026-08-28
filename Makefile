@@ -59,8 +59,9 @@ vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 vulncheck-windows:
-	go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
-	GOOS=windows govulncheck ./...
+	mkdir -p $(CURDIR)/.cache/gobin
+	GOBIN=$(CURDIR)/.cache/gobin go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	GOOS=windows $(CURDIR)/.cache/gobin/govulncheck ./...
 
 tidy:
 	go mod tidy
