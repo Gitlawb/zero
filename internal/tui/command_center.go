@@ -449,7 +449,12 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if err != nil {
 		return m, "Model\n" + err.Error()
 	}
-	persisted, persistErr := m.persistSelectedModel(nextProfile)
+	persisted, persistedName, persistErr := m.persistSelectedModel(nextProfile)
+	if persisted {
+		// Same reconciliation switchProviderModel does: the manager and picker
+		// read models from savedProviders, not from the live profile.
+		m.savedProviders = syncSavedProviderModel(m.savedProviders, persistedName, nextProfile.Model)
+	}
 
 	m.providerProfile = nextProfile
 	m.provider = nextProvider
@@ -580,9 +585,47 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	)
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(target.Name)
+	persistNote := ""
 	if strings.TrimSpace(m.userConfigPath) != "" {
-		_, _ = config.SetActiveProvider(m.userConfigPath, target.Name)
-		_, _ = config.SetProviderModel(m.userConfigPath, target.Name, target.Model)
+		// SetActiveProvider accepts any spelling of the credential identity and
+		// returns the config with the persisted row's OWN spelling in
+		// ActiveProvider. SetProviderModel matches rows exactly, so persist with
+		// that resolved name — passing the session's spelling silently wrote
+		// nothing whenever the two differed (session "openai", row "OpenAI").
+		//
+		// Env-derived providers have no row to update, so they are skipped
+		// silently; a failure to write a row that DOES exist is surfaced rather
+		// than swallowed, since the session and config.json then disagree.
+		// Ownership, not a credential-identity probe: "config.json carries this
+		// identity" was true for a project row whose identity a DIFFERENT user
+		// row owns, and the switch then pointed activeProvider at that user row
+		// and wrote this row's model onto it — a profile with another endpoint
+		// that the user never selected.
+		owner, err := config.ProviderRowOwnershipAt(m.userConfigPath, config.ProviderProfileNames(m.savedProviders), target.Name)
+		switch {
+		case err != nil:
+			persistNote = "\nNote: the switch applies to this session, but config.json could not be read: " + redaction.RedactString(err.Error(), redaction.Options{})
+		case owner.UserBacked:
+			if cfg, err := config.SetActiveProvider(m.userConfigPath, owner.PersistedName); err != nil {
+				persistNote = "\nNote: the switch applies to this session, but config.json was not updated: " + redaction.RedactString(err.Error(), redaction.Options{})
+			} else if _, err := config.SetProviderModel(m.userConfigPath, cfg.ActiveProvider, target.Model); err != nil {
+				persistNote = "\nNote: the active provider was saved, but its model was not: " + redaction.RedactString(err.Error(), redaction.Options{})
+			} else {
+				// Reconcile the in-memory list the manager and picker read from,
+				// or those surfaces keep showing the previous model until restart.
+				m.savedProviders = syncSavedProviderModel(m.savedProviders, cfg.ActiveProvider, target.Model)
+			}
+		case owner.Lookup == config.ProviderNameNotFound:
+			// The ordinary case: an environment-derived provider has no
+			// config.json row to update at all. Stay silent, same as before —
+			// only the surprising outcomes below (shadowed, ambiguous) are worth
+			// a note.
+		default:
+			// Shadowed by a listed sibling, or ambiguous: say so rather than
+			// silently writing through a row that only shares the credential
+			// identity, or picking one of several at random.
+			persistNote = "\nNote: the switch applies to this session only — " + owner.Reason + "."
+		}
 	}
 	// Warm discovery for the provider we just switched to, same as Init() does
 	// for the provider active at launch — otherwise the context-usage gauge has
@@ -597,6 +640,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 		}
 	}
 	status := fmt.Sprintf("Model\nSwitched to %s · %s", target.Name, target.Model)
+	status += persistNote
 	if warn := m.visionDropWarning(); warn != "" {
 		status += "\n" + warn
 	}
@@ -674,44 +718,85 @@ func oauthLoginName(profile config.ProviderProfile) (string, bool) {
 	return strings.TrimPrefix(key, oauth.KeyPrefixProvider), true
 }
 
+// activeProviderRowName is the saved-row spelling this session actually runs on.
+// It is sessionRowName's answer — exact first, sole identity match otherwise —
+// so every "is this the provider I am on?" comparison uses one value instead of
+// each caller re-deciding what "active" means from a credential identity.
+func (m model) activeProviderRowName() string {
+	return sessionRowName(m.providerName, m.savedProviders)
+}
+
+// savedProviderByName resolves a provider spelling to its saved profile through
+// the ONE shared rule (config.LookupProviderName): an exact spelling wins
+// outright, a credential-identity match is accepted only when exactly one saved
+// row carries that identity, and several rows are AMBIGUOUS rather than
+// first-match.
+//
+// First-match was the defect: with saved "Target" and "target" resolved side by
+// side, a lookup for either spelling returned whichever row came first, so a
+// model chosen under one endpoint could be applied to the other. The rule also
+// stays off strings.EqualFold on purpose — EqualFold folds "s" and Unicode
+// long-s "ſ" together while the credential store keeps them separate, so folding
+// here could hand back a different provider's profile and reach its secret.
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
-	name = strings.TrimSpace(name)
-	for _, profile := range m.savedProviders {
-		if strings.EqualFold(strings.TrimSpace(profile.Name), name) {
-			return profile, true
+	resolved, lookup := config.LookupProviderName(config.ProviderProfileNames(m.savedProviders), name)
+	if lookup.Resolved() {
+		for _, profile := range m.savedProviders {
+			if strings.TrimSpace(profile.Name) == resolved {
+				return profile, true
+			}
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(m.providerProfile.Name), name) {
+	if lookup == config.ProviderNameAmbiguous {
+		// Say nothing rather than guess: the caller falls back to the active
+		// provider, which is a visible outcome, instead of silently writing
+		// through one of several rows.
+		return config.ProviderProfile{}, false
+	}
+	if _, live := config.LookupProviderName([]string{m.providerProfile.Name}, name); live.Resolved() {
 		return m.providerProfile, true
 	}
 	return config.ProviderProfile{}, false
 }
 
-func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error) {
+// persistSelectedModel writes profile's model to its config.json row and
+// returns the EXACT row spelling it wrote to, so the caller can mirror the same
+// change into savedProviders with syncSavedProviderModel rather than re-deriving
+// the row from the session's spelling.
+func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, string, error) {
 	path := strings.TrimSpace(m.userConfigPath)
 	if path == "" {
-		return false, nil
+		return false, "", nil
 	}
 	name := strings.TrimSpace(profile.Name)
 	if name == "" {
-		return false, nil
+		return false, "", nil
 	}
 	model := strings.TrimSpace(profile.Model)
 	if model == "" {
-		return false, nil
+		return false, "", nil
 	}
-	persisted, err := config.ProviderPersisted(path, name)
+	// Provenance, not a credential-identity probe. "config.json carries this
+	// identity" was true for a project row whose identity a DIFFERENT user row
+	// owns, and the model was then persisted onto that user row — a profile the
+	// user never selected, with its own endpoint. Ownership consults the siblings
+	// the session resolved, which is what tells those two cases apart, and
+	// PersistedName is the exact spelling SetProviderModel needs (a case
+	// difference would otherwise make the write a silent no-op).
+	owner, err := config.ProviderRowOwnershipAt(path, config.ProviderProfileNames(m.savedProviders), name)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	if !persisted {
-		// Env-derived providers have no config.json row to update.
-		return false, nil
+	if !owner.UserBacked {
+		// Project- and environment-derived rows have no config.json row of their
+		// own; the model change stays in this session.
+		return false, "", nil
 	}
-	if _, err := config.SetProviderModel(path, name, model); err != nil {
-		return false, err
+	exactName := owner.PersistedName
+	if _, err := config.SetProviderModel(path, exactName, model); err != nil {
+		return false, "", err
 	}
-	return true, nil
+	return true, exactName, nil
 }
 
 type modelSwitchTarget struct {
