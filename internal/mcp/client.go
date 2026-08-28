@@ -516,10 +516,9 @@ func TextContent(content []Content) string {
 // forwarded, so a caller adds nothing to the ordinary case.
 //
 // Image payloads ride Result.Images. Audio, embedded resources, structured
-// content, image blocks whose data cannot be decoded, and images skipped
-// because they would exceed the aggregate byte budget still have nowhere to
-// go: naming them costs nothing and stops the model from treating a successful
-// call as empty and retrying.
+// content, and image blocks whose data cannot be decoded still have nowhere
+// to go. Images skipped because they would exceed the aggregate byte budget
+// are also named so the model hears that a valid screenshot was dropped.
 //
 // Only images actually kept by ImageBlocks are omitted from the note. An
 // image that would decode in isolation but was skipped by the aggregate cap
@@ -530,7 +529,7 @@ func TextContent(content []Content) string {
 // result always produces the same sentence.
 func DroppedContentSummary(content []Content) string {
 	_, disp := forwardImages(content)
-	return droppedContentNote(content, disp)
+	return droppedContentNote(content, disp, dispDropped, dispBudgetSkipped)
 }
 
 // ImageBlocks converts MCP image content into the same ImageBlock channel
@@ -542,9 +541,9 @@ func DroppedContentSummary(content []Content) string {
 // The aggregate cap is the same 10 MiB as the per-image cap: a server that
 // returns many individually valid images must not retain all of them in
 // Result.Images. Once the next valid image would exceed the remaining
-// budget it is skipped; a later smaller image may still fit. Once no
-// budget remains, later image payloads are not decoded — the cap is a
-// work limit, not only a retention limit.
+// budget it is skipped; a later smaller image may still fit. Later image
+// payloads are not decoded only once remaining is zero; a leftover residue
+// still fully decodes the next candidate before the length check rejects it.
 func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
 	images, _ := forwardImages(content)
 	return images
@@ -560,6 +559,7 @@ const (
 	dispText itemDisp = iota
 	dispForwarded
 	dispDropped
+	dispBudgetSkipped
 )
 
 // decodeImageBase64 is the MCP image payload decoder. Tests replace it to
@@ -575,11 +575,19 @@ func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 			disp[i] = dispText
 			continue
 		}
-		if item.Type == "image" && remaining > 0 {
-			if image, ok := imageBlockFromContent(item); ok && len(image.Data) <= remaining {
-				images = append(images, image)
-				remaining -= len(image.Data)
-				disp[i] = dispForwarded
+		if item.Type == "image" {
+			if remaining == 0 {
+				disp[i] = dispBudgetSkipped
+				continue
+			}
+			if image, ok := imageBlockFromContent(item); ok {
+				if len(image.Data) <= remaining {
+					images = append(images, image)
+					remaining -= len(image.Data)
+					disp[i] = dispForwarded
+					continue
+				}
+				disp[i] = dispBudgetSkipped
 				continue
 			}
 		}
@@ -588,11 +596,11 @@ func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 	return images, disp
 }
 
-func droppedContentNote(content []Content, disp []itemDisp) string {
+func droppedContentNote(content []Content, disp []itemDisp, kinds ...itemDisp) string {
 	labels := make([]string, 0, len(content))
 	counts := make(map[string]int, len(content))
 	for i, item := range content {
-		if i >= len(disp) || disp[i] != dispDropped {
+		if i >= len(disp) || !dispKind(disp[i], kinds) {
 			continue
 		}
 		// Prefer the mime type: "image/png" tells the reader more than "image".
@@ -622,6 +630,15 @@ func droppedContentNote(content []Content, disp []itemDisp) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func dispKind(got itemDisp, kinds []itemDisp) bool {
+	for _, kind := range kinds {
+		if got == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {

@@ -337,23 +337,38 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 	// per-item disposition, so a valid image is not decoded again just to
 	// decide whether it was forwarded.
 	//
-	// The note is appended only when something was actually dropped, so a
+	// Image-only success has no text block, so a one-line placeholder keeps
+	// the tool_result self-describing. ModelOutput and finalizeToolOutcome
+	// copy Output through verbatim; an empty string would hand the model an
+	// empty body next to the image.
+	//
+	// Notes are appended only when something was actually dropped, so a
 	// text-only result is byte-for-byte what it was before, and a successfully
 	// forwarded image is not described as unforwardable.
 	//
-	// It says retrying cannot RECOVER the payload rather than that a retry
-	// returns the same thing. Each retry is a fresh call, so the server may well
-	// answer differently; what cannot change is that Zero still has nowhere to
-	// put the remaining non-text block. Claiming the response would be identical
-	// would be a promise this code is in no position to make.
-	if dropped := droppedContentNote(result.Content, disp); dropped != "" {
+	// Unforwardable blocks (audio, resource, failed decode) say retrying
+	// cannot RECOVER the payload: Zero still has nowhere to put them.
+	// Budget-skipped images are different — Zero can forward them, and a
+	// retry with fewer images can recover the payload — so they get their
+	// own sentence.
+	if output == "" && len(images) > 0 {
+		output = "[image forwarded]"
+	}
+	if skipped := droppedContentNote(result.Content, disp, dispBudgetSkipped); skipped != "" {
+		note := "[zero] this server also returned " + skipped + ", which exceeded this result's image budget. Retrying with fewer images can recover this payload."
+		if output == "" {
+			note = "[zero] this server returned " + skipped + ", which exceeded this result's image budget. Retrying with fewer images can recover this payload."
+		}
+		output = strings.TrimSpace(output + "\n\n" + note)
+	}
+	if dropped := droppedContentNote(result.Content, disp, dispDropped); dropped != "" {
 		note := "[zero] this server also returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
 		if output == "" {
 			note = "[zero] this server returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
 		}
 		output = strings.TrimSpace(output + "\n\n" + note)
 	}
-	if output == "" && len(images) == 0 {
+	if output == "" {
 		output = "(empty MCP tool result)"
 	}
 	return tools.Result{
