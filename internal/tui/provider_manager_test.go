@@ -323,12 +323,10 @@ func TestProviderManagerEditKeyPersistsStoredMarker(t *testing.T) {
 	if backup.APIKey != "" {
 		t.Fatalf("cleartext key must never land in config.json: %+v", backup)
 	}
-	// The env reference is deliberately preserved as an explicit override: the
-	// resolver fills APIKey from a SET env var first, and the stored key applies
-	// only when the env var is absent — locked in here so a future merge change
-	// can't silently flip the precedence.
-	if backup.APIKeyEnv != "BACKUP_API_KEY" {
-		t.Fatalf("APIKeyEnv must survive a key edit as an explicit override, got %q", backup.APIKeyEnv)
+	// A freshly stored key becomes authoritative. Keeping the old env reference
+	// would let a stale environment value overwrite it during Resolve.
+	if backup.APIKeyEnv != "" {
+		t.Fatalf("APIKeyEnv must be cleared after a key edit, got %q", backup.APIKeyEnv)
 	}
 	store, err := config.ProviderKeyStoreAt(filepath.Dir(next.userConfigPath))
 	if err != nil {
@@ -644,4 +642,435 @@ func TestProviderManagerCredStateFallsThroughStaleMarker(t *testing.T) {
 	if state != "stored key missing" {
 		t.Fatalf("expected stored key missing with no fallback, got %q", state)
 	}
+}
+
+func TestProviderManagerRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	profiles := []config.ProviderProfile{
+		{Name: "work", APIKeyStored: true},
+		{Name: "WORK", APIKeyStored: true},
+	}
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: profiles[0],
+		SavedProviders:  profiles,
+		UserConfigPath:  configPath,
+	})
+	m, _ = m.openProviderManager()
+	m.providerWizard.manageCursor = 1
+	next, cmd := m.deleteManagerSelection()
+	next = drainProviderManagerCmds(t, next, cmd)
+
+	cfg := readManagerConfig(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" || !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("survivor = %+v, want credentialed work row", cfg.Providers)
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "work" {
+		t.Fatalf("in-memory survivor = %+v, want work", next.savedProviders)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("shared key changed: present=%v err=%v", ok, getErr)
+	}
+	if next.providerName != "work" || next.providerProfile.Name != "work" {
+		t.Fatalf("removing WORK changed live work identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if status := next.providerWizard.manageStatus; !strings.Contains(status, "Kept its stored API key") || !strings.Contains(status, "Active provider: work") {
+		t.Fatalf("delete status did not describe retained key and surviving active row: %q", status)
+	}
+}
+
+func TestProviderManagerKeepsDistinctUnicodeLiveProviderOnOtherRowMutation(t *testing.T) {
+	newModelWithRows := func(t *testing.T) model {
+		t.Helper()
+		t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+		profiles := []config.ProviderProfile{
+			{Name: "s", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://s.example/v1", Model: "s-model"},
+			{Name: "ſ", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://long-s.example/v1", Model: "long-s-model"},
+		}
+		path := filepath.Join(t.TempDir(), "config.json")
+		data, err := json.Marshal(config.FileConfig{ActiveProvider: "ſ", Providers: profiles})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{
+			ProviderName:    "ſ",
+			ProviderProfile: profiles[1],
+			SavedProviders:  profiles,
+			UserConfigPath:  path,
+		})
+		m, _ = m.openProviderManager()
+		return m
+	}
+
+	t.Run("edit s", func(t *testing.T) {
+		t.Setenv(config.ActiveProviderEnv, "ſ")
+		m := newModelWithRows(t)
+		m.providerWizard.beginProviderEdit(m.savedProviders[0], managerRowOwnership(t, m, m.savedProviders[0].Name))
+		m.providerWizard.editDraft.Model = "s-updated"
+		next, _ := m.saveManagerEdit()
+		if next.providerName != "ſ" || next.providerProfile.Name != "ſ" {
+			t.Fatalf("editing s rewrote live long-s identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+		}
+		if got := os.Getenv(config.ActiveProviderEnv); got != "ſ" {
+			t.Fatalf("%s = %q, want long-s unchanged", config.ActiveProviderEnv, got)
+		}
+		if next.savedProviders[0].Model != "s-updated" || next.savedProviders[1].Name != "ſ" {
+			t.Fatalf("wrong in-memory edit target: %+v", next.savedProviders)
+		}
+	})
+
+	t.Run("remove s", func(t *testing.T) {
+		m := newModelWithRows(t)
+		m.providerWizard.manageCursor = 0
+		next, _ := m.deleteManagerSelection()
+		if next.providerName != "ſ" {
+			t.Fatalf("removing s changed live long-s provider to %q", next.providerName)
+		}
+		if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "ſ" {
+			t.Fatalf("wrong in-memory removal target: %+v", next.savedProviders)
+		}
+	})
+}
+
+// A session can spell its provider differently from the row it runs on —
+// ZERO_PROVIDER=work against a saved "WORK", resumed session metadata, or a
+// `zero providers use work` from another terminal. When that row is the SOLE
+// carrier of the credential identity there is no other row the session could
+// mean, so the manager must mark it active and carry a rename onto the live
+// session; otherwise ZERO_PROVIDER keeps exporting a name no row answers to.
+func TestProviderManagerSoleRowCaseVariantTracksLiveSession(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	profile := config.ProviderProfile{
+		Name:         "WORK",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://other.example/v1",
+		Model:        "other-model",
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(config.FileConfig{ActiveProvider: "WORK", Providers: []config.ProviderProfile{profile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: config.ProviderProfile{Name: "work"},
+		SavedProviders:  []config.ProviderProfile{profile},
+		UserConfigPath:  path,
+	})
+	m, _ = m.openProviderManager()
+
+	// The row the session actually runs on must render as active even though
+	// the session spells it differently.
+	if got := m.providerWizard.manageActiveName; got != "WORK" {
+		t.Fatalf("manageActiveName = %q, want the sole row's spelling WORK", got)
+	}
+
+	m.providerWizard.beginProviderEdit(profile, managerRowOwnership(t, m, profile.Name))
+	m.providerWizard.editDraft.Name = "OFFICE"
+	next, _ := m.saveManagerEdit()
+
+	if next.providerWizard == nil || next.providerWizard.err != "" {
+		t.Fatalf("sole-row case-variant edit failed: %+v", next.providerWizard)
+	}
+	if next.providerName != "OFFICE" || next.providerProfile.Name != "OFFICE" {
+		t.Fatalf("rename did not follow the live session: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "OFFICE" {
+		t.Fatalf("%s = %q, want the renamed row so spawned children resolve it", config.ActiveProviderEnv, got)
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "OFFICE" {
+		t.Fatalf("wrong in-memory edit target: %+v", next.savedProviders)
+	}
+	cfg := readManagerConfig(t, path)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "OFFICE" {
+		t.Fatalf("wrong persisted edit target: %+v", cfg.Providers)
+	}
+}
+
+// The sole-row resolution above must NOT reach case-variant siblings: with both
+// "work" and "WORK" persisted, a session on "work" is one specific row, and a
+// delete aimed at the other must leave it alone. (Edit cannot be exercised here
+// — EditProvider validates the duplicate-identity config before mutating.)
+func TestProviderManagerCaseVariantDeleteDoesNotChangeLiveSibling(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	t.Setenv(config.ActiveProviderEnv, "work")
+	profiles := []config.ProviderProfile{
+		{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example/v1", Model: "work-model"},
+		{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://other.example/v1", Model: "other-model"},
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"activeProvider":"work","providers":[{"name":"work"},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: profiles[0],
+		SavedProviders:  profiles,
+		UserConfigPath:  path,
+	})
+	m, _ = m.openProviderManager()
+	// Exact spelling wins, so the live row is "work" and not its sibling.
+	if got := m.providerWizard.manageActiveName; got != "work" {
+		t.Fatalf("manageActiveName = %q, want the exact live row work", got)
+	}
+
+	m.providerWizard.manageCursor = 1
+	next, _ := m.deleteManagerSelection()
+
+	if next.providerName != "work" || next.providerProfile.Name != "work" {
+		t.Fatalf("deleting WORK rewrote live work identity: name=%q profile=%q", next.providerName, next.providerProfile.Name)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "work" {
+		t.Fatalf("%s = %q, want live work unchanged", config.ActiveProviderEnv, got)
+	}
+	if status := next.providerWizard.manageStatus; strings.Contains(status, "keeps running on it until you switch") {
+		t.Fatalf("delete of the sibling row claimed the live session runs on it: %q", status)
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "work" {
+		t.Fatalf("wrong in-memory removal target: %+v", next.savedProviders)
+	}
+}
+
+func TestProviderManagerAmbiguousCaseVariantSessionDoesNotGuessLiveRow(t *testing.T) {
+	providers := []config.ProviderProfile{{Name: "work"}, {Name: "WORK"}}
+	if got := sessionRowName("Work", providers); got != "Work" {
+		t.Fatalf("sessionRowName = %q, want unresolved live spelling Work", got)
+	}
+	for _, row := range providers {
+		if sessionRefersToPersistedRow("Work", row.Name, providers) {
+			t.Fatalf("ambiguous live spelling must not select row %q", row.Name)
+		}
+	}
+}
+
+func TestProviderManagerCleanupRedactsCredentialStoreError(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	secret := "sk-proj-12345678901234567890"
+	dir := filepath.Join(t.TempDir(), secret)
+	if err := os.MkdirAll(filepath.Join(dir, "credentials.json.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	msg, ok := providerManagerCleanupCmd(filepath.Join(dir, "config.json"), config.ProviderProfile{Name: "work"}, true)().(providerManagerCleanupMsg)
+	if !ok {
+		t.Fatal("cleanup command returned the wrong message type")
+	}
+	text := strings.Join(msg.notes, " ")
+	if strings.Contains(text, secret) {
+		t.Fatalf("cleanup warning leaked credential-like text: %q", text)
+	}
+	if !strings.Contains(text, "could not be deleted") {
+		t.Fatalf("cleanup warning missing failure context: %q", text)
+	}
+}
+
+// The confirmation prompt must promise what the delete actually does: with a
+// case variant that still claims the shared credential, the key is kept, so
+// the prompt must not say it is about to be removed.
+func TestProviderManagerDeleteConfirmMatchesKeyRetentionPolicy(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+
+	newManagerAtRow := func(t *testing.T, configJSON string, profiles []config.ProviderProfile, cursor int) model {
+		t.Helper()
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{
+			ProviderName:    profiles[0].Name,
+			ProviderProfile: profiles[0],
+			SavedProviders:  profiles,
+			UserConfigPath:  configPath,
+		})
+		m, _ = m.openProviderManager()
+		m.providerWizard.manageCursor = cursor
+		next, _ := m.handleProviderWizardKey(testKeyText("d"))
+		if !next.providerWizard.manageDeleting {
+			t.Fatal("d must arm the delete confirm")
+		}
+		return next
+	}
+
+	t.Run("shared credential is kept", func(t *testing.T) {
+		m := newManagerAtRow(t,
+			`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`,
+			[]config.ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "WORK", APIKeyStored: true}},
+			1,
+		)
+		if m.providerWizard.manageDeleteKeyNote == "" {
+			t.Fatal("retention not resolved for a survivor that claims the credential")
+		}
+		view := strings.Join(m.providerWizard.renderManageStep(80), "\n")
+		if !strings.Contains(view, "stored API key is kept") {
+			t.Fatalf("confirm text = %q, want the key-kept wording", view)
+		}
+	})
+
+	t.Run("last owner removal deletes the key", func(t *testing.T) {
+		m := newManagerAtRow(t,
+			`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"other"}]}`,
+			[]config.ProviderProfile{{Name: "work", APIKeyStored: true}, {Name: "other"}},
+			0,
+		)
+		if m.providerWizard.manageDeleteKeyNote == "" {
+			t.Fatal("delete confirmation made no claim about a persisted row's key")
+		}
+		view := strings.Join(m.providerWizard.renderManageStep(80), "\n")
+		if !strings.Contains(view, "also removes its stored API key") {
+			t.Fatalf("confirm text = %q, want the key-removal wording", view)
+		}
+	})
+}
+
+// A markerless case variant does not own the shared credential, so removing
+// the only row that claimed it must delete the secret rather than orphan it
+// behind a profile ApplyStoredAPIKey will never read.
+func TestProviderManagerRemoveDeletesKeyWhenSurvivorNeverClaimedIt(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	profiles := []config.ProviderProfile{
+		{Name: "work", APIKeyStored: true},
+		{Name: "WORK"},
+	}
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: profiles[0],
+		SavedProviders:  profiles,
+		UserConfigPath:  configPath,
+	})
+	m, _ = m.openProviderManager()
+	m.providerWizard.manageCursor = 0
+	next, cmd := m.deleteManagerSelection()
+	next = drainProviderManagerCmds(t, next, cmd)
+
+	if _, ok, getErr := store.Get("WORK"); getErr != nil {
+		t.Fatal(getErr)
+	} else if ok {
+		t.Fatal("shared key was orphaned behind a markerless survivor")
+	}
+	if status := next.providerWizard.manageStatus; !strings.Contains(status, "stored API key will also be deleted") {
+		t.Fatalf("delete status = %q, want the key-deletion note", status)
+	}
+}
+
+// A row visible only because Resolve() synthesized it from an env var has no
+// persisted profile and no stored key, so the confirmation must make no claim
+// about a key rather than promising a removal that cannot happen. The same
+// holds when the config is too ambiguous for the delete to proceed at all.
+func TestProviderDeleteKeyNoteMakesNoClaimWithoutAResolvableRow(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+
+	cases := []struct {
+		name       string
+		configJSON string
+		row        string
+		// resolved is every row spelling the manager is displaying.
+		resolved []string
+	}{
+		{
+			name:       "env-derived row with no persisted profile",
+			configJSON: `{"providers":[{"name":"other"}]}`,
+			row:        "openai",
+			resolved:   []string{"other", "openai"},
+		},
+		{
+			name:       "ambiguous duplicate rows the delete cannot resolve",
+			configJSON: `{"providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`,
+			row:        "Work",
+			resolved:   []string{"work", "WORK", "Work"},
+		},
+		{
+			// The project row's identity belongs to the user row listed beside
+			// it, so this row owns nothing on disk and promises nothing.
+			name:       "project row whose identity a listed user row owns",
+			configJSON: `{"providers":[{"name":"work","apiKeyStored":true}]}`,
+			row:        "WORK",
+			resolved:   []string{"work", "WORK"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(testCase.configJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			owner, err := config.ProviderRowOwnershipAt(path, testCase.resolved, testCase.row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if note := providerDeleteKeyNote(path, owner); note != "" {
+				t.Fatalf("note = %q, want no claim about the stored key", note)
+			}
+		})
+	}
+	// No user config path at all: nothing can be promised either.
+	if note := providerDeleteKeyNote("", config.ProviderRowOwnership{UserBacked: true, PersistedName: "work"}); note != "" {
+		t.Fatalf("note = %q, want no claim without a config path", note)
+	}
+}
+
+// The preview must resolve the row the same way the delete does: a case-variant
+// spelling that removes nothing would preview "key kept" for a delete that
+// resolves the row and takes the key with it.
+func TestProviderDeleteKeyNoteResolvesCaseVariantSpelling(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"WORK","apiKeyStored":true},{"name":"other"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// "work" addresses the sole WORK row, whose removal takes the key with it.
+	// No other displayed row carries "WORK", so the bridge is safe here — that
+	// sibling check is the whole difference from the project-row case above.
+	owner, err := config.ProviderRowOwnershipAt(path, []string{"work", "other"}, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owner.UserBacked || owner.PersistedName != "WORK" {
+		t.Fatalf("ownership = %+v, want the sole WORK row", owner)
+	}
+	note := providerDeleteKeyNote(path, owner)
+	if !strings.Contains(note, "also removes its stored API key") {
+		t.Fatalf("note = %q, want the key-removal wording for the resolved row", note)
+	}
+}
+
+// managerRowOwnership resolves a row's provenance exactly as
+// reloadProviderManagerRows does, so a test that drives beginProviderEdit
+// directly cannot hand the edit a stronger ownership than the manager would.
+func managerRowOwnership(t *testing.T, m model, name string) config.ProviderRowOwnership {
+	t.Helper()
+	owner, err := config.ProviderRowOwnershipAt(m.userConfigPath, config.ProviderProfileNames(m.savedProviders), name)
+	if err != nil {
+		t.Fatalf("resolve ownership for %q: %v", name, err)
+	}
+	return owner
 }

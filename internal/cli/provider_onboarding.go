@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -11,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type providerUseOptions struct {
@@ -37,6 +37,11 @@ type providerSetupPlan struct {
 	EnvVar       string `json:"envVar"`
 }
 
+type providerRepairOptions struct {
+	name string
+	json bool
+}
+
 func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseProviderUseArgs(args)
 	if err != nil {
@@ -53,6 +58,10 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	resolvedName, persisted, err := resolvePersistedProviderName(configPath, options.name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	// SetActiveProvider only ever matches profiles persisted in config.json
 	// (see config.ProviderPersisted), but a provider can be visible in
 	// `zero providers list`/the TUI picker purely because Resolve()
@@ -60,14 +69,12 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	// without ever writing a row to disk. Without this check, switching to
 	// that provider by name always fails with a confusing "not found" even
 	// though it is genuinely usable this session (issue #707).
-	persisted, err := config.ProviderPersisted(configPath, options.name)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
 	if !persisted {
 		if exit, handled := reportUnpersistedProviderUse(stdout, stderr, deps, options, configPath); handled {
 			return exit
 		}
+	} else {
+		options.name = resolvedName
 	}
 	cfg, err := config.SetActiveProvider(configPath, options.name)
 	if err != nil {
@@ -113,7 +120,7 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 		return ""
 	}
 	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
-	if override == "" || strings.EqualFold(override, strings.TrimSpace(selected)) {
+	if override == "" || config.SameProviderIdentity(override, selected) {
 		return ""
 	}
 	return override
@@ -379,6 +386,73 @@ func parseProviderNamesArgs(args []string, want int, usage string) (providerName
 	return options, false, nil
 }
 
+func runProvidersRepairConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseProviderRepairArgs(args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeProvidersHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	// repaired comes from the repair itself. Re-deriving the defaulting rules
+	// here reported activeProvider as the repaired name whenever that value
+	// already belonged to a different row and the fallback had actually named
+	// this one — the command said "Named legacy provider Groq" about a row it
+	// had named "openai".
+	_, repaired, err := config.RepairUnnamedProvider(configPath, options.name)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, map[string]any{"repairedProvider": repaired, "configPath": configPath}); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Named legacy provider %s in %s\n", repaired, configPath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func parseProviderRepairArgs(args []string) (providerRepairOptions, bool, error) {
+	options := providerRepairOptions{}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			return options, true, nil
+		case arg == "--json":
+			options.json = true
+		case arg == "--name":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.name = value
+			index = next
+		case strings.HasPrefix(arg, "--name="):
+			value, err := requiredInlineFlagValue(arg, "--name")
+			if err != nil {
+				return options, false, err
+			}
+			options.name = value
+		case strings.HasPrefix(arg, "-"):
+			return options, false, execUsageError{fmt.Sprintf("unknown flag %q", arg)}
+		default:
+			return options, false, execUsageError{fmt.Sprintf("unexpected argument %q", arg)}
+		}
+	}
+	return options, false, nil
+}
+
 // runProvidersRemove deletes a saved provider profile and its stored API key.
 // The OAuth token (if any) is kept — logins outlive profiles so re-adding the
 // provider needs no new browser round-trip; `zero auth logout <name>` removes it.
@@ -398,6 +472,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	name := options.names[0]
+	resolvedName, persisted, err := resolvePersistedProviderName(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	// RemoveProvider only ever matches profiles persisted in config.json (see
 	// config.ProviderPersisted), but a provider can be visible in
 	// `zero providers list`/the TUI picker purely because Resolve()
@@ -405,23 +483,24 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	// without ever writing a row to disk. Without this check, deleting that
 	// provider by name always fails with a confusing "not found" even though
 	// it is genuinely visible/usable this session (issue #707).
-	persisted, err := config.ProviderPersisted(configPath, name)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
 	if !persisted {
 		if exit, handled := reportUnpersistedProviderRemove(stdout, stderr, deps, name, options.json, configPath); handled {
 			return exit
 		}
+	} else {
+		name = resolvedName
 	}
-	cfg, err := config.RemoveProvider(configPath, name)
+	// Resolve credential identity to the exact persisted row before entering the
+	// transactional row/key mutation.
+	exactName, err := config.ResolvePersistedProviderName(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	// Delete the key from the store BESIDE the config being edited — the same
-	// store setup/rename write to — not the default-path store, so a
-	// non-default config path cannot leave the encrypted key behind.
-	keyRemoved, keyErr := removeStoredProviderKeyAt(configPath, name)
+	cfg, keyRemoved, err := config.RemoveProviderAndKey(configPath, exactName)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+
 	if options.json {
 		payload := map[string]any{
 			"removed":        name,
@@ -429,10 +508,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
 		}
-		if keyErr != nil {
-			// A lingering secret must not read as a clean removal.
-			payload["keyError"] = keyErr.Error()
-		}
+
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
 		}
@@ -441,11 +517,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if _, err := fmt.Fprintf(stdout, "Removed provider %s\n", name); err != nil {
 		return exitCrash
 	}
-	if keyErr != nil {
-		if _, err := fmt.Fprintf(stderr, "warning: its stored API key could not be deleted and remains in the credential store: %v\n", keyErr); err != nil {
-			return exitCrash
-		}
-	} else if keyRemoved {
+	if keyRemoved {
 		if _, err := fmt.Fprintln(stdout, "Deleted its stored API key."); err != nil {
 			return exitCrash
 		}
@@ -460,17 +532,6 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 	}
 	return exitSuccess
-}
-
-// removeStoredProviderKeyAt deletes a provider's API key from the credential
-// store co-located with configPath (the store SecureProviderProfile captured
-// it into and RenameProvider migrates within).
-func removeStoredProviderKeyAt(configPath string, provider string) (bool, error) {
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
-		return false, err
-	}
-	return store.Delete(provider)
 }
 
 // runProvidersRename renames a saved provider profile, migrating its stored
@@ -491,7 +552,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	oldName := options.names[0]
-	persisted, err := config.ProviderPersisted(configPath, oldName)
+	resolvedName, persisted, err := resolvePersistedProviderName(configPath, oldName)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -499,14 +560,22 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		if exit, handled := reportUnpersistedProviderRename(stdout, stderr, deps, oldName, options.json, configPath); handled {
 			return exit
 		}
+	} else {
+		oldName = resolvedName
 	}
-	cfg, err := config.RenameProvider(configPath, options.names[0], options.names[1])
+	// Same bridge as remove: the persisted check matches credential identity
+	// while RenameProvider matches the row's exact spelling.
+	oldName, err = config.ResolvePersistedProviderName(configPath, oldName)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	cfg, err := config.RenameProvider(configPath, oldName, options.names[1])
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{
-			"renamed":        map[string]string{"from": options.names[0], "to": options.names[1]},
+			"renamed":        map[string]string{"from": oldName, "to": options.names[1]},
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
 		}); err != nil {
@@ -514,10 +583,21 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintf(stdout, "Renamed provider %s to %s\n", options.names[0], options.names[1]); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Renamed provider %s to %s\n", oldName, options.names[1]); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func resolvePersistedProviderName(path, identity string) (string, bool, error) {
+	profile, match, err := config.ResolvePersistedProviderIdentity(path, identity)
+	if err != nil {
+		return "", false, err
+	}
+	if match == config.PersistedIdentityNone {
+		return strings.TrimSpace(identity), false, nil
+	}
+	return strings.TrimSpace(profile.Name), true, nil
 }
 
 // providerResolvedByName reports whether name matches a provider in a
@@ -526,7 +606,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 func providerResolvedByName(providers []config.ProviderProfile, name string) bool {
 	name = strings.TrimSpace(name)
 	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+		if config.SameProviderIdentity(provider.Name, name) {
 			return true
 		}
 	}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,12 +14,7 @@ import (
 
 // ProviderKeyStoreAt opens the encrypted credential store whose file backend lives
 // in dir. The backend resolves keyring-first, then encrypted-file, with a plaintext
-// opt-out via ZERO_CRED_STORAGE. The dir parameter exists so tests can point the file
-// backend at a temp directory; production always uses the user config directory
-// (ProviderKeyStore) because provider API keys are user-scoped by design — they are
-// only ever captured under the user config, never project config (a cloned repo must
-// not carry keys), so runtime lookups deliberately use the user store regardless of
-// where a provider profile was resolved from.
+// opt-out via ZERO_CRED_STORAGE.
 func ProviderKeyStoreAt(dir string) (*credstore.Store, error) {
 	return credstore.New(credstore.Options{Dir: dir})
 }
@@ -28,6 +24,15 @@ func ProviderKeyStore() (*credstore.Store, error) {
 	configPath, err := DefaultUserConfigPath()
 	if err != nil {
 		return nil, err
+	}
+	return ProviderKeyStoreAt(filepath.Dir(configPath))
+}
+
+// ProviderKeyStoreForConfigPath opens the store beside configPath. An empty path
+// retains the default-store behavior used by in-memory and ephemeral callers.
+func ProviderKeyStoreForConfigPath(configPath string) (*credstore.Store, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return ProviderKeyStore()
 	}
 	return ProviderKeyStoreAt(filepath.Dir(configPath))
 }
@@ -66,14 +71,74 @@ func SecureProviderProfile(profile ProviderProfile, configPath string) ProviderP
 	return secured
 }
 
+// PublishProviderCredential captures key into the credential store beside path
+// and publishes the matching APIKeyStored marker for exactName as ONE operation,
+// so a rejected publication cannot leave the user worse off than before the call.
+//
+// Hand-rolled Set-then-Mark sequences got this wrong in both directions: they
+// wrote the secret before any validation could reject the config, and their
+// rollback deleted the entry outright — destroying a working key that some
+// other row (the store folds "openrouter" and "OPENROUTER" onto one entry) was
+// still using. This validates first, snapshots whatever the store held, and on
+// a marker failure restores that snapshot rather than deleting.
+//
+// exactName must be a persisted row's own spelling; callers holding user or
+// session input resolve it with ResolvePersistedProviderName first.
+func PublishProviderCredential(path string, exactName string, key string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+	exactName = strings.TrimSpace(exactName)
+	if exactName == "" {
+		return fmt.Errorf("provider name is required")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("api key is required")
+	}
+	_, err := runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		index := -1
+		for candidate := range op.config.Providers {
+			if strings.TrimSpace(op.config.Providers[candidate].Name) == exactName {
+				index = candidate
+				break
+			}
+		}
+		if index < 0 {
+			return fmt.Errorf("provider %q not found", exactName)
+		}
+		if err := op.setKey(exactName, key); err != nil {
+			return fmt.Errorf("store API key for %q: %w", exactName, err)
+		}
+		profile := &op.config.Providers[index]
+		profile.APIKey = ""
+		profile.APIKeyEnv = ""
+		profile.APIKeyStored = true
+		return nil
+	})
+	return err
+}
+
 // ForgetProviderKey removes a provider's stored API key from the credential store,
 // reporting whether one existed. Used by the lifecycle "remove key" / auth logout.
 func ForgetProviderKey(provider string) (bool, error) {
-	store, err := ProviderKeyStore()
+	path, err := DefaultUserConfigPath()
 	if err != nil {
 		return false, err
 	}
-	return store.Delete(provider)
+	return DeleteProviderCredentials(path, []string{provider}, provider)
+}
+
+// StoreProviderCredential serializes a credential-only writer with provider
+// profile transactions. It intentionally does not change config markers; STT
+// setup uses the shared provider credential store without owning a profile row.
+func StoreProviderCredential(path, provider, key string) error {
+	_, err := runProviderProfileOperation(path, true, true, func(op *providerProfileOperation) error {
+		op.publish = false
+		return op.setKey(provider, key)
+	})
+	return err
 }
 
 // ClearProviderKeyStored unsets the APIKeyStored marker for a provider in the
@@ -86,28 +151,101 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 	if path == "" || provider == "" {
 		return false, nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read config %s: %w", path, err)
-	}
-	var cfg FileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
+	return clearProviderKeyStoredWhere(path, func(name string) bool {
+		return strings.TrimSpace(name) == provider
+	})
+}
+
+func clearProviderKeyStoredWhere(path string, matches func(string) bool) (bool, error) {
 	changed := false
-	for index := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) && cfg.Providers[index].APIKeyStored {
-			cfg.Providers[index].APIKeyStored = false
-			changed = true
+	_, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		for index := range op.config.Providers {
+			if matches(op.config.Providers[index].Name) && op.config.Providers[index].APIKeyStored {
+				op.config.Providers[index].APIKeyStored = false
+				changed = true
+			}
 		}
-	}
-	if !changed {
+		op.publish = changed
+		return nil
+	})
+	return changed, err
+}
+
+// ClearProviderKeyStoredCaseVariants unsets the APIKeyStored marker on every
+// row whose name normalizes to the same credential-store identity as provider,
+// not just an exact-spelling match. Deleting the shared secret for one
+// case-variant row (e.g. "WORK") must also clear the marker on any sibling row
+// ("work") that pointed at the same now-gone entry — leaving it set would claim
+// a key is available when ApplyStoredAPIKey's store lookup will always miss.
+func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
+	path = strings.TrimSpace(path)
+	provider = strings.TrimSpace(provider)
+	if path == "" || provider == "" {
 		return false, nil
 	}
-	return true, writeConfigFile(path, cfg)
+	providerIdentity := credstore.NormalizeProvider(provider)
+	return clearProviderKeyStoredWhere(path, func(name string) bool {
+		return credstore.NormalizeProvider(name) == providerIdentity
+	})
+}
+
+// DeleteProviderCredentials deletes the candidate API-key entries and clears
+// every marker sharing markerProvider's credential identity in one transaction.
+func DeleteProviderCredentials(path string, candidates []string, markerProvider string) (bool, error) {
+	removed := false
+	_, err := runProviderProfileOperation(path, true, true, func(op *providerProfileOperation) error {
+		var err error
+		removed, err = op.deleteProviderCredentials(candidates, markerProvider)
+		if err != nil {
+			return err
+		}
+		if !op.exists || ValidatePersistedProviderNames(op.config) != nil {
+			op.publish = false
+		}
+		return nil
+	})
+	return removed, err
+}
+
+// DeleteResolvedProviderCredentials resolves one persisted provider identity,
+// deletes every exclusively owned credential candidate, and clears its stored
+// marker under the provider config/key transaction lock.
+func DeleteResolvedProviderCredentials(path, addressedName string) (removed bool, canonicalName string, err error) {
+	_, err = runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
+		_, match, resolveErr := resolvePersistedProviderIdentity(op.config.Providers, addressedName)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if match == PersistedIdentityNone {
+			return fmt.Errorf("provider %q not found", strings.TrimSpace(addressedName))
+		}
+		candidates, canonical, resolveErr := providerCredentialCandidates(op.config.Providers, addressedName)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		canonicalName = canonical
+		removed, resolveErr = op.deleteProviderCredentials(candidates, canonicalName)
+		return resolveErr
+	})
+	return removed, canonicalName, err
+}
+
+func (op *providerProfileOperation) deleteProviderCredentials(candidates []string, markerProvider string) (bool, error) {
+	removed := false
+	for _, candidate := range candidates {
+		candidateRemoved, err := op.deleteKey(candidate)
+		if err != nil {
+			return false, fmt.Errorf("delete stored key for %q: %w", candidate, err)
+		}
+		removed = removed || candidateRemoved
+	}
+	markerIdentity := credstore.NormalizeProvider(markerProvider)
+	for index := range op.config.Providers {
+		if credstore.NormalizeProvider(op.config.Providers[index].Name) == markerIdentity {
+			op.config.Providers[index].APIKeyStored = false
+		}
+	}
+	return removed, nil
 }
 
 // MigratePlaintextProviderKeys moves any inline plaintext API key in the config at
@@ -132,6 +270,9 @@ func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) 
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return 0, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return 0, err
+	}
 	migrated := 0
 	for index := range cfg.Providers {
 		profile := &cfg.Providers[index]
@@ -154,6 +295,33 @@ func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) 
 		return migrated, fmt.Errorf("rewrite config after migration %s: %w", path, err)
 	}
 	return migrated, nil
+}
+
+// MigratePlaintextProviderKeysTransactional is the production startup migration.
+// It serializes plaintext capture with every other provider config/key writer.
+func MigratePlaintextProviderKeysTransactional(path string) (int, error) {
+	migrated := 0
+	var skipped error
+	_, err := runProviderProfileOperation(path, true, false, func(op *providerProfileOperation) error {
+		for index := range op.config.Providers {
+			profile := &op.config.Providers[index]
+			key := strings.TrimSpace(profile.APIKey)
+			if key == "" || strings.TrimSpace(profile.Name) == "" {
+				continue
+			}
+			if err := op.setKey(profile.Name, key); err != nil {
+				// Leave the plaintext key untouched; a failed Set must not strand it.
+				skipped = errors.Join(skipped, fmt.Errorf("migrate stored key for %q: %w", profile.Name, err))
+				continue
+			}
+			profile.APIKey = ""
+			profile.APIKeyStored = true
+			migrated++
+		}
+		op.publish = migrated > 0
+		return nil
+	})
+	return migrated, errors.Join(err, skipped)
 }
 
 // HasConfiguredCredential reports whether the profile is set up to authenticate
