@@ -1084,27 +1084,32 @@ func normalizeCredentialFinalPath(path string) string {
 }
 
 // unreadableEnforcementPath is the dest a bwrap bind or Seatbelt rule should
-// use for path. Symlinks keep their lexical spelling so a later atomic retarget
-// still hits the same pathname; other paths keep EvalSymlinks so aliases such
-// as macOS /var -> /private/var continue to match existing roots. Overlap and
-// allow checks use canonical identity via pathWithinRootCanonical, not this.
+// use for path. When the lexical spelling differs from the EvalSymlinks
+// target — a leaf symlink or an intermediate directory symlink such as
+// ~/.ssh — keep the lexical pathname so a later atomic retarget still hits
+// the same dest. Other paths keep EvalSymlinks so aliases such as macOS
+// /var -> /private/var continue to match existing roots. Overlap and allow
+// checks use canonical identity via pathWithinRootCanonical, not this.
 func unreadableEnforcementPath(path string) string {
 	lexical := normalizeProfilePathLexically(path)
 	if lexical == "" {
 		return ""
 	}
-	if info, err := os.Lstat(lexical); err == nil && info.Mode().Type() == os.ModeSymlink {
+	resolved := normalizeProfilePath(path)
+	if resolved == "" || resolved == lexical {
+		if resolved != "" {
+			return resolved
+		}
 		return lexical
-	}
-	if resolved := normalizeProfilePath(path); resolved != "" {
-		return resolved
 	}
 	return lexical
 }
 
-// unreadableEnforcementPaths preserves lexical symlink identity alongside any
-// resolved target so Seatbelt emits both spellings. Non-symlink paths stay
-// canonical, matching normalizeProfilePaths.
+// unreadableEnforcementPaths preserves lexical identity whenever it differs
+// from the EvalSymlinks target, including intermediate directory symlinks
+// (for example ~/.ssh -> elsewhere with a regular key file inside). A later
+// retarget of that directory would otherwise expose the key through the
+// original pathname. Non-symlink paths stay canonical.
 func unreadableEnforcementPaths(paths []string) []string {
 	if len(paths) == 0 {
 		return nil
@@ -1126,10 +1131,11 @@ func unreadableEnforcementPaths(paths []string) []string {
 		if lexical == "" {
 			continue
 		}
-		if info, err := os.Lstat(lexical); err == nil && info.Mode().Type() == os.ModeSymlink {
+		canonical := normalizeProfilePath(path)
+		if lexical != canonical {
 			add(lexical)
 		}
-		add(normalizeProfilePath(path))
+		add(canonical)
 	}
 	return out
 }
