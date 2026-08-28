@@ -429,10 +429,7 @@ func TestWriteStdinReturnsAReapedSessionThroughTheCompletedStore(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if manager.Len() == 0 {
-			break
-		}
+	for manager.Len() != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("session %d was not reaped; manager has %d sessions", sessionID, manager.Len())
 		}

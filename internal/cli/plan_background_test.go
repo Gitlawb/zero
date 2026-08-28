@@ -102,10 +102,7 @@ func TestAPanickingBackgroundPlanIsContainedAndFreesTheSlot(t *testing.T) {
 	}
 
 	deadline := time.After(3 * time.Second)
-	for {
-		if !bridge.BackgroundPlanLive() {
-			break
-		}
+	for bridge.BackgroundPlanLive() {
 		select {
 		case <-deadline:
 			t.Fatal("a panicking plan left the bridge busy")
