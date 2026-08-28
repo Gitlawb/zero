@@ -260,9 +260,11 @@ func expandSSHConfigPath(value, home, sshDir string) string {
 	if value == "" || strings.EqualFold(value, "none") || strings.EqualFold(value, "SSH_AUTH_SOCK") {
 		return ""
 	}
-	if strings.Contains(value, "%") {
+	expanded, ok := expandSSHConfigPathTokens(value, home)
+	if !ok {
 		return ""
 	}
+	value = expanded
 	switch {
 	case value == "~":
 		return filepath.Clean(home)
@@ -275,6 +277,37 @@ func expandSSHConfigPath(value, home, sshDir string) string {
 	default:
 		return filepath.Join(sshDir, value)
 	}
+}
+
+// expandSSHConfigPathTokens resolves OpenSSH path tokens we can expand without
+// a live connection: %d is the supplied local home, %% is a literal %. Any
+// remaining percent token (%h, a trailing %, ...) is unsupported and the path
+// is dropped so we never deny (or follow) an unresolved pattern.
+func expandSSHConfigPathTokens(value, home string) (string, bool) {
+	if !strings.Contains(value, "%") {
+		return value, true
+	}
+	var b strings.Builder
+	b.Grow(len(value) + len(home))
+	for i := 0; i < len(value); i++ {
+		if value[i] != '%' {
+			b.WriteByte(value[i])
+			continue
+		}
+		if i+1 >= len(value) {
+			return "", false
+		}
+		switch value[i+1] {
+		case '%':
+			b.WriteByte('%')
+		case 'd':
+			b.WriteString(home)
+		default:
+			return "", false
+		}
+		i++
+	}
+	return b.String(), true
 }
 
 func sshShouldDenyReferencedPath(path, home, sshDir string) bool {
