@@ -399,10 +399,20 @@ func TestLinuxBwrapAndSeatbeltKeepLexicalCredentialSymlinkPaths(t *testing.T) {
 	sbpl := strings.Join(denyReadRules(profile.FileSystem), "\n")
 	for _, candidate := range []string{gnupgLink, gitLink, sshLink} {
 		lexical := normalizeProfilePathLexically(candidate)
-		assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", lexical)
+		assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexical)
 		if !strings.Contains(sbpl, sandboxProfileString(lexical)) {
 			t.Fatalf("Seatbelt rules missing lexical pathname %q:\n%s", lexical, sbpl)
 		}
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(gitTarget))
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(sshTarget))
+	sshDir := normalizeProfilePathLexically(filepath.Join(home, ".ssh"))
+	if !argsContainSequence(args, "--tmpfs", sshDir) {
+		t.Fatalf("expected tmpfs overlay of ~/.ssh to hide lexical key symlink: %#v", args)
+	}
+	gnupgTargetNorm := normalizeProfilePath(gnupgTarget)
+	if !argsContainSequence(args, "--tmpfs", gnupgTargetNorm) {
+		t.Fatalf("expected tmpfs mask of resolved ~/.gnupg target: %#v", args)
 	}
 
 	newGit := filepath.Join(realDir, "other-credentials")
@@ -413,11 +423,10 @@ func TestLinuxBwrapAndSeatbeltKeepLexicalCredentialSymlinkPaths(t *testing.T) {
 	mustSymlink(t, newGit, gitLink)
 
 	lexicalGit := normalizeProfilePathLexically(gitLink)
-	if !argsContainSequence(args, "--ro-bind", "/dev/null", lexicalGit) {
-		t.Fatalf("pre-retarget bwrap args lost lexical dest %q: %#v", lexicalGit, args)
-	}
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalGit)
 	reemitted := linuxBwrapFilesystemArgs(profile)
-	assertArgsContainSequence(t, reemitted, "--ro-bind", "/dev/null", lexicalGit)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, reemitted, lexicalGit)
+	assertArgsContainSequence(t, reemitted, "--ro-bind", "/dev/null", normalizeProfilePath(newGit))
 
 	deniedAfter := sshGPGDenied(t, home, nil)
 	if !denyListedExact(deniedAfter, lexicalGit) {
@@ -731,8 +740,9 @@ func TestWalkSSHPrivateKeyFilesDeniesCustomNamedSymlinkToPrivateKey(t *testing.T
 	mustSymlink(t, target, link)
 
 	denied := sshGPGDenied(t, home, nil)
-	if !denyCovered(denied, link) {
-		t.Fatalf("custom-named symlink to a private key is readable; deny list = %v", denied)
+	lexical := normalizeProfilePathLexically(link)
+	if !denyListedExact(denied, lexical) && !denyListedExact(denied, link) {
+		t.Fatalf("custom-named symlink lost its lexical deny entry; deny list = %v", denied)
 	}
 	if denyCovered(denied, filepath.Join(home, ".ssh")) {
 		t.Fatalf("~/.ssh was denied wholesale")
@@ -810,5 +820,219 @@ func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowRead(t *testing.T) {
 	denyIdx := strings.LastIndex(full, `(deny file-read* (subpath "`+sandboxProfileString(gnupg)+`"))`)
 	if denyIdx >= 0 {
 		t.Fatalf("full Seatbelt profile still denies ~/.gnupg subtree:\n%s", full)
+	}
+}
+
+func assertBwrapDoesNotFollowBindSymlinkDest(t *testing.T, args []string, lexical string) {
+	t.Helper()
+	if argsContainSequence(args, "--ro-bind", "/dev/null", lexical) {
+		t.Fatalf("bwrap --ro-bind /dev/null used symlink dest %q (follows / ENOENTs): %#v", lexical, args)
+	}
+}
+
+func TestExpandSSHConfigPathHomeEnvFromSuppliedHome(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	got := expandSSHConfigPath("${HOME}/keys/work_ed25519", home, sshDir)
+	want := filepath.Join(home, "keys", "work_ed25519")
+	if got != want {
+		t.Fatalf("expandSSHConfigPath(${HOME}) = %q, want %q", got, want)
+	}
+	got = expandSSHConfigPath("$HOME/keys/work_ed25519", home, sshDir)
+	if got != want {
+		t.Fatalf("expandSSHConfigPath($HOME) = %q, want %q", got, want)
+	}
+	if expandSSHConfigPath("${NOTHOME}/keys/x", home, sshDir) != "" {
+		t.Fatalf("unknown ${NOTHOME} must be dropped, not joined under ~/.ssh")
+	}
+	if expandSSHConfigPath("$NOTHOME/keys/x", home, sshDir) != "" {
+		t.Fatalf("unknown $NOTHOME must be dropped, not joined under ~/.ssh")
+	}
+	nonsense := filepath.Join(sshDir, "${NOTHOME}", "keys", "x")
+	if expandSSHConfigPath("${NOTHOME}/keys/x", home, sshDir) == nonsense {
+		t.Fatalf("unknown ${NOTHOME} was joined under ~/.ssh as %q", nonsense)
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileHomeEnv(t *testing.T) {
+	home := t.TempDir()
+	workKey := filepath.Join(home, "keys", "work_ed25519")
+	mustWriteFile(t, workKey, "")
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile ${HOME}/keys/work_ed25519\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile ${HOME}/keys/work_ed25519 is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile $HOME/keys/work_ed25519\nIdentityFile ${NOTHOME}/keys/x\n")
+	denied = sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile $HOME/keys/work_ed25519 is readable; deny list = %v", denied)
+	}
+	nonsense := filepath.Join(home, ".ssh", "${NOTHOME}", "keys", "x")
+	if denyListedExact(denied, nonsense) || denyCovered(denied, nonsense) {
+		t.Fatalf("unknown ${NOTHOME} was joined under ~/.ssh: %v", denied)
+	}
+}
+
+func TestWalkSSHPrivateKeyFilesDeniesPrivateKeyPayloadNamedPub(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	fakePub := filepath.Join(sshDir, "work.pub")
+	realPub := filepath.Join(sshDir, "id_ed25519.pub")
+	mustWriteFile(t, fakePub, sshPrivateKeyFixture())
+	mustWriteFile(t, realPub, "ssh-ed25519 AAAA public\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakePub) {
+		t.Fatalf("private-key payload at ~/.ssh/work.pub is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realPub) {
+		t.Fatalf("real ssh-ed25519 .pub was denied; public keys must stay readable")
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowReadThroughDirSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	gnupgTarget := filepath.Join(t.TempDir(), "gnupg-store")
+	key := filepath.Join(gnupgTarget, "private-keys-v1.d", "keygrip.key")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, filepath.Join(gnupgTarget, "secring.gpg"), "fake-secring")
+	mustSymlink(t, gnupgTarget, filepath.Join(home, ".gnupg"))
+
+	allow := []string{key}
+	creds := credentialDenyReadPathsIn(credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}, allow)
+	lexicalGnupg := normalizeProfilePathLexically(filepath.Join(home, ".gnupg"))
+	canonicalGnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	if denyListedExact(creds.Paths, lexicalGnupg) {
+		t.Fatalf("lexical ~/.gnupg dir deny retained despite nested canonical allowRead: %v", creds.Paths)
+	}
+	if canonicalGnupg != "" && denyListedExact(creds.Paths, canonicalGnupg) {
+		t.Fatalf("canonical ~/.gnupg dir deny retained despite nested allowRead: %v", creds.Paths)
+	}
+	if denyCovered(creds.Paths, key) {
+		t.Fatalf("nested allowRead key is still denied: %v", creds.Paths)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator), normalizeProfilePath(key)},
+			DenyReadIfExists:  creds.Paths,
+			DenyReadCarveouts: creds.Carveouts,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	if argsContainSequence(args, "--perms", "000", "--tmpfs", lexicalGnupg) ||
+		argsContainSequence(args, "--perms", "111", "--tmpfs", lexicalGnupg) ||
+		argsContainSequence(args, "--perms", "555", "--tmpfs", lexicalGnupg) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", lexicalGnupg) ||
+		(canonicalGnupg != "" && (argsContainSequence(args, "--perms", "000", "--tmpfs", canonicalGnupg) ||
+			argsContainSequence(args, "--perms", "111", "--tmpfs", canonicalGnupg) ||
+			argsContainSequence(args, "--ro-bind", "/dev/null", canonicalGnupg))) {
+		t.Fatalf("bwrap masked ~/.gnupg despite nested allowRead under dir symlink: %#v", args)
+	}
+
+	sbpl := strings.Join(denyReadRules(profile.FileSystem), "\n")
+	if strings.Contains(sbpl, sandboxProfileString(lexicalGnupg)) {
+		t.Fatalf("Seatbelt deny rules still cover lexical ~/.gnupg after nested allowRead:\n%s", sbpl)
+	}
+	if canonicalGnupg != "" && strings.Contains(sbpl, sandboxProfileString(canonicalGnupg)) {
+		t.Fatalf("Seatbelt deny rules still cover canonical ~/.gnupg after nested allowRead:\n%s", sbpl)
+	}
+	keyLit := sandboxProfileString(normalizeProfilePath(key))
+	if strings.Contains(sbpl, `(deny file-read* (literal "`+keyLit+`"))`) ||
+		strings.Contains(sbpl, `(deny file-read* (subpath "`+keyLit+`"))`) {
+		t.Fatalf("Seatbelt still denies the nested allowRead key:\n%s", sbpl)
+	}
+	full := seatbeltProfileFromPermissionProfile(profile, Policy{}, "")
+	if canonicalGnupg != "" {
+		denyIdx := strings.LastIndex(full, `(deny file-read* (subpath "`+sandboxProfileString(canonicalGnupg)+`"))`)
+		if denyIdx >= 0 {
+			t.Fatalf("full Seatbelt profile still denies canonical ~/.gnupg subtree:\n%s", full)
+		}
+	}
+}
+
+func TestLinuxBwrapMasksLiveAndDanglingCredentialSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	realDir := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	config := filepath.Join(sshDir, "config")
+	knownHosts := filepath.Join(sshDir, "known_hosts")
+	pub := filepath.Join(sshDir, "id_ed25519.pub")
+	mustWriteFile(t, config, "Host *\n")
+	mustWriteFile(t, knownHosts, "github.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, pub, "ssh-ed25519 AAAA public\n")
+
+	liveTarget := filepath.Join(realDir, "id_ed25519")
+	mustWriteFile(t, liveTarget, sshPrivateKeyFixture())
+	liveLink := filepath.Join(sshDir, "id_ed25519")
+	mustSymlink(t, liveTarget, liveLink)
+
+	danglingTarget := filepath.Join(realDir, "missing-id_rsa")
+	danglingLink := filepath.Join(sshDir, "id_rsa")
+	mustSymlink(t, danglingTarget, danglingLink)
+
+	gitTarget := filepath.Join(realDir, "git-credentials")
+	mustWriteFile(t, gitTarget, "x")
+	gitLink := filepath.Join(home, ".git-credentials")
+	mustSymlink(t, gitTarget, gitLink)
+
+	denied := sshGPGDenied(t, home, nil)
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+
+	lexicalLive := normalizeProfilePathLexically(liveLink)
+	lexicalDangling := normalizeProfilePathLexically(danglingLink)
+	lexicalGit := normalizeProfilePathLexically(gitLink)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalLive)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalDangling)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalGit)
+
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(liveTarget))
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(gitTarget))
+	if argsContainSequence(args, "--ro-bind", "/dev/null", danglingTarget) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", lexicalDangling) {
+		t.Fatalf("dangling symlink must not be a hard --ro-bind dest: %#v", args)
+	}
+
+	sshDirLex := normalizeProfilePathLexically(sshDir)
+	if !argsContainSequence(args, "--tmpfs", sshDirLex) {
+		t.Fatalf("expected tmpfs overlay of ~/.ssh for live/dangling key symlinks: %#v", args)
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", config, config)
+	assertArgsContainSequence(t, args, "--ro-bind", knownHosts, knownHosts)
+	assertArgsContainSequence(t, args, "--ro-bind", pub, pub)
+	if argsContainSequence(args, "--ro-bind", liveLink, liveLink) ||
+		argsContainSequence(args, "--ro-bind", danglingLink, danglingLink) {
+		t.Fatalf("denied symlink basenames were rebound into ~/.ssh overlay: %#v", args)
+	}
+	if argsContainSequence(args, "--tmpfs", home) || argsContainSequence(args, "--tmpfs", filepath.Clean(home)) {
+		t.Fatalf("HOME must never be tmpfs-overlaid: %#v", args)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
 	}
 }

@@ -772,14 +772,21 @@ func credentialPathReincluded(allowRoots []string, path string) bool {
 }
 
 // credentialNestedAllowReads returns allowRead paths that sit strictly inside
-// path — a nested grant under a credential directory.
+// path — a nested grant under a credential directory. Containment is canonical
+// so a lexical ~/.gnupg symlink is recognized as the parent of a nested
+// allowRead that lives under the symlink target. pathWithinRoot on the lexical
+// spelling would miss that pair, keep the lexical dir deny, and let Seatbelt
+// and bwrap expand it onto the canonical store.
 func credentialNestedAllowReads(allowRoots []string, path string) []string {
 	if path == "" || len(allowRoots) == 0 {
 		return nil
 	}
 	var out []string
 	for _, allow := range allowRoots {
-		if allow != path && pathWithinRoot(path, allow) {
+		if allow == path {
+			continue
+		}
+		if pathWithinRootCanonical(path, allow) && !pathWithinRootCanonical(allow, path) {
 			out = append(out, allow)
 		}
 	}
