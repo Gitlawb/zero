@@ -109,10 +109,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 			priorContentKnown = true
 		}
 	}
-	modelKnownContent := content
 	if priorBytes != nil {
 		content = preserveWriteFileEncoding(priorBytes, content)
 	}
+	modelEquivalentContent := content
 
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
@@ -148,7 +148,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	} else {
 		options.FileTracker.Forget(absolutePath)
 	}
-	if finalContentKnown && content == modelKnownContent {
+	if finalContentKnown && content == modelEquivalentContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
