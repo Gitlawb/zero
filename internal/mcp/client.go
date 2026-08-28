@@ -516,21 +516,34 @@ func TextContent(content []Content) string {
 // forwarded, so a caller adds nothing to the ordinary case.
 //
 // Image payloads ride Result.Images. Audio, embedded resources, structured
-// content, and image blocks whose data cannot be decoded still have nowhere to
+// content, image blocks whose data cannot be decoded, and images skipped
+// because they would exceed the aggregate byte budget still have nowhere to
 // go: naming them costs nothing and stops the model from treating a successful
 // call as empty and retrying.
+//
+// Only images actually kept by ImageBlocks are omitted from the note. An
+// image that would decode in isolation but was skipped by the aggregate cap
+// is still named, otherwise the model would not hear that a valid screenshot
+// was dropped.
 //
 // Counts are grouped by mime type and ordered by first appearance, so the same
 // result always produces the same sentence.
 func DroppedContentSummary(content []Content) string {
+	forwarded := ImageBlocks(content)
+	next := 0
 	labels := make([]string, 0, len(content))
 	counts := make(map[string]int, len(content))
 	for _, item := range content {
 		if item.Type == "text" {
 			continue
 		}
-		if _, ok := imageBlockFromContent(item); ok {
-			continue
+		if image, ok := imageBlockFromContent(item); ok {
+			if next < len(forwarded) &&
+				image.MediaType == forwarded[next].MediaType &&
+				bytes.Equal(image.Data, forwarded[next].Data) {
+				next++
+				continue
+			}
 		}
 		// Prefer the mime type: "image/png" tells the reader more than "image".
 		// A server may omit it, so fall back to the block type rather than
@@ -563,14 +576,27 @@ func DroppedContentSummary(content []Content) string {
 
 // ImageBlocks converts MCP image content into the same ImageBlock channel
 // capture tools already use. Blocks that cannot be decoded, exceed
-// imageinput.MaxImageBytes, or sniff to a type outside the provider
-// allow-list are left for DroppedContentSummary to name.
+// imageinput.MaxImageBytes individually, sniff to a type outside the provider
+// allow-list, or would push the result over an aggregate
+// imageinput.MaxImageBytes budget, are left for DroppedContentSummary to name.
+//
+// The aggregate cap is the same 10 MiB as the per-image cap: a server that
+// returns many individually valid images must not retain all of them in
+// Result.Images. Once the next valid image would exceed the remaining
+// budget it is skipped; a later smaller image may still fit.
 func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
 	var images []zeroruntime.ImageBlock
+	remaining := imageinput.MaxImageBytes
 	for _, item := range content {
-		if image, ok := imageBlockFromContent(item); ok {
-			images = append(images, image)
+		image, ok := imageBlockFromContent(item)
+		if !ok {
+			continue
 		}
+		if len(image.Data) > remaining {
+			continue
+		}
+		images = append(images, image)
+		remaining -= len(image.Data)
 	}
 	return images
 }
