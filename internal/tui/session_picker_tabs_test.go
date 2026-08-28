@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,20 @@ import (
 	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
+
+func foreignSessionRecord(t *testing.T, cwd, sessionID string) []byte {
+	t.Helper()
+	record, err := json.Marshal(map[string]any{
+		"type":      "user",
+		"cwd":       cwd,
+		"sessionId": sessionID,
+		"message":   map[string]any{"role": "user", "content": "hi"},
+	})
+	if err != nil {
+		t.Fatalf("marshal foreign-session fixture: %v", err)
+	}
+	return append(record, '\n')
+}
 
 func tabbedPicker(items ...pickerItem) *commandPicker {
 	picker := &commandPicker{
@@ -79,7 +94,7 @@ func TestAnAgentWithNoSessionsGetsNoTab(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(transcript, []byte(`{"type":"user","cwd":"`+workspace+`","sessionId":"abc","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, foreignSessionRecord(t, workspace, "abc"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env := agentsessions.Env{Home: home}
@@ -111,7 +126,7 @@ func TestForeignSessionItemsSuppressAnImportedSource(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(transcript, []byte(`{"type":"user","cwd":"`+workspace+`","sessionId":"abc","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, foreignSessionRecord(t, workspace, "abc"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	agentsessions.InvalidateDiscovery()
