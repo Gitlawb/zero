@@ -173,7 +173,11 @@ func sshKnownHostsFamilyName(name string) bool {
 }
 
 func sshFileLooksLikePrivateKey(path string) bool {
-	if sshPublicOrConfigName(filepath.Base(path)) {
+	// Basename-based denial still treats *.pub as public, but a PEM/OpenSSH/PuTTY
+	// private key named work.pub must not stay readable. Sniff .pub payloads.
+	// Keep config / authorized_keys / known-hosts family exemptions: those names
+	// are never content-denied here (CertificateFile and host-key files).
+	if sshConfigOrKnownHostsName(filepath.Base(path)) {
 		return false
 	}
 	data, ok := readRegularFileBounded(path, sshPrivateKeySniffBytes)
@@ -188,6 +192,17 @@ func sshFileLooksLikePrivateKey(path string) bool {
 		return false
 	}
 	return strings.Contains(s, "PRIVATE KEY")
+}
+
+// sshConfigOrKnownHostsName is the subset of sshPublicOrConfigName that must
+// not be content-sniffed. *.pub is intentionally excluded so a private-key
+// payload at that name is still denied.
+func sshConfigOrKnownHostsName(name string) bool {
+	switch name {
+	case "config", "authorized_keys", "authorized_keys2":
+		return true
+	}
+	return sshKnownHostsFamilyName(name)
 }
 
 // readRegularFileBounded Lstats first and refuses FIFOs, devices, and
@@ -376,7 +391,15 @@ func expandSSHConfigPath(value, home, sshDir string) string {
 	if value == "" || strings.EqualFold(value, "none") || strings.EqualFold(value, "SSH_AUTH_SOCK") {
 		return ""
 	}
-	expanded, ok := expandSSHConfigPathTokens(value, home)
+	// OpenSSH expands environment variables in IdentityFile. Only ${HOME}/$HOME
+	// from the supplied home argument (never process env). Unknown $VAR is
+	// treated like an unsupported percent token: drop the path so we never deny
+	// or follow an unresolved pattern.
+	expandedEnv, ok := expandSSHConfigPathEnv(value, home)
+	if !ok {
+		return ""
+	}
+	expanded, ok := expandSSHConfigPathTokens(expandedEnv, home)
 	if !ok {
 		return ""
 	}
@@ -393,6 +416,60 @@ func expandSSHConfigPath(value, home, sshDir string) string {
 	default:
 		return filepath.Join(sshDir, value)
 	}
+}
+
+// expandSSHConfigPathEnv resolves ${HOME} and $HOME from the supplied home
+// argument. Any other ${VAR}/$VAR, a dangling $, or a malformed ${...} drops
+// the path. No live process environment map is consulted.
+func expandSSHConfigPathEnv(value, home string) (string, bool) {
+	if !strings.Contains(value, "$") {
+		return value, true
+	}
+	var b strings.Builder
+	b.Grow(len(value) + len(home))
+	for i := 0; i < len(value); i++ {
+		if value[i] != '$' {
+			b.WriteByte(value[i])
+			continue
+		}
+		if i+1 >= len(value) {
+			return "", false
+		}
+		if value[i+1] == '{' {
+			end := strings.IndexByte(value[i+2:], '}')
+			if end < 0 {
+				return "", false
+			}
+			name := value[i+2 : i+2+end]
+			if name != "HOME" {
+				return "", false
+			}
+			b.WriteString(home)
+			i += 2 + end
+			continue
+		}
+		if !sshEnvVarStart(value[i+1]) {
+			return "", false
+		}
+		j := i + 1
+		for j < len(value) && sshEnvVarChar(value[j]) {
+			j++
+		}
+		if value[i+1:j] != "HOME" {
+			return "", false
+		}
+		b.WriteString(home)
+		i = j - 1
+	}
+	return b.String(), true
+}
+
+func sshEnvVarStart(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'
+}
+
+func sshEnvVarChar(c byte) bool {
+	return sshEnvVarStart(c) || (c >= '0' && c <= '9')
 }
 
 // expandSSHConfigPathTokens resolves OpenSSH path tokens we can expand without

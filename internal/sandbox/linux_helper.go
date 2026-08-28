@@ -303,9 +303,8 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 	for _, path := range fs.DenyWrite {
 		args = appendReadOnlyLinuxPathArgs(args, path)
 	}
-	for _, path := range fs.DenyRead {
-		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
-	}
+	var unreadable []string
+	unreadable = append(unreadable, fs.DenyRead...)
 	// The profile includes only trusted, process-environment-derived directories
 	// here. Command-controlled credential roots remain deny-if-present and must
 	// never cause host filesystem mutations before sandbox launch.
@@ -323,8 +322,9 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 			// retarget cannot reopen it.
 			continue
 		}
-		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
+		unreadable = append(unreadable, path)
 	}
+	args = appendUnreadableLinuxPaths(args, unreadable, fs.DenyReadCarveouts, fs.WriteRoots)
 	return linuxBwrapFilesystemPlan{
 		Args:                   args,
 		ProtectedCreateTargets: dedupeStrings(protectedCreateTargets),
@@ -400,15 +400,112 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	path = unreadableEnforcementPath(path)
-	if path == "" {
+	return appendUnreadableLinuxPaths(args, []string{path}, carveouts, nil)
+}
+
+// appendUnreadableLinuxPaths emits bwrap args that hide the given deny paths.
+// Directories keep the existing tmpfs mask. Regular files stay `--ro-bind
+// /dev/null path`. Symlink dests cannot use that bind: mount(2) LOOKUP_FOLLOW
+// would mask the current target (so a later retarget reopens a new credential)
+// or ENOENT a dangling link. Instead mask the resolved regular-file target and,
+// when the parent is a credential directory, tmpfs-overlay the parent omitting
+// denied basenames so the lexical dentry disappears without following.
+func appendUnreadableLinuxPaths(args []string, paths []string, carveouts []string, writeRoots []WritableRoot) []string {
+	classified := classifyUnreadableLinuxPaths(paths)
+	for _, dir := range classified.dirs {
+		args = appendUnreadableLinuxDirArgs(args, dir, carveouts)
+	}
+	omits := linuxDeniedBasenamesByParent(classified.files, classified.links)
+	seenParents := make(map[string]struct{})
+	for _, link := range classified.links {
+		args = appendUnreadableLinuxResolvedSymlinkArgs(args, link, carveouts)
+		parent := filepath.Clean(filepath.Dir(link))
+		if _, dup := seenParents[parent]; dup {
+			continue
+		}
+		if !linuxCredentialParentSafeToTmpfs(parent, writeRoots) {
+			continue
+		}
+		seenParents[parent] = struct{}{}
+		args = appendLinuxParentTmpfsOmitting(args, parent, omits[parent])
+	}
+	for _, file := range classified.files {
+		args = append(args, "--ro-bind", "/dev/null", file)
+	}
+	return args
+}
+
+type linuxUnreadableClassified struct {
+	files []string
+	dirs  []string
+	links []string
+}
+
+func classifyUnreadableLinuxPaths(paths []string) linuxUnreadableClassified {
+	var out linuxUnreadableClassified
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = unreadableEnforcementPath(path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		switch {
+		case info.Mode().Type() == os.ModeSymlink:
+			out.links = append(out.links, path)
+		case info.IsDir():
+			out.dirs = append(out.dirs, path)
+		default:
+			out.files = append(out.files, path)
+		}
+	}
+	return out
+}
+
+func linuxDeniedBasenamesByParent(files, links []string) map[string]map[string]struct{} {
+	out := make(map[string]map[string]struct{})
+	add := func(path string) {
+		parent := filepath.Clean(filepath.Dir(path))
+		base := filepath.Base(path)
+		m, ok := out[parent]
+		if !ok {
+			m = make(map[string]struct{})
+			out[parent] = m
+		}
+		m[base] = struct{}{}
+	}
+	for _, path := range files {
+		add(path)
+	}
+	for _, path := range links {
+		add(path)
+	}
+	return out
+}
+
+func appendUnreadableLinuxResolvedSymlinkArgs(args []string, path string, carveouts []string) []string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved == "" {
 		return args
 	}
-	// Lstat so a credential symlink is masked at its lexical pathname rather
-	// than following to a dest that a later retarget would miss.
-	if info, err := os.Lstat(path); err == nil && !info.IsDir() {
-		return append(args, "--ro-bind", "/dev/null", path)
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return args
 	}
+	if info.IsDir() {
+		return appendUnreadableLinuxDirArgs(args, resolved, carveouts)
+	}
+	return append(args, "--ro-bind", "/dev/null", resolved)
+}
+
+func appendUnreadableLinuxDirArgs(args []string, path string, carveouts []string) []string {
 	nested := nestedCarveoutPaths(path, carveouts)
 	if len(nested) == 0 {
 		return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
@@ -425,6 +522,78 @@ func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []strin
 		}
 	}
 	return append(args, "--remount-ro", path)
+}
+
+// linuxCredentialParentSafeToTmpfs reports that parent may be reconstructed
+// inside the sandbox to hide a lexical symlink dentry. HOME, `/`, `/tmp`,
+// `/etc`, `/var`, and write roots must never be tmpfs-overlaid: reconstructing
+// HOME is forbidden and would hide the workspace. Only credential directories
+// such as ~/.ssh and ~/.gnupg (including nested dirs under them) qualify.
+func linuxCredentialParentSafeToTmpfs(parent string, writeRoots []WritableRoot) bool {
+	parent = filepath.Clean(parent)
+	if parent == "" || parent == "." || parent == string(filepath.Separator) {
+		return false
+	}
+	switch parent {
+	case "/tmp", "/etc", "/var", "/usr", "/home", "/root", "/opt", "/dev", "/proc", "/sys", "/run", "/mnt", "/media":
+		return false
+	}
+	switch strings.ToLower(filepath.Base(parent)) {
+	case "tmp", "etc", "var", "usr", "home", "root", "opt", "dev", "proc", "sys", "run":
+		return false
+	}
+	for _, wr := range writeRoots {
+		root := filepath.Clean(strings.TrimSpace(wr.Root))
+		if root != "" && parent == root {
+			return false
+		}
+	}
+	if !linuxCredentialDirPath(parent) {
+		return false
+	}
+	info, err := os.Lstat(parent)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return true
+}
+
+func linuxCredentialDirPath(path string) bool {
+	base := filepath.Base(filepath.Clean(path))
+	switch base {
+	case ".ssh", ".gnupg", ".aws", ".azure":
+		return true
+	}
+	slash := filepath.ToSlash(filepath.Clean(path))
+	for _, marker := range []string{"/.ssh/", "/.gnupg/", "/.aws/", "/.azure/"} {
+		if strings.Contains(slash, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendLinuxParentTmpfsOmitting(args []string, parent string, omit map[string]struct{}) []string {
+	parent = filepath.Clean(parent)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return args
+	}
+	// 555 keeps option-2 public names (config, known_hosts, *.pub) listable
+	// after the overlay; denied basenames are simply not rebound.
+	args = append(args, "--perms", "555", "--tmpfs", parent)
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "." || name == ".." {
+			continue
+		}
+		if _, skip := omit[name]; skip {
+			continue
+		}
+		sibling := filepath.Join(parent, name)
+		args = append(args, "--ro-bind", sibling, sibling)
+	}
+	return append(args, "--remount-ro", parent)
 }
 
 // nestedCarveoutPaths returns the carveouts that sit strictly inside root,
