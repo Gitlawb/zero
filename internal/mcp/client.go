@@ -3,10 +3,12 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,6 +17,8 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Gitlawb/zero/internal/imageinput"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type RemoteTool struct {
@@ -26,10 +30,16 @@ type RemoteTool struct {
 type Content struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	// MimeType names what a non-text block holds. Decoded but not yet forwarded:
-	// it is what lets a dropped block be described to the model instead of
-	// vanishing (#823). Servers that omit it still decode fine.
+	// MimeType names what a non-text block holds. Additive and omitempty, so
+	// servers that never send it decode exactly as before. Image blocks with
+	// valid data are forwarded on Result.Images; MimeType is what lets a
+	// remaining dropped block (audio, resource, failed decode) be described
+	// instead of vanishing (#823).
 	MimeType string `json:"mimeType,omitempty"`
+	// Data is the MCP image block's base64 payload. Additive and omitempty so a
+	// result that never sent it still unmarshals. Decoded only for type
+	// "image"; other types leave it unread.
+	Data string `json:"data,omitempty"`
 }
 
 type CallToolResult struct {
@@ -500,16 +510,15 @@ func TextContent(content []Content) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-// DroppedContentSummary describes the blocks TextContent discards, e.g.
-// "1 image/png block" or "2 resource blocks, 1 audio/wav block". It returns ""
-// when a result is entirely text, so a caller adds nothing to the ordinary case.
+// DroppedContentSummary describes the blocks that were not forwarded, e.g.
+// "1 audio/wav block" or "2 resource blocks, 1 image/png block". It returns ""
+// when every block is text or an image that ImageBlocks successfully
+// forwarded, so a caller adds nothing to the ordinary case.
 //
-// This exists because dropping silently is the worst available behaviour. A
-// screenshot server returns a valid image, TextContent keeps nothing, and the
-// call is reported as "(empty MCP tool result)" — so the model concludes the
-// tool produced nothing and usually retries, burning another call on the same
-// empty answer. Naming what came back costs nothing and ends that loop even
-// though the payload still cannot be forwarded.
+// Image payloads ride Result.Images. Audio, embedded resources, structured
+// content, and image blocks whose data cannot be decoded still have nowhere to
+// go: naming them costs nothing and stops the model from treating a successful
+// call as empty and retrying.
 //
 // Counts are grouped by mime type and ordered by first appearance, so the same
 // result always produces the same sentence.
@@ -518,6 +527,9 @@ func DroppedContentSummary(content []Content) string {
 	counts := make(map[string]int, len(content))
 	for _, item := range content {
 		if item.Type == "text" {
+			continue
+		}
+		if _, ok := imageBlockFromContent(item); ok {
 			continue
 		}
 		// Prefer the mime type: "image/png" tells the reader more than "image".
@@ -547,4 +559,47 @@ func DroppedContentSummary(content []Content) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ImageBlocks converts MCP image content into the same ImageBlock channel
+// capture tools already use. Blocks that cannot be decoded, exceed
+// imageinput.MaxImageBytes, or sniff to a type outside the provider
+// allow-list are left for DroppedContentSummary to name.
+func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
+	var images []zeroruntime.ImageBlock
+	for _, item := range content {
+		if image, ok := imageBlockFromContent(item); ok {
+			images = append(images, image)
+		}
+	}
+	return images
+}
+
+func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {
+	if item.Type != "image" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	raw := strings.TrimSpace(item.Data)
+	if raw == "" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	if base64.StdEncoding.DecodedLen(len(raw)) > imageinput.MaxImageBytes {
+		return zeroruntime.ImageBlock{}, false
+	}
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return zeroruntime.ImageBlock{}, false
+	}
+	if len(data) == 0 || len(data) > imageinput.MaxImageBytes {
+		return zeroruntime.ImageBlock{}, false
+	}
+	sniffLen := len(data)
+	if sniffLen > 512 {
+		sniffLen = 512
+	}
+	mediaType := zeroruntime.NormalizeImageMediaType(http.DetectContentType(data[:sniffLen]))
+	if mediaType == "" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	return zeroruntime.ImageBlock{MediaType: mediaType, Data: data}, true
 }
