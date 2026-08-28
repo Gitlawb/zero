@@ -487,6 +487,10 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 	targetWindows := strings.HasPrefix(key, "windows-")
 	// Resolve through the tarball's flattened subdir so an ALREADY-extracted
 	// engine is found and not needlessly re-downloaded (the idempotency check).
+	// A previous run may have been stopped mid-promotion, leaving the only
+	// install in a holder beside engineDir. Put it back before deciding whether
+	// anything needs downloading.
+	restoreInterruptedPromotion(engineDir)
 	binPath, serverPath := resolveEnginePaths(engineDir, targetWindows)
 	if !fileExists(binPath) {
 		pinned := ""
@@ -750,6 +754,33 @@ func resolveEnginePaths(engineDir string, targetWindows bool) (bin, server strin
 		return enginePaths(child, targetWindows)
 	}
 	return bin, server
+}
+
+// restoreInterruptedPromotion puts back an install that promoteStagedDir set
+// aside but never replaced, which is what a process stop between its two renames
+// leaves behind: destDir absent and the only usable copy in a .previous-* holder
+// nothing else looks at. Anything already at destDir wins, and the check for it
+// is explicit rather than leaning on os.Rename refusing an existing directory.
+// Best effort by design, since the caller can still download a fresh engine.
+func restoreInterruptedPromotion(destDir string) {
+	if _, err := os.Lstat(destDir); err == nil {
+		return
+	}
+	holders, err := filepath.Glob(destDir + ".previous-*")
+	if err != nil {
+		return
+	}
+	for _, holder := range holders {
+		install := filepath.Join(holder, "install")
+		if _, err := os.Stat(install); err != nil {
+			continue
+		}
+		if err := renameStagedDir(install, destDir); err != nil {
+			continue
+		}
+		_ = os.RemoveAll(holder)
+		return
+	}
 }
 
 // promoteStagedDir moves stageDir into place at destDir. os.Rename refuses to
