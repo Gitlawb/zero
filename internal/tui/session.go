@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/execution"
@@ -216,24 +218,37 @@ func tuiSessionTitle(prompt string) string {
 	return title
 }
 
+type foreignSessionImportedMsg struct {
+	result        agentsessions.ImportResult
+	originSession string
+	err           error
+}
+
+// startResumeCommand keeps foreign transcript I/O off Bubble Tea's Update
+// loop. Local Zero resumes stay synchronous; a foreign reference returns a
+// command whose result is applied by finishForeignSessionImport.
+func (m model) startResumeCommand(args string) (model, string, tea.Cmd) {
+	args = strings.TrimSpace(args)
+	if !strings.Contains(args, ":") {
+		next, text := m.handleResumeCommand(args)
+		return next, text, nil
+	}
+	if m.sessionImportInFlight {
+		return m, "Sessions\na foreign session import is already in progress", nil
+	}
+	m.sessionImportInFlight = true
+	return m, "", m.importForeignSessionCmd(args)
+}
+
 func (m model) handleResumeCommand(args string) (model, string) {
 	args = strings.TrimSpace(args)
 	if args == "" {
 		return m, m.resumeText()
 	}
+	return m.resumeZeroSession(args, "")
+}
 
-	// A "<agent>:<id>" argument names another agent's session. Import it first,
-	// then resume the copy. Zero session ids cannot contain a colon
-	// (sessions.ValidSessionID), so this is unambiguous.
-	importNote := ""
-	if strings.Contains(args, ":") {
-		imported, note, err := m.importForeignSession(args)
-		if err != nil {
-			return m, "Sessions\n" + err.Error()
-		}
-		args = imported
-		importNote = note
-	}
+func (m model) resumeZeroSession(args string, importNote string) (model, string) {
 
 	session, err := m.resolveResumeSession(args)
 	if err != nil {
@@ -482,24 +497,39 @@ func pickerFromParts(local []pickerItem, foreign []pickerItem) *commandPicker {
 // Resuming a foreign session cannot be silent: it creates a durable Zero session
 // the user did not explicitly ask for, and it may have run in a different
 // directory, so the note names both.
-func (m model) importForeignSession(ref string) (string, string, error) {
-	if m.sessionStore == nil {
-		return "", "", errors.New("no session store")
+func (m model) importForeignSessionCmd(ref string) tea.Cmd {
+	store := m.sessionStore
+	env := m.agentSessionsEnv
+	originSession := m.activeSession.SessionID
+	return func() tea.Msg {
+		if store == nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: errors.New("no session store")}
+		}
+		adapter, id, err := agentsessions.ParseRef(env, ref)
+		if err != nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: err}
+		}
+		// A resume imports the complete visible transcript by design. The total
+		// event count is uncapped, but each source line remains bounded by the
+		// agentsessions reader so one malformed record cannot exhaust memory.
+		result, err := agentsessions.Import(store, adapter, id, agentsessions.ReadOptions{})
+		return foreignSessionImportedMsg{result: result, originSession: originSession, err: err}
 	}
-	env := agentsessions.OSEnv()
-	adapter, id, err := agentsessions.ParseRef(env, ref)
-	if err != nil {
-		return "", "", err
-	}
-	result, err := agentsessions.Import(m.sessionStore, adapter, id, agentsessions.ReadOptions{})
-	if err != nil {
-		return "", "", err
+}
+
+func (m model) finishForeignSessionImport(msg foreignSessionImportedMsg) (model, string) {
+	m.sessionImportInFlight = false
+	if msg.err != nil {
+		return m, "Sessions\n" + msg.err.Error()
 	}
 	// This session is no longer un-imported, so the memo that says otherwise
 	// must go before the picker is rebuilt.
 	agentsessions.InvalidateDiscovery()
-
-	return result.Session.SessionID, importedSessionNote(result, m.cwd), nil
+	if m.pending || m.activeSession.SessionID != msg.originSession {
+		note := importedSessionNote(msg.result, m.cwd)
+		return m, note + "\nThe import completed, but Zero did not resume it because the active session changed or a run started."
+	}
+	return m.resumeZeroSession(msg.result.Session.SessionID, importedSessionNote(msg.result, m.cwd))
 }
 
 // importedSessionNote is the transcript row an import writes.
@@ -548,11 +578,10 @@ func importedSessionNote(result agentsessions.ImportResult, workspace string) st
 // listed as the copy, and a retry impossible because the source was hidden. The
 // two filters have to agree on what a real session is.
 //
-// This is the recoverable half of the answer rather than a rollback: nothing in
-// the store deletes a session, and inventing that primitive to serve an import
-// error would hand every caller a destructive operation. Leaving the empty
-// session on disk and refusing to treat it as provenance keeps the source
-// offered, which is what makes the retry work. Reported by @jatmn.
+// Current imports roll back a session whose event append fails. This filter is
+// retained for empty import records left by older builds or interrupted
+// cleanup, so upgrading restores the source to the picker and makes it
+// retryable. Reported by @jatmn.
 func importedSourceRefs(existing []sessions.Metadata) map[string]bool {
 	imported := map[string]bool{}
 	for _, meta := range existing {
@@ -569,7 +598,7 @@ func importedSourceRefs(existing []sessions.Metadata) map[string]bool {
 func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) []pickerItem {
 	imported := importedSourceRefs(existing)
 
-	found, _ := agentsessions.DiscoverAllCached(agentsessions.OSEnv(), m.cwd)
+	found, _ := agentsessions.DiscoverAllCached(m.agentSessionsEnv, m.cwd)
 	items := make([]pickerItem, 0, len(found))
 	for _, session := range found {
 		ref := session.Agent + ":" + session.ID

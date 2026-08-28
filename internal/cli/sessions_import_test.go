@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,6 +103,73 @@ func TestImportWorkspaceWarningSanitizesTheRecordedPath(t *testing.T) {
 	}
 	if got := importWorkspaceWarning(working); got != "" {
 		t.Errorf("a session recorded in the current directory warned anyway: %q", got)
+	}
+}
+
+func TestImportWorkspaceWarningUsesWindowsCaseInsensitivePaths(t *testing.T) {
+	if got := importWorkspaceWarningForOS(`C:\Work\Temp\..\Project`, `c:\work\project`, "windows"); got != "" {
+		t.Fatalf("Windows-equivalent paths produced a warning: %q", got)
+	}
+	if got := importWorkspaceWarningForOS(`/Work/Other`, `/work/project`, "windows"); got == "" {
+		t.Fatal("different Windows paths produced no warning")
+	}
+}
+
+func TestRunSessionsDiscoverFiltersAgentAndWritesJSON(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-workspace", "claude.jsonl"),
+		`{"type":"user","cwd":"`+workspace+`","sessionId":"claude","message":{"role":"user","content":"hello"}}`+"\n")
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+
+	for _, test := range []struct {
+		agent string
+		want  int
+	}{{agent: "claude-code", want: 1}, {agent: "codex", want: 0}} {
+		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		code := runSessionsDiscover(sessionCommandOptions{agent: test.agent, json: true}, stdout, stderr)
+		if code != exitSuccess {
+			t.Fatalf("discover --agent %s exited %d: %s", test.agent, code, stderr.String())
+		}
+		var found []discoveredSnapshot
+		if err := json.Unmarshal(stdout.Bytes(), &found); err != nil {
+			t.Fatalf("discover JSON did not decode: %v\n%s", err, stdout.String())
+		}
+		if len(found) != test.want {
+			t.Fatalf("discover --agent %s returned %d rows, want %d: %+v", test.agent, len(found), test.want, found)
+		}
+	}
+}
+
+func TestRunSessionsImportReportsUsageAndReadFailures(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+
+	for _, test := range []struct {
+		ref      string
+		wantCode int
+	}{{ref: "unknown:id", wantCode: exitUsage}, {ref: "claude-code:missing", wantCode: exitCrash}} {
+		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		if code := runSessionsImport(store, test.ref, sessionCommandOptions{}, stdout, stderr); code != test.wantCode {
+			t.Fatalf("import %s exited %d, want %d; stderr=%q", test.ref, code, test.wantCode, stderr.String())
+		}
+		if stderr.Len() == 0 {
+			t.Fatalf("import %s failed without an error message", test.ref)
+		}
 	}
 }
 

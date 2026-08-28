@@ -40,7 +40,7 @@ func (adapter codex) transcripts() []string {
 	if strings.TrimSpace(adapter.root) == "" {
 		return nil
 	}
-	return globTranscripts(filepath.Join(adapter.root, "*", "*", "*", "rollout-*"+transcriptExt))
+	return globTranscripts(adapter.root, filepath.Join(adapter.root, "*", "*", "*", "rollout-*"+transcriptExt))
 }
 
 func (adapter codex) Discover(cwd string) ([]ForeignSession, error) {

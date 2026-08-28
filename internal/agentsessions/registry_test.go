@@ -8,6 +8,16 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
+type invalidImportAdapter struct{}
+
+func (invalidImportAdapter) Name() string { return "invalid" }
+func (invalidImportAdapter) Discover(string) ([]ForeignSession, error) {
+	return []ForeignSession{{Agent: "invalid", ID: "broken", Title: "broken"}}, nil
+}
+func (invalidImportAdapter) Read(string, ReadOptions) ([]sessions.AppendEventInput, error) {
+	return []sessions.AppendEventInput{{Type: sessions.EventMessage, Payload: map[string]any{"invalid": make(chan int)}}}, nil
+}
+
 // WHAT THE STORE HOLDS IS WHAT EVERY CONSUMER DRAWS. The import used
 // stripControl on the title and nothing at all on the cwd, which left two
 // separate hazards in the record itself: stripControl deliberately keeps
@@ -94,5 +104,19 @@ func TestACredentialAfterALineBreakIsStillRedactedInAMetadataField(t *testing.T)
 				t.Errorf("DisplayField = %q, want %q", got, "rotate the key [REDACTED]")
 			}
 		})
+	}
+}
+
+func TestImportRemovesSessionWhenAppendingEventsFails(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := Import(store, invalidImportAdapter{}, "broken", ReadOptions{}); err == nil {
+		t.Fatal("import with an unencodable event unexpectedly succeeded")
+	}
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("failed import left a durable session behind: %+v", metas)
 	}
 }

@@ -226,6 +226,7 @@ func TestSecretsInToolArgumentsAreRedacted(t *testing.T) {
 	const leaked = "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLL"
 	lines := []string{`{"type":"user","cwd":"/w","message":{"role":"user","content":"go"}}`}
 	lines = append(lines, claudeToolLines("t1", "Bash", `{"command":"export K=`+leaked+`"}`, "ok", false)...)
+	lines = append(lines, claudeToolLines("t2", "Bash", `{"command":"run-command"}`, "stderr: "+leaked, true)...)
 
 	events, _ := translateFamily1("", writeTranscript(t, lines...), ReadOptions{Cwd: "/w"})
 	encoded, err := json.Marshal(events)

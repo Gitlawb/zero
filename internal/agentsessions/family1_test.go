@@ -233,7 +233,7 @@ func TestTheRealCorpusStillParses(t *testing.T) {
 	}
 	transcripts := 0
 	for _, dir := range globSessionDirs(root) {
-		transcripts += len(globTranscripts(filepath.Join(dir, "*"+transcriptExt)))
+		transcripts += len(globTranscripts(root, filepath.Join(dir, "*"+transcriptExt)))
 	}
 	if transcripts == 0 {
 		t.Skip("store exists but holds no transcripts")
