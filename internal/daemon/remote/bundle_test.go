@@ -745,3 +745,97 @@ func TestRecoverBundleDirLeavesALiveExtractAlone(t *testing.T) {
 		t.Fatalf("a.txt = %q, want the published %q", got, "v1")
 	}
 }
+
+// stageBackup plants a staging dir holding a backup tree for linkID.
+func stageBackup(t *testing.T, dir, name, linkID, content string, age time.Duration) string {
+	t.Helper()
+	staging := filepath.Join(dir, stagingPrefix+name)
+	backup := filepath.Join(staging, "backup")
+	if err := os.MkdirAll(filepath.Join(backup, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "a.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(linkID), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if age > 0 {
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(backup, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return staging
+}
+
+// One link can end up with more than one staged backup: a staging cleanup that
+// could not finish leaves one behind, and a later crash adds another. Recovery
+// must bring back the newest, and must not delete the newer one as superseded
+// just because directory order put the older one first.
+func TestRecoverBundleDirRestoresTheNewestOfSeveralBackups(t *testing.T) {
+	dir := t.TempDir()
+	stageBackup(t, dir, "aaa-old", "proj-1", "v0", time.Hour)
+	newer := stageBackup(t, dir, "zzz-new", "proj-1", "v1", 0)
+
+	recoverBundleDir(dir, nil)
+
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil {
+		t.Fatalf("nothing was restored: %v", err)
+	}
+	if string(got) != "v1" {
+		t.Errorf("restored a.txt = %q, want the newest tree %q", got, "v1")
+		if _, err := os.Stat(filepath.Join(newer, "backup", "a.txt")); err != nil {
+			t.Errorf("and the newest tree was deleted as superseded: %v", err)
+		}
+	}
+}
+
+// A backup that is not provably older than the live tree may be the newer copy
+// a restart has not published yet, so it is kept rather than dropped.
+func TestRecoverBundleDirKeepsABackupNewerThanTheLiveTree(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "proj-1")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(live, old, old); err != nil {
+		t.Fatal(err)
+	}
+	staging := stageBackup(t, dir, "newer", "proj-1", "v2", 0)
+
+	recoverBundleDir(dir, nil)
+
+	if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+		t.Errorf("a backup newer than the live tree must be kept: %v", err)
+	}
+}
+
+// Link ids starting with '.' used to be accepted, so a work tree may already be
+// published under a name that now looks like a staging dir. The reaper must not
+// mistake it for an abandoned extract and delete it on the first start.
+func TestRecoverBundleDirKeepsAWorkTreePublishedUnderAReservedName(t *testing.T) {
+	dir := t.TempDir()
+	published := filepath.Join(dir, stagingPrefix+"foo")
+	if err := os.MkdirAll(filepath.Join(published, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(published, "a.txt"), []byte("someones repo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * gitTimeout)
+	if err := os.Chtimes(published, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	recoverBundleDir(dir, nil)
+
+	if _, err := os.Stat(filepath.Join(published, "a.txt")); err != nil {
+		t.Errorf("a published work tree was reaped on upgrade: %v", err)
+	}
+}

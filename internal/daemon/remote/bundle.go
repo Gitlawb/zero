@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -285,17 +286,41 @@ func recoverBundleDir(dir string, logf func(string, ...any)) {
 		}
 		return
 	}
+	// One link can have several staged backups: a cleanup that could not finish
+	// leaves one behind, and a later crash adds another. Newest first, so the
+	// tree that comes back is the most recent one rather than whichever the
+	// directory happened to list first.
+	staged := make([]string, 0, len(entries))
+	backupTime := map[string]time.Time{}
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), stagingPrefix) {
 			continue
 		}
-		staging := filepath.Join(dir, entry.Name())
+		path := filepath.Join(dir, entry.Name())
+		staged = append(staged, path)
+		if info, err := os.Stat(filepath.Join(path, "backup")); err == nil {
+			backupTime[path] = info.ModTime()
+		}
+	}
+	slices.SortFunc(staged, func(a, b string) int {
+		return backupTime[b].Compare(backupTime[a])
+	})
+
+	for _, staging := range staged {
 		if restoreStagedBackup(dir, staging, logf) {
 			continue
 		}
-		// No backup to attribute. Only reap once no clone can still be running:
-		// gitTimeout bounds a clone, so anything older than that is abandoned.
-		info, err := entry.Info()
+		// No backup to attribute. A dir with a .git at its root is not staging at
+		// all: link ids starting with '.' used to be accepted, so this may be a
+		// work tree someone published under a name that now looks reserved.
+		// Never reap that.
+		if _, err := os.Stat(filepath.Join(staging, ".git")); err == nil {
+			logf("remote: %s holds a work tree, not a staged extract; leaving it in place", staging)
+			continue
+		}
+		// Only reap once no clone can still be running: gitTimeout bounds a
+		// clone, so anything older than that is abandoned.
+		info, err := os.Stat(staging)
 		if err != nil || time.Since(info.ModTime()) < 2*gitTimeout {
 			continue
 		}
@@ -339,8 +364,15 @@ func restoreStagedBackup(dir, staging string, logf func(string, ...any)) bool {
 		return true
 	}
 	defer release()
-	if _, err := os.Stat(dest); err == nil {
-		// The link already has a tree, so the backup is a stale copy.
+	if destInfo, err := os.Stat(dest); err == nil {
+		// The link already has a tree. Only drop the backup when it is provably
+		// the older copy; otherwise it may be the newer one a restart has not
+		// published yet, and deleting it would lose that work.
+		backupInfo, statErr := os.Stat(backup)
+		if statErr != nil || !backupInfo.ModTime().Before(destInfo.ModTime()) {
+			logf("remote: staged tree in %s is not older than the live tree for %s; leaving it in place", staging, id)
+			return true
+		}
 		if err := os.RemoveAll(staging); err != nil {
 			logf("remote: could not remove superseded staging dir %s: %v", staging, err)
 		}
