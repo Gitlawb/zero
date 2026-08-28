@@ -147,15 +147,17 @@ func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 		tempName = ""
 	} else {
 		committed = true
+	}
+	path = filepath.Join(dir, publishName)
+	if !crashPathUsesRoot(root, absoluteDir) {
+		path = ""
+	}
+	if tempName != "" {
 		if err := removeCrashTemp(hooks, root, tempName); err != nil && !errors.Is(err, os.ErrNotExist) {
 			tempName = ""
 			return path, fmt.Errorf("remove temporary crash report: %w", err)
 		}
 		tempName = ""
-	}
-	path = filepath.Join(dir, publishName)
-	if !crashPathUsesRoot(root, absoluteDir) {
-		return "", nil
 	}
 	return path, nil
 }
