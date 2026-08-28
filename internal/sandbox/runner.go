@@ -900,7 +900,7 @@ func denyWriteRulesFromPaths(paths []string) []string {
 }
 
 func denySeatbeltPathRules(action string, paths []string) []string {
-	return denySeatbeltNormalizedPathRules(action, normalizeProfilePaths(paths))
+	return denySeatbeltNormalizedPathRules(action, unreadableEnforcementPaths(paths))
 }
 
 func denySeatbeltNormalizedPathRules(action string, paths []string) []string {

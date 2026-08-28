@@ -311,14 +311,16 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 	// never cause host filesystem mutations before sandbox launch.
 	ensureLinuxDenyReadDirs(fs.EnsureDenyReadDirs)
 	for _, path := range fs.DenyReadIfExists {
-		if !pathExists(path) {
+		if !pathExists(path) && !pathExistsNoFollow(path) {
 			// A baseline credential path is emitted for every run, so an absent
 			// entry is the common case on a fresh machine — a third-party store
 			// such as ~/.aws that Zero must not create. The read-all profile starts
 			// from a read-only host-root bind where bubblewrap cannot create a
 			// missing mount destination, and masking the nearest existing parent
 			// could hide HOME, /tmp, or the workspace. Path-based backends
-			// (seatbelt) still deny these paths before they exist.
+			// (seatbelt) still deny these paths before they exist. A dangling
+			// symlink still exists as a pathname and must be masked so a later
+			// retarget cannot reopen it.
 			continue
 		}
 		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
@@ -398,11 +400,13 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	path = normalizeProfilePath(path)
+	path = unreadableEnforcementPath(path)
 	if path == "" {
 		return args
 	}
-	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+	// Lstat so a credential symlink is masked at its lexical pathname rather
+	// than following to a dest that a later retarget would miss.
+	if info, err := os.Lstat(path); err == nil && !info.IsDir() {
 		return append(args, "--ro-bind", "/dev/null", path)
 	}
 	nested := nestedCarveoutPaths(path, carveouts)
@@ -468,6 +472,14 @@ func pathExists(path string) bool {
 		return false
 	}
 	_, err := os.Stat(path)
+	return err == nil
+}
+
+func pathExistsNoFollow(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Lstat(path)
 	return err == nil
 }
 
