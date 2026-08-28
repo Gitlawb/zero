@@ -218,6 +218,16 @@ func HostShellEnvironmentGuidance() string {
 	return hostShellEnvironmentGuidanceForRuntime(detectShellRuntime(runtime.GOOS))
 }
 
+// HostShellEnvironmentGuidanceForEngine describes the exact shell runtime an
+// exec_command/bash call will use with engine. On Windows the restricted-token
+// sandbox can reject a PowerShell binary that starts successfully on the host;
+// shellRuntimeForEngine performs that sandboxed probe and falls back to cmd.exe.
+// Keeping prompt guidance on this path prevents the model being taught one
+// grammar while its commands are executed by another shell.
+func HostShellEnvironmentGuidanceForEngine(engine *zeroSandbox.Engine, cwd string) string {
+	return hostShellEnvironmentGuidanceForRuntime(shellRuntimeForEngine(engine, cwd))
+}
+
 func hostShellEnvironmentGuidanceForRuntime(shell shellRuntime) string {
 	if shell.GOOS == "windows" && shell.Kind == shellKindPowerShell {
 		guidance := "Shell syntax: PowerShell for exec_command/bash tools. Use PowerShell cmdlets and pipelines (Get-ChildItem, Get-Content, Select-String, Select-Object), use $env:NAME='value' for environment variables, and prefer the workdir/cwd argument over Set-Location. Do not invoke Git-for-Windows MSYS binaries (bash, sh, grep.exe, sed.exe, head.exe, and similar) inside the restricted sandbox; use native PowerShell cmdlets or Zero tools instead, or sandbox_permissions require_escalated only when host-level execution is truly required."

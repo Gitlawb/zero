@@ -178,6 +178,9 @@ func BuildTemplatePlan(name string, params map[string]string) (map[string]any, e
 			name, pluralParams(unused), strings.Join(quoteAll(unused), ", "),
 			strings.Join(quoteAll(template.Params), ", "))
 	}
+	if template.Name == "sweep" && len(splitTemplateList(params["targets"])) == 0 {
+		return nil, fmt.Errorf("the %q template needs at least one non-empty target", name)
+	}
 	return template.build(params), nil
 }
 

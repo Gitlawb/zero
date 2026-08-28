@@ -4969,6 +4969,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A run is in progress. Press Esc to cancel it first, then /new."})
 			return m, nil
 		}
+		if m.planProgress != nil && m.planProgress.BackgroundPlanLive() {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A background plan still belongs to this session. Wait for it to finish or run /plans stop before /new."})
+			return m, nil
+		}
 		return m.startNewSession(), nil
 	case commandBTW:
 		return m.handleBTWCommand(command.text)
@@ -5112,6 +5116,13 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
 				text: "Cannot resume sessions while a run is active.",
+			})
+			return m, nil
+		}
+		if m.planProgress != nil && m.planProgress.BackgroundPlanLive() {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendError,
+				text: "Cannot switch sessions while a background plan is running. Wait for it to finish or run /plans stop first.",
 			})
 			return m, nil
 		}

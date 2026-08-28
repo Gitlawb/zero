@@ -35,8 +35,8 @@ const (
 	defaultCompletedRetention = 2 * maxEmptyPollYield
 
 	// maxRememberedCompletions bounds the finished-session records kept after a
-	// process is evicted. They hold an exit code and a short output tail, so the
-	// cost is bytes; the bound exists so a long session cannot accumulate them
+	// process is evicted. Each immutable result is already bounded by the process
+	// output cap; the count bound prevents a long session from accumulating them
 	// without limit.
 	maxRememberedCompletions = 64
 )
@@ -53,8 +53,8 @@ type ProcessManagerOptions struct {
 
 // ProcessManager owns retained interactive-process identity, transport,
 // bounded output, continuation, cancellation, completion, and cleanup.
-// completedProcess is what a finished session leaves behind once its process is
-// gone: enough to answer a late poll honestly.
+// completedProcess is the immutable terminal result a finished session leaves
+// behind once its process is gone.
 //
 // A LATE POLL IS NOT A GUESS. Without this, an id that ran and finished is
 // indistinguishable from one a model invented, and both are answered by
@@ -62,11 +62,7 @@ type ProcessManagerOptions struct {
 // handed it that id and instructed it to poll. The result is a re-run of work
 // already done.
 type completedProcess struct {
-	id       int
-	command  string
-	output   string
-	exitCode int
-	exited   bool
+	result ProcessResult
 }
 
 type ProcessManager struct {
@@ -305,10 +301,25 @@ func (manager *ProcessManager) List() []ProcessSnapshot {
 
 func (manager *ProcessManager) Snapshot(id int) (ProcessSnapshot, bool) {
 	process, ok := manager.get(id)
+	if ok {
+		return process.snapshot(), true
+	}
+	result, ok := manager.Completed(id)
 	if !ok {
 		return ProcessSnapshot{}, false
 	}
-	return process.snapshot(), true
+	exitCode := result.ExitCode
+	return ProcessSnapshot{
+		ID:              result.ProcessID,
+		Command:         result.CommandText,
+		Cwd:             result.Request.WorkingDirectory,
+		RelativeCwd:     result.RelativeCwd,
+		TTY:             result.TTY,
+		Status:          "exited",
+		ExitCode:        &exitCode,
+		RecentOutput:    result.Output,
+		OutputTruncated: result.OutputTruncated,
+	}, true
 }
 
 func (manager *ProcessManager) Stop(id int) bool {
@@ -353,20 +364,16 @@ func (manager *ProcessManager) remember(result ProcessResult) {
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	if _, seen := manager.completed[result.ProcessID]; !seen {
+	if _, seen := manager.completed[result.ProcessID]; seen {
+		return
+	} else {
 		manager.completedOrder = append(manager.completedOrder, result.ProcessID)
 		for len(manager.completedOrder) > maxRememberedCompletions {
 			delete(manager.completed, manager.completedOrder[0])
 			manager.completedOrder = manager.completedOrder[1:]
 		}
 	}
-	manager.completed[result.ProcessID] = completedProcess{
-		id:       result.ProcessID,
-		command:  result.CommandText,
-		output:   tailProcessOutput(result.Output),
-		exitCode: result.ExitCode,
-		exited:   true,
-	}
+	manager.completed[result.ProcessID] = completedProcess{result: cloneProcessResult(result)}
 }
 
 // Completed reports a finished session's result when the id ran in this process
@@ -379,23 +386,7 @@ func (manager *ProcessManager) Completed(id int) (ProcessResult, bool) {
 	if !ok {
 		return ProcessResult{}, false
 	}
-	return ProcessResult{
-		ProcessID:   record.id,
-		CommandText: record.command,
-		Output:      record.output,
-		Exited:      record.exited,
-		ExitCode:    record.exitCode,
-	}, true
-}
-
-// tailProcessOutput keeps the END of a finished session's output: the tail is
-// where a test result, a build error and an exit summary live, and the head is
-// where the noise is.
-func tailProcessOutput(output string) string {
-	if len(output) <= recentOutputBytes {
-		return output
-	}
-	return output[len(output)-recentOutputBytes:]
+	return cloneProcessResult(record.result), true
 }
 
 func (manager *ProcessManager) Len() int {
@@ -497,6 +488,9 @@ type managedProcess struct {
 	reportErr    error
 	changes      []Change
 	metadata     map[string]string
+	collectMu    sync.Mutex
+	terminal     *ProcessResult
+	interrupted  bool
 }
 
 func (process *managedProcess) markDone(err error, exitCode int, report AdapterReport, reportErr error, changes []Change) {
@@ -511,6 +505,14 @@ func (process *managedProcess) markDone(err error, exitCode int, report AdapterR
 }
 
 func (process *managedProcess) collectResult(ctx context.Context, wait time.Duration, interrupted bool) ProcessResult {
+	// Output collection is destructive, so exactly one collector owns the
+	// transition to a terminal result. Once the process exits, every caller and
+	// the retention goroutine receives a clone of the same immutable result.
+	process.collectMu.Lock()
+	defer process.collectMu.Unlock()
+	if process.terminal != nil {
+		return cloneProcessResult(*process.terminal)
+	}
 	output, truncated := process.collect(ctx, wait)
 	process.mu.Lock()
 	exitCode := 0
@@ -521,11 +523,15 @@ func (process *managedProcess) collectResult(ctx context.Context, wait time.Dura
 	result := ProcessResult{
 		ProcessID: process.id, CommandText: process.commandText, RelativeCwd: process.relativeCwd,
 		TTY: process.tty, Output: output, OutputTruncated: truncated, Exited: exited,
-		ExitCode: exitCode, Interrupted: interrupted, Request: process.request,
+		ExitCode: exitCode, Interrupted: interrupted || process.interrupted, Request: cloneRequest(process.request),
 		Enforcement: process.enforcement, Report: process.resultReport, ReportErr: process.reportErr,
 		Changes: append([]Change(nil), process.changes...), Metadata: cloneStringMap(process.metadata),
 	}
 	process.mu.Unlock()
+	if result.Exited {
+		terminal := cloneProcessResult(result)
+		process.terminal = &terminal
+	}
 	return result
 }
 
@@ -628,6 +634,9 @@ func (process *managedProcess) lastUsed() time.Time {
 	return process.lastUsedAt
 }
 func (process *managedProcess) terminate() {
+	process.mu.Lock()
+	process.interrupted = true
+	process.mu.Unlock()
 	if process.reapedClosed() || process.command.Process == nil {
 		return
 	}
@@ -750,6 +759,27 @@ func cloneStringMap(input map[string]string) map[string]string {
 	output := make(map[string]string, len(input))
 	for key, value := range input {
 		output[key] = value
+	}
+	return output
+}
+
+func cloneRequest(input Request) Request {
+	output := input
+	output.Command.Args = append([]string(nil), input.Command.Args...)
+	output.Command.Env = append([]string(nil), input.Command.Env...)
+	output.WorkspaceRoots = append([]string(nil), input.WorkspaceRoots...)
+	output.Capabilities = append([]Capability(nil), input.Capabilities...)
+	return output
+}
+
+func cloneProcessResult(input ProcessResult) ProcessResult {
+	output := input
+	output.Request = cloneRequest(input.Request)
+	output.Changes = append([]Change(nil), input.Changes...)
+	output.Metadata = cloneStringMap(input.Metadata)
+	if input.Report.Denial != nil {
+		denial := *input.Report.Denial
+		output.Report.Denial = &denial
 	}
 	return output
 }

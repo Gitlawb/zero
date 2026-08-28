@@ -75,6 +75,11 @@ type OrchestrateTool struct {
 	// to merely listing it. nil skips proving entirely, which is the behaviour
 	// every plan had before this existed.
 	ProbeModel ModelProber
+	// ProbeIdentity names the live provider/profile/endpoint whose answers
+	// ProbeModel returns. It is resolved for every plan because the TUI can
+	// switch providers without rebuilding this long-lived tool. Empty retains a
+	// private default namespace for callers that have no provider concept.
+	ProbeIdentity func() string
 	// probes remembers verdicts for the life of the process, so the cost is one
 	// trivial request per model per session rather than per plan.
 	probes probeCache
@@ -759,7 +764,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 			recordPlanCompleted(recorder, plan, report)
 		})
 		if !launched {
-			workspace.Release()
+			workspace.Abort()
 		}
 		if !launched {
 			return tools.Result{
@@ -912,7 +917,11 @@ func (tool *OrchestrateTool) autoAssignModelsCosting(ctx context.Context, args m
 	if tool.ProbeModel != nil {
 		planPreflight(tool.Recorder, "checking which models this provider will run…")
 	}
-	models, probeNotes := proveModels(ctx, models, tool.ProbeModel, &tool.probes)
+	probeIdentity := ""
+	if tool.ProbeIdentity != nil {
+		probeIdentity = tool.ProbeIdentity()
+	}
+	models, probeNotes := proveModels(ctx, models, tool.ProbeModel, &tool.probes, probeIdentity)
 
 	tiers := buildModelTiers(models, tool.ModelPrefs)
 	served := servedModels(models)

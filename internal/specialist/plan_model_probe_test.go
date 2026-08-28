@@ -125,13 +125,26 @@ func TestAModelIsProbedOnceAndRememberedForTheSession(t *testing.T) {
 // the rest of the session.
 func TestAnUnknownVerdictIsNotCached(t *testing.T) {
 	cache := &probeCache{}
-	cache.put("m", ModelProbeResult{Verdict: ProbeUnknown, Reason: "timeout"})
-	if _, ok := cache.get("m"); ok {
+	cache.put("provider-a", "m", ModelProbeResult{Verdict: ProbeUnknown, Reason: "timeout"})
+	if _, ok := cache.get("provider-a", "m"); ok {
 		t.Error("a failure to reach the provider was remembered as an answer")
 	}
-	cache.put("m", ModelProbeResult{Verdict: ProbeRefuses, Reason: "no such model"})
-	if _, ok := cache.get("m"); !ok {
+	cache.put("provider-a", "m", ModelProbeResult{Verdict: ProbeRefuses, Reason: "no such model"})
+	if _, ok := cache.get("provider-a", "m"); !ok {
 		t.Error("a real verdict was not remembered")
+	}
+}
+
+func TestProbeCacheSeparatesProvidersAdvertisingTheSameModel(t *testing.T) {
+	cache := &probeCache{}
+	cache.put("provider-a|https://a.example/v1", "shared-model", ModelProbeResult{Verdict: ProbeRefuses})
+	cache.put("provider-b|https://b.example/v1", "shared-model", ModelProbeResult{Verdict: ProbeServes})
+
+	if got, ok := cache.get("provider-a|https://a.example/v1", "shared-model"); !ok || got.Verdict != ProbeRefuses {
+		t.Fatalf("provider A verdict = %#v, %v", got, ok)
+	}
+	if got, ok := cache.get("provider-b|https://b.example/v1", "shared-model"); !ok || got.Verdict != ProbeServes {
+		t.Fatalf("provider B verdict = %#v, %v", got, ok)
 	}
 }
 

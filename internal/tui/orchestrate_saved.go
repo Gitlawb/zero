@@ -431,6 +431,11 @@ func (m model) resumeLastPlan() (tea.Model, tea.Cmd) {
 		return m.appendPlansNotice(planControlNotice("warning",
 			"That plan no longer validates, so it was not resumed: "+err.Error())), nil
 	}
+	if progress.Name != plan.Name() {
+		return m.appendPlansNotice(planControlNotice("warning", fmt.Sprintf(
+			"The last plan recorded in this session was %q, not %q, so its progress cannot be applied here.",
+			progress.Name, plan.Name()))), nil
+	}
 	remaining, err := specialist.RemainingPlan(plan, progress, m.savedPlanLimits())
 	if err != nil {
 		// The only error here is "everything already succeeded" — which is not a

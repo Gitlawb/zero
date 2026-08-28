@@ -341,9 +341,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				// Proves a model will actually run before a task is assigned it,
 				// so the plan never dispatches onto something the provider only
 				// advertises.
-				ProbeModel: planModelProber(workspaceRoot, planProvider, deps.newProvider),
-				ModelPrefs: planModelPreferences(planModelPrefs),
-				Gate:       planGate,
+				ProbeModel:    planModelProber(workspaceRoot, planProvider, deps.newProvider),
+				ProbeIdentity: planModelProbeIdentity(workspaceRoot, planProvider),
+				ModelPrefs:    planModelPreferences(planModelPrefs),
+				Gate:          planGate,
 				PlanContext: specialist.PlanTaskContext{
 					PostureReasoningEffort: string(execprofile.Zeromaxing.ReasoningEffort),
 					Cwd:                    workspaceRoot,

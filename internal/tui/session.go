@@ -45,6 +45,9 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 		return m, err
 	}
 	m.activeSession = session
+	if m.planProgress != nil {
+		m.planProgress.SelectSession(session.SessionID)
+	}
 	m.pendingSessionTitle = ""
 	m.sessionEvents = []sessions.Event{}
 	if manuallyNamed {
@@ -69,6 +72,9 @@ func (m model) startNewSession() model {
 	previousID := m.activeSession.SessionID
 
 	m.activeSession = sessions.Metadata{}
+	if m.planProgress != nil {
+		m.planProgress.SelectSession("")
+	}
 	m.pendingSessionTitle = ""
 	m.sessionEvents = nil
 
@@ -215,6 +221,9 @@ func tuiSessionTitle(prompt string) string {
 }
 
 func (m model) handleResumeCommand(args string) (model, string) {
+	if m.planProgress != nil && m.planProgress.BackgroundPlanLive() {
+		return m, "Sessions\nCannot switch sessions while a background plan is running. Wait for it to finish or run /plans stop first."
+	}
 	args = strings.TrimSpace(args)
 	if args == "" {
 		return m, m.resumeText()
@@ -234,6 +243,9 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// the already-active session, whose loops belong to it, not a "previous" one.
 	previousID := m.activeSession.SessionID
 	m.activeSession = *session
+	if m.planProgress != nil {
+		m.planProgress.SelectSession(session.SessionID)
+	}
 	m.pendingSessionTitle = ""
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	if m.providerName == "" {

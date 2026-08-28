@@ -70,6 +70,24 @@ func planModelProber(workspaceRoot string, profile config.ProviderProfile, newPr
 	}
 }
 
+// planModelProbeIdentity returns the non-secret routing identity that makes a
+// probe verdict true. Model IDs overlap across providers, profiles and custom
+// endpoints, so none of those dimensions may share a cache namespace.
+func planModelProbeIdentity(workspaceRoot string, profile config.ProviderProfile) func() string {
+	return func() string {
+		live := livePlanProvider(workspaceRoot, profile)
+		return strings.Join([]string{
+			strings.TrimSpace(live.Name),
+			strings.TrimSpace(live.Provider),
+			strings.TrimSpace(string(live.ProviderKind)),
+			strings.TrimSpace(live.CatalogID),
+			strings.TrimSpace(live.BaseURL),
+			strings.TrimSpace(live.APIFormat),
+			strings.TrimSpace(live.APIKeyEnv),
+		}, "\x00")
+	}
+}
+
 // errStub carries a provider's message into the classifier, which takes an error
 // because every other caller has one.
 type errStub string

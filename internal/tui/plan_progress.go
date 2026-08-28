@@ -44,6 +44,11 @@ type PlanProgressBridge struct {
 	// is file I/O, and the Bubble Tea loop must not block on it.
 	store     *sessions.Store
 	sessionID string
+	// planStore/planSessionID are captured when a plan starts and never rebound
+	// by a later run. Display state may attach to another run in the same
+	// session; durable ownership may not move underneath an in-flight plan.
+	planStore     *sessions.Store
+	planSessionID string
 	// recordErr latches the first append failure. Recording is best-effort and
 	// must never fail a plan, but a silent drop would let a user believe a plan
 	// was persisted when it was not.
@@ -54,9 +59,10 @@ type PlanProgressBridge struct {
 	// is right for a foreground plan's leftovers and wrong for a background
 	// plan that is still working.
 	background bool
-	// completed collects finished background plans for the model to be told
-	// about on a later turn. Drained by the agent loop, never by the event loop.
-	completed []string
+	// completedBySession collects finished background plans for the originating
+	// conversation to be told about on a later turn. Drained by the agent loop,
+	// never by the event loop.
+	completedBySession map[string][]string
 	// cancelPlan stops THIS PLAN without stopping the turn. Held only while a
 	// plan is running and dropped in PlanCompleted, so a stop arriving after the
 	// plan ended cannot cancel a context that has since been reused.
@@ -66,13 +72,12 @@ type PlanProgressBridge struct {
 	// still proceeds instead of blocking forever on a send nobody makes.
 	paused bool
 	resume chan struct{}
-	// lastPlan is the ARGUMENTS of the most recent plan admitted this session —
+	// lastPlans holds the ARGUMENTS of the most recent plan admitted per session —
 	// what /plans save writes. Kept here rather than in the panel because the
 	// panel holds a RENDERING of a plan (ids, statuses, depths) and saving that
 	// would produce something that merely resembles what ran. The bridge is
 	// handed the real Plan, so it keeps the one thing that can be run again.
-	lastPlan     map[string]any
-	lastPlanName string
+	lastPlans map[string]lastPlanRecord
 	// cardByTask maps a task id to the card it opened, so a child's stream event
 	// can be routed to the right row. The recorder is the only thing that knows
 	// this pairing — it created it — which is why per-task progress travels
@@ -92,6 +97,15 @@ type PlanProgressBridge struct {
 	// so the card is keyed by this and reconciled on completion — exactly how
 	// the Task tool's card works.
 	dispatched int
+	// planFinalized makes every background exit converge on one terminal
+	// transition. The launcher may observe a panic or an early return after the
+	// executor already reported completion; only the first finalizer wins.
+	planFinalized bool
+}
+
+type lastPlanRecord struct {
+	args map[string]any
+	name string
 }
 
 // The optional halves the bridge implements, asserted at COMPILE TIME. Each is
@@ -130,7 +144,18 @@ func (bridge *PlanProgressBridge) Attach(sink func(tea.Msg), runID int, store *s
 	// A counter monotonic for the bridge's life costs nothing and cannot collide.
 	bridge.store = store
 	bridge.sessionID = sessionID
-	bridge.recordErr = nil
+}
+
+// SelectSession updates the conversational scope before another run starts.
+// Session switches are refused while a background plan is live, so this never
+// changes an active plan's captured durable owner.
+func (bridge *PlanProgressBridge) SelectSession(sessionID string) {
+	if bridge == nil {
+		return
+	}
+	bridge.mu.Lock()
+	bridge.sessionID = sessionID
+	bridge.mu.Unlock()
 }
 
 // record appends one plan event to the session log.
@@ -144,7 +169,11 @@ func (bridge *PlanProgressBridge) record(eventType sessions.EventType, payload m
 		return
 	}
 	bridge.mu.Lock()
-	store, sessionID, failed := bridge.store, bridge.sessionID, bridge.recordErr != nil
+	store, sessionID := bridge.store, bridge.sessionID
+	if bridge.planSessionID != "" {
+		store, sessionID = bridge.planStore, bridge.planSessionID
+	}
+	failed := bridge.recordErr != nil
 	bridge.mu.Unlock()
 	if store == nil || sessionID == "" || failed {
 		return
@@ -176,6 +205,9 @@ func (bridge *PlanProgressBridge) PlanRunning(cancel context.CancelFunc) {
 	}
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
+	bridge.capturePlanOwnerLocked()
+	bridge.recordErr = nil
+	bridge.planFinalized = false
 	bridge.cancelPlan = cancel
 	bridge.clearPauseLocked()
 }
@@ -187,6 +219,11 @@ func (bridge *PlanProgressBridge) SetBackground(background bool) {
 		return
 	}
 	bridge.mu.Lock()
+	if background {
+		bridge.capturePlanOwnerLocked()
+		bridge.recordErr = nil
+		bridge.planFinalized = false
+	}
 	bridge.background = background
 	bridge.mu.Unlock()
 }
@@ -204,8 +241,8 @@ func (bridge *PlanProgressBridge) DrainCompletedPlans() string {
 		return ""
 	}
 	bridge.mu.Lock()
-	done := bridge.completed
-	bridge.completed = nil
+	done := append([]string(nil), bridge.completedBySession[bridge.sessionID]...)
+	delete(bridge.completedBySession, bridge.sessionID)
 	bridge.mu.Unlock()
 	if len(done) == 0 {
 		return ""
@@ -326,7 +363,12 @@ func (bridge *PlanProgressBridge) RunningPlanName() (string, bool) {
 	if bridge.cancelPlan == nil && !bridge.background {
 		return "", false
 	}
-	name := bridge.lastPlanName
+	name := ""
+	if last, ok := bridge.lastPlans[bridge.planSessionID]; ok {
+		name = last.name
+	} else if last, ok := bridge.lastPlans[bridge.sessionID]; ok {
+		name = last.name
+	}
 	if strings.TrimSpace(name) == "" {
 		// A plan launched but not yet admitted has no name recorded. Refusing
 		// without one is still the right answer; "a plan" is honest.
@@ -355,7 +397,8 @@ func (bridge *PlanProgressBridge) BackgroundPlanLive() bool {
 	}
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	return bridge.background && (bridge.cancelPlan != nil || bridge.lastPlanName != "")
+	last := bridge.lastPlans[bridge.planSessionID]
+	return bridge.background && (bridge.cancelPlan != nil || last.name != "")
 }
 
 // clearPauseLocked releases any waiter. Closing the channel rather than sending
@@ -377,10 +420,11 @@ func (bridge *PlanProgressBridge) LastPlan() (map[string]any, string, bool) {
 	}
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	if len(bridge.lastPlan) == 0 {
+	last, ok := bridge.lastPlans[bridge.sessionID]
+	if !ok || len(last.args) == 0 {
 		return nil, "", false
 	}
-	return bridge.lastPlan, bridge.lastPlanName, true
+	return clonePlanArgs(last.args), last.name, true
 }
 
 // TaskProgress routes one of a task's child events to that task's card.
@@ -471,16 +515,20 @@ func boundTaskOutput(output string) string {
 // PlanAdmitted announces the plan so the transcript can show that N tasks are
 // about to run rather than going silent until the first one finishes.
 func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
-	bridge.record(specialist.PlanAdmittedEvent(plan))
 	if bridge != nil {
 		// Args, not the Plan: what gets saved has to be re-admitted through
 		// ParsePlan on the way back in, so it is stored in the shape ParsePlan
 		// accepts and never as an object that could reach execution unvalidated.
 		bridge.mu.Lock()
-		bridge.lastPlan = plan.Args()
-		bridge.lastPlanName = plan.Name()
+		bridge.capturePlanOwnerLocked()
+		bridge.planFinalized = false
+		if bridge.lastPlans == nil {
+			bridge.lastPlans = map[string]lastPlanRecord{}
+		}
+		bridge.lastPlans[bridge.planSessionID] = lastPlanRecord{args: clonePlanArgs(plan.Args()), name: plan.Name()}
 		bridge.mu.Unlock()
 	}
+	bridge.record(specialist.PlanAdmittedEvent(plan))
 	name := plan.Name()
 	count := plan.TaskCount()
 	limit := plan.Budget().MaxTokens
@@ -612,55 +660,101 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 // PlanCompleted reports the plan's terminal state.
 func (bridge *PlanProgressBridge) PlanCompleted(plan specialist.Plan, report specialist.PlanReport) {
 	bridge.record(specialist.PlanCompletedEvent(plan, report))
+	bridge.finalizePlan(planCompletedMsg{
+		name: plan.Name(), status: string(report.Status),
+		succeeded: report.Succeeded, failed: report.Failed, skipped: report.Skipped, cancelled: report.Cancelled,
+		tokensUsed: report.TokensUsed, tokenLimit: plan.Budget().MaxTokens, maxSpeedup: report.MaxSpeedup,
+	}, backgroundPlanReport(plan, report))
+}
 
-	// wasBackground is read BEFORE the flag is cleared and carried down to the
-	// message. Reading it again afterwards returns false — the plan is over —
-	// and the terminal message would then be dropped by the stale-run guard,
-	// leaving a background plan's panel frozen one row from the end. Caught by
-	// the compiler complaining the second read was unused, which is luckier
-	// than it deserved to be.
-	wasBackground := false
-	if bridge != nil {
-		bridge.mu.Lock()
-		wasBackground = bridge.background
-		// The plan is over: drop the cancel and release any pause. Keeping a
-		// stale cancel would let a later stop cancel a context that has since
-		// been reused, which is the PostureGate lifetime mistake in another
-		// costume.
-		//
-		// These fields belong to THE plan, not to a plan, and clearing them here
-		// is correct only while one plan runs at a time — the same precondition
-		// cardByTask rests on, enforced by specialist.PlanSurfaceBusy. Without
-		// it a foreground plan's completion would strip a still-running
-		// background plan's flag and cancel, and the background plan's result
-		// would then reach nobody: spend nobody sees and no result.
-		bridge.cancelPlan = nil
-		bridge.background = false
-		bridge.clearPauseLocked()
-		if wasBackground {
-			// The MODEL is told, on a later turn, because it was told the plan
-			// was not finished and must not report it as done until it is. A
-			// completion nobody delivers is the background failure mode that
-			// matters: spend nobody sees and no result.
-			bridge.completed = append(bridge.completed, backgroundPlanReport(plan, report))
-		}
-		bridge.mu.Unlock()
+// FinalizeBackgroundExit is the launcher's final safety net. Normal execution
+// reaches PlanCompleted first and this becomes an idempotent no-op. A panic,
+// cancellation, or early return that skipped the executor's terminal callback
+// still records and publishes one explicit terminal transition.
+func (bridge *PlanProgressBridge) FinalizeBackgroundExit(panicked, cancelled bool) {
+	if bridge == nil {
+		return
 	}
-
-	name := plan.Name()
-	status := string(report.Status)
-	succeeded, failed := report.Succeeded, report.Failed
-	skipped, cancelled := report.Skipped, report.Cancelled
-	tokens, limit := report.TokensUsed, plan.Budget().MaxTokens
-	speedup := report.MaxSpeedup
-	bridge.send(func(runID int) tea.Msg {
-		return planCompletedMsg{
-			runID: runID, name: name, status: status,
-			succeeded: succeeded, failed: failed, skipped: skipped, cancelled: cancelled,
-			tokensUsed: tokens, tokenLimit: limit, maxSpeedup: speedup,
-			background: wasBackground,
-		}
+	bridge.mu.Lock()
+	if bridge.planFinalized {
+		bridge.mu.Unlock()
+		return
+	}
+	name := bridge.lastPlans[bridge.planSessionID].name
+	bridge.mu.Unlock()
+	if name == "" {
+		name = "(unnamed)"
+	}
+	status, failed, cancelledCount, reason := "failed", 1, 0, "background plan exited without a terminal report"
+	if panicked {
+		reason = "background plan panicked"
+	} else if cancelled {
+		status, failed, cancelledCount, reason = "cancelled", 0, 1, "background plan was cancelled"
+	}
+	bridge.record(sessions.EventPlanCompleted, map[string]any{
+		"name": name, "status": status, "failed": failed, "cancelled": cancelledCount, "reason": reason,
 	})
+	bridge.finalizePlan(planCompletedMsg{name: name, status: status, failed: failed, cancelled: cancelledCount},
+		"The background plan "+name+" has finished with status "+status+": "+reason+".")
+}
+
+func (bridge *PlanProgressBridge) finalizePlan(message planCompletedMsg, completion string) {
+	if bridge == nil {
+		return
+	}
+	bridge.mu.Lock()
+	if bridge.planFinalized {
+		bridge.mu.Unlock()
+		return
+	}
+	bridge.planFinalized = true
+	wasBackground := bridge.background
+	originSessionID := bridge.planSessionID
+	durabilityError := ""
+	if bridge.recordErr != nil {
+		durabilityError = bridge.recordErr.Error()
+	}
+	bridge.cancelPlan = nil
+	bridge.background = false
+	bridge.clearPauseLocked()
+	if wasBackground {
+		if bridge.completedBySession == nil {
+			bridge.completedBySession = map[string][]string{}
+		}
+		if durabilityError != "" {
+			completion += "\n\nWarning: plan progress was not fully persisted, so this result is not safely resumable: " + durabilityError
+		}
+		bridge.completedBySession[originSessionID] = append(bridge.completedBySession[originSessionID], completion)
+	}
+	bridge.planStore = nil
+	bridge.planSessionID = ""
+	bridge.mu.Unlock()
+
+	message.background = wasBackground
+	message.durabilityError = durabilityError
+	bridge.send(func(runID int) tea.Msg {
+		message.runID = runID
+		return message
+	})
+}
+
+func (bridge *PlanProgressBridge) capturePlanOwnerLocked() {
+	if bridge.planSessionID != "" {
+		return
+	}
+	bridge.planStore = bridge.store
+	bridge.planSessionID = bridge.sessionID
+}
+
+func clonePlanArgs(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 // PlanIsBackground reports whether the running plan outlives its run, for a

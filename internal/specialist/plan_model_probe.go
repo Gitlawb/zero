@@ -78,29 +78,34 @@ type ModelProber func(ctx context.Context, modelID string) ModelProbeResult
 // the rest of the session.
 type probeCache struct {
 	mu      sync.Mutex
-	results map[string]ModelProbeResult
+	results map[probeCacheKey]ModelProbeResult
 }
 
-func (cache *probeCache) get(id string) (ModelProbeResult, bool) {
+type probeCacheKey struct {
+	provider string
+	model    string
+}
+
+func (cache *probeCache) get(provider, id string) (ModelProbeResult, bool) {
 	if cache == nil {
 		return ModelProbeResult{}, false
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	result, ok := cache.results[id]
+	result, ok := cache.results[probeCacheKey{provider: provider, model: id}]
 	return result, ok
 }
 
-func (cache *probeCache) put(id string, result ModelProbeResult) {
+func (cache *probeCache) put(provider, id string, result ModelProbeResult) {
 	if cache == nil || result.Verdict == ProbeUnknown {
 		return
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.results == nil {
-		cache.results = map[string]ModelProbeResult{}
+		cache.results = map[probeCacheKey]ModelProbeResult{}
 	}
-	cache.results[id] = result
+	cache.results[probeCacheKey{provider: provider, model: id}] = result
 }
 
 // ClassifyProbeError turns a provider's error into a verdict.
@@ -178,19 +183,23 @@ func ClassifyProbeError(err error) ModelProbeResult {
 // as the removal: a model vanishing from routing with no explanation is
 // indistinguishable from a bug, and the user has spent this week hand-adding
 // exactly these ids to an exclude list.
-func proveModels(ctx context.Context, models []DiscoveredModel, probe ModelProber, cache *probeCache) ([]DiscoveredModel, []string) {
+func proveModels(ctx context.Context, models []DiscoveredModel, probe ModelProber, cache *probeCache, providerIdentity ...string) ([]DiscoveredModel, []string) {
 	if probe == nil || len(models) == 0 {
 		return models, nil
 	}
 
 	verdicts := make([]ModelProbeResult, len(models))
+	provider := ""
+	if len(providerIdentity) > 0 {
+		provider = strings.TrimSpace(providerIdentity[0])
+	}
 	var wait sync.WaitGroup
 	// A counting semaphore, not a worker pool: the number of models is usually
 	// under the cap, and this way that common case still starts every probe at
 	// once with no queue to hand work through.
 	inFlight := make(chan struct{}, maxProbesInFlight)
 	for index, model := range models {
-		if cached, ok := cache.get(model.ID); ok {
+		if cached, ok := cache.get(provider, model.ID); ok {
 			verdicts[index] = cached
 			continue
 		}
@@ -217,7 +226,7 @@ func proveModels(ctx context.Context, models []DiscoveredModel, probe ModelProbe
 	kept := make([]DiscoveredModel, 0, len(models))
 	var notes []string
 	for index, model := range models {
-		cache.put(model.ID, verdicts[index])
+		cache.put(provider, model.ID, verdicts[index])
 		if verdicts[index].Verdict != ProbeRefuses {
 			kept = append(kept, model)
 			continue

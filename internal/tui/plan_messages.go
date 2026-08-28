@@ -130,6 +130,7 @@ type planCompletedMsg struct {
 	tokensUsed int
 	tokenLimit int
 	maxSpeedup float64
+	durabilityError string
 	// background marks a plan that outlives the run that launched it, so the
 	// stale-run guard must not drop its progress.
 	background bool
@@ -165,6 +166,9 @@ func planCompletedLine(msg planCompletedMsg) string {
 	}
 	if msg.maxSpeedup > 0 {
 		fmt.Fprintf(&b, " · max_speedup %.2fx", msg.maxSpeedup)
+	}
+	if strings.TrimSpace(msg.durabilityError) != "" {
+		fmt.Fprintf(&b, " · warning: progress was not fully saved; this plan is not safely resumable (%s)", msg.durabilityError)
 	}
 	return b.String()
 }

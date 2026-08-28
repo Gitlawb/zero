@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/repomap"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/workspaceseed"
 )
@@ -183,7 +184,7 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 	if user := userGuidelines(); user != "" {
 		sections = append(sections, user)
 	}
-	project := workspaceContext(options.Cwd)
+	project := workspaceContext(options.Cwd, options.Sandbox)
 	if project != "" {
 		sections = append(sections, project)
 	}
@@ -379,7 +380,7 @@ func sessionRuntimeContext(options Options) string {
 // directory, git branch, and any project guideline doc, so the model grounds its
 // work in the actual repo. Returns "" when cwd is unset (keeps headless/test
 // runs deterministic).
-func workspaceContext(cwd string) string {
+func workspaceContext(cwd string, sandboxEngine *sandbox.Engine) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return ""
@@ -388,7 +389,7 @@ func workspaceContext(cwd string) string {
 	b.WriteString("<environment>\n")
 	b.WriteString("Working directory: " + cwd + "\n")
 	b.WriteString("Operating system: " + runtime.GOOS + "\n")
-	b.WriteString(tools.HostShellEnvironmentGuidance() + "\n")
+	b.WriteString(tools.HostShellEnvironmentGuidanceForEngine(sandboxEngine, cwd) + "\n")
 	if branch := gitBranchForPrompt(cwd); branch != "" {
 		b.WriteString("Git branch: " + branch + "\n")
 	}

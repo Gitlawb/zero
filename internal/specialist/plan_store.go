@@ -2,8 +2,9 @@ package specialist
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -189,25 +190,6 @@ func SavePlan(root, dir, name string, plan Plan) (string, error) {
 	return path, nil
 }
 
-// refuseSymlink reports an error when path exists and is a symlink. Lstat, not
-// Stat: Stat follows the link and would report the target's kind, which is the
-// whole thing being guarded against.
-func refuseSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		// Does not exist yet is fine; anything else is reported rather than
-		// assumed safe.
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("inspect %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink; refusing to write through it", path)
-	}
-	return nil
-}
-
 // LoadPlans reads every saved plan under the given paths, project shadowing
 // user. It returns the plans sorted by name and, separately, the files it could
 // not read — malformed data is reported, never silently skipped.
@@ -218,13 +200,33 @@ func LoadPlans(paths PlanPaths) (plans []SavedPlan, problems []string) {
 	for _, plan := range builtinPlans() {
 		byName[plan.Name] = plan
 	}
-	// Then user, then project, so a project plan of the same name wins.
-	for _, dir := range []string{paths.UserDir, paths.ProjectDir} {
+	// Then user, then project, so a project plan of the same name wins. A failed
+	// higher-precedence scope blocks lower entries instead of silently running a
+	// different plan than the user named.
+	for _, source := range []struct {
+		root  string
+		dir   string
+		scope PlanScope
+	}{
+		{paths.UserRoot, paths.UserDir, PlanScopeUser},
+		{paths.ProjectRoot, paths.ProjectDir, PlanScopeProject},
+	} {
+		dir := source.dir
 		if strings.TrimSpace(dir) == "" {
 			continue
 		}
-		found, bad := loadPlanDir(dir, dir == paths.ProjectDir)
+		root := source.root
+		if strings.TrimSpace(root) == "" {
+			root = dir
+		}
+		found, bad, blocked, unavailable := loadPlanDir(root, dir, source.scope)
 		problems = append(problems, bad...)
+		if unavailable {
+			clear(byName)
+		}
+		for _, name := range blocked {
+			delete(byName, name)
+		}
 		for _, plan := range found {
 			byName[plan.Name] = plan
 		}
@@ -237,11 +239,21 @@ func LoadPlans(paths PlanPaths) (plans []SavedPlan, problems []string) {
 	return plans, problems
 }
 
-func loadPlanDir(dir string, project bool) (plans []SavedPlan, problems []string) {
-	entries, err := os.ReadDir(dir)
+func loadPlanDir(root, dir string, scope PlanScope) (plans []SavedPlan, problems []string, blocked []string, unavailable bool) {
+	handle, relative, err := pathjail.OpenExisting(root, dir)
 	if err != nil {
-		// A missing directory is the ordinary case, not a problem worth naming.
-		return nil, nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, nil, false
+		}
+		return nil, []string{fmt.Sprintf("%s: %v", dir, err)}, nil, true
+	}
+	defer handle.Close()
+	entries, err := fs.ReadDir(handle.FS(), filepath.ToSlash(relative))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, nil, false
+		}
+		return nil, []string{fmt.Sprintf("%s: %v", dir, err)}, nil, true
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), planFileExt) {
@@ -253,23 +265,23 @@ func loadPlanDir(dir string, project bool) (plans []SavedPlan, problems []string
 			problems = append(problems, fmt.Sprintf("%s: name is not a valid plan name", path))
 			continue
 		}
-		if err := refuseSymlink(path); err != nil {
+		relativePath := filepath.Join(relative, entry.Name())
+		if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
+			blocked = append(blocked, name)
 			continue
 		}
-		raw, err := os.ReadFile(path)
+		raw, err := fs.ReadFile(handle.FS(), filepath.ToSlash(relativePath))
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
+			blocked = append(blocked, name)
 			continue
 		}
 		var args map[string]any
 		if err := json.Unmarshal(raw, &args); err != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
+			blocked = append(blocked, name)
 			continue
-		}
-		scope := PlanScopeUser
-		if project {
-			scope = PlanScopeProject
 		}
 		plans = append(plans, SavedPlan{
 			Name:        name,
@@ -280,7 +292,7 @@ func loadPlanDir(dir string, project bool) (plans []SavedPlan, problems []string
 			Args:        args,
 		})
 	}
-	return plans, problems
+	return plans, problems, blocked, false
 }
 
 // savedTaskCount is for LISTING only — a length for a display line, before any

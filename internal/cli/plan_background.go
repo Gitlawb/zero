@@ -70,10 +70,12 @@ func (launcher *planLauncher) Launch(run func(ctx context.Context)) bool {
 
 	launcher.bridge.SetBackground(true)
 	go func() {
-		// Every goroutine gets recover(): a panic in a background plan must not
-		// take down the session it was launched from.
-		defer func() { _ = recover() }()
 		defer func() {
+			// Every exit converges on the bridge's idempotent terminal transition.
+			// Normal execution has already called PlanCompleted; panic, cancellation,
+			// or an early return is finalized here before the launcher slot opens.
+			panicked := recover() != nil
+			launcher.bridge.FinalizeBackgroundExit(panicked, ctx.Err() != nil)
 			cancel()
 			launcher.mu.Lock()
 			launcher.running = nil

@@ -20,9 +20,9 @@ import (
 //
 // NOT DELETED ON RELEASE. A plan that wrote something produced work the user has
 // not seen yet, and removing the tree would remove the only copy of it. Release
-// exists for the case where a plan is refused after the tree was prepared; the
-// tree a plan actually wrote in stays, and its path is reported so it can be
-// reviewed, merged, or thrown away deliberately.
+// therefore retains successful output. Abort is the distinct admission-failure
+// path: it drops the lease on a tree the plan never received, so a corrected
+// retry is not permanently locked out.
 
 // planWorktreeName derives a worktree name from a plan name.
 //
@@ -84,6 +84,9 @@ func newPlanIsolator(workspaceRoot string) specialist.PlanIsolator {
 			// Release does NOT remove the tree. A plan that wrote produced work
 			// nobody has reviewed; deleting it would delete the only copy.
 			Release: func() {},
+			Abort: func() {
+				_ = worktrees.Release(context.Background(), worktrees.Options{Cwd: workspaceRoot}, prepared.Path)
+			},
 		}, nil
 	}
 }

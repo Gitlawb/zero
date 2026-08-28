@@ -877,6 +877,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// workspace" in every task. LIVE scope, read at dispatch, same as above.
 			ExtraReadRoots: scope.ExtraReadRoots,
 			ProbeModel:     planModelProber(workspaceRoot, resolved.Provider, deps.newProvider),
+			ProbeIdentity:  planModelProbeIdentity(workspaceRoot, resolved.Provider),
 			ModelPrefs:     planModelPreferences(resolved.Profiles.PlanModels),
 			// Off unless the user's own config asks for it: on by default would
 			// refuse a plan for everyone whose phrasing does not happen to match.
@@ -1361,6 +1362,9 @@ type orchestrateWiring struct {
 	// ProbeModel proves a model will actually run before any task is assigned it.
 	// nil skips proving, which is what every plan did before this existed.
 	ProbeModel specialist.ModelProber
+	// ProbeIdentity namespaces cached verdicts by the live provider/profile and
+	// endpoint. nil uses the specialist package's private default namespace.
+	ProbeIdentity func() string
 	// Size is the configured plan-size tier. The zero value is the default tier,
 	// so a call site that has no resolved config yet still gets a real ceiling
 	// rather than none.
@@ -1495,6 +1499,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		ContextWindows:     wiring.ContextWindows,
 		ExtraReadRoots:     wiring.ExtraReadRoots,
 		ProbeModel:         wiring.ProbeModel,
+		ProbeIdentity:      wiring.ProbeIdentity,
 		ModelPrefs:         wiring.ModelPrefs,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil

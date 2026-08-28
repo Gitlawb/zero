@@ -89,6 +89,14 @@ func TestATemplateRefusesMissingAndUnknownParameters(t *testing.T) {
 	}
 }
 
+func TestSweepRefusesTargetsThatNormalizeToNothing(t *testing.T) {
+	for _, targets := range []string{",", ", ,", " \t,\n,  "} {
+		if _, err := BuildTemplatePlan("sweep", map[string]string{"question": "q", "targets": targets}); err == nil {
+			t.Fatalf("targets %q produced a combine-only plan", targets)
+		}
+	}
+}
+
 // A VARIABLE TASK COUNT is the shape a model most often gets wrong by hand: one
 // unique id per target, every one of them listed in the synthesis dependency.
 func TestSweepWiresEveryTargetIntoTheSynthesis(t *testing.T) {

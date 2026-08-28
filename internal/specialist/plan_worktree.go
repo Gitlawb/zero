@@ -41,6 +41,11 @@ type PlanWorkspace struct {
 	// Release is called when the plan ends. Never nil after a successful
 	// prepare, so a caller can defer it without a check.
 	Release func()
+	// Abort rolls back ownership when admission fails after preparation and the
+	// caller never receives a runnable plan. It is separate from Release because
+	// successful plan work may intentionally remain for human review while an
+	// unused lease must never remain locked.
+	Abort func()
 }
 
 // PlanIsolator prepares an isolated workspace for a plan.
@@ -76,7 +81,7 @@ func resolvePlanWorkspace(ctx context.Context, plan Plan, isolate PlanIsolator) 
 	if !plan.RequiresIsolation() {
 		// A read-only plan runs where the parent runs. Preparing a worktree for
 		// it would cost a checkout to protect a tree nothing can touch.
-		return PlanWorkspace{Release: func() {}}, nil
+		return PlanWorkspace{Release: func() {}, Abort: func() {}}, nil
 	}
 	if isolate == nil {
 		return PlanWorkspace{}, fmt.Errorf(
@@ -99,6 +104,9 @@ func resolvePlanWorkspace(ctx context.Context, plan Plan, isolate PlanIsolator) 
 	if workspace.Release == nil {
 		workspace.Release = func() {}
 	}
+	if workspace.Abort == nil {
+		workspace.Abort = workspace.Release
+	}
 	// AND THE WORKTREE MUST BE ABLE TO SERVE THE PLAN. The two refusals above
 	// cover isolation being unavailable or dishonest; this covers it being
 	// available, honest, and useless — a worktree of the wrong tree, which a
@@ -109,7 +117,7 @@ func resolvePlanWorkspace(ctx context.Context, plan Plan, isolate PlanIsolator) 
 	// leak one directory per attempt, and the caller has no handle to clean up
 	// something it was never given.
 	if unreachable := unreachablePlanPaths(plan, workspace); len(unreachable) > 0 {
-		workspace.Release()
+		workspace.Abort()
 		return PlanWorkspace{}, refuseUnreachableWorkspace(plan, workspace, unreachable)
 	}
 	// THE SAME FAILURE NAMED RELATIVELY. The check above sees only absolute
@@ -117,7 +125,7 @@ func resolvePlanWorkspace(ctx context.Context, plan Plan, isolate PlanIsolator) 
 	// carried none — so six tasks searched an empty worktree and the guard said
 	// nothing. See planNamesNothingPresent for the conjunction this holds to.
 	if named, bare := planNamesNothingPresent(plan, workspace); bare {
-		workspace.Release()
+		workspace.Abort()
 		return PlanWorkspace{}, refuseBareWorkspace(plan, workspace, named)
 	}
 	return workspace, nil

@@ -93,21 +93,52 @@ func TestOnlyFinishedSessionsAreRemembered(t *testing.T) {
 	}
 }
 
-// A long output keeps its TAIL: the exit summary and the failure live at the
-// end, the noise at the start.
-func TestARememberedOutputKeepsItsTail(t *testing.T) {
+// Retention is the same terminal result, not a lossy second representation.
+func TestARememberedResultPreservesTerminalSemantics(t *testing.T) {
 	manager := NewProcessManager(ProcessManagerOptions{})
 	long := strings.Repeat("noise\n", recentOutputBytes) + "FINAL: ok"
-	manager.remember(ProcessResult{ProcessID: 1002, Exited: true, Output: long})
+	want := ProcessResult{
+		ProcessID: 1002, CommandText: "go test ./...", RelativeCwd: "sub", TTY: true,
+		Exited: true, ExitCode: 7, Interrupted: true, Output: long, OutputTruncated: true,
+		Request:     Request{WorkingDirectory: "/workspace", WorkspaceRoots: []string{"/workspace"}},
+		Enforcement: Enforcement{Backend: "seatbelt", Level: "workspace-write"},
+		Changes:     []Change{{Path: "changed.go", Kind: ChangeModified}},
+		Metadata:    map[string]string{"sandbox": "active"},
+	}
+	manager.remember(want)
 	got, ok := manager.Completed(1002)
 	if !ok {
 		t.Fatal("not remembered")
 	}
-	if !strings.Contains(got.Output, "FINAL: ok") {
-		t.Error("the tail was discarded, which is where the result is")
+	if got.Output != want.Output || got.CommandText != want.CommandText || got.RelativeCwd != want.RelativeCwd || got.TTY != want.TTY || got.ExitCode != want.ExitCode || !got.Interrupted || !got.OutputTruncated {
+		t.Fatalf("terminal result lost execution fields: got %+v want %+v", got, want)
 	}
-	if len(got.Output) > recentOutputBytes {
-		t.Errorf("kept %d bytes, want at most %d", len(got.Output), recentOutputBytes)
+	if got.Request.WorkingDirectory != want.Request.WorkingDirectory || got.Enforcement != want.Enforcement || len(got.Changes) != 1 || got.Metadata["sandbox"] != "active" {
+		t.Fatalf("terminal result lost policy or mutation evidence: %+v", got)
+	}
+}
+
+func TestTerminalCollectionHasOneOwner(t *testing.T) {
+	for attempt := 0; attempt < 100; attempt++ {
+		process := &managedProcess{
+			id: 1000 + attempt, output: newProcessOutputBuffer(), done: make(chan struct{}), reaped: make(chan struct{}),
+		}
+		_, _ = process.output.Write([]byte("FINAL-RESULT"))
+		process.markDone(nil, 0, AdapterReport{}, nil, nil)
+
+		start := make(chan struct{})
+		results := make(chan ProcessResult, 2)
+		for collector := 0; collector < 2; collector++ {
+			go func() {
+				<-start
+				results <- process.collectResult(context.Background(), 0, false)
+			}()
+		}
+		close(start)
+		first, second := <-results, <-results
+		if first.Output != "FINAL-RESULT" || second.Output != "FINAL-RESULT" {
+			t.Fatalf("attempt %d: collectors observed different terminal output: %q / %q", attempt, first.Output, second.Output)
+		}
 	}
 }
 

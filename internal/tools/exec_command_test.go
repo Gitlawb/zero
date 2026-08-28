@@ -410,10 +410,11 @@ func parseListeningAddress(output string) string {
 	return ""
 }
 
-func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
+func TestWriteStdinReturnsAReapedSessionThroughTheCompletedStore(t *testing.T) {
 	root := execTestRoot(t)
 	manager := execution.NewProcessManager(execution.ProcessManagerOptions{CompletedRetention: 10 * time.Millisecond})
 	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
 
 	start := execTool.Run(context.Background(), map[string]any{
 		"cmd":           helperCommand("sleep"),
@@ -429,13 +430,26 @@ func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, ok := manager.Snapshot(sessionID); !ok {
-			return
+		if manager.Len() == 0 {
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("session %d was not reaped; manager has %d sessions", sessionID, manager.Len())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	late := writeTool.Run(context.Background(), map[string]any{
+		"session_id": sessionID,
+	})
+	if late.Status != StatusOK || !strings.Contains(late.Output, "woke up") {
+		t.Fatalf("late write_stdin poll did not return the completed result: status=%s output=%q", late.Status, late.Output)
+	}
+	if late.Meta["exit_code"] != "0" || late.Meta["cwd"] != "." || late.Meta["tty"] != "false" {
+		t.Fatalf("late result lost terminal metadata: %#v", late.Meta)
+	}
+	if late.ExecutionRequest == nil || late.ExecutionRequest.WorkingDirectory != root || len(late.ExecutionRequest.WorkspaceRoots) != 1 || late.ExecutionRequest.WorkspaceRoots[0] != root {
+		t.Fatalf("late result lost its execution request: %#v", late.ExecutionRequest)
 	}
 }
 
