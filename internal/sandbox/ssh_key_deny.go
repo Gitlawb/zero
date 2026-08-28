@@ -83,8 +83,15 @@ func walkSSHPrivateKeyFiles(sshDir string) []string {
 		if depth > sshPrivateKeyWalkMaxDepth {
 			return
 		}
-		entries, err := os.ReadDir(dir)
+		d, err := os.Open(dir)
 		if err != nil {
+			return
+		}
+		// Bound allocation to the per-directory cap. os.ReadDir would load the
+		// whole directory first. Overflow of one dir must not abort siblings.
+		entries, err := d.ReadDir(sshPrivateKeyWalkMaxEntries)
+		_ = d.Close()
+		if err != nil && err != io.EOF {
 			return
 		}
 		n := 0
@@ -105,9 +112,10 @@ func walkSSHPrivateKeyFiles(sshDir string) []string {
 			}
 			mode := info.Mode()
 			if mode.Type() == os.ModeSymlink {
-				// Name-based only: do not follow, so a FIFO or cycle behind
-				// the link cannot block profile construction.
-				if isSSHPrivateKeyFileName(name) {
+				// Inspect leaf symlinks (bounded, specials rejected) so a
+				// custom-named link to a PEM/OpenSSH key is still denied.
+				// Directory symlinks are not traversed.
+				if isSSHPrivateKeyFileName(name) || sshFileLooksLikePrivateKey(path) {
 					out = append(out, path)
 				}
 				continue
@@ -150,16 +158,18 @@ func sshPublicOrConfigName(name string) bool {
 	return sshKnownHostsFamilyName(name)
 }
 
-// sshKnownHostsFamilyName reports OpenSSH known-hosts filenames that must stay
-// readable so git host resolution still works. The family is the known_hosts /
-// ssh_known_hosts spellings (including *2 and *.old), not five exact literals.
+// sshKnownHostsFamilyName reports the supported OpenSSH known-hosts filenames
+// that must stay readable so git host resolution still works. Arbitrary
+// known_hosts.* / ssh_known_hosts.* names are not included: a private key
+// named known_hosts.private must still be detected. /dev/null is exempted in
+// sshShouldDenyReferencedPath, not here (its basename is "null").
 func sshKnownHostsFamilyName(name string) bool {
 	switch name {
 	case "known_hosts", "known_hosts2", "known_hosts.old",
 		"ssh_known_hosts", "ssh_known_hosts2":
 		return true
 	}
-	return strings.HasPrefix(name, "known_hosts.") || strings.HasPrefix(name, "ssh_known_hosts.")
+	return false
 }
 
 func sshFileLooksLikePrivateKey(path string) bool {
