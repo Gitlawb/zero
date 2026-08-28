@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // initTestRepo creates a temp git work tree with one committed file and returns
@@ -412,5 +414,286 @@ func TestExtractBundleKeepsBackupWhenRestoreAlsoFails(t *testing.T) {
 	got, readErr := os.ReadFile(filepath.Join(bundleDir, found, "backup", "a.txt"))
 	if readErr != nil || string(got) != "v0" {
 		t.Fatalf("retained backup = %q, err %v, want %q", got, readErr, "v0")
+	}
+
+	// The retained tree carries its link marker, so the next bridge start puts
+	// it back rather than leaving the link empty forever.
+	renameDir = real
+	recoverBundleDir(bundleDir, nil)
+	got, readErr = os.ReadFile(filepath.Join(dest, "a.txt"))
+	if readErr != nil {
+		t.Fatalf("recovery did not restore the retained tree: %v", readErr)
+	}
+	if string(got) != "v0" {
+		t.Fatalf("recovered a.txt = %q, want %q", got, "v0")
+	}
+}
+
+// The link marker is read off disk, so a hostile or corrupt one must not steer a
+// rename anywhere outside the bundle dir.
+func TestRecoverBundleDirRefusesAMarkerThatEscapesTheBundleDir(t *testing.T) {
+	for _, marker := range []string{"../evil", "/etc/evil", "..", "a/b", ".hidden"} {
+		dir := t.TempDir()
+		staging := plantInterruptedExtract(t, dir, "proj-1", "v0")
+		if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(marker), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(filepath.Dir(dir), "evil")
+
+		var logged []string
+		recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+
+		if _, err := os.Stat(outside); !os.IsNotExist(err) {
+			t.Errorf("marker %q created %s: %v", marker, outside, err)
+		}
+		if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+			t.Errorf("marker %q: the tree should be left in place, not moved: %v", marker, err)
+		}
+		if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "leaving it in place") }) {
+			t.Errorf("marker %q should be reported, got %v", marker, logged)
+		}
+	}
+}
+
+// plantInterruptedExtract builds the on-disk state a crash between the two swap
+// renames leaves behind: the link's only tree sitting in a staging dir.
+func plantInterruptedExtract(t *testing.T, bundleDir, linkID, content string) string {
+	t.Helper()
+	staging := filepath.Join(bundleDir, stagingPrefix+"crashed")
+	backup := filepath.Join(staging, "backup")
+	if err := os.MkdirAll(filepath.Join(backup, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "a.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(linkID), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return staging
+}
+
+func TestRecoverBundleDirRestoresInterruptedExtract(t *testing.T) {
+	dir := t.TempDir()
+	staging := plantInterruptedExtract(t, dir, "proj-1", "v0")
+
+	var logged []string
+	recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil {
+		t.Fatalf("the interrupted extract was not restored: %v", err)
+	}
+	if string(got) != "v0" {
+		t.Fatalf("restored a.txt = %q, want %q", got, "v0")
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("staging should be gone after a successful restore, got %v", err)
+	}
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "restored the work tree") }) {
+		t.Errorf("a restore should be reported, got %v", logged)
+	}
+}
+
+func TestRecoverBundleDirDropsBackupWhenTheLinkAlreadyHasATree(t *testing.T) {
+	dir := t.TempDir()
+	staging := plantInterruptedExtract(t, dir, "proj-1", "stale")
+	live := filepath.Join(dir, "proj-1")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recoverBundleDir(dir, nil)
+
+	got, err := os.ReadFile(filepath.Join(live, "a.txt"))
+	if err != nil || string(got) != "live" {
+		t.Fatalf("the live tree must win: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("a superseded backup should be removed, got %v", err)
+	}
+}
+
+func TestRecoverBundleDirKeepsABackupItCannotAttribute(t *testing.T) {
+	dir := t.TempDir()
+	staging := plantInterruptedExtract(t, dir, "proj-1", "v0")
+	if err := os.Remove(filepath.Join(staging, stagingLinkFile)); err != nil {
+		t.Fatal(err)
+	}
+
+	var logged []string
+	recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+
+	if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+		t.Errorf("an unattributable tree must be left alone, not deleted: %v", err)
+	}
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "no link marker") }) {
+		t.Errorf("an unattributable tree should be reported, got %v", logged)
+	}
+}
+
+func TestRecoverBundleDirLeavesAStagingDirAnExtractCouldStillOwn(t *testing.T) {
+	dir := t.TempDir()
+	staging := filepath.Join(dir, stagingPrefix+"live")
+	if err := os.MkdirAll(filepath.Join(staging, "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	recoverBundleDir(dir, nil)
+
+	if _, err := os.Stat(staging); err != nil {
+		t.Errorf("a fresh staging dir may belong to a running clone: %v", err)
+	}
+}
+
+func TestRecoverBundleDirReapsAbandonedStaging(t *testing.T) {
+	dir := t.TempDir()
+	staging := filepath.Join(dir, stagingPrefix+"old")
+	if err := os.MkdirAll(filepath.Join(staging, "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * gitTimeout)
+	if err := os.Chtimes(staging, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	recoverBundleDir(dir, nil)
+
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("a staging dir older than any clone should be reaped, got %v", err)
+	}
+}
+
+// A second daemon sharing the bundle dir must not extract the same link at the
+// same time; the in-process lock cannot see it, so an advisory file lock does.
+func TestExtractBundleWaitsForACrossProcessLock(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	b := testBundle(t, "a.txt", "v0")
+
+	lockDir := filepath.Join(dir, lockDirName)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := lockutil.TryAcquireFileLockAt(dir, filepath.Join(lockDir, "proj-1.lock"))
+	if err != nil {
+		t.Fatalf("take the lock as the other daemon would: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := extractBundle(ctx, b, dest, nil); err == nil {
+		t.Fatal("an extract must not proceed while another process holds the link")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("a blocked extract must not touch dest, got %v", err)
+	}
+
+	// Once the other holder is gone the same extract goes through.
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractBundle(context.Background(), b, dest, nil); err != nil {
+		t.Fatalf("extract after the lock was released: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "a.txt")); err != nil {
+		t.Errorf("extract did not publish: %v", err)
+	}
+}
+
+// End to end over TLS: two clients uploading the same link id at once must both
+// succeed and leave one valid work tree.
+func TestBridgeConcurrentUploadsOfOneLinkID(t *testing.T) {
+	srv := newBridgeServer(t, staticLauncher())
+	auth, _ := NewTokenAuthenticator("tok")
+	bundleRoot := t.TempDir()
+	addr, ca := startBridge(t, srv, BridgeOptions{Authenticator: auth, BundleDir: bundleRoot})
+
+	first := initTestRepo(t, "a.txt", "v0")
+	second := initTestRepo(t, "a.txt", "v1")
+	cfg := RemoteConfig{Address: addr, Token: "tok", CACertFile: ca}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []error
+	for _, repo := range []string{first, second, first, second} {
+		wg.Add(1)
+		go func(repo string) {
+			defer wg.Done()
+			if _, err := UploadRepoBundle(cfg, repo, "proj-1"); err != nil {
+				mu.Lock()
+				failures = append(failures, err)
+				mu.Unlock()
+			}
+		}(repo)
+	}
+	wg.Wait()
+
+	if len(failures) > 0 {
+		t.Errorf("concurrent uploads of one link id failed: %v", failures)
+	}
+	dest := filepath.Join(bundleRoot, "proj-1")
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {
+		t.Fatalf("the link has no work tree after concurrent uploads: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil {
+		t.Fatalf("extracted tree is missing its file: %v", err)
+	}
+	if string(got) != "v0" && string(got) != "v1" {
+		t.Fatalf("a.txt = %q, want one of the uploaded trees", got)
+	}
+}
+
+// End to end: a link id that could name a staging dir is refused, and refused
+// before the client dials.
+func TestBridgeRejectsDotPrefixedLinkID(t *testing.T) {
+	srv := newBridgeServer(t, staticLauncher())
+	auth, _ := NewTokenAuthenticator("tok")
+	bundleRoot := t.TempDir()
+	addr, ca := startBridge(t, srv, BridgeOptions{Authenticator: auth, BundleDir: bundleRoot})
+
+	repo := initTestRepo(t, "a.txt", "v0")
+	for _, id := range []string{".staging-1", ".git", ".hidden"} {
+		if _, err := UploadRepoBundle(RemoteConfig{Address: addr, Token: "tok", CACertFile: ca}, repo, id); err == nil {
+			t.Errorf("upload with link id %q should be refused", id)
+		}
+		if _, err := os.Stat(filepath.Join(bundleRoot, id)); !os.IsNotExist(err) {
+			t.Errorf("link id %q must not create %s: %v", id, filepath.Join(bundleRoot, id), err)
+		}
+	}
+}
+
+// End to end: a bridge started over a bundle dir a crash left mid-swap puts the
+// tree back before it serves anything, and the link is usable again.
+func TestBridgeRecoversInterruptedExtractOnStart(t *testing.T) {
+	srv := newBridgeServer(t, staticLauncher())
+	auth, _ := NewTokenAuthenticator("tok")
+	bundleRoot := t.TempDir()
+	staging := plantInterruptedExtract(t, bundleRoot, "proj-1", "recovered")
+
+	addr, ca := startBridge(t, srv, BridgeOptions{Authenticator: auth, BundleDir: bundleRoot})
+
+	got, err := os.ReadFile(filepath.Join(bundleRoot, "proj-1", "a.txt"))
+	if err != nil {
+		t.Fatalf("the bridge did not restore the interrupted extract: %v", err)
+	}
+	if string(got) != "recovered" {
+		t.Fatalf("restored a.txt = %q, want %q", got, "recovered")
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("staging should be cleared after recovery, got %v", err)
+	}
+	// The recovered link still accepts a fresh upload.
+	repo := initTestRepo(t, "a.txt", "v2")
+	if _, err := UploadRepoBundle(RemoteConfig{Address: addr, Token: "tok", CACertFile: ca}, repo, "proj-1"); err != nil {
+		t.Fatalf("upload to a recovered link: %v", err)
+	}
+	got, err = os.ReadFile(filepath.Join(bundleRoot, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v2" {
+		t.Fatalf("after re-upload a.txt = %q, err %v, want %q", got, err, "v2")
 	}
 }

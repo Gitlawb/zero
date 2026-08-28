@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // gitTimeout bounds a single git invocation (bundle create/verify, clone) so a
@@ -175,6 +176,17 @@ func streamFramesToFile(r io.Reader, w io.Writer, size int64) error {
 // sanitizeLinkID refuses every dot-prefixed id so a link can never name one.
 const stagingPrefix = ".staging-"
 
+// lockDirName holds the per-link advisory lock files that serialize extracts
+// across processes. Dot-prefixed for the same reason stagingPrefix is.
+const lockDirName = ".extract-locks"
+
+// stagingLinkFile records, inside a staging dir, which link the backup beside it
+// belongs to. Without it a crash leaves an orphan nothing can attribute.
+const stagingLinkFile = "link"
+
+// extractLockPoll is how often a cross-process extract lock is retried.
+const extractLockPoll = 50 * time.Millisecond
+
 // renameDir moves a directory into its published location. It is a var so tests
 // can force a failure at the steps whose errors would otherwise be unrecoverable.
 var renameDir = os.Rename
@@ -216,6 +228,110 @@ func lockExtract(dest string) func() {
 	}
 }
 
+// lockExtractFile takes the cross-process advisory lock for dest, waiting until
+// ctx is done or the wait budget runs out. The in-process lock already excludes
+// this daemon's own goroutines; this excludes a second daemon sharing the dir.
+func lockExtractFile(ctx context.Context, bundleDir, dest string) (func(), error) {
+	lockDir := filepath.Join(bundleDir, lockDirName)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(lockDir, filepath.Base(dest)+".lock")
+	deadline := time.NewTimer(gitTimeout)
+	defer deadline.Stop()
+	for {
+		lock, err := lockutil.TryAcquireFileLockAt(bundleDir, path)
+		if err == nil {
+			return func() { _ = lock.Release() }, nil
+		}
+		if !errors.Is(err, lockutil.ErrLockHeld) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("remote: timed out waiting for the extract lock on %s", dest)
+		case <-time.After(extractLockPoll):
+		}
+	}
+}
+
+// recoverBundleDir repairs what a crash left behind in dir. A staging dir whose
+// backup belongs to a link with no live tree is put back; one that no extract
+// can still own is removed. It is called once at bridge construction, before any
+// upload is served, and never removes a staging dir a live extract may hold.
+func recoverBundleDir(dir string, logf func(string, ...any)) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logf("remote: could not scan bundle dir %s: %v", dir, err)
+		}
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), stagingPrefix) {
+			continue
+		}
+		staging := filepath.Join(dir, entry.Name())
+		if restoreStagedBackup(dir, staging, logf) {
+			continue
+		}
+		// No backup to attribute. Only reap once no clone can still be running:
+		// gitTimeout bounds a clone, so anything older than that is abandoned.
+		info, err := entry.Info()
+		if err != nil || time.Since(info.ModTime()) < 2*gitTimeout {
+			continue
+		}
+		if err := os.RemoveAll(staging); err != nil {
+			logf("remote: could not remove abandoned staging dir %s: %v", staging, err)
+		}
+	}
+}
+
+// restoreStagedBackup puts a staged backup back if its link has no live tree.
+// It reports whether staging was dealt with and needs no further handling.
+func restoreStagedBackup(dir, staging string, logf func(string, ...any)) bool {
+	backup := filepath.Join(staging, "backup")
+	if _, err := os.Stat(backup); err != nil {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(staging, stagingLinkFile))
+	if err != nil {
+		logf("remote: staged tree in %s has no link marker; leaving it in place", staging)
+		return true
+	}
+	id, err := sanitizeLinkID(string(raw))
+	if err != nil {
+		logf("remote: staged tree in %s names an invalid link (%v); leaving it in place", staging, err)
+		return true
+	}
+	dest := filepath.Join(dir, id)
+	if !withinDir(dir, dest) {
+		logf("remote: staged tree in %s names a link outside the bundle dir; leaving it in place", staging)
+		return true
+	}
+	if _, err := os.Stat(dest); err == nil {
+		// The link already has a tree, so the backup is a stale copy.
+		if err := os.RemoveAll(staging); err != nil {
+			logf("remote: could not remove superseded staging dir %s: %v", staging, err)
+		}
+		return true
+	}
+	if err := os.Rename(backup, dest); err != nil {
+		logf("remote: could not restore the staged tree for %s from %s: %v", id, staging, err)
+		return true
+	}
+	logf("remote: restored the work tree for %s from %s after an interrupted extract", id, staging)
+	if err := os.RemoveAll(staging); err != nil {
+		logf("remote: could not remove staging dir %s after restoring %s: %v", staging, id, err)
+	}
+	return true
+}
+
 // extractBundle clones bundleFile into a staging dir beside dest, then swaps the
 // clone into place (replacing any prior extraction for this link id). git clone
 // needs a non-existent target, hence the staging dir. The live tree is moved
@@ -234,6 +350,11 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	}
 	unlock := lockExtract(dest)
 	defer unlock()
+	unlockFile, err := lockExtractFile(ctx, parent, dest)
+	if err != nil {
+		return err
+	}
+	defer unlockFile()
 
 	staging, err := os.MkdirTemp(parent, stagingPrefix+"*")
 	if err != nil {
@@ -262,6 +383,11 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 
 	// Every rename stays inside parent, so none of them crosses a filesystem.
 	backup := filepath.Join(staging, "backup")
+	// Record the link before moving its tree, so a crash in the swap window
+	// leaves something recoverBundleDir can attribute and put back.
+	if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(filepath.Base(dest)), 0o600); err != nil {
+		return err
+	}
 	restore := func() error { return nil }
 	if err := os.Rename(dest, backup); err == nil {
 		restore = func() error { return renameDir(backup, dest) }
