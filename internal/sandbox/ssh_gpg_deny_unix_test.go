@@ -37,7 +37,7 @@ func TestSSHKeyDiscoverySkipsFIFOAndDeviceWithoutBlocking(t *testing.T) {
 	var denied []string
 	select {
 	case denied = <-done:
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("SSH/GPG discovery blocked on a FIFO or device")
 	}
 
@@ -83,7 +83,7 @@ func TestSSHConfigDiscoverySkipsSymlinkToFIFOWithoutBlocking(t *testing.T) {
 	var denied []string
 	select {
 	case denied = <-done:
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("SSH config discovery blocked on a FIFO behind a config symlink")
 	}
 

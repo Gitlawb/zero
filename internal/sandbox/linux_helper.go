@@ -430,6 +430,14 @@ func appendUnreadableLinuxPaths(args []string, paths []string, carveouts []strin
 		args = appendLinuxParentTmpfsOmitting(args, parent, omits[parent])
 	}
 	for _, file := range classified.files {
+		parent := filepath.Clean(filepath.Dir(file))
+		if _, overlaid := seenParents[parent]; overlaid {
+			// Parent was already tmpfs-overlaid (symlink sibling in the same
+			// credential dir). Re-binding /dev/null onto the regular file would
+			// target a dest that no longer exists after the overlay and can
+			// abort bubblewrap at startup.
+			continue
+		}
 		args = append(args, "--ro-bind", "/dev/null", file)
 	}
 	return args
@@ -591,6 +599,11 @@ func appendLinuxParentTmpfsOmitting(args []string, parent string, omit map[strin
 			continue
 		}
 		sibling := filepath.Join(parent, name)
+		if !pathExists(sibling) {
+			// os.ReadDir returns dangling symlinks; bwrap --ro-bind sources
+			// must resolve, so skip them rather than aborting sandbox startup.
+			continue
+		}
 		args = append(args, "--ro-bind", sibling, sibling)
 	}
 	return append(args, "--remount-ro", parent)

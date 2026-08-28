@@ -173,11 +173,12 @@ func sshKnownHostsFamilyName(name string) bool {
 }
 
 func sshFileLooksLikePrivateKey(path string) bool {
-	// Basename-based denial still treats *.pub as public, but a PEM/OpenSSH/PuTTY
-	// private key named work.pub must not stay readable. Sniff .pub payloads.
-	// Keep config / authorized_keys / known-hosts family exemptions: those names
-	// are never content-denied here (CertificateFile and host-key files).
-	if sshConfigOrKnownHostsName(filepath.Base(path)) {
+	// Basename-based denial still treats *.pub and known-hosts names as public,
+	// but a PEM/OpenSSH/PuTTY private key at those names must not stay readable.
+	// Sniff those payloads. Keep config / authorized_keys exemptions:
+	// CertificateFile and authorized_keys are never content-denied here.
+	switch filepath.Base(path) {
+	case "config", "authorized_keys", "authorized_keys2":
 		return false
 	}
 	data, ok := readRegularFileBounded(path, sshPrivateKeySniffBytes)
@@ -192,17 +193,6 @@ func sshFileLooksLikePrivateKey(path string) bool {
 		return false
 	}
 	return strings.Contains(s, "PRIVATE KEY")
-}
-
-// sshConfigOrKnownHostsName is the subset of sshPublicOrConfigName that must
-// not be content-sniffed. *.pub is intentionally excluded so a private-key
-// payload at that name is still denied.
-func sshConfigOrKnownHostsName(name string) bool {
-	switch name {
-	case "config", "authorized_keys", "authorized_keys2":
-		return true
-	}
-	return sshKnownHostsFamilyName(name)
 }
 
 // readRegularFileBounded Lstats first and refuses FIFOs, devices, and
@@ -520,6 +510,13 @@ func sshShouldDenyReferencedPath(path, home, sshDir string) bool {
 	}
 	if sshIsDevNullPath(cleaned) {
 		return false
+	}
+	// Sniff before the public-name exemption so IdentityFile ~/keys/work.pub
+	// (or a relocated key named known_hosts) with a private-key payload is
+	// denied. Genuine public keys, genuine known-hosts, config, and
+	// authorized_keys do not match and stay readable.
+	if sshFileLooksLikePrivateKey(cleaned) {
+		return true
 	}
 	return !sshPublicOrConfigName(filepath.Base(cleaned))
 }
