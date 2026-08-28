@@ -88,28 +88,43 @@ func messageEvent(role string, content string) sessions.AppendEventInput {
 	}
 }
 
-func toolCallEvent(name string, callID string, arguments string) sessions.AppendEventInput {
+type importCallIdentities struct {
+	byForeign map[string]string
+}
+
+func (identities *importCallIdentities) opaque(foreign string) string {
+	if identities.byForeign == nil {
+		identities.byForeign = map[string]string{}
+	}
+	if existing := identities.byForeign[foreign]; existing != "" {
+		return existing
+	}
+	identity := fmt.Sprintf("import-call-%06d", len(identities.byForeign)+1)
+	identities.byForeign[foreign] = identity
+	return identity
+}
+
+func toolCallEvent(identities *importCallIdentities, name string, foreignCallID string, arguments string) sessions.AppendEventInput {
 	return sessions.AppendEventInput{
 		Type: sessions.EventToolCall,
 		Payload: map[string]any{
 			"name": redact(name),
-			// The foreign agent's own call id is reused verbatim so a call and
-			// its result pair up: the TUI keys them together on this string
-			// (effectiveToolRowID), and inventing new ids would split every pair.
-			// redact is deterministic, so both sides transform the id identically
-			// and the pairing survives.
-			"toolCallId": redact(callID),
+			// Identity is structural, not display text. Foreign ids may contain
+			// secrets, and redaction is deliberately many-to-one, so persisting a
+			// redacted foreign id can collapse distinct call/result pairs. This
+			// per-import opaque id is non-secret and one-to-one.
+			"toolCallId": identities.opaque(foreignCallID),
 			"arguments":  redact(arguments),
 		},
 	}
 }
 
-func toolResultEvent(name string, callID string, status tools.Status, output string) sessions.AppendEventInput {
+func toolResultEvent(identities *importCallIdentities, name string, foreignCallID string, status tools.Status, output string) sessions.AppendEventInput {
 	return sessions.AppendEventInput{
 		Type: sessions.EventToolResult,
 		Payload: map[string]any{
 			"name":       redact(name),
-			"toolCallId": redact(callID),
+			"toolCallId": identities.opaque(foreignCallID),
 			"status":     string(status),
 			"output":     redact(output),
 		},
@@ -167,6 +182,7 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 	// has to be carried forward. Every family-1 agent writes the tool_use before
 	// the matching tool_result, so this is populated by the time it is read.
 	toolNames := map[string]string{}
+	identities := &importCallIdentities{}
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
@@ -217,7 +233,7 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 			case "tool_use":
 				toolNames[block.ID] = block.Name
 				activity.observeCall(block.ID, block.Name, string(block.Input))
-				events = append(events, toolCallEvent(block.Name, block.ID, string(block.Input)))
+				events = append(events, toolCallEvent(identities, block.Name, block.ID, string(block.Input)))
 			case "tool_result":
 				name := toolNames[block.ToolUseID]
 				if name == "" {
@@ -229,7 +245,7 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 				}
 				output := family1ResultText(block.Content)
 				activity.observeResult(block.ToolUseID, name, status, output)
-				events = append(events, toolResultEvent(name, block.ToolUseID, status, output))
+				events = append(events, toolResultEvent(identities, name, block.ToolUseID, status, output))
 			}
 		}
 		return true
@@ -240,12 +256,11 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 	// SAID OUT LOUD. A resumed conversation that quietly lost a record reads as
 	// complete to both the user and the model continuing it — the failure this
 	// makes visible is a question with no answer followed by a follow-up.
+	contextEvents := activity.summaryEvents()
 	if omitted > 0 {
-		events = append(events, omittedRecordsEvent(omitted))
+		contextEvents = append([]sessions.AppendEventInput{omittedRecordsEvent(omitted)}, contextEvents...)
 	}
-
-	events = append(events, activity.summaryEvents()...)
-	return capEvents(events, options.MaxEvents), nil
+	return capTranslatedEvents(events, contextEvents, options.MaxEvents), nil
 }
 
 // roleFor maps a record to the role the TUI understands. Anything that is not
@@ -298,6 +313,41 @@ func capEvents(events []sessions.AppendEventInput, max int) []sessions.AppendEve
 		" from this session were not imported; the most recent "+
 		itoaEvents(len(shown))+" are shown."))
 	return append(out, shown...)
+}
+
+// capTranslatedEvents applies MaxEvents without allowing generated summaries
+// to evict the actual transcript tail. Context receives spare/reserved slots,
+// but at least the final source event always survives when source exists.
+func capTranslatedEvents(source, contextEvents []sessions.AppendEventInput, max int) []sessions.AppendEventInput {
+	if max <= 0 || len(source)+len(contextEvents) <= max {
+		return append(append([]sessions.AppendEventInput{}, source...), contextEvents...)
+	}
+	if len(source) == 0 {
+		return capEvents(contextEvents, max)
+	}
+	if len(contextEvents) == 0 {
+		return capEvents(source, max)
+	}
+	contextSlots := min(len(contextEvents), max-1)
+	if contextSlots < 0 {
+		contextSlots = 0
+	}
+	sourceSlots := max - contextSlots
+	// If source must be truncated and the budget has room, reserve a second
+	// source slot for capEvents' disclosure note. Keeping only the final source
+	// event would satisfy the tail guarantee while silently hiding that earlier
+	// transcript events were dropped.
+	if len(source) > sourceSlots && max >= 2 && sourceSlots < 2 {
+		sourceSlots = 2
+		contextSlots = max - sourceSlots
+	}
+	var keptSource []sessions.AppendEventInput
+	if sourceSlots <= 1 {
+		keptSource = append(keptSource, source[len(source)-1])
+	} else {
+		keptSource = capEvents(source, sourceSlots)
+	}
+	return append(keptSource, contextEvents[len(contextEvents)-contextSlots:]...)
 }
 
 func itoaEvents(value int) string { return strconv.Itoa(value) }

@@ -83,10 +83,11 @@ func TestActivitySummaryIsAMessageNotACompaction(t *testing.T) {
 // of them must be redacted, not merely stripped of control bytes.
 func TestStructuralFieldsAreRedacted(t *testing.T) {
 	secret := "sk-ant-api03-" + strings.Repeat("A", 40)
+	identities := &importCallIdentities{}
 	events := []sessions.AppendEventInput{
-		messageEvent(secret, "hi"),                   // malicious role
-		toolCallEvent(secret, secret, "{}"),          // malicious tool name + call id
-		toolResultEvent(secret, secret, "ok", "out"), // malicious tool name + result id
+		messageEvent(secret, "hi"),                               // malicious role
+		toolCallEvent(identities, secret, secret, "{}"),          // malicious tool name + call id
+		toolResultEvent(identities, secret, secret, "ok", "out"), // malicious tool name + result id
 	}
 	encoded, err := json.Marshal(events)
 	if err != nil {

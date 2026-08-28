@@ -123,6 +123,28 @@ func TestCodexToolCallsPairUpAcrossBothCallShapes(t *testing.T) {
 	}
 }
 
+func TestCodexCapCannotLetActivitySummaryEvictSourceTail(t *testing.T) {
+	_, path := writeCodexStore(t,
+		`{"type":"session_meta","timestamp":"2026-08-01T10:00:00.000Z","payload":{"session_id":"s","cwd":"/w"}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"read_file","call_id":"call_1","arguments":"{\"path\":\"parser.go\"}"}}`,
+		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"package parser"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"final codex answer"}]}}`,
+	)
+	events, err := translateCodex("", path, ReadOptions{MaxEvents: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d capped events, want 2", len(events))
+	}
+	if note := str(t, events[0], "content"); !strings.Contains(note, "not imported") {
+		t.Fatalf("source truncation was silent: got %q", note)
+	}
+	if got := str(t, events[1], "content"); got != "final codex answer" {
+		t.Fatalf("source tail was evicted by generated context: got %q", got)
+	}
+}
+
 func TestCodexDiscoveryIsFixedDepth(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".codex", "sessions")
