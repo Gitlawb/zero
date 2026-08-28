@@ -500,17 +500,20 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	var carveouts []string
 	var ensureDirs []string
 	var dirs []string
+	var lexicalCandidates []string
+	var lexicalDirs []string
 	for _, home := range options.Homes {
 		if strings.TrimSpace(home) == "" {
 			continue
 		}
+		gnupg := filepath.Join(home, ".gnupg")
 		homeDirs := []string{
 			filepath.Join(home, ".aws"),
 			filepath.Join(home, ".azure"),
 			// GPG secret keyring (secring.gpg, private-keys-v1.d). Directory-
 			// shaped like ~/.aws so a mount-based backend masks the whole
 			// store, including files created later in the session (#815).
-			filepath.Join(home, ".gnupg"),
+			gnupg,
 		}
 		candidates = append(candidates, homeDirs...)
 		dirs = append(dirs, homeDirs...)
@@ -521,8 +524,18 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// material (id_*, *.pem, IdentityFile paths) rather than the whole
 		// of ~/.ssh, so config and known_hosts stay readable for git host
 		// resolution (#815).
-		candidates = append(candidates, filepath.Join(home, ".git-credentials"))
-		candidates = append(candidates, sshPrivateKeyDenyCandidates(home)...)
+		gitCredentials := filepath.Join(home, ".git-credentials")
+		sshKeys := sshPrivateKeyDenyCandidates(home)
+		candidates = append(candidates, gitCredentials)
+		candidates = append(candidates, sshKeys...)
+		// Keep the lexical candidate as well as any EvalSymlinks target so a
+		// same-user atomic symlink retarget after profile construction still
+		// hits a deny on ~/.gnupg, ~/.git-credentials, and SSH private keys.
+		// Use-time handle-relative / openat enforcement is a pre-existing
+		// backend gap, not introduced here.
+		lexicalCandidates = append(lexicalCandidates, gnupg, gitCredentials)
+		lexicalCandidates = append(lexicalCandidates, sshKeys...)
+		lexicalDirs = append(lexicalDirs, gnupg)
 	}
 	candidates = append(candidates, options.GoogleCredentials...)
 	candidates = append(candidates, options.NPMUserConfigs...)
@@ -600,19 +613,54 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		candidates = append(candidates, tokenPath, tokenPath+".migrated")
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
-	out := make([]string, 0, len(candidates))
+	out := make([]string, 0, len(candidates)+len(lexicalCandidates))
 	for _, path := range normalizeProfilePaths(candidates) {
 		if credentialPathReincluded(allowRoots, path) {
 			continue
 		}
 		out = append(out, path)
 	}
+	out = appendLexicalCredentialDenyPaths(out, allowRoots, lexicalCandidates)
+	dirList := normalizeProfilePaths(dirs)
+	dirList = appendLexicalCredentialDenyPaths(dirList, nil, lexicalDirs)
 	return credentialDenyPaths{
 		Paths:      out,
 		Carveouts:  credentialCarveoutPaths(out, carveouts),
 		EnsureDirs: credentialRetainedDirs(out, normalizeProfilePaths(ensureDirs)),
-		Dirs:       credentialRetainedDirs(out, normalizeProfilePaths(dirs)),
+		Dirs:       credentialRetainedDirs(out, dirList),
 	}
+}
+
+// appendLexicalCredentialDenyPaths adds the pre-EvalSymlinks spelling of each
+// candidate. normalizeProfilePath replaces a symlink with its target, so
+// omitting the lexical path would let a later atomic retarget of the same
+// pathname escape the deny list.
+func appendLexicalCredentialDenyPaths(out, allowRoots, candidates []string) []string {
+	if len(candidates) == 0 {
+		return out
+	}
+	seen := make(map[string]struct{}, len(out))
+	for _, path := range out {
+		seen[path] = struct{}{}
+	}
+	for _, path := range candidates {
+		lexical := normalizeProfilePathLexically(path)
+		if lexical == "" {
+			continue
+		}
+		if _, ok := seen[lexical]; ok {
+			continue
+		}
+		if credentialPathReincluded(allowRoots, lexical) {
+			continue
+		}
+		if resolved := normalizeProfilePath(path); resolved != "" && credentialPathReincluded(allowRoots, resolved) {
+			continue
+		}
+		seen[lexical] = struct{}{}
+		out = append(out, lexical)
+	}
+	return out
 }
 
 // credentialTokenStorePaths returns the deny entries for one token-store path:
