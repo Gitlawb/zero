@@ -120,16 +120,16 @@ type planTaskProgressMsg struct {
 
 // planCompletedMsg carries the plan's terminal record.
 type planCompletedMsg struct {
-	runID      int
-	name       string
-	status     string
-	succeeded  int
-	failed     int
-	skipped    int
-	cancelled  int
-	tokensUsed int
-	tokenLimit int
-	maxSpeedup float64
+	runID           int
+	name            string
+	status          string
+	succeeded       int
+	failed          int
+	skipped         int
+	cancelled       int
+	tokensUsed      int
+	tokenLimit      int
+	maxSpeedup      float64
 	durabilityError string
 	// background marks a plan that outlives the run that launched it, so the
 	// stale-run guard must not drop its progress.
