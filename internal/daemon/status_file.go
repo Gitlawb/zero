@@ -52,15 +52,12 @@ func writeStatusFileAtomically(
 	committed := false
 	defer func() {
 		if err := root.Close(); err != nil {
-			closeErr := fmt.Errorf("close status directory: %w", err)
-			if committed {
-				var committedErr *statusFileCommittedError
-				if errors.As(returnErr, &committedErr) {
-					closeErr = errors.Join(committedErr.cause, closeErr)
-				}
-				returnErr = &statusFileCommittedError{cause: closeErr}
-			} else {
-				returnErr = errors.Join(returnErr, closeErr)
+			returnErr = errors.Join(returnErr, fmt.Errorf("close status directory: %w", err))
+		}
+		if committed && returnErr != nil {
+			var committedErr *statusFileCommittedError
+			if !errors.As(returnErr, &committedErr) {
+				returnErr = &statusFileCommittedError{cause: returnErr}
 			}
 		}
 	}()
@@ -124,7 +121,7 @@ func writeStatusFileAtomically(
 		committedWarning = errors.Join(committedWarning, fmt.Errorf("sync status directory: %w", err))
 	}
 	if committedWarning != nil {
-		return &statusFileCommittedError{cause: committedWarning}
+		return committedWarning
 	}
 	return nil
 }

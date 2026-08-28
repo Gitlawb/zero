@@ -256,6 +256,61 @@ func TestWriteStatusFileContinuesAfterCommittedReplacementWarning(t *testing.T) 
 	assertNoStatusTemps(t, dir)
 }
 
+func TestWriteStatusFileContinuesAfterCommittedTempCleanupWarning(t *testing.T) {
+	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
+	path := filepath.Join(dir, "daemon.status")
+	if err := os.WriteFile(path, []byte(`{"pid":7}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var tempName string
+	var logs []string
+	server := &Server{
+		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
+		opts: ServerOptions{
+			Paths:   Paths{Socket: filepath.Join(dir, "daemon.sock"), Status: path},
+			Version: 6,
+			Log:     func(message string) { logs = append(logs, message) },
+			replaceStatusFile: func(root *os.Root, src, dst string) error {
+				if err := fsutil.RenameWithRetry(src, dst, root.Rename); err != nil {
+					return err
+				}
+				tempName = src
+				if err := root.Mkdir(src, 0o700); err != nil {
+					t.Fatalf("recreate staged path as directory: %v", err)
+				}
+				keep, err := root.OpenFile(filepath.Join(src, "keep"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					t.Fatalf("make staged directory non-empty: %v", err)
+				}
+				if err := keep.Close(); err != nil {
+					t.Fatalf("close staged directory marker: %v", err)
+				}
+				return nil
+			},
+		},
+	}
+
+	if err := server.writeStatusFile(); err != nil {
+		t.Fatalf("writeStatusFile returned a post-commit warning as failure: %v", err)
+	}
+	status := readStatusDocument(t, path)
+	if status.Version != 6 {
+		t.Fatalf("published status = %+v, want version 6", status)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "remove temporary status file") {
+		t.Fatalf("logs = %q, want temporary cleanup warning", logs)
+	}
+	if err := os.Remove(filepath.Join(dir, tempName, "keep")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, tempName)); err != nil {
+		t.Fatal(err)
+	}
+	assertNoStatusTemps(t, dir)
+}
+
 func TestWriteStatusFileBindsDirectoryDuringAncestorSwap(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "live")

@@ -7,6 +7,7 @@
 package observability
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,17 +29,44 @@ func FormatCrashReport(label string, recovered any, stack []byte, ts time.Time) 
 
 // WriteCrashReport writes a crash report file into dir and returns its path.
 func WriteCrashReport(dir, label string, recovered any, stack []byte, ts time.Time) (string, error) {
-	if err := ensureCrashDirectory(dir); err != nil {
+	return writeCrashReport(dir, label, recovered, stack, ts, nil)
+}
+
+func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Time, beforeCreate func()) (path string, returnErr error) {
+	root, err := openCrashDirectory(dir)
+	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "crash-"+ts.UTC().Format("20060102-150405")+".log")
-	if err := os.WriteFile(path, []byte(FormatCrashReport(label, recovered, stack, ts)), 0o600); err != nil {
-		return "", err
+	defer func() {
+		if err := root.Close(); err != nil {
+			path = ""
+			returnErr = errors.Join(returnErr, fmt.Errorf("close crash report directory: %w", err))
+		}
+	}()
+
+	name := "crash-" + ts.UTC().Format("20060102-150405") + ".log"
+	path = filepath.Join(dir, name)
+	if beforeCreate != nil {
+		beforeCreate()
+	}
+	report, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create crash report: %w", err)
+	}
+	if _, err := report.Write([]byte(FormatCrashReport(label, recovered, stack, ts))); err != nil {
+		closeErr := report.Close()
+		if closeErr != nil {
+			return "", errors.Join(fmt.Errorf("write crash report: %w", err), fmt.Errorf("close crash report: %w", closeErr))
+		}
+		return "", fmt.Errorf("write crash report: %w", err)
+	}
+	if err := report.Close(); err != nil {
+		return "", fmt.Errorf("close crash report: %w", err)
 	}
 	return path, nil
 }
 
-func ensureCrashDirectory(dir string) error {
+func openCrashDirectory(dir string) (*os.Root, error) {
 	clean := filepath.Clean(dir)
 	defaultDir := filepath.Clean(DefaultCrashDir())
 	parent := filepath.Dir(clean)
@@ -47,13 +75,14 @@ func ensureCrashDirectory(dir string) error {
 	// destinations are hardened at the caller-supplied boundary only.
 	if clean == defaultDir && filepath.Base(clean) == "crashes" && filepath.Base(parent) == ".zero" {
 		if err := privatedir.Ensure(parent); err != nil {
-			return fmt.Errorf("secure crash report parent: %w", err)
+			return nil, fmt.Errorf("secure crash report parent: %w", err)
 		}
 	}
-	if err := privatedir.Ensure(clean); err != nil {
-		return fmt.Errorf("secure crash report directory: %w", err)
+	root, err := privatedir.Open(clean)
+	if err != nil {
+		return nil, fmt.Errorf("secure crash report directory: %w", err)
 	}
-	return nil
+	return root, nil
 }
 
 // DefaultCrashDir is where crash reports are written by default.
