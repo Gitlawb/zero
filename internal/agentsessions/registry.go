@@ -174,17 +174,14 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	}
 	if len(events) > 0 {
 		if _, err := store.AppendEvents(created.SessionID, events); err != nil {
-			// SAY WHAT WAS LEFT BEHIND. Create and AppendEvents are two steps and
-			// only the second one failed, so a session exists holding this
-			// import's tag and no transcript. The store has no delete, and adding
-			// one to unwind an import would hand every caller a destructive
-			// primitive for the sake of an error path, so the empty session stays
-			// on disk — named here, and refused as import provenance by the
-			// picker (see importedSourceRefs) so the foreign source stays offered
-			// and re-running this command works. Reported by @jatmn.
-			return ImportResult{}, fmt.Errorf(
-				"import %s into zero session %s: %w (the empty session was left in place; re-run the import to try again)",
-				id, created.SessionID, err)
+			cleanupErr := store.DiscardCreated(created)
+			if cleanupErr != nil {
+				return ImportResult{}, errors.Join(
+					fmt.Errorf("import %s into zero session %s: %w", id, created.SessionID, err),
+					fmt.Errorf("clean up failed import: %w", cleanupErr),
+				)
+			}
+			return ImportResult{}, fmt.Errorf("import %s: %w", id, err)
 		}
 	}
 	return ImportResult{Session: created, Events: len(events), Source: source}, nil

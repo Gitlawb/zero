@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -71,11 +73,52 @@ func TestTheBusiestAgentSitsNearestToAll(t *testing.T) {
 }
 
 func TestAnAgentWithNoSessionsGetsNoTab(t *testing.T) {
-	picker := tabbedPicker(sessionRow("a", "zero"), sessionRow("b", "codex"))
+	home := t.TempDir()
+	workspace := filepath.Join(home, "work")
+	transcript := filepath.Join(home, ".claude", "projects", "-work", "abc.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte(`{"type":"user","cwd":"`+workspace+`","sessionId":"abc","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := agentsessions.Env{Home: home}
+	agentsessions.InvalidateDiscovery()
+	m := model{agentSessionsEnv: env, cwd: workspace}
+	foreign := m.foreignSessionItems(nil, time.Now())
+	picker := pickerFromParts([]pickerItem{sessionRow("a", "zero")}, foreign)
+	if picker == nil {
+		t.Fatal("controlled Claude transcript produced no picker")
+	}
 	for _, tab := range picker.tabs {
 		if tab == "factory" || tab == "pi" {
 			t.Errorf("tabs = %v, want no tab for an agent with nothing in it", picker.tabs)
 		}
+	}
+	foundClaude := false
+	for _, tab := range picker.tabs {
+		foundClaude = foundClaude || tab == "claude-code"
+	}
+	if !foundClaude {
+		t.Fatalf("tabs = %v, want the one discovered agent", picker.tabs)
+	}
+}
+
+func TestForeignSessionItemsSuppressAnImportedSource(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "work")
+	transcript := filepath.Join(home, ".claude", "projects", "-work", "abc.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte(`{"type":"user","cwd":"`+workspace+`","sessionId":"abc","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agentsessions.InvalidateDiscovery()
+	m := model{agentSessionsEnv: agentsessions.Env{Home: home}, cwd: workspace}
+	existing := []sessions.Metadata{{Tag: agentsessions.ImportTag("claude-code", "abc"), EventCount: 1}}
+	if items := m.foreignSessionItems(existing, time.Now()); len(items) != 0 {
+		t.Fatalf("already imported source was offered again: %+v", items)
 	}
 }
 
@@ -290,7 +333,8 @@ func TestNewSessionPickerSurvivesAnEmptyLocalHistory(t *testing.T) {
 	if len(metas) != 0 {
 		t.Fatalf("this test needs an empty store; got %d sessions", len(metas))
 	}
-	m := model{sessionStore: store, cwd: t.TempDir(), now: func() time.Time { return time.Unix(0, 0) }}
+	env := agentsessions.Env{Home: t.TempDir()}
+	m := model{sessionStore: store, agentSessionsEnv: env, cwd: t.TempDir(), now: func() time.Time { return time.Unix(0, 0) }}
 
 	// With no store at all the picker is still nil — the guard above it stands.
 	if bare := (model{}).newSessionPicker(); bare != nil {

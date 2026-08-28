@@ -14,7 +14,7 @@ import (
 // content is built with Go escapes and JSON-encoded so the transcript carries
 // the real control bytes.
 func TestImportedControlBytesAreStripped(t *testing.T) {
-	malicious := "before\x1b[2J\x1b[1;1H FORGED \x00\x07 after"
+	malicious := "before\x1b[2J\x1b[1;1H FORGED \x00\x07\r after"
 	line, err := json.Marshal(map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": malicious},
@@ -41,7 +41,7 @@ func TestImportedControlBytesAreStripped(t *testing.T) {
 			if !ok {
 				continue
 			}
-			if strings.ContainsAny(s, "\x1b\x00\x07") {
+			if strings.ContainsAny(s, "\x1b\x00\x07\r") {
 				t.Errorf("a control byte survived translation into a payload string: %q", s)
 			}
 			if strings.Contains(s, "before") {
@@ -57,7 +57,7 @@ func TestImportedControlBytesAreStripped(t *testing.T) {
 // TestStripControlKeepsTabAndNewline guards the one carve-out: transcripts
 // legitimately carry tab and newline, and dropping them would mangle real text.
 func TestStripControlKeepsTabAndNewline(t *testing.T) {
-	if got := stripControl("a\tb\nc\x1bd\x00e"); got != "a\tb\ncde" {
+	if got := stripControl("a\tb\nc\rd\x1be\x00f"); got != "a\tb\ncdef" {
 		t.Errorf("stripControl = %q, want tab and newline kept and ESC/NUL dropped", got)
 	}
 }

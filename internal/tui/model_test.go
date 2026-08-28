@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -1173,7 +1174,8 @@ func TestResumePickerHidesEmptyFailedSessions(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	picker := newModel(context.Background(), Options{SessionStore: store}).newSessionPicker()
+	env := agentsessions.Env{Home: t.TempDir()}
+	picker := newModel(context.Background(), Options{SessionStore: store, AgentSessionsEnv: &env}).newSessionPicker()
 	if picker == nil {
 		t.Fatal("expected a picker containing the real session")
 	}
