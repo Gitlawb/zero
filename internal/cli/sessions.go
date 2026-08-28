@@ -561,7 +561,7 @@ func formatSessionSnapshotLine(session zerocommands.SessionSnapshot) string {
 		details = append(details, "spec_id="+redact(session.SpecID))
 	}
 	if session.Tag != "" {
-		details = append(details, "tag="+redact(session.Tag))
+		details = append(details, "tag="+agentsessions.DisplayField(session.Tag))
 	}
 	if session.Depth > 0 {
 		details = append(details, fmt.Sprintf("depth=%d", session.Depth))

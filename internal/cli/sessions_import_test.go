@@ -42,12 +42,16 @@ func TestSessionListSanitizesPersistedModelMetadata(t *testing.T) {
 	line := formatSessionSnapshotLine(zerocommands.SessionSnapshot{
 		SessionID: "session-1",
 		ModelID:   "claude\x1b[2K-opus\n" + secret,
+		Tag:       "imported:codex:filename\x1b[2K\n" + secret,
 	})
 	if strings.Contains(line, "\x1b") || strings.Contains(line, secret) {
 		t.Fatalf("unsafe model metadata reached the session list: %q", line)
 	}
 	if !strings.Contains(line, "model=claude[2K-opus [REDACTED]") {
 		t.Fatalf("session list lost safe model text: %q", line)
+	}
+	if !strings.Contains(line, "tag=imported:codex:filename[2K [REDACTED]") {
+		t.Fatalf("session list did not sanitize the raw imported provenance tag: %q", line)
 	}
 }
 
