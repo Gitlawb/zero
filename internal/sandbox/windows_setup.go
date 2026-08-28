@@ -618,6 +618,9 @@ type windowsRuntimeRootRollback struct {
 type windowsCreatedRuntimeDir struct {
 	path     string
 	identity string
+	// identified separates "no identity" from "identity not established", for the
+	// same reason as the stamp snapshot above.
+	identified bool
 }
 
 // windowsSandboxStampSnapshot records the runtime stamp as it was before setup
@@ -637,6 +640,12 @@ type windowsSandboxStampSnapshot struct {
 	// directory is the object whose replacement this has to detect.
 	root         string
 	rootIdentity string
+	// rootIdentified records whether the identity above was ESTABLISHED, as
+	// opposed to being empty because the capture failed. The two were
+	// indistinguishable, and restore treated the empty case as permission to
+	// mutate the pathname: exactly the case where compensation cannot prove what
+	// it is undoing.
+	rootIdentified bool
 }
 
 func snapshotWindowsSandboxRuntimeStamp(root string) windowsSandboxStampSnapshot {
@@ -645,13 +654,13 @@ func snapshotWindowsSandboxRuntimeStamp(root string) windowsSandboxStampSnapshot
 		return windowsSandboxStampSnapshot{}
 	}
 	path := windowsSandboxRuntimeStampPath(root)
-	rootIdentity, _ := runtimeDirIdentity(root)
+	rootIdentity, rootIdentified := runtimeDirIdentity(root)
 	prior, err := os.ReadFile(path)
 	if err != nil {
 		// Absent, or unreadable and therefore not something to put back.
-		return windowsSandboxStampSnapshot{path: path, root: root, rootIdentity: rootIdentity}
+		return windowsSandboxStampSnapshot{path: path, root: root, rootIdentity: rootIdentity, rootIdentified: rootIdentified}
 	}
-	return windowsSandboxStampSnapshot{path: path, prior: prior, existed: true, root: root, rootIdentity: rootIdentity}
+	return windowsSandboxStampSnapshot{path: path, prior: prior, existed: true, root: root, rootIdentity: rootIdentity, rootIdentified: rootIdentified}
 }
 
 func (snapshot windowsSandboxStampSnapshot) restore() error {
@@ -663,7 +672,21 @@ func (snapshot windowsSandboxStampSnapshot) restore() error {
 	// mutate a directory this run never touched, while the original keeps the
 	// grant and the stamp. Leave the substitute alone and say what was left
 	// behind.
-	if snapshot.rootIdentity != "" {
+	if !snapshot.rootIdentified {
+		// AN IDENTITY THAT WAS NEVER ESTABLISHED IS NOT PERMISSION TO MUTATE. This
+		// used to fall through to the pathname operations below, so a root that
+		// could not be opened when setup began was compensated by writing to, or
+		// removing from, whatever answered to the name afterwards.
+		//
+		// A root that is simply absent is different: there is no object to confuse
+		// and nothing of a previous run to put back, and the created-directory
+		// rollback owns that case.
+		if _, err := os.Lstat(snapshot.root); err == nil {
+			return fmt.Errorf("sandbox runtime root %s could not be identified when setup began, so the stamp at %s cannot be shown to belong to this run; leaving it untouched", snapshot.root, snapshot.path)
+		}
+		return nil
+	}
+	{
 		current, ok := runtimeDirIdentity(snapshot.root)
 		if !ok {
 			return fmt.Errorf("identify the sandbox runtime root %s for stamp compensation", snapshot.root)
@@ -710,7 +733,14 @@ func (rollback windowsRuntimeRootRollback) run() error {
 			// run can prove it created.
 			continue
 		}
-		if entry.identity != "" && current != entry.identity {
+		if !entry.identified {
+			// Created, but never identified. Removing whatever is here now would be
+			// a pathname-authoritative delete of an object this run cannot prove it
+			// made.
+			errs = append(errs, fmt.Errorf("sandbox runtime root %s was created by this run but could not be identified, so it cannot be removed safely; leaving it in place", entry.path))
+			continue
+		}
+		if current != entry.identity {
 			errs = append(errs, fmt.Errorf("sandbox runtime root %s is no longer the directory this run created; "+
 				"leaving the replacement in place", entry.path))
 			continue
@@ -847,8 +877,8 @@ func createRuntimeDirRecording(root string) ([]windowsCreatedRuntimeDir, error) 
 		}
 		// Identified immediately after creating it, so compensation can prove it is
 		// still the same object rather than trusting the name.
-		identity, _ := runtimeDirIdentity(missing[index])
-		created = append(created, windowsCreatedRuntimeDir{path: missing[index], identity: identity})
+		identity, identified := runtimeDirIdentity(missing[index])
+		created = append(created, windowsCreatedRuntimeDir{path: missing[index], identity: identity, identified: identified})
 	}
 	// Re-checked after creation. If an ancestor was swapped for a junction while
 	// we were creating, the leaf we just made is in the wrong tree, and granting

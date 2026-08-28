@@ -110,7 +110,11 @@ func TestRollbackContinuesAfterACompensationFails(t *testing.T) {
 	}
 	rollback := windowsRuntimeRootRollback{
 		created: createdRuntimeDirsForTest(filepath.Join(parent, "zero"), root),
-		stamp:   windowsSandboxStampSnapshot{path: filepath.Join(broken, "stamp"), prior: []byte("x"), existed: true},
+		// Carries a REAL identified root, because compensation now refuses to
+		// mutate a pathname whose root identity was never established, and a
+		// snapshot without one is a shape production never builds. The failure
+		// under test is the unwritable stamp path, not a missing identity.
+		stamp: stampSnapshotForTest(t, root, filepath.Join(broken, "stamp")),
 	}
 
 	err := rollback.run()
@@ -119,6 +123,24 @@ func TestRollbackContinuesAfterACompensationFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(parent, "zero")); !os.IsNotExist(statErr) {
 		t.Errorf("the directory removal was skipped because the stamp restore failed (stat err %v); every compensation has to run", statErr)
+	}
+}
+
+// stampSnapshotForTest builds the snapshot production would build for root,
+// then points it at a different stamp path so a test can choose the failure.
+func stampSnapshotForTest(t *testing.T, root string, stampPath string) windowsSandboxStampSnapshot {
+	t.Helper()
+	identity, identified := runtimeDirIdentity(root)
+	if !identified {
+		t.Fatalf("identify the runtime root %s for the snapshot", root)
+	}
+	return windowsSandboxStampSnapshot{
+		path:           stampPath,
+		prior:          []byte("x"),
+		existed:        true,
+		root:           root,
+		rootIdentity:   identity,
+		rootIdentified: identified,
 	}
 }
 

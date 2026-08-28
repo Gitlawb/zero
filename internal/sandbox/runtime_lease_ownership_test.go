@@ -86,8 +86,8 @@ func TestAHeldLeaseDoesNotProtectASiblingRoot(t *testing.T) {
 func createdRuntimeDirsForTest(paths ...string) []windowsCreatedRuntimeDir {
 	records := make([]windowsCreatedRuntimeDir, 0, len(paths))
 	for _, path := range paths {
-		identity, _ := runtimeDirIdentity(path)
-		records = append(records, windowsCreatedRuntimeDir{path: path, identity: identity})
+		identity, identified := runtimeDirIdentity(path)
+		records = append(records, windowsCreatedRuntimeDir{path: path, identity: identity, identified: identified})
 	}
 	return records
 }
