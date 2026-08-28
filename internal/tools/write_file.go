@@ -103,10 +103,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 			priorContent = string(prev)
 		}
 	}
-	modelKnownContent := content
 	if priorBytes != nil {
 		content = preserveWriteFileEncoding(priorBytes, content)
 	}
+	modelEquivalentContent := content
 
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
@@ -125,7 +125,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	if content == modelKnownContent {
+	if content == modelEquivalentContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
