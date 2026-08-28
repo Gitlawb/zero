@@ -1379,6 +1379,23 @@ func longestPrefixSuffix(pattern, text string) int {
 	if len(text) > len(pattern) {
 		text = text[len(text)-len(pattern):]
 	}
+	// THE WORK IS BOUNDED BY THE TEXT, NOT BY THE CANDIDATE.
+	//
+	// A prefix of pattern that is a suffix of text can be at most len(text) long,
+	// so every longer prefix is unreachable and scanning it changes no answer.
+	// Without this the KMP below builds pattern+sentinel+text and an []int over
+	// it, so an oversized configured value drove the cost: three 2 MiB candidates
+	// measured 54.5 MiB and 33ms on EVERY /mcp state rebuild, against a nominal
+	// fixed render budget. Configured headers, env values, URL components, OAuth
+	// fields and stored tokens have no size limit, so that was the attacker's input
+	// sizing the defender's work.
+	//
+	// Truncating here rather than at the call site keeps recoverableSecretPrefix
+	// weighing the match against the FULL credential length, which is what decides
+	// whether a partial is worth cutting.
+	if len(pattern) > len(text) {
+		pattern = pattern[:len(text)]
+	}
 	const sentinel = "\x00"
 	if strings.Contains(pattern, sentinel) || strings.Contains(text, sentinel) {
 		// Unreachable for a rendered failure reason, whose control bytes are
