@@ -393,6 +393,13 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	})
 }
 
+func foreignSessionAge(updatedAt time.Time, now time.Time) string {
+	if updatedAt.IsZero() {
+		return ""
+	}
+	return relativeAge(updatedAt.Format(time.RFC3339), now)
+}
+
 // newSessionPicker builds the interactive /resume picker (mirrors /model & /provider):
 // one row per resumable session — age + title (Label), session id (Value), and a
 // project/model/size line (Detail). Returns nil when there are no resumable
@@ -595,7 +602,7 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 		// pin — controls first, so a secret split by an escape byte is reassembled
 		// before the shape match runs.
 		label := displayValue(agentsessions.DisplayField(session.Title), "untitled")
-		if when := relativeAge(session.UpdatedAt.Format(time.RFC3339), now); when != "" {
+		if when := foreignSessionAge(session.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
 		items = append(items, pickerItem{
