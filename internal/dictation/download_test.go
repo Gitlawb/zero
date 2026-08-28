@@ -360,3 +360,78 @@ func TestPromoteStagedDirKeepsTheSetAsideCopyWhenRestoreAlsoFails(t *testing.T) 
 		t.Error("the previous install was deleted along with the holder dir")
 	}
 }
+
+// A process stop between the two renames in promoteStagedDir leaves destDir
+// absent and the only usable install in a .previous-* holder. Nothing else knows
+// about that holder, so without a repair the engine is re-downloaded and a host
+// that cannot reach the network stays without dictation despite having a copy.
+func TestRestoreInterruptedPromotionPutsTheInstallBack(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	holder := filepath.Join(root, filepath.Base(dest)+".previous-abc")
+	install := filepath.Join(holder, "install")
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(install, "engine"), []byte("kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreInterruptedPromotion(dest)
+
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil {
+		t.Fatalf("the interrupted promotion was not restored: %v", err)
+	}
+	if string(got) != "kept" {
+		t.Fatalf("restored engine = %q, want %q", got, "kept")
+	}
+	if _, err := os.Stat(holder); !os.IsNotExist(err) {
+		t.Errorf("the holder should be cleared after a restore, got %v", err)
+	}
+}
+
+// A holder is a leftover, never a replacement for whatever is already at destDir,
+// empty or not. os.Rename refuses an existing directory either way, so this
+// pins the behavior rather than one implementation of it.
+func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
+	for _, tc := range []struct{ name, live string }{
+		{"empty dest", ""},
+		{"populated dest", "live"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+			if err := os.MkdirAll(dest, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.live != "" {
+				if err := os.WriteFile(filepath.Join(dest, "engine"), []byte(tc.live), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			holder := filepath.Join(root, filepath.Base(dest)+".previous-abc")
+			install := filepath.Join(holder, "install")
+			if err := os.MkdirAll(install, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(install, "engine"), []byte("stale"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			restoreInterruptedPromotion(dest)
+
+			got, err := os.ReadFile(filepath.Join(dest, "engine"))
+			if tc.live == "" {
+				if err == nil {
+					t.Fatalf("an existing dest was replaced by a stale holder: engine = %q", got)
+				}
+			} else if err != nil || string(got) != tc.live {
+				t.Fatalf("engine = %q, err %v, want the live %q", got, err, tc.live)
+			}
+			if _, err := os.Stat(install); err != nil {
+				t.Errorf("the holder must be left intact when dest exists: %v", err)
+			}
+		})
+	}
+}
