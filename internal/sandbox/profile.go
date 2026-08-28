@@ -114,20 +114,10 @@ func gitMetadataWriteCarveouts(root string) []string {
 			filepath.Join(gitPath, "config"),
 		}
 	}
-	if info.IsDir() {
+	if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return []string{
 			filepath.Join(gitPath, "hooks"),
 			filepath.Join(gitPath, "config"),
-		}
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, statErr := os.Stat(gitPath)
-		if statErr == nil && target.IsDir() {
-			// Preserve the pre-existing behavior for directory symlinks.
-			return []string{
-				filepath.Join(gitPath, "hooks"),
-				filepath.Join(gitPath, "config"),
-			}
 		}
 	}
 	return []string{gitPath}

@@ -73,18 +73,29 @@ func TestGitMetadataWriteCarveoutsPlainCheckout(t *testing.T) {
 	mustEqualCarveouts(t, gitMetadataWriteCarveouts(root), want)
 }
 
-func TestGitMetadataWriteCarveoutsPreservesDirectorySymlinkBehavior(t *testing.T) {
-	root := t.TempDir()
-	realGit := filepath.Join(root, "real.git")
-	if err := os.MkdirAll(realGit, 0o755); err != nil {
-		t.Fatal(err)
+func TestGitMetadataWriteCarveoutsPreservesSymlinkBehavior(t *testing.T) {
+	for _, targetKind := range []string{"directory", "file", "dangling"} {
+		t.Run(targetKind, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "real.git")
+			switch targetKind {
+			case "directory":
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				if err := os.WriteFile(target, []byte("gitdir: ../outside\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(target, filepath.Join(root, ".git")); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			want := []string{
+				filepath.Join(root, ".git", "hooks"),
+				filepath.Join(root, ".git", "config"),
+			}
+			mustEqualCarveouts(t, gitMetadataWriteCarveouts(root), want)
+		})
 	}
-	if err := os.Symlink(realGit, filepath.Join(root, ".git")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	want := []string{
-		filepath.Join(root, ".git", "hooks"),
-		filepath.Join(root, ".git", "config"),
-	}
-	mustEqualCarveouts(t, gitMetadataWriteCarveouts(root), want)
 }
