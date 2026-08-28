@@ -97,14 +97,16 @@ func TestWriteCrashReportBindsDirectoryDuringSwap(t *testing.T) {
 
 	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	var swapErr error
-	path, err := writeCrashReport(dir, "cli", "secret panic", []byte("secret stack"), ts, func() {
-		swapErr = os.Rename(dir, movedDir)
-		if swapErr != nil {
-			return
-		}
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatalf("create substitute crash directory: %v", err)
-		}
+	path, err := writeCrashReport(dir, "cli", "secret panic", []byte("secret stack"), ts, crashReportHooks{
+		beforePublish: func() {
+			swapErr = os.Rename(dir, movedDir)
+			if swapErr != nil {
+				return
+			}
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatalf("create substitute crash directory: %v", err)
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("writeCrashReport: %v", err)
@@ -119,7 +121,10 @@ func TestWriteCrashReportBindsDirectoryDuringSwap(t *testing.T) {
 		return
 	}
 
-	reportName := filepath.Base(path)
+	if path != "" {
+		t.Fatalf("writeCrashReport returned stale path %q after directory swap", path)
+	}
+	reportName := "crash-" + ts.UTC().Format("20060102-150405") + ".log"
 	data, err := os.ReadFile(filepath.Join(movedDir, reportName))
 	if err != nil {
 		t.Fatalf("read report through originally bound directory: %v", err)
@@ -130,6 +135,95 @@ func TestWriteCrashReportBindsDirectoryDuringSwap(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, reportName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("substitute directory received crash report: %v", err)
 	}
+}
+
+func TestWriteCrashReportPublishesOnlyCompleteContent(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	finalPath := filepath.Join(dir, "crash-20260824-120000.log")
+	staged := make(chan struct{})
+	release := make(chan struct{})
+	result := make(chan crashWriteResult, 1)
+	go func() {
+		path, err := writeCrashReport(dir, "cli", "boom", []byte("complete stack"), ts, crashReportHooks{
+			beforePublish: func() {
+				close(staged)
+				<-release
+			},
+		})
+		result <- crashWriteResult{path: path, err: err}
+	}()
+	select {
+	case <-staged:
+	case written := <-result:
+		t.Fatalf("writeCrashReport returned before publication hook: %v", written.err)
+	case <-time.After(time.Second):
+		t.Fatal("writeCrashReport did not reach publication hook")
+	}
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	if _, err := os.Stat(finalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final report visible before complete publication: %v", err)
+	}
+	close(release)
+	written := <-result
+	if written.err != nil {
+		t.Fatalf("writeCrashReport: %v", written.err)
+	}
+	data, err := os.ReadFile(written.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "complete stack") {
+		t.Fatalf("published report is incomplete: %q", data)
+	}
+}
+
+func TestWriteCrashReportRemovesTempAfterWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	injected := errors.New("injected write failure")
+	_, err := writeCrashReport(dir, "cli", "boom", []byte("stack"), time.Now(), crashReportHooks{
+		write: func(*os.File, []byte) (int, error) { return 0, injected },
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("writeCrashReport error = %v, want injected failure", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("crash directory contains partial files after failure: %v", entries)
+	}
+}
+
+func TestWriteCrashReportDoesNotOverwriteExistingReport(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(dir, "crash-20260824-120000.log")
+	if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteCrashReport(dir, "cli", "boom", []byte("stack"), ts); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("WriteCrashReport error = %v, want existing destination", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("existing report overwritten: %q", data)
+	}
+}
+
+type crashWriteResult struct {
+	path string
+	err  error
 }
 
 func TestRecoverCapturesPanic(t *testing.T) {
