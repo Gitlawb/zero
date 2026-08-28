@@ -357,6 +357,7 @@ func (provider *Provider) emitChunk(
 				PromptTokens:      chunk.Usage.PromptTokens,
 				CompletionTokens:  chunk.Usage.CompletionTokens,
 				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+				CacheWriteTokens:  chunk.Usage.PromptTokensDetails.CacheWriteTokens,
 				ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
 			},
 		})
@@ -486,12 +487,27 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 				Function: toolFunction{
 					Name:        tool.Name,
 					Description: tool.Description,
-					Parameters:  tool.Parameters,
+					Parameters:  normalizeToolParameters(tool.Parameters),
 				},
 			})
 		}
 	}
 	return mapped
+}
+
+// normalizeToolParameters keeps schemas accepted by strict OpenAI-compatible
+// servers such as LM Studio. No-argument tools still need an object-valued
+// parameters.properties field instead of an omitted field.
+func normalizeToolParameters(parameters map[string]any) map[string]any {
+	normalized := make(map[string]any, len(parameters)+1)
+	for key, value := range parameters {
+		normalized[key] = value
+	}
+	properties, ok := normalized["properties"].(map[string]any)
+	if !ok || properties == nil {
+		normalized["properties"] = map[string]any{}
+	}
+	return normalized
 }
 
 // promptCacheKeyDisabled reports whether the ZERO_DISABLE_PROMPT_CACHE_KEY

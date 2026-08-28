@@ -132,8 +132,9 @@ func TestFileOffsetsAccountForTheProgressBar(t *testing.T) {
 	}
 }
 
-// Clicking a task row selects it, through the real mouse handler.
-func TestClickingASidebarTaskSelectsIt(t *testing.T) {
+// Main removed the permanent sidebar rail. Its old coordinates must not mutate
+// compact run-details selection.
+func TestFormerSidebarTaskRailDoesNotInterceptClicks(t *testing.T) {
 	m := sidebarDetailModel(t)
 	width := sidebarWidth(m.width)
 	hits := m.sidebarOrchestrateSelectables(width)
@@ -142,17 +143,16 @@ func TestClickingASidebarTaskSelectsIt(t *testing.T) {
 	}
 
 	target := hits[0]
+	before := m.orchestrateSelected
 	x := m.chatColumnWidth() + 4
 	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: target.lineOffset, Button: tea.MouseLeft})
 	m = updated.(model)
-	if m.orchestrateSelected != target.taskIndex {
-		t.Fatalf("selected %d, want %d — the click did not land on the task it was over",
-			m.orchestrateSelected, target.taskIndex)
+	if m.orchestrateSelected != before {
+		t.Fatalf("former sidebar coordinate changed selection from %d to %d", before, m.orchestrateSelected)
 	}
 }
 
-// Clicking the PLAN header collapses the section, and says how to reopen it.
-func TestClickingTheSidebarPlanHeaderCollapsesIt(t *testing.T) {
+func TestFormerSidebarPlanHeaderDoesNotInterceptClicks(t *testing.T) {
 	m := sidebarDetailModel(t)
 	sidebarW := sidebarWidth(m.width)
 	agentBody := len(m.sidebarAgentLines(sidebarW))
@@ -164,15 +164,8 @@ func TestClickingTheSidebarPlanHeaderCollapsesIt(t *testing.T) {
 	x := m.chatColumnWidth() + 4
 	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: headerRow, Button: tea.MouseLeft})
 	m = updated.(model)
-	if !m.orchestrate.sidebarCollapsed {
-		t.Fatal("clicking the PLAN header did not collapse the section")
-	}
-	rendered := stripANSILines(m.renderContextSidebar(sidebarW, 28))
-	if !strings.Contains(rendered, "collapsed") {
-		t.Fatalf("a collapsed section must say how to reopen it:\n%s", rendered)
-	}
-	if strings.Contains(rendered, "TASK") {
-		t.Fatalf("the detail must collapse with the list:\n%s", rendered)
+	if m.orchestrate.sidebarCollapsed {
+		t.Fatal("former sidebar header coordinate changed compact run-details state")
 	}
 }
 
@@ -242,9 +235,7 @@ func TestTheDetailShowsWhatATaskBlocks(t *testing.T) {
 	}
 }
 
-// HOVER ON THE PLAN ROWS. They are clickable, so they must highlight under the
-// cursor like every other clickable sidebar row.
-func TestHoveringASidebarTaskHighlightsIt(t *testing.T) {
+func TestFormerSidebarTaskRailDoesNotCreateHover(t *testing.T) {
 	m := sidebarDetailModel(t)
 	width := sidebarWidth(m.width)
 	hits := m.sidebarOrchestrateSelectables(width)
@@ -254,16 +245,8 @@ func TestHoveringASidebarTaskHighlightsIt(t *testing.T) {
 	target := hits[0]
 
 	m = m.updateHoverTarget(tea.MouseMotionMsg{X: m.chatColumnWidth() + 4, Y: target.lineOffset})
-	if m.hover.kind != hoverOrchestrateTask {
-		t.Fatalf("hovering a plan row set hover kind %v, want the task kind", m.hover.kind)
-	}
-	if want := m.orchestrate.tasks[target.taskIndex].id; m.hover.taskID != want {
-		t.Fatalf("hover identified %q, want %q", m.hover.taskID, want)
-	}
-
-	offset, ok := m.hoveredSidebarLineOffset(width)
-	if !ok || offset != target.lineOffset {
-		t.Fatalf("the hover resolved to row %d (ok=%v), want %d", offset, ok, target.lineOffset)
+	if m.hover.kind != hoverNone {
+		t.Fatalf("former sidebar rail created hover kind %v", m.hover.kind)
 	}
 }
 

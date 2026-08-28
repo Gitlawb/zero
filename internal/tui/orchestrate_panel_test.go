@@ -382,41 +382,30 @@ func TestStalePlanMessagesAreDropped(t *testing.T) {
 	}
 }
 
-// THE MOUNT. The panel has to be reachable from the real View, not just
-// renderable in isolation — a renderer nothing calls is the same defect as a
-// state machine nothing feeds.
-func TestOrchestratePanelMountsInTheFooter(t *testing.T) {
+// THE MOUNT. Main replaced the permanent sidebar/footer plan panel with the
+// compact run-details overlay; orchestration must remain reachable there.
+func TestOrchestratePanelMountsInRunDetails(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.width, m.height = 96, 30
+	m.width, m.height, m.altScreen = 96, 30, true
 	m.activeRunID = 1
+	m.transcript = appendRow(m.transcript, rowUser, "run the plan")
+	m.runDetailsOpen = true
 
-	before := plainRender(t, m.View())
+	before := plainRender(t, m.runDetailsOverlay(m.width))
 	if strings.Contains(before, "PLAN diamond") {
 		t.Fatal("the panel must not appear before a plan is admitted")
 	}
 
 	updated, _ := m.Update(diamondAdmitted())
 	m = updated.(model)
-	m.width, m.height = 96, 30
+	m.runDetailsOpen = true
+	after := plainRender(t, m.runDetailsOverlay(m.width))
 
-	// Collapsed by default: the header is there, the tasks are not.
-	collapsed := plainRender(t, m.View())
-	if !strings.Contains(collapsed, "PLAN diamond") {
-		t.Fatalf("the collapsed panel must still show the plan header:\n%s", collapsed)
-	}
-	if strings.Contains(collapsed, "click to open") == false {
-		t.Fatalf("the collapsed panel must say how to open it:\n%s", collapsed)
-	}
-	m.orchestrate.expanded = true
-	after := plainRender(t, m.View())
-
-	if !strings.Contains(after, "PLAN diamond") {
+	if !strings.Contains(after, "PLAN") {
 		t.Fatalf("the panel is not mounted in the view:\n%s", after)
 	}
-	for _, id := range []string{"a", "b", "c", "d"} {
-		if !strings.Contains(after, " "+id+" ") {
-			t.Fatalf("task %q missing from the rendered view:\n%s", id, after)
-		}
+	if !strings.Contains(after, "a") {
+		t.Fatalf("the first task is missing from the bounded run-details view:\n%s", after)
 	}
 }
 

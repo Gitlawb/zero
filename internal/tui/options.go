@@ -37,9 +37,14 @@ type Options struct {
 	RecapsEnabled        bool
 	// KeepFinishedAgents seeds showDoneAgents so finished sub-agents stay in the
 	// AGENTS panel from the first render, without a click.
-	KeepFinishedAgents          bool
+	KeepFinishedAgents bool
+	// CompactionModel is the resolved preferences.compactionModel value; see
+	// providers.CompactionModelID for how it combines with the env override
+	// and the curated cheap defaults.
+	CompactionModel             string
 	Provider                    zeroruntime.Provider
 	NewProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
+	NewTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	ProbeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	DiscoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	DiscoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
@@ -55,9 +60,13 @@ type Options struct {
 	PrepareRunCompletionWarning func()
 	RunCompletionWarning        func() string
 	Registry                    *tools.Registry
-	SessionStore                *sessions.Store
-	SandboxStore                *sandbox.GrantStore
-	MCPConfig                   config.MCPConfig
+	// AwaitToolReadiness gives prompt-critical integration startup a bounded
+	// chance to publish its tools before this turn snapshots the registry. The
+	// wait runs inside the asynchronous agent command, so the TUI stays usable.
+	AwaitToolReadiness func(context.Context)
+	SessionStore       *sessions.Store
+	SandboxStore       *sandbox.GrantStore
+	MCPConfig          config.MCPConfig
 	// ZeromaxingDisabled carries resolved config's profiles.disableZeromaxing so
 	// /effort and /profile refuse the posture on exactly the same rule the
 	// headless exec path applies. Resolved config already folded the

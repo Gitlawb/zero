@@ -18,13 +18,8 @@ const (
 	// hoverFileRow: a touched-file row in the sidebar's FILES section, identified
 	// by path.
 	hoverFileRow
-	// hoverZeromaxingChip: the footer's posture badge, which opens /effort.
-	hoverZeromaxingChip
-	// hoverOrchestrateTask: a plan task row in the sidebar's PLAN section,
-	// identified by task ID. The ID rather than the index for the same reason
-	// the others use stable identities: the rendered row set changes as tasks
-	// finish and fade, with no mouse motion in between to re-resolve it.
 	hoverOrchestrateTask
+	hoverZeromaxingChip
 )
 
 // hoverTarget identifies the single clickable row (if any) currently under the
@@ -59,28 +54,15 @@ func mouseHover(msg tea.MouseMsg) bool {
 	return mouseEvent(msg).Button == tea.MouseNone
 }
 
-// updateHoverTarget resolves what's under the cursor for a hover motion, using
-// the SAME hit-testers and priority order as the click handlers in
-// handleTranscriptSelectionMouse's press case: a sidebar row (agent, then plan
-// step) takes priority since it's outside the chat column, then a clickable
-// transcript line. Clears the hover when nothing clickable is under the cursor.
+// updateHoverTarget resolves visible transcript targets for a hover motion.
+// Context data lives in the run-details overlay; the former sidebar rail is not
+// rendered and therefore cannot own a hover target.
 func (m model) updateHoverTarget(msg tea.MouseMsg) model {
-	// The footer chip first: it sits outside every other hit-tester's region,
-	// and those all return false for it rather than claiming it.
+	// The posture chip remains an active footer control on main's compact layout.
+	// It is outside the transcript hit-test and does not revive removed sidebar
+	// rail hit targets.
 	if m.zeromaxingChipAtMouse(msg) {
 		return m.withHover(hoverTarget{kind: hoverZeromaxingChip})
-	}
-	if hit, ok := m.sidebarLineAtMouse(msg); ok {
-		return m.withHover(hoverTarget{kind: hoverSidebarAgent, sessionID: hit.sessionID})
-	}
-	if stepIndex, ok := m.planStepAtMouse(msg); ok {
-		return m.withHover(hoverTarget{kind: hoverPlanStep, stepIndex: stepIndex})
-	}
-	if index, ok := m.orchestrateTaskAtMouse(msg); ok && index < len(m.orchestrate.tasks) {
-		return m.withHover(hoverTarget{kind: hoverOrchestrateTask, taskID: m.orchestrate.tasks[index].id})
-	}
-	if path, ok := m.fileRowAtMouse(msg); ok {
-		return m.withHover(hoverTarget{kind: hoverFileRow, filePath: path})
 	}
 	if line, ok := m.transcriptLineAtMouse(msg); ok {
 		// A permission option reuses its OWN existing keyboard-cursor highlight

@@ -6,18 +6,14 @@
 // transcript's tool-result rows (their changedFiles), so it survives resume for
 // free and can never drift from what the chat shows.
 //
-// Interaction (see handleTranscriptSelectionMouse): the first click on a row
-// SELECTS the file — its edit cards tint in the chat and the transcript scrolls
-// to the most recent one; a second click (or a click while the drill-in is
-// already open) opens the file view (file_view.go). Esc clears the selection.
+// The same compact rows feed the run-details overlay; selecting a file from a
+// visible transcript card opens the file drill-in (file_view.go).
 package tui
 
 import (
 	"fmt"
 	"sort"
 	"strings"
-
-	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -204,9 +200,9 @@ type fileHit struct {
 func (m model) sidebarFilesHeader(width int) string {
 	n := len(m.touchedFiles())
 	if n == 0 {
-		return m.postureHeader("FILES", width)
+		return sidebarHeader("FILES", width)
 	}
-	return m.postureHeaderWithCount("FILES", fmt.Sprintf("%d", n), zeroTheme.muted, width)
+	return sidebarHeaderWithCount("FILES", fmt.Sprintf("%d", n), zeroTheme.muted, width)
 }
 
 // sidebarFileLines renders the FILES section body: the live "writing" pulse row
@@ -306,41 +302,10 @@ func (m model) sidebarFileSelectables(width int) []fileHit {
 		planBody = 1 // the "no active plan" placeholder occupies one line
 	}
 	base := 1 + agentBody + 2 + planBody + 2 // sections above + (blank + FILES header)
-	kept := hits[:0]
-	for _, hit := range hits {
-		hit.lineOffset += base
-		if m.sidebarRowOnScreen(hit.lineOffset) {
-			kept = append(kept, hit)
-		}
+	for i := range hits {
+		hits[i].lineOffset += base
 	}
-	return kept
-}
-
-// fileRowAtMouse maps a left-click in the context sidebar to a touched file,
-// mirroring planStepAtMouse's column/x gate. Rows truncated away by the
-// sidebar's height budget (or colliding with the token floor line) never match.
-func (m model) fileRowAtMouse(msg tea.MouseMsg) (string, bool) {
-	if !m.sidebarActive() {
-		return "", false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
-		return "", false
-	}
-	sidebarW := sidebarWidth(m.width)
-	if sidebarW <= 0 {
-		return "", false
-	}
-	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
-	x, y := mouseX(msg), mouseY(msg)
-	if x < x0 || x >= x0+sidebarW {
-		return "", false
-	}
-	for _, hit := range m.sidebarFileSelectables(sidebarW) {
-		if hit.lineOffset == y && hit.path != "" {
-			return hit.path, true
-		}
-	}
-	return "", false
+	return hits
 }
 
 // rowTouchesSelectedFile reports whether a transcript row's mutation touched

@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26.5+" src="https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.6+" src="https://img.shields.io/badge/Go-1.26.6+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
@@ -76,7 +76,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### From source
 
-Source builds require Go 1.26.5+.
+Source builds require Go 1.26.6+.
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -371,9 +371,13 @@ go run ./cmd/zero-perf-bench
 
 Experimental: `ZERO_OPENAI_TURN_SESSION=1` enables the optimized OpenAI turn
 session (background connection prewarm + request-prefix telemetry) for headless
-`zero exec` runs against official OpenAI profiles. Off by default; `0`/`false`
-disable. A/B-benchmark it by running the same `zero-perf-bench` suite with the
-variable unset and set.
+`zero exec` runs against official OpenAI profiles. Off by default; `0`, `false`,
+or `off` disable it. A/B-benchmark it by running the same `zero-perf-bench` suite
+with the variable unset and set.
+
+Native ChatGPT Responses sessions are enabled by default. Set
+`ZERO_CHATGPT_TURN_SESSION=0`, `false`, or `off` to restore stateless HTTP/SSE
+transport.
 
 ### Code Quality and Security Checks
 

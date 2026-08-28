@@ -11,6 +11,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// completedHideAfter keeps a finished orchestration visible briefly unless the
+// user expanded it. The old pinned-plan panel that previously owned this timing
+// was removed on main, but orchestration retains the lifecycle independently.
+const completedHideAfter = 30 * time.Second
+
 // orchestrateTaskStatus is a plan task's state in the panel.
 type orchestrateTaskStatus int
 

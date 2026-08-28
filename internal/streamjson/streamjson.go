@@ -94,10 +94,11 @@ type Event struct {
 	Meta              map[string]string `json:"meta,omitempty"`
 	PromptTokens      *int              `json:"promptTokens,omitempty"`
 	CompletionTokens  *int              `json:"completionTokens,omitempty"`
+	CachedInputTokens *int              `json:"cachedInputTokens,omitempty"`
+	CacheWriteTokens  *int              `json:"cacheWriteTokens,omitempty"`
 	TotalTokens       *int              `json:"totalTokens,omitempty"`
-	// CachedInputTokens, CacheWriteTokens and ReasoningTokens exist so a PARENT
-	// can price a child's turn the way the child's own session record already
-	// can.
+	// ReasoningTokens completes the usage breakdown a parent needs to price a
+	// child's turn; cached input and cache-write counts are carried above.
 	//
 	// Without them a sub-agent's usage rolled up to its parent with no cache
 	// information at all, and BuildReport priced every one of those turns as if
@@ -106,17 +107,14 @@ type Event struct {
 	// tasks are the ideal cache case, re-sending a large stable prompt every
 	// turn. The counts were right and the money was wrong.
 	//
-	// Emitted only when non-zero, matching usage.EventUsagePayload, so an older
-	// reader sees exactly the three fields it saw before.
-	CachedInputTokens *int     `json:"cachedInputTokens,omitempty"`
-	CacheWriteTokens  *int     `json:"cacheWriteTokens,omitempty"`
-	ReasoningTokens   *int     `json:"reasoningTokens,omitempty"`
-	CostUSD           *float64 `json:"costUsd,omitempty"`
-	Text              string   `json:"text,omitempty"`
-	Message           string   `json:"message,omitempty"`
-	Code              string   `json:"code,omitempty"`
-	Recoverable       *bool    `json:"recoverable,omitempty"`
-	ExitCode          *int     `json:"exitCode,omitempty"`
+	// It is emitted only when non-zero, matching usage.EventUsagePayload.
+	ReasoningTokens *int     `json:"reasoningTokens,omitempty"`
+	CostUSD         *float64 `json:"costUsd,omitempty"`
+	Text            string   `json:"text,omitempty"`
+	Message         string   `json:"message,omitempty"`
+	Code            string   `json:"code,omitempty"`
+	Recoverable     *bool    `json:"recoverable,omitempty"`
+	ExitCode        *int     `json:"exitCode,omitempty"`
 }
 
 type InputEvent struct {

@@ -171,6 +171,13 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		// Record would drop all of them, and did — a file read in three pieces
 		// lost every piece to a single two-line edit, and the next six edits into
 		// regions that had been read were refused as unseen. See RecordEdit.
+		//
+		// This SUBSUMES the previouslySeenWhole special-case #956 added here.
+		// That branch re-recorded 1..total when the file had been read whole;
+		// RecordEdit does the same thing one level down (its seenWhole arm
+		// re-baselines as a single covering observation) and additionally keeps
+		// the partial reads the old else-branch discarded. Two copies of the
+		// rule would drift, and only one of them sees the pre-edit observation.
 		options.FileTracker.RecordEdit(absolutePath, []byte(content), []byte(updated), newInfo)
 		for _, span := range editedSpans {
 			options.FileTracker.RecordSeenBytes(absolutePath, span.start, span.end, len(updated))

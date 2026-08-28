@@ -33,8 +33,11 @@ func TestDictationTranscribedEmptyIsNoticed(t *testing.T) {
 	if got.composer.text != "" {
 		t.Errorf("composer should stay empty, got %q", got.composer.text)
 	}
-	if !transcriptHasText(got, "No speech detected") {
-		t.Error("expected a 'no speech' notice")
+	if got.transientNotice.text != "No speech detected." {
+		t.Errorf("no-speech notice = %q", got.transientNotice.text)
+	}
+	if transcriptHasText(got, "No speech detected") {
+		t.Error("no-speech confirmation should not be persisted in the transcript")
 	}
 }
 

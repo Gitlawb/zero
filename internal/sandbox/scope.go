@@ -58,20 +58,16 @@ func (s *Scope) WorkspaceRoot() string {
 	return s.workspaceRoot
 }
 
-// Roots returns the workspace root first, then the extra roots, as a copy.
-// ExtraRoots returns ONLY the roots granted beyond the workspace, as a copy.
-//
-// Roots() includes the workspace root as well, which is right for a caller
-// asking "everything this run may write". It is wrong for a caller asking "what
-// does this run hold BEYOND its workspace" — and one such caller launches child
-// agents in an isolated worktree, where handing back the parent's workspace root
-// re-opens the very tree the worktree exists to protect.
+// ExtraRoots returns only the write roots granted beyond the workspace. Child
+// agents run in an isolated worktree and must inherit explicitly granted roots
+// without reopening the parent's workspace.
 func (s *Scope) ExtraRoots() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]string(nil), s.extraRoots...)
 }
 
+// Roots returns the workspace root first, then the extra roots, as a copy.
 func (s *Scope) Roots() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -94,18 +90,10 @@ func (s *Scope) ReadRoots() []string {
 	return dedupeScopeRoots(roots)
 }
 
-// ExtraReadRoots returns every path the run may READ BEYOND its workspace — the
-// write grants AND the read-only grants, deduped, as a copy. It is ReadRoots()
-// without the workspace root.
-//
-// It exists for the same caller ExtraRoots() does: a child agent dispatched into
-// its own workspace, which the parent must be able to hand its beyond-workspace
-// access without also handing back the parent workspace root (see ExtraRoots).
-// ExtraRoots() alone is not enough for that child, because a read grant from
-// request_permissions lands in readRoots, not extraRoots — so a child given only
-// ExtraRoots() can read what the parent may WRITE beyond its workspace but not
-// what it was granted to READ, and a read-only audit of a granted path fails
-// "outside the workspace" for want of exactly this list.
+// ExtraReadRoots returns every path readable beyond the workspace. Write roots
+// are included because write authority also confers read authority. Like
+// ExtraRoots, this deliberately omits the parent workspace when propagating a
+// request_permissions grant to an isolated child.
 func (s *Scope) ExtraReadRoots() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -136,10 +124,8 @@ func (s *Scope) Add(path string) (string, error) {
 	// Permanent coverage is looked for FIRST and across every root, because a
 	// path can be covered twice and the temporary cover must not decide the
 	// answer when a permanent one is also present.
-	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
-		if pathWithinRoot(existing, root) && !s.temporaryWriteLocked(existing) {
-			return root, nil
-		}
+	if s.permanentWriteRootCoversLocked(root) {
+		return root, nil
 	}
 	for _, existing := range s.extraRoots {
 		// The same root, held temporarily: promote it in place. Its holders'
@@ -163,6 +149,47 @@ func (s *Scope) temporaryWriteLocked(root string) bool {
 	return temporary
 }
 
+// permanentWriteRootCoversLocked reports whether root sits under write authority
+// that outlives every temporary holder: the workspace root, or a session-scoped
+// grant. Coverage by a TEMPORARY write root deliberately does not count —
+// it is going to be released, so nothing recorded on the strength of it
+// survives. Callers must hold the lock.
+//
+// One helper rather than a copy per caller because Add, AddRead and
+// AddTemporaryRead all turn on the same question, and three copies of "covered,
+// but by what" is how one of them ends up answering it differently.
+// permanentReadRootCoversLocked reports whether root is already readable by a
+// grant that outlives every temporary holder.
+//
+// SLICE ORDER MUST NOT DECIDE THIS. The old check walked readRoots and stopped at
+// the first entry covering the path, so a BROAD TEMPORARY root sitting earlier in
+// the slice shadowed a narrower PERMANENT one later — and the caller was handed a
+// reference on somebody else's grant when it needed no reference at all. Asking
+// the whole question first, over both lists, makes the answer independent of
+// insertion order.
+//
+// Write roots count: a grant that permits writing permits reading the same tree.
+func (s *Scope) permanentReadRootCoversLocked(root string) bool {
+	if s.permanentWriteRootCoversLocked(root) {
+		return true
+	}
+	for _, existing := range s.readRoots {
+		if pathWithinRoot(existing, root) && !s.temporaryReadLocked(existing) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scope) permanentWriteRootCoversLocked(root string) bool {
+	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
+		if pathWithinRoot(existing, root) && !s.temporaryWriteLocked(existing) {
+			return true
+		}
+	}
+	return false
+}
+
 // temporaryReadLocked is temporaryWriteLocked for read roots.
 func (s *Scope) temporaryReadLocked(root string) bool {
 	_, temporary := s.tempReads[root]
@@ -182,15 +209,11 @@ func (s *Scope) AddRead(path string) (string, error) {
 	// permanent grant can rely on, whichever side of the read/write boundary it
 	// sits on. A permanent read covered only by a temporary WRITE root died with
 	// that root just as surely.
-	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
-		if pathWithinRoot(existing, root) && !s.temporaryWriteLocked(existing) {
-			return root, nil
-		}
+	if s.permanentWriteRootCoversLocked(root) {
+		return root, nil
 	}
-	for _, existing := range s.readRoots {
-		if pathWithinRoot(existing, root) && !s.temporaryReadLocked(existing) {
-			return root, nil
-		}
+	if s.permanentReadRootCoversLocked(root) {
+		return root, nil
 	}
 	for _, existing := range s.readRoots {
 		if existing == root && s.temporaryReadLocked(existing) {
@@ -209,43 +232,57 @@ func (s *Scope) AddTemporaryRead(path string) (string, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.writeRootCoversLocked(root) {
-		// Covered by a write root — which is NOT necessarily permanent.
-		// writeRootCoversLocked scans extraRoots, and AddTemporaryWrite appends
-		// TEMPORARY write roots there, so the covering grant may belong to
-		// another holder who is going to release it. Take a reference in that
-		// case, exactly as the read-covered-by-read path below does: without one
-		// the write holder's cleanup silently revokes this reader's access —
-		// the same defect this refcount exists to close, reached across the
-		// read/write boundary rather than within one side of it.
-		for existing := range s.tempWrites {
-			if pathWithinRoot(existing, root) {
-				s.tempWrites[existing]++
-				covering := existing
-				return root, oncePerHolder(func() { s.releaseTemporaryWrite(covering) }), nil
-			}
-		}
-		// Genuinely permanent — the workspace root, or a session-scoped grant.
-		// Nothing to release.
+	// Genuinely permanent — the workspace root, or a session-scoped grant. It
+	// outlives this reader, so there is nothing to release.
+	if s.permanentWriteRootCoversLocked(root) {
 		return root, func() {}, nil
 	}
-	for _, existing := range s.readRoots {
-		if !pathWithinRoot(existing, root) {
-			continue
-		}
-		// Already covered — but by WHAT decides whether this caller has
-		// something to release. A permanent read root outlives every grant, so
-		// the undo is genuinely nothing. A TEMPORARY one is held by another
-		// caller who will release it, and that caller must not be able to
-		// revoke this one's access: take a reference on the covering root, so
-		// it survives until the last holder is done.
-		if _, temporary := s.tempReads[existing]; temporary {
-			s.tempReads[existing]++
-			covering := existing
-			return root, oncePerHolder(func() { s.releaseTemporaryRead(covering) }), nil
-		}
+	// A TEMPORARY write root covering this path is NOT borrowed, and this is the
+	// one place the distinction bites hardest.
+	//
+	// The dependency on that root is real — the write holder's cleanup must not
+	// revoke this reader, which is the defect the refcount exists to close,
+	// reached across the read/write boundary. But taking a reference on the
+	// WRITE root pays for the lifetime with the authority: the reference keeps
+	// the root in extraRoots, extraRoots is what Roots() feeds validate(), and
+	// validate() is WRITE authorization. So a reader outliving its writer went on
+	// writing anywhere under a write grant that had already ended — not merely
+	// under the path it asked to read.
+	//
+	// One reference cannot be both the lifetime and the capability. The lifetime
+	// is kept below, as a temporary READ root for the path this caller actually
+	// asked for. readRoots feeds ReadRoots(), which confers no write authority —
+	// validate() authorises writes from workspaceRoot plus extraRoots, and this
+	// path never enters that list. So the reader survives its writer with read
+	// authority and only read authority.
+	//
+	// That claim is the written justification for the whole design, so it has to
+	// stay exhaustive as the accessors change. It has already been wrong once, in
+	// both directions: an earlier draft said readRoots fed ReadRoots() and nothing
+	// else while ExtraReadRoots() also read it, and that accessor has since been
+	// removed as belonging to a different change.
+	if s.permanentReadRootCoversLocked(root) {
 		return root, func() {}, nil
 	}
+	if s.tempReads == nil {
+		s.tempReads = map[string]int{}
+	}
+	// THE SAME ROOT, ANOTHER HOLDER: one entry, two references. Only an EXACT
+	// match shares — a narrower request must not, which is the whole point below.
+	if _, held := s.tempReads[root]; held {
+		s.tempReads[root]++
+		return root, oncePerHolder(func() { s.releaseTemporaryRead(root) }), nil
+	}
+	// A NARROWER REQUEST RECORDS ITS OWN ROOT, even under a broader temporary
+	// read that currently covers it.
+	//
+	// Borrowing the covering root's reference kept this reader alive by keeping
+	// the BROAD ROOT alive, and readRoots feeds validateRead and the native
+	// sandbox profile. So once the broad reader released, a caller that had asked
+	// to read one subdirectory was left able to read the whole tree its neighbour
+	// had asked for, siblings included. Reported by @jatmn, and it is the read
+	// twin of the write escalation fixed above: the refcount key decides not only
+	// WHEN an entry disappears but WHICH path stays authorised while it lives.
 	s.readRoots = append(s.readRoots, root)
 	if s.tempReads == nil {
 		s.tempReads = map[string]int{}
@@ -261,35 +298,42 @@ func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.writeRootCoversLocked(root) {
-		// Covered already. If a TEMPORARY write grant is what covers it, take a
-		// reference so the covering holder's cleanup cannot revoke this one —
-		// the same rule as reads, and it has to be the same rule or a write
-		// grant would keep the bug reads no longer have.
-		for existing := range s.tempWrites {
-			if pathWithinRoot(existing, root) {
-				s.tempWrites[existing]++
-				covering := existing
-				return root, oncePerHolder(func() { s.releaseTemporaryWrite(covering) }), nil
-			}
-		}
+	// A PERMANENT grant is the only cover that needs no bookkeeping: it outlives
+	// every temporary holder, so there is nothing to keep alive and nothing to
+	// release.
+	if s.permanentWriteRootCoversLocked(root) {
 		return root, func() {}, nil
 	}
-	s.extraRoots = append(s.extraRoots, root)
 	if s.tempWrites == nil {
 		s.tempWrites = map[string]int{}
 	}
+	// THE SAME ROOT, ANOTHER HOLDER: one entry, two references. Only an exact
+	// match shares an entry — a NARROWER request must not, which is the whole
+	// point below.
+	if _, held := s.tempWrites[root]; held {
+		s.tempWrites[root]++
+		return root, oncePerHolder(func() { s.releaseTemporaryWrite(root) }), nil
+	}
+	// A NARROWER REQUEST RECORDS ITS OWN ROOT, even when a broader temporary
+	// grant currently covers it.
+	//
+	// Borrowing a reference on the covering root kept this holder alive, which
+	// was the point, but it kept the COVERING ROOT alive to do it — and
+	// extraRoots is what validate() authorises writes from. So once the broad
+	// holder released, a caller that had asked to write one subdirectory was
+	// left holding write authority over the whole tree its neighbour had asked
+	// for, including siblings it never named. Reported by CodeRabbit, and it is
+	// the write-side twin of the read-side escalation @jatmn found: one
+	// reference cannot be both a lifetime and a capability, whichever side of
+	// the read/write boundary it sits on.
+	//
+	// Recording the requested root separately gives each holder exactly the
+	// authority it asked for and a lifetime of its own. The nesting costs an
+	// extra entry in extraRoots while both are live, which is redundant but not
+	// wrong — the broader root already permits everything the narrower one does.
+	s.extraRoots = append(s.extraRoots, root)
 	s.tempWrites[root] = 1
 	return root, oncePerHolder(func() { s.releaseTemporaryWrite(root) }), nil
-}
-
-func (s *Scope) writeRootCoversLocked(root string) bool {
-	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
-		if pathWithinRoot(existing, root) {
-			return true
-		}
-	}
-	return false
 }
 
 // releaseTemporaryRead drops ONE holder's reference and removes the root only

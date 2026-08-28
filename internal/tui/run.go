@@ -44,8 +44,17 @@ func Run(ctx context.Context, options Options) int {
 	// text first, keeping order intact.
 	options.RuntimeMessageSink = newTextCoalescer(forward).send
 	options.AltScreen = useAltScreen(options)
-	petRenderer := terminalpet.NewImageRendererWithCache(terminalpet.DetectImageSupport(os.Getenv), terminalPetFrameCache(options))
-	petOutput := newPetImageOutput(os.Stdout, petRenderer)
+	imageSupport := terminalpet.DetectImageSupport(os.Getenv)
+	imageCache := terminalPetFrameCache(options)
+	petRenderer := terminalpet.NewImageRendererWithCache(imageSupport, imageCache)
+	attachmentRenderers := make([]*terminalpet.ImageRenderer, attachmentPreviewMaxImages)
+	outputRenderers := make([]*terminalpet.ImageRenderer, 0, 1+len(attachmentRenderers))
+	outputRenderers = append(outputRenderers, petRenderer)
+	for index := range attachmentRenderers {
+		attachmentRenderers[index] = terminalpet.NewImageRendererWithCache(imageSupport, imageCache)
+		outputRenderers = append(outputRenderers, attachmentRenderers[index])
+	}
+	petOutput := newPetImageOutput(os.Stdout, outputRenderers...)
 
 	programOpts := []tea.ProgramOption{
 		tea.WithContext(ctx),
@@ -61,7 +70,12 @@ func Run(ctx context.Context, options Options) int {
 		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	initialModel := newModel(ctx, options)
+	// Apply the terminal-native system default at the real interactive entry point.
+	// Constructing a model alone is also useful to tests and non-TUI helpers, and
+	// should not mutate the package-level render palette for those callers.
+	applyTheme(initialModel.themeMode, initialModel.hasDarkBg)
 	initialModel.petRenderer = petRenderer
+	initialModel.attachmentRenderers = attachmentRenderers
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true
 	}
@@ -111,6 +125,7 @@ func Run(ctx context.Context, options Options) int {
 	}
 	if clearErr != nil {
 		fmt.Fprintln(os.Stderr, "zero: terminal companion cleanup error:", clearErr)
+		return 1
 	}
 	return 0
 }

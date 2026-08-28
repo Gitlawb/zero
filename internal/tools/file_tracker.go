@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -264,20 +265,87 @@ func (tracker *FileTracker) RecordEdit(absPath string, before, after []byte, inf
 // replacement spans: one edit_file call with replace_all can rewrite many
 // scattered occurrences, and the span between the outermost two is the only
 // region that is honestly unknown afterwards.
+// The span is derived by scanning BYTES, not by materialising lines.
+//
+// The first version split both versions into []string. That allocates one string
+// header per line for each version — work that scales with the SIZE OF THE FILE
+// rather than the size of the edit, and it ran before RecordEdit had even checked
+// whether there was a tracked observation to update. @jatmn measured 32,036,640
+// bytes for two 2 MB versions of a million short lines, and extrapolated roughly
+// 1.6 GB of headers for a 100 MB file before counting the content and hashes
+// already live alongside them.
+//
+// That mattered beyond memory pressure: edit_file writes the updated bytes BEFORE
+// calling RecordEdit, so an out-of-memory kill lands after the user's file has
+// changed and before the tracker baseline catches up — the file and the record of
+// it disagree, and nothing says so.
+//
+// Bytes give the same answer in bounded memory. Two identical byte prefixes share
+// every line that ends inside them, so counting newlines in the common prefix
+// counts the unchanged leading lines directly.
 func changedLineSpan(before, after string) (firstChanged, lastChangedBefore, delta int) {
-	beforeLines := splitLinesForTracking(before)
-	afterLines := splitLinesForTracking(after)
-	prefix := 0
-	for prefix < len(beforeLines) && prefix < len(afterLines) && beforeLines[prefix] == afterLines[prefix] {
-		prefix++
-	}
-	suffix := 0
-	for suffix < len(beforeLines)-prefix && suffix < len(afterLines)-prefix &&
-		beforeLines[len(beforeLines)-1-suffix] == afterLines[len(afterLines)-1-suffix] {
-		suffix++
-	}
-	return prefix + 1, len(beforeLines) - suffix, len(afterLines) - len(beforeLines)
+	beforeCount := countTrackedLines(before)
+	afterCount := countTrackedLines(after)
+
+	prefix := commonLinePrefix(before, after)
+	// Never more leading lines than the shorter version has. The byte scan can
+	// otherwise claim a line that only one side possesses — two empty versions
+	// share a whole "line" that neither actually contains.
+	prefix = min(prefix, min(beforeCount, afterCount))
+	// The suffix may not reach back past the lines the prefix already claimed,
+	// exactly as the line-array loop bounded itself.
+	suffix := commonLineSuffix(before, after, min(beforeCount-prefix, afterCount-prefix))
+	return prefix + 1, beforeCount - suffix, afterCount - beforeCount
 }
+
+// commonLinePrefix counts the leading lines that are byte-identical in both.
+func commonLinePrefix(before, after string) int {
+	limit := min(len(before), len(after))
+	at := 0
+	for at < limit && before[at] == after[at] {
+		at++
+	}
+	lines := strings.Count(before[:at], "\n")
+	// A LINE THAT ENDS EXACTLY WHERE THE SCAN STOPPED IS STILL SHARED. Scanning
+	// halts where the bytes diverge OR where the shorter version runs out, and in
+	// the second case the line containing that point can be complete and equal on
+	// both sides — "a\nb" against "a\nb\nc" diverges only because the first ended,
+	// and "b" is a whole matching line in each.
+	if lineBoundary(before, at) && lineBoundary(after, at) {
+		lines++
+	}
+	return lines
+}
+
+// commonLineSuffix counts the trailing lines that are byte-identical in both, up
+// to the ceiling the prefix leaves.
+func commonLineSuffix(before, after string, ceiling int) int {
+	if ceiling <= 0 {
+		return 0
+	}
+	limit := min(len(before), len(after))
+	back := 0
+	for back < limit && before[len(before)-1-back] == after[len(after)-1-back] {
+		back++
+	}
+	beforeAt, afterAt := len(before)-back, len(after)-back
+	// Each newline inside the shared tail closes a line that lies wholly within
+	// it. The line the tail STARTS in is shared only when the tail begins on a
+	// line boundary in both versions — otherwise its opening bytes differ and it
+	// is a changed line that merely ends the same way.
+	lines := strings.Count(before[beforeAt:], "\n")
+	if lineStart(before, beforeAt) && lineStart(after, afterAt) {
+		lines++
+	}
+	return min(lines, ceiling)
+}
+
+// lineBoundary reports whether at is the end of a line: the end of the text, or
+// the position of the newline that closes it.
+func lineBoundary(text string, at int) bool { return at == len(text) || text[at] == '\n' }
+
+// lineStart reports whether at begins a line.
+func lineStart(text string, at int) bool { return at == 0 || text[at-1] == '\n' }
 
 // changedByteSpan is changedLineSpan in bytes: the first differing offset, the
 // end offset of the changed region in BEFORE, and the size delta.
@@ -294,13 +362,6 @@ func changedByteSpan(before, after []byte) (firstChanged, lastChangedBefore, del
 	return prefix, len(before) - suffix, len(after) - len(before)
 }
 
-func splitLinesForTracking(text string) []string {
-	if text == "" {
-		return nil
-	}
-	return strings.Split(text, "\n")
-}
-
 // countLines reports the line count a READER would give the content, which is
 // what observation.total is compared against.
 //
@@ -311,15 +372,34 @@ func splitLinesForTracking(text string) []string {
 // every text file ends in a newline, so this was the common case rather than an
 // edge one.
 //
-// splitLinesForTracking keeps its own behaviour: changedLineSpan diffs the two
-// slices against each other, where the trailing element is harmless because both
-// sides carry it.
+// countTrackedLines keeps the OTHER rule deliberately: the span arithmetic has to
+// match the indices strings.Split produced, so it counts the empty element after
+// a trailing newline where this one does not. Two rules, two names, both stated —
+// they were one function with an if, and that is how they were confused.
 func countLines(content []byte) int {
-	lines := splitLinesForTracking(string(content))
-	if n := len(lines); n > 0 && lines[n-1] == "" {
-		return n - 1
+	// Counted, not split. This only ever needed a number, and building a slice of
+	// every line to take its length was the third full per-line allocation in the
+	// same call path.
+	if len(content) == 0 {
+		return 0
 	}
-	return len(lines)
+	lines := bytes.Count(content, []byte{'\n'})
+	if content[len(content)-1] != '\n' {
+		lines++
+	}
+	return lines
+}
+
+// countTrackedLines is countLines' rule for the string form: the number of
+// elements strings.Split would produce, which counts the empty element after a
+// trailing newline. The two differ deliberately — observation.total compares
+// against what a READER reports, while the span arithmetic has to match the
+// indices the split produced.
+func countTrackedLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
 }
 
 // coversFully reports whether ranges together cover every line in [start, end].

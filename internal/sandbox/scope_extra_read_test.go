@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -13,20 +12,7 @@ import (
 // path but cannot modify it. Emitting the grant as a WRITE root (--add-dir) would
 // break exactly this.
 func TestAReadGrantIsReadableButNotWritable(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home directory to place a non-temp grant under")
-	}
-	granted, err := os.MkdirTemp(home, "zero-scope-ro-")
-	if err != nil {
-		t.Fatalf("mkdir under home: %v", err)
-	}
-	defer os.RemoveAll(granted)
-
-	scope, err := NewScope(t.TempDir(), nil)
-	if err != nil {
-		t.Fatalf("NewScope: %v", err)
-	}
+	scope, granted := grantOutsideDefaults(t)
 	root, err := scope.AddRead(granted)
 	if err != nil {
 		t.Fatalf("AddRead: %v", err)
@@ -41,43 +27,49 @@ func TestAReadGrantIsReadableButNotWritable(t *testing.T) {
 	}
 }
 
-// ExtraReadRoots carries a read grant that ExtraRoots() omits, and never the
-// workspace root. This is the bug: a request_permissions READ grant lands in
-// readRoots, which ExtraRoots() (write grants only) does not return — so a child
-// handed only ExtraRoots() cannot read a path the parent was granted.
+// grantOutsideDefaults returns a scope and a directory that scope does not
+// already cover, both under test-owned storage.
 //
-// The grant is created OUTSIDE the default temp roots (/tmp, $TMPDIR), which
-// NewScope seeds as write roots: a t.TempDir() grant would collapse into them and
-// prove nothing.
-func TestExtraReadRootsCarriesAReadGrantThatExtraRootsOmits(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home directory to place a non-temp grant under")
+// THE CAUSE, NOT THE SYMPTOM. NewScope seeds the system temporary directory as a
+// permanent write root, so a plain t.TempDir() grant is writable before any
+// grant exists and the anti-escalation assertions below prove nothing. The first
+// fix placed the fixture under os.UserHomeDir() to find ground the defaults do
+// not own. That worked and bought two problems: a hermetic runner may expose
+// HOME read-only, so these tests failed at MkdirTemp before asserting anything,
+// and on an ordinary machine they wrote into the developer's real home and left
+// zero-scope-* debris whenever a run was interrupted. Reported by @jatmn.
+//
+// Building the Scope directly removes the seeded defaults, which is what made
+// HOME necessary in the first place. t.TempDir() is then outside by
+// construction, the fixture is hermetic, and nothing touches HOME.
+func grantOutsideDefaults(t *testing.T) (*Scope, string) {
+	t.Helper()
+	workspace := resolvedFixturePath(t, t.TempDir())
+	granted := resolvedFixturePath(t, t.TempDir())
+	scope := &Scope{workspaceRoot: workspace}
+	// PROVED AGAINST THIS SCOPE. The point of the helper is that the grant is
+	// what changes access, so the target has to begin unauthorised — asserted
+	// here once rather than trusted in every caller.
+	if scope.validate(filepath.Join(granted, "probe.txt")) == nil {
+		t.Fatalf("%s is writable before any grant exists; the assertions below would prove nothing", granted)
 	}
-	readGrant, err := os.MkdirTemp(home, "zero-scope-read-")
-	if err != nil {
-		t.Fatalf("mkdir under home: %v", err)
-	}
-	defer os.RemoveAll(readGrant)
+	return scope, granted
+}
 
-	scope, err := NewScope(t.TempDir(), nil)
-	if err != nil {
-		t.Fatalf("NewScope: %v", err)
-	}
-	readRoot, err := scope.AddRead(readGrant) // request_permissions read grant -> readRoots
+func TestExtraReadRootsCarriesAReadGrantThatExtraRootsOmits(t *testing.T) {
+	scope, granted := grantOutsideDefaults(t)
+	readRoot, err := scope.AddRead(granted)
 	if err != nil {
 		t.Fatalf("AddRead: %v", err)
 	}
 
 	if slices.Contains(scope.ExtraRoots(), readRoot) {
-		t.Fatalf("ExtraRoots carried the read grant %q — then there would be no bug to fix", readRoot)
+		t.Fatalf("ExtraRoots carried the read grant %q", readRoot)
 	}
 	if !slices.Contains(scope.ExtraReadRoots(), readRoot) {
-		t.Fatalf("ExtraReadRoots omitted the read grant %q: %v — a read-only child cannot audit a granted path",
-			readRoot, scope.ExtraReadRoots())
+		t.Fatalf("ExtraReadRoots omitted the read grant %q: %v", readRoot, scope.ExtraReadRoots())
 	}
 	if slices.Contains(scope.ExtraReadRoots(), scope.WorkspaceRoot()) {
-		t.Fatalf("ExtraReadRoots included the workspace root %q — a worktree child would re-open the parent tree",
-			scope.WorkspaceRoot())
+		t.Fatalf("ExtraReadRoots reopened the parent workspace %q", scope.WorkspaceRoot())
 	}
 }

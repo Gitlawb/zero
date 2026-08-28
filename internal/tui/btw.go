@@ -136,6 +136,7 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	if question == "" {
 		side.pendingImages = nil
 		side.pendingImageLabels = nil
+		side.pendingImageThumbnails = nil
 		side.pendingDocuments = nil
 	}
 	side.loops = nil

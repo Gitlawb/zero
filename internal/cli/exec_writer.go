@@ -267,35 +267,32 @@ func streamJSONPermissionEventType(event agent.PermissionEvent) streamjson.Event
 func (writer *execEventWriter) usage(usage agent.Usage) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{
-			"type":              "usage",
-			"prompt_tokens":     usage.PromptTokens,
-			"completion_tokens": usage.CompletionTokens,
-			"total_tokens":      usage.TotalTokens(),
+			"type":                "usage",
+			"prompt_tokens":       usage.PromptTokens,
+			"completion_tokens":   usage.CompletionTokens,
+			"cached_input_tokens": usage.CachedInputTokens,
+			"cache_write_tokens":  usage.CacheWriteTokens,
+			"total_tokens":        usage.TotalTokens(),
 		})
 		return
 	}
 	if writer.format == execOutputStreamJSON {
 		promptTokens := usage.EffectiveInputTokens()
 		completionTokens := usage.EffectiveOutputTokens()
+		cachedInputTokens := usage.CachedInputTokens
+		cacheWriteTokens := usage.CacheWriteTokens
 		totalTokens := usage.TotalTokens()
 		event := streamjson.Event{
-			Type:             streamjson.EventUsage,
-			RunID:            writer.runID,
-			PromptTokens:     &promptTokens,
-			CompletionTokens: &completionTokens,
-			TotalTokens:      &totalTokens,
+			Type:              streamjson.EventUsage,
+			RunID:             writer.runID,
+			PromptTokens:      &promptTokens,
+			CompletionTokens:  &completionTokens,
+			CachedInputTokens: &cachedInputTokens,
+			CacheWriteTokens:  &cacheWriteTokens,
+			TotalTokens:       &totalTokens,
 		}
-		// THE SAME FIELDS THE SESSION RECORD KEEPS. A parent summarising this
-		// stream is the only place a sub-agent's turn can be priced, and it was
-		// being handed prompt/completion/total alone — so every child turn was
-		// priced as fully uncached. Non-zero only, exactly like
-		// usage.EventUsagePayload, so the common shape is unchanged.
-		if cached := usage.CachedInputTokens; cached > 0 {
-			event.CachedInputTokens = &cached
-		}
-		if written := usage.CacheWriteTokens; written > 0 {
-			event.CacheWriteTokens = &written
-		}
+		// Reasoning tokens are optional in the stream schema. Preserve the
+		// provider breakdown when it exists so a parent can price child work.
 		if reasoning := usage.ReasoningTokens; reasoning > 0 {
 			event.ReasoningTokens = &reasoning
 		}

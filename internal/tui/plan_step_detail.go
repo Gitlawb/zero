@@ -127,20 +127,19 @@ func (m model) sidebarPlanSelectables(width int) []planStepHit {
 	return hits
 }
 
-// planStepAtMouse maps a left-click in the context sidebar to a plan step index,
-// mirroring sidebarLineAtMouse's column/x gate.
+// planStepAtMouse resolves the legacy sidebar geometry without installing it in
+// mainline's compact transcript click path. It remains useful to verify that a
+// clipped row is never exposed as selectable while #829's sidebar helpers are
+// still present.
 func (m model) planStepAtMouse(msg tea.MouseMsg) (int, bool) {
 	if !m.sidebarActive() {
-		return 0, false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
 		return 0, false
 	}
 	sidebarW := sidebarWidth(m.width)
 	if sidebarW <= 0 {
 		return 0, false
 	}
-	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
+	x0 := m.chatColumnWidth() + 3
 	x, y := mouseX(msg), mouseY(msg)
 	if x < x0 || x >= x0+sidebarW {
 		return 0, false

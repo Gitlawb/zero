@@ -825,16 +825,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ModelSwitcher:        modelSwitcher,
 		TurnSessionProvider:  turnSessions,
 		ModelSessionSwitcher: modelSessionSwitcher,
-		ReasoningEffort:      forwardEffort,
-		Trace:                traceRecorder,
-		Cwd:                  workspaceRoot,
-		Images:               images,
-		Registry:             registry,
-		PermissionMode:       permissionMode,
-		Autonomy:             options.autonomy,
-		SelfCorrect:          selfCorrector,
-		FileDiagnostics:      fileDiagnostics,
-		Profile:              execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
+		Summarizer:           summarizerFactory(resolved, deps.newProvider),
+		ContextWindowFor: func(modelID string) int {
+			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
+		},
+		ReasoningEffort: forwardEffort,
+		Trace:           traceRecorder,
+		Cwd:             workspaceRoot,
+		Images:          images,
+		Registry:        registry,
+		PermissionMode:  permissionMode,
+		Autonomy:        options.autonomy,
+		SelfCorrect:     selfCorrector,
+		FileDiagnostics: fileDiagnostics,
+		Profile:         execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
 		// A headless run that selected the posture is by definition entering it:
 		// the process starts, runs once, exits, so there is no earlier turn for
 		// it to have been active across.
@@ -1095,6 +1099,9 @@ func deferredEligibleCount(registry *tools.Registry, permissionMode agent.Permis
 // the same tools.
 func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int, permissionMode agent.PermissionMode, enabledTools []string, disabledTools []string) {
 	if deferThreshold <= 0 {
+		return
+	}
+	if _, registered := registry.Get(tools.ToolSearchToolName); registered {
 		return
 	}
 	if deferredEligibleCount(registry, permissionMode, enabledTools, disabledTools) < deferThreshold {

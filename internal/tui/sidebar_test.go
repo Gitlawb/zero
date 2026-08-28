@@ -54,6 +54,18 @@ func TestSidebarActivityLines(t *testing.T) {
 	}
 }
 
+func TestSidebarActivityNamesCurrentTool(t *testing.T) {
+	m := sidebarTestModel()
+	m.pending = true
+	m.activeRunID = 7
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, id: "call-1", runID: 7, tool: "grep", detail: "internal/tui"})
+
+	got := plainRender(t, strings.Join(m.sidebarActivityLines(40, 10), "\n"))
+	if !strings.Contains(got, "searching") {
+		t.Fatalf("sidebar activity should name the active tool, got:\n%s", got)
+	}
+}
+
 func swarmSidebarTestModel(t *testing.T, sessionIDs map[string]string) model {
 	t.Helper()
 	m := sidebarTestModel()
@@ -96,31 +108,8 @@ func TestSidebarAgentSelectablesMapToScreenRows(t *testing.T) {
 	}
 }
 
-func TestSidebarLineAtMouseHitsMemberRow(t *testing.T) {
-	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
-	// Sidebar starts at screen X = chatColumnWidth + 3 (the " │ " divider); the
-	// first member row is at sidebar line 1 → screen Y 1.
-	x := m.chatColumnWidth() + 3 + 2
-	hit, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 1))
-	if !ok || hit.sessionID != "sess-1" {
-		t.Fatalf("expected to hit member row (sess-1), got ok=%v hit=%+v", ok, hit)
-	}
-	// A click in the chat column (left of the divider) must miss the sidebar.
-	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, 2, 1)); ok {
-		t.Fatal("a click in the chat column should not hit the sidebar")
-	}
-	// The AGENTS header row (Y 0) is not a clickable member.
-	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 0)); ok {
-		t.Fatal("the AGENTS header row should not be clickable")
-	}
-	// A member with no known session (subagent-2 at Y 2) is not clickable.
-	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 2)); ok {
-		t.Fatal("a member without a session id should not be clickable")
-	}
-}
-
-func TestSidebarMemberClickRoutesToSubchatDrillIn(t *testing.T) {
-	// A real session so the click can actually drill in (not just be "handled").
+func TestSidebarMemberClickDoesNotInterceptFullWidthChat(t *testing.T) {
+	// A real member session proves that a stale rail coordinate cannot open it.
 	store := testSessionStore(t)
 	session, err := store.Create(sessions.CreateInput{Title: "member: build the homepage", ModelID: "gpt-4.1", Provider: "openai"})
 	if err != nil {
@@ -135,15 +124,13 @@ func TestSidebarMemberClickRoutesToSubchatDrillIn(t *testing.T) {
 
 	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": session.SessionID})
 	m.sessionStore = store
-	x := m.chatColumnWidth() + 3 + 2
+	x := m.width - sidebarWidth(m.width) + 2
 	next, _, handled := m.handleTranscriptSelectionMouse(testMouseClick(tea.MouseLeft, x, 1))
-	if !handled {
-		t.Fatal("clicking a clickable member row should be handled")
+	if handled {
+		t.Fatal("an invisible rail coordinate must not be handled")
 	}
-	// It must actually enter the member's subchat session, not merely consume the click.
-	if !next.subchat.active || next.subchat.childSessionID != session.SessionID {
-		t.Fatalf("click should drill into member session %q, got active=%v id=%q",
-			session.SessionID, next.subchat.active, next.subchat.childSessionID)
+	if next.subchat.active {
+		t.Fatalf("an invisible rail coordinate must not enter member session %q", session.SessionID)
 	}
 }
 
@@ -253,13 +240,10 @@ func TestSidebarToggleHidesAndShows(t *testing.T) {
 	}
 }
 
-func TestChatColumnWidthLeavesRoomForSidebar(t *testing.T) {
+func TestChatColumnWidthUsesFullConversationWidth(t *testing.T) {
 	m := sidebarTestModel()
-	chatW := m.chatColumnWidth()
-	sidebarW := sidebarWidth(m.width)
-	if chatW+3+sidebarW != m.width {
-		t.Fatalf("chat(%d) + divider(3) + sidebar(%d) = %d, want total width %d",
-			chatW, sidebarW, chatW+3+sidebarW, m.width)
+	if got, want := m.chatColumnWidth(), chatWidth(m.width); got != want {
+		t.Fatalf("chat width = %d, want full width %d", got, want)
 	}
 
 	// When the sidebar is inactive, chat width is the full chat width.
@@ -619,52 +603,52 @@ func TestJoinColumnsAligns(t *testing.T) {
 	}
 }
 
-func TestTwoColumnTranscriptViewWidth(t *testing.T) {
+func TestTranscriptViewUsesFullWidth(t *testing.T) {
 	m := sidebarTestModel()
-	out := m.twoColumnTranscriptView()
+	out := m.transcriptView()
 	lines := strings.Split(out, "\n")
 	if len(lines) != m.height {
-		t.Fatalf("two-column view = %d lines, want terminal height %d", len(lines), m.height)
+		t.Fatalf("transcript view = %d lines, want terminal height %d", len(lines), m.height)
 	}
 	for i, line := range lines {
-		if w := lipgloss.Width(line); w != m.width {
-			t.Fatalf("two-column row %d width = %d, want full width %d", i, w, m.width)
+		if w := lipgloss.Width(line); w > m.width {
+			t.Fatalf("row %d width = %d, exceeds full width %d", i, w, m.width)
 		}
 	}
+	for _, line := range lines {
+		if strings.HasPrefix(ansiPattern.ReplaceAllString(line, ""), "╭") && lipgloss.Width(line) == m.width {
+			return
+		}
+	}
+	t.Fatal("full-width composer frame not found")
 }
 
-func TestTwoColumnSidebarRemainsFullHeightBesideFooter(t *testing.T) {
+func TestFullWidthFooterKeepsContextAndComposerVisible(t *testing.T) {
 	m := sidebarTestModel()
 	m.width, m.height = 120, 34
 	m.unpricedTokens = 10000
-	out := plainRender(t, m.twoColumnTranscriptView())
+	out := plainRender(t, m.transcriptView())
 	lines := strings.Split(out, "\n")
 
 	tokenRow := -1
 	composerTop := -1
 	for index, line := range lines {
-		if strings.Contains(line, "10K tokens") {
+		if strings.Contains(line, "10K tok") {
 			tokenRow = index
 		}
 		if strings.HasPrefix(line, "╭") {
 			composerTop = index
 		}
 	}
-	if tokenRow != len(lines)-1 {
-		t.Fatalf("sidebar token summary should remain pinned to the bottom, row=%d last=%d\n%s", tokenRow, len(lines)-1, out)
+	if tokenRow < 0 {
+		t.Fatalf("footer should retain context information:\n%s", out)
 	}
 	if composerTop < 0 {
 		t.Fatalf("chat composer missing:\n%s", out)
 	}
 	composerRunes := []rune(lines[composerTop])
-	if len(composerRunes) != m.width || composerRunes[m.chatColumnWidth()-1] != '╮' {
-		t.Fatalf("composer should retain the chat-column width, got %q", lines[composerTop])
-	}
-	for index, line := range lines {
-		runes := []rune(line)
-		if len(runes) != m.width || runes[m.chatColumnWidth()+1] != '│' {
-			t.Fatalf("sidebar divider ended early on row %d: %q", index, line)
-		}
+	if len(composerRunes) != m.width || composerRunes[m.width-1] != '╮' {
+		t.Fatalf("composer should use the full conversation width, got %q", lines[composerTop])
 	}
 }
 
@@ -673,58 +657,23 @@ func stripSidebar(lines []string) string {
 	return ansiPattern.ReplaceAllString(strings.Join(lines, "\n"), "")
 }
 
-// The `/` command palette must NOT collapse the sidebar. It is a centred box
-// capped at suggestionPaletteMaxWidth floating over the chat column, not a
-// full-screen overlay — suppressing the second column for it dropped the plan
-// out of the sidebar and re-rendered it inline at the bottom on every `/`,
-// which is at its most disruptive mid-run with a live plan on screen. The
-// genuinely full-width overlays must still suppress it.
-func TestSidebarSurvivesCommandPalette(t *testing.T) {
-	base := func() model {
-		m := runningPlanModel(t, 3)
-		m.altScreen = true
-		m.height = 40
-		m.headerPrinted = true
-		m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
-		return m
-	}
-
-	m := base()
-	if !m.sidebarActive() {
-		t.Fatal("precondition: sidebar should be active for a wide alt-screen model with a plan")
-	}
-
-	// `/` palette open: sidebar stays, so the plan keeps its home and the layout
-	// does not reflow.
+// The `/` command palette must not reduce the conversation width.
+func TestCommandPaletteKeepsConversationWidth(t *testing.T) {
+	m := sidebarTestModel()
+	m.altScreen = true
+	m.height = 40
+	m.headerPrinted = true
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
 	m.suggestions = []commandSuggestion{{Name: "/model", Desc: "Pick a model."}, {Name: "/plan", Desc: "Show planning mode status."}}
 	if !m.suggestionsActive() {
 		t.Fatal("precondition: suggestions should be active")
 	}
-	if !m.sidebarActive() {
-		t.Error("command palette must not collapse the sidebar")
-	}
-	if got := m.renderPinnedPlanPanel(m.chatColumnWidth(), 10); got != "" {
-		t.Errorf("plan must stay in the sidebar, not fall back to the pinned panel:\n%s", got)
-	}
-	// The palette never contends for the sidebar's cells: the two-column path
-	// renders it at width = chatColumnWidth, so it is centred inside the chat
-	// column and cannot overlap the sidebar.
+	// The palette is bounded within the full-width transcript.
 	chatW := m.chatColumnWidth()
 	for _, line := range strings.Split(plainRender(t, m.suggestionOverlay(chatW)), "\n") {
 		if w := lipgloss.Width(line); w > chatW {
 			t.Errorf("palette line is %d wide, wider than the chat column %d — it would overlap the sidebar", w, chatW)
 		}
-	}
-	// Clicks still belong to the palette, not the sidebar rows beneath it.
-	if _, ok := m.sidebarLineAtMouse(tea.MouseClickMsg{Button: tea.MouseLeft}); ok {
-		t.Error("sidebar must not take mouse hits while the palette is open")
-	}
-
-	// A genuinely full-width overlay still suppresses the sidebar.
-	full := base()
-	full.picker = &commandPicker{}
-	if full.sidebarActive() {
-		t.Error("a full-screen picker must still collapse the sidebar")
 	}
 }
 
@@ -749,53 +698,16 @@ func specialistSidebarModel(t *testing.T, now time.Time) model {
 // A RUNNING agent row is clickable. It is keyed by its card, and a plan task's
 // card key is not a session id until the task finishes — so the drill-in has
 // nothing to open at the one moment the detail is most wanted.
-func TestClickingARunningAgentRowExpandsItInPlace(t *testing.T) {
+func TestAnExpandedRunningAgentRowShowsItsDetail(t *testing.T) {
 	now := time.Unix(20000, 0)
 	m := specialistSidebarModel(t, now)
+	m.expandedAgent = "plantask_1"
 
-	hits := m.sidebarAgentSelectables(sidebarWidth(m.width))
-	if len(hits) != 1 {
-		t.Fatalf("expected the specialist row to be clickable, got %d hits", len(hits))
-	}
-	if !hits[0].expands || hits[0].sessionID != "plantask_1" {
-		t.Fatalf("specialist hit = %+v, want an in-place expansion keyed by its card", hits[0])
-	}
-
-	collapsed := plainRender(t, strings.Join(m.sidebarAgentLines(sidebarWidth(m.width)), "\n"))
-	if strings.Contains(collapsed, "config resolver") {
-		t.Errorf("the collapsed row must not already show the brief:\n%s", collapsed)
-	}
-
-	x0 := m.chatColumnWidth() + 3
-	click := tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: hits[0].lineOffset}
-	updated, _, handled := m.handleTranscriptSelectionMouse(click)
-	if !handled {
-		t.Fatal("the click was not handled")
-	}
-	if updated.expandedAgent != "plantask_1" {
-		t.Fatalf("expandedAgent = %q, want the clicked row's card", updated.expandedAgent)
-	}
-	// IN PLACE, NOT A DRILL-IN. The swarm path on the other side of this branch
-	// swaps the whole view for the member's subchat; a card key that is not yet
-	// a session would take it there with nothing to open.
-	if updated.subchat.active {
-		t.Error("expanding a specialist row must not enter the swarm subchat")
-	}
-
-	expanded := plainRender(t, strings.Join(updated.sidebarAgentLines(sidebarWidth(m.width)), "\n"))
-	// The column is 26 cells at its minimum, so the brief wraps and the spend
-	// line truncates — checked against what actually renders, not against a
-	// wider terminal's version of it.
+	expanded := plainRender(t, strings.Join(m.sidebarAgentLines(sidebarWidth(m.width)), "\n"))
 	for _, want := range []string{"read the config", "1m10s", "3.4K tok"} {
 		if !strings.Contains(expanded, want) {
 			t.Errorf("expansion is missing %q:\n%s", want, expanded)
 		}
-	}
-
-	// Clicking the open row closes it again.
-	reclicked, _, _ := updated.handleTranscriptSelectionMouse(click)
-	if reclicked.expandedAgent != "" {
-		t.Errorf("a second click must close the row, got %q", reclicked.expandedAgent)
 	}
 }
 
@@ -952,7 +864,7 @@ func doneAgentsModel(t *testing.T, now time.Time) model {
 // A plan's finished tasks ARE its result. They used to vanish a second and a
 // half after each one landed, so a nine-task run that succeeded showed an empty
 // AGENTS section and no way to ask what any of them did.
-func TestTheDoneToggleRevealsFinishedAgents(t *testing.T) {
+func TestShowDoneAgentsRevealsFinishedAgents(t *testing.T) {
 	now := time.Unix(50000, 0)
 	m := doneAgentsModel(t, now)
 	width := sidebarWidth(m.width)
@@ -968,28 +880,8 @@ func TestTheDoneToggleRevealsFinishedAgents(t *testing.T) {
 		t.Errorf("the header must advertise what the toggle would reveal: %q", header)
 	}
 
-	// The toggle is clickable at the header row.
-	hits := m.sidebarAgentSelectables(width)
-	var toggle *sidebarAgentHit
-	for i := range hits {
-		if hits[i].toggleDone {
-			toggle = &hits[i]
-		}
-	}
-	if toggle == nil {
-		t.Fatal("the header's toggle must be clickable")
-	}
-	if toggle.lineOffset != 0 {
-		t.Fatalf("the toggle sits on the AGENTS header at offset 0, got %d", toggle.lineOffset)
-	}
-
-	x0 := m.chatColumnWidth() + 3
-	opened, _, handled := m.handleTranscriptSelectionMouse(
-		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: 0})
-	if !handled || !opened.showDoneAgents {
-		t.Fatalf("the click must open the finished list: handled=%v shown=%v", handled, opened.showDoneAgents)
-	}
-	shown := plainRender(t, strings.Join(opened.sidebarAgentLines(width), "\n"))
+	m.showDoneAgents = true
+	shown := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
 	// The two finished agents have sentence descriptions ("You are auditing
 	// package X"), so they fall back to their names; the running one has a label
 	// description ("producing the report") and shows the job.
@@ -998,19 +890,12 @@ func TestTheDoneToggleRevealsFinishedAgents(t *testing.T) {
 			t.Errorf("expected %q in the opened list:\n%s", want, shown)
 		}
 	}
-
-	// And it closes again.
-	closed, _, _ := opened.handleTranscriptSelectionMouse(
-		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: 0})
-	if closed.showDoneAgents {
-		t.Error("a second click must close the finished list")
-	}
 }
 
 // THE STATE THE TOGGLE EXISTS FOR. When every agent has finished there are no
 // rows left, so a control hung off the rows would be unclickable in precisely
 // the case it is needed.
-func TestTheDoneToggleIsClickableWithNoLiveAgents(t *testing.T) {
+func TestShowDoneAgentsWorksWithNoLiveAgents(t *testing.T) {
 	now := time.Unix(50000, 0)
 	m := doneAgentsModel(t, now)
 	m.specialists.complete("plantask_3", specialistCompleted, 0, "", now.Add(-30*time.Second))
@@ -1019,47 +904,22 @@ func TestTheDoneToggleIsClickableWithNoLiveAgents(t *testing.T) {
 	if len(m.sidebarAgentLines(width)) != 0 {
 		t.Fatal("sanity check failed: every agent has finished, so no rows remain")
 	}
-	hits := m.sidebarAgentSelectables(width)
-	if len(hits) != 1 || !hits[0].toggleDone {
-		t.Fatalf("the toggle must survive an empty list, got %+v", hits)
-	}
-	x0 := m.chatColumnWidth() + 3
-	opened, _, handled := m.handleTranscriptSelectionMouse(
-		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: 0})
-	if !handled || !opened.showDoneAgents {
-		t.Fatal("clicking the toggle with no live agents must still open the list")
-	}
-	if got := len(opened.sidebarAgentLines(width)); got != 3 {
+	m.showDoneAgents = true
+	if got := len(m.sidebarAgentLines(width)); got != 3 {
 		t.Errorf("expected all three finished agents, got %d rows", got)
 	}
 }
 
 // WHAT IT PRODUCED, which is the thing the agent was run for. Every other line
 // of the expansion says how the work went; this is the work.
-func TestAFinishedAgentExpandsToShowWhatItProduced(t *testing.T) {
+func TestAnExpandedFinishedAgentShowsWhatItProduced(t *testing.T) {
 	now := time.Unix(50000, 0)
 	m := doneAgentsModel(t, now)
 	m.showDoneAgents = true
 	width := sidebarWidth(m.width)
 
-	hits := m.sidebarAgentSelectables(width)
-	var row *sidebarAgentHit
-	for i := range hits {
-		if hits[i].sessionID == "plantask_1" {
-			row = &hits[i]
-		}
-	}
-	if row == nil {
-		t.Fatalf("the finished agent's row must be clickable, got %+v", hits)
-	}
-
-	x0 := m.chatColumnWidth() + 3
-	opened, _, handled := m.handleTranscriptSelectionMouse(
-		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: row.lineOffset})
-	if !handled || opened.expandedAgent != "plantask_1" {
-		t.Fatalf("clicking a finished agent must expand it, got %q", opened.expandedAgent)
-	}
-	shown := plainRender(t, strings.Join(opened.sidebarAgentLines(width), "\n"))
+	m.expandedAgent = "plantask_1"
+	shown := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
 	// Checked against what a 30-cell column actually renders: the result wraps
 	// nothing and truncates per line, so assert on the head of each.
 	for _, want := range []string{"3 findings", "reltime.go:41"} {

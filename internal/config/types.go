@@ -130,6 +130,12 @@ type PreferencesConfig struct {
 	// A *bool tri-state like Recaps: nil is unset (the drop-after-linger
 	// default), true keeps them, false is the explicit drop.
 	KeepFinishedAgents *bool `json:"keepFinishedAgents,omitempty"`
+	// CompactionModel routes compaction summarization calls to this model
+	// instead of the session's main model (summaries at main-model prices are
+	// the most expensive recurring event in long runs). Empty = automatic: a
+	// curated cheap model on official endpoints, the main model elsewhere.
+	// "main" forces the main model. ZERO_COMPACTION_MODEL overrides.
+	CompactionModel string `json:"compactionModel,omitempty"`
 }
 
 // RecentModelEntry is one provider-qualified model selection recorded in
@@ -171,7 +177,8 @@ type KeyBindingsConfig struct {
 	ToggleMouse KeyBindingDef `json:"toggleMouse,omitempty"`
 	// CycleReasoning cycles through reasoning effort levels (default: ctrl+t).
 	CycleReasoning KeyBindingDef `json:"cycleReasoning,omitempty"`
-	// TogglePlan toggles the plan panel expansion (default: ctrl+p).
+	// TogglePlan is retained for configuration compatibility. Plan updates render
+	// in the transcript and no longer have a persistent panel to toggle.
 	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
 	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
 	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`
@@ -611,7 +618,7 @@ type MCPServerConfig struct {
 	// fields it set or what values they hold. A built-in default seeded by
 	// DefaultMCPServers() is never unmarshaled from JSON, so it starts false;
 	// any explicit entry in the user/project file — even one that happens to
-	// repeat a default's exact field values (e.g. re-declaring firecrawl's
+	// repeat a default's exact field values (e.g. re-declaring Exa's
 	// default URL) — sets it true. IsUnconfiguredDefault checks this alongside
 	// a resolved-value comparison, so redeclaring default values verbatim still
 	// counts as user-configured.

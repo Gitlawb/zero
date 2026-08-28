@@ -614,7 +614,7 @@ func TestAmbientPetRetainsSingleColumnComposerDock(t *testing.T) {
 	}
 }
 
-func TestAmbientPetDoesNotChangeSidebarFooterGeometry(t *testing.T) {
+func TestAmbientPetDoesNotChangeFullWidthFooterGeometry(t *testing.T) {
 	m := sidebarTestModel()
 	m.width, m.height = 120, 34
 	frame := image.NewNRGBA(image.Rect(0, 0, 12, 12))
@@ -639,12 +639,12 @@ func TestAmbientPetDoesNotChangeSidebarFooterGeometry(t *testing.T) {
 		}
 		runes := []rune(line)
 		dockEdge := m.chatColumnWidth() - petReservedColumns - 1
-		if len(runes) < m.width || runes[dockEdge] != '╮' || runes[m.chatColumnWidth()+1] != '│' {
-			t.Fatalf("pet changed the normal full-height sidebar geometry: %q", line)
+		if len(runes) < m.width || runes[dockEdge] != '╮' {
+			t.Fatalf("pet changed the normal full-width composer geometry: %q", line)
 		}
 		return
 	}
-	t.Fatal("sidebar composer top not found")
+	t.Fatal("composer top not found")
 }
 
 func TestDockedPetFollowsSidebarLayoutWithoutBecomingFreePositioned(t *testing.T) {

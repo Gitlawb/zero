@@ -88,7 +88,7 @@ type dictationController struct {
 	waveBars []int
 	waveTick int
 
-	// voiceModeEnabled repurposes Space into hold-to-record (§13.9).
+	// voiceModeEnabled repurposes Ctrl+Space into hold-to-record (§13.9).
 	voiceModeEnabled bool
 	// eventTypesSupported records whether the terminal confirmed key-release
 	// reporting (Kitty protocol); eventTypesKnown gates it until the terminal has
@@ -173,7 +173,7 @@ func firstNonEmptyStr(a, b string) string {
 func (d dictationController) active() bool { return d.phase != dictIdle }
 
 // toggleDictation starts a recording when idle and stops-and-transcribes when
-// recording. Invoked by the voice-mode Space gesture; a call during
+// recording. Invoked by the voice-mode Ctrl+Space gesture; a call during
 // startup/transcription is ignored (the machine is mid-transition).
 func (m model) toggleDictation() (model, tea.Cmd) {
 	if !m.dictation.available() {
@@ -193,21 +193,21 @@ func (m model) toggleDictation() (model, tea.Cmd) {
 	}
 }
 
-// toggleVoiceMode flips the /voice hold-to-record gesture — the dictation
-// trigger. While on, Space records; run /voice again to type spaces normally.
+// toggleVoiceMode flips the /voice hold-to-record gesture. While on,
+// Ctrl+Space records and ordinary Space continues to type normally.
 func (m model) toggleVoiceMode() (model, tea.Cmd) {
 	if !m.dictation.available() {
 		return m.appendSystemNotice("Dictation is not configured. See docs/dictation.md to set up a local engine or a Groq/OpenAI key."), nil
 	}
 	m.dictation.voiceModeEnabled = !m.dictation.voiceModeEnabled
 	if m.dictation.voiceModeEnabled {
-		return m.appendSystemNotice("Voice mode on (" + m.dictation.currentModelLabel() + ") — hold Space to dictate, release to transcribe. Run /voice again to turn it off (so Space types normally)."), nil
+		return m.showTransientNoticeInline("Voice mode on — "+voiceCaptureUsage+". Run /voice again to turn it off.", transientNoticeSuccess), nil
 	}
 	// Turning voice off is the "done dictating" signal, so release the warm sherpa
 	// streaming server — otherwise a loaded model keeps idling in RAM (and holding
 	// its port) until the app exits. It respawns lazily on the next streaming
 	// recording. Skip while a recording is still in flight so we don't kill it.
-	next := m.appendSystemNotice("Voice mode off.")
+	next := m.showTransientNoticeInline("Voice mode off.", transientNoticeInfo)
 	if next.dictation.active() {
 		return next, nil
 	}
@@ -299,7 +299,7 @@ func (m model) cancelDictation() (model, tea.Cmd) {
 	}
 	m = m.discardDictationRegion()
 	m.dictation.reset()
-	return m.appendSystemNotice("Dictation cancelled."), nil
+	return m.showTransientNoticeInline("Dictation cancelled.", transientNoticeInfo), nil
 }
 
 // wantStreaming decides whether this recording uses the streaming pipeline:
@@ -374,7 +374,7 @@ func (m model) handleDictationStarted(msg dictationStartedMsg) (model, tea.Cmd) 
 	if m.dictation.phase == dictStarting {
 		m.dictation.phase = dictRecording
 	}
-	// A voice-mode Space release that arrived mid-startup asked us to stop as soon
+	// A voice-mode Ctrl+Space release that arrived mid-startup asked us to stop as soon
 	// as recording began.
 	if m.dictation.voiceStopPending && m.dictation.phase == dictRecording {
 		m.dictation.voiceStopPending = false
@@ -438,7 +438,7 @@ func (m model) handleDictationTranscribed(msg dictationTranscribedMsg) (tea.Mode
 		if streaming {
 			return m, nil // streaming already rendered live; nothing to add
 		}
-		return m.appendSystemNotice("No speech detected."), nil
+		return m.showTransientNoticeInline("No speech detected.", transientNoticeInfo), nil
 	}
 	if !streaming {
 		m = m.insertDictatedText(msg.text)
@@ -480,12 +480,8 @@ func needsLeadingSpace(state composerState) bool {
 func (m model) dictationStatusChip() string {
 	switch m.dictation.phase {
 	case dictStarting, dictRecording:
-		stop := "release Space to stop"
-		if !m.dictation.eventTypesSupported {
-			stop = "press Space to stop" // press-to-toggle fallback
-		}
 		wave := zeroTheme.amber.Render("● " + renderWaveBars(m.dictation.waveBars) + " REC")
-		return wave + zeroTheme.muted.Render(" · "+stop+", Esc to cancel")
+		return wave + zeroTheme.muted.Render(" · "+m.voiceCaptureStatus()+", Esc to cancel")
 	case dictTranscribing:
 		return zeroTheme.accent.Render("●") + " " + zeroTheme.muted.Render("transcribing…")
 	}
@@ -601,13 +597,12 @@ func (m model) handleRecTick() (model, tea.Cmd) {
 	return m, nil
 }
 
-// voiceModeIndicator renders the persistent "voice mode on" hint shown while
-// idle so the user knows Space is repurposed to hold-to-record (§10).
+// voiceModeIndicator renders the current voice gesture or transcription state.
 func (m model) voiceModeIndicator() string {
 	if !m.dictation.voiceModeEnabled {
 		return ""
 	}
-	return zeroTheme.accent.Render("🎙 voice") + zeroTheme.muted.Render(" · "+m.dictation.currentModelLabel())
+	return zeroTheme.accent.Render("🎙 voice") + zeroTheme.muted.Render(" · "+m.voiceCaptureStatus()+" · "+m.dictation.currentModelLabel())
 }
 
 // dictationErrorText renders a dictation error for the transcript: a missing-

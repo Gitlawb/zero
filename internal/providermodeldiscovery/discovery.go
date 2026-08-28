@@ -539,7 +539,8 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 	hasCatalog := len(byID) > 0
 	// Aggregators publish the live list as the source of truth. Keep live-only
 	// ids even when a remote catalog also loaded, instead of intersecting.
-	preferLive := providermodelcatalog.PublicLiveCatalog(provider.ID) ||
+	preferLive := provider.Local ||
+		providermodelcatalog.PublicLiveCatalog(provider.ID) ||
 		providercatalog.NormalizeID(provider.ID) == "chatgpt"
 	result := make([]Model, 0, len(liveModels))
 	for _, live := range liveModels {
