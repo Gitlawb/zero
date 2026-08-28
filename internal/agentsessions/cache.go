@@ -27,9 +27,11 @@ type discoveryEntry struct {
 var (
 	discoveryMu    sync.Mutex
 	discoveryCache = map[string]discoveryEntry{}
+	discoveryEpoch uint64
 	// discoveryNow is the clock, swapped in tests so TTL expiry is exercised
 	// without sleeping.
 	discoveryNow = time.Now
+	discoverAll  = DiscoverAll
 )
 
 // DiscoverAllCached is DiscoverAll with a short per-workspace memo. Callers on a
@@ -37,16 +39,32 @@ var (
 // process has nothing cached and the result would only ever be stale.
 func DiscoverAllCached(env Env, cwd string) ([]ForeignSession, []error) {
 	discoveryMu.Lock()
-	defer discoveryMu.Unlock()
-
-	if entry, ok := discoveryCache[cwd]; ok && discoveryNow().Sub(entry.at) < discoveryTTL {
+	now := discoveryNow()
+	if entry, ok := discoveryCache[cwd]; ok && now.Sub(entry.at) < discoveryTTL {
 		// Copy: callers sort and filter the slice they are handed, and a shared
 		// backing array would let one caller reorder another's results.
+		discoveryMu.Unlock()
 		return append([]ForeignSession{}, entry.sessions...), entry.problems
 	}
+	epoch := discoveryEpoch
+	discoveryMu.Unlock()
 
-	found, problems := DiscoverAll(env, cwd)
-	discoveryCache[cwd] = discoveryEntry{sessions: found, problems: problems, at: discoveryNow()}
+	// Discovery reads several external stores and can take hundreds of
+	// milliseconds. It must not hold the global cache lock: a miss for one
+	// workspace cannot stall a valid hit for another workspace.
+	found, problems := discoverAll(env, cwd)
+	discoveryMu.Lock()
+	defer discoveryMu.Unlock()
+	// Prefer a value another concurrent miss already published. If the cache was
+	// invalidated while discovery ran, return this result to the current caller
+	// but do not repopulate the cache with a pre-invalidation snapshot.
+	now = discoveryNow()
+	if entry, ok := discoveryCache[cwd]; ok && now.Sub(entry.at) < discoveryTTL {
+		return append([]ForeignSession{}, entry.sessions...), entry.problems
+	}
+	if epoch == discoveryEpoch {
+		discoveryCache[cwd] = discoveryEntry{sessions: found, problems: problems, at: now}
+	}
 	return append([]ForeignSession{}, found...), problems
 }
 
@@ -55,5 +73,6 @@ func DiscoverAllCached(env Env, cwd string) ([]ForeignSession, []error) {
 func InvalidateDiscovery() {
 	discoveryMu.Lock()
 	defer discoveryMu.Unlock()
+	discoveryEpoch++
 	discoveryCache = map[string]discoveryEntry{}
 }

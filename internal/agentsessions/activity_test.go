@@ -310,9 +310,10 @@ func TestAnInterruptedWriteWithNoResultDoesNotClaimTheFile(t *testing.T) {
 	}
 }
 
-// THE BUDGET HAS TO BIND ON THE ASSEMBLED LINE. summaryEvents caps the tool
-// breakdown and then prepends the call/failure counts to it, so the headline
-// left the budget by exactly the length of that prefix. The existing budget test
+// THE BUDGET HAS TO BIND ON THE ASSEMBLED LINE. The previous implementation
+// capped the tool breakdown and then prepended the call/failure counts, so the
+// headline left the budget by exactly the length of that prefix. The existing
+// budget test
 // never caught it because its tools all carry a recognised "file_path", which
 // routes them to the file buckets and leaves the breakdown empty — the overflow
 // only appears once the arguments are a schema this package does not know, which

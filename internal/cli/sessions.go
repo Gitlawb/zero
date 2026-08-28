@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/zerocommands"
@@ -569,7 +570,7 @@ func formatSessionSnapshotLine(session zerocommands.SessionSnapshot) string {
 		details = append(details, "parent="+redact(session.ParentSessionID))
 	}
 	if session.ModelID != "" {
-		details = append(details, "model="+redact(session.ModelID))
+		details = append(details, "model="+agentsessions.DisplayField(session.ModelID))
 	}
 	if len(details) > 0 {
 		parts = append(parts, "("+strings.Join(details, ", ")+")")
