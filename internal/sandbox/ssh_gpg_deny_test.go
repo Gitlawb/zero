@@ -1190,3 +1190,89 @@ func TestLinuxBwrapSkipsFileBindsUnderOverlaidCredentialParent(t *testing.T) {
 		t.Fatalf("~/.ssh was denied wholesale")
 	}
 }
+
+func TestLinuxBwrapBindsDeniedFileWhenParentOverlayFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	realDir := t.TempDir()
+	workTarget := filepath.Join(realDir, "work")
+	mustWriteFile(t, workTarget, sshPrivateKeyFixture())
+	workLink := filepath.Join(sshDir, "work")
+	mustSymlink(t, workTarget, workLink)
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	mustWriteFile(t, idEd, sshPrivateKeyFixture())
+	config := filepath.Join(sshDir, "config")
+	mustWriteFile(t, config, "Host *\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workLink) {
+		t.Fatalf("denied symlink ~/.ssh/work missing from deny list: %v", denied)
+	}
+	if !denyCovered(denied, idEd) {
+		t.Fatalf("denied regular ~/.ssh/id_ed25519 missing from deny list: %v", denied)
+	}
+
+	// Execute-only: Lstat of children still classifies the symlink+file, but
+	// ReadDir fails so the tmpfs overlay is not applied. Build the deny list
+	// first while the directory is readable.
+	if err := os.Chmod(sshDir, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sshDir, 0o700) })
+	if _, err := os.ReadDir(sshDir); err == nil {
+		t.Skip("parent ReadDir succeeded after chmod 0111 (likely running as root)")
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	sshDirLex := normalizeProfilePathLexically(sshDir)
+	if argsContainSequence(args, "--tmpfs", sshDirLex) {
+		t.Fatalf("overlay must not apply when parent ReadDir fails: %#v", args)
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", idEd)
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileNamedConfigOrAuthorizedKeys(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	fakeConfig := filepath.Join(home, "keys", "config")
+	fakeAuthorized := filepath.Join(home, "keys", "authorized_keys")
+	realConfig := filepath.Join(sshDir, "config")
+	realAuthorized := filepath.Join(sshDir, "authorized_keys")
+	mustWriteFile(t, fakeConfig, sshPrivateKeyFixture())
+	mustWriteFile(t, fakeAuthorized, sshPrivateKeyFixture())
+	mustWriteFile(t, realAuthorized, "ssh-ed25519 AAAA user@host\n")
+	mustWriteFile(t, realConfig, "IdentityFile ~/keys/config\nIdentityFile ~/keys/authorized_keys\nUserKnownHostsFile /dev/null\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakeConfig) {
+		t.Fatalf("IdentityFile ~/keys/config with private-key payload is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, fakeAuthorized) {
+		t.Fatalf("IdentityFile ~/keys/authorized_keys with private-key payload is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realConfig) {
+		t.Fatalf("real ~/.ssh/config was denied")
+	}
+	if denyCovered(denied, realAuthorized) {
+		t.Fatalf("real ~/.ssh/authorized_keys was denied")
+	}
+	if denyListedExact(denied, filepath.Clean("/dev/null")) || denyListedExact(denied, "/dev/null") {
+		t.Fatalf("/dev/null was denied from UserKnownHostsFile: %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}

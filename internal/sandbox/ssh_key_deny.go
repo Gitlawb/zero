@@ -173,14 +173,11 @@ func sshKnownHostsFamilyName(name string) bool {
 }
 
 func sshFileLooksLikePrivateKey(path string) bool {
-	// Basename-based denial still treats *.pub and known-hosts names as public,
-	// but a PEM/OpenSSH/PuTTY private key at those names must not stay readable.
-	// Sniff those payloads. Keep config / authorized_keys exemptions:
-	// CertificateFile and authorized_keys are never content-denied here.
-	switch filepath.Base(path) {
-	case "config", "authorized_keys", "authorized_keys2":
-		return false
-	}
+	// Always sniff. IdentityFile ~/keys/config (or authorized_keys / *.pub /
+	// known_hosts) can hold a PEM/OpenSSH/PuTTY private-key payload and must
+	// not stay readable. Real config, authorized_keys, public keys, and
+	// known-hosts files do not match these headers, so name-only exemptions
+	// in sshShouldDenyReferencedPath still keep genuine support files readable.
 	data, ok := readRegularFileBounded(path, sshPrivateKeySniffBytes)
 	if !ok {
 		return false
@@ -512,9 +509,9 @@ func sshShouldDenyReferencedPath(path, home, sshDir string) bool {
 		return false
 	}
 	// Sniff before the public-name exemption so IdentityFile ~/keys/work.pub
-	// (or a relocated key named known_hosts) with a private-key payload is
-	// denied. Genuine public keys, genuine known-hosts, config, and
-	// authorized_keys do not match and stay readable.
+	// (or a relocated key named config / authorized_keys / known_hosts) with a
+	// private-key payload is denied. Genuine public keys, genuine known-hosts,
+	// config, and authorized_keys do not match and stay readable.
 	if sshFileLooksLikePrivateKey(cleaned) {
 		return true
 	}
