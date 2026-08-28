@@ -86,6 +86,11 @@ type authServerMetadata struct {
 	TokenEndpoint         string   `json:"token_endpoint"`
 	RegistrationEndpoint  string   `json:"registration_endpoint"`
 	ScopesSupported       []string `json:"scopes_supported"`
+
+	protectedResourceURL         string
+	protectAuthorizationEndpoint bool
+	protectTokenEndpoint         bool
+	protectRegistrationEndpoint  bool
 }
 
 // pkceParams holds a PKCE verifier/challenge pair.
@@ -134,10 +139,9 @@ func discoverAuthorizationServer(ctx context.Context, client *http.Client, baseU
 	}, nil
 }
 
-// validateResolvedEndpoints applies the shared https/loopback endpoint rule to
-// every non-empty endpoint in the resolved metadata — configured or discovered
-// alike — so discovery metadata can never downgrade an MCP login to an insecure
-// or attacker-controlled authorization, token, or registration endpoint.
+// validateResolvedEndpoints applies the shared https/loopback scheme rule to
+// every non-empty endpoint in the resolved metadata. Protected-resource
+// discovery adds its stricter provenance-aware network rule below.
 func validateResolvedEndpoints(metadata authServerMetadata) error {
 	for _, ep := range []struct{ kind, url string }{
 		{"authorization", metadata.AuthorizationEndpoint},
@@ -149,6 +153,40 @@ func validateResolvedEndpoints(metadata authServerMetadata) error {
 		}
 		if err := oauth.ValidateEndpointURL(ep.url); err != nil {
 			return fmt.Errorf("mcp oauth: %s endpoint: %w", ep.kind, err)
+		}
+	}
+	return nil
+}
+
+func validateProtectedDiscoveredEndpoints(ctx context.Context, metadata authServerMetadata) error {
+	if metadata.protectedResourceURL == "" {
+		return nil
+	}
+	policy, err := newOAuthDiscoveryNetworkPolicy(metadata.protectedResourceURL)
+	if err != nil {
+		return err
+	}
+	for _, endpoint := range []struct {
+		kind      string
+		url       string
+		protected bool
+	}{
+		{kind: "authorization", url: metadata.AuthorizationEndpoint, protected: metadata.protectAuthorizationEndpoint},
+		{kind: "token", url: metadata.TokenEndpoint, protected: metadata.protectTokenEndpoint},
+		{kind: "registration", url: metadata.RegistrationEndpoint, protected: metadata.protectRegistrationEndpoint},
+	} {
+		if !endpoint.protected || strings.TrimSpace(endpoint.url) == "" {
+			continue
+		}
+		parsed, parseErr := url.Parse(endpoint.url)
+		if parseErr != nil || parsed.Hostname() == "" {
+			return fmt.Errorf("mcp oauth: %s endpoint: %w", endpoint.kind, errUnsafeOAuthDiscoveryTarget)
+		}
+		if err := policy.validateLiteralHost(parsed.Hostname()); err != nil {
+			return fmt.Errorf("mcp oauth: %s endpoint: %w", endpoint.kind, err)
+		}
+		if _, err := policy.resolve(ctx, parsed.Hostname()); err != nil {
+			return fmt.Errorf("mcp oauth: %s endpoint: %w", endpoint.kind, err)
 		}
 	}
 	return nil
@@ -219,6 +257,12 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 	if endpoint := strings.TrimSpace(cfg.RegistrationEndpoint); endpoint != "" {
 		metadata.RegistrationEndpoint = endpoint
 	}
+	if protectedResourceDiscovery {
+		metadata.protectedResourceURL = strings.TrimSpace(baseURL)
+		metadata.protectAuthorizationEndpoint = strings.TrimSpace(cfg.AuthorizationEndpoint) == ""
+		metadata.protectTokenEndpoint = strings.TrimSpace(cfg.TokenEndpoint) == ""
+		metadata.protectRegistrationEndpoint = strings.TrimSpace(cfg.RegistrationEndpoint) == ""
+	}
 
 	if strings.TrimSpace(metadata.AuthorizationEndpoint) == "" {
 		return authServerMetadata{}, errors.New("no authorization endpoint discovered or configured")
@@ -227,6 +271,9 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 		return authServerMetadata{}, errors.New("no token endpoint discovered or configured")
 	}
 	if err := validateResolvedEndpoints(metadata); err != nil {
+		return authServerMetadata{}, err
+	}
+	if err := validateProtectedDiscoveredEndpoints(ctx, metadata); err != nil {
 		return authServerMetadata{}, err
 	}
 	return metadata, nil
@@ -387,10 +434,25 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 	}
 	defer listener.Close()
 	redirectURI := fmt.Sprintf("http://%s/callback", listener.Addr().String())
+	protectedEndpointClient := httpClient
+	if metadata.protectRegistrationEndpoint || metadata.protectTokenEndpoint {
+		protectedEndpointClient, err = newAdvertisedOAuthDiscoveryClient(httpClient, metadata.protectedResourceURL)
+		if err != nil {
+			return StoredToken{}, err
+		}
+	}
+	tokenClient := httpClient
+	if metadata.protectTokenEndpoint {
+		tokenClient = protectedEndpointClient
+	}
 
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		if registration := strings.TrimSpace(metadata.RegistrationEndpoint); registration != "" {
-			clientID, clientSecret, regErr := registerClient(loginCtx, httpClient, registration, redirectURI, cfg.Scopes)
+			registrationClient := httpClient
+			if metadata.protectRegistrationEndpoint {
+				registrationClient = protectedEndpointClient
+			}
+			clientID, clientSecret, regErr := registerClient(loginCtx, registrationClient, registration, redirectURI, cfg.Scopes)
 			if regErr != nil {
 				return StoredToken{}, regErr
 			}
@@ -414,7 +476,7 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 	}
 
 	flow := &authorizationFlow{
-		httpClient: httpClient,
+		httpClient: tokenClient,
 		metadata:   metadata,
 		config:     cfg,
 		pkce:       pkce,

@@ -3,10 +3,12 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -42,6 +44,42 @@ func TestOAuthDiscoveryNetworkPolicyRejectsNonPublicAddresses(t *testing.T) {
 	}
 	if err := loopbackPolicy.validateAddress(netip.MustParseAddr("10.0.0.1")); err == nil {
 		t.Fatal("loopback development must not permit arbitrary private targets")
+	}
+}
+
+func TestProtectedDiscoveryRejectsNonPublicOAuthEndpoints(t *testing.T) {
+	for _, endpoint := range []struct {
+		name     string
+		metadata authServerMetadata
+	}{
+		{
+			name: "authorization",
+			metadata: authServerMetadata{
+				AuthorizationEndpoint:        "http://127.0.0.1/authorize",
+				protectAuthorizationEndpoint: true,
+			},
+		},
+		{
+			name: "token",
+			metadata: authServerMetadata{
+				TokenEndpoint:        "https://10.0.0.1/token",
+				protectTokenEndpoint: true,
+			},
+		},
+		{
+			name: "registration",
+			metadata: authServerMetadata{
+				RegistrationEndpoint:        "https://169.254.169.254/register",
+				protectRegistrationEndpoint: true,
+			},
+		},
+	} {
+		t.Run(endpoint.name, func(t *testing.T) {
+			endpoint.metadata.protectedResourceURL = "https://mcp.example/mcp"
+			if err := validateProtectedDiscoveredEndpoints(context.Background(), endpoint.metadata); err == nil {
+				t.Fatalf("protected %s endpoint should be rejected", endpoint.name)
+			}
+		})
 	}
 }
 
@@ -102,5 +140,41 @@ func TestAdvertisedOAuthDiscoveryPinsResolvedAddress(t *testing.T) {
 	response.Body.Close()
 	if dialedAddress != net.JoinHostPort(publicAddress, "80") {
 		t.Fatalf("dialed %q, want resolved address", dialedAddress)
+	}
+}
+
+func TestPinnedOAuthDiscoveryPreservesHTTPSProxyFirstHop(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		proxy    string
+		firstHop string
+	}{
+		{name: "HTTP", proxy: "http://proxy.example:8080", firstHop: "proxy.example:8080"},
+		{name: "HTTPS", proxy: "https://proxy.example:8443", firstHop: "proxy.example:8443"},
+		{name: "SOCKS", proxy: "socks5://proxy.example:1080", firstHop: "proxy.example:1080"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			proxyURL, err := url.Parse(test.proxy)
+			if err != nil {
+				t.Fatalf("parse proxy URL: %v", err)
+			}
+			var dialedAddress string
+			baseTransport := &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+				DialContext: func(_ context.Context, _, address string) (net.Conn, error) {
+					dialedAddress = address
+					return nil, errors.New("stop after observing first hop")
+				},
+			}
+			request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://auth.example/metadata", nil)
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+
+			_, _ = roundTripPinnedOAuthDiscovery(request, baseTransport, netip.MustParseAddr("93.184.216.34"))
+			if dialedAddress != test.firstHop {
+				t.Fatalf("dialed %q, want %s proxy first hop", dialedAddress, test.name)
+			}
+		})
 	}
 }

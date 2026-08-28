@@ -3,7 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -11,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestParseResourceMetadataURL(t *testing.T) {
@@ -323,6 +327,223 @@ func TestProtectedDiscoveryPathsSendNoCookies(t *testing.T) {
 	}
 	if probeCookie != "" || resourceCookie != "" || issuerCookie != "" {
 		t.Fatalf("discovery sent cookies: probe=%q resource=%q issuer=%q", probeCookie, resourceCookie, issuerCookie)
+	}
+}
+
+func TestProtectedDiscoveryPreservesExplicitEndpointOverride(t *testing.T) {
+	fixture := newPublicProtectedOAuthFixture(t, "", "https://93.184.216.35/token", "", "")
+	explicitToken := "http://127.0.0.1:19432/token"
+	metadata, err := resolveAuthorizationServer(context.Background(), fixture.client, fixture.resourceURL, OAuthConfig{TokenEndpoint: explicitToken})
+	if err != nil {
+		t.Fatalf("resolve with explicit endpoint override: %v", err)
+	}
+	if metadata.TokenEndpoint != explicitToken || metadata.protectTokenEndpoint {
+		t.Fatalf("explicit token override lost provenance: endpoint=%q protected=%v", metadata.TokenEndpoint, metadata.protectTokenEndpoint)
+	}
+}
+
+func TestProtectedDiscoveryRejectsLoopbackRegistrationEndpointBeforeUse(t *testing.T) {
+	var registrationHits atomic.Int64
+	registration := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		registrationHits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"client_id": "registered-client"})
+	}))
+	defer registration.Close()
+	fixture := newPublicProtectedOAuthFixture(t, registration.URL+"/register", "https://93.184.216.35/token", "", "")
+
+	_, err := Login(context.Background(), LoginOptions{
+		ServerName: "registration-ssrf",
+		ServerURL:  fixture.resourceURL,
+		HTTPClient: fixture.client,
+		OpenBrowser: func(string) error {
+			return errors.New("authorization browser should not open")
+		},
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("protected discovery should reject a loopback registration endpoint")
+	}
+	if registrationHits.Load() != 0 {
+		t.Fatalf("loopback registration endpoint received %d request(s)", registrationHits.Load())
+	}
+}
+
+func TestProtectedDiscoveryRejectsLoopbackTokenEndpointBeforeUse(t *testing.T) {
+	var tokenHits atomic.Int64
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		tokenHits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "unexpected",
+			"token_type":   "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+	fixture := newPublicProtectedOAuthFixture(t, "", tokenServer.URL+"/token", "", "")
+
+	_, err := Login(context.Background(), LoginOptions{
+		ServerName: "token-ssrf",
+		ServerURL:  fixture.resourceURL,
+		Config:     OAuthConfig{ClientID: "configured-client"},
+		HTTPClient: fixture.client,
+		OpenBrowser: func(authURL string) error {
+			parsed, parseErr := url.Parse(authURL)
+			if parseErr != nil {
+				return parseErr
+			}
+			callbackURL := parsed.Query().Get("redirect_uri") + "?code=code&state=" + url.QueryEscape(parsed.Query().Get("state"))
+			go func() {
+				for attempt := 0; attempt < 20; attempt++ {
+					response, requestErr := http.Get(callbackURL)
+					if requestErr == nil {
+						response.Body.Close()
+						return
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+			}()
+			return nil
+		},
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("protected discovery should reject a loopback token endpoint")
+	}
+	if tokenHits.Load() != 0 {
+		t.Fatalf("loopback token endpoint received %d request(s)", tokenHits.Load())
+	}
+}
+
+func TestProtectedDiscoveryRegistrationRefusesPublicToPrivateRedirect(t *testing.T) {
+	var victimHits atomic.Int64
+	victim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		victimHits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"client_id": "redirected-client"})
+	}))
+	defer victim.Close()
+	fixture := newPublicProtectedOAuthFixture(t, "", "https://93.184.216.35/token", victim.URL+"/register", "")
+
+	_, err := Login(context.Background(), LoginOptions{
+		ServerName: "registration-redirect",
+		ServerURL:  fixture.resourceURL,
+		HTTPClient: fixture.client,
+		OpenBrowser: func(string) error {
+			return errors.New("authorization browser should not open")
+		},
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("protected registration redirect should be refused")
+	}
+	if victimHits.Load() != 0 {
+		t.Fatalf("registration redirect reached private victim %d time(s)", victimHits.Load())
+	}
+}
+
+func TestProtectedDiscoveryTokenRefusesPublicToPrivateRedirect(t *testing.T) {
+	var victimHits atomic.Int64
+	victim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		victimHits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "redirected-token", "token_type": "Bearer"})
+	}))
+	defer victim.Close()
+	fixture := newPublicProtectedOAuthFixture(t, "", "", "", victim.URL+"/token")
+
+	_, err := Login(context.Background(), LoginOptions{
+		ServerName: "token-redirect",
+		ServerURL:  fixture.resourceURL,
+		Config:     OAuthConfig{ClientID: "configured-client"},
+		HTTPClient: fixture.client,
+		OpenBrowser: func(authURL string) error {
+			parsed, parseErr := url.Parse(authURL)
+			if parseErr != nil {
+				return parseErr
+			}
+			callbackURL := parsed.Query().Get("redirect_uri") + "?code=code&state=" + url.QueryEscape(parsed.Query().Get("state"))
+			go func() {
+				for attempt := 0; attempt < 20; attempt++ {
+					response, requestErr := http.Get(callbackURL)
+					if requestErr == nil {
+						response.Body.Close()
+						return
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+			}()
+			return nil
+		},
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("protected token redirect should be refused")
+	}
+	if victimHits.Load() != 0 {
+		t.Fatalf("token redirect reached private victim %d time(s)", victimHits.Load())
+	}
+}
+
+type publicProtectedOAuthFixture struct {
+	client      *http.Client
+	resourceURL string
+}
+
+func newPublicProtectedOAuthFixture(t *testing.T, registrationEndpoint string, tokenEndpoint string, registrationRedirect string, tokenRedirect string) publicProtectedOAuthFixture {
+	t.Helper()
+	var resourceOrigin, issuerOrigin string
+	gateway := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resourceHost := strings.TrimPrefix(resourceOrigin, "https://")
+		issuerHost := strings.TrimPrefix(issuerOrigin, "https://")
+		switch {
+		case r.Host == resourceHost && r.URL.Path == "/mcp":
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+resourceOrigin+`/metadata"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case r.Host == resourceHost && r.URL.Path == "/metadata":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":              resourceOrigin + "/mcp",
+				"authorization_servers": []string{issuerOrigin},
+			})
+		case r.Host == issuerHost && r.URL.Path == "/.well-known/oauth-authorization-server":
+			metadataRegistration := registrationEndpoint
+			metadataToken := tokenEndpoint
+			if registrationRedirect != "" {
+				metadataRegistration = issuerOrigin + "/register"
+			}
+			if tokenRedirect != "" {
+				metadataToken = issuerOrigin + "/token"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"issuer":                 issuerOrigin,
+				"authorization_endpoint": issuerOrigin + "/authorize",
+				"token_endpoint":         metadataToken,
+				"registration_endpoint":  metadataRegistration,
+			})
+		case r.Host == issuerHost && r.URL.Path == "/register" && registrationRedirect != "":
+			http.Redirect(w, r, registrationRedirect, http.StatusTemporaryRedirect)
+		case r.Host == issuerHost && r.URL.Path == "/token" && tokenRedirect != "":
+			http.Redirect(w, r, tokenRedirect, http.StatusTemporaryRedirect)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(gateway.Close)
+	port := gateway.Listener.Addr().(*net.TCPAddr).Port
+	resourceOrigin = fmt.Sprintf("https://93.184.216.34:%d", port)
+	issuerOrigin = fmt.Sprintf("https://93.184.216.35:%d", port)
+
+	transport := gateway.Client().Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	transport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // hermetic public-address routing fixture
+	dialer := &net.Dialer{}
+	gatewayAddress := gateway.Listener.Addr().String()
+	transport.DialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(address)
+		if err == nil && (host == "93.184.216.34" || host == "93.184.216.35") {
+			return dialer.DialContext(ctx, network, gatewayAddress)
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
+	return publicProtectedOAuthFixture{
+		client:      &http.Client{Transport: transport},
+		resourceURL: resourceOrigin + "/mcp",
 	}
 }
 

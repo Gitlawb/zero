@@ -104,8 +104,20 @@ func (transport advertisedOAuthDiscoveryTransport) RoundTrip(request *http.Reque
 		return nil, err
 	}
 	var lastErr error
-	for _, address := range addresses {
-		response, roundTripErr := roundTripPinnedOAuthDiscovery(request, baseTransport, address)
+	for index, address := range addresses {
+		attempt := request
+		if index > 0 && request.Body != nil {
+			if request.GetBody == nil {
+				break
+			}
+			body, bodyErr := request.GetBody()
+			if bodyErr != nil {
+				return nil, bodyErr
+			}
+			attempt = request.Clone(request.Context())
+			attempt.Body = body
+		}
+		response, roundTripErr := roundTripPinnedOAuthDiscovery(attempt, baseTransport, address)
 		if roundTripErr == nil {
 			return response, nil
 		}
@@ -140,37 +152,10 @@ func roundTripPinnedOAuthDiscovery(request *http.Request, base *http.Transport, 
 
 	pinnedTransport := base.Clone()
 	pinnedTransport.DisableKeepAlives = true
-	if pinnedTransport.TLSClientConfig == nil {
-		pinnedTransport.TLSClientConfig = &tls.Config{ServerName: originalHost} //nolint:gosec // standard verification remains enabled
-	} else {
-		pinnedTransport.TLSClientConfig = pinnedTransport.TLSClientConfig.Clone()
-		if pinnedTransport.TLSClientConfig.ServerName == "" {
-			pinnedTransport.TLSClientConfig.ServerName = originalHost
-		}
-	}
-	// A custom TLS dialer must not resolve the advertised hostname again after
-	// the policy has pinned it. Dial the selected address and complete the TLS
-	// handshake here; DialTLSContext takes priority over the legacy TLS dialer.
-	dialContext := pinnedTransport.DialContext
-	if dialContext == nil {
-		dialContext = (&net.Dialer{}).DialContext
-	}
-	pinnedAddress := net.JoinHostPort(address.String(), port)
-	tlsConfig := pinnedTransport.TLSClientConfig
-	pinnedTransport.DialTLSContext = func(ctx context.Context, network string, _ string) (net.Conn, error) {
-		connection, err := dialContext(ctx, network, pinnedAddress)
-		if err != nil {
-			return nil, err
-		}
-		tlsConnection := tls.Client(connection, tlsConfig)
-		if err := tlsConnection.HandshakeContext(ctx); err != nil {
-			connection.Close()
-			return nil, err
-		}
-		return tlsConnection, nil
-	}
+	var proxyURL *url.URL
 	if base.Proxy != nil {
-		proxyURL, err := base.Proxy(request)
+		var err error
+		proxyURL, err = base.Proxy(request)
 		if err != nil {
 			return nil, fmt.Errorf("mcp oauth: resolve discovery proxy: %w", err)
 		}
@@ -180,7 +165,43 @@ func roundTripPinnedOAuthDiscovery(request *http.Request, base *http.Transport, 
 			pinnedTransport.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
+	if pinnedTransport.TLSClientConfig == nil {
+		pinnedTransport.TLSClientConfig = &tls.Config{ServerName: originalHost} //nolint:gosec // standard verification remains enabled
+	} else {
+		pinnedTransport.TLSClientConfig = pinnedTransport.TLSClientConfig.Clone()
+		pinnedTransport.TLSClientConfig.ServerName = originalHost
+	}
+	// A custom TLS dialer must not resolve the advertised hostname again after
+	// the policy has pinned it. For an HTTPS proxy, however, that proxy remains
+	// the TLS first hop and the transport sends CONNECT to the pinned target.
+	dialContext := pinnedTransport.DialContext
+	if dialContext == nil {
+		dialContext = (&net.Dialer{}).DialContext
+	}
+	pinnedAddress := net.JoinHostPort(address.String(), port)
+	targetTLSConfig := pinnedTransport.TLSClientConfig
+	pinnedTransport.DialTLSContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		if proxyURL != nil && strings.EqualFold(proxyURL.Scheme, "https") {
+			proxyTLSConfig := targetTLSConfig.Clone()
+			proxyTLSConfig.ServerName = proxyURL.Hostname()
+			return dialOAuthDiscoveryTLS(ctx, dialContext, network, address, proxyTLSConfig)
+		}
+		return dialOAuthDiscoveryTLS(ctx, dialContext, network, pinnedAddress, targetTLSConfig)
+	}
 	return pinnedTransport.RoundTrip(pinnedRequest)
+}
+
+func dialOAuthDiscoveryTLS(ctx context.Context, dialContext func(context.Context, string, string) (net.Conn, error), network string, address string, config *tls.Config) (net.Conn, error) {
+	connection, err := dialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	tlsConnection := tls.Client(connection, config)
+	if err := tlsConnection.HandshakeContext(ctx); err != nil {
+		connection.Close()
+		return nil, err
+	}
+	return tlsConnection, nil
 }
 
 func (policy oauthDiscoveryNetworkPolicy) resolve(ctx context.Context, host string) ([]netip.Addr, error) {
