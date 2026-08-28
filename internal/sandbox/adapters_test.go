@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"errors"
-	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -38,10 +37,7 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 	})
 
 	t.Run("linux helper missing uses self-exec when bwrap exists", func(t *testing.T) {
-		exe, err := os.Executable()
-		if err != nil {
-			t.Fatalf("os.Executable: %v", err)
-		}
+		exe := fakeZeroMain(t)
 		backend := SelectBackend(BackendOptions{
 			GOOS: "linux",
 			LookupExecutable: func(name string) (string, error) {
@@ -53,7 +49,7 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 			DetectWSL: func() WSLInfo { return WSLInfo{} },
 		})
 		if backend.Name != BackendLinuxBwrap || !backend.Available || backend.Executable != exe {
-			t.Fatalf("linux backend = %#v, want self-exec of os.Executable", backend)
+			t.Fatalf("linux backend = %#v, want self-exec of fake zero", backend)
 		}
 		if len(backend.ExecutableArgsPrefix) != 1 || backend.ExecutableArgsPrefix[0] != LinuxSandboxHelperSubcommand {
 			t.Fatalf("linux self-exec prefix = %#v, want [%q]", backend.ExecutableArgsPrefix, LinuxSandboxHelperSubcommand)

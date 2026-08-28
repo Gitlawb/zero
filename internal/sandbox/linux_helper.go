@@ -495,11 +495,13 @@ func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 	return LinuxSandboxHelperCommand{}, errors.New("zero-linux-sandbox helper is not available")
 }
 
+var linuxSandboxExecutable = os.Executable
+
 func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandboxHelperCommand {
 	if lookup == nil {
 		lookup = lookupExecutable
 	}
-	if exe, err := os.Executable(); err == nil {
+	if exe, err := linuxSandboxExecutable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
 		if executableRegularFile(candidate) {
 			return LinuxSandboxHelperCommand{Name: candidate}
@@ -508,13 +510,22 @@ func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandbox
 	if path, err := lookup(LinuxSandboxHelperName); err == nil && strings.TrimSpace(path) != "" {
 		return LinuxSandboxHelperCommand{Name: path}
 	}
-	if exe, err := os.Executable(); err == nil && executableRegularFile(exe) {
+	if exe, err := linuxSandboxExecutable(); err == nil && executableRegularFile(exe) && linuxMainBinaryName(exe) {
 		return LinuxSandboxHelperCommand{
 			Name:       exe,
 			ArgsPrefix: []string{LinuxSandboxHelperSubcommand},
 		}
 	}
 	return LinuxSandboxHelperCommand{}
+}
+
+func linuxMainBinaryName(path string) bool {
+	switch filepath.Base(path) {
+	case "zero", "zero.exe":
+		return true
+	default:
+		return false
+	}
 }
 
 func executableRegularFile(path string) bool {

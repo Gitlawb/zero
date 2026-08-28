@@ -10,6 +10,18 @@ import (
 	"testing"
 )
 
+func fakeZeroMain(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "zero")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restore := linuxSandboxExecutable
+	t.Cleanup(func() { linuxSandboxExecutable = restore })
+	linuxSandboxExecutable = func() (string, error) { return path, nil }
+	return path
+}
+
 func TestBuildLinuxSandboxCommandArgsSerializesPermissionProfile(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{

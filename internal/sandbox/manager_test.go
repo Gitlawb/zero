@@ -337,10 +337,7 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 }
 
 func TestSelectPlatformBackendLinuxSelfExecWhenStandaloneHelperMissing(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
+	exe := fakeZeroMain(t)
 	manager := NewSandboxManager(SandboxManagerOptions{
 		GOOS: "linux",
 		LookupExecutable: func(name string) (string, error) {
@@ -355,7 +352,7 @@ func TestSelectPlatformBackendLinuxSelfExecWhenStandaloneHelperMissing(t *testin
 		t.Fatalf("backend = %#v, want native linux bwrap via self-exec", backend)
 	}
 	if backend.Executable != exe {
-		t.Fatalf("executable = %q, want os.Executable %q", backend.Executable, exe)
+		t.Fatalf("executable = %q, want fake zero %q", backend.Executable, exe)
 	}
 	if len(backend.ExecutableArgsPrefix) != 1 || backend.ExecutableArgsPrefix[0] != LinuxSandboxHelperSubcommand {
 		t.Fatalf("args prefix = %#v, want [%q]", backend.ExecutableArgsPrefix, LinuxSandboxHelperSubcommand)
@@ -363,10 +360,7 @@ func TestSelectPlatformBackendLinuxSelfExecWhenStandaloneHelperMissing(t *testin
 }
 
 func TestSandboxManagerLinuxSelfExecSelectionDrivesCommandPlan(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
+	exe := fakeZeroMain(t)
 	manager := NewSandboxManager(SandboxManagerOptions{
 		GOOS: "linux",
 		LookupExecutable: func(name string) (string, error) {
@@ -389,7 +383,7 @@ func TestSandboxManagerLinuxSelfExecSelectionDrivesCommandPlan(t *testing.T) {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
 	if !plan.Wrapped || plan.Name != exe || plan.EnforcementLevel != EnforcementNative {
-		t.Fatalf("plan = %#v, want native wrap of os.Executable", plan)
+		t.Fatalf("plan = %#v, want native wrap of fake zero", plan)
 	}
 	if len(plan.Args) == 0 || plan.Args[0] != LinuxSandboxHelperSubcommand {
 		t.Fatalf("plan.Args = %#v, want prefix %q", plan.Args, LinuxSandboxHelperSubcommand)
