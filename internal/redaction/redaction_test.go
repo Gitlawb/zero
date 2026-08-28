@@ -159,6 +159,7 @@ func TestRedactStringCatchesSecretsSplitByControlBytes(t *testing.T) {
 		{name: "NUL", split: "\x00"},
 		{name: "ESC", split: "\x1b"},
 		{name: "C1", split: "\x9b"},
+		{name: "UTF-8 C1", split: string(rune(0x9B))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,5 +175,12 @@ func TestRedactStringCatchesSecretsSplitByControlBytes(t *testing.T) {
 				t.Fatalf("expected %q after %s split, got %q", RedactedSecret, tc.name, got)
 			}
 		})
+	}
+}
+
+func TestRedactStringPreservesAllowedWhitespaceAndUTF8(t *testing.T) {
+	input := "safe\tline\nnext\rfinal café"
+	if got := RedactString(input, Options{}); got != input {
+		t.Fatalf("unexpected normalization: %q", got)
 	}
 }
