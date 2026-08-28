@@ -426,8 +426,14 @@ func appendUnreadableLinuxPaths(args []string, paths []string, carveouts []strin
 		if !linuxCredentialParentSafeToTmpfs(parent, writeRoots) {
 			continue
 		}
-		seenParents[parent] = struct{}{}
-		args = appendLinuxParentTmpfsOmitting(args, parent, omits[parent])
+		var applied bool
+		args, applied = appendLinuxParentTmpfsOmitting(args, parent, omits[parent])
+		if applied {
+			// Record the parent only after the overlay is actually added. A
+			// ReadDir failure leaves the directory intact, so denied regular
+			// files under it still need --ro-bind /dev/null.
+			seenParents[parent] = struct{}{}
+		}
 	}
 	for _, file := range classified.files {
 		parent := filepath.Clean(filepath.Dir(file))
@@ -581,11 +587,11 @@ func linuxCredentialDirPath(path string) bool {
 	return false
 }
 
-func appendLinuxParentTmpfsOmitting(args []string, parent string, omit map[string]struct{}) []string {
+func appendLinuxParentTmpfsOmitting(args []string, parent string, omit map[string]struct{}) ([]string, bool) {
 	parent = filepath.Clean(parent)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return args
+		return args, false
 	}
 	// 555 keeps option-2 public names (config, known_hosts, *.pub) listable
 	// after the overlay; denied basenames are simply not rebound.
@@ -606,7 +612,7 @@ func appendLinuxParentTmpfsOmitting(args []string, parent string, omit map[strin
 		}
 		args = append(args, "--ro-bind", sibling, sibling)
 	}
-	return append(args, "--remount-ro", parent)
+	return append(args, "--remount-ro", parent), true
 }
 
 // nestedCarveoutPaths returns the carveouts that sit strictly inside root,
