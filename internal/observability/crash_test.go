@@ -2,6 +2,7 @@ package observability
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -83,6 +84,51 @@ func TestWriteCrashReportHardensPreexistingDefaultDirectories(t *testing.T) {
 		if got := info.Mode().Perm(); got&0o077 != 0 {
 			t.Fatalf("directory %s permissions = %04o after migration, want owner-only", path, got)
 		}
+	}
+}
+
+func TestWriteCrashReportBindsDirectoryDuringSwap(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "live")
+	movedDir := filepath.Join(parent, "moved")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	var swapErr error
+	path, err := writeCrashReport(dir, "cli", "secret panic", []byte("secret stack"), ts, func() {
+		swapErr = os.Rename(dir, movedDir)
+		if swapErr != nil {
+			return
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("create substitute crash directory: %v", err)
+		}
+	})
+	if err != nil {
+		t.Fatalf("writeCrashReport: %v", err)
+	}
+	if swapErr != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatalf("swap crash directory: %v", swapErr)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("report missing after Windows blocked directory swap: %v", err)
+		}
+		return
+	}
+
+	reportName := filepath.Base(path)
+	data, err := os.ReadFile(filepath.Join(movedDir, reportName))
+	if err != nil {
+		t.Fatalf("read report through originally bound directory: %v", err)
+	}
+	if !strings.Contains(string(data), "secret panic") {
+		t.Fatalf("report in bound directory missing panic: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(dir, reportName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("substitute directory received crash report: %v", err)
 	}
 }
 
