@@ -125,6 +125,13 @@ func TestRewritePosixWorkspacePath(t *testing.T) {
 			want:      "file",
 		},
 		{
+			name:      "windows tmp double slash rewrites",
+			goos:      "windows",
+			workspace: workspace,
+			requested: "/tmp/zero//file",
+			want:      "file",
+		},
+		{
 			name:      "windows rooted backslash system32 stays",
 			goos:      "windows",
 			workspace: workspace,
@@ -167,11 +174,27 @@ func TestAnnotatePosixWindowsPathError(t *testing.T) {
 	if !strings.Contains(msg, "Windows") {
 		t.Fatalf("hint missing Windows host: %q", msg)
 	}
-	if !strings.Contains(msg, root) {
-		t.Fatalf("hint missing workspace root %q: %q", root, msg)
-	}
 	if !strings.Contains(msg, "POSIX") {
 		t.Fatalf("hint missing POSIX path wording: %q", msg)
+	}
+	if strings.Contains(msg, root) {
+		t.Fatalf("hint must not name the workspace root %q: %q", root, msg)
+	}
+	if strings.Contains(msg, "workspace root") {
+		t.Fatalf("hint must not name the workspace root: %q", msg)
+	}
+
+	etcMiss := &os.PathError{Op: "stat", Path: "/etc/passwd", Err: os.ErrNotExist}
+	got = annotatePosixWindowsPathError("windows", root, "/etc/passwd", etcMiss)
+	if got == nil {
+		t.Fatal("expected wrapped missing-path error for /etc/passwd")
+	}
+	msg = got.Error()
+	if !strings.Contains(msg, "/etc/passwd") {
+		t.Fatalf("hint should name the requested POSIX path: %q", msg)
+	}
+	if strings.Contains(msg, root) {
+		t.Fatalf("hint must not name the workspace root %q: %q", root, msg)
 	}
 
 	if got := annotatePosixWindowsPathError("linux", root, "/tmp/does-not-exist-xyz", missing); got != missing {
@@ -230,8 +253,8 @@ func TestResolveWorkspacePathAnnotatesPosixMissOnWindows(t *testing.T) {
 	if !strings.Contains(msg, "Windows") {
 		t.Fatalf("error missing Windows host hint: %q", msg)
 	}
-	if !strings.Contains(msg, root) {
-		t.Fatalf("error missing workspace root %q: %q", root, msg)
+	if strings.Contains(msg, "workspace root") {
+		t.Fatalf("hint must not name the workspace root: %q", msg)
 	}
 	if strings.Contains(msg, "must stay inside the workspace") {
 		t.Fatalf("POSIX miss used confinement instead of a missing-path hint: %q", msg)
@@ -290,6 +313,22 @@ func TestResolveWorkspaceTargetPathRewritesMissingTmpFile(t *testing.T) {
 	}
 	if relative != "new.txt" {
 		t.Fatalf("relative = %q, want new.txt", relative)
+	}
+}
+
+func TestResolveWorkspacePathRewritesDoubleSlashTmpFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "file"), "workspace file")
+
+	_, relative, err := resolveWorkspacePathForGOOS("windows", root, "/tmp/zero//file")
+	if err != nil {
+		t.Fatalf("double-slash POSIX tmp path should resolve: %v", err)
+	}
+	if relative != "file" {
+		t.Fatalf("relative = %q, want file", relative)
 	}
 }
 

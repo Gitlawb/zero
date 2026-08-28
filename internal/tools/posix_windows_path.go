@@ -35,12 +35,14 @@ func isDriveLetter(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
-// isAbsForGOOS reports whether path is absolute on goos. On Windows a POSIX
-// leading "/" is not absolute (no volume or UNC), matching Windows
-// filepath.IsAbs, so those paths join onto the workspace.
+// isAbsForGOOS reports whether path is absolute on goos, independently of the
+// host. Non-Windows goos treats a leading "/" as absolute rather than calling
+// host filepath.IsAbs. On Windows a POSIX leading "/" is not absolute (no
+// volume or UNC), matching Windows filepath.IsAbs, so those paths join onto
+// the workspace.
 func isAbsForGOOS(goos, path string) bool {
 	if goos != "windows" {
-		return filepath.IsAbs(path)
+		return strings.HasPrefix(filepath.ToSlash(path), "/")
 	}
 	if path == "" {
 		return false
@@ -93,7 +95,15 @@ func posixPathSegments(path string) []string {
 	if normalized == "" {
 		return nil
 	}
-	return strings.Split(normalized, "/")
+	raw := strings.Split(normalized, "/")
+	parts := make([]string, 0, len(raw))
+	for _, part := range raw {
+		if part == "" {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
 }
 
 func restAfterPrefix(parts []string, prefixLen int) (string, bool) {
@@ -207,6 +217,9 @@ func isMissingPathError(err error) bool {
 // (outsideWorkspaceError) are left unchanged — those messages are already
 // actionable. The requested path is the original argument so the hint names
 // what the model passed, even if a synthetic prefix was already stripped.
+// The hint does not name the workspace root: a POSIX path such as /etc/passwd
+// joins into the workspace as a missing file, and naming the root would leak
+// it next to the requested path.
 func annotatePosixWindowsPathError(goos, workspaceRoot, requested string, err error) error {
 	if goos != "windows" || err == nil {
 		return err
@@ -217,9 +230,5 @@ func annotatePosixWindowsPathError(goos, workspaceRoot, requested string, err er
 	if !isMissingPathError(err) {
 		return err
 	}
-	root := workspaceRoot
-	if abs, absErr := filepath.Abs(workspaceRoot); absErr == nil {
-		root = abs
-	}
-	return fmt.Errorf("%w; host is Windows and %q looks like a POSIX absolute path; use a workspace-relative path or a Windows path (workspace root: %s)", err, requested, root)
+	return fmt.Errorf("%w; host is Windows and %q looks like a POSIX absolute path; use a workspace-relative path or a Windows path", err, requested)
 }
