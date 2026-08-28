@@ -898,6 +898,46 @@ func TestWalkSSHPrivateKeyFilesDeniesPrivateKeyPayloadNamedPub(t *testing.T) {
 	}
 }
 
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFilePubWithPrivateKeyPayload(t *testing.T) {
+	home := t.TempDir()
+	fakePub := filepath.Join(home, "keys", "work.pub")
+	realPub := filepath.Join(home, "keys", "id_ed25519.pub")
+	mustWriteFile(t, fakePub, sshPrivateKeyFixture())
+	mustWriteFile(t, realPub, "ssh-ed25519 AAAA public\n")
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile ~/keys/work.pub\nIdentityFile ~/keys/id_ed25519.pub\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakePub) {
+		t.Fatalf("IdentityFile ~/keys/work.pub with private-key payload is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realPub) {
+		t.Fatalf("real ssh-ed25519 .pub at IdentityFile path was denied; public keys must stay readable")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileNamedKnownHosts(t *testing.T) {
+	home := t.TempDir()
+	fakeKnown := filepath.Join(home, "keys", "known_hosts")
+	realKnown := filepath.Join(home, "other", "known_hosts")
+	mustWriteFile(t, fakeKnown, sshPrivateKeyFixture())
+	mustWriteFile(t, realKnown, "example.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile ~/keys/known_hosts\nUserKnownHostsFile ~/other/known_hosts\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakeKnown) {
+		t.Fatalf("IdentityFile of a private-key file named known_hosts is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realKnown) {
+		t.Fatalf("real known_hosts file was denied")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
 func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowReadThroughDirSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation is not reliably available on Windows CI")
@@ -963,6 +1003,67 @@ func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowReadThroughDirSymlink(t *testin
 		if denyIdx >= 0 {
 			t.Fatalf("full Seatbelt profile still denies canonical ~/.gnupg subtree:\n%s", full)
 		}
+	}
+}
+
+func TestLinuxBwrapAndSeatbeltHonorNestedGPGDirAllowReadThroughDirSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	gnupgTarget := filepath.Join(t.TempDir(), "gnupg-store")
+	keyDir := filepath.Join(gnupgTarget, "private-keys-v1.d")
+	key := filepath.Join(keyDir, "keygrip.key")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, filepath.Join(gnupgTarget, "secring.gpg"), "fake-secring")
+	mustSymlink(t, gnupgTarget, filepath.Join(home, ".gnupg"))
+
+	allow := []string{filepath.Join(home, ".gnupg", "private-keys-v1.d")}
+	creds := credentialDenyReadPathsIn(credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}, allow)
+	canonicalGnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	canonicalKeyDir := normalizeCredentialCarveoutPath(filepath.Join(home, ".gnupg", "private-keys-v1.d"))
+	if canonicalKeyDir == "" {
+		t.Fatalf("nested directory grant did not produce a credential carveout")
+	}
+	if canonicalGnupg == "" || !denyListedExact(creds.Paths, canonicalGnupg) {
+		t.Fatalf("canonical ~/.gnupg must stay denied so the directory carveout can re-bind: %v", creds.Paths)
+	}
+	if !denyListedExact(creds.Carveouts, canonicalKeyDir) {
+		t.Fatalf("canonical private-keys-v1.d carveout missing: %v", creds.Carveouts)
+	}
+	if denyListedExact(creds.Paths, canonicalKeyDir) || denyListedExact(creds.Paths, keyDir) {
+		t.Fatalf("nested directory grant itself was emitted as a deny path: %v", creds.Paths)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator), canonicalKeyDir},
+			DenyReadIfExists:  creds.Paths,
+			DenyReadCarveouts: creds.Carveouts,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	assertArgsContainSequence(t, args, "--perms", "111", "--tmpfs", canonicalGnupg)
+	assertArgsContainSequence(t, args, "--ro-bind", canonicalKeyDir, canonicalKeyDir)
+	assertArgsContainSequence(t, args, "--remount-ro", canonicalGnupg)
+	bindIdx := argsSequenceIndex(args, "--ro-bind", canonicalKeyDir, canonicalKeyDir)
+	remountIdx := argsSequenceIndex(args, "--remount-ro", canonicalGnupg)
+	if bindIdx < 0 || remountIdx < 0 || bindIdx > remountIdx {
+		t.Fatalf("canonical carveout bind (%d) must precede tmpfs remount-ro (%d): %#v", bindIdx, remountIdx, args)
+	}
+
+	sbpl := strings.Join(denyReadCarveoutRules(profile.FileSystem), "\n")
+	keyDirLit := sandboxProfileString(canonicalKeyDir)
+	if !strings.Contains(sbpl, `(allow file-read* file-test-existence (subpath "`+keyDirLit+`"))`) {
+		t.Fatalf("Seatbelt carveout rules missing canonical private-keys-v1.d:\n%s", sbpl)
+	}
+	full := seatbeltProfileFromPermissionProfile(profile, Policy{}, "")
+	if !strings.Contains(full, `(allow file-read* file-test-existence (subpath "`+keyDirLit+`"))`) {
+		t.Fatalf("full Seatbelt profile missing canonical directory carveout:\n%s", full)
 	}
 }
 
@@ -1032,6 +1133,59 @@ func TestLinuxBwrapMasksLiveAndDanglingCredentialSymlinks(t *testing.T) {
 	if argsContainSequence(args, "--tmpfs", home) || argsContainSequence(args, "--tmpfs", filepath.Clean(home)) {
 		t.Fatalf("HOME must never be tmpfs-overlaid: %#v", args)
 	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapSkipsFileBindsUnderOverlaidCredentialParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	realDir := t.TempDir()
+	workTarget := filepath.Join(realDir, "work")
+	mustWriteFile(t, workTarget, sshPrivateKeyFixture())
+	workLink := filepath.Join(sshDir, "work")
+	mustSymlink(t, workTarget, workLink)
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	mustWriteFile(t, idEd, sshPrivateKeyFixture())
+	config := filepath.Join(sshDir, "config")
+	mustWriteFile(t, config, "Host *\n")
+	danglingSibling := filepath.Join(sshDir, "config.local")
+	mustSymlink(t, filepath.Join(realDir, "missing-config.local"), danglingSibling)
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workLink) {
+		t.Fatalf("denied symlink ~/.ssh/work missing from deny list: %v", denied)
+	}
+	if !denyCovered(denied, idEd) {
+		t.Fatalf("denied regular ~/.ssh/id_ed25519 missing from deny list: %v", denied)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	sshDirLex := normalizeProfilePathLexically(sshDir)
+	if !argsContainSequence(args, "--tmpfs", sshDirLex) {
+		t.Fatalf("expected tmpfs overlay of ~/.ssh once a denied symlink is present: %#v", args)
+	}
+	if argsContainSequence(args, "--ro-bind", "/dev/null", idEd) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", normalizeProfilePath(idEd)) {
+		t.Fatalf("--ro-bind /dev/null onto regular file whose parent was tmpfs-overlaid: %#v", args)
+	}
+	if argsContainSequence(args, "--ro-bind", idEd, idEd) {
+		t.Fatalf("denied regular key was rebound into ~/.ssh overlay: %#v", args)
+	}
+	if argsContainSequence(args, "--ro-bind", danglingSibling, danglingSibling) {
+		t.Fatalf("dangling sibling used as --ro-bind source: %#v", args)
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", config, config)
 	if denyCovered(denied, sshDir) {
 		t.Fatalf("~/.ssh was denied wholesale")
 	}
