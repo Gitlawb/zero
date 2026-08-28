@@ -347,6 +347,96 @@ func TestPreflightRefusesWhenRecoveryMarkerIsDeletedButTrustedRecordRemains(t *t
 	}
 }
 
+// TestPreflightRefusesWhenRecordWriteFailsAndRecoveryMarkerIsDeleted is the
+// #868 follow-up: if the per-user unresolved record cannot be written, the
+// sibling .keep marker is the only remaining install-directory signal. A
+// writer there can delete it. The failed-restore path must still leave a
+// durable fail-closed signal so the next promotion refuses.
+func TestPreflightRefusesWhenRecordWriteFailsAndRecoveryMarkerIsDeleted(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	const suffix = "feedfeedfeedfeedfeedfeedfeedfeed"
+	stubRandomStagingSuffix(t, suffix)
+	originalRename := renameFileByHandle
+	var conflicting windows.Handle
+	renameFileByHandle = func(_ *os.File, target string) error {
+		pathPtr, err := windows.UTF16PtrFromString(target)
+		if err != nil {
+			return err
+		}
+		conflicting, err = windows.CreateFile(pathPtr, windows.GENERIC_WRITE, 0, nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			return fmt.Errorf("create conflicting target: %w", err)
+		}
+		return errors.New("injected promotion failure")
+	}
+	originalAppend := appendUnresolvedRecoveryRecord
+	appendUnresolvedRecoveryRecord = func(string, string, recoveryIdentity) error {
+		return errors.New("injected record write failure")
+	}
+	t.Cleanup(func() {
+		renameFileByHandle = originalRename
+		appendUnresolvedRecoveryRecord = originalAppend
+		if conflicting != 0 {
+			_ = windows.CloseHandle(conflicting)
+		}
+	})
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if conflicting != 0 {
+		_ = windows.CloseHandle(conflicting)
+		conflicting = 0
+	}
+	// Restore production seams so a missed preflight refusal would actually
+	// install, rather than fail for the injected reason.
+	renameFileByHandle = originalRename
+	appendUnresolvedRecoveryRecord = originalAppend
+
+	asidePath := targetPath + ".zero-update-" + suffix + ".old"
+	expectedRecovery := asidePath + "." + suffix + ".recovery"
+	if got, readErr := os.ReadFile(expectedRecovery); readErr != nil || string(got) != "old-binary" {
+		t.Fatalf("relocated recovery copy = %q err=%v, want the last verified binary at %s", got, readErr, expectedRecovery)
+	}
+	if !strings.Contains(err.Error(), expectedRecovery) {
+		t.Fatalf("installBinary error = %v, want the authoritative relocated recovery path", err)
+	}
+	if _, statErr := os.Lstat(asidePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("aside path %s still occupied after relocation: %v", asidePath, statErr)
+	}
+	for _, record := range loadRecoveryCleanupQueue(targetPath).Records {
+		if record.Unresolved {
+			t.Fatalf("unresolved record was written despite injected failure: %+v", record)
+		}
+	}
+
+	clearOldBinaryPreserved(asidePath)
+	if oldBinaryPreserved(asidePath) {
+		t.Fatal("marker deletion did not take effect")
+	}
+
+	err = installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("retry after record-write failure and marker deletion = %v, want refusal", err)
+	}
+	if !strings.Contains(err.Error(), expectedRecovery) {
+		t.Fatalf("error = %v, want it to name relocated recovery path %s", err, expectedRecovery)
+	}
+	if got, readErr := os.ReadFile(expectedRecovery); readErr != nil || string(got) != "old-binary" {
+		t.Fatalf("recovery copy after refusal = %q err=%v, want it left intact", got, readErr)
+	}
+}
+
 // TestSuccessfulPromoteCleanupRecordDoesNotBlockLaterUpdate pins the success
 // path for #868: a verified promotion still writes a cleanup record, that
 // record is not unresolved, and the next update proceeds.

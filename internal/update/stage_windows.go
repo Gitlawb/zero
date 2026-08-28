@@ -155,10 +155,10 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	if renameErr != nil {
 		if restoreErr := restoreOriginalBinary(original, asidePath, targetPath); restoreErr != nil {
 			// Best-effort: the restore error is what the operator must see.
-			// The .keep marker is still in the install directory if this write
-			// fails; if it succeeds, deleting that marker cannot silence the
-			// next preflight (#868).
-			_ = appendUnresolvedRecoveryRecord(targetPath, asidePath, originalIdentity)
+			// persistFailedRestoreSignal writes the per-user record when it
+			// can, and otherwise relocates the last verified copy so deleting
+			// the sibling .keep marker cannot silence the next preflight (#868).
+			restoreErr = persistFailedRestoreSignal(original, targetPath, asidePath, originalIdentity, restoreErr)
 			return fmt.Errorf("install new binary: %v; additionally failed to restore the original binary: %w", renameErr, restoreErr)
 		}
 		return fmt.Errorf("install new binary: %w", renameErr)

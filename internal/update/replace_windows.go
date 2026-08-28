@@ -431,8 +431,29 @@ func appendRecoveryCleanupRecord(targetPath string, recoveryPath string, identit
 // as the last verified binary. Unlike the sibling .keep marker in the
 // installation directory, this lives in per-user state an install-directory
 // writer cannot delete. Preflight consults it alongside the marker (#868).
-func appendUnresolvedRecoveryRecord(targetPath string, recoveryPath string, identity recoveryIdentity) error {
+//
+// A var so a test can force the failure branch. Making the real per-user store
+// unwritable also takes down cleanup-queue writes this path does not own.
+var appendUnresolvedRecoveryRecord = func(targetPath string, recoveryPath string, identity recoveryIdentity) error {
 	return appendRecoveryCleanupRecordWithState(targetPath, recoveryPath, identity, true)
+}
+
+// persistFailedRestoreSignal keeps a durable fail-closed preflight signal after
+// restoreOriginalBinary has already written the sibling .keep marker. The
+// preferred signal is the per-user unresolved record. If that write fails, the
+// marker is the only remaining protection and an install-directory writer can
+// delete it; relocate the last verified copy to a .recovery name so the next
+// preflight still refuses (#868).
+func persistFailedRestoreSignal(file *os.File, targetPath string, asidePath string, identity recoveryIdentity, restoreErr error) error {
+	if err := appendUnresolvedRecoveryRecord(targetPath, asidePath, identity); err == nil {
+		return restoreErr
+	} else if kept, keepErr := keepUnmarkedRecoveryCopy(file, asidePath); keepErr == nil {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v; the last binary this updater verified was moved to the distinct recovery path %s)", restoreErr, err, kept)
+	} else if kept != "" {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v; the last binary this updater verified was moved to %s but could not be verified there: %v)", restoreErr, err, kept, keepErr)
+	} else {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v)", restoreErr, err)
+	}
 }
 
 func appendRecoveryCleanupRecordWithState(targetPath string, recoveryPath string, identity recoveryIdentity, unresolved bool) error {
