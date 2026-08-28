@@ -96,19 +96,19 @@ var protectedMetadataNames = []string{".git", ".zero", ".agents"}
 // gitMetadataWriteCarveouts below.
 var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
-// gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
-// under the OS-level sandbox even though the rest of .git is writable to git
-// subprocesses. Nonexistent paths are harmless no-ops in every backend's
-// enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
+// gitMetadataWriteCarveouts returns the .git paths that stay write-denied under
+// the OS-level sandbox even though the rest of .git is writable to git
+// subprocesses. Worktrees and submodules store .git as a pointer file, so they
+// protect that file itself: constructing .git/hooks below a file makes bwrap
+// fail before the command starts. The pointer is deliberately not parsed here;
+// repository-controlled metadata must not redirect sandbox rules elsewhere.
 func gitMetadataWriteCarveouts(root string) []string {
-	// Worktrees/submodules store .git as a *file* ("gitdir: <path>"), so
-	// .git/hooks has no parent dir — a --tmpfs carveout there makes bwrap fail
-	// ("Can't mkdir parents ... Not a directory") and blocks every sandboxed
-	// tool. Resolve the real (common) git dir in that case; otherwise keep the
-	// plain-checkout paths (harmless no-ops when .git is absent).
 	gitPath := filepath.Join(root, ".git")
 	info, err := os.Lstat(gitPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return []string{gitPath}
+		}
 		return []string{
 			filepath.Join(gitPath, "hooks"),
 			filepath.Join(gitPath, "config"),
@@ -123,194 +123,14 @@ func gitMetadataWriteCarveouts(root string) []string {
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, statErr := os.Stat(gitPath)
 		if statErr == nil && target.IsDir() {
+			// Preserve the pre-existing behavior for directory symlinks.
 			return []string{
 				filepath.Join(gitPath, "hooks"),
 				filepath.Join(gitPath, "config"),
 			}
 		}
-		return []string{gitPath}
 	}
-	if !info.Mode().IsRegular() {
-		return []string{gitPath}
-	}
-
-	// .git is a file. Following gitdir/commondir is only safe when the
-	// real resolved directory stays inside this write root. An escaping
-	// pointer is untrusted input: do not carve outside the workspace, and
-	// do not fall back to <root>/.git/{hooks,config} (that path has no
-	// mkdir-able parent under a .git file and would crash bwrap). Missing
-	// carveouts drop git metadata protection; unbounded carveouts drop
-	// confinement.
-	//
-	// Always write-deny the .git pointer file itself so a sandboxed command
-	// cannot rewrite gitdir: between PermissionProfileFromPolicy calls.
-	gitDir := resolveGitDir(root)
-	if gitDir == "" || !pathContainedInRoot(root, gitDir) {
-		return []string{gitPath}
-	}
-	common := resolveGitCommonDir(gitDir)
-	if common == "" || !pathContainedInRoot(root, common) {
-		return []string{gitPath}
-	}
-	// Emit carveouts under the caller's lexical write root so a symlink
-	// workspace still matches the path the sandbox binds.
-	gitDir = pathUnderRoot(root, gitDir)
-	common = pathUnderRoot(root, common)
-	if gitDir == "" || common == "" {
-		return []string{gitPath}
-	}
-	carveouts := []string{
-		gitPath,
-		filepath.Join(common, "hooks"),
-		filepath.Join(common, "config"),
-	}
-	if gitDir != common {
-		carveouts = append(carveouts,
-			filepath.Join(gitDir, "hooks"),
-			filepath.Join(gitDir, "config"),
-		)
-	}
-	return carveouts
-}
-
-// resolveGitDir returns the real git directory for a workspace root when .git
-// is a gitdir: pointer file. Returns "" for absent, malformed, or unreadable
-// pointers so callers can refuse carveouts instead of pointing at a bogus path.
-func resolveGitDir(root string) string {
-	gitPath := filepath.Join(root, ".git")
-	info, err := os.Lstat(gitPath)
-	if err != nil {
-		return ""
-	}
-	if info.IsDir() {
-		return gitPath
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, statErr := os.Stat(gitPath)
-		if statErr == nil && target.IsDir() {
-			return gitPath
-		}
-		return ""
-	}
-	if !info.Mode().IsRegular() {
-		return ""
-	}
-	data, err := readRegularFile(gitPath)
-	if err != nil {
-		return ""
-	}
-	line := ""
-	for _, candidate := range strings.Split(string(data), "\n") {
-		candidate = strings.TrimSpace(candidate)
-		if candidate != "" {
-			line = candidate
-			break
-		}
-	}
-	const prefix = "gitdir:"
-	if !strings.HasPrefix(strings.ToLower(line), prefix) {
-		return ""
-	}
-	dir := strings.TrimSpace(line[len(prefix):])
-	if dir == "" {
-		return ""
-	}
-	// Worktree gitdir pointers are often relative to the worktree root.
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(root, dir)
-	}
-	dir = filepath.Clean(dir)
-	info, err = os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		return ""
-	}
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return ""
-	}
-	return resolved
-}
-
-// resolveGitCommonDir returns the shared git dir for a (possibly worktree)
-// gitDir. Worktree gitdirs carry a "commondir" pointer (usually "../.."); plain
-// checkouts have none and are their own common dir. An unreadable or empty
-// commondir keeps gitDir. A present but non-directory commondir is refused.
-func resolveGitCommonDir(gitDir string) string {
-	data, err := readRegularFile(filepath.Join(gitDir, "commondir"))
-	if err != nil {
-		return gitDir
-	}
-	common := strings.TrimSpace(string(data))
-	if common == "" {
-		return gitDir
-	}
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(gitDir, common)
-	}
-	common = filepath.Clean(common)
-	info, err := os.Stat(common)
-	if err != nil || !info.IsDir() {
-		return ""
-	}
-	resolved, err := filepath.EvalSymlinks(common)
-	if err != nil {
-		return ""
-	}
-	return resolved
-}
-
-func readRegularFile(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, os.ErrInvalid
-	}
-	return os.ReadFile(path)
-}
-
-func containedReadOnlySubpaths(root string, subpaths []string) []string {
-	out := make([]string, 0, len(subpaths))
-	for _, subpath := range subpaths {
-		subpath = strings.TrimSpace(subpath)
-		if subpath == "" {
-			continue
-		}
-		if !pathContainedInRoot(root, subpath) {
-			continue
-		}
-		out = append(out, subpath)
-	}
-	return out
-}
-
-func pathContainedInRoot(root, target string) bool {
-	return pathUnderRoot(root, target) != ""
-}
-
-func pathUnderRoot(root, target string) string {
-	root = filepath.Clean(root)
-	target = filepath.Clean(target)
-	evalRoot := root
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		evalRoot = resolved
-	}
-	evalTarget := target
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
-		evalTarget = resolved
-	}
-	rel, err := filepath.Rel(evalRoot, evalTarget)
-	if err != nil {
-		return ""
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return ""
-	}
-	if rel == "." {
-		return root
-	}
-	return filepath.Join(root, rel)
+	return []string{gitPath}
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {

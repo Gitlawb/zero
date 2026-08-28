@@ -97,8 +97,10 @@ func windowsWriteRootCapabilities(config WindowsSandboxCommandConfig) ([]windows
 			return nil, err
 		}
 		protected := make([]string, 0, len(root.ProtectedMetadataNames)+len(root.ReadOnlySubpaths))
-		for _, subpath := range containedReadOnlySubpaths(rootPath, root.ReadOnlySubpaths) {
-			protected = append(protected, subpath)
+		for _, subpath := range root.ReadOnlySubpaths {
+			if trimmed := strings.TrimSpace(subpath); trimmed != "" {
+				protected = append(protected, trimmed)
+			}
 		}
 		for _, name := range root.ProtectedMetadataNames {
 			if trimmed := strings.TrimSpace(name); trimmed != "" {
