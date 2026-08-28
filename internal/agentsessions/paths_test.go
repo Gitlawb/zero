@@ -39,6 +39,19 @@ func TestRootsHonourTheAgentsRedirectVariables(t *testing.T) {
 	}
 }
 
+func TestRelativeRedirectVariablesAreRejected(t *testing.T) {
+	env := testEnv(t.TempDir(), map[string]string{
+		"CLAUDE_CONFIG_DIR": ".config/claude",
+		"CODEX_HOME":        ".codex",
+	})
+	if got, want := claudeCodeRoot(env), filepath.Join(env.Home, ".claude", "projects"); got != want {
+		t.Fatalf("relative CLAUDE_CONFIG_DIR resolved from process cwd: got %q, want %q", got, want)
+	}
+	if got, want := codexRoot(env), filepath.Join(env.Home, ".codex", "sessions"); got != want {
+		t.Fatalf("relative CODEX_HOME resolved from process cwd: got %q, want %q", got, want)
+	}
+}
+
 func TestAnUnknownHomeYieldsNoRootRatherThanARelativePath(t *testing.T) {
 	// With no home, a naive filepath.Join would produce ".claude/projects" and
 	// probe relative to the process working directory — a different user's
@@ -247,6 +260,15 @@ func TestSameDirFollowsSymlinks(t *testing.T) {
 		if !sameDir(link, real) {
 			t.Error("a symlinked workspace should resolve to the same directory")
 		}
+	}
+}
+
+func TestSameDirUsesCaseInsensitiveComparisonOnWindows(t *testing.T) {
+	if !sameDirForOS("/Work/Project", "/work/project", "windows") {
+		t.Fatal("Windows workspace comparison rejected a case-only spelling difference")
+	}
+	if sameDirForOS("/Work/Project", "/work/other", "windows") {
+		t.Fatal("Windows workspace comparison accepted different paths")
 	}
 }
 

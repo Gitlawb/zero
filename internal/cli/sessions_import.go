@@ -208,7 +208,7 @@ func runSessionsImport(store *sessions.Store, ref string, options sessionCommand
 	}
 
 	lines := importSummaryLines(result)
-	if warning := importWorkspaceWarning(result.Session.Cwd); warning != "" {
+	if warning := importWorkspaceWarning(result.Source.Cwd); warning != "" {
 		lines = append(lines, "", warning)
 	}
 	lines = append(lines, "",

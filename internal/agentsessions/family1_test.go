@@ -214,6 +214,9 @@ func TestFindTranscriptCannotBeTalkedIntoOpeningAnArbitraryPath(t *testing.T) {
 // undocumented files belonging to another product, and a shape change upstream
 // should surface here rather than as an empty list in front of a user.
 func TestTheRealCorpusStillParses(t *testing.T) {
+	if os.Getenv("ZERO_TEST_LIVE_AGENT_SESSIONS") != "1" {
+		t.Skip("set ZERO_TEST_LIVE_AGENT_SESSIONS=1 to inspect the local Claude Code store")
+	}
 	env := OSEnv()
 	adapter := ClaudeCode(env)
 	root := claudeCodeRoot(env)

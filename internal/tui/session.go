@@ -348,7 +348,7 @@ func (m model) resumeEvents(sessionID string) ([]sessions.Event, error) {
 func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) string {
 	modelLine := "model: " + displayValue(m.modelName, "none")
 	if recorded := strings.TrimSpace(session.ModelID); recorded != "" && !strings.EqualFold(recorded, m.modelName) {
-		modelLine += "  (recorded: " + recorded + ")"
+		modelLine += "  (recorded: " + agentsessions.DisplayField(recorded) + ")"
 	}
 	providerLine := "provider: " + displayValue(m.providerName, "none")
 	if recorded := strings.TrimSpace(session.Provider); recorded != "" && !strings.EqualFold(recorded, m.providerName) {
@@ -519,7 +519,7 @@ func (m model) importForeignSession(ref string) (string, string, error) {
 func importedSessionNote(result agentsessions.ImportResult, workspace string) string {
 	note := fmt.Sprintf("Imported %s session %s into Zero as %s (%d events).",
 		result.Source.Agent, agentsessions.DisplayField(result.Source.ID), result.Session.SessionID, result.Events)
-	if recorded := strings.TrimSpace(result.Session.Cwd); recorded != "" && !sessionMatchesWorkspace(recorded, workspace) {
+	if recorded := strings.TrimSpace(result.Source.Cwd); recorded != "" && !sessionMatchesWorkspace(recorded, workspace) {
 		note += "\nIt ran in " + agentsessions.DisplayField(recorded) + ", so paths it mentions refer to that tree."
 	}
 	return note

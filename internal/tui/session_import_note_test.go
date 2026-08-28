@@ -69,7 +69,9 @@ func TestTheImportNoteCleansAStoredCwdItDidNotWrite(t *testing.T) {
 	result := agentsessions.ImportResult{
 		Session: sessions.Metadata{SessionID: "zero_1", Cwd: "/elsewhere/\x1b[31mred\x1b[0m/proj"},
 		Events:  2,
-		Source:  agentsessions.ForeignSession{Agent: "claude-code", ID: "abc\x1b[2Kdef"},
+		Source: agentsessions.ForeignSession{
+			Agent: "claude-code", ID: "abc\x1b[2Kdef", Cwd: "/elsewhere/\x1b[31mred\x1b[0m/proj",
+		},
 	}
 	got := importedSessionNote(result, t.TempDir())
 	const want = "Imported claude-code session abc[2Kdef into Zero as zero_1 (2 events).\n" +
@@ -86,7 +88,7 @@ func TestTheImportNoteOmitsTheWorkspaceSentenceInTheSameTree(t *testing.T) {
 	got := importedSessionNote(agentsessions.ImportResult{
 		Session: sessions.Metadata{SessionID: "zero_1", Cwd: here},
 		Events:  1,
-		Source:  agentsessions.ForeignSession{Agent: "codex", ID: "x"},
+		Source:  agentsessions.ForeignSession{Agent: "codex", ID: "x", Cwd: here},
 	}, here)
 	if strings.Contains(got, "It ran in") {
 		t.Errorf("a session imported from the current workspace was called foreign: %q", got)

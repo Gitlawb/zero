@@ -3,6 +3,7 @@ package agentsessions
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -46,14 +47,14 @@ func (env Env) underHome(parts ...string) string {
 // nothing while looking like it worked.
 
 func claudeCodeRoot(env Env) string {
-	if dir := env.lookup("CLAUDE_CONFIG_DIR"); dir != "" {
+	if dir := env.lookup("CLAUDE_CONFIG_DIR"); filepath.IsAbs(dir) {
 		return filepath.Join(dir, "projects")
 	}
 	return env.underHome(".claude", "projects")
 }
 
 func codexRoot(env Env) string {
-	if dir := env.lookup("CODEX_HOME"); dir != "" {
+	if dir := env.lookup("CODEX_HOME"); filepath.IsAbs(dir) {
 		return filepath.Join(dir, "sessions")
 	}
 	return env.underHome(".codex", "sessions")
@@ -194,10 +195,17 @@ func normalizeDir(path string) string {
 
 // sameDir reports whether two directory paths refer to the same workspace.
 func sameDir(left string, right string) bool {
+	return sameDirForOS(left, right, runtime.GOOS)
+}
+
+func sameDirForOS(left string, right string, goos string) bool {
 	normalizedLeft := normalizeDir(left)
 	normalizedRight := normalizeDir(right)
 	if normalizedLeft == "" || normalizedRight == "" {
 		return false
+	}
+	if goos == "windows" {
+		return strings.EqualFold(normalizedLeft, normalizedRight)
 	}
 	return normalizedLeft == normalizedRight
 }

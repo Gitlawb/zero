@@ -9,6 +9,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/zerocommands"
 )
 
 func writeImportFixture(t *testing.T, path string, content string) {
@@ -18,6 +19,20 @@ func writeImportFixture(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionListSanitizesPersistedModelMetadata(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
+	line := formatSessionSnapshotLine(zerocommands.SessionSnapshot{
+		SessionID: "session-1",
+		ModelID:   "claude\x1b[2K-opus\n" + secret,
+	})
+	if strings.Contains(line, "\x1b") || strings.Contains(line, secret) {
+		t.Fatalf("unsafe model metadata reached the session list: %q", line)
+	}
+	if !strings.Contains(line, "model=claude[2K-opus [REDACTED]") {
+		t.Fatalf("session list lost safe model text: %q", line)
 	}
 }
 

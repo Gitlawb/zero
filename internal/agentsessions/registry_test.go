@@ -24,7 +24,7 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	// fields: encoding/json rejects a raw one inside a string, so a transcript
 	// that carries an escape carries it escaped.
 	writeFile(t, transcript, strings.Join([]string{
-		`{"type":"user","cwd":"/w/\u001b[2Kmoved\u000dhidden/proj","sessionId":"hostile","message":{"role":"user","content":"hi"}}`,
+		`{"type":"user","cwd":"/w/\u001b[2Kmoved\u000dhidden/proj","sessionId":"hostile","message":{"role":"user","content":"hi","model":"claude\u001b[2K-opus\nsk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"}}`,
 		`{"type":"ai-title","aiTitle":"deploy\u0007 it\nwith key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA","sessionId":"hostile"}`,
 	}, "\n")+"\n")
 
@@ -49,6 +49,10 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	if result.Session.Cwd != wantCwd {
 		t.Errorf("stored cwd = %q, want %q", result.Session.Cwd, wantCwd)
 	}
+	const wantModel = "claude[2K-opus [REDACTED]"
+	if result.Session.ModelID != wantModel {
+		t.Errorf("stored model = %q, want %q", result.Session.ModelID, wantModel)
+	}
 
 	// And the record on disk, not merely the value handed back: the metadata is
 	// re-read by every later `zero sessions` verb and by /resume.
@@ -56,9 +60,9 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	if err != nil || reloaded == nil {
 		t.Fatalf("reloading the imported session: %v", err)
 	}
-	if reloaded.Title != wantTitle || reloaded.Cwd != wantCwd {
-		t.Errorf("reloaded title/cwd = %q / %q, want %q / %q",
-			reloaded.Title, reloaded.Cwd, wantTitle, wantCwd)
+	if reloaded.Title != wantTitle || reloaded.Cwd != wantCwd || reloaded.ModelID != wantModel {
+		t.Errorf("reloaded title/cwd/model = %q / %q / %q, want %q / %q / %q",
+			reloaded.Title, reloaded.Cwd, reloaded.ModelID, wantTitle, wantCwd, wantModel)
 	}
 }
 
