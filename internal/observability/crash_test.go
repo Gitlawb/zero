@@ -251,6 +251,49 @@ func TestWriteCrashReportPreservesPathAfterCommittedCleanupWarning(t *testing.T)
 	}
 }
 
+func TestWriteCrashReportDoesNotReturnStalePathWithCleanupWarning(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "live")
+	movedDir := filepath.Join(parent, "moved")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected cleanup failure")
+	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	var swapErr error
+	path, err := writeCrashReport(dir, "cli", "boom", []byte("complete stack"), ts, crashReportHooks{
+		beforePublish: func() {
+			swapErr = os.Rename(dir, movedDir)
+			if swapErr == nil {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatalf("create substitute crash directory: %v", err)
+				}
+			}
+		},
+		remove: func(*os.Root, string) error { return injected },
+	})
+	if swapErr != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows kept the open crash directory from being renamed: %v", swapErr)
+		}
+		t.Fatalf("swap crash directory: %v", swapErr)
+	}
+	if !errors.Is(err, ErrCrashReportCommitted) || !errors.Is(err, injected) {
+		t.Fatalf("writeCrashReport error = %v, want committed cleanup warning", err)
+	}
+	if path != "" {
+		t.Fatalf("writeCrashReport returned stale path %q after directory swap", path)
+	}
+	report := filepath.Join(movedDir, "crash-20260824-120000.log")
+	data, readErr := os.ReadFile(report)
+	if readErr != nil {
+		t.Fatalf("read committed report through moved directory: %v", readErr)
+	}
+	if !strings.Contains(string(data), "complete stack") {
+		t.Fatalf("committed report is incomplete: %q", data)
+	}
+}
+
 func TestWriteCrashReportFallsBackWhenHardLinksAreUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
