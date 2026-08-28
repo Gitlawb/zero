@@ -12,13 +12,22 @@ import (
 
 func fakeZeroMain(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "zero")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	name := "zero"
+	if runtime.GOOS == "windows" {
+		name = "zero.exe"
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restore := linuxSandboxExecutable
-	t.Cleanup(func() { linuxSandboxExecutable = restore })
+	restoreExec := linuxSandboxExecutable
+	restoreFile := linuxFileIsExecutable
+	t.Cleanup(func() {
+		linuxSandboxExecutable = restoreExec
+		linuxFileIsExecutable = restoreFile
+	})
 	linuxSandboxExecutable = func() (string, error) { return path, nil }
+	linuxFileIsExecutable = func(p string) bool { return p == path }
 	return path
 }
 
@@ -495,6 +504,26 @@ func TestFindLinuxSandboxHelperCommandSelfExec(t *testing.T) {
 	}
 }
 
+func TestBuildLinuxSandboxBwrapPlanVersionedStandaloneOmitsVerb(t *testing.T) {
+	plan, err := buildLinuxSandboxBwrapPlan(LinuxSandboxBwrapOptions{
+		Config: LinuxSandboxHelperConfig{
+			SandboxPolicyCWD: t.TempDir(),
+			CommandCWD:       t.TempDir(),
+			Command:          []string{"echo", "hello"},
+		},
+		HelperPath: "/usr/local/bin/zero-linux-sandbox-v1",
+	})
+	if err != nil {
+		t.Fatalf("buildLinuxSandboxBwrapPlan failed: %v", err)
+	}
+	if argsContainSequence(plan.Args, "__sandbox-helper") {
+		t.Fatalf("versioned standalone helper must not get __sandbox-helper: %v", plan.Args)
+	}
+	if !argsContainSequence(plan.Args, "--", "/usr/local/bin/zero-linux-sandbox-v1", "--sandbox-policy-cwd") {
+		t.Fatalf("expected flags directly after versioned helper path: %v", plan.Args)
+	}
+}
+
 func TestBuildLinuxSandboxBwrapPlanSelfExecInsertsHelperVerb(t *testing.T) {
 	plan, err := buildLinuxSandboxBwrapPlan(LinuxSandboxBwrapOptions{
 		Config: LinuxSandboxHelperConfig{
@@ -503,6 +532,7 @@ func TestBuildLinuxSandboxBwrapPlanSelfExecInsertsHelperVerb(t *testing.T) {
 			Command:          []string{"echo", "hello"},
 		},
 		HelperPath: "/usr/local/bin/zero",
+		SelfExec:   true,
 	})
 	if err != nil {
 		t.Fatalf("buildLinuxSandboxBwrapPlan failed: %v", err)

@@ -156,10 +156,11 @@ go install github.com/Gitlawb/zero/cmd/zero@latest
 This builds from source, so it needs Go 1.26.6+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 
-- On Linux you also need the sandbox helper, which is a separate binary and is
-  not installed by this command. See
+- On Linux, Bubblewrap is still required for native sandboxing. The installed
+  `zero` binary re-executes itself as the helper when `zero-linux-sandbox` is
+  not on `PATH`. A colocated or PATH `zero-linux-sandbox` remains optional and
+  takes precedence. See
   [Sandbox Helpers For Source Builds](#sandbox-helpers-for-source-builds).
-  Without it, native sandboxing is unavailable.
 - `zero upgrade` treats the result as a standalone install and will replace the
   binary with a release build rather than rebuilding from source. If you chose
   `go install` deliberately, rerun it instead.

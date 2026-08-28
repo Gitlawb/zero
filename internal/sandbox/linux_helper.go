@@ -53,6 +53,7 @@ type LinuxSandboxHelperCommand struct {
 type LinuxSandboxBwrapOptions struct {
 	Config     LinuxSandboxHelperConfig
 	HelperPath string
+	SelfExec   bool
 }
 
 type linuxSandboxBwrapPlan struct {
@@ -215,7 +216,7 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 		}
 	}
 	args = append(args, "--", helperPath)
-	if filepath.Base(helperPath) != LinuxSandboxHelperName {
+	if options.SelfExec {
 		args = append(args, LinuxSandboxHelperSubcommand)
 	}
 	args = append(args, innerArgs...)
@@ -503,14 +504,14 @@ func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandbox
 	}
 	if exe, err := linuxSandboxExecutable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
-		if executableRegularFile(candidate) {
+		if linuxFileIsExecutable(candidate) {
 			return LinuxSandboxHelperCommand{Name: candidate}
 		}
 	}
 	if path, err := lookup(LinuxSandboxHelperName); err == nil && strings.TrimSpace(path) != "" {
 		return LinuxSandboxHelperCommand{Name: path}
 	}
-	if exe, err := linuxSandboxExecutable(); err == nil && executableRegularFile(exe) && linuxMainBinaryName(exe) {
+	if exe, err := linuxSandboxExecutable(); err == nil && linuxFileIsExecutable(exe) && linuxMainBinaryName(exe) {
 		return LinuxSandboxHelperCommand{
 			Name:       exe,
 			ArgsPrefix: []string{LinuxSandboxHelperSubcommand},
@@ -527,6 +528,8 @@ func linuxMainBinaryName(path string) bool {
 		return false
 	}
 }
+
+var linuxFileIsExecutable = executableRegularFile
 
 func executableRegularFile(path string) bool {
 	info, err := os.Stat(path)
