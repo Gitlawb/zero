@@ -243,3 +243,120 @@ func TestUnsupportedPlatformSetupError(t *testing.T) {
 		t.Fatalf("want *SetupError for unsupported platform, got %v", err)
 	}
 }
+
+func stagedTree(t *testing.T, dir, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "engine"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestPromoteStagedDirReplacesAPreviousInstall(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-dir")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	if err := promoteStagedDir(stage, dest, "engine"); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("engine = %q, err %v, want %q", got, err, "new")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".previous-") {
+			t.Errorf("the set-aside install should be cleaned up, found %s", e.Name())
+		}
+	}
+}
+
+func TestPromoteStagedDirWorksWithNoPreviousInstall(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-dir")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	if err := promoteStagedDir(stage, dest, "engine"); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("engine = %q, err %v, want %q", got, err, "new")
+	}
+}
+
+// The old code deleted the previous install before it had anything to put in
+// its place, so a failed promotion left the user with no engine at all.
+func TestPromoteStagedDirKeepsThePreviousInstallWhenPromotionFails(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-dir")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	real := renameStagedDir
+	calls := 0
+	renameStagedDir = func(from, to string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected promotion failure")
+		}
+		return real(from, to)
+	}
+	t.Cleanup(func() { renameStagedDir = real })
+
+	if err := promoteStagedDir(stage, dest, "engine"); err == nil {
+		t.Fatal("a failed promotion must be reported")
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil {
+		t.Fatalf("the previous install was not restored: %v", err)
+	}
+	if string(got) != "old" {
+		t.Fatalf("engine = %q, want the previous %q", got, "old")
+	}
+}
+
+// If the restore fails too, the only remaining copy must survive the cleanup.
+func TestPromoteStagedDirKeepsTheSetAsideCopyWhenRestoreAlsoFails(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-dir")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	real := renameStagedDir
+	renameStagedDir = func(string, string) error { return errors.New("injected rename failure") }
+	t.Cleanup(func() { renameStagedDir = real })
+
+	err := promoteStagedDir(stage, dest, "engine")
+	if err == nil {
+		t.Fatal("a failed promotion must be reported")
+	}
+	if !strings.Contains(err.Error(), "previous install left in") {
+		t.Errorf("the error should name the retained copy, got: %v", err)
+	}
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	found := false
+	for _, e := range entries {
+		if !strings.Contains(e.Name(), ".previous-") {
+			continue
+		}
+		got, readErr := os.ReadFile(filepath.Join(root, e.Name(), "install", "engine"))
+		if readErr == nil && string(got) == "old" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the previous install was deleted along with the holder dir")
+	}
+}
