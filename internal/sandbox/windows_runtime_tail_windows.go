@@ -178,15 +178,42 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHas
 	}
 	file := os.NewFile(uintptr(handle), windowsSandboxRuntimeStampName)
 	defer file.Close()
+	reader, err := windowsRuntimeStampReader(directory)
+	if err != nil {
+		return err
+	}
 	// PROTECTED BEFORE ANYTHING IS WRITTEN, because the stamp lives inside the
 	// tree it attests. See protectWindowsRuntimeStamp.
-	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd())); err != nil {
+	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd()), reader); err != nil {
 		return err
 	}
 	if _, err := file.WriteString(planHash); err != nil {
 		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
 	}
 	return nil
+}
+
+// windowsRuntimeStampReader resolves the identity that has to read the stamp
+// AFTER setup returns, from the runtime root the stamp is created in.
+//
+// Taken from the DIRECTORY HANDLE rather than the setup token, because the
+// question is not who elevated but whose install this is. Setup runs elevated
+// and may run as a different administrator account than the one that later runs
+// the command or zero doctor; the runtime root lives under the ordinary user
+// profile and its owner is stable across that boundary.
+func windowsRuntimeStampReader(directory windows.Handle) (*windows.SID, error) {
+	descriptor, err := windows.GetSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, fmt.Errorf("read the sandbox runtime root owner: %w", err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return nil, fmt.Errorf("read the sandbox runtime root owner: %w", err)
+	}
+	if owner == nil {
+		return nil, fmt.Errorf("read the sandbox runtime root owner: the descriptor carried none")
+	}
+	return owner, nil
 }
 
 // protectWindowsRuntimeStamp gives the stamp its own DACL, excluding the
@@ -209,10 +236,9 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHas
 //
 // PROTECTED, not merely explicit: without SE_DACL_PROTECTED the inherited
 // capability ACE stays in the DACL alongside whatever is set here.
-func protectWindowsRuntimeStamp(handle windows.Handle) error {
-	owner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
-	if err != nil {
-		return fmt.Errorf("resolve owner SID for the sandbox runtime stamp: %w", err)
+func protectWindowsRuntimeStamp(handle windows.Handle, reader *windows.SID) error {
+	if reader == nil {
+		return fmt.Errorf("resolve the reader SID for the sandbox runtime stamp: no identity was supplied")
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
@@ -224,8 +250,33 @@ func protectWindowsRuntimeStamp(handle windows.Handle) error {
 	}
 	// Setup writes it, doctor and the elevated command read it; nothing else
 	// needs to reach it, and the capability SID is deliberately absent.
-	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)
-	for _, sid := range []*windows.SID{owner, system, administrators} {
+	//
+	// The reader is named EXPLICITLY and gets READ ONLY. It used to be
+	// WinCreatorOwnerSid at GENERIC_ALL. SetSecurityInfo does substitute that
+	// placeholder even in a NO_INHERITANCE ACE, so the resulting ACE did name a
+	// concrete SID, but the one it named was whoever happened to run setup. When
+	// setup is elevated by a different administrator account than the one that
+	// later runs the command or zero doctor, the reader matches no ACE and
+	// os.ReadFile on the stamp returns Access is denied, so a successful setup
+	// hands over an unreadable attestation. Resolving the identity from the
+	// runtime root the stamp lives in binds it to the install rather than to the
+	// elevation.
+	//
+	// Read only, because nothing outside setup and repair should be able to
+	// rewrite an attestation about the tree. The write below still succeeds: the
+	// handle was opened GENERIC_WRITE before this DACL was applied, and Windows
+	// checks access at open time.
+	entries := []windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.FILE_GENERIC_READ,
+		AccessMode:        windows.SET_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(reader),
+		},
+	}}
+	for _, sid := range []*windows.SID{system, administrators} {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.SET_ACCESS,
@@ -253,7 +304,7 @@ func protectWindowsRuntimeStamp(handle windows.Handle) error {
 }
 
 func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
-	directory, err := openWindowsRuntimeTailDirectory(root, windows.FILE_TRAVERSE|windowsFileAddFile|windows.SYNCHRONIZE)
+	directory, err := openWindowsRuntimeTailDirectory(root, windows.FILE_TRAVERSE|windowsFileAddFile|windows.READ_CONTROL|windows.SYNCHRONIZE)
 	if err != nil {
 		return err
 	}
@@ -290,10 +341,14 @@ func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
 	}
 	file := os.NewFile(uintptr(handle), windowsSandboxRuntimeStampName)
 	defer file.Close()
+	reader, err := windowsRuntimeStampReader(directory)
+	if err != nil {
+		return err
+	}
 	// Both writers protect. This one is the fallback path, and a stamp written
 	// here would inherit the same capability grant as one written through the
 	// ACL handle.
-	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd())); err != nil {
+	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd()), reader); err != nil {
 		return err
 	}
 	if _, err := file.WriteString(planHash); err != nil {
