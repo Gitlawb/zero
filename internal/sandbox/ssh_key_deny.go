@@ -155,18 +155,36 @@ func sshFileLooksLikePrivateKey(path string) bool {
 	return strings.Contains(s, "PRIVATE KEY")
 }
 
-// readRegularFileBounded Lstats first and refuses FIFOs, devices, sockets,
-// and symlinks so profile construction cannot block on a special file. The
-// subsequent read is capped with LimitReader.
+// readRegularFileBounded Lstats first and refuses FIFOs, devices, and
+// sockets so profile construction cannot block on a special file. Regular-file
+// symlinks are followed: OpenSSH reads ~/.ssh/config and Include targets
+// through them, so a relocated IdentityFile would otherwise stay readable.
+// The resolved path is Lstat'd again and opened (bounded LimitReader) so a
+// FIFO or device behind the link is never opened.
 func readRegularFileBounded(path string, maxBytes int) ([]byte, bool) {
 	if maxBytes <= 0 {
 		return nil, false
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil {
 		return nil, false
 	}
-	f, err := os.Open(path)
+	readPath := path
+	if info.Mode().Type() == os.ModeSymlink {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, false
+		}
+		info, err = os.Lstat(resolved)
+		if err != nil {
+			return nil, false
+		}
+		readPath = resolved
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false
+	}
+	f, err := os.Open(readPath)
 	if err != nil {
 		return nil, false
 	}

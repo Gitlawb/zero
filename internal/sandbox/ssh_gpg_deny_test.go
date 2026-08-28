@@ -439,3 +439,94 @@ func TestSSHConfigDiscoveryBoundsOversizedConfig(t *testing.T) {
 		t.Fatalf("~/.ssh was denied wholesale")
 	}
 }
+
+func TestCredentialDenyReadPathsFollowsSymlinkedSSHConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	workKey := filepath.Join(home, "keys", "work_ed25519")
+	mustWriteFile(t, workKey, "")
+	realConfig := filepath.Join(t.TempDir(), "root-config")
+	mustWriteFile(t, realConfig, "IdentityFile ~/keys/work_ed25519\n")
+	mustSymlink(t, realConfig, filepath.Join(home, ".ssh", "config"))
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile via symlinked ~/.ssh/config is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh", "config")) {
+		t.Fatalf("~/.ssh/config was denied")
+	}
+}
+
+func TestCredentialDenyReadPathsFollowsSymlinkedSSHConfigInclude(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	includedKey := filepath.Join(home, "keys", "included_ed25519")
+	mustWriteFile(t, includedKey, "")
+	realInclude := filepath.Join(t.TempDir(), "extra_config")
+	mustWriteFile(t, realInclude, "IdentityFile ~/keys/included_ed25519\n")
+	mustWriteFile(t, filepath.Join(sshDir, "config"), "Include extra_config\n")
+	mustSymlink(t, realInclude, filepath.Join(sshDir, "extra_config"))
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, includedKey) {
+		t.Fatalf("IdentityFile via symlinked Include target is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestUnreadableEnforcementPreservesLexicalWhenSSHDirIsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	realSSH := filepath.Join(t.TempDir(), "ssh-store")
+	idEd := filepath.Join(realSSH, "id_ed25519")
+	mustWriteFile(t, idEd, "")
+	mustSymlink(t, realSSH, filepath.Join(home, ".ssh"))
+
+	lexicalKey := filepath.Join(home, ".ssh", "id_ed25519")
+	lexical := normalizeProfilePathLexically(lexicalKey)
+	if info, err := os.Lstat(lexical); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Type() == os.ModeSymlink {
+		t.Fatalf("expected regular leaf under a symlinked ~/.ssh, got symlink")
+	}
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyListedExact(denied, lexical) {
+		t.Fatalf("lexical candidate %q missing from deny list %v", lexical, denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+
+	enforced := unreadableEnforcementPaths(denied)
+	if !denyListedExact(enforced, lexical) {
+		t.Fatalf("lexical path %q missing from enforcement list %v", lexical, enforced)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	sbpl := strings.Join(denyReadRules(profile.FileSystem), "\n")
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", lexical)
+	if !strings.Contains(sbpl, sandboxProfileString(lexical)) {
+		t.Fatalf("Seatbelt rules missing lexical pathname %q:\n%s", lexical, sbpl)
+	}
+}
