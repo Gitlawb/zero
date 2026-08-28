@@ -332,15 +332,14 @@ func omittedRecordsEvent(count int) sessions.AppendEventInput {
 
 // DisplayField makes one foreign metadata value safe to draw in a terminal.
 //
-// TWO SEPARATE HAZARDS, IN THIS ORDER. The value is a field another product
+// TWO SEPARATE HAZARDS, WITH REDACTION ON BOTH SIDES OF NORMALIZATION. The value is a field another product
 // wrote into its own file: it can carry terminal escapes that repaint the rows
 // around it, and it can carry something shaped like a credential — a title is
 // often the user's first prompt, which is where a pasted key ends up.
 //
-// Controls are stripped FIRST so a secret cannot be split by an escape byte and
-// slip past the shape match, then redaction runs on the reassembled text. That
-// ordering is the same one redaction_order_test.go pins for the transcript path;
-// the display path needed it too. Layout goes as well, unlike the transcript
+// A pre-pass catches an intact secret immediately after a control/escape; then
+// controls are stripped so a secret split by one cannot evade the post-pass.
+// Layout goes as well, unlike the transcript
 // helper, because a metadata field is drawn as one row and a newline in it moves
 // the rest of the line somewhere the caller did not intend.
 //
@@ -356,6 +355,11 @@ func omittedRecordsEvent(count int) sessions.AppendEventInput {
 // invisible bytes — C0, DEL, C1, Cf — are still DELETED, because those are the
 // ones an escape can hide inside a key.
 func DisplayField(value string) string {
+	// Redact once before normalization as well as after it. The first pass catches
+	// an intact credential immediately following an escape/control sequence; the
+	// second catches a credential whose bytes were split by controls and become
+	// contiguous only after those controls are removed.
+	value = redaction.RedactString(value, redaction.Options{})
 	var b strings.Builder
 	b.Grow(len(value))
 	for _, r := range value {

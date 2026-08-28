@@ -31,6 +31,7 @@ func (store *Store) CreateChild(parentSessionID string, input ChildInput) (Metad
 		SessionKind:         SessionKindChild,
 		Title:               childTitle(input.Title, input.AgentName, parent.Title),
 		Cwd:                 firstNonEmpty(input.Cwd, parent.Cwd),
+		WorkspaceKey:        derivedWorkspaceKey(input.Cwd, parent.WorkspaceKey),
 		ModelID:             firstNonEmpty(input.ModelID, parent.ModelID),
 		Provider:            firstNonEmpty(input.Provider, parent.Provider),
 		Tag:                 input.Tag,
