@@ -219,6 +219,83 @@ func TestWriteCrashReportDoesNotOverwriteExistingReport(t *testing.T) {
 	if string(data) != "existing" {
 		t.Fatalf("existing report overwritten: %q", data)
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("crash directory contains temporary files after publish failure: %v", entries)
+	}
+}
+
+func TestWriteCrashReportPreservesPathAfterCommittedCleanupWarning(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	injected := errors.New("injected cleanup failure")
+	path, err := writeCrashReport(dir, "cli", "boom", []byte("complete stack"), ts, crashReportHooks{
+		remove: func(*os.Root, string) error { return injected },
+	})
+	if !errors.Is(err, ErrCrashReportCommitted) || !errors.Is(err, injected) {
+		t.Fatalf("writeCrashReport error = %v, want committed cleanup warning", err)
+	}
+	wantPath := filepath.Join(dir, "crash-20260824-120000.log")
+	if path != wantPath {
+		t.Fatalf("writeCrashReport path = %q, want %q", path, wantPath)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read committed crash report: %v", readErr)
+	}
+	if !strings.Contains(string(data), "complete stack") {
+		t.Fatalf("committed crash report is incomplete: %q", data)
+	}
+}
+
+func TestWriteCrashReportFallsBackWhenHardLinksAreUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	unsupported := errors.New("hard links unavailable")
+	var collisionName string
+	path, err := writeCrashReport(dir, "cli", "boom", []byte("complete stack"), ts, crashReportHooks{
+		link: func(root *os.Root, oldname, _ string) error {
+			suffix := strings.TrimPrefix(oldname, crashTempPrefix)
+			collisionName = "crash-20260824-120000-" + suffix + ".log"
+			if err := root.WriteFile(collisionName, []byte("existing"), 0o600); err != nil {
+				t.Fatalf("create fallback-name collision: %v", err)
+			}
+			return unsupported
+		},
+	})
+	if err != nil {
+		t.Fatalf("writeCrashReport fallback: %v", err)
+	}
+	if path == filepath.Join(dir, collisionName) {
+		t.Fatalf("fallback replaced the existing report %q", collisionName)
+	}
+	if !strings.HasPrefix(filepath.Base(path), "crash-20260824-120000-") {
+		t.Fatalf("fallback path = %q, want timestamp and random suffix", path)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read fallback crash report: %v", readErr)
+	}
+	if !strings.Contains(string(data), "complete stack") {
+		t.Fatalf("fallback crash report is incomplete: %q", data)
+	}
+	existing, readErr := os.ReadFile(filepath.Join(dir, collisionName))
+	if readErr != nil {
+		t.Fatalf("read existing collision: %v", readErr)
+	}
+	if string(existing) != "existing" {
+		t.Fatalf("existing fallback collision was overwritten: %q", existing)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("crash directory contains partial files after fallback: %v", entries)
+	}
 }
 
 type crashWriteResult struct {
@@ -260,5 +337,27 @@ func TestRecoverNoPanicIsNoop(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected output without a panic: %q", stderr.String())
+	}
+}
+
+func TestReportRecoveredCrashReportsCommittedCleanupWarning(t *testing.T) {
+	var stderr bytes.Buffer
+	code := 0
+	injected := errors.New("injected cleanup failure")
+	reportRecoveredCrash(&stderr, &code, "kaboom", []byte("secret stack"), func() (string, error) {
+		return "/tmp/crash.log", &crashReportCommittedError{cause: injected}
+	})
+
+	if code != crashExitCode {
+		t.Fatalf("exit code = %d, want %d", code, crashExitCode)
+	}
+	output := stderr.String()
+	for _, want := range []string{"kaboom", "saved to /tmp/crash.log", "Warning:", injected.Error()} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("crash notice missing %q: %q", want, output)
+		}
+	}
+	if strings.Contains(output, "secret stack") {
+		t.Fatalf("committed report warning fell back to inline stack: %q", output)
 	}
 }
