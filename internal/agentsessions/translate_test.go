@@ -70,14 +70,15 @@ func conversationEvents(events []sessions.AppendEventInput) []sessions.AppendEve
 }
 
 func TestPayloadKeysMatchWhatTheTUIReads(t *testing.T) {
+	identities := &importCallIdentities{}
 	cases := []struct {
 		name  string
 		event sessions.AppendEventInput
 		want  []string
 	}{
 		{"message", messageEvent("user", "hi"), []string{"content", "role"}},
-		{"tool call", toolCallEvent("Read", "toolu_1", "{}"), []string{"arguments", "name", "toolCallId"}},
-		{"tool result", toolResultEvent("Read", "toolu_1", "ok", "out"), []string{"name", "output", "status", "toolCallId"}},
+		{"tool call", toolCallEvent(identities, "Read", "toolu_1", "{}"), []string{"arguments", "name", "toolCallId"}},
+		{"tool result", toolResultEvent(identities, "Read", "toolu_1", "ok", "out"), []string{"name", "output", "status", "toolCallId"}},
 		{"note", noteEvent("trimmed"), []string{"content", "importedActivitySummary", "role"}},
 	}
 	for _, test := range cases {
@@ -166,8 +167,34 @@ func TestACallAndItsResultSharePairingID(t *testing.T) {
 	if call == "" || call != result {
 		t.Errorf("call id %q and result id %q must match and be non-empty", call, result)
 	}
-	if call != "toolu_abc" {
-		t.Errorf("id = %q, want the foreign agent's own id reused verbatim", call)
+	if call == "toolu_abc" {
+		t.Errorf("foreign id was persisted instead of an opaque local identity: %q", call)
+	}
+}
+
+func TestDistinctSecretShapedCallIDsRemainDistinctAndPaired(t *testing.T) {
+	first := "sk-ant-api03-" + strings.Repeat("A", 40)
+	second := "sk-ant-api03-" + strings.Repeat("B", 40)
+	path := writeTranscript(t,
+		`{"type":"assistant","message":{"role":"assistant","content":[`+
+			`{"type":"tool_use","id":"`+first+`","name":"Read","input":{"path":"a"}},`+
+			`{"type":"tool_use","id":"`+second+`","name":"Read","input":{"path":"b"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[`+
+			`{"type":"tool_result","tool_use_id":"`+first+`","content":"first-result"},`+
+			`{"type":"tool_result","tool_use_id":"`+second+`","content":"second-result"}]}}`,
+	)
+	events := conversationEvents(mustTranslate(t, path))
+	if len(events) != 4 {
+		t.Fatalf("translated %d source events, want two calls and two results", len(events))
+	}
+	firstCall, secondCall := str(t, events[0], "toolCallId"), str(t, events[1], "toolCallId")
+	firstResult, secondResult := str(t, events[2], "toolCallId"), str(t, events[3], "toolCallId")
+	if firstCall == secondCall || firstCall != firstResult || secondCall != secondResult {
+		t.Fatalf("opaque pairing collapsed or crossed: calls %q/%q results %q/%q", firstCall, secondCall, firstResult, secondResult)
+	}
+	encoded, _ := json.Marshal(events)
+	if strings.Contains(string(encoded), first) || strings.Contains(string(encoded), second) {
+		t.Fatal("foreign secret-shaped identity survived persistence")
 	}
 }
 
@@ -294,6 +321,27 @@ func TestCappingKeepsTheTailAndSaysSo(t *testing.T) {
 	if last != "turn 49" {
 		t.Errorf("last kept event = %q, want the final turn — the tail is what a "+
 			"resume needs", last)
+	}
+}
+
+func TestCappingCannotLetActivitySummaryEvictSourceTail(t *testing.T) {
+	path := writeTranscript(t,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"parser.go"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"package parser"}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"final source answer"}]}}`,
+	)
+	events, err := translateFamily1("", path, ReadOptions{MaxEvents: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d capped events, want 2", len(events))
+	}
+	if note := str(t, events[0], "content"); !strings.Contains(note, "not imported") {
+		t.Fatalf("source truncation was silent: got %q", note)
+	}
+	if got := str(t, events[1], "content"); got != "final source answer" {
+		t.Fatalf("source tail was evicted by generated context: got %q", got)
 	}
 }
 

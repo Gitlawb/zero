@@ -190,6 +190,7 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 func translateCodex(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
 	events := []sessions.AppendEventInput{}
 	toolNames := map[string]string{}
+	identities := &importCallIdentities{}
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
@@ -237,7 +238,7 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 			toolNames[payload.CallID] = payload.Name
 			arguments := firstNonBlank(payload.Arguments, payload.Input)
 			activity.observeCall(payload.CallID, payload.Name, arguments)
-			events = append(events, toolCallEvent(payload.Name, payload.CallID, arguments))
+			events = append(events, toolCallEvent(identities, payload.Name, payload.CallID, arguments))
 		case "function_call_output", "custom_tool_call_output":
 			name := toolNames[payload.CallID]
 			if name == "" {
@@ -247,7 +248,7 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 			// as ok. Inventing an error status from the text would be guesswork,
 			// and a false "error" is worse than a plain result the reader can see.
 			activity.observeResult(payload.CallID, name, tools.StatusOK, "")
-			events = append(events, toolResultEvent(name, payload.CallID, tools.StatusOK, codexOutputText(payload.Output)))
+			events = append(events, toolResultEvent(identities, name, payload.CallID, tools.StatusOK, codexOutputText(payload.Output)))
 		}
 		return true
 	})
@@ -257,11 +258,11 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 	// SAID OUT LOUD. A resumed conversation that quietly lost a record reads as
 	// complete to both the user and the model continuing it — the failure this
 	// makes visible is a question with no answer followed by a follow-up.
+	contextEvents := activity.summaryEvents()
 	if omitted > 0 {
-		events = append(events, omittedRecordsEvent(omitted))
+		contextEvents = append([]sessions.AppendEventInput{omittedRecordsEvent(omitted)}, contextEvents...)
 	}
-	events = append(events, activity.summaryEvents()...)
-	return capEvents(events, options.MaxEvents), nil
+	return capTranslatedEvents(events, contextEvents, options.MaxEvents), nil
 }
 
 // codexBlocksText flattens input_text/output_text blocks to plain text.
