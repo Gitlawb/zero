@@ -102,10 +102,10 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	}
 
 	// Fuzzy fallback: when the exact string (and its CRLF translation) is absent,
-	// run a cascade of tolerant matchers (trimmed lines, block anchors, collapsed
-	// whitespace, indentation drift, escape normalization) to locate the span the
-	// model intended. Only a span that occurs literally in the file is accepted,
-	// so the replacement applied below is still exact.
+	// run a cascade of tolerant matchers (trimmed lines, collapsed whitespace,
+	// indentation drift, escape normalization) to locate the span the model
+	// intended. These transformations must preserve non-whitespace content; a
+	// merely similar interior is not safe to replace.
 	if occurrences == 0 {
 		findOld, findNew := oldString, newString
 		if strings.Contains(content, "\r\n") && !strings.Contains(findOld, "\r\n") {
