@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -45,6 +46,10 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 			_, _ = w.Wait()
 		}
 	})
+
+	// echo $! races ahead of exit 0. Wait until the leader is an unreaped
+	// zombie without calling Wait, so Kill exercises Darwin Getpgid ESRCH.
+	waitUntilUnreapedZombie(t, w.cmd.Process.Pid)
 
 	if err := w.Kill(); err != nil {
 		t.Fatalf("Kill: %v", err)
@@ -134,6 +139,34 @@ func launcherProcessStopped(pid int) bool {
 	state, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return errors.Is(syscall.Kill(pid, syscall.Signal(0)), syscall.ESRCH)
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
+}
+
+// waitUntilUnreapedZombie polls until pid is a zombie without calling Wait.
+func waitUntilUnreapedZombie(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !isUnreapedZombie(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d did not become an unreaped zombie before Kill", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func isUnreapedZombie(pid int) bool {
+	if data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
+		s := string(data)
+		i := strings.LastIndexByte(s, ')')
+		if i < 0 || i+2 >= len(s) {
+			return false
+		}
+		return s[i+2] == 'Z'
+	}
+	state, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
 	}
 	return strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
 }
