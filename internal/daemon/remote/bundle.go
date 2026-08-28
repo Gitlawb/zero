@@ -172,6 +172,7 @@ func streamFramesToFile(r io.Reader, w io.Writer, size int64) error {
 }
 
 // stagingPrefix names the per-extract staging directories created beside dest.
+// sanitizeLinkID refuses every dot-prefixed id so a link can never name one.
 const stagingPrefix = ".staging-"
 
 // renameDir moves a directory into its published location. It is a var so tests
@@ -411,8 +412,9 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 }
 
 // sanitizeLinkID validates a link id used as a single path component under the
-// bundle dir. It allows letters, digits, '-', '_', '.', forbids the traversal
-// names, and caps the length — so it can never escape the bundle dir.
+// bundle dir. It allows letters, digits, '-', '_', '.', forbids a leading '.',
+// and caps the length, so an id can never escape the bundle dir and can never
+// name one of the stagingPrefix directories an extract creates beside it.
 func sanitizeLinkID(id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -421,8 +423,8 @@ func sanitizeLinkID(id string) (string, error) {
 	if len(id) > 128 {
 		return "", errors.New("remote: link id too long (max 128)")
 	}
-	if id == "." || id == ".." {
-		return "", errors.New("remote: invalid link id")
+	if strings.HasPrefix(id, ".") {
+		return "", errors.New("remote: link id may not start with '.'")
 	}
 	for _, r := range id {
 		switch {
