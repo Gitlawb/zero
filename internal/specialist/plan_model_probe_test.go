@@ -148,6 +148,25 @@ func TestProbeCacheSeparatesProvidersAdvertisingTheSameModel(t *testing.T) {
 	}
 }
 
+func TestSwitchingProviderReprobesAnOverlappingModelID(t *testing.T) {
+	cache := &probeCache{}
+	models := []DiscoveredModel{{ID: "shared-model"}}
+	probes := 0
+	probe := func(context.Context, string) ModelProbeResult {
+		probes++
+		if probes == 1 {
+			return ModelProbeResult{Verdict: ProbeRefuses, Reason: "provider A refuses"}
+		}
+		return ModelProbeResult{Verdict: ProbeServes}
+	}
+
+	proveModels(context.Background(), models, probe, cache, "profile-a|https://a.example/v1")
+	proveModels(context.Background(), models, probe, cache, "profile-b|https://b.example/v1")
+	if probes != 2 {
+		t.Fatalf("provider B reused provider A's verdict; prober called %d time(s)", probes)
+	}
+}
+
 // EVERY CANDIDATE REFUSED POINTS AT THE PROVIDER, NOT THE MODELS. A credential
 // or endpoint problem rejects the whole list, and dropping all of them would
 // disable routing silently at the moment the user most needs telling.

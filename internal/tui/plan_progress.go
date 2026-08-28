@@ -397,8 +397,10 @@ func (bridge *PlanProgressBridge) BackgroundPlanLive() bool {
 	}
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	last := bridge.lastPlans[bridge.planSessionID]
-	return bridge.background && (bridge.cancelPlan != nil || last.name != "")
+	// SetBackground is synchronous at launch, before the goroutine records
+	// admission or installs its cancel function. The flag alone must close that
+	// window or /new and /resume can switch sessions between launch and admission.
+	return bridge.background
 }
 
 // clearPauseLocked releases any waiter. Closing the channel rather than sending
@@ -712,7 +714,7 @@ func (bridge *PlanProgressBridge) finalizePlan(message planCompletedMsg, complet
 	originSessionID := bridge.planSessionID
 	durabilityError := ""
 	if bridge.recordErr != nil {
-		durabilityError = bridge.recordErr.Error()
+		durabilityError = sanitizeCardText(bridge.recordErr.Error())
 	}
 	bridge.cancelPlan = nil
 	bridge.background = false

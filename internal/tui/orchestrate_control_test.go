@@ -60,6 +60,22 @@ func TestPlanControlWithNoPlanRunningRefusesWithAReason(t *testing.T) {
 	}
 }
 
+func TestSessionSwitchCommandsRefuseDuringBackgroundLaunchWindow(t *testing.T) {
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, nil, "session-a")
+	// The launcher sets this before admission or PlanRunning reaches the bridge.
+	bridge.SetBackground(true)
+
+	for _, command := range []parsedCommand{{kind: commandNew}, {kind: commandResume}} {
+		m := model{planProgress: bridge}
+		updated, _ := m.dispatchCommand(command)
+		text := transcriptText(updated.(model).transcript)
+		if !strings.Contains(strings.ToLower(text), "background plan") {
+			t.Fatalf("%v switched sessions during the launch window: %q", command.kind, text)
+		}
+	}
+}
+
 // THE PAUSE ACTUALLY HOLDS THE EXECUTOR, and the release actually releases it.
 // Asserting the boolean alone would pass against a flag nothing waits on.
 func TestPauseHoldsTheExecutorAtATaskBoundary(t *testing.T) {
