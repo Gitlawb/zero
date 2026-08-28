@@ -16,6 +16,8 @@ import (
 
 const LinuxSandboxHelperName = "zero-linux-sandbox"
 
+const LinuxSandboxHelperSubcommand = "__sandbox-helper"
+
 const linuxSandboxBackendEnv = BackendLinuxBwrap
 
 type LinuxSandboxCommandArgsOptions struct {
@@ -214,7 +216,7 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 	}
 	args = append(args, "--", helperPath)
 	if filepath.Base(helperPath) != LinuxSandboxHelperName {
-		args = append(args, "__sandbox-helper")
+		args = append(args, LinuxSandboxHelperSubcommand)
 	}
 	args = append(args, innerArgs...)
 	return linuxSandboxBwrapPlan{
@@ -475,20 +477,8 @@ func pathExists(path string) bool {
 }
 
 func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
-		if executableRegularFile(candidate) {
-			return LinuxSandboxHelperCommand{Name: candidate}, nil
-		}
-	}
-	if path, err := exec.LookPath(LinuxSandboxHelperName); err == nil && path != "" {
-		return LinuxSandboxHelperCommand{Name: path}, nil
-	}
-	if exe, err := os.Executable(); err == nil && executableRegularFile(exe) {
-		return LinuxSandboxHelperCommand{
-			Name:       exe,
-			ArgsPrefix: []string{"__sandbox-helper"},
-		}, nil
+	if cmd := resolveLinuxSandboxHelper(lookupExecutable); cmd.Name != "" {
+		return cmd, nil
 	}
 	if root := linuxSandboxRepoRoot(); root != "" {
 		mainPath := filepath.Join(root, "cmd", LinuxSandboxHelperName, "main.go")
@@ -503,6 +493,28 @@ func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 		}
 	}
 	return LinuxSandboxHelperCommand{}, errors.New("zero-linux-sandbox helper is not available")
+}
+
+func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandboxHelperCommand {
+	if lookup == nil {
+		lookup = lookupExecutable
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
+		if executableRegularFile(candidate) {
+			return LinuxSandboxHelperCommand{Name: candidate}
+		}
+	}
+	if path, err := lookup(LinuxSandboxHelperName); err == nil && strings.TrimSpace(path) != "" {
+		return LinuxSandboxHelperCommand{Name: path}
+	}
+	if exe, err := os.Executable(); err == nil && executableRegularFile(exe) {
+		return LinuxSandboxHelperCommand{
+			Name:       exe,
+			ArgsPrefix: []string{LinuxSandboxHelperSubcommand},
+		}
+	}
+	return LinuxSandboxHelperCommand{}
 }
 
 func executableRegularFile(path string) bool {

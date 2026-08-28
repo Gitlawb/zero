@@ -196,6 +196,35 @@ func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 	assertArgsContainSequence(t, plan.Args, "--", "/bin/sh", "-c", "pwd")
 }
 
+func TestSandboxManagerBuildsCommandPlanThroughLinuxSelfExec(t *testing.T) {
+	backend := Backend{
+		Name:                 BackendLinuxBwrap,
+		Available:            true,
+		Executable:           "/usr/local/bin/zero",
+		ExecutableArgsPrefix: []string{LinuxSandboxHelperSubcommand},
+		Platform:             "linux",
+	}
+	policy := DefaultPolicy()
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend})
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if !plan.Wrapped || plan.Name != "/usr/local/bin/zero" || plan.TargetBackend != BackendLinuxBwrap {
+		t.Fatalf("command plan = %#v, want self-exec linux helper wrapper", plan)
+	}
+	if len(plan.Args) == 0 || plan.Args[0] != LinuxSandboxHelperSubcommand {
+		t.Fatalf("plan.Args = %#v, want prefix %q", plan.Args, LinuxSandboxHelperSubcommand)
+	}
+}
+
 func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	// This exercises the native wrapped path, which requires the workspace to be
 	// sandbox-initialized; stub the marker present (otherwise it degrades).
@@ -304,6 +333,66 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 				t.Fatalf("target backend = %q, want %q for %#v", backend.TargetBackend(), test.wantTarget, backend)
 			}
 		})
+	}
+}
+
+func TestSelectPlatformBackendLinuxSelfExecWhenStandaloneHelperMissing(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	manager := NewSandboxManager(SandboxManagerOptions{
+		GOOS: "linux",
+		LookupExecutable: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			return "", errors.New("missing")
+		},
+	})
+	backend := manager.Backend()
+	if backend.Name != BackendLinuxBwrap || !backend.Available {
+		t.Fatalf("backend = %#v, want native linux bwrap via self-exec", backend)
+	}
+	if backend.Executable != exe {
+		t.Fatalf("executable = %q, want os.Executable %q", backend.Executable, exe)
+	}
+	if len(backend.ExecutableArgsPrefix) != 1 || backend.ExecutableArgsPrefix[0] != LinuxSandboxHelperSubcommand {
+		t.Fatalf("args prefix = %#v, want [%q]", backend.ExecutableArgsPrefix, LinuxSandboxHelperSubcommand)
+	}
+}
+
+func TestSandboxManagerLinuxSelfExecSelectionDrivesCommandPlan(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	manager := NewSandboxManager(SandboxManagerOptions{
+		GOOS: "linux",
+		LookupExecutable: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			return "", errors.New("missing")
+		},
+	})
+	policy := DefaultPolicy()
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/echo", Args: []string{"ok"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if !plan.Wrapped || plan.Name != exe || plan.EnforcementLevel != EnforcementNative {
+		t.Fatalf("plan = %#v, want native wrap of os.Executable", plan)
+	}
+	if len(plan.Args) == 0 || plan.Args[0] != LinuxSandboxHelperSubcommand {
+		t.Fatalf("plan.Args = %#v, want prefix %q", plan.Args, LinuxSandboxHelperSubcommand)
 	}
 }
 
