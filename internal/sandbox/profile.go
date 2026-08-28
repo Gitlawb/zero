@@ -632,9 +632,13 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 }
 
 // appendLexicalCredentialDenyPaths adds the pre-EvalSymlinks spelling of each
-// candidate. normalizeProfilePath replaces a symlink with its target, so
-// omitting the lexical path would let a later atomic retarget of the same
-// pathname escape the deny list.
+// candidate when a symlink is in the resolution chain. normalizeProfilePath
+// replaces a symlink with its target, so omitting the lexical path would let
+// a later atomic retarget of the same pathname escape the deny list.
+// String inequality alone is not enough: Windows EvalSymlinks rewrites
+// regular files to 8.3 short names (RUNNER~1 vs runneradmin) even when no
+// symlink is involved, and dual-adding those spellings breaks exact bwrap
+// dest sequences.
 func appendLexicalCredentialDenyPaths(out, allowRoots, candidates []string) []string {
 	if len(candidates) == 0 {
 		return out
@@ -654,7 +658,11 @@ func appendLexicalCredentialDenyPaths(out, allowRoots, candidates []string) []st
 		if credentialPathReincluded(allowRoots, lexical) {
 			continue
 		}
-		if resolved := normalizeProfilePath(path); resolved != "" && credentialPathReincluded(allowRoots, resolved) {
+		resolved := normalizeProfilePath(path)
+		if resolved != "" && credentialPathReincluded(allowRoots, resolved) {
+			continue
+		}
+		if resolved != "" && resolved != lexical && !pathResolutionInvolvesSymlink(path) {
 			continue
 		}
 		seen[lexical] = struct{}{}
@@ -1046,6 +1054,9 @@ func normalizeProfilePath(entry string) string {
 	if absolute == "" {
 		return ""
 	}
+	if canonical, _, ok := lookupTestCredentialPathAlias(absolute); ok {
+		return canonical
+	}
 	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
 		return resolved
 	}
@@ -1084,32 +1095,34 @@ func normalizeCredentialFinalPath(path string) string {
 }
 
 // unreadableEnforcementPath is the dest a bwrap bind or Seatbelt rule should
-// use for path. When the lexical spelling differs from the EvalSymlinks
-// target — a leaf symlink or an intermediate directory symlink such as
-// ~/.ssh — keep the lexical pathname so a later atomic retarget still hits
-// the same dest. Other paths keep EvalSymlinks so aliases such as macOS
-// /var -> /private/var continue to match existing roots. Overlap and allow
-// checks use canonical identity via pathWithinRootCanonical, not this.
+// use for path. Dual-emitting the pre-EvalSymlinks spelling is only useful
+// when a symlink is in the resolution chain (a leaf symlink, an intermediate
+// directory symlink such as ~/.ssh, or macOS /var -> /private/var). In that
+// case keep the lexical pathname so a later atomic retarget still hits the
+// same dest. Other paths keep EvalSymlinks so Windows 8.3 rewrites of regular
+// files are not treated as a second dest. Overlap and allow checks use
+// canonical identity via pathWithinRootCanonical, not this.
 func unreadableEnforcementPath(path string) string {
 	lexical := normalizeProfilePathLexically(path)
 	if lexical == "" {
 		return ""
 	}
 	resolved := normalizeProfilePath(path)
-	if resolved == "" || resolved == lexical {
-		if resolved != "" {
-			return resolved
-		}
+	if resolved == "" {
 		return lexical
+	}
+	if resolved == lexical || !pathResolutionInvolvesSymlink(path) {
+		return resolved
 	}
 	return lexical
 }
 
-// unreadableEnforcementPaths preserves lexical identity whenever it differs
-// from the EvalSymlinks target, including intermediate directory symlinks
+// unreadableEnforcementPaths preserves lexical identity only when a symlink
+// is in the resolution chain, including intermediate directory symlinks
 // (for example ~/.ssh -> elsewhere with a regular key file inside). A later
 // retarget of that directory would otherwise expose the key through the
-// original pathname. Non-symlink paths stay canonical.
+// original pathname. Non-symlink paths stay canonical, even when EvalSymlinks
+// rewrites the spelling (Windows 8.3 short names).
 func unreadableEnforcementPaths(paths []string) []string {
 	if len(paths) == 0 {
 		return nil
@@ -1132,12 +1145,54 @@ func unreadableEnforcementPaths(paths []string) []string {
 			continue
 		}
 		canonical := normalizeProfilePath(path)
-		if lexical != canonical {
+		if canonical == "" {
+			add(lexical)
+			continue
+		}
+		if lexical != canonical && pathResolutionInvolvesSymlink(path) {
 			add(lexical)
 		}
 		add(canonical)
 	}
 	return out
+}
+
+// testCredentialPathAlias remaps a lexically normalized path for tests so
+// both the EvalSymlinks (canonical) deny entry and the lexical extra can be
+// pinned without creating OS symlinks. Production leaves it nil.
+var testCredentialPathAlias func(lexical string) (canonical string, involvesSymlink bool, ok bool)
+
+func lookupTestCredentialPathAlias(lexical string) (canonical string, involvesSymlink bool, ok bool) {
+	if testCredentialPathAlias == nil || lexical == "" {
+		return "", false, false
+	}
+	return testCredentialPathAlias(lexical)
+}
+
+// pathResolutionInvolvesSymlink reports whether Lstat of path or an ancestor
+// is a symlink. Dual-adding lexical + EvalSymlinks target is only valid in
+// that case: macOS /var -> /private/var and a real ~/.ssh directory symlink
+// need both spellings, but Windows EvalSymlinks 8.3 short names of regular
+// files must not dual-add.
+func pathResolutionInvolvesSymlink(path string) bool {
+	current := normalizeProfilePathLexically(path)
+	if current == "" {
+		return false
+	}
+	if _, involves, ok := lookupTestCredentialPathAlias(current); ok {
+		return involves
+	}
+	for {
+		info, err := os.Lstat(current)
+		if err == nil && info.Mode().Type() == os.ModeSymlink {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 // normalizeProfilePathLexically expands and absolutizes a profile path without

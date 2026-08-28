@@ -20,6 +20,11 @@ const sshIncludeMatchCap = 64
 // followed, so a cycle cannot hang profile construction.
 const sshPrivateKeyWalkMaxDepth = 8
 
+// sshPrivateKeyWalkMaxEntries is a per-directory cap on entries considered
+// under ~/.ssh. Extra entries in one directory (a large known_hosts.d, for
+// example) are skipped; walking continues in sibling and parent directories
+// so a private key elsewhere is still discovered. It is not a process-wide
+// abort that unwinds the whole tree.
 const sshPrivateKeyWalkMaxEntries = 256
 
 const sshPrivateKeySniffBytes = 128
@@ -73,19 +78,20 @@ func sshPrivateKeyDenyCandidates(home string) []string {
 
 func walkSSHPrivateKeyFiles(sshDir string) []string {
 	var out []string
-	n := 0
 	var walk func(dir string, depth int)
 	walk = func(dir string, depth int) {
-		if depth > sshPrivateKeyWalkMaxDepth || n >= sshPrivateKeyWalkMaxEntries {
+		if depth > sshPrivateKeyWalkMaxDepth {
 			return
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return
 		}
+		n := 0
 		for _, entry := range entries {
 			if n >= sshPrivateKeyWalkMaxEntries {
-				return
+				// Skip the rest of this directory only; sibling dirs still walk.
+				break
 			}
 			name := entry.Name()
 			if name == "." || name == ".." {
@@ -129,15 +135,31 @@ func isSSHPrivateKeyFileName(name string) bool {
 	if strings.HasPrefix(name, "id_") {
 		return true
 	}
-	return strings.HasSuffix(strings.ToLower(name), ".pem")
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".ppk")
 }
 
 func sshPublicOrConfigName(name string) bool {
 	switch name {
-	case "config", "known_hosts", "known_hosts.old", "authorized_keys", "authorized_keys2":
+	case "config", "authorized_keys", "authorized_keys2":
 		return true
 	}
-	return strings.HasSuffix(name, ".pub")
+	if strings.HasSuffix(name, ".pub") {
+		return true
+	}
+	return sshKnownHostsFamilyName(name)
+}
+
+// sshKnownHostsFamilyName reports OpenSSH known-hosts filenames that must stay
+// readable so git host resolution still works. The family is the known_hosts /
+// ssh_known_hosts spellings (including *2 and *.old), not five exact literals.
+func sshKnownHostsFamilyName(name string) bool {
+	switch name {
+	case "known_hosts", "known_hosts2", "known_hosts.old",
+		"ssh_known_hosts", "ssh_known_hosts2":
+		return true
+	}
+	return strings.HasPrefix(name, "known_hosts.") || strings.HasPrefix(name, "ssh_known_hosts.")
 }
 
 func sshFileLooksLikePrivateKey(path string) bool {
@@ -149,6 +171,9 @@ func sshFileLooksLikePrivateKey(path string) bool {
 		return false
 	}
 	s := strings.TrimSpace(string(data))
+	if strings.HasPrefix(s, "PuTTY-User-Key-File") {
+		return true
+	}
 	if !strings.HasPrefix(s, "-----BEGIN ") {
 		return false
 	}
@@ -406,5 +431,19 @@ func sshShouldDenyReferencedPath(path, home, sshDir string) bool {
 	if sshDir != "" && cleaned == filepath.Clean(sshDir) {
 		return false
 	}
+	if sshIsDevNullPath(cleaned) {
+		return false
+	}
 	return !sshPublicOrConfigName(filepath.Base(cleaned))
+}
+
+// sshIsDevNullPath reports UserKnownHostsFile /dev/null (and the host equivalent
+// os.DevNull). The basename of that path is "null", which is not a known-hosts
+// name; denying it would install a Seatbelt deny file-read* on /dev/null.
+func sshIsDevNullPath(path string) bool {
+	cleaned := filepath.Clean(path)
+	if cleaned == os.DevNull || strings.EqualFold(cleaned, os.DevNull) {
+		return true
+	}
+	return filepath.ToSlash(cleaned) == "/dev/null"
 }

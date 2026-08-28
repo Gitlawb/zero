@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -280,6 +281,9 @@ func TestExpandSSHConfigPathPercentDUsesSuppliedHome(t *testing.T) {
 }
 
 func TestCredentialDenyReadPathsKeepsLexicalSymlinkCandidates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
 	home := t.TempDir()
 	realDir := t.TempDir()
 
@@ -528,5 +532,162 @@ func TestUnreadableEnforcementPreservesLexicalWhenSSHDirIsSymlink(t *testing.T) 
 	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", lexical)
 	if !strings.Contains(sbpl, sandboxProfileString(lexical)) {
 		t.Fatalf("Seatbelt rules missing lexical pathname %q:\n%s", lexical, sbpl)
+	}
+}
+
+func TestSSHShouldDenyReferencedPathExemptsKnownHostsFamilyAndDevNull(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	keepReadable := []string{
+		filepath.Join(sshDir, "known_hosts"),
+		filepath.Join(sshDir, "known_hosts2"),
+		filepath.Join(sshDir, "known_hosts.old"),
+		filepath.Join(sshDir, "ssh_known_hosts"),
+		filepath.Join(sshDir, "ssh_known_hosts2"),
+		"/dev/null",
+		os.DevNull,
+	}
+	for _, path := range keepReadable {
+		if sshShouldDenyReferencedPath(path, home, sshDir) {
+			t.Fatalf("%q must stay readable (known-hosts family or /dev/null)", path)
+		}
+	}
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	if !sshShouldDenyReferencedPath(idEd, home, sshDir) {
+		t.Fatalf("well-known SSH key under fake home was not a deny candidate")
+	}
+	if !sshShouldDenyReferencedPath(filepath.Join(sshDir, "custom-key"), home, sshDir) {
+		t.Fatalf("non-exempt referenced path was not a deny candidate")
+	}
+}
+
+func TestCredentialDenyReadPathsKeepsKnownHostsFamilyFromConfig(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	known2 := filepath.Join(sshDir, "known_hosts2")
+	sshKnown := filepath.Join(home, "ssh_known_hosts")
+	mustWriteFile(t, known2, "example.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, sshKnown, "example.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, filepath.Join(sshDir, "config"), "UserKnownHostsFile ~/.ssh/known_hosts2 /dev/null\nGlobalKnownHostsFile "+sshKnown+"\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if denyCovered(denied, known2) {
+		t.Fatalf("known_hosts2 was denied because UserKnownHostsFile pointed at it: %v", denied)
+	}
+	if denyCovered(denied, sshKnown) {
+		t.Fatalf("ssh_known_hosts was denied because GlobalKnownHostsFile pointed at it: %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(sshDir, "config")) {
+		t.Fatalf("~/.ssh/config was denied")
+	}
+	if denyListedExact(denied, filepath.Clean("/dev/null")) || denyListedExact(denied, "/dev/null") {
+		t.Fatalf("/dev/null was denied from UserKnownHostsFile: %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestWalkSSHPrivateKeyFilesFindsKeyAfterCrowdedSiblingDir(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	junkDir := filepath.Join(sshDir, "aaa_known_hosts.d")
+	if err := os.MkdirAll(junkDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < sshPrivateKeyWalkMaxEntries+32; i++ {
+		mustWriteFile(t, filepath.Join(junkDir, fmt.Sprintf("host-%04d", i)), "ssh-ed25519 AAAA\n")
+	}
+	nestedKey := filepath.Join(sshDir, "keys", "work_ed25519")
+	mustWriteFile(t, nestedKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, nestedKey) {
+		t.Fatalf("private key in a sibling of a crowded directory was not found; deny list = %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesPuttyPPK(t *testing.T) {
+	home := t.TempDir()
+	ppk := filepath.Join(home, ".ssh", "putty-key.ppk")
+	custom := filepath.Join(home, ".ssh", "custom-putty")
+	mustWriteFile(t, ppk, "")
+	mustWriteFile(t, custom, "PuTTY-User-Key-File-2: ssh-rsa\nEncryption: none\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, ppk) {
+		t.Fatalf(".ppk is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, custom) {
+		t.Fatalf("PuTTY-User-Key-File sniff missed custom-putty; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsPinsResolvedTargetWithoutOSSymlink(t *testing.T) {
+	home := t.TempDir()
+	lexicalKey := normalizeProfilePathLexically(filepath.Join(home, ".ssh", "id_ed25519"))
+	resolvedKey := filepath.Join(t.TempDir(), "resolved-id_ed25519-target")
+	testCredentialPathAlias = func(lexical string) (string, bool, bool) {
+		if lexical == lexicalKey {
+			return resolvedKey, true, true
+		}
+		return "", false, false
+	}
+	t.Cleanup(func() { testCredentialPathAlias = nil })
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyListedExact(denied, resolvedKey) {
+		t.Fatalf("resolved-target half missing; removing the sshKeys candidates append would cause this: %v", denied)
+	}
+	if !denyListedExact(denied, lexicalKey) {
+		t.Fatalf("lexical symlink extra missing: %v", denied)
+	}
+
+	enforced := unreadableEnforcementPaths([]string{lexicalKey})
+	if !denyListedExact(enforced, resolvedKey) {
+		t.Fatalf("enforcement list missing resolved target %q: %v", resolvedKey, enforced)
+	}
+	if !denyListedExact(enforced, lexicalKey) {
+		t.Fatalf("enforcement list missing lexical extra %q: %v", lexicalKey, enforced)
+	}
+}
+
+func TestUnreadableEnforcementPathsSkipsNonSymlinkSpellingRewrite(t *testing.T) {
+	home := t.TempDir()
+	lexicalKey := normalizeProfilePathLexically(filepath.Join(home, ".ssh", "id_ed25519"))
+	shortName := filepath.Join(t.TempDir(), "RUNNER~1", "id_ed25519")
+	testCredentialPathAlias = func(lexical string) (string, bool, bool) {
+		if lexical == lexicalKey {
+			return shortName, false, true
+		}
+		return "", false, false
+	}
+	t.Cleanup(func() { testCredentialPathAlias = nil })
+
+	if pathResolutionInvolvesSymlink(lexicalKey) {
+		t.Fatalf("8.3-style rewrite must not count as a symlink")
+	}
+	enforced := unreadableEnforcementPaths([]string{lexicalKey})
+	if denyListedExact(enforced, lexicalKey) {
+		t.Fatalf("non-symlink spelling rewrite dual-added lexical dest %q: %v", lexicalKey, enforced)
+	}
+	if !denyListedExact(enforced, shortName) {
+		t.Fatalf("canonical 8.3-style dest missing: %v", enforced)
+	}
+	if got := unreadableEnforcementPath(lexicalKey); got != shortName {
+		t.Fatalf("bwrap dest = %q, want canonical %q", got, shortName)
+	}
+
+	denied := sshGPGDenied(t, home, nil)
+	if denyListedExact(denied, lexicalKey) && lexicalKey != shortName {
+		t.Fatalf("lexical 8.3 extra was dual-added: %v", denied)
+	}
+	if !denyListedExact(denied, shortName) {
+		t.Fatalf("canonical ssh key missing after 8.3-style rewrite: %v", denied)
 	}
 }
