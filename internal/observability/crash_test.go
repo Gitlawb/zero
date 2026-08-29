@@ -341,6 +341,50 @@ func TestWriteCrashReportFallsBackWhenHardLinksAreUnavailable(t *testing.T) {
 	}
 }
 
+func TestWriteCrashReportFallbackDoesNotReplaceCommitTimeCollision(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	unsupported := errors.New("hard links unavailable")
+	var collisionName string
+	attempts := 0
+	path, err := writeCrashReport(dir, "cli", "boom", []byte("complete stack"), ts, crashReportHooks{
+		link: func(*os.Root, string, string) error { return unsupported },
+		renameNoReplace: func(root *os.Root, oldname, newname string) error {
+			attempts++
+			if attempts == 1 {
+				collisionName = newname
+				if err := root.WriteFile(newname, []byte("concurrent report"), 0o600); err != nil {
+					t.Fatalf("create commit-time collision: %v", err)
+				}
+			}
+			return renameNoReplace(root, oldname, newname)
+		},
+	})
+	if err != nil {
+		t.Fatalf("writeCrashReport fallback: %v", err)
+	}
+	if attempts < 2 {
+		t.Fatalf("fallback rename attempts = %d, want collision retry", attempts)
+	}
+	if filepath.Base(path) == collisionName {
+		t.Fatalf("fallback replaced the concurrent report %q", collisionName)
+	}
+	existing, err := os.ReadFile(filepath.Join(dir, collisionName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(existing) != "concurrent report" {
+		t.Fatalf("concurrent report overwritten: %q", existing)
+	}
+	published, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(published), "complete stack") {
+		t.Fatalf("published fallback is incomplete: %q", published)
+	}
+}
+
 type crashWriteResult struct {
 	path string
 	err  error
