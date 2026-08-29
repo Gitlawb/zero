@@ -641,17 +641,27 @@ func (cfg *mcpWritableConfig) ensureRaw() {
 	}
 }
 
-// refuseColliding reports a configured server whose key differs from name but
-// resolves to the same runtime identity.
-func (cfg *mcpWritableConfig) refuseColliding(name string) error {
-	canonical := strings.TrimSpace(name)
-	for existing := range cfg.file.MCP.Servers {
-		if existing == name || strings.TrimSpace(existing) != canonical {
-			continue
-		}
-		return fmt.Errorf("MCP server %q is already configured as %q; rename one so each server has its own identity", name, existing)
+// refuseColliding validates the PROSPECTIVE configuration with the same rule the
+// read and startup paths use.
+//
+// This used to compare key spellings here and reject every trimmed collision,
+// which is a second and weaker implementation of the active-identity rule.
+// ValidateUniqueNames skips disabled entries, because registration skips them
+// and a disabled server claims no runtime identity; the write side did not, so
+// `zero mcp add docs` failed when a disabled " docs" was configured, and even a
+// plain update of an enabled "docs" was refused while its disabled alias
+// existed. It also could not decide the inverse case at all, because it never
+// saw whether the incoming server was itself disabled.
+//
+// Building the combined map and handing it to the shared rule removes the
+// second implementation rather than teaching it the same exceptions.
+func (cfg *mcpWritableConfig) refuseColliding(name string, incoming config.MCPServerConfig) error {
+	prospective := make(map[string]config.MCPServerConfig, len(cfg.file.MCP.Servers)+1)
+	for key, server := range cfg.file.MCP.Servers {
+		prospective[key] = server
 	}
-	return nil
+	prospective[name] = incoming
+	return mcp.ValidateUniqueNames(config.MCPConfig{Servers: prospective})
 }
 
 func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerConfig) (bool, error) {
@@ -666,7 +676,7 @@ func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerC
 	// shared failure with its own credentials, so the one that did not fail can
 	// print the other's. Refusing at the write boundary keeps the collision out
 	// of the file rather than reporting it on every later load.
-	if err := cfg.refuseColliding(name); err != nil {
+	if err := cfg.refuseColliding(name, server); err != nil {
 		return false, err
 	}
 	existingRaw, updated := cfg.serverRaw[name]
