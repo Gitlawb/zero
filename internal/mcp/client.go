@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execution"
@@ -55,8 +56,9 @@ type Client struct {
 	nextID  int
 	cleanup func()
 
-	writeQueue chan writeOp
-	writerOnce sync.Once
+	writeQueue      chan writeOp
+	writerOnce      sync.Once
+	droppedCourtesy atomic.Uint64
 
 	// dispatchMu guards the response-dispatch state shared with the single
 	// reader goroutine. It is never held across a blocking read or write.
@@ -461,6 +463,7 @@ func (client *Client) readLoop() {
 				select {
 				case client.writeQueue <- courtesy:
 				default:
+					client.droppedCourtesy.Add(1)
 				}
 			}
 			continue
