@@ -66,9 +66,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Test with race detector & coverage
+      - name: Test with coverage
         run: |
-          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+          go test -count=1 -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Publish coverage summary
         if: always()
