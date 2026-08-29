@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -98,5 +99,50 @@ func TestAFailedStartPublishesNoLaunch(t *testing.T) {
 
 	if launched, notices := sink.observe(); launched {
 		t.Errorf("a server whose process never started was published as launched (notices %#v)", notices)
+	}
+}
+
+// A START THAT COMPLETES JUST AFTER THE TIMEOUT MUST STILL BE DISCLOSED.
+//
+// connectStdio publishes only once cmd.Start has returned, and the timeout
+// branch used to sample the sink the instant it fired. Those interleave: the
+// sample reads empty, the result commits with no notice, and the reaper closes
+// the late client without being able to amend a commit that already happened.
+//
+// The real window is microseconds wide, so this drives the CONTRACT instead:
+// the attempt starts after the registration timeout has elapsed but inside the
+// settle grace, which is the case the synchronization exists to catch.
+func TestStartJustAfterTheTimeoutIsStillDisclosed(t *testing.T) {
+	runtime := registerWithFactory(t, func(ctx context.Context, server Server) (ToolClient, error) {
+		// 50ms registration timeout has fired; this lands inside launchSettleGrace.
+		time.Sleep(120 * time.Millisecond)
+		publishLaunch(ctx, []string{launchNotice})
+		return nil, errors.New("initialize failed after start")
+	})
+
+	disclosures := runtime.StartupDisclosures()
+	if len(disclosures) != 1 || len(disclosures[0].Notices) != 1 || disclosures[0].Notices[0] != launchNotice {
+		t.Fatalf("a process that started just after the timeout was not disclosed: %#v", disclosures)
+	}
+	if skipped := runtime.Skipped(); len(skipped) != 1 {
+		t.Errorf("the server should still be recorded as skipped: %#v", skipped)
+	}
+}
+
+// And an attempt that never starts is not held for the grace, nor disclosed.
+func TestTimeoutBeforeStartIsNotDelayedOrDisclosed(t *testing.T) {
+	start := time.Now()
+	runtime := registerWithFactory(t, func(ctx context.Context, server Server) (ToolClient, error) {
+		<-ctx.Done() // cancel arrives with the timeout; returns immediately
+		return nil, ctx.Err()
+	})
+	elapsed := time.Since(start)
+
+	if disclosures := runtime.StartupDisclosures(); len(disclosures) != 0 {
+		t.Errorf("a server that never started claimed a token trade: %#v", disclosures)
+	}
+	// The grace is 250ms; an attempt that returns on cancel must not pay it.
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("registration waited %v for an attempt that never started", elapsed)
 	}
 }
