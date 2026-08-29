@@ -548,6 +548,27 @@ func SetRecentModels(path string, entries []RecentModelEntry) (FileConfig, error
 
 // SetRecapsEnabled persists the idle recap preference, mirroring
 // SetFavoriteModels (read-modify-atomic-write).
+func SetKeepFinishedAgents(path string, keep bool) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	v := keep
+	cfg.Preferences.KeepFinishedAgents = &v
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
 func SetRecapsEnabled(path string, enabled bool) (FileConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {

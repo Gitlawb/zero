@@ -77,7 +77,7 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 	}
 	description := "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
 	if runtimeGOOS() == "windows" {
-		description += "\n\n" + shellGuidanceForGOOS(runtimeGOOS())
+		description += "\n\nUse the effective shell syntax stated in the run's <environment> block."
 	}
 	return execCommandTool{
 		baseTool: baseTool{
@@ -173,9 +173,6 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	// unsandboxed) can actually bypass the MSYS guard instead of being
 	// hard-blocked by the same check it was meant to escalate past.
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtimeGOOS())); issue != nil && !msysGuardBypassed(issue, commandEngine) {
-		return shellIssueBlockResult(*issue)
-	}
 	if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
 		return interactiveBlockResult(interactive)
 	}
@@ -183,9 +180,13 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if err != nil {
 		return errorResult("Error running exec_command: " + err.Error())
 	}
+	effectiveShell := shellRuntimeForEngine(commandEngine, absoluteCwd)
+	if issue := detectShellCommandIssueForRuntime(commandText, effectiveShell); issue != nil && !msysGuardBypassed(issue, commandEngine) {
+		return shellIssueBlockResult(*issue)
+	}
 
 	commandCtx, cancel := context.WithCancel(context.Background())
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommandWithRuntime(commandCtx, commandText, absoluteCwd, commandEngine, effectiveShell)
 	if err != nil {
 		cancel()
 		return errorResult("Error starting exec_command: " + err.Error())
@@ -196,7 +197,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		cancel()
 		return errorResult("Error starting exec_command: prepare execution request: " + err.Error())
 	}
-	meta := map[string]string{}
+	meta := map[string]string{"shell_kind": string(effectiveShell.Kind)}
 	addSandboxMeta(meta, plan)
 	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
 	processResult, err := tool.manager.Start(ctx, execution.ProcessStart{
@@ -459,7 +460,11 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
 	if status == StatusError && input.exited && !input.interrupted {
-		if issue := detectShellOutputIssueForRuntime(output, detectShellRuntime(runtimeGOOS())); issue != nil {
+		shell := detectShellRuntime(runtimeGOOS())
+		if kind := input.sandboxMeta["shell_kind"]; kind != "" {
+			shell.Kind = shellKind(kind)
+		}
+		if issue := detectShellOutputIssueForRuntime(output, shell); issue != nil {
 			meta["shell_issue"] = issue.Kind
 			body = appendShellIssueHint(body, *issue)
 		}

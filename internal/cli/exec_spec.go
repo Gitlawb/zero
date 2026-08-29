@@ -12,6 +12,7 @@ import (
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specmode"
@@ -123,6 +124,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		SessionID:       draftSession.SessionID,
 		SessionTitle:    run.sessionTitle,
 		ProviderName:    run.resolved.Provider.Name,
+		ModelFamily:     providercatalog.ModelFamilyFor(run.resolved.Provider.CatalogID),
 		Model:           run.resolved.Provider.Model,
 		ReasoningEffort: run.reasoningEffort,
 		Profile:         run.profilePolicy,
