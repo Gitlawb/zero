@@ -29,6 +29,11 @@ import (
 // window this design closes.
 var runtimeCompensationSwapSeam func()
 
+// runtimeCompensationStat is the post-deletion existence probe. A var so a test
+// can produce the third outcome, an inspection that neither proves absence nor
+// presence, which no real filesystem produces on demand.
+var runtimeCompensationStat = os.Lstat
+
 type fileDispositionInfo struct {
 	DeleteFile byte
 }
@@ -162,8 +167,20 @@ func removeCreatedRuntimeDirBound(path string, identity string) error {
 	// REPORTED SUCCESS IS NOT PROOF. A handle-bound operation accepting the call
 	// has been seen not to take effect (PR #751, the promote rename), so the
 	// outcome is checked rather than assumed.
-	if _, err := os.Lstat(path); err == nil {
+	//
+	// THREE OUTCOMES, NOT TWO. This used to read any Lstat error as absence, so a
+	// sharing violation, an access denial, or a delete-pending entry held open by
+	// another process all reported complete compensation for a directory that is
+	// still there. A holder that clears the disposition can then make the
+	// "removed" object visible again. Only not-found is evidence of removal;
+	// everything else is at best unproven and has to be reported as residue.
+	_, statErr := runtimeCompensationStat(path)
+	switch {
+	case errors.Is(statErr, os.ErrNotExist):
+		return nil
+	case statErr == nil:
 		return fmt.Errorf("remove sandbox runtime root %s created by this run: it is still present after the deletion was accepted", path)
+	default:
+		return fmt.Errorf("remove sandbox runtime root %s created by this run: its removal could not be verified, so it may still be present: %w", path, statErr)
 	}
-	return nil
 }
