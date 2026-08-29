@@ -164,6 +164,12 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	// A no-op when MonitorTag is empty, so the default path is unchanged.
 	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
 	err = command.Run()
+	// OBSERVED HERE, at the only boundary that knows. exec.Cmd sets Process
+	// only once os.StartProcess has succeeded, so this separates a child that
+	// ran from a pre-start failure (missing executable, context already
+	// cancelled) that Run reports the same way. Every branch below hands this
+	// to withBashExecution rather than letting the conversion assume it.
+	launched := command.Process != nil
 	exitCode := commandExitCode(err)
 	adapterReport, reportErr := plan.ExecutionReport()
 	meta["exit_code"] = strconv.Itoa(exitCode)
@@ -180,7 +186,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 			Output: fmt.Sprintf("Error: Command timed out after %dms.", timeoutMS),
 			Meta:   meta,
 		}
-		return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), true)
+		return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, launched, changeObserver.Changes(), true)
 	}
 	if err != nil {
 		if exitCode < 0 {
@@ -189,7 +195,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 				Output: "Error executing command: " + err.Error(),
 				Meta:   meta,
 			}
-			return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), false)
+			return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, launched, changeObserver.Changes(), false)
 		}
 		if adapterReport.Denial != nil {
 			markStructuredSandboxDenial(meta, *adapterReport.Denial)
@@ -201,7 +207,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 			Truncated: truncated,
 			Meta:      meta,
 		}
-		return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), false)
+		return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, launched, changeObserver.Changes(), false)
 	}
 
 	if adapterReport.Denial != nil {
@@ -214,12 +220,13 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		Truncated: truncated,
 		Meta:      meta,
 	}
-	return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), false)
+	return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, launched, changeObserver.Changes(), false)
 }
 
-func withBashExecution(result Result, request execution.Request, plan zeroSandbox.CommandPlan, exitCode int, report execution.AdapterReport, reportErr error, changes []execution.Change, timedOut bool) Result {
+func withBashExecution(result Result, request execution.Request, plan zeroSandbox.CommandPlan, exitCode int, report execution.AdapterReport, reportErr error, launched bool, changes []execution.Change, timedOut bool) Result {
 	input := execToolResultInput{
 		exited:      true,
+		launched:    launched,
 		exitCode:    exitCode,
 		enforcement: executionEnforcement(plan),
 		request:     request,

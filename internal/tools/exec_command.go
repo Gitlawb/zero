@@ -403,16 +403,22 @@ type execToolResultInput struct {
 	sessionID             int
 	exitCode              int
 	exited                bool
-	relativeCwd           string
-	tty                   bool
-	interrupted           bool
-	request               execution.Request
-	enforcement           execution.Enforcement
-	sandboxMeta           map[string]string
-	report                execution.AdapterReport
-	reportErr             error
-	changes               []execution.Change
-	maxOutputTokens       int
+	// launched records whether an OS process was actually created, observed at
+	// the boundary that ran it rather than assumed from the outcome shape. The
+	// exec_command paths set it true because a start failure returns an
+	// errorResult before reaching here; bash cannot, because it routes a
+	// pre-start Run error through the same conversion.
+	launched        bool
+	relativeCwd     string
+	tty             bool
+	interrupted     bool
+	request         execution.Request
+	enforcement     execution.Enforcement
+	sandboxMeta     map[string]string
+	report          execution.AdapterReport
+	reportErr       error
+	changes         []execution.Change
+	maxOutputTokens int
 }
 
 func execToolResult(input execToolResultInput) Result {
@@ -432,6 +438,10 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	for key, value := range input.sandboxMeta {
 		meta[key] = value
 	}
+	// True here by construction: every path that reaches this conversion has
+	// already started a process, because a start failure returns an errorResult
+	// above without building an execution outcome.
+	input.launched = true
 	outcome := execExecutionOutcome(input)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)
@@ -530,7 +540,12 @@ func execExecutionOutcome(input execToolResultInput) execution.Outcome {
 	// could not be started returns an error result before this point, so there is
 	// no path in without a process behind it. Stated rather than inferred, so the
 	// disclosure derived from it does not rest on the terminal outcome kind.
-	const launched = true
+	// READ, not assumed. This used to be a const true, documented as safe
+	// because exec_command returns early on a start failure. That holds for
+	// exec_command and not for bash, which hands every Run error to this same
+	// conversion, so a command whose executable did not exist claimed the
+	// DenyRead token trade had been applied.
+	launched := input.launched
 	if !input.exited {
 		return execution.Outcome{
 			State:       execution.StateRetained,
