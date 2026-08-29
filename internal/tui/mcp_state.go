@@ -125,6 +125,7 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 		}
 		servers = append(servers, MCPServerView{
 			Name:      name,
+			ConfigKey: rawName,
 			Transport: mcpServerTransport(raw),
 			State:     state,
 			Target:    mcpServerTarget(raw),

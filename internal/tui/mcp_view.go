@@ -16,7 +16,14 @@ type MCPViewState struct {
 }
 
 type MCPServerView struct {
-	Name      string
+	// Name is the CANONICAL runtime name: trimmed, and the spelling the registry,
+	// skipped-failure records and tool counts all use. It is the display label and
+	// the join key, and it is deliberately not unique across config entries.
+	Name string
+	// ConfigKey is the EXACT key in the configuration map, untrimmed. Actions
+	// address the config by that key, so it is the only identity that can select
+	// one row when a padded alias renders under the same canonical name.
+	ConfigKey string
 	Transport string
 	State     string
 	Target    string
