@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/sessions"
 )
@@ -101,7 +102,7 @@ func TestAFailedCallDoesNotClaimItReadTheFile(t *testing.T) {
 
 // TestEverySummaryEventSurvivesTheDigestIntact is the constraint that decided
 // the shape of this feature. sessions.summarizePayload truncates each event at
-// 500 chars, so one combined summary would lose its tail; each event must fit.
+// 500 bytes, so one combined summary would lose its tail; each event must fit.
 func TestEverySummaryEventSurvivesTheDigestIntact(t *testing.T) {
 	lines := []string{`{"type":"user","cwd":"/w","message":{"role":"user","content":"go"}}`}
 	for i := 0; i < 40; i++ {
@@ -119,15 +120,83 @@ func TestEverySummaryEventSurvivesTheDigestIntact(t *testing.T) {
 		t.Fatal("no summary events produced")
 	}
 	for _, summary := range summaries {
-		if length := len([]rune(summary)); length > maxSummaryEventChars {
-			t.Errorf("summary event is %d chars, over the %d budget — it will be cut "+
-				"mid-sentence by the resume digest:\n%s", length, maxSummaryEventChars, summary)
+		if length := len(summary); length > maxSummaryEventBytes {
+			t.Errorf("summary event is %d bytes, over the %d budget — it will be cut "+
+				"mid-sentence by the resume digest:\n%s", length, maxSummaryEventBytes, summary)
 		}
 	}
 	// And the overflow must be stated, not silently dropped.
 	if !strings.Contains(strings.Join(summaries, "\n"), "more)") {
 		t.Errorf("40 files collapsed to a short list with no overflow note:\n%s",
 			strings.Join(summaries, "\n"))
+	}
+}
+
+func TestMultibyteSummarySurvivesFormatExecPromptIntact(t *testing.T) {
+	home := t.TempDir()
+	lines := []string{`{"type":"user","cwd":"/w","sessionId":"multi","message":{"role":"user","content":"continue"}}`}
+	for i := 0; i < 20; i++ {
+		name := strings.Repeat("界", 24) + itoa(i) + ".go"
+		lines = append(lines, claudeToolLines("t"+itoa(i), "Read", `{"file_path":"/w/`+name+`"}`, "ok", false)...)
+	}
+	writeFile(t, filepath.Join(home, ".claude", "projects", "-w", "multi.jsonl"), strings.Join(lines, "\n")+"\n")
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	result, err := Import(store, ClaudeCode(testEnv(home, nil)), "multi", ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ReadEvents(result.Session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fileSummary string
+	for _, event := range events {
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || !NoteEventIsSummary(payload) {
+			continue
+		}
+		content, _ := payload["content"].(string)
+		if strings.HasPrefix(content, "Files read:") {
+			fileSummary = content
+		}
+	}
+	if fileSummary == "" || !strings.Contains(fileSummary, "more)") {
+		t.Fatalf("multibyte file summary lost its overflow disclosure: %q", fileSummary)
+	}
+	if len(fileSummary) > maxSummaryEventBytes {
+		t.Fatalf("summary is %d bytes, want at most %d: %q", len(fileSummary), maxSummaryEventBytes, fileSummary)
+	}
+	prepared, err := sessions.PrepareExec(sessions.PrepareExecOptions{Store: store, Resume: result.Session.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := sessions.FormatExecPrompt("what remains?", prepared)
+	if !strings.Contains(prompt, fileSummary) {
+		t.Fatalf("FormatExecPrompt truncated a producer-approved summary:\nsummary=%q\nprompt=%s", fileSummary, prompt)
+	}
+}
+
+func TestSummaryLinePreservesOverflowDisclosureWhenOneItemExhaustsTheBudget(t *testing.T) {
+	items := []string{strings.Repeat("界", maxSummaryEventBytes)}
+	for i := 0; i < maxSummaryItems+4; i++ {
+		items = append(items, "file"+itoa(i)+".go")
+	}
+	line := summaryLine("Files read", items)
+	if len(line) > maxSummaryEventBytes || !utf8.ValidString(line) {
+		t.Fatalf("bounded summary is invalid or oversized: bytes=%d valid=%v %q", len(line), utf8.ValidString(line), line)
+	}
+	if !strings.Contains(line, "more)") {
+		t.Fatalf("a long first item erased the overflow disclosure: %q", line)
+	}
+}
+
+func TestTruncateToBudgetKeepsUTF8ValidAtEverySmallBudget(t *testing.T) {
+	for budget := 0; budget <= 4; budget++ {
+		got := truncateToBudget("界界", budget)
+		if len(got) > budget || !utf8.ValidString(got) {
+			t.Errorf("budget %d produced bytes=%d valid=%v %q", budget, len(got), utf8.ValidString(got), got)
+		}
 	}
 }
 
@@ -343,9 +412,9 @@ func TestTheActivityHeadlineIsTruncatedAfterItIsAssembled(t *testing.T) {
 	if !strings.Contains(headline, "Also: unrecognised_tool_") {
 		t.Fatalf("the breakdown never ran, so nothing could overflow:\n%s", headline)
 	}
-	if length := len([]rune(headline)); length != maxSummaryEventChars {
-		t.Errorf("headline is %d chars, want it cut to exactly the %d budget:\n%s",
-			length, maxSummaryEventChars, headline)
+	if length := len(headline); length != maxSummaryEventBytes {
+		t.Errorf("headline is %d bytes, want it cut to exactly the %d budget:\n%s",
+			length, maxSummaryEventBytes, headline)
 	}
 	// Cut, not merely short: the ellipsis is what tells a reader the list goes on.
 	if !strings.HasSuffix(headline, "…") {

@@ -90,16 +90,16 @@ func discoveredSnapshots(found []agentsessions.ForeignSession) []discoveredSnaps
 	out := make([]discoveredSnapshot, 0, len(found))
 	for _, session := range found {
 		out = append(out, discoveredSnapshot{
-			Agent:     session.Agent,
-			Ref:       session.Agent + ":" + session.ID,
-			ID:        session.ID,
-			Title:     session.Title,
-			Cwd:       session.Cwd,
-			GitBranch: session.GitBranch,
-			ModelID:   session.ModelID,
+			Agent:     agentsessions.DisplayField(session.Agent),
+			Ref:       agentsessions.DisplayField(session.Agent + ":" + session.ID),
+			ID:        agentsessions.DisplayField(session.ID),
+			Title:     agentsessions.DisplayField(session.Title),
+			Cwd:       agentsessions.DisplayField(session.Cwd),
+			GitBranch: agentsessions.DisplayField(session.GitBranch),
+			ModelID:   agentsessions.DisplayField(session.ModelID),
 			StartedAt: formatDiscoveredTime(session.StartedAt),
 			UpdatedAt: formatDiscoveredTime(session.UpdatedAt),
-			Path:      session.Path,
+			Path:      agentsessions.DisplayField(session.Path),
 		})
 	}
 	return out
@@ -199,8 +199,8 @@ func runSessionsImport(store *sessions.Store, ref string, options sessionCommand
 	if options.json {
 		if err := writePrettyJSON(stdout, redaction.RedactValue(map[string]any{
 			"sessionId": result.Session.SessionID,
-			"title":     result.Session.Title,
-			"cwd":       result.Session.Cwd,
+			"title":     agentsessions.DisplayField(result.Session.Title),
+			"cwd":       agentsessions.DisplayField(result.Session.Cwd),
 			"events":    result.Events,
 			"source":    discoveredSnapshots([]agentsessions.ForeignSession{result.Source})[0],
 		}, redaction.Options{})); err != nil {

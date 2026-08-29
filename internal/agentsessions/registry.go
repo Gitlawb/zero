@@ -129,6 +129,8 @@ type ImportResult struct {
 	Source  ForeignSession
 }
 
+var ErrNoImportableContent = errors.New("foreign session has no importable content")
+
 // Import copies one foreign session into the Zero session store and returns the
 // new Zero session.
 //
@@ -152,6 +154,9 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	if err != nil {
 		return ImportResult{}, err
 	}
+	if len(events) == 0 {
+		return ImportResult{}, fmt.Errorf("import %s: %w", id, ErrNoImportableContent)
+	}
 
 	created, discardCreated, err := store.CreateDiscardable(sessions.CreateInput{
 		// THE STORE IS THE CHOKEPOINT FOR DISPLAY VALUES. These fields are
@@ -173,17 +178,15 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	if err != nil {
 		return ImportResult{}, err
 	}
-	if len(events) > 0 {
-		if _, err := store.AppendEvents(created.SessionID, events); err != nil {
-			cleanupErr := discardCreated()
-			if cleanupErr != nil {
-				return ImportResult{}, errors.Join(
-					fmt.Errorf("import %s into zero session %s: %w", id, created.SessionID, err),
-					fmt.Errorf("clean up failed import: %w", cleanupErr),
-				)
-			}
-			return ImportResult{}, fmt.Errorf("import %s: %w", id, err)
+	if _, err := store.AppendEvents(created.SessionID, events); err != nil {
+		cleanupErr := discardCreated()
+		if cleanupErr != nil {
+			return ImportResult{}, errors.Join(
+				fmt.Errorf("import %s into zero session %s: %w", id, created.SessionID, err),
+				fmt.Errorf("clean up failed import: %w", cleanupErr),
+			)
 		}
+		return ImportResult{}, fmt.Errorf("import %s: %w", id, err)
 	}
 	return ImportResult{Session: created, Events: len(events), Source: source}, nil
 }
