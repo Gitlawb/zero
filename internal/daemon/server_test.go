@@ -4,11 +4,104 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/observability"
 )
+
+func TestSecureRuntimeParentsLeaveCustomDirectoryPermissionsUntouched(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission regression")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths := Paths{
+		Socket: filepath.Join(dir, "daemon.sock"),
+		Lock:   filepath.Join(dir, "daemon.lock"),
+		Status: filepath.Join(dir, "daemon.status"),
+	}
+	if err := secureRuntimeParents(paths); err != nil {
+		t.Fatalf("secureRuntimeParents: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("custom directory permissions = %04o, want unchanged 0755", got)
+	}
+}
+
+func TestSecureRuntimeParentsLeaveRelativeWorkingDirectoryPermissionsUntouched(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission regression")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+
+	if err := secureRuntimeParents(Paths{Socket: "daemon.sock", Lock: "daemon.lock", Status: "daemon.status"}); err != nil {
+		t.Fatalf("secureRuntimeParents: %v", err)
+	}
+	info, err := os.Stat(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("working directory permissions = %04o, want unchanged 0755", got)
+	}
+}
+
+func TestOpenRuntimeLogHardensDefaultRootBeforeOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows DACL hardening has platform-specific coverage")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(paths.Socket)
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	file, logPath, err := OpenRuntimeLog(paths)
+	if err != nil {
+		t.Fatalf("OpenRuntimeLog: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if logPath != filepath.Join(dir, "daemon.log") {
+		t.Fatalf("log path = %q", logPath)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got&0o077 != 0 {
+		t.Fatalf("default runtime directory permissions = %04o, want owner-only", got)
+	}
+}
 
 func newTestServer(t *testing.T, launcher Launcher) (*Server, Paths) {
 	t.Helper()

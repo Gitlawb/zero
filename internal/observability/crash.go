@@ -44,10 +44,11 @@ func (err *crashReportCommittedError) Unwrap() []error {
 }
 
 type crashReportHooks struct {
-	beforePublish func()
-	write         func(*os.File, []byte) (int, error)
-	link          func(*os.Root, string, string) error
-	remove        func(*os.Root, string) error
+	beforePublish   func()
+	write           func(*os.File, []byte) (int, error)
+	link            func(*os.Root, string, string) error
+	renameNoReplace func(*os.Root, string, string) error
+	remove          func(*os.Root, string) error
 }
 
 // FormatCrashReport renders a human-readable crash report.
@@ -136,12 +137,9 @@ func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 		if errors.Is(linkErr, os.ErrExist) {
 			return "", fmt.Errorf("publish crash report: %w", linkErr)
 		}
-		publishName, err = fallbackCrashName(root, name, tempName)
+		publishName, err = publishCrashFallback(root, name, tempName, hooks.renameNoReplace)
 		if err != nil {
 			return "", errors.Join(fmt.Errorf("publish crash report with hard link: %w", linkErr), err)
-		}
-		if err := root.Rename(tempName, publishName); err != nil {
-			return "", errors.Join(fmt.Errorf("publish crash report with hard link: %w", linkErr), fmt.Errorf("publish crash report with atomic rename: %w", err))
 		}
 		committed = true
 		tempName = ""
@@ -162,19 +160,20 @@ func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 	return path, nil
 }
 
-// fallbackCrashName selects an unpredictable vacant name for filesystems that
-// cannot create hard links. Rename then publishes the already-synced staging
-// file atomically without replacing the timestamp-only name or any other
-// crash report that was present when the fallback name was selected. The
-// directory is private to the current user, which excludes cross-user races.
-func fallbackCrashName(root *os.Root, timestampName, tempName string) (string, error) {
+// publishCrashFallback atomically renames the complete staging file to an
+// unpredictable unused name. The no-replace operation is the collision check;
+// there is no check-then-rename window in which another report can be replaced.
+func publishCrashFallback(root *os.Root, timestampName, tempName string, rename func(*os.Root, string, string) error) (string, error) {
+	if rename == nil {
+		rename = renameNoReplace
+	}
 	base := strings.TrimSuffix(timestampName, filepath.Ext(timestampName))
 	if suffix := strings.TrimPrefix(tempName, crashTempPrefix); suffix != "" && suffix != tempName {
 		candidate := base + "-" + suffix + filepath.Ext(timestampName)
-		if _, err := root.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+		if err := rename(root, tempName, candidate); err == nil {
 			return candidate, nil
-		} else if err != nil {
-			return "", fmt.Errorf("inspect fallback crash report path: %w", err)
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("publish fallback crash report: %w", err)
 		}
 	}
 	for range 100 {
@@ -183,10 +182,10 @@ func fallbackCrashName(root *os.Root, timestampName, tempName string) (string, e
 			return "", fmt.Errorf("generate fallback crash report name: %w", err)
 		}
 		candidate := base + "-" + hex.EncodeToString(suffix[:]) + filepath.Ext(timestampName)
-		if _, err := root.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+		if err := rename(root, tempName, candidate); err == nil {
 			return candidate, nil
-		} else if err != nil {
-			return "", fmt.Errorf("inspect fallback crash report path: %w", err)
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("publish fallback crash report: %w", err)
 		}
 	}
 	return "", fmt.Errorf("generate fallback crash report name: exhausted unique names")
