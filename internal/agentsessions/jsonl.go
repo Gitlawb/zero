@@ -169,6 +169,68 @@ func streamLines(root string, path string, maxLineBytes int, visit func(line []b
 	}
 }
 
+// streamTailLines visits complete records from at most the final maxBytes of a
+// transcript. Foreign session files are append-only in practice, and resume
+// needs their tail; bounding the window prevents one explicitly selected but
+// enormous transcript from turning import into an unbounded disk/CPU job.
+//
+// prefixOmitted reports that older bytes were deliberately skipped. If the
+// window begins in a record, that partial record is consumed and withheld so a
+// JSON fragment can never masquerade as a complete event.
+func streamTailLines(root string, path string, maxLineBytes int, maxBytes int, visit func(line []byte, truncated bool) bool) (prefixOmitted bool, err error) {
+	file, err := openContained(root, path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	start := int64(0)
+	if maxBytes > 0 && info.Size() > int64(maxBytes) {
+		prefixOmitted = true
+		start = info.Size() - int64(maxBytes)
+		if _, err := file.Seek(start-1, io.SeekStart); err != nil {
+			return false, err
+		}
+		previous := []byte{0}
+		if _, err := io.ReadFull(file, previous); err != nil {
+			return false, err
+		}
+		if _, err := file.Seek(start, io.SeekStart); err != nil {
+			return false, err
+		}
+		if previous[0] != '\n' {
+			reader := bufio.NewReaderSize(file, 64<<10)
+			if _, _, err := readBoundedLineTruncated(reader, 0); err != nil && err != io.EOF {
+				return false, err
+			}
+			return prefixOmitted, streamReaderLines(reader, maxLineBytes, visit)
+		}
+	} else if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return false, err
+	}
+
+	return prefixOmitted, streamReaderLines(bufio.NewReaderSize(file, 64<<10), maxLineBytes, visit)
+}
+
+func streamReaderLines(reader *bufio.Reader, maxLineBytes int, visit func(line []byte, truncated bool) bool) error {
+	for {
+		content, truncated, err := readBoundedLineTruncated(reader, maxLineBytes)
+		if (len(content) > 0 || truncated) && !visit(content, truncated) {
+			return nil
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
 // readBoundedLineTruncated consumes through the next newline, returns at most
 // keep bytes of it, and reports whether anything was discarded.
 //

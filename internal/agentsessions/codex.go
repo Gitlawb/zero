@@ -188,13 +188,13 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 }
 
 func translateCodex(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
-	events := []sessions.AppendEventInput{}
+	events := newEventTail(effectiveMaxEvents(options.MaxEvents))
 	toolNames := map[string]string{}
 	identities := &importCallIdentities{}
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
-	err := streamLines(root, path, importLineLimit, func(line []byte, truncated bool) bool {
+	prefixOmitted, err := streamTailLines(root, path, importLineLimit, importByteLimit, func(line []byte, truncated bool) bool {
 		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
 		// Skipping it silently produced a transcript that looked complete: a
 		// question, no answer, then the follow-up. The marker is the honest
@@ -223,13 +223,13 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 			if strings.TrimSpace(text) == "" || isCodexContextInjection(text) {
 				return true
 			}
-			events = append(events, messageEvent(role, text))
+			events.add(messageEvent(role, text))
 		case "reasoning":
 			if options.IncludeReasoning {
 				var summary []codexBlock
 				if json.Unmarshal(payload.Summary, &summary) == nil {
 					if text := codexBlocksText(summary); strings.TrimSpace(text) != "" {
-						events = append(events, messageEvent("reasoning", text))
+						events.add(messageEvent("reasoning", text))
 					}
 				}
 			}
@@ -238,7 +238,7 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 			toolNames[payload.CallID] = payload.Name
 			arguments := firstNonBlank(payload.Arguments, payload.Input)
 			activity.observeCall(payload.CallID, payload.Name, arguments)
-			events = append(events, toolCallEvent(identities, payload.Name, payload.CallID, arguments))
+			events.add(toolCallEvent(identities, payload.Name, payload.CallID, arguments))
 		case "function_call_output", "custom_tool_call_output":
 			name := toolNames[payload.CallID]
 			if name == "" {
@@ -248,7 +248,8 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 			// as ok. Inventing an error status from the text would be guesswork,
 			// and a false "error" is worse than a plain result the reader can see.
 			activity.observeResult(payload.CallID, name, tools.StatusOK, "")
-			events = append(events, toolResultEvent(identities, name, payload.CallID, tools.StatusOK, codexOutputText(payload.Output)))
+			events.add(toolResultEvent(identities, name, payload.CallID, tools.StatusOK, codexOutputText(payload.Output)))
+			delete(toolNames, payload.CallID)
 		}
 		return true
 	})
@@ -259,10 +260,13 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 	// complete to both the user and the model continuing it — the failure this
 	// makes visible is a question with no answer followed by a follow-up.
 	contextEvents := activity.summaryEvents()
-	if omitted > 0 {
-		contextEvents = append([]sessions.AppendEventInput{omittedRecordsEvent(omitted)}, contextEvents...)
+	if prefixOmitted {
+		contextEvents = append(contextEvents, omittedPrefixEvent())
 	}
-	return capTranslatedEvents(events, contextEvents, options.MaxEvents), nil
+	if omitted > 0 {
+		contextEvents = append(contextEvents, omittedRecordsEvent(omitted))
+	}
+	return capTranslatedEventsDropped(events.values(), contextEvents, effectiveMaxEvents(options.MaxEvents), events.dropped), nil
 }
 
 // codexBlocksText flattens input_text/output_text blocks to plain text.
