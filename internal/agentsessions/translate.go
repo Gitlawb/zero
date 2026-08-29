@@ -370,7 +370,7 @@ const (
 )
 
 func effectiveMaxEvents(requested int) int {
-	if requested > 0 && requested < defaultImportMaxEvents {
+	if requested > 0 {
 		return requested
 	}
 	return defaultImportMaxEvents
@@ -378,16 +378,20 @@ func effectiveMaxEvents(requested int) int {
 
 type eventTail struct {
 	events  []sessions.AppendEventInput
+	max     int
 	start   int
 	dropped int
 }
 
 func newEventTail(max int) *eventTail {
-	return &eventTail{events: make([]sessions.AppendEventInput, 0, max)}
+	return &eventTail{
+		events: make([]sessions.AppendEventInput, 0, min(max, 128)),
+		max:    max,
+	}
 }
 
 func (tail *eventTail) add(event sessions.AppendEventInput) {
-	if len(tail.events) < cap(tail.events) {
+	if len(tail.events) < tail.max {
 		tail.events = append(tail.events, event)
 		return
 	}
