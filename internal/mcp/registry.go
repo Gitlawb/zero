@@ -18,6 +18,11 @@ import (
 // so a slow or unreachable server (e.g. a hosted endpoint blocked by the local
 // network) cannot delay the first model response. Servers connect concurrently,
 // so total startup cost is the slowest reachable server, not the sum.
+// launchSettleGrace bounds how long an abandoned connect attempt is given to
+// say whether it had already started. It is paid only after cancel, so an
+// attempt that never reached Start returns well inside it.
+const launchSettleGrace = 250 * time.Millisecond
+
 const defaultConnectTimeout = 8 * time.Second
 
 type RegisterOptions struct {
@@ -130,6 +135,14 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		notices []string
 	}
 	results := make([]connectResult, len(servers))
+	// RETAINED PAST THE CONCURRENT PHASE. The timeout branch samples the sink the
+	// moment it fires, but connectStdio does not publish until cmd.Start has
+	// returned, so a Start that succeeds just after the timeout selected was
+	// sampled as "never launched" and its disclosure was lost: the reaper closes
+	// the late client and cannot amend a commit that has already happened.
+	// Reading the sink again in the serial phase is strictly later than the
+	// timeout branch and still deterministic, because it runs after wg.Wait.
+	sinks := make([]*launchSink, len(servers))
 	var wg sync.WaitGroup
 	for index := range servers {
 		wg.Add(1)
@@ -140,6 +153,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 			// can still report the confinement its process ran under. The connect
 			// result cannot supply that: it does not arrive until after this phase.
 			sink := &launchSink{}
+			sinks[index] = sink
 			serverCtx, cancel := context.WithCancel(withLaunchSink(ctx, sink))
 			done := make(chan connectResult, 1)
 			go func() {
@@ -156,23 +170,45 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 				results[index] = res
 			case <-time.After(timeout):
 				cancel() // abandon the slow connect: tears down the conn/subprocess
-				// Reap the goroutine + any partial client in the background so a
-				// slow server never blocks startup. The reaper cannot contribute the
-				// disclosure: it returns after the serial commit phase below has
-				// already run, which is why the launch fact is published at Start
-				// instead of being read off the late result here.
-				go func() {
-					if res := <-done; res.client != nil {
+				timedOut := connectResult{err: fmt.Errorf("connect timed out after %s", timeout)}
+				// SYNCHRONIZE WITH THE START, briefly, before deciding there was none.
+				//
+				// connectStdio publishes only after cmd.Start returns, so sampling the
+				// sink the instant the timeout fires races a Start that is about to
+				// succeed: the sample reads empty, the result commits with no notice,
+				// and the reaper cannot amend a commit that has already happened. The
+				// window is microseconds and unreachable from a test seam, which is
+				// exactly why it must be closed by construction rather than measured.
+				//
+				// cancel() has already fired, so an attempt that has NOT started fails
+				// fast and this returns immediately; only one that did start can still
+				// be in Start, and it publishes on the way out. The grace is therefore
+				// paid only when there is something to learn.
+				select {
+				case res := <-done:
+					if res.client != nil {
 						_ = res.client.Close()
 					}
-				}()
-				timedOut := connectResult{err: fmt.Errorf("connect timed out after %s", timeout)}
+					if len(res.notices) > 0 {
+						timedOut.notices = res.notices
+					}
+				case <-time.After(launchSettleGrace):
+					// Still stuck past the grace. Reap in the background so a slow
+					// server never blocks startup.
+					go func() {
+						if res := <-done; res.client != nil {
+							_ = res.client.Close()
+						}
+					}()
+				}
 				// A server that reached Start ran under the planned enforcement even
 				// though its connection never became usable. One that timed out
 				// before Start discloses nothing, so the sink stays empty and this
 				// adds nothing.
-				if launched, notices := sink.observe(); launched {
-					timedOut.notices = notices
+				if len(timedOut.notices) == 0 {
+					if launched, notices := sink.observe(); launched {
+						timedOut.notices = notices
+					}
 				}
 				results[index] = timedOut
 			}
@@ -194,8 +230,17 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		// including one whose tools are rejected below: the launch happened under
 		// that token either way, and a skip warning does not say what confinement
 		// the process ran with while it was alive.
-		if len(res.notices) > 0 {
-			runtime.disclosures = append(runtime.disclosures, StartupDisclosure{Name: server.Name, Notices: res.notices})
+		notices := res.notices
+		if len(notices) == 0 {
+			// A launch that published after the timeout branch sampled. Checked here
+			// rather than only there so the window between Start succeeding and the
+			// timeout committing cannot swallow the disclosure.
+			if launched, late := sinks[index].observe(); launched {
+				notices = late
+			}
+		}
+		if len(notices) > 0 {
+			runtime.disclosures = append(runtime.disclosures, StartupDisclosure{Name: server.Name, Notices: notices})
 		}
 		if res.err != nil {
 			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault})
