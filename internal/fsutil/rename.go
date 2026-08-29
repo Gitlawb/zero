@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+var posixChown = func(f *os.File, uid, gid int) error {
+	return f.Chown(uid, gid)
+}
+
 // WriteFileAtomic writes data to a temporary file in the same directory as filename,
 // flushes and syncs it to disk, and replaces filename atomically via ReplaceWithRetry.
 // For new files, it honors the process umask by creating the temporary file with
@@ -55,6 +59,13 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	if existingMode != nil {
 		if err := tmpFile.Chmod(*existingMode); err != nil {
 			return err
+		}
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			if err := posixChown(tmpFile, int(stat.Uid), int(stat.Gid)); err != nil {
+				if int(stat.Uid) != os.Getuid() || int(stat.Gid) != os.Getgid() {
+					return err
+				}
+			}
 		}
 	}
 	if _, err := tmpFile.Write(data); err != nil {
