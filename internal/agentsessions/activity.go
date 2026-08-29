@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -36,11 +37,11 @@ import (
 // but never which file or why. At translation time those values are still in
 // hand.
 
-// maxSummaryEventChars keeps one summary event inside the digest's per-event
-// budget. sessions.summarizePayload truncates every event to 500 characters, so
+// maxSummaryEventBytes keeps one summary event inside the digest's per-event
+// budget. sessions.summarizePayload truncates every event to 500 bytes, so
 // a single long summary would be sliced mid-sentence; several short ones each
 // arrive intact. The margin absorbs the payload's own framing.
-const maxSummaryEventChars = 460
+const maxSummaryEventBytes = 460
 
 // maxSummaryItems bounds one line's list before it collapses to a count. A
 // session that touched ninety files should say so rather than name eleven of
@@ -285,7 +286,7 @@ func (log *activityLog) summaryEvents() []sessions.AppendEventInput {
 	// full-length tail: a session full of unrecognised tool names produced a
 	// 500-character note, which is exactly where sessions.summarizePayload cuts —
 	// the mid-sentence truncation maxSummaryEventChars exists to keep off.
-	events = append(events, noteEvent(truncateToBudget(headline, maxSummaryEventChars)))
+	events = append(events, noteEvent(truncateToBudget(headline, maxSummaryEventBytes)))
 
 	for _, section := range []struct {
 		label string
@@ -346,12 +347,22 @@ func summaryLine(label string, items []string) string {
 		kept = kept[:maxSummaryItems]
 	}
 	for {
-		line := label + ": " + strings.Join(kept, ", ")
+		prefix := label + ": "
+		line := prefix + strings.Join(kept, ", ")
+		suffix := ""
 		if dropped > 0 {
-			line += " (+" + itoaEvents(dropped) + " more)"
+			suffix = " (+" + itoaEvents(dropped) + " more)"
+			line += suffix
 		}
-		if len([]rune(line)) <= maxSummaryEventChars || len(kept) <= 1 {
-			return truncateToBudget(line, maxSummaryEventChars)
+		if len(line) <= maxSummaryEventBytes {
+			return line
+		}
+		if len(kept) <= 1 {
+			itemBudget := maxSummaryEventBytes - len(prefix) - len(suffix)
+			if itemBudget <= 0 {
+				return truncateToBudget(prefix+suffix, maxSummaryEventBytes)
+			}
+			return prefix + truncateToBudget(kept[0], itemBudget) + suffix
 		}
 		dropped++
 		kept = kept[:len(kept)-1]
@@ -359,11 +370,21 @@ func summaryLine(label string, items []string) string {
 }
 
 func truncateToBudget(value string, budget int) string {
-	runes := []rune(value)
-	if len(runes) <= budget {
+	if budget <= 0 {
+		return ""
+	}
+	if len(value) <= budget {
 		return value
 	}
-	return string(runes[:budget-1]) + "…"
+	const ellipsis = "…"
+	if budget < len(ellipsis) {
+		return strings.Repeat(".", budget)
+	}
+	end := budget - len(ellipsis)
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end] + ellipsis
 }
 
 func countPhrase(count int, noun string) string {
