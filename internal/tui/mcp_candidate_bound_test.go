@@ -44,15 +44,90 @@ func TestADelimiterHeavyValueDoesNotExpandWithoutBound(t *testing.T) {
 	}
 }
 
-// An oversized value is still redacted whole. Only the suffix enumeration is
-// dropped, and that is what cost.
-func TestAnOversizedValueIsStillRedactedWhole(t *testing.T) {
-	value := strings.Repeat("Qw7ZmPr4", (maxMCPCredentialInput/8)+64)
-	if len(value) <= maxMCPCredentialInput {
-		t.Fatalf("the fixture is %d bytes, which does not exceed the %d-byte input bound", len(value), maxMCPCredentialInput)
-	}
+// A WORK BOUND MUST NOT DROP A CREDENTIAL SPELLING.
+//
+// The input cap this replaces returned the whole value and nothing else once a
+// configured value crossed 8 KiB. That turned a cost control into a change of
+// security semantics: "Bearer <opaque token>" stopped offering the bare token as
+// a candidate, so a failed server echoing only the token matched nothing, and an
+// opaque token has no shape for the fallback redactor to recognise either. The
+// first 400 characters then reached both /mcp render paths and the transcript.
+//
+// The bound is now on where a separator is looked for, so the tails survive at
+// any length.
+func TestAnOversizedCredentialStillYieldsItsToken(t *testing.T) {
+	token := strings.Repeat("A", 8198)
+	value := "Bearer " + token
+
 	candidates := credentialCandidates(value)
-	if len(candidates) != 1 || candidates[0] != value {
-		t.Fatalf("an oversized value produced %d candidates; it must still yield itself", len(candidates))
+	if len(candidates) > maxMCPCredentialCandidates {
+		t.Errorf("expanded into %d candidates, want at most %d", len(candidates), maxMCPCredentialCandidates)
+	}
+	var whole, bare bool
+	for _, candidate := range candidates {
+		switch candidate {
+		case value:
+			whole = true
+		case token:
+			bare = true
+		}
+	}
+	if !whole {
+		t.Error("the whole configured value is no longer a candidate")
+	}
+	if !bare {
+		t.Fatal("the bare token is not a candidate, so a server echoing only the token is not redacted")
+	}
+}
+
+// The header form has two separators, and both tails must survive the same way.
+func TestAnOversizedHeaderCredentialYieldsBothTails(t *testing.T) {
+	token := strings.Repeat("B", 9000)
+	value := "Authorization: Bearer " + token
+
+	var bare, afterHeader bool
+	for _, candidate := range credentialCandidates(value) {
+		switch candidate {
+		case token:
+			bare = true
+		case "Bearer " + token:
+			afterHeader = true
+		}
+	}
+	if !afterHeader {
+		t.Error("the <scheme> <credential> tail is missing")
+	}
+	if !bare {
+		t.Error("the bare token is missing")
+	}
+}
+
+// The separator scan is bounded, and the boundary is stated rather than implied:
+// a separator inside the window yields its tail, one past the window does not.
+// That is a cost decision, and it is safe because every convention this walks
+// puts its separators in a short prefix.
+func TestCredentialSeparatorScanBoundary(t *testing.T) {
+	token := strings.Repeat("C", 4096)
+	for _, testCase := range []struct {
+		name     string
+		padding  int
+		wantTail bool
+	}{
+		{name: "separator just inside the window", padding: maxMCPCredentialSeparatorScan - 2, wantTail: true},
+		{name: "separator at the last scanned byte", padding: maxMCPCredentialSeparatorScan - 1, wantTail: true},
+		{name: "separator just past the window", padding: maxMCPCredentialSeparatorScan + 1, wantTail: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			value := strings.Repeat("x", testCase.padding) + " " + token
+			var found bool
+			for _, candidate := range credentialCandidates(value) {
+				if candidate == token {
+					found = true
+				}
+			}
+			if found != testCase.wantTail {
+				t.Errorf("tail present = %v, want %v (padding %d)", found, testCase.wantTail, testCase.padding)
+			}
+		})
 	}
 }
