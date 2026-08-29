@@ -682,13 +682,19 @@ func snapshotWindowsSandboxRuntimeStamp(root string) windowsSandboxStampSnapshot
 		return windowsSandboxStampSnapshot{}
 	}
 	path := windowsSandboxRuntimeStampPath(root)
-	rootIdentity, rootIdentified := runtimeDirIdentity(root)
-	prior, err := os.ReadFile(path)
-	if err != nil {
-		// Absent, or unreadable and therefore not something to put back.
-		return windowsSandboxStampSnapshot{path: path, root: root, rootIdentity: rootIdentity, rootIdentified: rootIdentified}
+	// ONE HANDLE FOR BOTH FACTS. Taking the identity and then re-resolving the
+	// pathname to read the stamp let a rename in between pair one directory's
+	// identity with another's bytes, so a rollback could verify the right object
+	// and then write the wrong contents into it.
+	rootIdentity, rootIdentified, prior, existed := snapshotRuntimeStampBound(root)
+	return windowsSandboxStampSnapshot{
+		path:           path,
+		prior:          prior,
+		existed:        existed,
+		root:           root,
+		rootIdentity:   rootIdentity,
+		rootIdentified: rootIdentified,
 	}
-	return windowsSandboxStampSnapshot{path: path, prior: prior, existed: true, root: root, rootIdentity: rootIdentity, rootIdentified: rootIdentified}
 }
 
 func (snapshot windowsSandboxStampSnapshot) restore() error {
@@ -868,16 +874,17 @@ func createRuntimeDirRecording(root string) ([]windowsCreatedRuntimeDir, error) 
 	}
 	var created []windowsCreatedRuntimeDir
 	for index := len(missing) - 1; index >= 0; index-- {
-		if err := os.Mkdir(missing[index], 0o700); err != nil {
+		// IDENTITY FROM THE CREATION, not from a reopen of the name. Creating and
+		// then re-resolving is two chances to name a different object, and the
+		// ledger only means anything if it describes the directory this run made.
+		identity, identified, err := createRuntimeDirIdentified(missing[index])
+		if err != nil {
 			if os.IsExist(err) {
 				// Raced with something else creating it; not ours to remove.
 				continue
 			}
 			return created, fmt.Errorf("create sandbox runtime root %s: %w", missing[index], err)
 		}
-		// Identified immediately after creating it, so compensation can prove it is
-		// still the same object rather than trusting the name.
-		identity, identified := runtimeDirIdentity(missing[index])
 		created = append(created, windowsCreatedRuntimeDir{path: missing[index], identity: identity, identified: identified})
 	}
 	// Re-checked after creation. If an ancestor was swapped for a junction while
