@@ -174,6 +174,29 @@ func TestStreamLinesToleratesAMissingTrailingNewline(t *testing.T) {
 	}
 }
 
+func TestStreamTailLinesBoundsTheReadAndDropsAPartialLeadingRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.jsonl")
+	writeFile(t, path, strings.Repeat("x", 100)+"\nsecond\nthird\n")
+
+	var got []string
+	omitted, err := streamTailLines("", path, 64<<10, 20, func(line []byte, truncated bool) bool {
+		if truncated {
+			t.Fatal("short tail record was reported truncated")
+		}
+		got = append(got, string(line))
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !omitted {
+		t.Fatal("bounded tail read did not disclose that an older prefix was skipped")
+	}
+	if strings.Join(got, ",") != "second,third" {
+		t.Fatalf("tail records = %v, want only complete records second and third", got)
+	}
+}
+
 // THE LINE TERMINATOR IS NOT CONTENT. A record whose content exactly fills the
 // per-line cap has been read in full, and reporting it truncated made the import
 // path emit "could not be read" for records it had in fact read — a false alarm

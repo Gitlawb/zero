@@ -1,6 +1,7 @@
 package agentsessions
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -80,9 +81,10 @@ func AdapterNames(env Env) []string {
 
 // importTagPrefix marks a Zero session as a copy of another agent's transcript.
 const importTagPrefix = "imported:"
+const importTagVersion = "v1:"
 
 // ImportTag is the provenance stamp an imported session carries:
-// "imported:<agent>:<foreign session id>".
+// "imported:v1:<base64url agent>:<base64url foreign session id>".
 //
 // The foreign id is part of the tag, not a second metadata field, so there is
 // exactly one record of where a session came from (repo invariant #5 — two
@@ -90,7 +92,8 @@ const importTagPrefix = "imported:"
 // already-imported session apart from one still only on the other agent's disk,
 // which the /resume picker needs in order not to list both.
 func ImportTag(agent string, sourceID string) string {
-	return importTagPrefix + agent + ":" + sourceID
+	encode := base64.RawURLEncoding.EncodeToString
+	return importTagPrefix + importTagVersion + encode([]byte(agent)) + ":" + encode([]byte(sourceID))
 }
 
 // ParseImportTag splits an import tag back into its agent and source id.
@@ -100,6 +103,18 @@ func ParseImportTag(tag string) (agent string, sourceID string, ok bool) {
 	rest := strings.TrimPrefix(strings.TrimSpace(tag), importTagPrefix)
 	if rest == strings.TrimSpace(tag) {
 		return "", "", false
+	}
+	if encoded := strings.TrimPrefix(rest, importTagVersion); encoded != rest {
+		encodedAgent, encodedID, found := strings.Cut(encoded, ":")
+		if !found || encodedAgent == "" || encodedID == "" {
+			return "", "", false
+		}
+		decodedAgent, agentErr := base64.RawURLEncoding.DecodeString(encodedAgent)
+		decodedID, idErr := base64.RawURLEncoding.DecodeString(encodedID)
+		if agentErr != nil || idErr != nil || len(decodedAgent) == 0 || len(decodedID) == 0 {
+			return "", "", false
+		}
+		return string(decodedAgent), string(decodedID), true
 	}
 	agent, sourceID, found := strings.Cut(rest, ":")
 	if !found || agent == "" || sourceID == "" {
@@ -113,6 +128,9 @@ func ParseImportTag(tag string) (agent string, sourceID string, ok bool) {
 // "imported:<agent>" form, so sessions imported before the tag carried a source
 // id still group under the right agent.
 func ImportedAgent(tag string) string {
+	if agent, _, ok := ParseImportTag(tag); ok {
+		return agent
+	}
 	rest := strings.TrimSpace(tag)
 	trimmed := strings.TrimPrefix(rest, importTagPrefix)
 	if trimmed == rest {

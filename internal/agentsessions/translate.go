@@ -1,6 +1,9 @@
 package agentsessions
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -89,19 +92,16 @@ func messageEvent(role string, content string) sessions.AppendEventInput {
 }
 
 type importCallIdentities struct {
-	byForeign map[string]string
+	key []byte
 }
 
 func (identities *importCallIdentities) opaque(foreign string) string {
-	if identities.byForeign == nil {
-		identities.byForeign = map[string]string{}
+	if len(identities.key) == 0 {
+		identities.key = []byte(rand.Text())
 	}
-	if existing := identities.byForeign[foreign]; existing != "" {
-		return existing
-	}
-	identity := fmt.Sprintf("import-call-%06d", len(identities.byForeign)+1)
-	identities.byForeign[foreign] = identity
-	return identity
+	digest := hmac.New(sha256.New, identities.key)
+	_, _ = digest.Write([]byte(foreign))
+	return fmt.Sprintf("import-call-%x", digest.Sum(nil))
 }
 
 func toolCallEvent(identities *importCallIdentities, name string, foreignCallID string, arguments string) sessions.AppendEventInput {
@@ -177,7 +177,7 @@ func noteEvent(summary string) sessions.AppendEventInput {
 // dropped. Zero's own resume renders these events to a text digest anyway
 // (sessions.FormatExecPrompt), so perfect structural fidelity would buy nothing.
 func translateFamily1(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
-	events := []sessions.AppendEventInput{}
+	events := newEventTail(effectiveMaxEvents(options.MaxEvents))
 	// A tool result names only the id of the call it answers, so the call's name
 	// has to be carried forward. Every family-1 agent writes the tool_use before
 	// the matching tool_result, so this is populated by the time it is read.
@@ -186,7 +186,7 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
-	err := streamLines(root, path, importLineLimit, func(line []byte, truncated bool) bool {
+	prefixOmitted, err := streamTailLines(root, path, importLineLimit, importByteLimit, func(line []byte, truncated bool) bool {
 		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
 		// Skipping it silently produced a transcript that looked complete: a
 		// question, no answer, then the follow-up. The marker is the honest
@@ -207,7 +207,7 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 		var text string
 		if json.Unmarshal(record.Message.Content, &text) == nil {
 			if strings.TrimSpace(text) != "" {
-				events = append(events, messageEvent(roleFor(record), text))
+				events.add(messageEvent(roleFor(record), text))
 			}
 			return true
 		}
@@ -220,7 +220,7 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 			switch block.Type {
 			case "text":
 				if strings.TrimSpace(block.Text) != "" {
-					events = append(events, messageEvent(roleFor(record), block.Text))
+					events.add(messageEvent(roleFor(record), block.Text))
 				}
 			case "thinking":
 				// The other model's reasoning. Dropped by default: it is private
@@ -228,12 +228,12 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 				// conversation, and a different model continuing this work will
 				// not be picking up that chain of thought.
 				if options.IncludeReasoning && strings.TrimSpace(block.Thinking) != "" {
-					events = append(events, messageEvent("reasoning", block.Thinking))
+					events.add(messageEvent("reasoning", block.Thinking))
 				}
 			case "tool_use":
 				toolNames[block.ID] = block.Name
 				activity.observeCall(block.ID, block.Name, string(block.Input))
-				events = append(events, toolCallEvent(identities, block.Name, block.ID, string(block.Input)))
+				events.add(toolCallEvent(identities, block.Name, block.ID, string(block.Input)))
 			case "tool_result":
 				name := toolNames[block.ToolUseID]
 				if name == "" {
@@ -245,7 +245,8 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 				}
 				output := family1ResultText(block.Content)
 				activity.observeResult(block.ToolUseID, name, status, output)
-				events = append(events, toolResultEvent(identities, name, block.ToolUseID, status, output))
+				events.add(toolResultEvent(identities, name, block.ToolUseID, status, output))
+				delete(toolNames, block.ToolUseID)
 			}
 		}
 		return true
@@ -257,10 +258,13 @@ func translateFamily1(root string, path string, options ReadOptions) ([]sessions
 	// complete to both the user and the model continuing it — the failure this
 	// makes visible is a question with no answer followed by a follow-up.
 	contextEvents := activity.summaryEvents()
-	if omitted > 0 {
-		contextEvents = append([]sessions.AppendEventInput{omittedRecordsEvent(omitted)}, contextEvents...)
+	if prefixOmitted {
+		contextEvents = append(contextEvents, omittedPrefixEvent())
 	}
-	return capTranslatedEvents(events, contextEvents, options.MaxEvents), nil
+	if omitted > 0 {
+		contextEvents = append(contextEvents, omittedRecordsEvent(omitted))
+	}
+	return capTranslatedEventsDropped(events.values(), contextEvents, effectiveMaxEvents(options.MaxEvents), events.dropped), nil
 }
 
 // roleFor maps a record to the role the TUI understands. Anything that is not
@@ -298,7 +302,11 @@ func family1ResultText(raw json.RawMessage) string {
 // The drop is announced rather than silent. A truncated import that looks
 // complete is how someone concludes the other agent never did the work.
 func capEvents(events []sessions.AppendEventInput, max int) []sessions.AppendEventInput {
-	if max <= 0 || len(events) <= max {
+	return capEventsDropped(events, max, 0)
+}
+
+func capEventsDropped(events []sessions.AppendEventInput, max int, alreadyDropped int) []sessions.AppendEventInput {
+	if alreadyDropped == 0 && (max <= 0 || len(events) <= max) {
 		return events
 	}
 	// The note itself occupies one of the max slots, so one more original event
@@ -307,7 +315,9 @@ func capEvents(events []sessions.AppendEventInput, max int) []sessions.AppendEve
 	// by one, and a truncation that reads as smaller than it was is how someone
 	// concludes the other agent did less than it did.
 	shown := events[len(events)-max+1:]
-	dropped := len(events) - len(shown)
+	baseShown := len(shown)
+	shown, orphaned := withoutOrphanToolResults(shown)
+	dropped := alreadyDropped + len(events) - baseShown + orphaned
 	out := make([]sessions.AppendEventInput, 0, max)
 	out = append(out, noteEvent(plural(dropped, "earlier event")+
 		" from this session were not imported; the most recent "+
@@ -318,15 +328,15 @@ func capEvents(events []sessions.AppendEventInput, max int) []sessions.AppendEve
 // capTranslatedEvents applies MaxEvents without allowing generated summaries
 // to evict the actual transcript tail. Context receives spare/reserved slots,
 // but at least the final source event always survives when source exists.
-func capTranslatedEvents(source, contextEvents []sessions.AppendEventInput, max int) []sessions.AppendEventInput {
-	if max <= 0 || len(source)+len(contextEvents) <= max {
+func capTranslatedEventsDropped(source, contextEvents []sessions.AppendEventInput, max int, alreadyDropped int) []sessions.AppendEventInput {
+	if alreadyDropped == 0 && (max <= 0 || len(source)+len(contextEvents) <= max) {
 		return append(append([]sessions.AppendEventInput{}, source...), contextEvents...)
 	}
 	if len(source) == 0 {
 		return capEvents(contextEvents, max)
 	}
 	if len(contextEvents) == 0 {
-		return capEvents(source, max)
+		return capEventsDropped(source, max, alreadyDropped)
 	}
 	contextSlots := min(len(contextEvents), max-1)
 	if contextSlots < 0 {
@@ -343,11 +353,81 @@ func capTranslatedEvents(source, contextEvents []sessions.AppendEventInput, max 
 	}
 	var keptSource []sessions.AppendEventInput
 	if sourceSlots <= 1 {
-		keptSource = append(keptSource, source[len(source)-1])
+		if alreadyDropped > 0 || len(source) > 1 {
+			keptSource = capEventsDropped(source, 1, alreadyDropped)
+		} else {
+			keptSource = append(keptSource, source[len(source)-1])
+		}
 	} else {
-		keptSource = capEvents(source, sourceSlots)
+		keptSource = capEventsDropped(source, sourceSlots, alreadyDropped)
 	}
 	return append(keptSource, contextEvents[len(contextEvents)-contextSlots:]...)
+}
+
+const (
+	defaultImportMaxEvents = 4096
+	importByteLimit        = 32 << 20
+)
+
+func effectiveMaxEvents(requested int) int {
+	if requested > 0 && requested < defaultImportMaxEvents {
+		return requested
+	}
+	return defaultImportMaxEvents
+}
+
+type eventTail struct {
+	events  []sessions.AppendEventInput
+	start   int
+	dropped int
+}
+
+func newEventTail(max int) *eventTail {
+	return &eventTail{events: make([]sessions.AppendEventInput, 0, max)}
+}
+
+func (tail *eventTail) add(event sessions.AppendEventInput) {
+	if len(tail.events) < cap(tail.events) {
+		tail.events = append(tail.events, event)
+		return
+	}
+	tail.events[tail.start] = event
+	tail.start = (tail.start + 1) % len(tail.events)
+	tail.dropped++
+}
+
+func (tail *eventTail) values() []sessions.AppendEventInput {
+	if tail.start == 0 {
+		return tail.events
+	}
+	out := make([]sessions.AppendEventInput, 0, len(tail.events))
+	out = append(out, tail.events[tail.start:]...)
+	return append(out, tail.events[:tail.start]...)
+}
+
+func withoutOrphanToolResults(events []sessions.AppendEventInput) ([]sessions.AppendEventInput, int) {
+	calls := map[string]bool{}
+	out := make([]sessions.AppendEventInput, 0, len(events))
+	dropped := 0
+	for _, event := range events {
+		payload, _ := event.Payload.(map[string]any)
+		id, _ := payload["toolCallId"].(string)
+		if event.Type == sessions.EventToolCall {
+			calls[id] = true
+		}
+		if event.Type == sessions.EventToolResult {
+			if !calls[id] {
+				dropped++
+				continue
+			}
+		}
+		out = append(out, event)
+	}
+	return out, dropped
+}
+
+func omittedPrefixEvent() sessions.AppendEventInput {
+	return noteEvent("Older transcript records were not imported; only a bounded tail of this foreign session was read.")
 }
 
 func itoaEvents(value int) string { return strconv.Itoa(value) }
