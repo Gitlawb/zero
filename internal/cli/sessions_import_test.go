@@ -171,6 +171,93 @@ func TestRunSessionsDiscoverFiltersAgentAndWritesJSON(t *testing.T) {
 	}
 }
 
+func TestSessionJSONCommandsNormalizeBidiFormatCharacters(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record, err := json.Marshal(map[string]any{
+		"type": "user", "cwd": workspace, "gitBranch": "fix/\u202ebidi", "sessionId": "bidi",
+		"message": map[string]any{"role": "user", "model": "model-\u202eunsafe", "content": "deploy \u202egnp.txt.exe"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-workspace", "bidi.jsonl"), string(record)+"\n")
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	if code := runSessionsDiscover(sessionCommandOptions{json: true}, stdout, stderr); code != exitSuccess {
+		t.Fatalf("discover exited %d: %s", code, stderr.String())
+	}
+	if strings.ContainsRune(stdout.String(), '\u202e') {
+		t.Fatalf("discover JSON retained a terminal-active format character: %q", stdout.String())
+	}
+	var discovered []discoveredSnapshot
+	if err := json.Unmarshal(stdout.Bytes(), &discovered); err != nil || len(discovered) != 1 {
+		t.Fatalf("decode discover JSON: rows=%d err=%v output=%s", len(discovered), err, stdout.String())
+	}
+	if discovered[0].Title != "deploy gnp.txt.exe" || discovered[0].GitBranch != "fix/bidi" || discovered[0].ModelID != "model-unsafe" {
+		t.Fatalf("discover JSON lost safe text while normalizing: %+v", discovered[0])
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	stdout.Reset()
+	stderr.Reset()
+	if code := runSessionsImport(store, "claude-code:bidi", sessionCommandOptions{json: true}, stdout, stderr); code != exitSuccess {
+		t.Fatalf("import exited %d: %s", code, stderr.String())
+	}
+	if strings.ContainsRune(stdout.String(), '\u202e') {
+		t.Fatalf("import JSON retained a terminal-active format character: %q", stdout.String())
+	}
+	var imported struct {
+		Title  string             `json:"title"`
+		Source discoveredSnapshot `json:"source"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &imported); err != nil {
+		t.Fatalf("decode import JSON: %v\n%s", err, stdout.String())
+	}
+	if imported.Title != "deploy gnp.txt.exe" || imported.Source.GitBranch != "fix/bidi" || imported.Source.ModelID != "model-unsafe" {
+		t.Fatalf("import JSON lost safe text while normalizing: %+v", imported)
+	}
+}
+
+func TestRunSessionsImportRejectsEmptyTranslationsWithoutDurableState(t *testing.T) {
+	home := t.TempDir()
+	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-w", "empty.jsonl"),
+		`{"type":"user","cwd":"/w","sessionId":"empty","message":{"role":"user","content":""}}`+"\n")
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		if code := runSessionsImport(store, "claude-code:empty", sessionCommandOptions{}, stdout, stderr); code != exitCrash {
+			t.Fatalf("attempt %d exited %d, want %d; stdout=%q stderr=%q", attempt, code, exitCrash, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "no importable content") {
+			t.Fatalf("attempt %d did not explain the empty translation: %q", attempt, stderr.String())
+		}
+		metas, err := store.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(metas) != 0 {
+			t.Fatalf("attempt %d left durable empty sessions: %+v", attempt, metas)
+		}
+	}
+}
+
 func TestRunSessionsImportReportsUsageAndReadFailures(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

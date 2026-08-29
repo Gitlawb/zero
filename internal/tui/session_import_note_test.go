@@ -35,6 +35,51 @@ func TestForeignImportErrorIsSanitizedAtTranscriptBoundary(t *testing.T) {
 	}
 }
 
+func TestForeignResumeCanRetryAnEmptyTranslationWithoutCreatingSessions(t *testing.T) {
+	home := t.TempDir()
+	transcript := filepath.Join(home, ".claude", "projects", "-w", "empty.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte(`{"type":"user","cwd":"/w","sessionId":"empty","message":{"role":"user","content":""}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := agentsessions.Env{Home: home, Getenv: func(name string) string {
+		if name == "CLAUDE_CONFIG_DIR" {
+			return filepath.Join(home, ".claude")
+		}
+		return ""
+	}}
+	store := testSessionStore(t)
+	m := model{sessionStore: store, agentSessionsEnv: env, cwd: "/w"}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		msg, ok := m.importForeignSessionCmd("claude-code:empty")().(foreignSessionImportedMsg)
+		if !ok || msg.err == nil || !strings.Contains(msg.err.Error(), "no importable content") {
+			t.Fatalf("attempt %d returned %#v, want no-importable-content error", attempt, msg)
+		}
+		m.sessionImportInFlight = true
+		var note string
+		m, note = m.finishForeignSessionImport(msg)
+		if !strings.Contains(note, "no importable content") || m.sessionImportInFlight {
+			t.Fatalf("attempt %d finish state: inFlight=%v note=%q", attempt, m.sessionImportInFlight, note)
+		}
+		metas, err := store.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(metas) != 0 {
+			t.Fatalf("attempt %d left durable empty sessions: %+v", attempt, metas)
+		}
+	}
+
+	agentsessions.InvalidateDiscovery()
+	items := m.foreignSessionItems(nil, time.Now())
+	if len(items) != 1 || items[0].Value != "claude-code:empty" {
+		t.Fatalf("retryable foreign source disappeared from the picker: %+v", items)
+	}
+}
+
 // THE IMPORT NOTE IS A TRANSCRIPT ROW, and it was the one foreign-bytes path in
 // /resume still drawn raw. The picker row directly beside it already runs every
 // title through agentsessions.DisplayField; this note went to appendRow with the
