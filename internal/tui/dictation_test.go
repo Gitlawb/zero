@@ -192,7 +192,7 @@ func TestDictationStreamingPartialWithCaretInsideExistingText(t *testing.T) {
 	}
 }
 
-func TestDictationStreamingPartialClampsRegionAfterComposerShrink(t *testing.T) {
+func TestDictationStreamingPartialReanchorsRegionAfterComposerShrink(t *testing.T) {
 	m := model{}
 	m.setComposerState(composerState{text: "hello world", cursor: 11})
 	m.dictation.phase = dictRecording
@@ -205,6 +205,37 @@ func TestDictationStreamingPartialClampsRegionAfterComposerShrink(t *testing.T) 
 	m = m.handleDictationPartial(sttPartialMsg{text: "again"})
 	if m.composer.text != "hi again" {
 		t.Fatalf("partial after composer shrink: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingPartialDoesNotClampStaleRegionIntoUserText(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "aOLDz", cursor: 1})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "first"})
+
+	// Replace the composer while another cumulative partial is in flight. The
+	// old region starts after the same prefix but no longer contains dictation
+	// text, so its clamped bounds must not consume the user's "b".
+	m.setComposerState(composerState{text: "ab", cursor: 2})
+	m = m.handleDictationPartial(sttPartialMsg{text: "next"})
+	if m.composer.text != "abnext" {
+		t.Fatalf("stale live region replaced user text: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingCancelDoesNotClampStaleRegionIntoUserText(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "aOLDz", cursor: 1})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "first"})
+
+	m.setComposerState(composerState{text: "ab", cursor: 2})
+	m = m.discardDictationRegion()
+	if m.composer.text != "ab" {
+		t.Fatalf("discarded stale live region from user text: %q", m.composer.text)
 	}
 }
 
@@ -230,7 +261,7 @@ func TestDictationStreamingBackspaceAcrossRegionPreservesUserTextOnCancel(t *tes
 	}
 }
 
-func TestDictationStreamingInvalidRegionBoundsReanchorOrClamp(t *testing.T) {
+func TestDictationStreamingInvalidRegionBoundsReanchor(t *testing.T) {
 	tests := []struct {
 		name   string
 		start  int
@@ -240,7 +271,7 @@ func TestDictationStreamingInvalidRegionBoundsReanchorOrClamp(t *testing.T) {
 	}{
 		{name: "start past end", start: 40, end: 60, anchor: "a much longer previous composer", want: "abpartial text"},
 		{name: "negative start", start: -3, end: 1, anchor: "", want: "abpartial text"},
-		{name: "end past end", start: 1, end: 40, anchor: "a", want: "apartial text"},
+		{name: "end past end", start: 1, end: 40, anchor: "a", want: "abpartial text"},
 	}
 
 	for _, tt := range tests {
