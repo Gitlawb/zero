@@ -17,12 +17,30 @@ import (
 const maxMessageBytes = 64 * 1024 * 1024
 
 type rpcMessage struct {
-	JSONRPC string          `json:"jsonrpc,omitempty"`
-	ID      any             `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
+	JSONRPC       string          `json:"jsonrpc,omitempty"`
+	ID            any             `json:"id,omitempty"`
+	Method        string          `json:"method,omitempty"`
+	Params        json.RawMessage `json:"params,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Error         *rpcError       `json:"error,omitempty"`
+	methodPresent bool            `json:"-"`
+}
+
+func (m *rpcMessage) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Method *string `json:"method"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	type wire rpcMessage
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*m = rpcMessage(w)
+	m.methodPresent = probe.Method != nil
+	return nil
 }
 
 type rpcError struct {

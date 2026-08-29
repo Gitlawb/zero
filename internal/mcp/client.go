@@ -444,11 +444,8 @@ func (client *Client) readLoop() {
 		}
 		// A message with a Method is a server-initiated request or notification.
 		// It must never be routed as a response to a pending client request.
-		if message.Method != "" {
+		if message.methodPresent || message.Method != "" {
 			if message.ID != nil && jsonRPCIDEchoable(message.ID) {
-				// Send the courtesy -32601 reply via the bounded writer queue. If the
-				// queue is saturated (e.g. an undrained server pipe), drop the reply
-				// immediately so it never stalls readLoop, holds a mutex, or blocks callers.
 				client.ensureWriter()
 				id := message.ID
 				method := message.Method
