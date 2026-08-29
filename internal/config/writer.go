@@ -225,6 +225,51 @@ func SetActiveProvider(path string, name string) (result FileConfig, err error) 
 	return FileConfig{}, fmt.Errorf("provider %q not found", name)
 }
 
+// SetActiveProviderModel persists a provider selection as one lock-held
+// read-modify-write. The active provider and that provider's model are one UI
+// choice; publishing them separately can leave a partially applied selection
+// if another writer wins the lock between calls.
+func SetActiveProviderModel(path string, name string, model string) (result FileConfig, err error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return FileConfig{}, fmt.Errorf("provider name is required")
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return FileConfig{}, fmt.Errorf("model is required")
+	}
+
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer func() { err = errors.Join(err, unlock()) }()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg := FileConfig{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	for index := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), name) {
+			cfg.ActiveProvider = cfg.Providers[index].Name
+			cfg.Providers[index].Model = model
+			if err := writeConfigFile(path, cfg); err != nil {
+				return FileConfig{}, err
+			}
+			return cfg, nil
+		}
+	}
+	return FileConfig{}, fmt.Errorf("provider %q not found", name)
+}
+
 // ProviderPersisted reports whether a provider profile named name actually has
 // a row in the config file at path. A provider can appear in the resolved/
 // in-memory provider list without ever being written to config.json — e.g.

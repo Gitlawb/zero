@@ -4464,11 +4464,12 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerModel:
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
+		var switchPersistErr error
 		owner := strings.TrimSpace(item.OwnerProvider)
 		_, ownerIsSavedProvider := m.savedProviderByName(owner)
 		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
 			// A model from another saved provider: switch provider + model together.
-			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
+			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
 			// OwnerProvider is blank, matches the active provider, or (registry-fallback
 			// / stale-history rows) doesn't resolve to any saved provider: apply against
@@ -4476,6 +4477,10 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			m, text = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {
+			if switchPersistErr != nil {
+				notice := m.modelAppliedNotice() + " · not saved (" + switchPersistErr.Error() + ")"
+				return m.showTransientNoticeInline(notice, transientNoticeWarning), cmd
+			}
 			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), cmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
