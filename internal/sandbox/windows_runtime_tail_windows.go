@@ -5,6 +5,7 @@ package sandbox
 import (
 	"fmt"
 	"os"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -201,7 +202,54 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHas
 // and may run as a different administrator account than the one that later runs
 // the command or zero doctor; the runtime root lives under the ordinary user
 // profile and its owner is stable across that boundary.
+// windowsSetupConsumerSID is the ordinary reader carried across the elevation
+// boundary by `zero sandbox setup`, resolved in the operator's shell.
+//
+// Guarded because tests set it; production writes it once, before setup touches
+// anything, and clears it on the way out.
+var (
+	windowsSetupConsumerMu  sync.Mutex
+	windowsSetupConsumerSID *windows.SID
+)
+
+func setWindowsSetupConsumerSID(sid *windows.SID) func() {
+	windowsSetupConsumerMu.Lock()
+	previous := windowsSetupConsumerSID
+	windowsSetupConsumerSID = sid
+	windowsSetupConsumerMu.Unlock()
+	return func() {
+		windowsSetupConsumerMu.Lock()
+		windowsSetupConsumerSID = previous
+		windowsSetupConsumerMu.Unlock()
+	}
+}
+
+func carriedWindowsSetupConsumerSID() *windows.SID {
+	windowsSetupConsumerMu.Lock()
+	defer windowsSetupConsumerMu.Unlock()
+	return windowsSetupConsumerSID
+}
+
+// windowsRuntimeStampReader resolves the identity that must READ the stamp once
+// setup has returned.
+//
+// The carried SID wins. It is the token that will actually run the commands,
+// resolved before elevation, and it is the only source that survives the token
+// boundary: the elevated helper CREATES the runtime leaf when it is absent, so
+// deriving the reader from that leaf yields BUILTINAdministrators. A later
+// UAC-filtered administrator carries that group deny-only and a standard user
+// given alternate admin credentials is not in it at all, so the protected stamp
+// would end up with no enabled allow ACE for the token that has to validate it,
+// and every restricted command would stop before launch on a setup that had
+// just reported success.
+//
+// The owner fallback stays for the paths that are not setup, notably rollback
+// recreating a stamp it just removed, where the leaf already exists and belongs
+// to whoever owns the install.
 func windowsRuntimeStampReader(directory windows.Handle) (*windows.SID, error) {
+	if carried := carriedWindowsSetupConsumerSID(); carried != nil {
+		return carried, nil
+	}
 	descriptor, err := windows.GetSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		return nil, fmt.Errorf("read the sandbox runtime root owner: %w", err)

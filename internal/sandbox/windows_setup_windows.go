@@ -18,6 +18,20 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": Administrator rights are required. Re-run `zero sandbox setup` from an elevated (Run as administrator) terminal.")
 		return 1
 	}
+	// CARRY THE CONSUMER ACROSS THE ELEVATION BOUNDARY, before anything is
+	// provisioned. The unelevated caller resolved who will read the stamp and
+	// passed it in; this process cannot observe that, because it is the installer
+	// and it creates the runtime leaf the old code derived the reader from.
+	if trimmed := strings.TrimSpace(config.ConsumerSID); trimmed != "" {
+		consumer, sidErr := windows.StringToSid(trimmed)
+		if sidErr != nil {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": the calling user SID could not be parsed: "+sidErr.Error())
+			return 1
+		}
+		restore := setWindowsSetupConsumerSID(consumer)
+		defer restore()
+	}
+
 	// HOLD THE SELECTED ROOT FOR THE WHOLE TRANSACTION.
 	//
 	// The unelevated caller took a lease only to learn which root wins and released

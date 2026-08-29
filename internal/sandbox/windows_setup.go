@@ -41,6 +41,12 @@ type WindowsSandboxSetupConfig struct {
 	CommandCWD        string
 	WorkspaceRoots    []string
 	PermissionProfile PermissionProfile
+	// ConsumerSID is the ordinary token that will READ the setup stamp after
+	// elevation returns. Resolved in the operator's shell and carried across the
+	// elevation boundary, never inferred here: the elevated helper creates the
+	// runtime leaf when it is absent, so that leaf's owner describes the
+	// installer rather than the consumer.
+	ConsumerSID string
 }
 
 type WindowsSandboxSetupMarker struct {
@@ -134,10 +140,25 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	if err != nil {
 		return nil, fmt.Errorf("marshal windows sandbox setup permission profile: %w", err)
 	}
+	// RESOLVED HERE, in the operator's shell, for the same reason the runtime
+	// root is selected here: the elevated helper cannot observe who will run the
+	// commands afterwards. It creates the runtime leaf when it is missing, so a
+	// reader derived from that leaf is BUILTINAdministrators, and a later
+	// UAC-filtered administrator carries that group deny-only while a standard
+	// user given alternate admin credentials is not in it at all. Either way the
+	// protected stamp ends up with no enabled allow ACE for the token that has to
+	// validate it, and every restricted command stops before launch.
+	consumerSID, sidErr := currentProcessSID()
+	if sidErr != nil {
+		return nil, sidErr
+	}
 	args := []string{
 		"--sandbox-home", sandboxHome,
 		"--command-cwd", commandCWD,
 		"--permission-profile", string(profileJSON),
+	}
+	if consumerSID != "" {
+		args = append(args, "--consumer-sid", consumerSID)
 	}
 	for _, root := range workspaceRoots {
 		args = append(args, "--workspace-root", root)
@@ -173,6 +194,13 @@ func ParseWindowsSandboxSetupArgs(args []string) (WindowsSandboxSetupConfig, err
 			if root := strings.TrimSpace(value); root != "" {
 				config.WorkspaceRoots = append(config.WorkspaceRoots, root)
 			}
+			index = next
+		case "--consumer-sid":
+			value, next, err := nextWindowsSandboxFlagValue(args, index)
+			if err != nil {
+				return WindowsSandboxSetupConfig{}, err
+			}
+			config.ConsumerSID = strings.TrimSpace(value)
 			index = next
 		case "--permission-profile":
 			value, next, err := nextWindowsSandboxFlagValue(args, index)
