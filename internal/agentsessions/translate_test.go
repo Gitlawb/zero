@@ -379,6 +379,21 @@ func TestUnsetMaxEventsUsesABoundedDefaultAndDisclosesTheDrop(t *testing.T) {
 	}
 }
 
+func TestExplicitMaxEventsAboveTheDefaultIsHonoured(t *testing.T) {
+	want := defaultImportMaxEvents + 5
+	lines := make([]string, 0, want)
+	for i := 0; i < want; i++ {
+		lines = append(lines, `{"type":"user","message":{"role":"user","content":"turn `+itoa(i)+`"}}`)
+	}
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{MaxEvents: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != want {
+		t.Fatalf("explicit cap returned %d events, want all %d requested events", len(events), want)
+	}
+}
+
 func TestCapDoesNotKeepAToolResultAfterDroppingItsCall(t *testing.T) {
 	identities := &importCallIdentities{}
 	events := []sessions.AppendEventInput{
