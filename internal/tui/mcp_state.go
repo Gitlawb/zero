@@ -1091,18 +1091,26 @@ func mcpURLSecretValues(rawURL string) (known []string, ambiguous []string) {
 // being plausible credentials and start being work.
 const (
 	maxMCPCredentialCandidates = 8
-	maxMCPCredentialInput      = 8 << 10
+	// maxMCPCredentialSeparatorScan bounds where a separator is LOOKED FOR, not
+	// how long a value may be.
+	//
+	// This used to be an input-length cap that returned the whole value and
+	// nothing else once crossed, which made a work bound into a change of
+	// security semantics: an Authorization value of "Bearer <opaque token>" longer
+	// than the cap stopped offering the bare token as a candidate, so a failed
+	// server echoing only the token matched nothing, and an opaque token has no
+	// shape for the fallback redactor to catch either.
+	//
+	// Every convention this walks, "<scheme> <credential>" and
+	// "<header>: <scheme> <credential>", puts its separators in a short prefix, so
+	// scanning only that prefix keeps the cost fixed while the tails survive at
+	// any value length.
+	maxMCPCredentialSeparatorScan = 256
 )
 
 func credentialCandidates(value string) []string {
 	candidates := make([]string, 0, 3)
 	remainder := strings.TrimSpace(value)
-	if len(remainder) > maxMCPCredentialInput {
-		// Bounded before the walk, not after. A value this long is still redacted
-		// whole, because the untruncated original is added by the caller; what is
-		// dropped is only the suffix enumeration, which is what costs.
-		return []string{remainder}
-	}
 	for {
 		if len(remainder) >= shortestMCPSecret {
 			candidates = append(candidates, remainder)
@@ -1110,7 +1118,13 @@ func credentialCandidates(value string) []string {
 		if len(candidates) >= maxMCPCredentialCandidates {
 			return candidates
 		}
-		index := strings.IndexAny(remainder, " :")
+		// Only the prefix is searched, so a multi-megabyte opaque token costs the
+		// same as a short one and still yields its tail.
+		window := remainder
+		if len(window) > maxMCPCredentialSeparatorScan {
+			window = window[:maxMCPCredentialSeparatorScan]
+		}
+		index := strings.IndexAny(window, " :")
 		if index < 0 {
 			return candidates
 		}
