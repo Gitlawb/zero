@@ -381,3 +381,20 @@ func TestExtractTarGzRejectsChainedSymlinkEscapingFile(t *testing.T) {
 		t.Fatalf("escaped file exists outside destDir: %v", err)
 	}
 }
+
+func TestVerifyNoSymlinkEscapeRejectsDanglingLink(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	destDir := t.TempDir()
+	if err := os.Symlink("missing-target", filepath.Join(destDir, "d")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("..", filepath.Join(destDir, "d", "s")); err == nil {
+		t.Log("created d/s through dangling d")
+	}
+	target := filepath.Join(destDir, "d", "s", "x")
+	if err := verifyNoSymlinkEscape(destDir, target); err == nil {
+		t.Fatal("expected dangling or unresolvable symlink to be rejected")
+	}
+}

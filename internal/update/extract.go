@@ -208,19 +208,7 @@ func verifyNoSymlinkEscape(destDirClean string, target string) error {
 		if info.Mode()&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(current)
 			if err != nil {
-				if os.IsNotExist(err) {
-					// Dangling symlink is allowed if its relative destination stays within destDir.
-					linkTarget, readErr := os.Readlink(current)
-					if readErr != nil {
-						return readErr
-					}
-					if filepath.IsAbs(linkTarget) {
-						return fmt.Errorf("archive symlink %s has absolute target: %s", current, linkTarget)
-					}
-					resolved = filepath.Clean(filepath.Join(filepath.Dir(current), linkTarget))
-				} else {
-					return err
-				}
+				return fmt.Errorf("archive symlink %s is dangling or unresolvable: %w", current, err)
 			}
 			resolved = filepath.Clean(resolved)
 			if resolved != destDirResolved && !strings.HasPrefix(resolved, destDirResolved+string(os.PathSeparator)) &&
