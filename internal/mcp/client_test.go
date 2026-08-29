@@ -842,3 +842,66 @@ func TestBoundedBufferCapsRetainedBytes(t *testing.T) {
 		t.Fatalf("retained %q, want %q (capped at 8 bytes, head kept)", got, "hellowor")
 	}
 }
+
+func TestStdioClientIgnoresServerInitiatedRequestsInPendingResponses(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	// Drain output responses from client
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			if _, err := outReader.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	client.ensureReader()
+
+	// Register a pending response for ID 1
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	// Simulate server sending a request with ID 1 ("roots/list")
+	serverReq := `{"jsonrpc":"2.0","id":1,"method":"roots/list","params":{}}` + "\n"
+	go func() {
+		_, _ = inWriter.Write([]byte(serverReq))
+	}()
+
+	// The pending channel for client ID 1 should NOT receive the server request.
+	select {
+	case res := <-responses:
+		t.Fatalf("pending request 1 received server request: %#v", res.message)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: server request was not misdelivered to pending client request
+	}
+
+	// Now send the actual response for ID 1
+	serverResp := `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n"
+	go func() {
+		_, _ = inWriter.Write([]byte(serverResp))
+	}()
+
+	select {
+	case res := <-responses:
+		if res.message.Method != "" || len(res.message.Result) == 0 {
+			t.Fatalf("expected valid response, got %#v", res.message)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for actual response")
+	}
+}
+

@@ -385,6 +385,22 @@ func (client *Client) readLoop() {
 			client.failAll(err)
 			return
 		}
+		// A message with a Method is a server-initiated request or notification.
+		// It must never be routed as a response to a pending client request.
+		if message.Method != "" {
+			if message.ID != nil {
+				client.mu.Lock()
+				_ = client.writer.write(rpcMessage{
+					ID: message.ID,
+					Error: &rpcError{
+						Code:    -32601,
+						Message: fmt.Sprintf("Method %q not supported", message.Method),
+					},
+				})
+				client.mu.Unlock()
+			}
+			continue
+		}
 		if message.ID == nil {
 			continue
 		}
