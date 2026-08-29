@@ -61,11 +61,12 @@ type ForeignSession struct {
 }
 
 // ReadOptions tunes a full read. The zero value is the intended default:
-// reasoning dropped, no cap.
+// reasoning dropped, with a defensive event cap.
 type ReadOptions struct {
 	// MaxEvents caps how many events a session contributes, keeping the LAST
 	// MaxEvents. The tail is what matters for continuing work — the most recent
-	// exchanges are the ones a resume needs. Zero means no cap.
+	// exchanges are the ones a resume needs. Zero uses the package's bounded
+	// default; callers may request a smaller positive cap.
 	MaxEvents int
 	// Cwd is the session's working directory, used only to shorten absolute
 	// paths in the activity summary. Empty just means paths stay absolute.

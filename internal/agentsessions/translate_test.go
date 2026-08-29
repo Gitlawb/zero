@@ -359,6 +359,45 @@ func TestNoCapKeepsEverything(t *testing.T) {
 	}
 }
 
+func TestUnsetMaxEventsUsesABoundedDefaultAndDisclosesTheDrop(t *testing.T) {
+	lines := make([]string, 0, defaultImportMaxEvents+5)
+	for i := 0; i < defaultImportMaxEvents+5; i++ {
+		lines = append(lines, `{"type":"user","message":{"role":"user","content":"turn `+itoa(i)+`"}}`)
+	}
+	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != defaultImportMaxEvents {
+		t.Fatalf("default import returned %d events, want bounded %d", len(events), defaultImportMaxEvents)
+	}
+	if note := str(t, events[0], "content"); !strings.Contains(note, "not imported") {
+		t.Fatalf("default event cap silently dropped history: %q", note)
+	}
+	if last := str(t, events[len(events)-1], "content"); last != "turn "+itoa(defaultImportMaxEvents+4) {
+		t.Fatalf("default cap lost the newest event: %q", last)
+	}
+}
+
+func TestCapDoesNotKeepAToolResultAfterDroppingItsCall(t *testing.T) {
+	identities := &importCallIdentities{}
+	events := []sessions.AppendEventInput{
+		messageEvent("user", "old context"),
+		toolCallEvent(identities, "Read", "foreign-1", `{}`),
+		messageEvent("assistant", "finished"),
+		toolResultEvent(identities, "Read", "foreign-1", "ok", "done"),
+	}
+	capped := capEvents(events, 3)
+	for _, event := range capped {
+		if event.Type == sessions.EventToolResult {
+			t.Fatal("cap retained a tool result after its matching call was displaced by the omission note")
+		}
+	}
+	if got := str(t, capped[len(capped)-1], "content"); got != "finished" {
+		t.Fatalf("cap lost final answer while removing orphan result: %q", got)
+	}
+}
+
 func TestReadRejectsAnUnknownSession(t *testing.T) {
 	adapter := ClaudeCode(testEnv(t.TempDir(), nil))
 	if _, err := adapter.Read("nope", ReadOptions{}); err == nil {

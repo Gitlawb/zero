@@ -48,8 +48,8 @@ func TestAnImportedSessionIsResumable(t *testing.T) {
 	// The tag records the agent AND the foreign session id, which is what lets
 	// the /resume picker tell an already-imported session from one still only on
 	// the other agent's disk.
-	if result.Session.Tag != "imported:claude-code:abc123" {
-		t.Errorf("tag = %q, want agent and source id recorded", result.Session.Tag)
+	if !strings.HasPrefix(result.Session.Tag, "imported:v1:") {
+		t.Errorf("tag = %q, want an encoded v1 provenance tag", result.Session.Tag)
 	}
 	agent, sourceID, ok := ParseImportTag(result.Session.Tag)
 	if !ok || agent != "claude-code" || sourceID != "abc123" {
@@ -159,4 +159,30 @@ func TestImportTagsRoundTrip(t *testing.T) {
 			t.Errorf("ImportedAgent(%q) = %q, want %q", tag, got, want)
 		}
 	}
+}
+
+func TestImportTagEncodesUntrustedProvenanceBeforeDisplay(t *testing.T) {
+	agent := "co\x1bdex"
+	sourceID := "session-\u202ejson\u2066"
+	tag := ImportTag(agent, sourceID)
+	for _, r := range tag {
+		if !safeProvenanceRune(r) {
+			t.Fatalf("provenance tag contains a display-unsafe rune %U: %q", r, tag)
+		}
+	}
+	if strings.Contains(tag, sourceID) || strings.ContainsAny(tag, "\x1b\u202e\u2066") {
+		t.Fatalf("raw foreign provenance survived into display metadata: %q", tag)
+	}
+	gotAgent, gotID, ok := ParseImportTag(tag)
+	if !ok || gotAgent != agent || gotID != sourceID {
+		t.Fatalf("encoded provenance did not round trip: (%q, %q, %v)", gotAgent, gotID, ok)
+	}
+	if got := ImportedAgent(tag); got != agent {
+		t.Fatalf("ImportedAgent(encoded tag) = %q, want %q", got, agent)
+	}
+}
+
+func safeProvenanceRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+		r >= '0' && r <= '9' || strings.ContainsRune("-_:", r)
 }
