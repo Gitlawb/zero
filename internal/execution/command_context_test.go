@@ -3,6 +3,7 @@ package execution
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -48,6 +49,55 @@ func TestRunCommandKillsDescendantAfterRootExit(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("timed-out command unexpectedly succeeded")
+	}
+	pidData, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("read descendant PID: %v; command output: %s", readErr, output.String())
+	}
+	pid, parseErr := strconv.Atoi(string(pidData))
+	if parseErr != nil {
+		t.Fatalf("parse descendant PID %q: %v", pidData, parseErr)
+	}
+	awaitProcessExit(t, pid)
+}
+
+func TestRunCommandKillsDescendantWhenWaitDelayExpires(t *testing.T) {
+	switch os.Getenv("ZERO_WAIT_DELAY_TREE_HELPER") {
+	case "root":
+		child := exec.Command(os.Args[0], "-test.run=^TestRunCommandKillsDescendantWhenWaitDelayExpires$")
+		child.Env = append(os.Environ(), "ZERO_WAIT_DELAY_TREE_HELPER=child")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(os.Getenv("ZERO_WAIT_DELAY_TREE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			os.Exit(3)
+		}
+		return
+	case "child":
+		time.Sleep(30 * time.Second)
+		return
+	}
+
+	pidFile := t.TempDir() + string(os.PathSeparator) + "child.pid"
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunCommandKillsDescendantWhenWaitDelayExpires$")
+	cmd.Env = append(os.Environ(),
+		"ZERO_WAIT_DELAY_TREE_HELPER=root",
+		"ZERO_WAIT_DELAY_TREE_PID_FILE="+pidFile,
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	started := time.Now()
+	err := RunCommand(ctx, cmd)
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("RunCommand remained blocked by descendant output handles for %s", elapsed)
+	}
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("RunCommand error = %v, want exec.ErrWaitDelay", err)
 	}
 	pidData, readErr := os.ReadFile(pidFile)
 	if readErr != nil {

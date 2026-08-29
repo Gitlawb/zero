@@ -53,5 +53,8 @@ func RunCommand(ctx context.Context, command *exec.Cmd) (err error) {
 	if canceled.canceled {
 		return errors.Join(waitErr, ctx.Err(), canceled.err)
 	}
+	if waitErr != nil {
+		return errors.Join(waitErr, tree.cancel())
+	}
 	return waitErr
 }
