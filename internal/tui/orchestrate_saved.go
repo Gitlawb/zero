@@ -94,10 +94,7 @@ func (m model) savePlanText(name string) string {
 		return planControlNotice("warning",
 			"No plan has run this session, so there is nothing to save. Run one first — a saved plan is a plan that worked.")
 	}
-	dir := m.planPaths.ProjectDir
-	if dir == "" {
-		dir = m.planPaths.UserDir
-	}
+	root, dir := m.planWriteTarget()
 	if dir == "" {
 		return planControlNotice("warning", "There is nowhere to save plans in this run.")
 	}
@@ -121,7 +118,7 @@ func (m model) savePlanText(name string) string {
 	if err != nil {
 		return planControlNotice("warning", "That plan no longer validates, so it was not saved: "+err.Error())
 	}
-	path, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, name, plan)
+	path, err := specialist.SavePlan(root, dir, name, plan)
 	if err != nil {
 		return planControlNotice("warning", "Could not save the plan: "+err.Error())
 	}
@@ -390,9 +387,9 @@ func quotePlanParams(declared []string) []string {
 // reads exactly what is about to happen, and it travels the one execution path
 // every other plan travels.
 //
-// A FIXED name, overwritten each time, for the same reason the resume staging
-// uses one: a directory of last_run_1, _2, _3 is a directory nobody can tell
-// apart, and only the newest is ever the right one.
+// A FIXED reserved name keeps the staged plan inspectable. Publication is
+// exclusive: if a user already owns that name, restart refuses instead of
+// replacing their bytes.
 // resumeLastPlan runs the plan that last ran, from WHERE IT STOPPED — the
 // completed tasks are skipped and their findings are folded into the tasks that
 // remain (RemainingPlan). It is bare "/plans resume" when no plan is live to
@@ -442,14 +439,11 @@ func (m model) resumeLastPlan() (tea.Model, tea.Cmd) {
 		// failure, it is the plan being done. Say so plainly.
 		return m.appendPlansNotice(planControlNotice("info", err.Error())), nil
 	}
-	dir := m.planPaths.ProjectDir
-	if dir == "" {
-		dir = m.planPaths.UserDir
-	}
+	root, dir := m.planWriteTarget()
 	if dir == "" {
 		return m.appendPlansNotice(planControlNotice("warning", "There is nowhere to stage the plan in this run.")), nil
 	}
-	if _, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, resumePlanName, remaining); err != nil {
+	if _, err := specialist.SavePlanExclusive(root, dir, resumePlanName, remaining); err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the remaining plan: "+err.Error())), nil
 	}
 	label := planName
@@ -513,15 +507,12 @@ func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 		return m.appendPlansNotice(planControlNotice("warning",
 			"That plan no longer validates, so it was not restarted: "+err.Error())), nil
 	}
-	dir := m.planPaths.ProjectDir
-	if dir == "" {
-		dir = m.planPaths.UserDir
-	}
+	root, dir := m.planWriteTarget()
 	if dir == "" {
 		return m.appendPlansNotice(planControlNotice("warning",
 			"There is nowhere to stage the plan in this run.")), nil
 	}
-	if _, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, restartPlanName, plan); err != nil {
+	if _, err := specialist.SavePlanExclusive(root, dir, restartPlanName, plan); err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the plan: "+err.Error())), nil
 	}
 	label := planName
@@ -542,9 +533,8 @@ func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 }
 
 // restartPlanName is where a restart stages the last plan; resumePlanName is
-// where a resume-from-stop stages the remainder. A FIXED name each, overwritten
-// each time: a directory of last_run_1, _2, _3 is one nobody can tell apart, and
-// only the newest is ever the right one.
+// where a resume-from-stop stages the remainder. These names are never allowed
+// to replace an existing saved plan.
 const restartPlanName = "last_run"
 const resumePlanName = "last_run_resume"
 
@@ -592,15 +582,11 @@ func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice
 		return "", planControlNotice("info", err.Error()), false
 	}
 
-	dir := m.planPaths.ProjectDir
-	if dir == "" {
-		dir = m.planPaths.UserDir
-	}
-	// A FIXED name, overwritten each time. A resume that accumulated
-	// sweep-resume-1, -2, -3 would leave a directory of near-identical plans
-	// nobody can tell apart, and only the newest is ever the right one.
+	root, dir := m.planWriteTarget()
+	// A fixed, inspectable name. Exclusive publication below refuses rather than
+	// replacing a user-authored plan that already owns it.
 	resumeName := stored.Name + "_resume"
-	if _, err := specialist.SavePlan(m.planPaths.ProjectRoot, dir, resumeName, remaining); err != nil {
+	if _, err := specialist.SavePlanExclusive(root, dir, resumeName, remaining); err != nil {
 		return "", planControlNotice("warning", "Could not stage the remaining plan: "+err.Error()), false
 	}
 	// WHY there is work left, not just how much. A plan that RAN TO THE END with
@@ -626,4 +612,11 @@ func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice
 	}
 	notice += fmt.Sprintf("\nSaved the remainder as %q — /plans show %s to read it first.", resumeName, resumeName)
 	return resumeName, planControlNotice("info", notice), true
+}
+
+func (m model) planWriteTarget() (root, dir string) {
+	if m.planPaths.ProjectDir != "" {
+		return m.planPaths.ProjectRoot, m.planPaths.ProjectDir
+	}
+	return m.planPaths.UserRoot, m.planPaths.UserDir
 }

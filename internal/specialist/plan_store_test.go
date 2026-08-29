@@ -661,6 +661,62 @@ func TestSavingNeverWritesThroughASymlinkedTempFile(t *testing.T) {
 	}
 }
 
+func TestExclusiveSaveDoesNotReplaceAnExistingPlan(t *testing.T) {
+	dir := t.TempDir()
+	original := mustPlan(t, []any{task("original", "keep this")}, okBudget(), readOnlyLimits())
+	if _, err := SavePlan(dir, dir, "last_run", original); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "last_run"+planFileExt)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := mustPlan(t, []any{task("replacement", "do not publish")}, okBudget(), readOnlyLimits())
+	if _, err := SavePlanExclusive(dir, dir, "last_run", replacement); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("exclusive save did not report the collision: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("exclusive save replaced the existing plan")
+	}
+}
+
+func TestConcurrentExclusiveSavesPublishExactlyOnePlan(t *testing.T) {
+	dir := t.TempDir()
+	plan := savedPlanFixture(t)
+	errs := make([]error, 8)
+	var wait sync.WaitGroup
+	for i := range errs {
+		wait.Add(1)
+		go func(i int) {
+			defer wait.Done()
+			_, errs[i] = SavePlanExclusive(dir, dir, "last_run", plan)
+		}(i)
+	}
+	wait.Wait()
+
+	winners := 0
+	for _, err := range errs {
+		if err == nil {
+			winners++
+			continue
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("losing save returned the wrong error: %v", err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("exclusive saves produced %d winners, want exactly one", winners)
+	}
+	if _, err := FindSavedPlan(PlanPaths{ProjectRoot: dir, ProjectDir: dir}, "last_run"); err != nil {
+		t.Fatalf("winning plan is not readable: %v", err)
+	}
+}
+
 // TWO SAVES OF ONE PLAN MUST NOT STOMP EACH OTHER'S BYTES.
 //
 // The temp file used to be a fixed <name>.json.tmp, so concurrent saves wrote

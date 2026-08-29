@@ -120,6 +120,19 @@ func validPlanName(name string) bool {
 // symlinked at ~/.ssh/config would otherwise make "save my plan" a file
 // overwrite primitive.
 func SavePlan(root, dir, name string, plan Plan) (string, error) {
+	return savePlan(root, dir, name, plan, true)
+}
+
+// SavePlanExclusive publishes a validated plan only when name is unused.
+// Generated restart/resume staging must never replace a user-authored plan
+// that happens to have the same name. The final hard link is an atomic
+// no-replace publish: checking first and then calling SavePlan would retain a
+// window in which another process could create the destination.
+func SavePlanExclusive(root, dir, name string, plan Plan) (string, error) {
+	return savePlan(root, dir, name, plan, false)
+}
+
+func savePlan(root, dir, name string, plan Plan, replace bool) (string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return "", fmt.Errorf("no directory to save plans in")
 	}
@@ -183,6 +196,17 @@ func SavePlan(root, dir, name string, plan Plan) (string, error) {
 	// CreateTemp makes the file 0600 already; this is belt-and-braces against a
 	// umask-sensitive platform, and it runs before the rename so the plan is
 	// never briefly world-readable under its real name.
+	if !replace {
+		if err := handle.Link(temp, relativePath); err != nil {
+			_ = handle.Remove(temp)
+			if errors.Is(err, fs.ErrExist) {
+				return "", fmt.Errorf("saved plan %q already exists; refusing to overwrite it", name)
+			}
+			return "", fmt.Errorf("save %s without replacing an existing plan: %w", path, err)
+		}
+		_ = handle.Remove(temp)
+		return path, nil
+	}
 	if err := handle.Rename(temp, relativePath); err != nil {
 		_ = handle.Remove(temp)
 		return "", fmt.Errorf("save %s: %w", path, err)

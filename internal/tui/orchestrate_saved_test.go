@@ -78,6 +78,27 @@ func TestSavingRequiresAName(t *testing.T) {
 	}
 }
 
+func TestSavingFallsBackToTheUserPlanRoot(t *testing.T) {
+	m, paths := savedPlanModel(t)
+	m.planPaths.ProjectRoot = ""
+	m.planPaths.ProjectDir = ""
+	m.planProgress.PlanAdmitted(samplePlan(t))
+
+	text := m.savePlanText("personal")
+	if !strings.Contains(text, "status: info") {
+		t.Fatalf("user-scope fallback failed: %s", text)
+	}
+	paths.ProjectRoot = ""
+	paths.ProjectDir = ""
+	stored, err := specialist.FindSavedPlan(paths, "personal")
+	if err != nil {
+		t.Fatalf("user-scope plan was not saved under the user root: %v", err)
+	}
+	if stored.Scope != specialist.PlanScopeUser {
+		t.Fatalf("saved scope = %q, want user", stored.Scope)
+	}
+}
+
 // An invalid name is refused by the STORE, and the surface reports it rather
 // than swallowing it.
 func TestSavingAnInvalidNameIsReported(t *testing.T) {
@@ -362,6 +383,75 @@ func TestRestartStagesTheLastPlanFromTheBeginning(t *testing.T) {
 	}
 	if !strings.Contains(transcriptText(updated.(model).transcript), "from the beginning") {
 		t.Fatalf("restart must say it starts over: %s", transcriptText(updated.(model).transcript))
+	}
+}
+
+func TestRestartRefusesToOverwriteAUserPlan(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	m.planProgress.PlanAdmitted(plan)
+	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, restartPlanName, plan); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(paths.ProjectDir, restartPlanName+".json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, cmd := m.restartLastPlan()
+	if cmd != nil {
+		t.Fatal("a colliding restart started a turn")
+	}
+	text := transcriptText(updated.(model).transcript)
+	if !strings.Contains(text, "already exists") || !strings.Contains(text, restartPlanName) {
+		t.Fatalf("collision was not explained: %s", text)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("restart changed the existing user plan")
+	}
+}
+
+func TestBareResumeRefusesToOverwriteAUserPlan(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	m.planProgress.PlanAdmitted(plan)
+	m.planProgress.TaskDispatched(specialist.Task{ID: plan.Order()[0]})
+	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, resumePlanName, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, cmd := m.resumeLastPlan()
+	if cmd != nil {
+		t.Fatal("a colliding resume started a turn")
+	}
+	text := transcriptText(updated.(model).transcript)
+	if !strings.Contains(text, "already exists") || !strings.Contains(text, resumePlanName) {
+		t.Fatalf("collision was not explained: %s", text)
+	}
+}
+
+func TestNamedResumeRefusesToOverwriteAUserPlan(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	m.planProgress.PlanAdmitted(plan)
+	m.planProgress.TaskDispatched(specialist.Task{ID: plan.Order()[0]})
+	stored, err := specialist.FindSavedPlan(paths, "sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	collision := stored.Name + "_resume"
+	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, collision, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	_, notice, ok := m.resumeSavedPlan(stored)
+	if ok {
+		t.Fatal("named resume overwrote an existing user plan")
+	}
+	if !strings.Contains(notice, "already exists") || !strings.Contains(notice, collision) {
+		t.Fatalf("collision was not explained: %s", notice)
 	}
 }
 
