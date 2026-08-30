@@ -7,8 +7,6 @@ DEADCODE_VERSION := v0.46.0
 GOLANGCI_LINT_VERSION := v2.12.2
 GOVULNCHECK_VERSION := v1.3.0
 
-export GOWORK ?= off
-
 .PHONY: build build-all test test-race vet fmt fmt-check lint lint-static deadcode vulncheck vulncheck-windows tidy clean baseline help
 
 # Build the main CLI binary into ./zero.

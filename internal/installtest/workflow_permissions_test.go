@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestPullRequestWorkflowsDeclareContentsRead(t *testing.T) {
@@ -20,10 +22,15 @@ func TestPullRequestWorkflowsDeclareContentsRead(t *testing.T) {
 		}
 		rel := filepath.Join(".github", "workflows", e.Name())
 		body := readRepoText(t, rel)
-		if !workflowHasPullRequestTrigger(body) {
+		doc, err := parseWorkflow(body)
+		if err != nil {
+			t.Errorf("%s: yaml: %v", rel, err)
 			continue
 		}
-		if !workflowHasTopLevelContentsRead(body) {
+		if !workflowOnHasPullRequest(doc.On) {
+			continue
+		}
+		if !workflowPermissionsContentsRead(doc.Permissions) {
 			missing = append(missing, rel)
 		}
 	}
@@ -63,6 +70,36 @@ func TestWorkflowPermissionParsing(t *testing.T) {
 			wantPR:   false,
 			wantPerm: false,
 		},
+		{
+			name:     "inline comment does not fake contents read",
+			yml:      "on: [pull_request]\npermissions: write-all # contents: read\n",
+			wantPR:   true,
+			wantPerm: false,
+		},
+		{
+			name:     "empty permissions mapping",
+			yml:      "on: [pull_request]\npermissions: {}\n",
+			wantPR:   true,
+			wantPerm: false,
+		},
+		{
+			name:     "write-all is not contents read",
+			yml:      "on: [pull_request]\npermissions: write-all\n",
+			wantPR:   true,
+			wantPerm: false,
+		},
+		{
+			name:     "quoted on and permissions keys",
+			yml:      "\"on\": [pull_request]\n\"permissions\":\n  \"contents\": read\n",
+			wantPR:   true,
+			wantPerm: true,
+		},
+		{
+			name:     "nested job permissions are not top-level",
+			yml:      "on:\n  pull_request:\njobs:\n  x:\n    permissions:\n      contents: read\n",
+			wantPR:   true,
+			wantPerm: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,69 +126,59 @@ func TestVulncheckWindowsQuotesGobinPath(t *testing.T) {
 	}
 }
 
+type workflowFile struct {
+	On          any `yaml:"on"`
+	Permissions any `yaml:"permissions"`
+}
+
+func parseWorkflow(body string) (workflowFile, error) {
+	var doc workflowFile
+	err := yaml.Unmarshal([]byte(body), &doc)
+	return doc, err
+}
+
 func workflowHasPullRequestTrigger(body string) bool {
-	inOn := false
-	for _, line := range yamlActiveLines(body) {
-		indent := yamlIndent(line)
-		trim := strings.TrimSpace(line)
-		if indent == 0 && trim != "" && !strings.HasPrefix(trim, "-") {
-			key, rest, ok := strings.Cut(trim, ":")
-			if !ok {
-				inOn = false
-				continue
-			}
-			inOn = key == "on"
-			if inOn && strings.Contains(rest, "pull_request") {
-				return true
-			}
-			continue
-		}
-		if inOn && strings.Contains(trim, "pull_request") {
-			return true
-		}
+	doc, err := parseWorkflow(body)
+	if err != nil {
+		return false
 	}
-	return false
+	return workflowOnHasPullRequest(doc.On)
 }
 
 func workflowHasTopLevelContentsRead(body string) bool {
-	inPerm := false
-	for _, line := range yamlActiveLines(body) {
-		indent := yamlIndent(line)
-		trim := strings.TrimSpace(line)
-		if indent == 0 && trim != "" && !strings.HasPrefix(trim, "-") {
-			key, rest, ok := strings.Cut(trim, ":")
-			inPerm = ok && key == "permissions"
-			if inPerm && strings.Contains(rest, "contents: read") {
+	doc, err := parseWorkflow(body)
+	if err != nil {
+		return false
+	}
+	return workflowPermissionsContentsRead(doc.Permissions)
+}
+
+func workflowOnHasPullRequest(on any) bool {
+	switch v := on.(type) {
+	case string:
+		return v == "pull_request"
+	case []any:
+		for _, item := range v {
+			if workflowOnHasPullRequest(item) {
 				return true
 			}
-			continue
 		}
-		if inPerm && trim == "contents: read" {
-			return true
-		}
+	case map[string]any:
+		_, ok := v["pull_request"]
+		return ok
 	}
 	return false
 }
 
-func yamlActiveLines(body string) []string {
-	var out []string
-	for _, line := range strings.Split(body, "\n") {
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			continue
-		}
-		out = append(out, line)
+func workflowPermissionsContentsRead(perm any) bool {
+	m, ok := perm.(map[string]any)
+	if !ok {
+		return false
 	}
-	return out
-}
-
-func yamlIndent(line string) int {
-	n := 0
-	for _, r := range line {
-		if r != ' ' && r != '\t' {
-			break
-		}
-		n++
+	contents, ok := m["contents"]
+	if !ok {
+		return false
 	}
-	return n
+	s, ok := contents.(string)
+	return ok && s == "read"
 }

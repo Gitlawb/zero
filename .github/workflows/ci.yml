@@ -48,7 +48,7 @@ jobs:
         run: make lint-static
 
   test:
-    name: Unit Tests & Race Detector
+    name: Unit Tests & Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -132,7 +132,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Test (Fast Non-Race)
+      - name: Test
         run: go test ./...
 
       - name: Build binary
