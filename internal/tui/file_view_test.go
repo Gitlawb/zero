@@ -741,6 +741,204 @@ func TestReadFileViewBounded_ExactMaxBytesUnterminatedLineTruncated(t *testing.T
 	}
 }
 
+func TestReadFileViewBounded_SourceByteBudgetCountsDelimiters(t *testing.T) {
+	tests := []struct {
+		name          string
+		content       string
+		maxLines      int
+		maxLineBytes  int
+		maxTotalBytes int
+		wantLines     []string
+		wantTrunc     bool
+		wantOmitted   bool
+		wantTrailer   string
+	}{
+		{
+			name:          "empty file",
+			content:       "",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 1,
+			wantLines:     nil,
+		},
+		{
+			name:          "budget 1 two LF empty lines",
+			content:       "\n\n",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 1,
+			wantLines:     []string{""},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+		{
+			name:          "single LF exact budget",
+			content:       "\n",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 1,
+			wantLines:     []string{""},
+		},
+		{
+			name:          "LF content line exact budget",
+			content:       "ab\n",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 3,
+			wantLines:     []string{"ab"},
+		},
+		{
+			name:          "LF second line one byte over",
+			content:       "ab\ncd\n",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 3,
+			wantLines:     []string{"ab"},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+		{
+			name:          "CRLF two empty lines budget 2",
+			content:       "\r\n\r\n",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 2,
+			wantLines:     []string{""},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+		{
+			name:          "CRLF exact budget",
+			content:       "ab\r\n",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 4,
+			wantLines:     []string{"ab"},
+		},
+		{
+			name:          "CRLF one byte over",
+			content:       "ab\r\ncd",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 3,
+			wantLines:     []string{"ab"},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+		{
+			name:          "exact budget unterminated last line",
+			content:       "abc",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 3,
+			wantLines:     []string{"abc"},
+		},
+		{
+			name:          "unterminated last line one byte over",
+			content:       "abcd",
+			maxLines:      4000,
+			maxLineBytes:  4096,
+			maxTotalBytes: 3,
+			wantLines:     []string{"abc"},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+		{
+			name:          "overlong physical line clipped then next line shown",
+			content:       strings.Repeat("x", 20) + "\nnext\n",
+			maxLines:      4000,
+			maxLineBytes:  8,
+			maxTotalBytes: 100,
+			wantLines:     []string{strings.Repeat("x", 8), "next"},
+			wantTrunc:     true,
+			wantTrailer:   "line content truncated",
+		},
+		{
+			name:          "overlong physical line newline counts against byte budget",
+			content:       strings.Repeat("x", 10) + "\ny\n",
+			maxLines:      4000,
+			maxLineBytes:  4,
+			maxTotalBytes: 11,
+			wantLines:     []string{strings.Repeat("x", 4)},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+		{
+			name:          "line count cap with leftover",
+			content:       "a\nb\nc\nd\n",
+			maxLines:      2,
+			maxLineBytes:  4096,
+			maxTotalBytes: 100,
+			wantLines:     []string{"a", "b"},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+		{
+			name:          "line count cap exact file",
+			content:       "a\nb\n",
+			maxLines:      2,
+			maxLineBytes:  4096,
+			maxTotalBytes: 100,
+			wantLines:     []string{"a", "b"},
+		},
+		{
+			name:          "byte budget binds before line count cap on empty LF lines",
+			content:       "\n\n\n\n",
+			maxLines:      10,
+			maxLineBytes:  4096,
+			maxTotalBytes: 2,
+			wantLines:     []string{"", ""},
+			wantTrunc:     true,
+			wantOmitted:   true,
+			wantTrailer:   "more lines",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "input.txt")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			res := readFileViewBounded(path, tc.maxLines, tc.maxLineBytes, tc.maxTotalBytes)
+			if res.err != nil {
+				t.Fatalf("unexpected read error: %v", res.err)
+			}
+			if res.truncated != tc.wantTrunc {
+				t.Fatalf("truncated=%v, want %v (lines=%q)", res.truncated, tc.wantTrunc, res.lines)
+			}
+			if res.omittedLines != tc.wantOmitted {
+				t.Fatalf("omittedLines=%v, want %v (lines=%q)", res.omittedLines, tc.wantOmitted, res.lines)
+			}
+			if len(res.lines) != len(tc.wantLines) {
+				t.Fatalf("retained %d lines %q, want %d %q", len(res.lines), res.lines, len(tc.wantLines), tc.wantLines)
+			}
+			for i := range tc.wantLines {
+				if res.lines[i] != tc.wantLines[i] {
+					t.Fatalf("line %d = %q, want %q", i, res.lines[i], tc.wantLines[i])
+				}
+			}
+
+			plain := plainRender(t, formatFileViewLines(res.lines, res.lines, nil, res.truncated, res.omittedLines, 80, zeroTheme))
+			if tc.wantTrailer == "" {
+				if strings.Contains(plain, "truncated") {
+					t.Fatalf("expected no trailer, got %q", plain)
+				}
+			} else if !strings.Contains(plain, tc.wantTrailer) {
+				t.Fatalf("expected trailer %q in %q", tc.wantTrailer, plain)
+			}
+		})
+	}
+}
+
 // TestFileViewCache_RenderVariantsBoundedUnderResize verifies that varying width
 // and changed-line fingerprints cannot grow an entry's renders map beyond
 // fileViewMaxRenderVariants, even under concurrent access from multiple goroutines.
