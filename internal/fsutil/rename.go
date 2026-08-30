@@ -12,10 +12,19 @@ import (
 	"time"
 )
 
+// ErrNonRegularDestination is returned when WriteFileAtomic would replace a
+// FIFO, device, socket, directory, or other special file with a regular file.
+var ErrNonRegularDestination = errors.New("fsutil: destination exists and is not a regular file")
+
 // WriteFileAtomic writes data to a temporary file in the same directory as filename,
 // flushes and syncs it to disk, and replaces filename atomically via ReplaceWithRetry.
 // For new files, it honors the process umask by creating the temporary file with
-// os.OpenFile(..., perm). For existing regular files, it preserves the existing file mode.
+// os.OpenFile(..., perm). For existing regular files, it requires write access to
+// the current destination and copies that destination's authorization metadata onto
+// the replacement (mode bits including setuid/setgid/sticky, owner, and xattrs such
+// as POSIX ACLs and capabilities). If that metadata cannot be preserved, the call
+// fails and leaves the destination unchanged. Non-regular, non-symlink destinations
+// are refused before staging so a FIFO, device, or socket is not replaced.
 //
 // Platform differences on symlink destinations: On Unix (Linux/macOS), replacing a
 // symlink destination replaces the symlink itself with the new regular file. On Windows,
@@ -31,9 +40,17 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	info, err := os.Lstat(filename)
 	switch {
 	case err == nil:
-		if info.Mode().IsRegular() {
-			m := info.Mode().Perm()
-			existingMode = &m
+		mode := info.Mode()
+		switch {
+		case mode.IsRegular():
+			if err := ensureWritable(filename); err != nil {
+				return err
+			}
+			existingMode = &mode
+		case mode&os.ModeSymlink != 0:
+			// Documented platform-specific replacement of the symlink itself.
+		default:
+			return fmt.Errorf("%w: %s", ErrNonRegularDestination, filename)
 		}
 	case !os.IsNotExist(err):
 		return err
@@ -59,6 +76,9 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		if err := preserveOwner(tmpFile, info); err != nil {
 			return err
 		}
+		if err := preserveXattrs(tmpFile, filename); err != nil {
+			return err
+		}
 	}
 	if _, err := tmpFile.Write(data); err != nil {
 		return err
@@ -76,6 +96,14 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		syncDir(dir)
 	}
 	return replaceErr
+}
+
+func ensureWritable(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func createTempFile(dir string, perm os.FileMode) (*os.File, error) {

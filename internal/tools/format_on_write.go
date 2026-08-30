@@ -10,19 +10,19 @@ import (
 )
 
 // Format-on-write for the mutating file tools. When enabled, a successful
-// edit_file/write_file runs the language's standard formatter on the file it
-// just wrote, so the model's output always lands in project-canonical style
+// edit_file/write_file formats staged content before the single atomic
+// publication, so the model's output always lands in project-canonical style
 // and never fails a CI format check it cannot see. Off by default (set
 // ZERO_FORMAT_ON_WRITE=1): auto-reformatting changes bytes the model did not
 // write, which strict workflows may not want.
 //
-// Ordering matters: formatting runs BEFORE the FileTracker re-baseline, and
-// the caller records the POST-format content. Formatting after the baseline
-// would make the very next edit look like an external modification and trip
-// the conflict guard.
+// Ordering matters: formatting runs on a sibling temporary file BEFORE
+// publication and BEFORE the FileTracker re-baseline. The caller records the
+// POST-format content that was actually published. Formatting the destination
+// in place after publication would reintroduce partial-file writes.
 
 // formatOnWriteTimeout bounds one formatter run; a wedged formatter must never
-// hang a tool call. On timeout the unformatted write stands.
+// hang a tool call. On timeout the unformatted staged bytes are published.
 const formatOnWriteTimeout = 10 * time.Second
 
 // formatterCommands maps a file extension to the formatter argv; the file path
@@ -65,16 +65,18 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
-// maybeFormatWrittenFile runs the configured formatter for absolutePath (when
-// enabled and on PATH) and returns the file's content afterwards. Best-effort
+// maybeFormatWrittenFile runs the configured formatter on a sibling copy of
+// writtenContent (when enabled and on PATH) and returns the bytes to publish.
+// The destination path is never opened or rewritten here. Best-effort
 // throughout: any failure — no formatter, formatter error, timeout, unreadable
-// result — returns writtenContent so the caller's state matches the last write
-// it performed itself.
+// result — returns writtenContent so the caller can atomically publish the
+// unformatted staged bytes.
 func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) string {
 	if !formatOnWriteEnabled() {
 		return writtenContent
 	}
-	command, ok := formatterCommands[strings.ToLower(filepath.Ext(absolutePath))]
+	ext := strings.ToLower(filepath.Ext(absolutePath))
+	command, ok := formatterCommands[ext]
 	if !ok {
 		return writtenContent
 	}
@@ -82,16 +84,30 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	if err != nil {
 		return writtenContent
 	}
+	dir := filepath.Dir(absolutePath)
+	staging, err := os.CreateTemp(dir, ".zero-fmt-*"+ext)
+	if err != nil {
+		return writtenContent
+	}
+	stagingName := staging.Name()
+	defer func() { _ = os.Remove(stagingName) }()
+	if _, err := staging.WriteString(writtenContent); err != nil {
+		_ = staging.Close()
+		return writtenContent
+	}
+	if err := staging.Close(); err != nil {
+		return writtenContent
+	}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
-	arguments := append(append([]string(nil), command[1:]...), absolutePath)
+	arguments := append(append([]string(nil), command[1:]...), stagingName)
 	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
-	formatter.Dir = filepath.Dir(absolutePath)
+	formatter.Dir = dir
 	formatter.Stdin = strings.NewReader("")
 	if err := formatter.Run(); err != nil {
 		return writtenContent
 	}
-	formatted, err := os.ReadFile(absolutePath)
+	formatted, err := os.ReadFile(stagingName)
 	if err != nil {
 		return writtenContent
 	}

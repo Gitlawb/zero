@@ -153,15 +153,16 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
+	modelKnownContent := updated
+	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Format staged bytes, then
+	// publish once. Recording pre-format content would make the next edit look
+	// like an external modification and trip the conflict guard; formatting the
+	// destination in place after publication would reintroduce partial writes.
+	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
 	cleanupWarning, err := committedWrite(absolutePath, []byte(updated), 0o644)
 	if err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	modelKnownContent := updated
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
-	// FileTracker re-baseline: recording pre-format content would make the very
-	// next edit look like an external modification and trip the conflict guard.
-	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := os.Stat(absolutePath)
