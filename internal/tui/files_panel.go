@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -357,8 +359,13 @@ func (m *model) setSelectedFile(path string) {
 
 // selectFile marks path as the selected file and scrolls the transcript so its
 // most recent edit card is in view; the card tint comes from the renderers
-// reading selectedFile (rowTouchesSelectedFile).
-func (m model) selectFile(path string) model {
+// reading selectedFile (rowTouchesSelectedFile). A second activation of the
+// same path drills into the file view and returns any load command.
+func (m model) selectFile(path string) (model, tea.Cmd) {
+	if m.selectedFile == path {
+		m.runDetailsOpen = false
+		return m.openFileView(path)
+	}
 	rowIndex := m.lastRowIndexForFile(path)
 	m.setSelectedFile(path)
 	if offset, ok := m.scrollOffsetForTranscriptRow(rowIndex); ok {
@@ -367,7 +374,32 @@ func (m model) selectFile(path string) model {
 			m.chatBodyLines = 0
 		}
 	}
-	return m
+	return m, nil
+}
+
+func (m model) runDetailsFileAtMouse(msg tea.MouseMsg) (string, bool) {
+	if !m.runDetailsOpen || !m.runDetailsAllowed() {
+		return "", false
+	}
+	width := m.width
+	overlay := m.runDetailsOverlay(width)
+	hit, ok := m.overlayMouseHit(msg, overlay, width)
+	if !ok {
+		return "", false
+	}
+	lines := viewLines(overlay)
+	_, lines, _ = normalizeOverlayBlock(lines, width)
+	if hit.y < 0 || hit.y >= len(lines) {
+		return "", false
+	}
+	row := lines[hit.y]
+	for _, f := range m.touchedFiles() {
+		shown := truncatePathLeft(f.path, 40)
+		if strings.Contains(row, f.path) || strings.Contains(row, shown) {
+			return f.path, true
+		}
+	}
+	return "", false
 }
 
 // scrollOffsetForTranscriptRow computes the chatScrollOffset that places the
