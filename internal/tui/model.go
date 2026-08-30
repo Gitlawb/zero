@@ -1544,10 +1544,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyboardEnhancementsMsg:
 		return m.handleKeyboardEnhancements(msg), nil
 	case tea.KeyReleaseMsg:
-		// Voice mode's hold-to-record ends on Space release; every other release
-		// event is ignored (dispatch elsewhere is press-based).
-		if m.dictation.voiceModeEnabled && keyIs(msg, tea.KeySpace) {
-			return m.handleVoiceSpaceRelease()
+		// Voice mode's hold-to-record ends on Ctrl+Space release; every other
+		// release event is ignored (dispatch elsewhere is press-based).
+		if m.dictation.voiceModeEnabled && voiceCaptureReleaseKey(msg) {
+			return m.handleVoiceCaptureRelease()
 		}
 		return m, nil
 	case tea.KeyPressMsg:
@@ -1681,11 +1681,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
 			return m.showTransientNoticeInline("Mouse interaction re-enabled.", transientNoticeSuccess), nil
-		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && keyIs(msg, tea.KeySpace) && !keyHasMod(msg, tea.ModCtrl) && !keyAlt(msg) && m.noBlockingModal():
-			// Voice mode (/voice) repurposes Space into the record gesture — the only
-			// dictation trigger — so it must not also type a space. Turn voice mode
-			// off (/voice) to type normally.
-			return m.handleVoiceSpacePress(msg)
+		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && voiceCaptureKey(msg) && m.noBlockingModal():
+			// Voice mode reserves Ctrl+Space for recording; ordinary Space continues
+			// through the composer path below.
+			return m.handleVoiceCapturePress(msg)
 		case keyIs(msg, tea.KeyEsc):
 			// Esc is heavily overloaded below (subchat exit, MCP cancel, ask-user,
 			// permission deny, wizard/picker/suggestions dismiss, ...) before ever
