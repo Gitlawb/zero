@@ -150,6 +150,8 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, err
 	}
 	defer unlock()
+	// Put back anything an earlier run was killed mid-commit; see installtxn.Recover.
+	installtxn.Recover(dir)
 
 	// Re-read under the cross-process lock. Another install may have updated the
 	// lockfile while this skill was fetched and staged.
@@ -201,6 +203,8 @@ func Remove(dir string, name string) error {
 		return err
 	}
 	defer unlock()
+	// Put back anything an earlier run was killed mid-commit; see installtxn.Recover.
+	installtxn.Recover(dir)
 
 	lock, err := ReadLock(dir)
 	if err != nil {

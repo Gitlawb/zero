@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // initGitSkillRepo creates a real local git repo holding a skill and returns a
@@ -430,5 +432,45 @@ func TestSkillHashDriftUnreadableLockedPath(t *testing.T) {
 	}
 	if skillHashDrift(Skill{Path: missing}, "") {
 		t.Fatal("missing lock hash must not count as drift")
+	}
+}
+
+// skills.Install carries the same recovery call as plugins.Install, so it needs
+// the same proof. An install killed mid-commit leaves the skill's only copy in
+// a workspace backup; the next install over the same directory has to put it
+// back rather than leave it stranded where nothing reads it.
+func TestInstallRecoversASkillLeftByAnInterruptedCommit(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourceSkill(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: alpha\ndescription: first.\n---\nalpha body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The state a kill between CommitDir's two renames leaves behind.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	if err := os.WriteFile(filepath.Join(workspace, "target"), []byte("alpha"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "alpha"), filepath.Join(workspace, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	src2 := writeSourceSkill(t, filepath.Join(t.TempDir(), "src2"),
+		"---\nname: beta\ndescription: second.\n---\nbeta body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	got, ok := Get(dir, "alpha")
+	if !ok || !strings.Contains(got.Content, "alpha body") {
+		t.Fatalf("the interrupted skill install was not put back: ok=%v skill=%+v", ok, got)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("the recovered workspace should be cleared, got %v", err)
 	}
 }
