@@ -132,7 +132,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Test
+      - name: Test (Fast Non-Race)
         run: go test ./...
 
       - name: Build binary
