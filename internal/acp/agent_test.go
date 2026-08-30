@@ -1023,7 +1023,6 @@ func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
 		prompts <- prompt
 		return agent.Result{FinalAnswer: "continued"}, nil
 	}
-
 	h := newHarness(t, deps)
 	defer h.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1077,6 +1076,39 @@ func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+}
+
+func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
+	deps := testDeps(t)
+	displayCwd := "/work/[REDACTED]/repo"
+	operationalCwd := "/work/sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA/repo"
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:        "imported session",
+		Cwd:          displayCwd,
+		WorkspaceKey: operationalCwd,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	var resolved []string
+	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) {
+		resolved = append(resolved, cwd)
+		return cwd, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: meta.SessionID,
+		Cwd:       operationalCwd,
+	}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	if len(resolved) != 2 || resolved[0] != operationalCwd || resolved[1] != operationalCwd {
+		t.Fatalf("session/load resolved workspaces %q, want persisted and requested %q", resolved, operationalCwd)
 	}
 }
 

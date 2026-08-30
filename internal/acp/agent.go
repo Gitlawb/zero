@@ -257,7 +257,8 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if operation == persistedSessionResume && !sessions.IsResumableKind(meta.SessionKind) {
 		return nil, RPCError(codeInvalidParams, "session is not resumable: "+p.SessionID)
 	}
-	if strings.TrimSpace(meta.Cwd) == "" {
+	persistedCwd := sessions.OperationalCwd(*meta)
+	if strings.TrimSpace(persistedCwd) == "" {
 		return nil, RPCError(codeInvalidParams, "session has no persisted workspace: "+p.SessionID)
 	}
 	// SAME RULE ON THE WAY IN. Omitting a relative entry from the listing is not
@@ -265,10 +266,10 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// client that hands back that same directory as its cwd would be sold the
 	// invented root as a match. A workspace that cannot be identified is not one
 	// this session can be restored into.
-	if !filepath.IsAbs(meta.Cwd) {
+	if !filepath.IsAbs(persistedCwd) {
 		return nil, RPCError(codeInvalidParams, "session workspace is not an absolute path, so it cannot be identified: "+p.SessionID)
 	}
-	persistedRoot, err := a.deps.ResolveWorkspaceRoot(meta.Cwd)
+	persistedRoot, err := a.deps.ResolveWorkspaceRoot(persistedCwd)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, "persisted session workspace is unavailable: "+err.Error())
 	}
