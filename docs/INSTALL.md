@@ -156,10 +156,10 @@ go install github.com/Gitlawb/zero/cmd/zero@latest
 This builds from source, so it needs Go 1.26.6+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 
-- On Linux, Bubblewrap is still required for native sandboxing. The installed
-  `zero` binary re-executes itself as the helper when no standalone
-  `zero-linux-sandbox` is available next to `zero` or on `PATH`. A colocated or
-  PATH helper remains optional and takes precedence. See
+- On Linux, Bubblewrap is still required for native sandboxing. Zero resolves
+  the helper in this order: an executable `zero-linux-sandbox` next to `zero`,
+  then `PATH`, then self-exec of the main binary. Standalone helpers remain
+  optional and preferred. See
   [Sandbox Helpers For Source Builds](#sandbox-helpers-for-source-builds).
 - `zero upgrade` treats the result as a standalone install and will replace the
   binary with a release build rather than rebuilding from source. If you chose
@@ -186,9 +186,15 @@ Source builds require Go 1.26.6+.
 ### Sandbox Helpers For Source Builds
 
 Release archives include the platform sandbox helpers. A source build of the
-main `zero` binary is enough for Linux native sandboxing: Zero re-executes
-itself as the helper when no standalone `zero-linux-sandbox` is available next
-to `zero` or on `PATH`. Bubblewrap must still be installed.
+main `zero` binary is enough for Linux native sandboxing. Zero resolves the
+helper in this order:
+
+1. an executable `zero-linux-sandbox` next to `zero`
+2. then `PATH`
+3. then self-exec of the main binary
+
+Bubblewrap must still be installed. Standalone helpers remain optional and
+preferred.
 
 A separate helper remains supported if it sits next to `zero` or on `PATH`:
 

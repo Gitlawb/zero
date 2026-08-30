@@ -477,6 +477,9 @@ func pathExists(path string) bool {
 	return err == nil
 }
 
+// findLinuxSandboxHelperCommand locates the Linux sandbox helper. Resolution
+// order is sibling zero-linux-sandbox, then PATH, then self-exec of the main
+// binary; a source checkout may also fall back to go run.
 func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 	if cmd := resolveLinuxSandboxHelper(lookupExecutable); cmd.Name != "" {
 		return cmd, nil
@@ -498,6 +501,8 @@ func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 
 var linuxSandboxExecutable = os.Executable
 
+// resolveLinuxSandboxHelper returns the helper in sibling, PATH, then
+// self-exec order. An empty Name means none of those candidates is available.
 func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandboxHelperCommand {
 	if lookup == nil {
 		lookup = lookupExecutable
