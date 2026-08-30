@@ -479,3 +479,56 @@ func TestExtractTarGzAllowsSafeDanglingRelative(t *testing.T) {
 		t.Fatal("safe dangling target was written outside destDir")
 	}
 }
+
+// Tar entry d -> . followed by d/s -> .. creates destDir/s -> .. if the
+// symlink entry's link-target check uses lexical filepath.Dir instead of the
+// physical parent that will create it. The symlink entry itself must be
+// rejected before an outbound link can be planted.
+func TestExtractTarGzRejectsSymlinkParentEscape(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	destDir := filepath.Join(dir, "extracted")
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+	writeTestTarGzEntries(t, archivePath, []testTarEntry{
+		{name: "d", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "d/s", typeflag: tar.TypeSymlink, linkname: ".."},
+	})
+	extractErr := extractArchive(archivePath, destDir)
+	escaped := filepath.Join(destDir, "s")
+	if _, err := os.Lstat(escaped); err == nil {
+		t.Fatalf("outbound symlink %s was created", escaped)
+	}
+	if extractErr == nil {
+		t.Fatal("expected extractArchive to reject symlink entry with escaping target through symlink parent")
+	}
+}
+
+// An archive attempting to plant zero -> d/s/outside-file through a symlink parent
+// must not create the target outside destDir and extractArchive must fail.
+func TestExtractTarGzRejectsSymlinkThroughSymlinkParentOutsideTarget(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	destDir := filepath.Join(dir, "extracted")
+	outsideDir := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll outside: %v", err)
+	}
+	outsideFile := filepath.Join(outsideDir, "pwned.txt")
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+	writeTestTarGzEntries(t, archivePath, []testTarEntry{
+		{name: "d", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "d/s", typeflag: tar.TypeSymlink, linkname: ".."},
+		{name: "zero", typeflag: tar.TypeSymlink, linkname: "d/s/outside/pwned.txt"},
+	})
+	extractErr := extractArchive(archivePath, destDir)
+	if extractErr == nil {
+		t.Fatal("expected extractArchive to fail on escaping symlink chain")
+	}
+	if _, err := os.Stat(outsideFile); !os.IsNotExist(err) {
+		t.Fatalf("file outside destDir was accessed/created: %v", err)
+	}
+}

@@ -21,6 +21,17 @@ func extractArchive(archivePath string, destDir string) error {
 }
 
 func extractTarGz(archivePath string, destDir string) error {
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return err
+	}
+	destRoot, err := os.OpenRoot(destDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = destRoot.Close()
+	}()
+
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return err
@@ -44,37 +55,40 @@ func extractTarGz(archivePath string, destDir string) error {
 		if err != nil {
 			return err
 		}
-		target, err := safeExtractPath(destDir, header.Name)
+		cleanName, err := cleanEntryPath(header.Name)
 		if err != nil {
 			return err
 		}
+		if cleanName == "." {
+			continue
+		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+			if err := destRoot.MkdirAll(cleanName, 0o755); err != nil {
+				return fmt.Errorf("archive directory entry %s escapes destination: %w", header.Name, err)
 			}
 		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+			parent := filepath.Dir(cleanName)
+			if parent != "." {
+				if err := destRoot.MkdirAll(parent, 0o755); err != nil {
+					return fmt.Errorf("archive symlink parent %s escapes destination: %w", parent, err)
+				}
 			}
-			if filepath.IsAbs(header.Linkname) {
-				return fmt.Errorf("absolute symlink targets are not supported: %s -> %s", header.Name, header.Linkname)
+			if err := validateSymlinkTarget(destRoot, parent, header.Linkname); err != nil {
+				return fmt.Errorf("archive symlink target escapes destination: %s -> %s: %w", header.Name, header.Linkname, err)
 			}
-			// Verify that the symlink target, when resolved, does not escape destDir.
-			resolvedTarget := filepath.Join(filepath.Dir(target), header.Linkname)
-			destDirClean := filepath.Clean(destDir)
-			if !strings.HasPrefix(resolvedTarget, destDirClean+string(os.PathSeparator)) && resolvedTarget != destDirClean {
-				return fmt.Errorf("archive symlink target escapes destination: %s -> %s", header.Name, header.Linkname)
-			}
-			_ = os.Remove(target)
-			if err := os.Symlink(header.Linkname, target); err != nil {
+			_ = destRoot.Remove(cleanName)
+			if err := destRoot.Symlink(header.Linkname, cleanName); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+			parent := filepath.Dir(cleanName)
+			if parent != "." {
+				if err := destRoot.MkdirAll(parent, 0o755); err != nil {
+					return fmt.Errorf("archive file parent %s escapes destination: %w", parent, err)
+				}
 			}
-			if err := writeExtractedFile(target, tarReader, fs.FileMode(header.Mode)); err != nil {
+			if err := writeExtractedFile(destRoot, cleanName, tarReader, fs.FileMode(header.Mode)); err != nil {
 				return err
 			}
 		default:
@@ -86,6 +100,17 @@ func extractTarGz(archivePath string, destDir string) error {
 }
 
 func extractZip(archivePath string, destDir string) error {
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return err
+	}
+	destRoot, err := os.OpenRoot(destDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = destRoot.Close()
+	}()
+
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
@@ -94,13 +119,16 @@ func extractZip(archivePath string, destDir string) error {
 		_ = reader.Close()
 	}()
 	for _, entry := range reader.File {
-		target, err := safeExtractPath(destDir, entry.Name)
+		cleanName, err := cleanEntryPath(entry.Name)
 		if err != nil {
 			return err
 		}
+		if cleanName == "." {
+			continue
+		}
 		if entry.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+			if err := destRoot.MkdirAll(cleanName, 0o755); err != nil {
+				return fmt.Errorf("archive directory entry %s escapes destination: %w", entry.Name, err)
 			}
 			continue
 		}
@@ -117,8 +145,11 @@ func extractZip(archivePath string, destDir string) error {
 		if !entry.Mode().IsRegular() {
 			return fmt.Errorf("unsupported archive entry type for %s", entry.Name)
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
+		parent := filepath.Dir(cleanName)
+		if parent != "." {
+			if err := destRoot.MkdirAll(parent, 0o755); err != nil {
+				return fmt.Errorf("archive file parent %s escapes destination: %w", parent, err)
+			}
 		}
 		if err := func() error {
 			entryReader, err := entry.Open()
@@ -128,7 +159,7 @@ func extractZip(archivePath string, destDir string) error {
 			defer func() {
 				_ = entryReader.Close()
 			}()
-			return writeExtractedFile(target, entryReader, entry.Mode())
+			return writeExtractedFile(destRoot, cleanName, entryReader, entry.Mode())
 		}(); err != nil {
 			return err
 		}
@@ -136,11 +167,12 @@ func extractZip(archivePath string, destDir string) error {
 	return nil
 }
 
-func writeExtractedFile(target string, source io.Reader, mode fs.FileMode) error {
-	if mode == 0 {
-		mode = 0o644
+func writeExtractedFile(destRoot *os.Root, name string, source io.Reader, mode fs.FileMode) error {
+	perm := mode.Perm()
+	if perm == 0 {
+		perm = 0o644
 	}
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	out, err := destRoot.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
@@ -152,159 +184,112 @@ func writeExtractedFile(target string, source io.Reader, mode fs.FileMode) error
 	return closeErr
 }
 
-// safeExtractPath resolves an archive entry name against destDir, rejecting
-// absolute paths or entries that would escape destDir via "..".
-func safeExtractPath(destDir string, name string) (string, error) {
+// cleanEntryPath resolves an archive entry name, rejecting absolute paths or
+// entries that would escape the destination via "..".
+func cleanEntryPath(name string) (string, error) {
 	cleanName := filepath.Clean(strings.ReplaceAll(name, "\\", "/"))
 	if cleanName == "." {
-		return destDir, nil
+		return ".", nil
 	}
-	if filepath.IsAbs(cleanName) || cleanName == ".." || strings.HasPrefix(cleanName, "../") {
+	if filepath.IsAbs(cleanName) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, "\\") ||
+		cleanName == ".." || strings.HasPrefix(cleanName, ".."+string(os.PathSeparator)) || strings.HasPrefix(cleanName, "../") ||
+		filepath.VolumeName(cleanName) != "" || strings.Contains(cleanName, ":") {
 		return "", fmt.Errorf("archive entry escapes destination: %s", name)
 	}
-	target := filepath.Join(destDir, cleanName)
-	destDirClean := filepath.Clean(destDir)
-	if target != destDirClean && !strings.HasPrefix(target, destDirClean+string(os.PathSeparator)) {
-		return "", fmt.Errorf("archive entry escapes destination: %s", name)
+	return cleanName, nil
+}
+
+func validateSymlinkTarget(root *os.Root, parentRel, linkTarget string) error {
+	if filepath.IsAbs(linkTarget) || strings.HasPrefix(linkTarget, "/") || strings.HasPrefix(linkTarget, "\\") ||
+		filepath.VolumeName(linkTarget) != "" || strings.Contains(linkTarget, ":") {
+		return fmt.Errorf("archive symlink has absolute or invalid target: %s", linkTarget)
 	}
-	if err := verifyNoSymlinkEscape(destDirClean, target); err != nil {
+	base := parentRel
+	if base == "" {
+		base = "."
+	}
+	resolvedBase, err := followUnderRoot(root, base, 0)
+	if err != nil {
+		return err
+	}
+	_, err = walkUnderRoot(root, resolvedBase, linkTarget, 0)
+	return err
+}
+
+func followUnderRoot(root *os.Root, rel string, depth int) (string, error) {
+	if depth > 255 {
+		return "", fmt.Errorf("archive symlink nest exceeds limit")
+	}
+	if rel == "" || rel == "." {
+		return ".", nil
+	}
+	info, err := root.Lstat(rel)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return rel, nil
+		}
 		return "", err
 	}
-	return target, nil
-}
-
-// verifyNoSymlinkEscape ensures that intermediate path segments do not traverse
-// symlinks that escape destDir.
-//
-// Note: This is a POSIX-only control covering os.ModeSymlink. Windows NTFS
-// directory junctions (reparse points reported as ModeIrregular rather than
-// ModeSymlink) are not covered.
-func verifyNoSymlinkEscape(destDirClean string, target string) error {
-	rel, err := filepath.Rel(destDirClean, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("archive entry escapes destination: %s", target)
+	if info.Mode()&os.ModeSymlink == 0 {
+		return rel, nil
 	}
-	destDirResolved, err := filepath.EvalSymlinks(destDirClean)
-	if err != nil {
-		destDirResolved = destDirClean
-	} else {
-		destDirResolved = filepath.Clean(destDirResolved)
-	}
-
-	current := destDirClean
-	parts := strings.Split(rel, string(os.PathSeparator))
-	for _, part := range parts {
-		if part == "" || part == "." {
-			continue
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			if os.IsNotExist(err) {
-				break
-			}
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, err := filepath.EvalSymlinks(current)
-			if err != nil {
-				if !os.IsNotExist(err) {
-					return err
-				}
-				resolved, err = resolveDanglingSymlink(destDirClean, destDirResolved, current)
-				if err != nil {
-					return err
-				}
-			} else {
-				resolved = filepath.Clean(resolved)
-			}
-			if !pathInsideDest(destDirClean, destDirResolved, resolved) {
-				return fmt.Errorf("archive symlink %s escapes destination: %s", current, resolved)
-			}
-		}
-	}
-	return nil
-}
-
-func pathInsideDest(destDirClean, destDirResolved, path string) bool {
-	path = filepath.Clean(path)
-	sep := string(os.PathSeparator)
-	return path == destDirResolved || strings.HasPrefix(path, destDirResolved+sep) ||
-		path == destDirClean || strings.HasPrefix(path, destDirClean+sep)
-}
-
-// resolveDanglingSymlink resolves a symlink whose final target does not yet
-// exist. Each already-existing link in the target chain is followed from the
-// physical parent; a resolved prefix outside destDir is rejected. A missing
-// suffix is allowed only when that prefix stays inside destDir. Lexical
-// Join(Dir(link), target) is not used, because Dir does not preserve links
-// already traversed.
-func resolveDanglingSymlink(destDirClean, destDirResolved, linkPath string) (string, error) {
-	linkTarget, err := os.Readlink(linkPath)
+	tgt, err := root.Readlink(rel)
 	if err != nil {
 		return "", err
 	}
-	if filepath.IsAbs(linkTarget) {
-		return "", fmt.Errorf("archive symlink %s has absolute target: %s", linkPath, linkTarget)
+	if filepath.IsAbs(tgt) || strings.HasPrefix(tgt, "/") {
+		return "", fmt.Errorf("archive symlink %s has absolute target: %s", rel, tgt)
 	}
-	parentResolved, err := filepath.EvalSymlinks(filepath.Dir(linkPath))
-	if err != nil {
-		return "", fmt.Errorf("archive symlink %s parent is unresolvable: %w", linkPath, err)
+	parent := filepath.Dir(rel)
+	if parent == "" {
+		parent = "."
 	}
-	return walkLinkTarget(destDirClean, destDirResolved, filepath.Clean(parentResolved), linkTarget, 0)
+	return walkUnderRoot(root, parent, tgt, depth+1)
 }
 
-func walkLinkTarget(destDirClean, destDirResolved, base, linkTarget string, depth int) (string, error) {
+func walkUnderRoot(root *os.Root, base, linkTarget string, depth int) (string, error) {
 	if depth > 255 {
 		return "", fmt.Errorf("archive symlink nest exceeds limit")
 	}
 	current := base
+	if current == "" {
+		current = "."
+	}
 	for _, part := range strings.Split(strings.ReplaceAll(linkTarget, "\\", "/"), "/") {
 		if part == "" || part == "." {
 			continue
 		}
-		parent := current
 		if part == ".." {
+			if current == "." {
+				return "", fmt.Errorf("archive symlink target escapes destination")
+			}
 			current = filepath.Dir(current)
-		} else {
-			current = filepath.Join(current, part)
+			if current == "" {
+				current = "."
+			}
+			continue
 		}
-		if !pathInsideDest(destDirClean, destDirResolved, current) {
-			return "", fmt.Errorf("archive symlink target escapes destination: %s", current)
+		next := part
+		if current != "." {
+			next = filepath.Join(current, part)
 		}
-		info, err := os.Lstat(current)
+		info, err := root.Lstat(next)
 		if err != nil {
 			if os.IsNotExist(err) {
+				current = next
 				continue
 			}
 			return "", err
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
+			current = next
 			continue
 		}
-		nextTarget, err := os.Readlink(current)
+		followed, err := followUnderRoot(root, next, depth+1)
 		if err != nil {
 			return "", err
 		}
-		if filepath.IsAbs(nextTarget) {
-			return "", fmt.Errorf("archive symlink %s has absolute target: %s", current, nextTarget)
-		}
-		resolved, err := filepath.EvalSymlinks(current)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				return "", err
-			}
-			resolved, err = walkLinkTarget(destDirClean, destDirResolved, parent, nextTarget, depth+1)
-			if err != nil {
-				return "", err
-			}
-		} else {
-			resolved = filepath.Clean(resolved)
-		}
-		if !pathInsideDest(destDirClean, destDirResolved, resolved) {
-			return "", fmt.Errorf("archive symlink %s escapes destination: %s", current, resolved)
-		}
-		current = resolved
+		current = followed
 	}
 	return current, nil
 }
