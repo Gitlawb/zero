@@ -1562,3 +1562,121 @@ func TestStdioClientPreservesLargeNumericRequestID(t *testing.T) {
 		t.Fatal("timed out waiting for courtesy response")
 	}
 }
+
+func TestRPCMessageIDAcceptsExponentForm(t *testing.T) {
+	got, ok := rpcMessageID(json.Number("1e0"))
+	if !ok || got != 1 {
+		t.Fatalf("rpcMessageID(1e0) = %d, %v, want 1, true", got, ok)
+	}
+	got, ok = rpcMessageID(json.Number("2e2"))
+	if !ok || got != 200 {
+		t.Fatalf("rpcMessageID(2e2) = %d, %v, want 200, true", got, ok)
+	}
+	if _, ok := rpcMessageID(json.Number("1.5")); ok {
+		t.Fatal("fractional json.Number should not match")
+	}
+	if rpcIDMatches(json.Number("1e0"), 1) != true {
+		t.Fatal("rpcIDMatches(1e0, 1) = false")
+	}
+}
+
+func TestStdioClientMatchesExponentFormResponseID(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1e0,"result":{"ok":true}}` + "\n")); err != nil {
+		t.Fatalf("write exponent-id response: %v", err)
+	}
+	select {
+	case res := <-responses:
+		if res.err != nil || len(res.message.Result) == 0 {
+			t.Fatalf("pending 1 not completed by id 1e0: %#v err=%v", res.message, res.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response id 1e0 did not resolve pending request 1")
+	}
+}
+
+func TestStdioClientCourtesyOverflowIsBounded(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	flood := writeQueueCapacity + courtesyOverflowCap + 64
+	for i := 0; i < flood; i++ {
+		frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"roots/list","params":{}}`+"\n", i+100)
+		if _, err := inWriter.Write([]byte(frame)); err != nil {
+			t.Fatalf("write server request %d: %v", i, err)
+		}
+	}
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\n")); err != nil {
+		t.Fatalf("write pending response: %v", err)
+	}
+	select {
+	case res := <-responses:
+		if res.err != nil {
+			t.Fatalf("pending stalled: %v", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop stalled during courtesy flood")
+	}
+
+	client.writeMu.Lock()
+	n := len(client.courtesyOverflow)
+	client.writeMu.Unlock()
+	if n > courtesyOverflowCap {
+		t.Fatalf("courtesyOverflow = %d, want <= %d", n, courtesyOverflowCap)
+	}
+}
+
+func TestWriterLoopCloseBeforeScheduleDoesNotHang(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		client := &Client{
+			writer: newMessageWriter(io.Discard),
+		}
+		if err := client.startWriter(); err != nil {
+			t.Fatalf("startWriter: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- client.Close()
+		}()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatalf("Close: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close hung: writeLoop ranged over a nil queue")
+		}
+	}
+}

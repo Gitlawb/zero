@@ -79,6 +79,7 @@ type writeOp struct {
 }
 
 const writeQueueCapacity = 32
+const courtesyOverflowCap = writeQueueCapacity
 
 var errMCPClientClosed = errors.New("MCP client closed")
 
@@ -393,10 +394,11 @@ func (client *Client) startWriter() error {
 	if client.writeQueue != nil {
 		return nil
 	}
-	client.writeQueue = make(chan writeOp, writeQueueCapacity)
+	queue := make(chan writeOp, writeQueueCapacity)
+	client.writeQueue = queue
 	client.writerStop = make(chan struct{})
 	client.writerDone = make(chan struct{})
-	go client.writeLoop()
+	go client.writeLoop(queue)
 	return nil
 }
 
@@ -446,9 +448,12 @@ func (client *Client) finishWriterShutdown() {
 	}
 }
 
-func (client *Client) writeLoop() {
+func (client *Client) writeLoop(queue <-chan writeOp) {
 	defer close(client.writerDone)
-	for op := range client.writeQueue {
+	if queue == nil {
+		return
+	}
+	for op := range queue {
 		if client.writerStopped() {
 			if op.done != nil {
 				op.done <- errMCPClientClosed
@@ -503,6 +508,9 @@ func (client *Client) enqueueCourtesy(message rpcMessage) {
 	select {
 	case client.writeQueue <- op:
 	default:
+		if len(client.courtesyOverflow) >= courtesyOverflowCap {
+			return
+		}
 		client.courtesyOverflow = append(client.courtesyOverflow, op)
 	}
 }
@@ -637,6 +645,20 @@ func (client *Client) failAll(err error) {
 
 // rpcMessageID extracts the integer id from a JSON-RPC id value across the
 // numeric/string encodings a server may use.
+func jsonNumberAsInt(n json.Number) (int64, bool) {
+	if parsed, err := n.Int64(); err == nil {
+		return parsed, true
+	}
+	f, err := n.Float64()
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		return 0, false
+	}
+	if f > float64(math.MaxInt64) || f < float64(math.MinInt64) {
+		return 0, false
+	}
+	return int64(f), true
+}
+
 func rpcMessageID(value any) (int, bool) {
 	switch typed := value.(type) {
 	case int:
@@ -644,10 +666,13 @@ func rpcMessageID(value any) (int, bool) {
 	case int64:
 		return int(typed), true
 	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) {
+			return 0, false
+		}
 		return int(typed), true
 	case json.Number:
-		parsed, err := typed.Int64()
-		if err != nil {
+		parsed, ok := jsonNumberAsInt(typed)
+		if !ok {
 			return 0, false
 		}
 		return int(parsed), true
@@ -663,21 +688,8 @@ func rpcMessageID(value any) (int, bool) {
 }
 
 func rpcIDMatches(value any, id int) bool {
-	switch typed := value.(type) {
-	case int:
-		return typed == id
-	case int64:
-		return typed == int64(id)
-	case float64:
-		return typed == float64(id)
-	case json.Number:
-		parsed, err := typed.Int64()
-		return err == nil && parsed == int64(id)
-	case string:
-		return typed == strconv.Itoa(id)
-	default:
-		return false
-	}
+	got, ok := rpcMessageID(value)
+	return ok && got == id
 }
 
 // jsonRPCIDEchoable reports whether id is a valid JSON-RPC 2.0 identifier type
