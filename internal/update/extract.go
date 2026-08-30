@@ -216,39 +216,17 @@ func validateSymlinkTarget(root *os.Root, parentRel, linkTarget string) error {
 	return err
 }
 
+const maxRootSymlinks = 8
+
 func followUnderRoot(root *os.Root, rel string, depth int) (string, error) {
-	if depth > 255 {
-		return "", fmt.Errorf("archive symlink nest exceeds limit")
-	}
 	if rel == "" || rel == "." {
 		return ".", nil
 	}
-	info, err := root.Lstat(rel)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return rel, nil
-		}
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		return rel, nil
-	}
-	tgt, err := root.Readlink(rel)
-	if err != nil {
-		return "", err
-	}
-	if filepath.IsAbs(tgt) || strings.HasPrefix(tgt, "/") {
-		return "", fmt.Errorf("archive symlink %s has absolute target: %s", rel, tgt)
-	}
-	parent := filepath.Dir(rel)
-	if parent == "" {
-		parent = "."
-	}
-	return walkUnderRoot(root, parent, tgt, depth+1)
+	return walkUnderRoot(root, ".", rel, depth)
 }
 
 func walkUnderRoot(root *os.Root, base, linkTarget string, depth int) (string, error) {
-	if depth > 255 {
+	if depth > maxRootSymlinks {
 		return "", fmt.Errorf("archive symlink nest exceeds limit")
 	}
 	current := base
@@ -285,7 +263,15 @@ func walkUnderRoot(root *os.Root, base, linkTarget string, depth int) (string, e
 			current = next
 			continue
 		}
-		followed, err := followUnderRoot(root, next, depth+1)
+		tgt, err := root.Readlink(next)
+		if err != nil {
+			return "", err
+		}
+		if filepath.IsAbs(tgt) || strings.HasPrefix(tgt, "/") || strings.HasPrefix(tgt, "\\") ||
+			filepath.VolumeName(tgt) != "" || strings.Contains(tgt, ":") {
+			return "", fmt.Errorf("archive symlink %s has absolute target: %s", next, tgt)
+		}
+		followed, err := walkUnderRoot(root, current, tgt, depth+1)
 		if err != nil {
 			return "", err
 		}
@@ -299,16 +285,25 @@ func walkUnderRoot(root *os.Root, base, linkTarget string, depth int) (string, e
 // helper binaries nested under archive subdirectories (e.g. helpers/) are
 // still found.
 func findByBasename(root string, name string) (string, error) {
+	destRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return "", err
+	}
+	defer destRoot.Close()
 	var found string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(destRoot.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if found != "" {
 			return fs.SkipAll
 		}
-		if !entry.IsDir() && entry.Name() == name {
-			found = path
+		if entry.Type().IsRegular() && entry.Name() == name {
+			if path == "." {
+				found = filepath.Join(root, name)
+			} else {
+				found = filepath.Join(root, filepath.FromSlash(path))
+			}
 		}
 		return nil
 	})

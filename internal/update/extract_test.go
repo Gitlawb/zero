@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -258,21 +259,23 @@ func TestExtractTarGzAllowsSafeSymlink(t *testing.T) {
 	}
 
 	// Cover a linked subdirectory with a file extracted through the link.
+	// Windows Root.Symlink needs the directory target to exist first so the
+	// link is created as a directory junction rather than a file symlink.
 	h3 := &tar.Header{
-		Name:     "sublink",
-		Typeflag: tar.TypeSymlink,
-		Linkname: "subdir",
-	}
-	if err := tw.WriteHeader(h3); err != nil {
-		t.Fatalf("WriteHeader sublink: %v", err)
-	}
-	h4 := &tar.Header{
 		Name:     "subdir",
 		Typeflag: tar.TypeDir,
 		Mode:     0o755,
 	}
-	if err := tw.WriteHeader(h4); err != nil {
+	if err := tw.WriteHeader(h3); err != nil {
 		t.Fatalf("WriteHeader subdir: %v", err)
+	}
+	h4 := &tar.Header{
+		Name:     "sublink",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "subdir",
+	}
+	if err := tw.WriteHeader(h4); err != nil {
+		t.Fatalf("WriteHeader sublink: %v", err)
 	}
 	h5 := &tar.Header{
 		Name:     "sublink/nested.txt",
@@ -530,5 +533,62 @@ func TestExtractTarGzRejectsSymlinkThroughSymlinkParentOutsideTarget(t *testing.
 	}
 	if _, err := os.Stat(outsideFile); !os.IsNotExist(err) {
 		t.Fatalf("file outside destDir was accessed/created: %v", err)
+	}
+}
+
+func TestExtractTarGzRejectsIntermediateDirSymlinkEscape(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	destDir := filepath.Join(dir, "extracted")
+	outside := filepath.Join(dir, "archive.tar.gz.outside")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+	writeTestTarGzEntries(t, archivePath, []testTarEntry{
+		{name: "d", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "d/a", typeflag: tar.TypeDir},
+		{name: "d/a/zero", typeflag: tar.TypeSymlink, linkname: "../../archive.tar.gz.outside"},
+	})
+	if err := extractArchive(archivePath, destDir); err == nil {
+		t.Fatal("expected reject of ../../ escape through intermediate dir symlink")
+	}
+	if _, err := os.Lstat(filepath.Join(destDir, "d", "a", "zero")); err == nil {
+		t.Fatal("escaping link must not be created")
+	}
+}
+
+func TestFollowUnderRootRejectsNinthLink(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.Mkdir(filepath.Join(dir, "leaf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prev := "leaf"
+	for i := 0; i < maxRootSymlinks; i++ {
+		name := fmt.Sprintf("l%d", i)
+		if err := os.Symlink(prev, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+		prev = name
+	}
+	if _, err := followUnderRoot(root, prev, 0); err != nil {
+		t.Fatalf("eight links must resolve: %v", err)
+	}
+	ninth := "l8"
+	if err := os.Symlink(prev, filepath.Join(dir, ninth)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := followUnderRoot(root, ninth, 0); err == nil {
+		t.Fatal("ninth link must be rejected")
 	}
 }
