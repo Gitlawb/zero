@@ -257,7 +257,7 @@ func TestExtractTarGzAllowsSafeSymlink(t *testing.T) {
 		t.Fatalf("Write target: %v", err)
 	}
 
-	// Couvre le cas d'un sous-dossier lié avec extraction d'un fichier traversant le lien
+	// Cover a linked subdirectory with a file extracted through the link.
 	h3 := &tar.Header{
 		Name:     "sublink",
 		Typeflag: tar.TypeSymlink,
@@ -382,19 +382,100 @@ func TestExtractTarGzRejectsChainedSymlinkEscapingFile(t *testing.T) {
 	}
 }
 
-func TestVerifyNoSymlinkEscapeRejectsDanglingLink(t *testing.T) {
+type testTarEntry struct {
+	name     string
+	typeflag byte
+	linkname string
+	body     string
+}
+
+func writeTestTarGzEntries(t *testing.T, archivePath string, entries []testTarEntry) {
+	t.Helper()
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("Create archive: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+	gzipWriter := gzip.NewWriter(file)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for _, entry := range entries {
+		header := &tar.Header{
+			Name:     entry.name,
+			Typeflag: entry.typeflag,
+			Linkname: entry.linkname,
+			Mode:     0o644,
+			Size:     int64(len(entry.body)),
+		}
+		if entry.typeflag == tar.TypeSymlink || entry.typeflag == tar.TypeDir {
+			header.Size = 0
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			t.Fatalf("WriteHeader %s: %v", entry.name, err)
+		}
+		if header.Size > 0 {
+			if _, err := tarWriter.Write([]byte(entry.body)); err != nil {
+				t.Fatalf("Write %s: %v", entry.name, err)
+			}
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+}
+
+// A tar can plant d -> ., then d/s -> .. (physically destDir/s -> .. because
+// d is already a link), then l -> d/s/missing, then a regular file named l.
+// EvalSymlinks(l) is ENOENT; lexical Join would accept destDir/d/s/missing
+// while open follows d and s and writes missing beside destDir.
+func TestExtractTarGzRejectsDanglingSymlinkChainEscape(t *testing.T) {
 	if !symlinksSupported(t) {
 		t.Skip("symlinks not supported")
 	}
-	destDir := t.TempDir()
-	if err := os.Symlink("missing-target", filepath.Join(destDir, "d")); err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	destDir := filepath.Join(dir, "extracted")
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+	writeTestTarGzEntries(t, archivePath, []testTarEntry{
+		{name: "d", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "d/s", typeflag: tar.TypeSymlink, linkname: ".."},
+		{name: "l", typeflag: tar.TypeSymlink, linkname: "d/s/missing"},
+		{name: "l", typeflag: tar.TypeReg, body: "pwned"},
+	})
+	extractErr := extractArchive(archivePath, destDir)
+	escaped := filepath.Join(dir, "missing")
+	_, statErr := os.Stat(escaped)
+	if !os.IsNotExist(statErr) {
+		t.Fatalf("escaped file exists outside destDir: %v", statErr)
 	}
-	if err := os.Symlink("..", filepath.Join(destDir, "d", "s")); err == nil {
-		t.Log("created d/s through dangling d")
+	if extractErr == nil {
+		t.Fatal("expected extractArchive to reject a dangling symlink chain that escapes destDir")
 	}
-	target := filepath.Join(destDir, "d", "s", "x")
-	if err := verifyNoSymlinkEscape(destDir, target); err == nil {
-		t.Fatal("expected dangling or unresolvable symlink to be rejected")
+}
+
+func TestExtractTarGzAllowsSafeDanglingRelative(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	destDir := filepath.Join(dir, "extracted")
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+	writeTestTarGzEntries(t, archivePath, []testTarEntry{
+		{name: "l", typeflag: tar.TypeSymlink, linkname: "not-yet-there"},
+		{name: "l", typeflag: tar.TypeReg, body: "safe-content"},
+	})
+	if err := extractArchive(archivePath, destDir); err != nil {
+		t.Fatalf("extractArchive: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(destDir, "not-yet-there"))
+	if err != nil {
+		t.Fatalf("ReadFile not-yet-there: %v", err)
+	}
+	if string(data) != "safe-content" {
+		t.Fatalf("not-yet-there content = %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "not-yet-there")); err == nil {
+		t.Fatal("safe dangling target was written outside destDir")
 	}
 }

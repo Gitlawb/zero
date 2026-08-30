@@ -208,16 +208,105 @@ func verifyNoSymlinkEscape(destDirClean string, target string) error {
 		if info.Mode()&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(current)
 			if err != nil {
-				return fmt.Errorf("archive symlink %s is dangling or unresolvable: %w", current, err)
+				if !os.IsNotExist(err) {
+					return err
+				}
+				resolved, err = resolveDanglingSymlink(destDirClean, destDirResolved, current)
+				if err != nil {
+					return err
+				}
+			} else {
+				resolved = filepath.Clean(resolved)
 			}
-			resolved = filepath.Clean(resolved)
-			if resolved != destDirResolved && !strings.HasPrefix(resolved, destDirResolved+string(os.PathSeparator)) &&
-				resolved != destDirClean && !strings.HasPrefix(resolved, destDirClean+string(os.PathSeparator)) {
+			if !pathInsideDest(destDirClean, destDirResolved, resolved) {
 				return fmt.Errorf("archive symlink %s escapes destination: %s", current, resolved)
 			}
 		}
 	}
 	return nil
+}
+
+func pathInsideDest(destDirClean, destDirResolved, path string) bool {
+	path = filepath.Clean(path)
+	sep := string(os.PathSeparator)
+	return path == destDirResolved || strings.HasPrefix(path, destDirResolved+sep) ||
+		path == destDirClean || strings.HasPrefix(path, destDirClean+sep)
+}
+
+// resolveDanglingSymlink resolves a symlink whose final target does not yet
+// exist. Each already-existing link in the target chain is followed from the
+// physical parent; a resolved prefix outside destDir is rejected. A missing
+// suffix is allowed only when that prefix stays inside destDir. Lexical
+// Join(Dir(link), target) is not used, because Dir does not preserve links
+// already traversed.
+func resolveDanglingSymlink(destDirClean, destDirResolved, linkPath string) (string, error) {
+	linkTarget, err := os.Readlink(linkPath)
+	if err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(linkTarget) {
+		return "", fmt.Errorf("archive symlink %s has absolute target: %s", linkPath, linkTarget)
+	}
+	parentResolved, err := filepath.EvalSymlinks(filepath.Dir(linkPath))
+	if err != nil {
+		return "", fmt.Errorf("archive symlink %s parent is unresolvable: %w", linkPath, err)
+	}
+	return walkLinkTarget(destDirClean, destDirResolved, filepath.Clean(parentResolved), linkTarget, 0)
+}
+
+func walkLinkTarget(destDirClean, destDirResolved, base, linkTarget string, depth int) (string, error) {
+	if depth > 255 {
+		return "", fmt.Errorf("archive symlink nest exceeds limit")
+	}
+	current := base
+	for _, part := range strings.Split(strings.ReplaceAll(linkTarget, "\\", "/"), "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		parent := current
+		if part == ".." {
+			current = filepath.Dir(current)
+		} else {
+			current = filepath.Join(current, part)
+		}
+		if !pathInsideDest(destDirClean, destDirResolved, current) {
+			return "", fmt.Errorf("archive symlink target escapes destination: %s", current)
+		}
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		nextTarget, err := os.Readlink(current)
+		if err != nil {
+			return "", err
+		}
+		if filepath.IsAbs(nextTarget) {
+			return "", fmt.Errorf("archive symlink %s has absolute target: %s", current, nextTarget)
+		}
+		resolved, err := filepath.EvalSymlinks(current)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+			resolved, err = walkLinkTarget(destDirClean, destDirResolved, parent, nextTarget, depth+1)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			resolved = filepath.Clean(resolved)
+		}
+		if !pathInsideDest(destDirClean, destDirResolved, resolved) {
+			return "", fmt.Errorf("archive symlink %s escapes destination: %s", current, resolved)
+		}
+		current = resolved
+	}
+	return current, nil
 }
 
 // findByBasename recursively searches root for the first regular file whose
