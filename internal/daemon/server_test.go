@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +235,95 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.Lock); err != nil {
 		t.Fatalf("stable lock file missing after shutdown: %v", err)
+	}
+}
+
+func TestServePreservesPreviousStatusWhenReplacementFails(t *testing.T) {
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1, exitCode: 0})
+	dir, err := os.MkdirTemp("", "zero-daemon-status-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	secureStatusTestDir(t, dir)
+	paths := Paths{Socket: filepath.Join(dir, "d.sock"), Lock: filepath.Join(dir, "d.lock"), Status: filepath.Join(dir, "d.status")}
+	srv := newTestServerWithPaths(t, launcher, paths)
+	previous := []byte(`{"pid":7,"socket":"previous","version":1}`)
+	if err := os.WriteFile(paths.Status, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.opts.replaceStatusFile = func(*os.Root, string, string) error {
+		return errors.New("injected replacement failure")
+	}
+
+	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "injected replacement failure") {
+		t.Fatal("Serve succeeded despite injected status replacement failure")
+	}
+	got, err := os.ReadFile(paths.Status)
+	if err != nil {
+		t.Fatalf("previous status was removed after failed publication: %v", err)
+	}
+	if string(got) != string(previous) {
+		t.Fatalf("previous status changed after failed publication: %q", got)
+	}
+}
+
+func TestServeCleansStatusThroughBoundDirectoryAfterSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit renaming the directory containing the live socket")
+	}
+	parent, err := os.MkdirTemp("", "zero-daemon-swap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	dir := filepath.Join(parent, "live")
+	movedDir := filepath.Join(parent, "moved")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secureStatusTestDir(t, dir)
+	paths := Paths{
+		Socket: filepath.Join(dir, "d.sock"),
+		Lock:   filepath.Join(dir, "d.lock"),
+		Status: filepath.Join(dir, "d.status"),
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1, exitCode: 0})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	substitute := []byte(`{"pid":999,"socket":"substitute"}`)
+	srv.opts.beforeStatusReplace = func() {
+		if err := os.Rename(dir, movedDir); err != nil {
+			t.Fatalf("move status directory: %v", err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("create substitute directory: %v", err)
+		}
+		if err := os.WriteFile(paths.Status, substitute, 0o600); err != nil {
+			t.Fatalf("write substitute status: %v", err)
+		}
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve() }()
+	waitForFile(t, filepath.Join(movedDir, "d.status"))
+	srv.Shutdown()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after shutdown")
+	}
+	if _, err := os.Stat(filepath.Join(movedDir, "d.status")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bound status survived cleanup: %v", err)
+	}
+	got, err := os.ReadFile(paths.Status)
+	if err != nil {
+		t.Fatalf("substitute status was removed by pathname cleanup: %v", err)
+	}
+	if string(got) != string(substitute) {
+		t.Fatalf("substitute status changed during cleanup: %q", got)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -23,6 +24,12 @@ type Server struct {
 	listener net.Listener
 	conns    map[net.Conn]struct{} // open connections, closed on Shutdown so blocked reads return
 	lock     *fileLock
+	// statusRoot binds status publication and shutdown cleanup to the same
+	// directory object. statusCommitted is set only after this server publishes
+	// its document, so a failed startup never removes a previous daemon's status.
+	statusRoot      *os.Root
+	statusName      string
+	statusCommitted bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -94,6 +101,12 @@ func (s *Server) Serve() error {
 	}
 	s.lock = lock
 	defer s.cleanup()
+	statusRoot, err := openStatusRoot(s.opts.Paths.Status)
+	if err != nil {
+		return fmt.Errorf("daemon: open status directory: %w", err)
+	}
+	s.statusRoot = statusRoot
+	s.statusName = filepath.Base(s.opts.Paths.Status)
 
 	// A leftover socket file from an unclean exit would make Listen fail with
 	// "address already in use"; we hold the lock, so any socket here is stale.
@@ -196,7 +209,17 @@ func (s *Server) cleanup() {
 		_ = s.listener.Close()
 	}
 	_ = os.Remove(s.opts.Paths.Socket)
-	_ = os.Remove(s.opts.Paths.Status)
+	if s.statusRoot != nil {
+		if s.statusCommitted {
+			if err := s.statusRoot.Remove(s.statusName); err != nil && !errors.Is(err, os.ErrNotExist) {
+				s.logf("daemon: remove status file: %v", err)
+			}
+		}
+		if err := s.statusRoot.Close(); err != nil {
+			s.logf("daemon: close status directory: %v", err)
+		}
+		s.statusRoot = nil
+	}
 	if s.lock != nil {
 		_ = s.lock.release()
 	}
@@ -213,10 +236,28 @@ func (s *Server) writeStatusFile() error {
 	if err != nil {
 		return err
 	}
-	if err := writeStatusFileAtomically(s.opts.Paths.Status, data, 0o600, s.opts.beforeStatusReplace, s.opts.replaceStatusFile, s.opts.syncStatusParent); err != nil {
-		var committed *statusFileCommittedError
-		if errors.As(err, &committed) {
-			s.logf("daemon: %v", committed)
+	root := s.statusRoot
+	ownedRoot := false
+	if root == nil {
+		var err error
+		root, err = openStatusRoot(s.opts.Paths.Status)
+		if err != nil {
+			return fmt.Errorf("daemon: write status file: %w", err)
+		}
+		ownedRoot = true
+	}
+	committed, err := writeStatusFileAtomicallyRoot(root, filepath.Base(s.opts.Paths.Status), data, 0o600, s.opts.beforeStatusReplace, s.opts.replaceStatusFile, s.opts.syncStatusParent)
+	if ownedRoot {
+		if closeErr := root.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close status directory: %w", closeErr))
+		}
+	}
+	if committed {
+		s.statusCommitted = true
+	}
+	if err != nil {
+		if committed {
+			s.logf("daemon: status file publication committed with warning: %v", err)
 			return nil
 		}
 		return fmt.Errorf("daemon: write status file: %w", err)
