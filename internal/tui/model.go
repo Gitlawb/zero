@@ -1655,6 +1655,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.runDetailsOpen:
 			if keyIs(msg, tea.KeyEsc) || m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) {
 				m.runDetailsOpen = false
+				return m, nil
+			}
+			if keyIs(msg, tea.KeyEnter) && m.selectedFile != "" {
+				return m.selectFile(m.selectedFile)
 			}
 			return m, nil
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):

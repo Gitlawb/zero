@@ -1773,3 +1773,53 @@ func TestFileViewLifecycle_SupersededResizeSkipsWork(t *testing.T) {
 		t.Fatal("latest width must still load")
 	}
 }
+
+func TestFilesPanelSecondActivationOpensFullViewThroughUpdate(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "web", "app.js"), []byte("let a = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.runDetailsOpen = true
+	m, cmd := m.selectFile("web/app.js")
+	if cmd != nil {
+		t.Fatal("first FILES activation must only select")
+	}
+	if m.fileView.active {
+		t.Fatal("first FILES activation must not open the file view")
+	}
+	if m.selectedFile != "web/app.js" {
+		t.Fatalf("selectedFile = %q", m.selectedFile)
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(model)
+	if !m.fileView.active || m.fileView.path != "web/app.js" {
+		t.Fatal("Enter on the selected FILES row must call openFileView")
+	}
+	if m.runDetailsOpen {
+		t.Fatal("drilling in must close run details")
+	}
+
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m = updated.(model)
+	if m.fileView.mode != fileViewFull {
+		t.Fatal("f must switch to full mode")
+	}
+	if cmd == nil {
+		t.Fatal("full mode must schedule an async load")
+	}
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), fileViewLoadingPlaceholder) {
+		t.Fatal("expected loading before async result")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "let a = 1") {
+		t.Fatalf("expected loaded file content, got %s", plainRender(t, m.renderFileViewFull(80)))
+	}
+}
