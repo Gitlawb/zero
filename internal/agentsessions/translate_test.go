@@ -324,6 +324,23 @@ func TestCappingKeepsTheTailAndSaysSo(t *testing.T) {
 	}
 }
 
+func TestMaxEventsOneKeepsTheFinalSourceEvent(t *testing.T) {
+	path := writeTranscript(t,
+		`{"type":"user","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":"final answer"}}`,
+	)
+	events, err := translateFamily1("", path, ReadOptions{MaxEvents: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want the one requested source event", len(events))
+	}
+	if got := str(t, events[0], "content"); got != "final answer" {
+		t.Fatalf("sole capped event = %q, want final source answer", got)
+	}
+}
+
 func TestCappingCannotLetActivitySummaryEvictSourceTail(t *testing.T) {
 	path := writeTranscript(t,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"parser.go"}}]}}`,

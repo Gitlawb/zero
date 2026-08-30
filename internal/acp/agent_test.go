@@ -575,6 +575,36 @@ func TestACPLoadWarnsWhenHistoryReadFails(t *testing.T) {
 	}
 }
 
+func TestACPLoadWithoutCwdUsesOperationalWorkspaceKey(t *testing.T) {
+	deps := testDeps(t)
+	displayCwd := "/work/[REDACTED]/repo"
+	operationalCwd := "/work/sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA/repo"
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:        "imported session",
+		Cwd:          displayCwd,
+		WorkspaceKey: operationalCwd,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	var resolved string
+	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) {
+		resolved = cwd
+		return cwd, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	if resolved != operationalCwd {
+		t.Fatalf("implicit session/load resolved %q, want operational workspace %q", resolved, operationalCwd)
+	}
+}
+
 // drainText collects streamed chunks for a short window and concatenates them.
 func drainText(t *testing.T, ch <-chan string) string {
 	t.Helper()

@@ -160,7 +160,7 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	}
 	cwdInput := p.Cwd
 	if strings.TrimSpace(cwdInput) == "" {
-		cwdInput = meta.Cwd
+		cwdInput = sessions.OperationalCwd(*meta)
 	}
 	root, err := a.deps.ResolveWorkspaceRoot(cwdInput)
 	if err != nil {
