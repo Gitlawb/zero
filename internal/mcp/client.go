@@ -590,7 +590,7 @@ func (client *Client) readLoop() {
 		}
 		// A message with a Method is a server-initiated request or notification.
 		// It must never be routed as a response to a pending client request.
-		if message.methodPresent || message.Method != "" {
+		if message.isRequestOrNotification() {
 			if message.ID != nil && jsonRPCIDEchoable(message.ID) {
 				client.enqueueCourtesy(rpcMessage{
 					ID: message.ID,

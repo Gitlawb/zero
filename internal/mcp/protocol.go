@@ -27,6 +27,10 @@ type rpcMessage struct {
 	methodPresent bool            `json:"-"`
 }
 
+func (m rpcMessage) isRequestOrNotification() bool {
+	return m.methodPresent || m.Method != ""
+}
+
 func (m *rpcMessage) UnmarshalJSON(data []byte) error {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(data, &probe); err != nil {

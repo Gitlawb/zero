@@ -539,6 +539,9 @@ func (client *remoteSSEClient) deliverEventMessage(value string) error {
 	if err := decoder.Decode(&message); err != nil {
 		return fmt.Errorf("decode MCP SSE stream message: %w", err)
 	}
+	if message.isRequestOrNotification() {
+		return nil
+	}
 	key := rpcResponseKey(message.ID)
 	if key == "" {
 		return nil
@@ -633,7 +636,7 @@ func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {
 		// those — the response has no method — and keep scanning. Previously the
 		// first message event was returned unconditionally, so a leading
 		// notification surfaced to the caller as an id mismatch and failed the call.
-		if candidate.Method != "" {
+		if candidate.isRequestOrNotification() {
 			return true
 		}
 		decoded = candidate
