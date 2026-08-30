@@ -550,20 +550,26 @@ func TestRecoverBundleDirLeavesAStagingDirAnExtractCouldStillOwn(t *testing.T) {
 }
 
 func TestRecoverBundleDirReapsAbandonedStaging(t *testing.T) {
-	dir := t.TempDir()
-	staging := filepath.Join(dir, stagingPrefix+"old")
-	if err := os.MkdirAll(filepath.Join(staging, "repo"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-3 * gitTimeout)
-	if err := os.Chtimes(staging, old, old); err != nil {
-		t.Fatal(err)
-	}
+	// Both name shapes: the stamped one is what extractBundle writes now, the
+	// bare one is any staging dir whose name the reaper cannot read.
+	for _, name := range []string{"old", "00000000000000000100-old"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			staging := filepath.Join(dir, stagingPrefix+name)
+			if err := os.MkdirAll(filepath.Join(staging, "repo"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-3 * gitTimeout)
+			if err := os.Chtimes(staging, old, old); err != nil {
+				t.Fatal(err)
+			}
 
-	recoverBundleDir(dir, nil)
+			recoverBundleDir(dir, nil)
 
-	if _, err := os.Stat(staging); !os.IsNotExist(err) {
-		t.Errorf("a staging dir older than any clone should be reaped, got %v", err)
+			if _, err := os.Stat(staging); !os.IsNotExist(err) {
+				t.Errorf("a staging dir older than any clone should be reaped, got %v", err)
+			}
+		})
 	}
 }
 
@@ -892,5 +898,169 @@ func TestRecoverBundleDirDropsBackupWhenMtimesAreEqual(t *testing.T) {
 	}
 	if _, err := os.Stat(staging); !os.IsNotExist(err) {
 		t.Errorf("a superseded backup should be removed, got %v", err)
+	}
+}
+
+// End to end over the real transaction. A real upload publishes a tree, a second
+// upload is interrupted exactly the way a killed daemon interrupts it (the
+// publish rename and the restore behind it both fail, so the prior tree is left
+// in staging), and a fresh bridge on the same directory puts it back. Nothing
+// here plants a fixture: the staging name recovery has to order by is the one
+// extractBundle writes, which is the half a hand-built fixture cannot check.
+func TestBridgeRecoversARealInterruptedExtractOnStart(t *testing.T) {
+	srv := newBridgeServer(t, staticLauncher())
+	auth, _ := NewTokenAuthenticator("tok")
+	bundleRoot := t.TempDir()
+	addr, ca := startBridge(t, srv, BridgeOptions{Authenticator: auth, BundleDir: bundleRoot})
+	cfg := RemoteConfig{Address: addr, Token: "tok", CACertFile: ca}
+	dest := filepath.Join(bundleRoot, "proj-1")
+
+	if _, err := UploadRepoBundle(cfg, initTestRepo(t, "a.txt", "v1"), "proj-1"); err != nil {
+		t.Fatalf("first upload: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "a.txt")); err != nil || string(got) != "v1" {
+		t.Fatalf("first upload did not publish: got %q err %v", got, err)
+	}
+
+	// Both renames fail, which is the one path that leaves the tree in staging
+	// with dest absent -- what a process killed between the two renames leaves.
+	real := renameDir
+	renameDir = func(string, string) error { return errors.New("injected rename failure") }
+	_, err := UploadRepoBundle(cfg, initTestRepo(t, "a.txt", "v2"), "proj-1")
+	renameDir = real
+	if err == nil {
+		t.Fatal("an upload whose publish and restore both fail must report an error")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("the interrupted swap should leave dest absent, got %v", err)
+	}
+
+	// The name extractBundle wrote must be one recovery can order by. If the
+	// writer and the reader ever disagree on the format, this is where it shows.
+	entries, err := os.ReadDir(bundleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagedNames := []string{}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), stagingPrefix) {
+			stagedNames = append(stagedNames, e.Name())
+		}
+	}
+	if len(stagedNames) != 1 {
+		t.Fatalf("want exactly one staging dir left behind, got %v", stagedNames)
+	}
+	if _, ok := stagingStamp(stagedNames[0]); !ok {
+		t.Fatalf("recovery cannot order the name extractBundle wrote: %q", stagedNames[0])
+	}
+
+	// A fresh daemon over the same directory repairs it before serving.
+	addr2, ca2 := startBridge(t, newBridgeServer(t, staticLauncher()), BridgeOptions{Authenticator: auth, BundleDir: bundleRoot})
+
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("the interrupted extract was not restored: got %q err %v", got, err)
+	}
+	for _, name := range stagedNames {
+		if _, err := os.Stat(filepath.Join(bundleRoot, name)); !os.IsNotExist(err) {
+			t.Errorf("staging %s should be cleared after recovery, got %v", name, err)
+		}
+	}
+	// And the repaired link still serves.
+	if _, err := UploadRepoBundle(RemoteConfig{Address: addr2, Token: "tok", CACertFile: ca2}, initTestRepo(t, "a.txt", "v3"), "proj-1"); err != nil {
+		t.Fatalf("upload to a recovered link: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "a.txt")); err != nil || string(got) != "v3" {
+		t.Fatalf("after re-upload a.txt = %q, err %v, want %q", got, err, "v3")
+	}
+}
+
+// Recovery decides each link on its own: restoring one link's tree must not make
+// another link's superseded backup look unorderable, and vice versa.
+func TestRecoverBundleDirHandlesLinksIndependently(t *testing.T) {
+	dir := t.TempDir()
+	// proj-1 has no tree, so its backup is restored.
+	restorable := stageBackup(t, dir, "one", "proj-1", "v1", 100)
+	// proj-2 has a live tree, so its backup was published over and is dropped.
+	superseded := stageBackup(t, dir, "two", "proj-2", "old", 200)
+	live := filepath.Join(dir, "proj-2")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recoverBundleDir(dir, nil)
+
+	if got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt")); err != nil || string(got) != "v1" {
+		t.Errorf("proj-1 should be restored: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(restorable); !os.IsNotExist(err) {
+		t.Errorf("proj-1 staging should be cleared, got %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(live, "a.txt")); err != nil || string(got) != "live" {
+		t.Errorf("proj-2's live tree must win: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(superseded); !os.IsNotExist(err) {
+		t.Errorf("proj-2's superseded staging should be removed, got %v", err)
+	}
+}
+
+// Recovery runs on every start, so a second pass over an already-repaired
+// directory must be a no-op rather than treating the tree it restored last time
+// as something to move again.
+func TestRecoverBundleDirIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	stageBackup(t, dir, "one", "proj-1", "v1", 100)
+
+	recoverBundleDir(dir, nil)
+	first, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoverBundleDir(dir, nil)
+	second, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt")); err != nil || string(got) != "v1" {
+		t.Fatalf("the restored tree must survive a second pass: got %q err %v", got, err)
+	}
+	names := func(es []os.DirEntry) []string {
+		out := []string{}
+		for _, e := range es {
+			out = append(out, e.Name())
+		}
+		return out
+	}
+	if !slices.Equal(names(first), names(second)) {
+		t.Errorf("a second recovery pass changed the directory: %v then %v", names(first), names(second))
+	}
+}
+
+// Two extracts can stamp the same instant. Recovery restores one of them and
+// must then keep the other rather than deleting it as superseded: equal stamps
+// are not evidence that one came first.
+func TestRecoverBundleDirKeepsABackupItCannotTellApartFromTheRestore(t *testing.T) {
+	dir := t.TempDir()
+	first := stageBackup(t, dir, "one", "proj-1", "v1", 100)
+	second := stageBackup(t, dir, "two", "proj-1", "v2", 100)
+
+	recoverBundleDir(dir, nil)
+
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil {
+		t.Fatalf("nothing was restored: %v", err)
+	}
+	kept := 0
+	for _, staging := range []string{first, second} {
+		if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err == nil {
+			kept++
+		}
+	}
+	if kept != 1 {
+		t.Fatalf("restored %q and kept %d of the two tied backups, want exactly 1 kept", got, kept)
 	}
 }
