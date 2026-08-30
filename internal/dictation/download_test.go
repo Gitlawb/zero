@@ -524,3 +524,161 @@ func TestRestoreInterruptedPromotionPrefersTheNewestHolder(t *testing.T) {
 		t.Errorf("the older holder must be left intact: %v", err)
 	}
 }
+
+// interruptPromotion drives the REAL promotion into the state a process killed
+// between its two renames leaves: destDir absent, the only install in a holder
+// promoteStagedDir named. Both renames fail, so nothing is put back in process
+// and the holder is retained rather than cleaned up.
+func interruptPromotion(t *testing.T, destDir, label string) {
+	t.Helper()
+	stage := destDir + ".incoming"
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := renameStagedDir
+	renameStagedDir = func(string, string) error { return errors.New("injected rename failure") }
+	err := promoteStagedDir(stage, destDir, label)
+	renameStagedDir = real
+	if err == nil {
+		t.Fatalf("a promotion whose publish and restore both fail must report an error")
+	}
+	if _, statErr := os.Lstat(destDir); !os.IsNotExist(statErr) {
+		t.Fatalf("the interrupted promotion should leave %s absent, got %v", destDir, statErr)
+	}
+}
+
+// holdersFor lists the holders promoteStagedDir left beside destDir.
+func holdersFor(t *testing.T, destDir string) []string {
+	t.Helper()
+	holders, err := filepath.Glob(destDir + holderSuffix + "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return holders
+}
+
+// End to end over the real transaction, for BOTH consumers of it. The engine and
+// the model are installed for real, one of them is interrupted mid-promotion by
+// the real promoteStagedDir, and the next start has to put it back with no
+// network to fall back on. Nothing plants a holder by hand, so the name recovery
+// orders by is the one promoteStagedDir writes -- the half a hand-built fixture
+// cannot check.
+func TestEnsureLocalEngineRecoversARealInterruptedPromotionOffline(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		label string
+		// dirFor picks the install this case interrupts, given a finished setup.
+		dirFor func(t *testing.T, dest string, comp EngineComponents) string
+	}{
+		{
+			name:  "engine",
+			label: "Engine",
+			dirFor: func(t *testing.T, dest string, comp EngineComponents) string {
+				t.Helper()
+				matches, err := filepath.Glob(filepath.Join(dest, "engine-*"))
+				if err != nil || len(matches) != 1 {
+					t.Fatalf("want exactly one engine dir under %s, got %v (err %v)", dest, matches, err)
+				}
+				return matches[0]
+			},
+		},
+		{
+			name:  "model",
+			label: "Model",
+			dirFor: func(t *testing.T, dest string, comp EngineComponents) string {
+				t.Helper()
+				return filepath.Dir(comp.ModelPath)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := fakeReleaseServer(t, engineSHA, modelSHA)
+			dest := t.TempDir()
+			comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+				DestRoot: dest, EngineVersion: "test", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+			})
+			if err != nil {
+				t.Fatalf("seeding the install: %v", err)
+			}
+
+			target := tc.dirFor(t, dest, comp)
+			interruptPromotion(t, target, tc.label)
+			holders := holdersFor(t, target)
+			if len(holders) != 1 {
+				t.Fatalf("want exactly one holder beside %s, got %v", target, holders)
+			}
+			// The name promoteStagedDir wrote must be one recovery can order by.
+			// Restoring a lone holder works either way, so without this the two
+			// halves could drift apart and only a second holder would show it.
+			if _, ok := holderStamp(target, holders[0]); !ok {
+				t.Fatalf("recovery cannot order the name promoteStagedDir wrote: %q", holders[0])
+			}
+
+			// No network: if the holder is not found there is nothing to fall
+			// back on, which is the failure the offline user actually sees.
+			got, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+				DestRoot: dest, EngineVersion: "test", APIBase: offlineAPIBase(t), platformKey: "linux-amd64", skipPinned: true,
+			})
+			if err != nil {
+				t.Fatalf("the interrupted %s promotion was not recovered offline: %v", tc.name, err)
+			}
+			if !fileExists(got.BinaryPath) {
+				t.Errorf("engine binary missing after recovery: %q", got.BinaryPath)
+			}
+			if !fileExists(filepath.Join(got.ModelPath, "tokens.txt")) {
+				t.Errorf("model tokens.txt missing after recovery under %q", got.ModelPath)
+			}
+			if holders := holdersFor(t, target); len(holders) != 0 {
+				t.Errorf("the holder should be cleared after recovery, got %v", holders)
+			}
+		})
+	}
+}
+
+// A path is not a pattern. An install root containing a glob metacharacter -- a
+// '[' is the one that silently matches nothing -- must not cost a user the
+// install recovery exists to put back.
+func TestRestoreInterruptedPromotionFindsHoldersUnderAnAwkwardPath(t *testing.T) {
+	for _, dirName := range []string{"plain", "wei[rd", "sta*r", "que?ry", "br]ack"} {
+		t.Run(dirName, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), dirName)
+			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+			install := filepath.Join(plantHolder(t, dest, 100, "kept"), "install")
+			if _, err := os.Stat(install); err != nil {
+				t.Fatal(err)
+			}
+
+			restoreInterruptedPromotion(dest)
+
+			got, err := os.ReadFile(filepath.Join(dest, "engine"))
+			if err != nil || string(got) != "kept" {
+				t.Fatalf("the install was not restored under %q: got %q err %v", dirName, got, err)
+			}
+		})
+	}
+}
+
+// A holder can be there without an install in it: the promotion creates the
+// holder first, so a stop before the rename leaves an empty one. Recovery must
+// step over it and keep looking rather than treating it as the newest word on
+// what to restore.
+func TestRestoreInterruptedPromotionSkipsAHolderWithNoInstall(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	usable := plantHolder(t, dest, 100, "kept")
+	// Newer, so ordering reaches it first, but it holds nothing.
+	empty := fmt.Sprintf("%s%s%020d-x", dest, holderSuffix, 200)
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreInterruptedPromotion(dest)
+
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "kept" {
+		t.Fatalf("the usable holder should be restored: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(usable); !os.IsNotExist(err) {
+		t.Errorf("the restored holder should be cleared, got %v", err)
+	}
+}
