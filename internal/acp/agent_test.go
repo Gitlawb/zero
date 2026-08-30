@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,9 +68,11 @@ func testDeps(t *testing.T) Deps {
 // clientHarness wires a client Conn to an Agent over in-memory pipes and collects
 // session/update text chunks.
 type clientHarness struct {
-	client  *Conn
-	updates chan string
-	stop    func()
+	agent     *Agent
+	agentConn *Conn
+	client    *Conn
+	updates   chan string
+	stop      func()
 }
 
 func newHarness(t *testing.T, deps Deps) *clientHarness {
@@ -80,7 +83,7 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 	client := NewConn(br, bw)
 	a := NewAgent(agentConn, deps)
 
-	h := &clientHarness{client: client, updates: make(chan string, 128)}
+	h := &clientHarness{agent: a, agentConn: agentConn, client: client, updates: make(chan string, 128)}
 	client.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
 		var probe struct {
 			Update struct {
@@ -597,5 +600,150 @@ func drainTextUntil(t *testing.T, ch <-chan string, done func(string) bool) stri
 		case <-deadline:
 			return b.String()
 		}
+	}
+}
+
+func TestACPCancelInterleavedSessionsCancelsBothPrompts(t *testing.T) {
+	prompt1Entered := make(chan struct{})
+	prompt2Entered := make(chan struct{})
+	blockPrompt1 := make(chan struct{})
+	blockPrompt2 := make(chan struct{})
+
+	firstCancelStarted := make(chan struct{})
+	holdFirstCancel := make(chan struct{})
+	var cancelCount atomic.Int32
+
+	deps := testDeps(t)
+	deps.RunAgent = func(ctx context.Context, prompt string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		if opts.SessionID == "sess-1" {
+			close(prompt1Entered)
+			select {
+			case <-blockPrompt1:
+				return agent.Result{FinalAnswer: "done1"}, nil
+			case <-ctx.Done():
+				return agent.Result{}, ctx.Err()
+			}
+		} else if opts.SessionID == "sess-2" {
+			close(prompt2Entered)
+			select {
+			case <-blockPrompt2:
+				return agent.Result{FinalAnswer: "done2"}, nil
+			case <-ctx.Done():
+				return agent.Result{}, ctx.Err()
+			}
+		}
+		return agent.Result{}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var initRes InitializeResult
+	if err := h.client.Call(ctx, MethodInitialize, InitializeParams{ProtocolVersion: ProtocolVersion}, &initRes); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	root := t.TempDir()
+	_, _ = deps.Store.Create(sessions.CreateInput{SessionID: "sess-1", Title: "s1", Cwd: root, ModelID: "fake-model"})
+	_, _ = deps.Store.Create(sessions.CreateInput{SessionID: "sess-2", Title: "s2", Cwd: root, ModelID: "fake-model"})
+
+	var load1, load2 LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: "sess-1", Cwd: root}, &load1); err != nil {
+		t.Fatalf("load sess-1: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: "sess-2", Cwd: root}, &load2); err != nil {
+		t.Fatalf("load sess-2: %v", err)
+	}
+
+	// Intercept cancel notification handler to delay the first cancel execution
+	origCancel := h.agent.conn.notifiers[MethodSessionCancel]
+	h.agent.conn.HandleNotify(MethodSessionCancel, func(ctx context.Context, params json.RawMessage) {
+		if cancelCount.Add(1) == 1 {
+			close(firstCancelStarted)
+			<-holdFirstCancel
+		}
+		origCancel(ctx, params)
+	})
+
+	type promptOutcome struct {
+		res PromptResult
+		err error
+	}
+	res1Ch := make(chan promptOutcome, 1)
+	res2Ch := make(chan promptOutcome, 1)
+
+	go func() {
+		var res PromptResult
+		err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: "sess-1", Prompt: []ContentBlock{TextBlock("prompt1")}}, &res)
+		res1Ch <- promptOutcome{res: res, err: err}
+	}()
+
+	go func() {
+		var res PromptResult
+		err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: "sess-2", Prompt: []ContentBlock{TextBlock("prompt2")}}, &res)
+		res2Ch <- promptOutcome{res: res, err: err}
+	}()
+
+	select {
+	case <-prompt1Entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt1 did not enter RunAgent")
+	}
+	select {
+	case <-prompt2Entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt2 did not enter RunAgent")
+	}
+
+	// Send cancel for sess-1 which starts the worker and waits on holdFirstCancel
+	_ = h.client.Notify(MethodSessionCancel, CancelParams{SessionID: "sess-1"})
+	select {
+	case <-firstCancelStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first cancel did not start")
+	}
+
+	// Interleave cancel for sess-2, then another cancel for sess-1
+	_ = h.client.Notify(MethodSessionCancel, CancelParams{SessionID: "sess-2"})
+	_ = h.client.Notify(MethodSessionCancel, CancelParams{SessionID: "sess-1"})
+
+	deadlineWait := time.Now().Add(2 * time.Second)
+	for {
+		h.agent.conn.notifyMu.Lock()
+		queued := string(h.agent.conn.notifyQ[notifyKey{method: MethodSessionCancel, target: "sess-1"}])
+		h.agent.conn.notifyMu.Unlock()
+		if strings.Contains(queued, "sess-1") || time.Now().After(deadlineWait) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	close(holdFirstCancel)
+
+	select {
+	case out1 := <-res1Ch:
+		if out1.err != nil {
+			t.Fatalf("prompt1 error: %v", out1.err)
+		}
+		if out1.res.StopReason != StopCancelled {
+			t.Fatalf("prompt1 StopReason = %q, want %q", out1.res.StopReason, StopCancelled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt1 did not cancel")
+	}
+
+	select {
+	case out2 := <-res2Ch:
+		if out2.err != nil {
+			t.Fatalf("prompt2 error: %v", out2.err)
+		}
+		if out2.res.StopReason != StopCancelled {
+			t.Fatalf("prompt2 StopReason = %q, want %q", out2.res.StopReason, StopCancelled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt2 did not cancel (session cancel was overwritten/coalesced across sessions)")
 	}
 }
