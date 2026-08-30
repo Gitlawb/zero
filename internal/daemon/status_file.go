@@ -17,57 +17,37 @@ const (
 	statusTempPattern = statusTempPrefix + "*"
 )
 
-// statusFileCommittedError reports a warning that happened after the complete
-// status document was already published. Callers must not tear down the daemon
-// as though publication failed.
-type statusFileCommittedError struct {
-	cause error
+func openStatusRoot(path string) (*os.Root, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("open status directory: %w", err)
+	}
+	if err := validateStatusRoot(root); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	return root, nil
 }
 
-func (err *statusFileCommittedError) Error() string {
-	return fmt.Sprintf("status file publication committed with warning: %v", err.cause)
-}
-
-func (err *statusFileCommittedError) Unwrap() error {
-	return err.cause
-}
-
-// writeStatusFileAtomically stages a complete, synced sibling file before
-// publishing it over path, so it never truncates the live document in place.
-// All operations after opening the parent use one traversal-resistant Root, so
-// swapping a named ancestor cannot redirect replacement or cleanup.
-func writeStatusFileAtomically(
-	path string,
+// writeStatusFileAtomicallyRoot publishes through a caller-owned, already
+// bound directory root. The returned boolean crosses the commit boundary: once
+// true, err is a durability/cleanup warning and the complete document is live.
+func writeStatusFileAtomicallyRoot(
+	root *os.Root,
+	statusName string,
 	data []byte,
 	perm os.FileMode,
 	beforeReplace func(),
 	replace func(root *os.Root, src, dst string) error,
 	syncParent func(root *os.Root) error,
-) (returnErr error) {
-	dir := filepath.Dir(path)
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return fmt.Errorf("open status directory: %w", err)
-	}
-	committed := false
-	defer func() {
-		if err := root.Close(); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("close status directory: %w", err))
-		}
-		if committed && returnErr != nil {
-			var committedErr *statusFileCommittedError
-			if !errors.As(returnErr, &committedErr) {
-				returnErr = &statusFileCommittedError{cause: returnErr}
-			}
-		}
-	}()
+) (committed bool, returnErr error) {
 	if err := validateStatusRoot(root); err != nil {
-		return err
+		return false, err
 	}
 
 	temp, tempName, err := createStatusTemp(root, perm)
 	if err != nil {
-		return err
+		return false, err
 	}
 	closed := false
 	defer func() {
@@ -83,24 +63,23 @@ func writeStatusFileAtomically(
 	}()
 
 	if err := temp.Chmod(perm); err != nil {
-		return fmt.Errorf("set temporary status file permissions: %w", err)
+		return false, fmt.Errorf("set temporary status file permissions: %w", err)
 	}
 	if _, err := temp.Write(data); err != nil {
-		return fmt.Errorf("write temporary status file: %w", err)
+		return false, fmt.Errorf("write temporary status file: %w", err)
 	}
 	if err := temp.Sync(); err != nil {
-		return fmt.Errorf("sync temporary status file: %w", err)
+		return false, fmt.Errorf("sync temporary status file: %w", err)
 	}
 	closeErr := temp.Close()
 	closed = true
 	if closeErr != nil {
-		return fmt.Errorf("close temporary status file: %w", closeErr)
+		return false, fmt.Errorf("close temporary status file: %w", closeErr)
 	}
 	if beforeReplace != nil {
 		beforeReplace()
 	}
 
-	statusName := filepath.Base(path)
 	rename := root.Rename
 	if replace != nil {
 		rename = func(src, dst string) error { return replace(root, src, dst) }
@@ -109,7 +88,7 @@ func writeStatusFileAtomically(
 	if err := fsutil.RenameWithRetry(tempName, statusName, rename); err != nil {
 		var committedReplacement *fsutil.CommittedReplacementCleanupError
 		if !errors.As(err, &committedReplacement) {
-			return fmt.Errorf("replace status file: %w", err)
+			return false, fmt.Errorf("replace status file: %w", err)
 		}
 		committedWarning = fmt.Errorf("clean up replaced status file: %w", err)
 	}
@@ -121,9 +100,9 @@ func writeStatusFileAtomically(
 		committedWarning = errors.Join(committedWarning, fmt.Errorf("sync status directory: %w", err))
 	}
 	if committedWarning != nil {
-		return committedWarning
+		return committed, committedWarning
 	}
-	return nil
+	return committed, nil
 }
 
 func validateStatusRoot(root *os.Root) error {
