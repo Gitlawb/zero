@@ -409,6 +409,8 @@ var errFileViewSuperseded = errors.New("file view request superseded")
 
 var fileViewInsideLoad func()
 
+var fileViewBeforeCacheCommit func()
+
 func fileViewSuperseded(liveSeq *atomic.Uint64, seq uint64) bool {
 	return liveSeq != nil && liveSeq.Load() != seq
 }
@@ -504,6 +506,13 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	rendered := formatFileViewLines(readRes.lines, display, changed, readRes.truncated, readRes.omittedLines, width, theme)
 
+	if fileViewBeforeCacheCommit != nil {
+		fileViewBeforeCacheCommit()
+	}
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
+	}
+
 	entry := &fileViewCachedEntry{
 		targetPath:   targetPath,
 		displayPath:  displayPath,
@@ -521,6 +530,10 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	if c.gen != reqGen {
 		c.mu.Unlock()
 		return "", errors.New("request superseded by cache invalidation")
+	}
+	if fileViewSuperseded(liveSeq, seq) {
+		c.mu.Unlock()
+		return "", errFileViewSuperseded
 	}
 
 	if elem, ok := c.items[targetPath]; ok {

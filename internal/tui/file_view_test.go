@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1882,5 +1883,76 @@ func TestFileViewLifecycle_SupersedeStopsInFlightWork(t *testing.T) {
 	m = updated.(model)
 	if !strings.Contains(plainRender(t, m.renderFileViewFull(100)), "package stall") {
 		t.Fatal("latest request must complete")
+	}
+}
+
+func TestFileViewLifecycle_SupersededHighlightMustNotClobberCache(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clobber.go")
+	if err := os.WriteFile(path, []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "clobber.go")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTime := info.ModTime()
+	if err := os.WriteFile(path, []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var n int32
+	fileViewBeforeCacheCommit = func() {
+		if atomic.AddInt32(&n, 1) == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	defer func() { fileViewBeforeCacheCommit = nil }()
+
+	m, cmdA := m.startFileViewRefreshCmd(80)
+	if cmdA == nil {
+		t.Fatal("expected refresh A")
+	}
+	doneA := make(chan tea.Msg, 1)
+	go func() { doneA <- cmdA() }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("A did not reach cache commit")
+	}
+	m, cmdB := m.startFileViewRefreshCmd(80)
+	if cmdB == nil {
+		t.Fatal("expected refresh B")
+	}
+	updated, _ := m.Update(cmdB())
+	m = updated.(model)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package new") {
+		t.Fatal("B must be accepted before releasing A")
+	}
+	close(release)
+	msgA := <-doneA
+	loaded, ok := msgA.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("msgA type %T", msgA)
+	}
+	if !errors.Is(loaded.err, errFileViewSuperseded) {
+		t.Fatalf("A must not commit, err=%v", loaded.err)
+	}
+	got := plainRender(t, m.renderFileViewFull(80))
+	if strings.Contains(got, "package old") {
+		t.Fatalf("stale highlight must not clobber cache, got %s", got)
+	}
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("expected package new, got %s", got)
 	}
 }
