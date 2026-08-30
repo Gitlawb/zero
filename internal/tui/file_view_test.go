@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1728,7 +1729,15 @@ func TestFileViewLifecycle_ShellEscapeReloadsFullView(t *testing.T) {
 	m := filesPanelTestModel()
 	m.cwd = dir
 	m = testOpenFile(m, "shell.go")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTime := info.ModTime()
 	if err := os.WriteFile(path, []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
 	updated, cmd := m.Update(bashResultMsg{output: "ok"})
@@ -1797,7 +1806,7 @@ func TestFilesPanelSecondActivationOpensFullViewThroughUpdate(t *testing.T) {
 		t.Fatalf("selectedFile = %q", m.selectedFile)
 	}
 
-	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(model)
 	if !m.fileView.active || m.fileView.path != "web/app.js" {
 		t.Fatal("Enter on the selected FILES row must call openFileView")
@@ -1821,5 +1830,57 @@ func TestFilesPanelSecondActivationOpensFullViewThroughUpdate(t *testing.T) {
 	m = updated.(model)
 	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "let a = 1") {
 		t.Fatalf("expected loaded file content, got %s", plainRender(t, m.renderFileViewFull(80)))
+	}
+}
+
+func TestFileViewLifecycle_SupersedeStopsInFlightWork(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "stall.go"), []byte("package stall\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	fileViewInsideLoad = func() {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	}
+	defer func() { fileViewInsideLoad = nil }()
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m, cmdA := m.openFileView("stall.go")
+	if cmdA == nil {
+		t.Fatal("expected initial load")
+	}
+	doneA := make(chan tea.Msg, 1)
+	go func() { doneA <- cmdA() }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("load A did not enter worker")
+	}
+	m, cmdB := m.startFileViewLoadCmd(100)
+	if cmdB == nil {
+		t.Fatal("expected superseding load")
+	}
+	close(release)
+	msgA := <-doneA
+	loaded, ok := msgA.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("msgA type %T", msgA)
+	}
+	if !errors.Is(loaded.err, errFileViewSuperseded) {
+		t.Fatalf("in-flight A must stop, err=%v", loaded.err)
+	}
+	msgB := cmdB()
+	updated, _ := m.Update(msgB)
+	m = updated.(model)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(100)), "package stall") {
+		t.Fatal("latest request must complete")
 	}
 }

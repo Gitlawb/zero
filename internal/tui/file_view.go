@@ -405,7 +405,24 @@ func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, chang
 // loadAndRender performs the bounded read, Chroma highlighting, and formatting
 // on a cache miss (or re-formats for a new width variant on a cache hit). It is
 // intended to be executed from a tea.Cmd / background worker, off the View path.
-func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme) (string, error) {
+var errFileViewSuperseded = errors.New("file view request superseded")
+
+var fileViewInsideLoad func()
+
+func fileViewSuperseded(liveSeq *atomic.Uint64, seq uint64) bool {
+	return liveSeq != nil && liveSeq.Load() != seq
+}
+
+func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, refreshSource bool, liveSeq *atomic.Uint64, seq uint64) (string, error) {
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
+	}
+	if fileViewInsideLoad != nil {
+		fileViewInsideLoad()
+	}
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
+	}
 	stat, err := os.Stat(targetPath)
 	if err != nil {
 		c.mu.Lock()
@@ -428,22 +445,29 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return "", errors.New("request superseded by cache invalidation")
 	}
 
-	if elem, ok := c.items[targetPath]; ok {
-		entry := elem.Value.(*fileViewCachedEntry)
-		if entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
-			c.statsData.CacheHits++
-			c.lru.MoveToFront(elem)
-			c.mu.Unlock()
+	if !refreshSource {
+		if elem, ok := c.items[targetPath]; ok {
+			entry := elem.Value.(*fileViewCachedEntry)
+			if entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
+				c.statsData.CacheHits++
+				c.lru.MoveToFront(elem)
+				c.mu.Unlock()
 
-			if rendered, ok := entry.getRender(renderKey); ok {
+				if rendered, ok := entry.getRender(renderKey); ok {
+					return rendered, nil
+				}
+
+				// Re-format for the new width or changed markers using cached display and lines
+				rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
+				entry.putRender(renderKey, rendered)
 				return rendered, nil
 			}
-
-			// Re-format for the new width or changed markers using cached display and lines
-			rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
-			entry.putRender(renderKey, rendered)
-			return rendered, nil
 		}
+	}
+
+	if fileViewSuperseded(liveSeq, seq) {
+		c.mu.Unlock()
+		return "", errFileViewSuperseded
 	}
 
 	c.statsData.CacheMisses++
@@ -460,6 +484,10 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		c.mu.Unlock()
 		rendered := theme.faint.Render("Could not read file: " + readRes.err.Error())
 		return rendered, readRes.err
+	}
+
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
 	}
 
 	c.mu.Lock()
@@ -544,7 +572,7 @@ func sanitizeRawFileLine(s string) string {
 
 func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
 	fingerprint := changedLinesFingerprint(changed)
-	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, fingerprint, c.generation(), zeroTheme)
+	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, fingerprint, c.generation(), zeroTheme, false, nil, 0)
 	return rendered
 }
 
@@ -561,12 +589,12 @@ type fileViewLoadedMsg struct {
 	err           error
 }
 
-func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, theme tuiTheme, live *atomic.Uint64) tea.Cmd {
+func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, theme tuiTheme, refreshSource bool, liveSeq *atomic.Uint64) tea.Cmd {
 	return func() tea.Msg {
-		if live != nil && live.Load() != seq {
-			return fileViewLoadedMsg{lifetimeToken: token, seq: seq, generation: gen, displayPath: displayPath, width: width, fingerprint: fingerprint}
+		if fileViewSuperseded(liveSeq, seq) {
+			return fileViewLoadedMsg{lifetimeToken: token, seq: seq, generation: gen, displayPath: displayPath, width: width, fingerprint: fingerprint, err: errFileViewSuperseded}
 		}
-		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme)
+		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme, refreshSource, liveSeq, seq)
 		return fileViewLoadedMsg{
 			lifetimeToken: token,
 			seq:           seq,
@@ -613,6 +641,14 @@ type fileViewState struct {
 }
 
 func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
+	return m.startFileViewLoad(width, false)
+}
+
+func (m model) startFileViewRefreshCmd(width int) (model, tea.Cmd) {
+	return m.startFileViewLoad(width, true)
+}
+
+func (m model) startFileViewLoad(width int, refreshSource bool) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode != fileViewFull || m.fileView.path == "" {
 		return m, nil
 	}
@@ -636,7 +672,7 @@ func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
 	m.fileView.desiredFingerprint = fingerprint
 	m.fileView.desiredGen = gen
 	theme := zeroTheme
-	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, seq, gen, theme, m.fileView.liveSeq)
+	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, seq, gen, theme, refreshSource, m.fileView.liveSeq)
 }
 
 // openFileView activates the drill-in for path in diff mode. Opening from an

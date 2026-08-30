@@ -296,6 +296,24 @@ func TestSidebarFileLinesOverflowExcludesLiveRow(t *testing.T) {
 
 // TestSidebarHasContentForLiveWrite: the sidebar counts an in-flight first
 // write as content, so the FILES pulse is visible before any result row lands.
+func TestSidebarFileHitsDistinguishSuffixPaths(t *testing.T) {
+	m := sidebarTestModel()
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "a", status: tools.StatusOK, changedFiles: []string{"a.go"}},
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "b", status: tools.StatusOK, changedFiles: []string{"dir/a.go"}},
+	)
+	_, hits := m.sidebarFileLines(80)
+	if len(hits) < 2 {
+		t.Fatalf("want two fileHit rows, got %#v", hits)
+	}
+	if hits[0].path == hits[1].path {
+		t.Fatal("fileHit paths must stay distinct")
+	}
+	if hits[0].lineOffset == hits[1].lineOffset {
+		t.Fatal("fileHit rows must not share a line offset")
+	}
+}
+
 func TestSidebarHasContentForLiveWrite(t *testing.T) {
 	m := sidebarTestModel()
 	m.plan.steps = nil // drop the helper's seeded plan: no agents/plan/files now
