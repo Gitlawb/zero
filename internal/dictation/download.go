@@ -796,9 +796,20 @@ func restoreInterruptedPromotion(destDir string) {
 	if _, err := os.Lstat(destDir); err == nil {
 		return
 	}
-	holders, err := filepath.Glob(destDir + holderSuffix + "*")
+	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
+	// and a '[' anywhere in it opens a character class to Glob, which then
+	// matches nothing and strands the install this exists to put back.
+	parent := filepath.Dir(destDir)
+	entries, err := os.ReadDir(parent)
 	if err != nil {
 		return
+	}
+	prefix := filepath.Base(destDir) + holderSuffix
+	holders := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+			holders = append(holders, filepath.Join(parent, entry.Name()))
+		}
 	}
 	// Newest first: an unstamped holder is the least recent thing we can claim
 	// to know about, so it is only reached once every stamped one has failed.
