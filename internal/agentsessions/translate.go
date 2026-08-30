@@ -336,6 +336,12 @@ func capTranslatedEventsDropped(source, contextEvents []sessions.AppendEventInpu
 		return capEvents(contextEvents, max)
 	}
 	if len(contextEvents) == 0 {
+		if max == 1 {
+			// A one-event budget cannot hold both a disclosure and source content.
+			// Preserve the promised transcript tail instead of returning only the
+			// generated omission marker.
+			return []sessions.AppendEventInput{source[len(source)-1]}
+		}
 		return capEventsDropped(source, max, alreadyDropped)
 	}
 	contextSlots := min(len(contextEvents), max-1)
@@ -353,11 +359,10 @@ func capTranslatedEventsDropped(source, contextEvents []sessions.AppendEventInpu
 	}
 	var keptSource []sessions.AppendEventInput
 	if sourceSlots <= 1 {
-		if alreadyDropped > 0 || len(source) > 1 {
-			keptSource = capEventsDropped(source, 1, alreadyDropped)
-		} else {
-			keptSource = append(keptSource, source[len(source)-1])
-		}
+		// A one-event budget cannot hold both a disclosure and source content.
+		// The flag promises transcript-tail events, so the final source event wins;
+		// larger budgets retain the explicit omission marker below.
+		keptSource = append(keptSource, source[len(source)-1])
 	} else {
 		keptSource = capEventsDropped(source, sourceSlots, alreadyDropped)
 	}
