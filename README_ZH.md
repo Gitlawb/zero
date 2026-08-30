@@ -71,14 +71,14 @@ go run ./cmd/zero
 go build -o zero ./cmd/zero
 ```
 
-在 Linux 上，如果你需要原生沙箱，还需要构建沙箱辅助程序：
+在 Linux 上，原生沙箱需要 Bubblewrap。主程序 `zero` 在找不到 `zero-linux-sandbox` 时会以自身作为辅助进程重新执行。同目录或 PATH 上的独立 helper 仍优先：
 
 ```bash
-go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
-go build -o zero-seccomp ./cmd/zero-seccomp   # 可选的兼容性包装器
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox   # 可选
+go build -o zero-seccomp ./cmd/zero-seccomp               # 可选的兼容性包装器
 ```
 
-将 `zero` 和 `zero-linux-sandbox` 放在 `PATH` 上的同一目录中（`~/.local/bin` 是一个好的默认选择）。macOS 不需要额外的辅助二进制文件。Windows 源码构建可以使用主 `zero.exe` 作为沙箱辅助程序；发布包仍然附带独立的 Windows 辅助可执行文件。
+将 `zero` 放在 `PATH` 上（`~/.local/bin` 是一个好的默认选择）。macOS 不需要额外的辅助二进制文件。Windows 源码构建可以使用主 `zero.exe` 作为沙箱辅助程序；发布包仍然附带独立的 Windows 辅助可执行文件。
 
 更多安装细节：[docs/INSTALL.md](docs/INSTALL.md)。
 
