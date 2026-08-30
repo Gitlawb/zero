@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -289,25 +291,33 @@ func recoverBundleDir(dir string, logf func(string, ...any)) {
 	// One link can have several staged backups: a cleanup that could not finish
 	// leaves one behind, and a later crash adds another. Newest first, so the
 	// tree that comes back is the most recent one rather than whichever the
-	// directory happened to list first.
-	staged := make([]string, 0, len(entries))
-	backupTime := map[string]time.Time{}
+	// directory happened to list first. The order comes from the stamp the
+	// extract wrote into the staging name, not from a directory mtime: mtimes
+	// track a tree's contents, and a coarse filesystem gives two of them the
+	// same value anyway.
+	staged := make([]stagedExtract, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), stagingPrefix) {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		staged = append(staged, path)
-		if info, err := os.Stat(filepath.Join(path, "backup")); err == nil {
-			backupTime[path] = info.ModTime()
-		}
+		stamp, stamped := stagingStamp(entry.Name())
+		staged = append(staged, stagedExtract{path: filepath.Join(dir, entry.Name()), stamp: stamp, stamped: stamped})
 	}
-	slices.SortFunc(staged, func(a, b string) int {
-		return backupTime[b].Compare(backupTime[a])
+	slices.SortStableFunc(staged, func(a, b stagedExtract) int {
+		if a.stamped != b.stamped {
+			if a.stamped {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(b.stamp, a.stamp)
 	})
 
-	for _, staging := range staged {
-		if restoreStagedBackup(dir, staging, logf) {
+	// Which links this pass put a tree back on, and the staging it came from.
+	restored := map[string]stagedExtract{}
+	for _, s := range staged {
+		staging := s.path
+		if restoreStagedBackup(dir, s, restored, logf) {
 			continue
 		}
 		// No backup to attribute. A dir with a .git at its root is not staging at
@@ -330,9 +340,33 @@ func recoverBundleDir(dir string, logf func(string, ...any)) {
 	}
 }
 
+// stagedExtract is a staging dir plus the creation order recorded in its name.
+// stamped is false for a name this package did not write, which is an ordering
+// it must not claim to know.
+type stagedExtract struct {
+	path    string
+	stamp   int64
+	stamped bool
+}
+
+// stagingStamp reads back the creation time extractBundle put in a staging name.
+func stagingStamp(name string) (int64, bool) {
+	digits, _, found := strings.Cut(strings.TrimPrefix(name, stagingPrefix), "-")
+	if !found {
+		return 0, false
+	}
+	stamp, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return stamp, true
+}
+
 // restoreStagedBackup puts a staged backup back if its link has no live tree.
 // It reports whether staging was dealt with and needs no further handling.
-func restoreStagedBackup(dir, staging string, logf func(string, ...any)) bool {
+// restored carries the links this recovery pass has already put a tree back on.
+func restoreStagedBackup(dir string, s stagedExtract, restored map[string]stagedExtract, logf func(string, ...any)) bool {
+	staging := s.path
 	backup := filepath.Join(staging, "backup")
 	if _, err := os.Stat(backup); err != nil {
 		return false
@@ -364,13 +398,18 @@ func restoreStagedBackup(dir, staging string, logf func(string, ...any)) bool {
 		return true
 	}
 	defer release()
-	if destInfo, err := os.Stat(dest); err == nil {
-		// The link already has a tree. Only drop the backup when it is provably
-		// the older copy; otherwise it may be the newer one a restart has not
-		// published yet, and deleting it would lose that work.
-		backupInfo, statErr := os.Stat(backup)
-		if statErr != nil || !backupInfo.ModTime().Before(destInfo.ModTime()) {
-			logf("remote: staged tree in %s is not older than the live tree for %s; leaving it in place", staging, id)
+	if _, err := os.Stat(dest); err == nil {
+		// The link already has a tree, and a backup only ever holds the tree that
+		// was live BEFORE it: backup is filled by renaming dest aside, so dest
+		// holding anything at all means a later extract published over it. That
+		// is what makes the backup superseded -- not a timestamp comparison,
+		// which two directories can tie on and which tracks a tree's contents
+		// rather than when it was promoted.
+		if from, ours := restored[dest]; ours && !(s.stamped && from.stamped && s.stamp < from.stamp) {
+			// dest is a tree THIS pass put back, so nothing published over this
+			// backup and the reasoning above does not apply. Without an order
+			// both names agree on, which of the two is current is unknown.
+			logf("remote: staged tree in %s cannot be ordered against the tree just restored for %s; leaving it in place", staging, id)
 			return true
 		}
 		if err := os.RemoveAll(staging); err != nil {
@@ -382,6 +421,7 @@ func restoreStagedBackup(dir, staging string, logf func(string, ...any)) bool {
 		logf("remote: could not restore the staged tree for %s from %s: %v", id, staging, err)
 		return true
 	}
+	restored[dest] = s
 	logf("remote: restored the work tree for %s from %s after an interrupted extract", id, staging)
 	if err := os.RemoveAll(staging); err != nil {
 		logf("remote: could not remove staging dir %s after restoring %s: %v", staging, id, err)
@@ -413,7 +453,9 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	}
 	defer unlockFile()
 
-	staging, err := os.MkdirTemp(parent, stagingPrefix+"*")
+	// The stamp records this extract's place in the order, which is what lets
+	// recovery tell an older leftover staging dir from a newer one.
+	staging, err := os.MkdirTemp(parent, fmt.Sprintf("%s%020d-*", stagingPrefix, time.Now().UnixNano()))
 	if err != nil {
 		return err
 	}
