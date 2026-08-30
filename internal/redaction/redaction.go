@@ -75,7 +75,12 @@ var sensitiveKeys = map[string]struct{}{
 // Applied via ReplaceAllStringFunc rather than the plain list below.
 var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 
-// textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
+type secretPatternTrigger struct {
+	prefixes []string
+	patterns []*regexp.Regexp
+}
+
+// triggeredSecretPatterns mirror secrets.Scan for end-boundary behavior and the
 // shared high-confidence shapes. A leading \b keeps each pattern from firing
 // mid-word; a trailing \b is omitted so a secret followed by more word
 // characters outside its body class (e.g. AKIA…EXAMPLEEXTRA) still matches,
@@ -84,16 +89,18 @@ var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 // (not in secrets.Scan); ASIA temporary access keys are kept alongside AKIA.
 // openai keys are handled separately (digit filter). JWT has a strict form
 // (both segments start with eyJ) and a looser three-segment form.
-var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
-	regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`),
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+var triggeredSecretPatterns = []secretPatternTrigger{
+	{prefixes: []string{"sk-ant-"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`)}},
+	{prefixes: []string{"github_pat_"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`)}},
+	{prefixes: []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`)}},
+	{prefixes: []string{"glpat-"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`)}},
+	{prefixes: []string{"AIza"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`)}},
+	{prefixes: []string{"xox"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`)}},
+	{prefixes: []string{"AKIA", "ASIA"}, patterns: []*regexp.Regexp{regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`)}},
+	{prefixes: []string{"eyJ"}, patterns: []*regexp.Regexp{
+		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+	}},
 }
 
 var (
@@ -185,58 +192,114 @@ func RedactString(value string, options Options) string {
 		}
 	}
 
-	redacted = privateKeyPattern.ReplaceAllString(redacted, replacement)
-	redacted = jsonStringPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		parts := jsonStringPattern.FindStringSubmatch(match)
-		if len(parts) < 3 || !IsSensitiveKey(parts[2], options) {
-			return match
+	if strings.Contains(redacted, "-----BEGIN ") && strings.Contains(redacted, "PRIVATE KEY") {
+		redacted = privateKeyPattern.ReplaceAllString(redacted, replacement)
+	}
+	if strings.Contains(redacted, ":") && strings.Contains(redacted, "\"") {
+		redacted = jsonStringPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			parts := jsonStringPattern.FindStringSubmatch(match)
+			if len(parts) < 3 || !IsSensitiveKey(parts[2], options) {
+				return match
+			}
+			return parts[1] + `"` + replacement + `"`
+		})
+	}
+	if strings.Contains(redacted, "=") {
+		redacted = assignPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			parts := assignPattern.FindStringSubmatch(match)
+			if len(parts) < 6 || !IsSensitiveKey(parts[1], options) {
+				return match
+			}
+			if parts[3] != "" {
+				return parts[1] + parts[2] + `"` + replacement + `"`
+			}
+			if parts[4] != "" {
+				return parts[1] + parts[2] + `'` + replacement + `'`
+			}
+			return parts[1] + parts[2] + replacement
+		})
+	}
+	if strings.Contains(redacted, ":") {
+		if containsCaseInsensitive(redacted, "authorization") {
+			redacted = headerPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+				groups := headerPattern.FindStringSubmatch(match)
+				if groups[2] != "" {
+					return groups[1] + ": " + groups[2] + " " + replacement
+				}
+				return groups[1] + ": " + replacement
+			})
 		}
-		return parts[1] + `"` + replacement + `"`
-	})
-	redacted = assignPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		parts := assignPattern.FindStringSubmatch(match)
-		if len(parts) < 6 || !IsSensitiveKey(parts[1], options) {
-			return match
-		}
-		if parts[3] != "" {
-			return parts[1] + parts[2] + `"` + replacement + `"`
-		}
-		if parts[4] != "" {
-			return parts[1] + parts[2] + `'` + replacement + `'`
-		}
-		return parts[1] + parts[2] + replacement
-	})
-	redacted = headerPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		groups := headerPattern.FindStringSubmatch(match)
-		// groups[2] is the known scheme (kept for readability) or "" for an opaque /
-		// custom-scheme credential — in which case the whole value is redacted (M12).
-		if groups[2] != "" {
-			return groups[1] + ": " + groups[2] + " " + replacement
-		}
-		return groups[1] + ": " + replacement
-	})
-	redacted = secretHeader.ReplaceAllString(redacted, "$1: "+replacement)
-	redacted = redactURLPasswords(redacted, replacement)
-	redacted = queryPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		parts := queryPattern.FindStringSubmatch(match)
-		if len(parts) < 4 || !IsSensitiveKey(parts[2], options) {
-			return match
-		}
-		return parts[1] + parts[2] + "=" + replacement
-	})
+		redacted = secretHeader.ReplaceAllString(redacted, "$1: "+replacement)
+	}
+	if strings.Contains(redacted, "://") && strings.Contains(redacted, "@") {
+		redacted = redactURLPasswords(redacted, replacement)
+	}
+	if strings.Contains(redacted, "?") || strings.Contains(redacted, "&") {
+		redacted = queryPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			parts := queryPattern.FindStringSubmatch(match)
+			if len(parts) < 4 || !IsSensitiveKey(parts[2], options) {
+				return match
+			}
+			return parts[1] + parts[2] + "=" + replacement
+		})
+	}
 	// openai keys first so the filter can drop kebab-case false positives
 	// before any other pattern rewrites nearby text.
-	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) &&
-			strings.Contains(strings.TrimPrefix(match, "sk-"), "-") {
-			return match
+	if strings.Contains(redacted, "sk-") {
+		redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) &&
+				strings.Contains(strings.TrimPrefix(match, "sk-"), "-") {
+				return match
+			}
+			return replacement
+		})
+	}
+	for _, entry := range triggeredSecretPatterns {
+		hasPrefix := false
+		for _, p := range entry.prefixes {
+			if strings.Contains(redacted, p) {
+				hasPrefix = true
+				break
+			}
 		}
-		return replacement
-	})
-	for _, pattern := range textSecretPatterns {
-		redacted = pattern.ReplaceAllString(redacted, replacement)
+		if hasPrefix {
+			for _, pat := range entry.patterns {
+				redacted = pat.ReplaceAllString(redacted, replacement)
+			}
+		}
 	}
 	return redacted
+}
+
+func containsCaseInsensitive(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(s) < len(substr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			c1 := s[i+j]
+			c2 := substr[j]
+			if c1 != c2 && toLowerASCII(c1) != toLowerASCII(c2) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func toLowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // knownOpenAIKeyPrefix is the redaction-side twin of secrets.knownOpenAIKeyPrefix:
@@ -482,7 +545,15 @@ func redactURLPasswords(value string, replacement string) string {
 		if _, hasPassword := parsed.User.Password(); !hasPassword {
 			return candidate
 		}
-		parsed.User = url.UserPassword(parsed.User.Username(), replacement)
-		return parsed.String()
+		username := parsed.User.Username()
+		userinfo := url.UserPassword(username, replacement)
+		parsed.User = userinfo
+		out := parsed.String()
+		encodedUserinfo := userinfo.String()
+		literalUserinfo := url.User(username).String() + ":" + replacement
+		if encodedUserinfo != literalUserinfo {
+			out = strings.Replace(out, encodedUserinfo, literalUserinfo, 1)
+		}
+		return out
 	})
 }
