@@ -203,6 +203,35 @@ type fileViewReadResult struct {
 	err          error
 }
 
+type fileViewByteCounter struct {
+	r io.Reader
+	n int
+}
+
+func (c *fileViewByteCounter) Read(p []byte) (int, error) {
+	got, err := c.r.Read(p)
+	c.n += got
+	return got, err
+}
+
+func (c *fileViewByteCounter) delivered(buf *bufio.Reader) int {
+	n := c.n - buf.Buffered()
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func stripFileViewLineEnding(b []byte) []byte {
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+	}
+	if n := len(b); n > 0 && b[n-1] == '\r' {
+		b = b[:n-1]
+	}
+	return b
+}
+
 func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBytes int) fileViewReadResult {
 	file, err := os.Open(path)
 	if err != nil {
@@ -211,115 +240,92 @@ func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBy
 	defer file.Close()
 
 	var lines []string
-	var totalSourceBytes int
 	truncated := false
 	omittedLines := false
+	counter := &fileViewByteCounter{r: io.LimitReader(file, int64(maxTotalBytes)+1)}
+	reader := bufio.NewReader(counter)
 
-	// Enforce hard source-byte read limit to avoid reading unbounded data from disk.
-	// We allow up to maxTotalBytes + 1 so we can detect truncation without reading to EOF.
-	limitReader := io.LimitReader(file, int64(maxTotalBytes)+1)
-	reader := bufio.NewReader(limitReader)
+	moreSource := func() bool {
+		if reader.Buffered() > 0 {
+			return true
+		}
+		_, err := reader.Peek(1)
+		return err == nil
+	}
 
-	for len(lines) < maxLines && totalSourceBytes < maxTotalBytes {
-		var lineBuf []byte
-		var lineTruncated bool
-
-		for {
-			chunk, isPrefix, err := reader.ReadLine()
-			chunkLen := len(chunk)
-			if chunkLen > 0 {
-				remainTotal := maxTotalBytes - totalSourceBytes
-				if remainTotal <= 0 {
-					truncated = true
-					omittedLines = true
-					if len(lineBuf) > 0 {
-						lines = append(lines, string(lineBuf))
-					}
-					goto finished
-				}
-
-				if chunkLen > remainTotal {
-					chunk = chunk[:remainTotal]
-					totalSourceBytes += remainTotal
-					truncated = true
-					omittedLines = true
-					lineTruncated = true
-				} else {
-					totalSourceBytes += chunkLen
-				}
-
-				remainLine := maxLineBytes - len(lineBuf)
-				if remainLine > 0 {
-					if len(chunk) > remainLine {
-						lineBuf = append(lineBuf, chunk[:remainLine]...)
-						lineTruncated = true
-					} else {
-						lineBuf = append(lineBuf, chunk...)
-					}
-				} else {
-					lineTruncated = true
-				}
+	for len(lines) < maxLines {
+		start := counter.delivered(reader)
+		if start >= maxTotalBytes {
+			if moreSource() {
+				truncated = true
+				omittedLines = true
 			}
-
-			if err != nil {
-				if len(lineBuf) > 0 {
-					lines = append(lines, string(lineBuf))
-					if lineTruncated {
-						truncated = true
-					}
-				}
-				if !errors.Is(err, io.EOF) {
-					if len(lines) == 0 {
-						return fileViewReadResult{err: err}
-					}
-					truncated = true
-					omittedLines = true
-				}
-				goto finished
-			}
-
-			if totalSourceBytes >= maxTotalBytes {
-				if isPrefix {
-					truncated = true
-					omittedLines = true
-				} else if lineTruncated {
-					truncated = true
-				}
-				if len(lineBuf) > 0 {
-					lines = append(lines, string(lineBuf))
-				}
-				goto finished
-			}
-
-			if !isPrefix {
-				break
-			}
+			break
 		}
 
+		var raw []byte
+		for {
+			frag, err := reader.ReadSlice('\n')
+			raw = append(raw, frag...)
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
+			}
+			if err != nil && !errors.Is(err, io.EOF) {
+				if len(lines) == 0 && len(raw) == 0 {
+					return fileViewReadResult{err: err}
+				}
+				truncated = true
+				omittedLines = true
+				break
+			}
+			break
+		}
+
+		if len(raw) == 0 {
+			break
+		}
+
+		consumed := counter.delivered(reader)
+		budget := maxTotalBytes - start
+		if budget < 0 {
+			budget = 0
+		}
+		kept := raw
+		if len(kept) > budget {
+			kept = kept[:budget]
+			truncated = true
+			omittedLines = true
+		}
+		display := stripFileViewLineEnding(kept)
+		lineTruncated := false
+		if len(display) > maxLineBytes {
+			display = display[:maxLineBytes]
+			lineTruncated = true
+			truncated = true
+		}
+		if consumed > maxTotalBytes {
+			truncated = true
+			omittedLines = true
+		}
 		if lineTruncated {
 			truncated = true
 		}
-		lines = append(lines, string(lineBuf))
-		if totalSourceBytes >= maxTotalBytes {
+		lines = append(lines, string(display))
+		if consumed >= maxTotalBytes {
+			if moreSource() {
+				truncated = true
+				omittedLines = true
+			}
+			break
+		}
+		if len(raw) > 0 && raw[len(raw)-1] != '\n' && !moreSource() {
 			break
 		}
 	}
 
-finished:
-	if !omittedLines {
-		if reader.Buffered() > 0 {
-			truncated = true
-			omittedLines = true
-		} else if _, err := reader.Peek(1); err == nil {
-			truncated = true
-			omittedLines = true
-		} else {
-			var probe [1]byte
-			if n, _ := file.Read(probe[:]); n > 0 {
-				truncated = true
-				omittedLines = true
-			}
-		}
+	if !omittedLines && len(lines) >= maxLines && moreSource() {
+		truncated = true
+		omittedLines = true
 	}
 
 	return fileViewReadResult{
