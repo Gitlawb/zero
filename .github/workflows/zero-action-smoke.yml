@@ -14,6 +14,9 @@ on:
       - docs/GITHUB_ACTION.md
       - .github/workflows/zero-action-smoke.yml
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Validate action.yml
