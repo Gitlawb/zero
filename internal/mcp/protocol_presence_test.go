@@ -23,4 +23,11 @@ func TestRPCMessageMethodPresence(t *testing.T) {
 	if resp.Method != "" {
 		t.Fatalf("response Method = %q", resp.Method)
 	}
+	var nullMethod rpcMessage
+	if err := json.Unmarshal([]byte(`{"jsonrpc":"2.0","id":1,"method":null}`), &nullMethod); err != nil {
+		t.Fatal(err)
+	}
+	if !nullMethod.methodPresent {
+		t.Fatal(`{"method":null} must set methodPresent so it is not routed as a response`)
+	}
 }

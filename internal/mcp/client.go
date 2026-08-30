@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execution"
@@ -56,9 +55,13 @@ type Client struct {
 	nextID  int
 	cleanup func()
 
-	writeQueue      chan writeOp
-	writerOnce      sync.Once
-	droppedCourtesy atomic.Uint64
+	writeMu          sync.Mutex
+	writeQueue       chan writeOp
+	writeClosed      bool
+	writeSenders     sync.WaitGroup
+	writerStop       chan struct{}
+	writerDone       chan struct{}
+	courtesyOverflow []writeOp
 
 	// dispatchMu guards the response-dispatch state shared with the single
 	// reader goroutine. It is never held across a blocking read or write.
@@ -76,6 +79,8 @@ type writeOp struct {
 }
 
 const writeQueueCapacity = 32
+
+var errMCPClientClosed = errors.New("MCP client closed")
 
 // dispatchResult carries one matched JSON-RPC response (or a terminal reader
 // error) to a waiting caller.
@@ -266,7 +271,8 @@ func (client *Client) Close() error {
 	// Fail any callers still waiting on a response. The blocking read in the
 	// reader goroutine is released below when stdin closes and the process
 	// exits (or is killed), EOFing stdout.
-	client.failAll(errors.New("MCP client closed"))
+	client.failAll(errMCPClientClosed)
+	client.beginWriterShutdown()
 
 	var err error
 	stdin := client.stdin
@@ -306,6 +312,7 @@ func (client *Client) Close() error {
 		client.cleanup()
 		client.cleanup = nil
 	}
+	client.finishWriterShutdown()
 	return err
 }
 
@@ -373,18 +380,81 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 	}
 }
 
-// ensureWriter lazily starts the single writer goroutine.
 func (client *Client) ensureWriter() {
-	client.writerOnce.Do(func() {
-		if client.writeQueue == nil {
-			client.writeQueue = make(chan writeOp, writeQueueCapacity)
+	_ = client.startWriter()
+}
+
+func (client *Client) startWriter() error {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed {
+		return errMCPClientClosed
+	}
+	if client.writeQueue != nil {
+		return nil
+	}
+	client.writeQueue = make(chan writeOp, writeQueueCapacity)
+	client.writerStop = make(chan struct{})
+	client.writerDone = make(chan struct{})
+	go client.writeLoop()
+	return nil
+}
+
+func (client *Client) writerStopped() bool {
+	if client.writerStop == nil {
+		return false
+	}
+	select {
+	case <-client.writerStop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (client *Client) beginWriterShutdown() {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed {
+		return
+	}
+	client.writeClosed = true
+	if client.writerStop != nil {
+		close(client.writerStop)
+	}
+	for _, op := range client.courtesyOverflow {
+		if op.done != nil {
+			op.done <- errMCPClientClosed
 		}
-		go client.writeLoop()
-	})
+	}
+	client.courtesyOverflow = nil
+}
+
+func (client *Client) finishWriterShutdown() {
+	client.writeMu.Lock()
+	queue := client.writeQueue
+	done := client.writerDone
+	client.writeQueue = nil
+	client.writeMu.Unlock()
+	if queue == nil {
+		return
+	}
+	client.writeSenders.Wait()
+	close(queue)
+	if done != nil {
+		<-done
+	}
 }
 
 func (client *Client) writeLoop() {
+	defer close(client.writerDone)
 	for op := range client.writeQueue {
+		if client.writerStopped() {
+			if op.done != nil {
+				op.done <- errMCPClientClosed
+			}
+			continue
+		}
 		if op.ctx != nil {
 			select {
 			case <-op.ctx.Done():
@@ -399,22 +469,88 @@ func (client *Client) writeLoop() {
 		if op.done != nil {
 			op.done <- err
 		}
+		client.drainCourtesyOverflow()
+	}
+}
+
+func (client *Client) drainCourtesyOverflow() {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed || client.writeQueue == nil {
+		client.courtesyOverflow = nil
+		return
+	}
+	for len(client.courtesyOverflow) > 0 {
+		select {
+		case client.writeQueue <- client.courtesyOverflow[0]:
+			client.courtesyOverflow = client.courtesyOverflow[1:]
+		default:
+			return
+		}
+	}
+}
+
+func (client *Client) enqueueCourtesy(message rpcMessage) {
+	if err := client.startWriter(); err != nil {
+		return
+	}
+	op := writeOp{message: message}
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed || client.writeQueue == nil {
+		return
+	}
+	select {
+	case client.writeQueue <- op:
+	default:
+		client.courtesyOverflow = append(client.courtesyOverflow, op)
 	}
 }
 
 func (client *Client) writeMessage(ctx context.Context, message rpcMessage) error {
-	client.ensureWriter()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := client.startWriter(); err != nil {
+		return err
+	}
 	done := make(chan error, 1)
 	op := writeOp{ctx: ctx, message: message, done: done}
+
+	client.writeMu.Lock()
+	if client.writeClosed {
+		client.writeMu.Unlock()
+		return errMCPClientClosed
+	}
+	stop := client.writerStop
+	queue := client.writeQueue
+	client.writeSenders.Add(1)
+	client.writeMu.Unlock()
+
 	select {
 	case <-ctx.Done():
+		client.writeSenders.Done()
 		return ctx.Err()
-	case client.writeQueue <- op:
+	case <-stop:
+		client.writeSenders.Done()
+		return errMCPClientClosed
+	case queue <- op:
+		client.writeSenders.Done()
 	}
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-stop:
+		select {
+		case err := <-done:
+			if err != nil {
+				return err
+			}
+			return errMCPClientClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	case err := <-done:
 		return err
 	}
@@ -448,23 +584,13 @@ func (client *Client) readLoop() {
 		// It must never be routed as a response to a pending client request.
 		if message.methodPresent || message.Method != "" {
 			if message.ID != nil && jsonRPCIDEchoable(message.ID) {
-				client.ensureWriter()
-				id := message.ID
-				method := message.Method
-				courtesy := writeOp{
-					message: rpcMessage{
-						ID: id,
-						Error: &rpcError{
-							Code:    -32601,
-							Message: fmt.Sprintf("Method %q not supported", method),
-						},
+				client.enqueueCourtesy(rpcMessage{
+					ID: message.ID,
+					Error: &rpcError{
+						Code:    -32601,
+						Message: fmt.Sprintf("Method %q not supported", message.Method),
 					},
-				}
-				select {
-				case client.writeQueue <- courtesy:
-				default:
-					client.droppedCourtesy.Add(1)
-				}
+				})
 			}
 			continue
 		}

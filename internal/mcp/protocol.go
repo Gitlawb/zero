@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,19 +28,34 @@ type rpcMessage struct {
 }
 
 func (m *rpcMessage) UnmarshalJSON(data []byte) error {
-	var probe struct {
-		Method *string `json:"method"`
-	}
+	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return err
 	}
-	type wire rpcMessage
-	var w wire
-	if err := json.Unmarshal(data, &w); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var wire struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      any             `json:"id"`
+		Params  json.RawMessage `json:"params"`
+		Result  json.RawMessage `json:"result"`
+		Error   *rpcError       `json:"error"`
+	}
+	if err := decoder.Decode(&wire); err != nil {
 		return err
 	}
-	*m = rpcMessage(w)
-	m.methodPresent = probe.Method != nil
+	m.JSONRPC = wire.JSONRPC
+	m.ID = wire.ID
+	m.Params = wire.Params
+	m.Result = wire.Result
+	m.Error = wire.Error
+	if raw, ok := probe["method"]; ok {
+		m.methodPresent = true
+		var method string
+		if err := json.Unmarshal(raw, &method); err == nil {
+			m.Method = method
+		}
+	}
 	return nil
 }
 
