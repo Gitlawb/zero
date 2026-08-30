@@ -383,7 +383,10 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 // peekRenderOnly looks up an already-formatted variant in memory. It performs
 // strictly 0 I/O and 0 string formatting/allocations, guaranteeing O(1) instantaneous
 // access on the View() drawing path.
-func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, changedFingerprint string) (string, bool) {
+func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, changedFingerprint string, loadedSeq, desiredSeq uint64) (string, bool) {
+	if loadedSeq != desiredSeq {
+		return "", false
+	}
 	c.mu.Lock()
 	elem, ok := c.items[targetPath]
 	if !ok {
@@ -802,7 +805,7 @@ func (m model) renderFileViewFull(width int) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint); ok {
+	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint, m.fileView.loadedSeq, m.fileView.desiredSeq); ok {
 		return cached
 	}
 	if m.fileView.renderedContent != "" &&
