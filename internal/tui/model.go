@@ -2938,7 +2938,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, p := range msg.row.changedFiles {
 					if p == m.fileView.path {
 						var loadCmd tea.Cmd
-						m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+						m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
 						return m, loadCmd
 					}
 				}
@@ -2978,7 +2978,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.handleGitSweepMsg(msg)
 		if m.fileView.active && m.fileView.mode == fileViewFull {
 			var cmd tea.Cmd
-			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+			m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
 			return m, cmd
 		}
 		return m, nil
@@ -2994,7 +2994,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
 		if m.fileView.active && m.fileView.mode == fileViewFull {
-			return m.startFileViewLoadCmd(m.chatColumnWidth())
+			return m.startFileViewRefreshCmd(m.chatColumnWidth())
 		}
 		return m, nil
 	case providerModelsDiscoveredMsg:

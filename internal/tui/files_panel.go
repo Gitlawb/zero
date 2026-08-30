@@ -377,6 +377,12 @@ func (m model) selectFile(path string) (model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) runDetailsInnerWidth() int {
+	overlayWidth := minInt(72, maxInt(40, m.width-8))
+	overlayWidth = minInt(overlayWidth, m.width)
+	return maxInt(12, overlayWidth-4)
+}
+
 func (m model) runDetailsFileAtMouse(msg tea.MouseMsg) (string, bool) {
 	if !m.runDetailsOpen || !m.runDetailsAllowed() {
 		return "", false
@@ -387,19 +393,46 @@ func (m model) runDetailsFileAtMouse(msg tea.MouseMsg) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	lines := viewLines(overlay)
-	_, lines, _ = normalizeOverlayBlock(lines, width)
-	if hit.y < 0 || hit.y >= len(lines) {
-		return "", false
-	}
-	row := lines[hit.y]
-	for _, f := range m.touchedFiles() {
-		shown := truncatePathLeft(f.path, 40)
-		if strings.Contains(row, f.path) || strings.Contains(row, shown) {
-			return f.path, true
+	inner := m.runDetailsInnerWidth()
+	fileLines, hits := m.sidebarFileLines(inner)
+	content := m.runDetailsLines(inner)
+	fileStart := -1
+	if len(fileLines) > 0 {
+		for i, line := range content {
+			if line == fileLines[0] {
+				fileStart = i
+				break
+			}
 		}
 	}
-	return "", false
+	overlayLines := viewLines(overlay)
+	_, overlayLines, _ = normalizeOverlayBlock(overlayLines, width)
+	contentOrigin := -1
+	if len(content) > 0 {
+		for i, line := range overlayLines {
+			if line == content[0] {
+				contentOrigin = i
+				break
+			}
+		}
+	}
+	if fileStart < 0 || contentOrigin < 0 {
+		return "", false
+	}
+	y := hit.y - contentOrigin
+	var match fileHit
+	found := false
+	for _, h := range hits {
+		if y == fileStart+h.lineOffset {
+			match = h
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", false
+	}
+	return match.path, true
 }
 
 // scrollOffsetForTranscriptRow computes the chatScrollOffset that places the
