@@ -435,3 +435,92 @@ func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
 		})
 	}
 }
+
+// An interrupted promotion of the MODEL leaves it in a holder exactly as it does
+// for the engine, and the model side is what an offline user loses if nothing
+// puts it back: with no network there is no download to fall back to.
+func TestEnsureLocalEngineRestoresAnInterruptedModelPromotion(t *testing.T) {
+	srv := fakeReleaseServer(t, engineSHA, modelSHA)
+	dest := t.TempDir()
+	opts := DownloadOptions{
+		DestRoot: dest, EngineVersion: "test", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+	}
+	comp, err := EnsureLocalEngine(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// Stop the world where promoteStagedDir has moved the model aside but has
+	// not yet published the staged copy.
+	modelDir := filepath.Dir(comp.ModelPath)
+	holder := modelDir + ".previous-abc"
+	if err := os.MkdirAll(holder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(modelDir, filepath.Join(holder, "install")); err != nil {
+		t.Fatal(err)
+	}
+
+	offline := offlineAPIBase(t)
+	got, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: dest, EngineVersion: "test", APIBase: offline, platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err != nil {
+		t.Fatalf("the model set aside by an interrupted promotion was not restored: %v", err)
+	}
+	if !fileExists(filepath.Join(got.ModelPath, "tokens.txt")) {
+		t.Errorf("model tokens.txt missing under %q", got.ModelPath)
+	}
+	if _, err := os.Stat(holder); !os.IsNotExist(err) {
+		t.Errorf("the holder should be cleared after a restore, got %v", err)
+	}
+}
+
+// offlineAPIBase returns an API base nothing is listening on, so any attempt to
+// resolve a release asset fails instead of silently downloading.
+func offlineAPIBase(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NewServeMux())
+	url := srv.URL
+	srv.Close()
+	return url
+}
+
+// plantHolder writes an install into a holder named the way promoteStagedDir
+// names one, so recovery sees the same shape it does in production.
+func plantHolder(t *testing.T, destDir string, stamp int64, content string) string {
+	t.Helper()
+	holder := fmt.Sprintf("%s%s%020d-%d", destDir, holderSuffix, stamp, stamp)
+	install := filepath.Join(holder, "install")
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(install, "engine"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return holder
+}
+
+// A cleanup that could not finish leaves an old holder behind; a later
+// interrupted promotion adds a second one. Recovery has to put back the newer
+// install, and Glob's lexical order is no evidence of which that is.
+func TestRestoreInterruptedPromotionPrefersTheNewestHolder(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stale := plantHolder(t, dest, 100, "stale")
+	current := plantHolder(t, dest, 200, "current")
+
+	restoreInterruptedPromotion(dest)
+
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "current" {
+		t.Fatalf("restored engine = %q (err %v), want the newest holder's %q", got, err, "current")
+	}
+	if _, err := os.Stat(current); !os.IsNotExist(err) {
+		t.Errorf("the restored holder should be cleared, got %v", err)
+	}
+	// The loser is left for a human rather than deleted on a guess.
+	if _, err := os.Stat(filepath.Join(stale, "install", "engine")); err != nil {
+		t.Errorf("the older holder must be left intact: %v", err)
+	}
+}

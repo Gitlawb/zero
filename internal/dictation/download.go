@@ -2,6 +2,7 @@ package dictation
 
 import (
 	"archive/tar"
+	"cmp"
 	"compress/bzip2"
 	"context"
 	"crypto/sha256"
@@ -13,7 +14,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Auto-download of the local engine + a default model (opt-in, behind a confirm
@@ -519,6 +523,10 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		modelDirName = "model-moonshine-tiny-en-int8"
 	}
 	modelDir := filepath.Join(opts.DestRoot, modelDirName)
+	// promoteStagedDir is shared with the model, so a stop mid-promotion leaves
+	// the model in a holder too. Put it back before deciding anything is
+	// missing: without this an offline user has no download to fall back on.
+	restoreInterruptedPromotion(modelDir)
 	if !dirHasModel(modelDir) {
 		asset, err := resolveAsset(ctx, client, apiBase, modelReleaseTag, modelName, "")
 		if err != nil {
@@ -756,6 +764,28 @@ func resolveEnginePaths(engineDir string, targetWindows bool) (bin, server strin
 	return bin, server
 }
 
+// holderSuffix is what promoteStagedDir appends to an install's own name for the
+// holder it sets that install aside in. The creation time goes in the name
+// because recovery has to pick the NEWEST holder when a failed cleanup left an
+// older one behind, and nothing else records that order: Glob sorts lexically
+// and a directory mtime tracks the install's contents, not its promotion.
+const holderSuffix = ".previous-"
+
+// holderStamp reads back the creation time in a holder name, reporting false for
+// a name it cannot order (one this package did not write).
+func holderStamp(destDir, holder string) (int64, bool) {
+	rest := strings.TrimPrefix(filepath.Base(holder), filepath.Base(destDir)+holderSuffix)
+	digits, _, found := strings.Cut(rest, "-")
+	if !found {
+		return 0, false
+	}
+	stamp, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return stamp, true
+}
+
 // restoreInterruptedPromotion puts back an install that promoteStagedDir set
 // aside but never replaced, which is what a process stop between its two renames
 // leaves behind: destDir absent and the only usable copy in a .previous-* holder
@@ -766,10 +796,23 @@ func restoreInterruptedPromotion(destDir string) {
 	if _, err := os.Lstat(destDir); err == nil {
 		return
 	}
-	holders, err := filepath.Glob(destDir + ".previous-*")
+	holders, err := filepath.Glob(destDir + holderSuffix + "*")
 	if err != nil {
 		return
 	}
+	// Newest first: an unstamped holder is the least recent thing we can claim
+	// to know about, so it is only reached once every stamped one has failed.
+	slices.SortStableFunc(holders, func(a, b string) int {
+		sa, oka := holderStamp(destDir, a)
+		sb, okb := holderStamp(destDir, b)
+		if oka != okb {
+			if oka {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(sb, sa)
+	})
 	for _, holder := range holders {
 		install := filepath.Join(holder, "install")
 		if _, err := os.Stat(install); err != nil {
@@ -778,6 +821,8 @@ func restoreInterruptedPromotion(destDir string) {
 		if err := renameStagedDir(install, destDir); err != nil {
 			continue
 		}
+		// Only the holder this install came out of is removed; an older one is
+		// left for a human, never deleted on a guess about which is current.
 		_ = os.RemoveAll(holder)
 		return
 	}
@@ -799,7 +844,8 @@ func promoteStagedDir(stageDir, destDir, label string) error {
 
 	restore := func() error { return nil }
 	if _, err := os.Lstat(destDir); err == nil {
-		holder, err = os.MkdirTemp(filepath.Dir(destDir), filepath.Base(destDir)+".previous-*")
+		holder, err = os.MkdirTemp(filepath.Dir(destDir),
+			fmt.Sprintf("%s%s%020d-*", filepath.Base(destDir), holderSuffix, time.Now().UnixNano()))
 		if err != nil {
 			return fmt.Errorf("setting aside previous %s install: %w", label, err)
 		}
