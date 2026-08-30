@@ -145,3 +145,38 @@ func TestWriteFileAtomicLeavesDestinationOnReplaceFailure(t *testing.T) {
 		t.Fatalf("temporary files left behind: %v", leftovers)
 	}
 }
+
+func TestWriteFileAtomicRefusesNonWritableTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "readonly.txt")
+	if err := os.WriteFile(target, []byte("original"), 0o444); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(target, 0o444); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	probe, err := os.OpenFile(target, os.O_WRONLY, 0)
+	if err == nil {
+		_ = probe.Close()
+		t.Skip("this host allows writing a mode-0444 file (for example when running as root)")
+	}
+
+	if err := WriteFileAtomic(target, []byte("replaced"), 0o644); err == nil {
+		t.Fatal("expected WriteFileAtomic to refuse a non-writable destination")
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("content = %q, want %q", got, "original")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got&0o222 != 0 {
+		t.Fatalf("destination became writable: perm=%04o", got)
+	}
+}

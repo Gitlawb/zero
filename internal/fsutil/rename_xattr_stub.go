@@ -1,12 +1,8 @@
-//go:build windows
+//go:build !windows && !linux && !darwin && !freebsd && !netbsd
 
 package fsutil
 
 import "os"
-
-func preserveOwner(*os.File, os.FileInfo) error {
-	return nil
-}
 
 func preserveXattrs(*os.File, string) error {
 	return nil
