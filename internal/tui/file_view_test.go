@@ -1652,3 +1652,50 @@ func TestFileViewLifecycle_ReverseOrderToolMutationCompletions(t *testing.T) {
 		t.Fatalf("expected version 2 state still visible, got: %s", rendered)
 	}
 }
+
+func TestFileViewLifecycle_ResizeRoundTripDoesNotReuseStaleCache(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "roundtrip.go")
+	if err := os.WriteFile(filePath, []byte("package roundtrip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "roundtrip.go")
+
+	m, cmd80 := m.startFileViewLoadCmd(80)
+	if cmd80 == nil {
+		t.Fatal("expected first width-80 load")
+	}
+	updated, _ := m.Update(cmd80())
+	m = updated.(model)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package roundtrip") {
+		t.Fatal("expected committed width-80 content")
+	}
+
+	m, cmd100 := m.startFileViewLoadCmd(100)
+	if cmd100 == nil {
+		t.Fatal("expected width-100 load")
+	}
+	m, cmd80b := m.startFileViewLoadCmd(80)
+	if cmd80b == nil {
+		t.Fatal("expected second width-80 load")
+	}
+
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, fileViewLoadingPlaceholder) {
+		t.Fatalf("80→100→80 must stay on loading until desiredSeq completes, got: %s", got)
+	}
+	if strings.Contains(got, "package roundtrip") {
+		t.Fatalf("must not reuse cached width 80 from an earlier seq, got: %s", got)
+	}
+
+	updated, _ = m.Update(cmd80b())
+	m = updated.(model)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package roundtrip") {
+		t.Fatalf("expected content after matching seq completes, got: %s", plainRender(t, m.renderFileViewFull(80)))
+	}
+}
