@@ -1699,3 +1699,77 @@ func TestFileViewLifecycle_ResizeRoundTripDoesNotReuseStaleCache(t *testing.T) {
 		t.Fatalf("expected content after matching seq completes, got: %s", plainRender(t, m.renderFileViewFull(80)))
 	}
 }
+
+func TestFileViewLifecycle_EmptyFileIsCompletedSnapshot(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "empty.go"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "empty.go")
+	got := plainRender(t, m.renderFileViewFull(80))
+	if strings.Contains(got, fileViewLoadingPlaceholder) {
+		t.Fatalf("empty completed snapshot must not stay on loading, got %q", got)
+	}
+	if !m.fileView.snapshotReady {
+		t.Fatal("snapshotReady must be set for an empty file")
+	}
+}
+
+func TestFileViewLifecycle_ShellEscapeReloadsFullView(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shell.go")
+	if err := os.WriteFile(path, []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "shell.go")
+	if err := os.WriteFile(path, []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(bashResultMsg{output: "ok"})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("bashResultMsg must schedule a file-view reload")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("expected reloaded content after shell escape, got %s", got)
+	}
+}
+
+func TestFileViewLifecycle_SupersededResizeSkipsWork(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "coalesce.go"), []byte("package coalesce\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	var cmd0 tea.Cmd
+	m, cmd0 = m.openFileView("coalesce.go")
+	if cmd0 == nil {
+		t.Fatal("expected initial load")
+	}
+	var cmd1, cmd2 tea.Cmd
+	m, cmd1 = m.startFileViewLoadCmd(60)
+	m, cmd2 = m.startFileViewLoadCmd(100)
+	_ = cmd0()
+	_ = cmd1()
+	msg := cmd2()
+	updated, _ := m.Update(msg)
+	m = updated.(model)
+	stats := fileViewCacheStatsForTest()
+	if stats.DiskReads != 1 {
+		t.Fatalf("superseded loads must not re-read, DiskReads=%d", stats.DiskReads)
+	}
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(100)), "package coalesce") {
+		t.Fatal("latest width must still load")
+	}
+}

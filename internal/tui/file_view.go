@@ -561,8 +561,11 @@ type fileViewLoadedMsg struct {
 	err           error
 }
 
-func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, theme tuiTheme) tea.Cmd {
+func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, theme tuiTheme, live *atomic.Uint64) tea.Cmd {
 	return func() tea.Msg {
+		if live != nil && live.Load() != seq {
+			return fileViewLoadedMsg{lifetimeToken: token, seq: seq, generation: gen, displayPath: displayPath, width: width, fingerprint: fingerprint}
+		}
 		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme)
 		return fileViewLoadedMsg{
 			lifetimeToken: token,
@@ -605,6 +608,8 @@ type fileViewState struct {
 	loadedSeq         uint64
 	loading           bool
 	hasError          bool
+	snapshotReady     bool
+	liveSeq           *atomic.Uint64
 }
 
 func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
@@ -618,7 +623,12 @@ func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
 	m.fileView.desiredSeq++
 	m.fileView.desiredWidth = width
 	m.fileView.loading = true
+	m.fileView.snapshotReady = false
+	if m.fileView.liveSeq == nil {
+		m.fileView.liveSeq = new(atomic.Uint64)
+	}
 	seq := m.fileView.desiredSeq
+	m.fileView.liveSeq.Store(seq)
 	token := m.fileView.lifetimeToken
 	gen := defaultFileViewCache.generation()
 	changed := m.fileViewChangedLines()
@@ -626,7 +636,7 @@ func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
 	m.fileView.desiredFingerprint = fingerprint
 	m.fileView.desiredGen = gen
 	theme := zeroTheme
-	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, seq, gen, theme)
+	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, seq, gen, theme, m.fileView.liveSeq)
 }
 
 // openFileView activates the drill-in for path in diff mode. Opening from an
@@ -709,6 +719,7 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	m.fileView.loading = false
+	m.fileView.snapshotReady = true
 	m.fileView.renderedContent = msg.rendered
 	m.fileView.loadedPath = msg.displayPath
 	m.fileView.loadedWidth = msg.width
@@ -808,7 +819,7 @@ func (m model) renderFileViewFull(width int) string {
 	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint, m.fileView.loadedSeq, m.fileView.desiredSeq); ok {
 		return cached
 	}
-	if m.fileView.renderedContent != "" &&
+	if m.fileView.snapshotReady &&
 		m.fileView.loadedPath == m.fileView.path &&
 		m.fileView.loadedSeq == m.fileView.desiredSeq &&
 		m.fileView.loadedGen == defaultFileViewCache.generation() &&

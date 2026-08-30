@@ -2989,6 +2989,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			return m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
 		return m, nil
 	case providerModelsDiscoveredMsg:
 		return m.applyProviderModelsDiscovered(msg), nil
