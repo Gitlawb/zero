@@ -746,9 +746,14 @@ func TestRecoverBundleDirLeavesALiveExtractAlone(t *testing.T) {
 	}
 }
 
-// stageBackup plants a staging dir holding a backup tree for linkID.
-func stageBackup(t *testing.T, dir, name, linkID, content string, age time.Duration) string {
+// stageBackup plants a staging dir holding a backup tree for linkID, named the
+// way extractBundle names one so recovery can order it. A stamp of 0 plants an
+// unstamped name, which is the shape recovery must refuse to order.
+func stageBackup(t *testing.T, dir, name, linkID, content string, stamp int64) string {
 	t.Helper()
+	if stamp > 0 {
+		name = fmt.Sprintf("%020d-%s", stamp, name)
+	}
 	staging := filepath.Join(dir, stagingPrefix+name)
 	backup := filepath.Join(staging, "backup")
 	if err := os.MkdirAll(filepath.Join(backup, ".git"), 0o700); err != nil {
@@ -760,12 +765,6 @@ func stageBackup(t *testing.T, dir, name, linkID, content string, age time.Durat
 	if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(linkID), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if age > 0 {
-		when := time.Now().Add(-age)
-		if err := os.Chtimes(backup, when, when); err != nil {
-			t.Fatal(err)
-		}
-	}
 	return staging
 }
 
@@ -775,8 +774,9 @@ func stageBackup(t *testing.T, dir, name, linkID, content string, age time.Durat
 // just because directory order put the older one first.
 func TestRecoverBundleDirRestoresTheNewestOfSeveralBackups(t *testing.T) {
 	dir := t.TempDir()
-	stageBackup(t, dir, "aaa-old", "proj-1", "v0", time.Hour)
-	newer := stageBackup(t, dir, "zzz-new", "proj-1", "v1", 0)
+	// Lexically first, so directory order alone would pick the older tree.
+	stageBackup(t, dir, "aaa-old", "proj-1", "v0", 100)
+	newer := stageBackup(t, dir, "zzz-new", "proj-1", "v1", 200)
 
 	recoverBundleDir(dir, nil)
 
@@ -792,27 +792,48 @@ func TestRecoverBundleDirRestoresTheNewestOfSeveralBackups(t *testing.T) {
 	}
 }
 
-// A backup that is not provably older than the live tree may be the newer copy
-// a restart has not published yet, so it is kept rather than dropped.
-func TestRecoverBundleDirKeepsABackupNewerThanTheLiveTree(t *testing.T) {
+// Dropping a backup rests on the live tree having been published over it, which
+// is not true of a tree recovery itself just put back. A second backup that
+// carries no order recovery can compare against that restore may be the newer
+// copy, so it is kept rather than dropped.
+func TestRecoverBundleDirKeepsAnUnorderableBackupAgainstATreeItRestored(t *testing.T) {
 	dir := t.TempDir()
-	live := filepath.Join(dir, "proj-1")
-	if err := os.MkdirAll(live, 0o700); err != nil {
-		t.Fatal(err)
+	stamped := stageBackup(t, dir, "current", "proj-1", "v1", 200)
+	unordered := stageBackup(t, dir, "leftover", "proj-1", "v2", 0)
+
+	var logged []string
+	recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("the stamped backup should be restored: got %q err %v", got, err)
 	}
-	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(stamped, "backup")); !os.IsNotExist(err) {
+		t.Errorf("the restored staging dir should be cleared, got %v", err)
 	}
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(live, old, old); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(unordered, "backup", "a.txt")); err != nil {
+		t.Errorf("a backup that cannot be ordered against the restore must be kept: %v", err)
 	}
-	staging := stageBackup(t, dir, "newer", "proj-1", "v2", 0)
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "cannot be ordered") }) {
+		t.Errorf("keeping an unorderable backup should be reported, got %v", logged)
+	}
+}
+
+// An older backup IS dropped once the tree restored over it is provably newer,
+// so the fail-safe above does not turn into a leak of every leftover.
+func TestRecoverBundleDirDropsAnOlderBackupAfterRestoringANewerOne(t *testing.T) {
+	dir := t.TempDir()
+	stale := stageBackup(t, dir, "stale", "proj-1", "v0", 100)
+	stageBackup(t, dir, "current", "proj-1", "v1", 200)
 
 	recoverBundleDir(dir, nil)
 
-	if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
-		t.Errorf("a backup newer than the live tree must be kept: %v", err)
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("the newest backup should be restored: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the superseded backup should be removed, got %v", err)
 	}
 }
 
@@ -837,5 +858,39 @@ func TestRecoverBundleDirKeepsAWorkTreePublishedUnderAReservedName(t *testing.T)
 
 	if _, err := os.Stat(filepath.Join(published, "a.txt")); err != nil {
 		t.Errorf("a published work tree was reaped on upgrade: %v", err)
+	}
+}
+
+// A coarse-resolution filesystem can stamp the backup and the live tree with the
+// same directory mtime, which is why recovery must not decide staleness from
+// timestamps at all: a backup only ever holds the tree that was live BEFORE the
+// one at dest, so a link that has a tree supersedes it either way.
+func TestRecoverBundleDirDropsBackupWhenMtimesAreEqual(t *testing.T) {
+	dir := t.TempDir()
+	staging := plantInterruptedExtract(t, dir, "proj-1", "stale")
+	live := filepath.Join(dir, "proj-1")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// What a one-second-granularity filesystem produces for a backup and a
+	// publish that happen in the same second.
+	tie := time.Unix(1700000000, 0)
+	for _, path := range []string{filepath.Join(staging, "backup"), live} {
+		if err := os.Chtimes(path, tie, tie); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recoverBundleDir(dir, nil)
+
+	got, err := os.ReadFile(filepath.Join(live, "a.txt"))
+	if err != nil || string(got) != "live" {
+		t.Fatalf("the live tree must win: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("a superseded backup should be removed, got %v", err)
 	}
 }
