@@ -146,3 +146,54 @@ func TestTimeoutBeforeStartIsNotDelayedOrDisclosed(t *testing.T) {
 		t.Errorf("registration waited %v for an attempt that never started", elapsed)
 	}
 }
+
+// AND A START THAT COMPLETES AFTER THE SETTLE GRACE MUST STILL BE DISCLOSED.
+//
+// The grace is only another timeout. Once it expires, registration reaps the
+// attempt in the background and returns; the process can still be inside
+// cmd.Start at that moment and start successfully afterwards. If Runtime were a
+// snapshot taken at commit time, that launch would have no owner: the reaper can
+// close the late client but cannot amend a value already returned, so the server
+// would have run under the reduced write confinement with startup reporting it
+// only as skipped.
+//
+// A larger grace changes the probability, not the contract, which is why this
+// releases the launch strictly AFTER the bound rather than inside it. The sink
+// outlives registration and StartupDisclosures reads through it.
+func TestStartAfterTheSettleGraceIsStillDisclosed(t *testing.T) {
+	released := make(chan struct{})
+	runtime := registerWithFactory(t, func(ctx context.Context, server Server) (ToolClient, error) {
+		// Held past the 50ms registration timeout AND past launchSettleGrace, so
+		// registration has already reaped this attempt and returned.
+		<-released
+		publishLaunch(ctx, []string{launchNotice})
+		return nil, errors.New("initialize failed long after start")
+	})
+
+	// Registration is done and the disclosure legitimately is not known yet.
+	if disclosures := runtime.StartupDisclosures(); len(disclosures) != 0 {
+		t.Fatalf("nothing had started yet, so nothing should be disclosed: %#v", disclosures)
+	}
+
+	close(released)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var disclosures []StartupDisclosure
+	for time.Now().Before(deadline) {
+		if disclosures = runtime.StartupDisclosures(); len(disclosures) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if len(disclosures) != 1 || len(disclosures[0].Notices) != 1 || disclosures[0].Notices[0] != launchNotice {
+		t.Fatalf("a process that started after the settle grace was never disclosed: %#v", disclosures)
+	}
+	// Reading again must not duplicate it.
+	if again := runtime.StartupDisclosures(); len(again) != 1 {
+		t.Errorf("a second read changed the disclosures: %#v", again)
+	}
+	if skipped := runtime.Skipped(); len(skipped) != 1 {
+		t.Errorf("the server should still be recorded as skipped: %#v", skipped)
+	}
+}

@@ -69,11 +69,28 @@ type Runtime struct {
 	// is closed). Same length/order as clients is not required.
 	cancels []context.CancelFunc
 	skipped []SkippedServer
-	// disclosures are the least-privilege statements that applied to each server
-	// process this registration LAUNCHED. See StartupDisclosures.
-	disclosures []StartupDisclosure
-	once        sync.Once
-	err         error
+	// disclosureSources are the least-privilege statements that applied to each
+	// server process this registration LAUNCHED, in server order, each still
+	// holding the sink that carries the authoritative launch fact.
+	//
+	// NOT a frozen snapshot. Registration is bounded and a launch is not: an
+	// attempt abandoned at the connect timeout can still be inside cmd.Start when
+	// wg.Wait returns, so the serial commit samples an empty sink and the process
+	// then starts under the reduced confinement with nobody left to say so. The
+	// sink outlives registration and StartupDisclosures reads through it, so a
+	// late Start is reported instead of lost. See StartupDisclosures.
+	disclosureSources []disclosureSource
+	once              sync.Once
+	err               error
+}
+
+// disclosureSource pairs a server with both the notices known at commit time and
+// the sink that may still learn them. notices wins when it is already populated,
+// so a settled server never re-reads the sink.
+type disclosureSource struct {
+	name    string
+	notices []string
+	sink    *launchSink
 }
 
 // Skipped returns the servers that were skipped during registration (unreachable
@@ -239,9 +256,15 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 				notices = late
 			}
 		}
-		if len(notices) > 0 {
-			runtime.disclosures = append(runtime.disclosures, StartupDisclosure{Name: server.Name, Notices: notices})
-		}
+		// Recorded whether or not notices are known YET. An abandoned attempt can
+		// still be inside cmd.Start, and keeping its sink here is what lets
+		// StartupDisclosures report that launch after this phase has finished.
+		// Order is server order, so a late arrival does not reorder the rest.
+		runtime.disclosureSources = append(runtime.disclosureSources, disclosureSource{
+			name:    server.Name,
+			notices: notices,
+			sink:    sinks[index],
+		})
 		if res.err != nil {
 			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault})
 			continue
@@ -513,9 +536,33 @@ func isPersistentlyApproved(store *PermissionStore, server Server, toolName stri
 // MCP server processes this registration launched, so a caller can report them
 // once. Empty when no server was launched under reduced enforcement, and always
 // empty for network servers, which launch no local process.
+//
+// READ THROUGH THE SINK, so this is not fixed at the moment registration
+// returned. A server abandoned at the connect timeout may still have been inside
+// cmd.Start then, and its process starts under the reduced write confinement
+// regardless of whether the connection ever became usable. Registration stays
+// bounded; the disclosure does not expire with it.
+//
+// Server order, and a settled entry never re-reads its sink, so calling this
+// twice cannot reorder or duplicate anything.
 func (runtime *Runtime) StartupDisclosures() []StartupDisclosure {
 	if runtime == nil {
 		return nil
 	}
-	return append([]StartupDisclosure(nil), runtime.disclosures...)
+	disclosures := make([]StartupDisclosure, 0, len(runtime.disclosureSources))
+	for _, source := range runtime.disclosureSources {
+		notices := source.notices
+		if len(notices) == 0 {
+			if launched, late := source.sink.observe(); launched {
+				notices = late
+			}
+		}
+		if len(notices) > 0 {
+			disclosures = append(disclosures, StartupDisclosure{Name: source.name, Notices: notices})
+		}
+	}
+	if len(disclosures) == 0 {
+		return nil
+	}
+	return disclosures
 }
