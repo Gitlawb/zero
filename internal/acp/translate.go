@@ -120,14 +120,26 @@ func toolCallResult(result agent.ToolResult) ToolCallUpdate {
 }
 
 func toolResultContent(result agent.ToolResult) []ToolCallContent {
+	content := make([]ToolCallContent, 0, 1+len(result.FileDiffs))
 	text := strings.TrimRight(result.Output, "\n")
 	if text == "" {
 		text = result.Display.Summary
 	}
 	if text == "" {
-		return nil
+		return appendToolResultDiffs(content, result.FileDiffs)
 	}
-	return []ToolCallContent{ToolContent(TextBlock(text))}
+	content = append(content, ToolContent(TextBlock(text)))
+	return appendToolResultDiffs(content, result.FileDiffs)
+}
+
+func appendToolResultDiffs(content []ToolCallContent, diffs []tools.FileDiff) []ToolCallContent {
+	for _, diff := range diffs {
+		if strings.TrimSpace(diff.Path) == "" || diff.OldText == diff.NewText {
+			continue
+		}
+		content = append(content, ToolCallContent{Type: "diff", Path: diff.Path, OldText: diff.OldText, NewText: diff.NewText})
+	}
+	return content
 }
 
 func toolResultLocations(result agent.ToolResult) []ToolCallLocation {

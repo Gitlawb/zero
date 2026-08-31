@@ -80,12 +80,16 @@ func TestToolCallResult(t *testing.T) {
 		Status:       tools.StatusOK,
 		Output:       "applied\n",
 		ChangedFiles: []string{"a.go", ""},
+		FileDiffs:    []tools.FileDiff{{Path: "a.go", OldText: "before\n", NewText: "after\n"}},
 	})
 	if ok.SessionUpdate != UpdateToolCallUpdate || ok.Status != ToolStatusCompleted {
 		t.Fatalf("unexpected ok result: %+v", ok)
 	}
-	if len(ok.Content) != 1 || ok.Content[0].Type != "content" || ok.Content[0].Content.Text != "applied" {
+	if len(ok.Content) != 2 || ok.Content[0].Type != "content" || ok.Content[0].Content.Text != "applied" {
 		t.Fatalf("unexpected content: %+v", ok.Content)
+	}
+	if diff := ok.Content[1]; diff.Type != "diff" || diff.Path != "a.go" || diff.OldText != "before\n" || diff.NewText != "after\n" {
+		t.Fatalf("unexpected diff content: %+v", diff)
 	}
 	if len(ok.Locations) != 1 || ok.Locations[0].Path != "a.go" {
 		t.Fatalf("blank changed files should be dropped, got %+v", ok.Locations)
