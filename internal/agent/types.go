@@ -84,6 +84,7 @@ type ToolResult struct {
 	Images       []zeroruntime.ImageBlock
 	Redacted     bool
 	ChangedFiles []string
+	FileDiffs    []tools.FileDiff
 	// ChangeSummaries are non-selectable generated-tree summaries emitted by
 	// command execution; callers must not schedule per-file work from them.
 	ChangeSummaries []execution.Change
