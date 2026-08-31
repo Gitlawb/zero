@@ -188,23 +188,36 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	if len(workspaceRoots) == 0 {
 		workspaceRoots = []string{commandCWD}
 	}
-	// DO NOT PROVISION A PRINCIPAL THIS CALLER COULD NEVER LAUNCH.
+	// THE PRINCIPAL BACKEND HAS NO LAUNCH PATH YET, SO IT IS NOT PROVISIONED.
 	//
 	// Launching a command as a separate account needs SeAssignPrimaryTokenPrivilege
-	// and SeIncreaseQuotaPrivilege, and an ordinary unelevated process holds
-	// neither. Elevated setup does not fix that, because the command runs later
-	// from the caller, not from setup. Without this check setup succeeds
-	// completely, creating a local account, its password, its logon-right
-	// assignments, workspace ACEs, the recovery ledger and network filter state,
-	// and then every principal-mode command refuses before opening its executable.
-	// The operator is left with durable machine state serving a backend that
-	// cannot run, and nothing said so at the point they could act on it.
+	// and SeIncreaseQuotaPrivilege. An ordinary unelevated process holds neither,
+	// and the command runs LATER, from the caller, not from setup. So the
+	// advertised lifecycle -- provision once from an elevated terminal, then run
+	// ordinary commands -- cannot execute: the elevated setup process holds the
+	// privileges and the process that needs them does not.
 	//
-	// Checked HERE, in the caller's own process, because that is the process whose
-	// privileges decide the answer, and this runs before anything crosses the UAC
-	// boundary. The error names the opt-out so there is a way forward.
-	if options.principalOptIn() && windowsPrincipalLaunchPreflight != nil {
-		if err := windowsPrincipalLaunchPreflight(); err != nil {
+	// An earlier version of this check tested the CALLING process's token, which
+	// is the wrong lifetime. It refused unelevated setup, which was never the
+	// dangerous case, and PASSED elevated setup, which is exactly the case that
+	// creates a local account, its password, its logon-right assignments,
+	// workspace ACEs, the recovery ledger and network filter state for a backend
+	// no later command can use. Durable machine state serving something that
+	// cannot run is the outcome the check existed to prevent, and it produced it.
+	//
+	// Requiring every sandboxed command to run elevated would make the privileges
+	// line up, and is deliberately not done: it is a worse boundary than the
+	// restricted token this would replace, and it is not the lifecycle the feature
+	// is for. Until a reviewed launch mechanism exists -- a bootstrap or an
+	// authenticated broker that carries launch authority across the UAC boundary
+	// -- provisioning stays unavailable rather than half-working.
+	//
+	// Everything below the launch path (the plans, the ledger, the ACL and filter
+	// work) still builds and is still tested; it is the provisioning entry point
+	// that is closed. See #662, which this PR is foundation for and does not
+	// close.
+	if options.principalOptIn() {
+		if err := windowsPrincipalLaunchAvailable(); err != nil {
 			return nil, fmt.Errorf("refusing to provision a sandbox principal: %w", err)
 		}
 	}
@@ -754,8 +767,32 @@ func WindowsSandboxPrincipalRoleForNetwork(network NetworkMode) string {
 	return "offline"
 }
 
-// windowsPrincipalLaunchPreflight reports whether this process could start a
-// command as a separate principal. Nil off Windows, where the principal backend
-// does not exist, and set from the Windows launch path so the check and the
-// launch cannot disagree about what is required.
-var windowsPrincipalLaunchPreflight func() error
+// errWindowsPrincipalLaunchUnavailable is why provisioning refuses.
+//
+// Stated as one sentence about the MECHANISM rather than about the caller's
+// token, because the caller's token was never the question: the process that
+// needs the launch privileges is a later, ordinary one, and no supported path
+// carries launch authority to it. A message about the current process invited
+// the operator to re-run from an elevated terminal, which passes such a check
+// and still cannot run a command.
+var errWindowsPrincipalLaunchUnavailable = errors.New(
+	"launching a command as a separate account needs SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege, " +
+		"which an ordinary command process does not hold; elevated setup cannot grant them to it, and no bootstrap " +
+		"or broker exists yet to carry that authority across. The restricted-token sandbox is unaffected: unset " +
+		windowsSandboxIdentityEnv + " to use it",
+)
+
+// windowsPrincipalLaunchAvailable reports whether a provisioned principal could
+// actually be launched by the process that will run the command.
+//
+// ONE SEAM, DEFAULTING TO UNAVAILABLE. The answer does not depend on the token
+// of whoever calls setup, so this takes no argument: it is a statement about
+// which mechanisms exist, not about the current process. When a bootstrap or
+// broker lands, this is the single place that learns to say yes, and the plans,
+// ledger and ACL work below it are already built and tested against it.
+//
+// It stays a var so the argument-plumbing tests can exercise the opt-in path
+// without depending on a capability no machine currently has.
+var windowsPrincipalLaunchAvailable = func() error {
+	return errWindowsPrincipalLaunchUnavailable
+}

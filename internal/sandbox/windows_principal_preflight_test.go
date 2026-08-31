@@ -6,23 +6,23 @@ import (
 	"testing"
 )
 
-// SETUP MUST NOT PROVISION A PRINCIPAL THE CALLER COULD NEVER LAUNCH.
+// PROVISIONING STAYS CLOSED WHILE NO LAUNCH MECHANISM EXISTS.
 //
 // Launching a command as a separate account needs SeAssignPrimaryTokenPrivilege
-// and SeIncreaseQuotaPrivilege, which an ordinary unelevated process does not
-// hold, and elevated setup cannot supply them because the command runs later
-// from the caller rather than from setup. Without this gate setup succeeded
-// completely: a local account, its password, its logon rights, workspace ACEs,
-// the recovery ledger and network filter state all landed, and then every
-// principal-mode command refused before opening its executable.
+// and SeIncreaseQuotaPrivilege. The process that needs them is the LATER,
+// ordinary command process, not setup, and nothing carries launch authority
+// across that boundary.
 //
-// The check belongs in the caller's process, which is the one whose privileges
-// decide the answer, and it has to run before anything crosses the UAC
-// boundary.
-func TestSetupRefusesAPrincipalThisCallerCannotLaunch(t *testing.T) {
-	previous := windowsPrincipalLaunchPreflight
-	t.Cleanup(func() { windowsPrincipalLaunchPreflight = previous })
-
+// The previous gate asked whether the CALLING process held the privileges,
+// which is the wrong lifetime and got the answer backwards where it mattered:
+// it refused unelevated setup, which was never dangerous, and it PASSED
+// elevated setup, which is precisely the case that lands a local account, its
+// password, its logon rights, workspace ACEs, the recovery ledger and network
+// filter state for a backend no later command can use. The gate existed to
+// prevent durable state serving something that cannot run, and it produced it.
+//
+// So the refusal must not be satisfiable by holding the privileges right now.
+func TestSetupRefusesToProvisionAPrincipalNothingCanLaunch(t *testing.T) {
 	optIn := true
 	options := WindowsSandboxSetupArgsOptions{
 		CommandCWD:     t.TempDir(),
@@ -30,38 +30,56 @@ func TestSetupRefusesAPrincipalThisCallerCannotLaunch(t *testing.T) {
 		PrincipalOptIn: &optIn,
 	}
 
-	windowsPrincipalLaunchPreflight = func() error {
-		return errors.New("needs SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege, which this process does not hold")
-	}
 	args, err := BuildWindowsSandboxSetupArgs(options)
 	if err == nil {
-		t.Fatalf("setup args were built for a principal that can never be launched: %v", args)
+		t.Fatalf("setup args were built for a principal nothing can launch: %v", args)
 	}
-	if !strings.Contains(err.Error(), "SeAssignPrimaryTokenPrivilege") {
-		t.Errorf("the refusal does not say what is missing: %v", err)
+	if !errors.Is(err, errWindowsPrincipalLaunchUnavailable) {
+		t.Errorf("the refusal is not the launch-unavailable one: %v", err)
 	}
-	if !strings.Contains(err.Error(), "provision") {
-		t.Errorf("the refusal does not say that provisioning was declined: %v", err)
+	for _, want := range []string{"SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege", "provision"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+	// The way forward has to be the one that works. Telling the operator to
+	// re-run elevated is the advice that produced the unusable state.
+	if strings.Contains(strings.ToLower(err.Error()), "elevated terminal") {
+		t.Errorf("the refusal still points at an elevated terminal, which does not help: %v", err)
+	}
+	if !strings.Contains(err.Error(), windowsSandboxIdentityEnv) {
+		t.Errorf("the refusal does not name the opt-out: %v", err)
+	}
+}
+
+// THE REGRESSION, STATED DIRECTLY: an elevated caller must be refused too.
+//
+// This is the case the old check let through, and it is the only one that
+// creates durable machine state. A gate that consults the current process
+// cannot express it, which is why the seam takes no token and no argument.
+func TestSetupRefusalDoesNotDependOnTheCallersPrivileges(t *testing.T) {
+	optIn := true
+	options := WindowsSandboxSetupArgsOptions{
+		CommandCWD:     t.TempDir(),
+		SandboxHome:    t.TempDir(),
+		PrincipalOptIn: &optIn,
 	}
 
-	// A caller that CAN launch still provisions, or the gate would have disabled
-	// the feature rather than gated it.
-	windowsPrincipalLaunchPreflight = func() error { return nil }
-	if _, err := BuildWindowsSandboxSetupArgs(options); err != nil {
-		t.Errorf("a caller holding the privileges was refused anyway: %v", err)
+	// Whatever this process holds, twice, must give the same answer.
+	first, firstErr := BuildWindowsSandboxSetupArgs(options)
+	second, secondErr := BuildWindowsSandboxSetupArgs(options)
+	if firstErr == nil || secondErr == nil {
+		t.Fatalf("provisioning succeeded: %v / %v", first, second)
+	}
+	if firstErr.Error() != secondErr.Error() {
+		t.Errorf("the refusal is not stable across calls:\n  %v\n  %v", firstErr, secondErr)
 	}
 }
 
 // AND THE GATE IS ONLY FOR THE OPTED-IN PATH. Without the opt-in there is no
-// principal to provision, so a caller lacking the privileges must be able to
-// set up the ordinary restricted-token sandbox, which needs none of them.
-func TestSetupWithoutTheOptInIgnoresTheLaunchPreflight(t *testing.T) {
-	previous := windowsPrincipalLaunchPreflight
-	t.Cleanup(func() { windowsPrincipalLaunchPreflight = previous })
-	windowsPrincipalLaunchPreflight = func() error {
-		return errors.New("this process cannot launch a principal")
-	}
-
+// principal to provision, so the ordinary restricted-token sandbox, which needs
+// none of those privileges, must still set up.
+func TestSetupWithoutTheOptInIsUnaffected(t *testing.T) {
 	optOut := false
 	if _, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		CommandCWD:     t.TempDir(),
@@ -72,13 +90,14 @@ func TestSetupWithoutTheOptInIgnoresTheLaunchPreflight(t *testing.T) {
 	}
 }
 
-// allowPrincipalLaunchForTest stubs the launch preflight for tests that are
-// about argument plumbing rather than about whether this machine can launch a
-// principal. Without it they depend on the privileges of whoever runs the
-// suite, and they only passed before because nothing checked.
+// allowPrincipalLaunchForTest opens the gate for tests that are about argument
+// PLUMBING rather than about whether a principal can be launched. The opt-in
+// still has to round-trip correctly for `zero doctor` and for the day a broker
+// lands, and those assertions should not be deleted just because the entry
+// point is closed today.
 func allowPrincipalLaunchForTest(t *testing.T) {
 	t.Helper()
-	previous := windowsPrincipalLaunchPreflight
-	windowsPrincipalLaunchPreflight = func() error { return nil }
-	t.Cleanup(func() { windowsPrincipalLaunchPreflight = previous })
+	previous := windowsPrincipalLaunchAvailable
+	windowsPrincipalLaunchAvailable = func() error { return nil }
+	t.Cleanup(func() { windowsPrincipalLaunchAvailable = previous })
 }
