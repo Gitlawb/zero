@@ -30,6 +30,36 @@ func TestWriteAndFormatCrashReport(t *testing.T) {
 	}
 }
 
+func TestWriteCrashReportKeepsTwoReportsFromTheSameSecond(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 8, 30, 18, 0, 0, 0, time.UTC)
+	first, err := WriteCrashReport(dir, "cli", "first panic", []byte("first stack"), ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := WriteCrashReport(dir, "cli", "second panic", []byte("second stack"), ts)
+	if err != nil {
+		t.Fatalf("second report in the same second: %v", err)
+	}
+	if first == second {
+		t.Fatalf("same-second reports shared path %q", first)
+	}
+	firstData, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondData, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(firstData), "first panic") || strings.Contains(string(firstData), "second panic") {
+		t.Fatalf("first report was replaced: %q", firstData)
+	}
+	if !strings.Contains(string(secondData), "second panic") {
+		t.Fatalf("second report was not persisted: %q", secondData)
+	}
+}
+
 func TestWriteCrashReportCreatesPrivateDefaultDirectories(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -209,8 +239,12 @@ func TestWriteCrashReportDoesNotOverwriteExistingReport(t *testing.T) {
 	if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := WriteCrashReport(dir, "cli", "boom", []byte("stack"), ts); !errors.Is(err, os.ErrExist) {
-		t.Fatalf("WriteCrashReport error = %v, want existing destination", err)
+	published, err := WriteCrashReport(dir, "cli", "boom", []byte("stack"), ts)
+	if err != nil {
+		t.Fatalf("WriteCrashReport with existing timestamp: %v", err)
+	}
+	if published == path {
+		t.Fatal("new report reused the occupied timestamp path")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -223,8 +257,8 @@ func TestWriteCrashReportDoesNotOverwriteExistingReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("crash directory contains temporary files after publish failure: %v", entries)
+	if len(entries) != 2 {
+		t.Fatalf("crash directory should contain existing and uniquely published reports: %v", entries)
 	}
 }
 

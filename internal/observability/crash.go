@@ -134,9 +134,6 @@ func writeCrashReport(dir, label string, recovered any, stack []byte, ts time.Ti
 		link = func(oldname, newname string) error { return hooks.link(root, oldname, newname) }
 	}
 	if linkErr := link(tempName, name); linkErr != nil {
-		if errors.Is(linkErr, os.ErrExist) {
-			return "", fmt.Errorf("publish crash report: %w", linkErr)
-		}
 		publishName, err = publishCrashFallback(root, name, tempName, hooks.renameNoReplace)
 		if err != nil {
 			return "", errors.Join(fmt.Errorf("publish crash report with hard link: %w", linkErr), err)

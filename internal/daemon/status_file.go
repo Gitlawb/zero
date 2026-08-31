@@ -79,6 +79,9 @@ func writeStatusFileAtomicallyRoot(
 	if beforeReplace != nil {
 		beforeReplace()
 	}
+	if err := prepareStatusReplacement(root, tempName, statusName); err != nil {
+		return false, fmt.Errorf("prepare status replacement: %w", err)
+	}
 
 	rename := root.Rename
 	if replace != nil {
