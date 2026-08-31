@@ -50,7 +50,7 @@ func TestTheClaudeCodeFixtureParsesEndToEnd(t *testing.T) {
 	}
 
 	// Discover and Read must agree: a session the picker lists must import.
-	events, err := adapter.Read(session.ID, ReadOptions{})
+	events, err := adapter.Read(session, ReadOptions{})
 	if err != nil {
 		t.Fatalf("Read of a discovered fixture session failed: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestTheCodexFixtureParsesEndToEnd(t *testing.T) {
 		t.Errorf("incomplete Codex fixture index entry: %+v", session)
 	}
 
-	events, err := adapter.Read(session.ID, ReadOptions{})
+	events, err := adapter.Read(session, ReadOptions{})
 	if err != nil {
 		t.Fatalf("Read of a discovered Codex fixture session failed: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestARolloutWithALateTurnContextIndexesWithoutAModel(t *testing.T) {
 			"If the index was deliberately taught to recover it, update this test and the comment above it.", session.ModelID)
 	}
 	// And it still imports, which is what "not lost" has to mean in practice.
-	events, err := adapter.Read(session.ID, ReadOptions{})
+	events, err := adapter.Read(session, ReadOptions{})
 	if err != nil {
 		t.Fatalf("a rollout indexed without a model failed to import: %v", err)
 	}
@@ -272,7 +272,11 @@ func TestARolloutWithALateTurnContextIndexesWithoutAModel(t *testing.T) {
 // continuing the session would see a conversation that looks whole.
 func TestAnOrdinaryLongMessageSurvivesImport(t *testing.T) {
 	adapter, _ := longMessageStore(t, 65*1024)
-	events, err := adapter.Read("s", ReadOptions{})
+	found, err := adapter.Discover("")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("discover long-message session: %v (%d results)", err, len(found))
+	}
+	events, err := adapter.Read(found[0], ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +294,11 @@ func TestAnOrdinaryLongMessageSurvivesImport(t *testing.T) {
 // the session next.
 func TestARecordPastTheImportCapIsReportedNotDropped(t *testing.T) {
 	adapter, _ := longMessageStore(t, 9<<20)
-	events, err := adapter.Read("s", ReadOptions{})
+	found, err := adapter.Discover("")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("discover oversized session: %v (%d results)", err, len(found))
+	}
+	events, err := adapter.Read(found[0], ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

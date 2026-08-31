@@ -39,7 +39,21 @@ func DiscoverAll(env Env, cwd string) ([]ForeignSession, []error) {
 			problems = append(problems, errors.New(adapter.Name()+": "+err.Error()))
 			continue
 		}
-		found = append(found, discovered...)
+		counts := make(map[string]int, len(discovered))
+		for _, session := range discovered {
+			counts[session.ID]++
+		}
+		ambiguous := map[string]bool{}
+		for _, session := range discovered {
+			if counts[session.ID] > 1 {
+				if !ambiguous[session.ID] {
+					problems = append(problems, fmt.Errorf("%s: session id %q is ambiguous across multiple transcripts", adapter.Name(), DisplayField(session.ID)))
+					ambiguous[session.ID] = true
+				}
+				continue
+			}
+			found = append(found, session)
+		}
 	}
 	sortByRecency(found)
 	return found, problems
@@ -165,10 +179,21 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 	if err != nil {
 		return ImportResult{}, err
 	}
+	return ImportSource(store, adapter, source, options)
+}
+
+// ImportSource imports the exact discovery row selected by a caller. Picker
+// flows use this form so a file disappearing or a same-ID file appearing after
+// rendering cannot silently redirect the selection.
+func ImportSource(store *sessions.Store, adapter Adapter, source ForeignSession, options ReadOptions) (ImportResult, error) {
+	id := source.ID
+	if adapter == nil || !strings.EqualFold(strings.TrimSpace(source.Agent), adapter.Name()) || strings.TrimSpace(id) == "" {
+		return ImportResult{}, errors.New("foreign session source does not match its adapter")
+	}
 	if strings.TrimSpace(options.Cwd) == "" {
 		options.Cwd = source.Cwd
 	}
-	events, err := adapter.Read(id, options)
+	events, err := adapter.Read(source, options)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -187,11 +212,11 @@ func Import(store *sessions.Store, adapter Adapter, id string, options ReadOptio
 		// the store for every consumer to leak independently. Two of them did.
 		// DisplayField is the one helper that strips controls FIRST and then
 		// redacts, the order redaction_order_test.go pins.
-		Title:        DisplayField(source.Title),
-		Cwd:          DisplayField(source.Cwd),
-		WorkspaceKey: normalizeDir(source.Cwd),
-		ModelID:      DisplayField(source.ModelID),
-		Tag:          ImportTag(adapter.Name(), id),
+		Title:         DisplayField(source.Title),
+		Cwd:           DisplayField(source.Cwd),
+		WorkspaceKey:  normalizeDir(source.Cwd),
+		SourceModelID: DisplayField(source.ModelID),
+		Tag:           ImportTag(adapter.Name(), id),
 	})
 	if err != nil {
 		return ImportResult{}, err
@@ -218,10 +243,17 @@ func describe(adapter Adapter, id string) (ForeignSession, error) {
 	if err != nil {
 		return ForeignSession{}, err
 	}
+	matches := []ForeignSession{}
 	for _, session := range found {
 		if session.ID == id {
-			return session, nil
+			matches = append(matches, session)
 		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return ForeignSession{}, fmt.Errorf("%s session id %q is ambiguous across %d transcripts; remove or rename the duplicate before importing", adapter.Name(), DisplayField(id), len(matches))
 	}
 	return ForeignSession{}, errors.New("no " + adapter.Name() + " session with id " + id +
 		" — run `zero sessions discover --all` to list them")
