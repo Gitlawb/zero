@@ -100,6 +100,10 @@ type StoreOptions struct {
 	// Keyring is the client used when Storage=="keyring"; nil => keyring.New().
 	// Injected by tests to avoid touching a real keychain.
 	Keyring KeyringClient
+	// KeyringLockPath overrides the cross-process lock file used by the keyring
+	// backend. When empty, it is derived from the keyring storage identity
+	// via ResolveKeyringLockPath(Env).
+	KeyringLockPath string
 }
 
 // KeyringClient is the minimal OS-keyring surface the store needs. *keyring.Keyring
@@ -191,6 +195,35 @@ func ResolveStorePath(env map[string]string) (string, error) {
 	return filepath.Join(configHome, "zero", "oauth-tokens.json"), nil
 }
 
+// ResolveKeyringLockPath determines the on-disk cross-process lock file for the
+// keyring backend. Unlike file-backed storage, keyring entries are anchored to
+// the user's OS keychain (zero/oauth-tokens) and are shared across all processes
+// for that OS user, regardless of file-store overrides such as
+// ZERO_OAUTH_TOKENS_PATH, FilePath, or XDG_CONFIG_HOME.
+func ResolveKeyringLockPath(env map[string]string) (string, error) {
+	if override := strings.TrimSpace(envValue(env, "ZERO_OAUTH_KEYRING_LOCK_PATH")); override != "" {
+		if filepath.IsAbs(override) {
+			return filepath.Clean(override), nil
+		}
+		return filepath.Abs(override)
+	}
+	home := strings.TrimSpace(firstNonEmpty(envValue(env, "HOME"), envValue(env, "USERPROFILE")))
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("oauth: resolve user home for keyring lock: %w", err)
+		}
+	} else if !filepath.IsAbs(home) {
+		resolved, err := filepath.Abs(home)
+		if err != nil {
+			return "", err
+		}
+		home = resolved
+	}
+	return filepath.Join(home, ".zero", "oauth-keyring.lockfile"), nil
+}
+
 // NewStore builds a token store with the configured backend (file by default,
 // or the OS keyring when Storage/ZERO_OAUTH_STORAGE selects it).
 func NewStore(options StoreOptions) (*Store, error) {
@@ -230,11 +263,15 @@ func NewStore(options StoreOptions) (*Store, error) {
 			kr = osKeyring
 		}
 		// Serialize the keyring's read-modify-write across processes with a lock
-		// file beside where the file backend would live. Best-effort: if no config
-		// location resolves, fall back to in-process serialization only.
-		lockPath := ""
-		if storePath, perr := ResolveStorePath(options.Env); perr == nil {
-			lockPath = filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
+		// file derived from the keyring storage identity ("zero"/"oauth-tokens").
+		// Unlike the file backend, the keyring does not vary with file configuration
+		// (ZERO_OAUTH_TOKENS_PATH, FilePath, or XDG_CONFIG_HOME). Best-effort: if no
+		// home location resolves, fall back to in-process serialization only.
+		lockPath := strings.TrimSpace(options.KeyringLockPath)
+		if lockPath == "" {
+			if lp, perr := ResolveKeyringLockPath(options.Env); perr == nil {
+				lockPath = lp
+			}
 		}
 		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount, lockPath: lockPath}, now: now}, nil
 	default:

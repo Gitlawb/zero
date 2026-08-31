@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"errors"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,7 +31,10 @@ func bigToken(seed string) Token {
 
 func newCappedKeyringStore(t *testing.T, kr KeyringClient) *Store {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
 		t.Fatalf("NewStore(keyring): %v", err)
@@ -486,6 +490,8 @@ func TestStoreKeyringSweepsStrayChunksOnFirstGrowth(t *testing.T) {
 // has deleted old-generation chunks).
 func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
 	kr := newCappedFakeKR(macOSLikeBudget)
@@ -562,6 +568,112 @@ func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("reader.Status timed out waiting for lock release")
+	}
+}
+
+// TestStoreKeyringSharedLockAcrossDifferentEnvironmentRoots is the regression for
+// split lock domains when processes run with different ZERO_OAUTH_TOKENS_PATH,
+// FilePath, or XDG_CONFIG_HOME. Because the OS keychain is single-domain for the
+// user ("zero"/"oauth-tokens"), all stores must share the same lock file so
+// concurrent reads, writes, and manifest rotations remain strictly serialized.
+func TestStoreKeyringSharedLockAcrossDifferentEnvironmentRoots(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+
+	kr := newCappedFakeKR(macOSLikeBudget)
+	storeA, err := NewStore(StoreOptions{
+		Storage:  "keyring",
+		Keyring:  kr,
+		FilePath: filepath.Join(dirA, "custom-tokens.json"),
+		Env: map[string]string{
+			"ZERO_OAUTH_TOKENS_PATH": filepath.Join(dirA, "custom-tokens.json"),
+			"XDG_CONFIG_HOME":        dirA,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewStore(storeA): %v", err)
+	}
+
+	storeB, err := NewStore(StoreOptions{
+		Storage:  "keyring",
+		Keyring:  kr,
+		FilePath: filepath.Join(dirB, "custom-tokens.json"),
+		Env: map[string]string{
+			"ZERO_OAUTH_TOKENS_PATH": filepath.Join(dirB, "custom-tokens.json"),
+			"XDG_CONFIG_HOME":        dirB,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewStore(storeB): %v", err)
+	}
+
+	lockA := storeA.blob.(keyringBlob).lockPath
+	lockB := storeB.blob.(keyringBlob).lockPath
+	if lockA == "" || lockB == "" {
+		t.Fatalf("lockPath should not be empty: lockA=%q lockB=%q", lockA, lockB)
+	}
+	if lockA != lockB {
+		t.Fatalf("stores with distinct env roots must share the keyring lock: lockA=%q != lockB=%q", lockA, lockB)
+	}
+
+	mustSave(t, storeA, "keyA", bigToken("a"))
+
+	// 1. Force overlapping save/read: hold the lock manually to simulate an
+	// in-flight multi-step write by storeA, and verify storeB's Load / Status blocks.
+	unlock, err := acquireFileLock(lockA, time.Now)
+	if err != nil {
+		t.Fatalf("acquireFileLock: %v", err)
+	}
+
+	loaded := make(chan Token, 1)
+	loadErr := make(chan error, 1)
+	go func() {
+		tok, _, err := storeB.Load(ProviderKey("keyA"))
+		loadErr <- err
+		loaded <- tok
+	}()
+
+	select {
+	case <-loaded:
+		t.Fatal("storeB.Load completed while storeA's lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	unlock()
+
+	select {
+	case err := <-loadErr:
+		if err != nil {
+			t.Fatalf("storeB.Load failed after unlock: %v", err)
+		}
+		tok := <-loaded
+		if tok.AccessToken != bigToken("a").AccessToken {
+			t.Errorf("storeB.Load got unexpected token: %v", tok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("storeB.Load timed out waiting for lock release")
+	}
+
+	// 2. Force overlapping save/save: write from storeB and storeA consecutively,
+	// verifying both updates are preserved and readable by either store.
+	if err := storeB.Save(ProviderKey("keyB"), bigToken("b")); err != nil {
+		t.Fatalf("storeB.Save: %v", err)
+	}
+	if err := storeA.Save(ProviderKey("keyC"), bigToken("c")); err != nil {
+		t.Fatalf("storeA.Save: %v", err)
+	}
+
+	gotA := mustLoad(t, storeB, "keyA")
+	gotB := mustLoad(t, storeA, "keyB")
+	gotC := mustLoad(t, storeB, "keyC")
+	if gotA.AccessToken != bigToken("a").AccessToken ||
+		gotB.AccessToken != bigToken("b").AccessToken ||
+		gotC.AccessToken != bigToken("c").AccessToken {
+		t.Errorf("concurrent state was not preserved across stores")
 	}
 }
 

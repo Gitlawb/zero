@@ -91,8 +91,10 @@ func (f *fakeKR) chunkAccounts(family string) []string {
 }
 
 func TestStoreKeyringBackendRoundTrip(t *testing.T) {
-	// Keep the cross-process keyring lock file inside a temp config dir.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Keep the cross-process keyring lock file inside a temp dir.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
@@ -158,7 +160,9 @@ func TestNewStoreStorageSelection(t *testing.T) {
 }
 
 func TestStoreKeyringStatus(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
