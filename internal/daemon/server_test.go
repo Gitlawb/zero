@@ -16,7 +16,11 @@ func TestSecureRuntimeParentsLeaveCustomDirectoryPermissionsUntouched(t *testing
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission regression")
 	}
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("/tmp", "zero-custom-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +67,87 @@ func TestSecureRuntimeParentsLeaveRelativeWorkingDirectoryPermissionsUntouched(t
 	}
 	if got := info.Mode().Perm(); got != 0o755 {
 		t.Fatalf("working directory permissions = %04o, want unchanged 0755", got)
+	}
+}
+
+func TestServeSupportsReadOnlyCustomRuntimeDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission compatibility regression")
+	}
+	dir, err := os.MkdirTemp("/tmp", "zero-serve-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths := Paths{
+		Socket: filepath.Join(dir, "daemon.sock"),
+		Lock:   filepath.Join(dir, "daemon.lock"),
+		Status: filepath.Join(dir, "daemon.status"),
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve() }()
+	waitForFile(t, paths.Status)
+	srv.Shutdown()
+	if err := <-serveErr; err != nil {
+		t.Fatalf("Serve with 0755 custom runtime directory: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("custom runtime directory permissions = %04o, want unchanged 0755", got)
+	}
+}
+
+func TestServeKeepsDefaultRootBoundAcrossCoordination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows may deny renaming a directory with an open AF_UNIX lifecycle handle")
+	}
+	home, err := os.MkdirTemp("/tmp", "zero-root-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(paths.Socket)
+	moved := filepath.Join(home, "bound-runtime")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	srv.opts.beforeSocketBind = func() {
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = srv.Serve()
+	if err == nil || !strings.Contains(err.Error(), "changed after it was secured") {
+		t.Fatalf("Serve error = %v, want replaced-runtime rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, filepath.Base(paths.Lock))); err != nil {
+		t.Fatalf("rooted lock was not created in the bound directory: %v", err)
+	}
+	for _, path := range []string{paths.Lock, paths.Socket, paths.Status} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("substitute runtime entry %s was touched: %v", path, err)
+		}
 	}
 }
 

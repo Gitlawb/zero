@@ -33,14 +33,51 @@ func Open(path string) (*os.Root, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("create private directory: %w", err)
 	}
+	before, err := os.Lstat(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("inspect private directory entry: %w", err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("private directory entry is a symbolic link")
+	}
+	if !before.IsDir() {
+		return nil, fmt.Errorf("private directory path is not a directory")
+	}
 	root, err := os.OpenRoot(absolute)
 	if err != nil {
 		return nil, fmt.Errorf("open private directory: %w", err)
+	}
+	opened, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("inspect opened private directory: %w", err)
+	}
+	after, err := os.Lstat(absolute)
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("reinspect private directory entry: %w", err)
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
+		_ = root.Close()
+		return nil, fmt.Errorf("private directory entry changed while opening")
 	}
 	if err := harden(root); err != nil {
 		closeErr := root.Close()
 		if closeErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("close private directory: %w", closeErr))
+		}
+		return nil, err
+	}
+	current, err := os.Lstat(absolute)
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) {
+		closeErr := root.Close()
+		if err == nil {
+			err = fmt.Errorf("private directory entry changed while hardening")
+		} else {
+			err = fmt.Errorf("verify private directory entry after hardening: %w", err)
+		}
+		if closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close private directory: %w", closeErr))
 		}
 		return nil, err
 	}
