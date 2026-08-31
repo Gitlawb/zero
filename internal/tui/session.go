@@ -642,9 +642,14 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				status = tools.StatusOK
 			}
 			output := payloadString(payload, "output")
-			detail := payloadString(payload, "displayPreview")
-			if detail == "" {
-				detail = output
+			// PRESENCE, not emptiness. displayPreview is the undecorated card
+			// body; output carries the enforcement notice composed in. An empty
+			// stored body is a real answer (a command that printed nothing under
+			// an enforced profile), and treating it as absent would restore the
+			// decorated output and render the disclosure twice.
+			detail := output
+			if raw, ok := payload["displayPreview"]; ok {
+				detail, _ = raw.(string)
 			}
 			rows = append(rows, transcriptRow{
 				kind:               rowToolResult,

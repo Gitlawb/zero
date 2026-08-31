@@ -114,3 +114,93 @@ func TestOrdinaryResultsGainNoNoticeLines(t *testing.T) {
 		t.Errorf("blank notices changed the card:\n--- none ---\n%s\n--- blank ---\n%s", plain, blank)
 	}
 }
+
+// THE NO-PREVIEW CARD IS THE ONE THE PREVIEW TEST CANNOT SEE.
+//
+// The disclosure travels in two forms: typed EnforcementNotices, which the card
+// renders as its own furniture, and ModelOutput, which has the notice composed
+// in. A rich preview is undecorated, so an edit card was right. Every bash and
+// exec result, and every error, has no preview and fell back to ModelOutput, so
+// row.detail already began with the notice and the card drew it twice: once in
+// the notice lines and once at the top of the body.
+//
+// Both halves are asserted, because a body that lost the notice by losing the
+// output would also count once.
+func resultWithoutPreviewAndNotice(status tools.Status, output string) agent.ToolResult {
+	return agent.ToolResult{
+		ToolCallID:         "call-2",
+		Name:               "bash",
+		Status:             status,
+		Output:             output,
+		EnforcementNotices: []string{cardNotice},
+	}
+}
+
+func countNoticeAndBody(t *testing.T, card string, body string) (int, int) {
+	t.Helper()
+	return strings.Count(card, "WRITE_RESTRICTED"), strings.Count(card, body)
+}
+
+func TestNoPreviewCardShowsTheDisclosureExactlyOnce(t *testing.T) {
+	cases := []struct {
+		name   string
+		status tools.Status
+		output string
+	}{
+		{"success", tools.StatusOK, "PROBE-BODY-OK"},
+		{"error", tools.StatusError, "PROBE-BODY-ERR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := rowForResult(resultWithoutPreviewAndNotice(tc.status, tc.output))
+			for _, expanded := range []bool{false, true} {
+				notices, bodies := countNoticeAndBody(t, renderedCard(row, expanded), tc.output)
+				if notices != 1 {
+					t.Errorf("expanded=%v: disclosure rendered %d times, want exactly 1", expanded, notices)
+				}
+				if bodies != 1 {
+					t.Errorf("expanded=%v: command output rendered %d times, want exactly 1", expanded, bodies)
+				}
+			}
+		})
+	}
+}
+
+// The durable path had the same mismatch: the payload stores the decorated
+// output beside the typed notices, and restoration used that output as the card
+// body whenever no distinct preview was stored.
+func TestRestoredNoPreviewCardShowsTheDisclosureExactlyOnce(t *testing.T) {
+	cases := []struct {
+		name   string
+		status tools.Status
+		output string
+	}{
+		{"success", tools.StatusOK, "PROBE-BODY-OK"},
+		{"error", tools.StatusError, "PROBE-BODY-ERR"},
+		// A command that printed nothing under an enforced profile still has a
+		// real notice. The stored body is empty, which restoration must treat as
+		// present-and-empty rather than absent.
+		{"empty output", tools.StatusOK, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := json.Marshal(toolResultSessionPayload(resultWithoutPreviewAndNotice(tc.status, tc.output)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: json.RawMessage(encoded)}})
+			if len(rows) != 1 {
+				t.Fatalf("expected one restored row, got %d", len(rows))
+			}
+			for _, expanded := range []bool{false, true} {
+				card := renderedCard(rows[0], expanded)
+				if notices := strings.Count(card, "WRITE_RESTRICTED"); notices != 1 {
+					t.Errorf("expanded=%v: restored card rendered the disclosure %d times, want exactly 1:\n%s", expanded, notices, card)
+				}
+				if tc.output != "" && strings.Count(card, tc.output) != 1 {
+					t.Errorf("expanded=%v: restored card rendered the output %d times, want exactly 1:\n%s", expanded, strings.Count(card, tc.output), card)
+				}
+			}
+		})
+	}
+}
