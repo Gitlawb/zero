@@ -1087,6 +1087,7 @@ func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
 		Title:        "imported session",
 		Cwd:          displayCwd,
 		WorkspaceKey: operationalCwd,
+		Tag:          "imported:claude-code:foreign-id",
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -1100,6 +1101,13 @@ func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
 	defer h.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID}, &LoadSessionResult{}); err == nil {
+		t.Fatal("session/load accepted an imported session without an ACP client workspace")
+	}
+	if len(resolved) != 0 {
+		t.Fatalf("omitted client workspace reached resolver: %q", resolved)
+	}
 
 	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
 		SessionID: meta.SessionID,
