@@ -4512,7 +4512,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
 		// rebuilds the transcript (returning "" on success, an error note on failure).
 		text := ""
-		m, text, cmd = m.startResumeCommand(item.Value)
+		if item.ForeignSource != nil {
+			m, text, cmd = m.startForeignSessionImport(*item.ForeignSource)
+		} else {
+			m, text, cmd = m.startResumeCommand(item.Value)
+		}
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}

@@ -59,14 +59,21 @@ func (adapter codex) Discover(cwd string) ([]ForeignSession, error) {
 	return found, nil
 }
 
-func (adapter codex) Read(id string, options ReadOptions) ([]sessions.AppendEventInput, error) {
-	wanted := strings.TrimSpace(id)
-	for _, path := range adapter.transcripts() {
-		if codexID(path) == wanted {
-			return translateCodex(adapter.root, path, options)
-		}
+func (adapter codex) Read(source ForeignSession, options ReadOptions) ([]sessions.AppendEventInput, error) {
+	if source.Agent != adapter.Name() || source.ID != codexID(source.Path) {
+		return nil, errors.New("agentsessions: selected session does not belong to codex")
 	}
-	return nil, errors.New("agentsessions: no such session: " + id)
+	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
+		return nil, err
+	}
+	events, err := translateCodex(adapter.root, source.Path, options)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 type codexRecord struct {
@@ -147,7 +154,7 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 	session := ForeignSession{Agent: agent, ID: codexID(path), Path: path}
 	firstPrompt := ""
 
-	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte, _ bool) bool {
+	_, snapshot, err := scanHeadSnapshot(root, path, defaultHeadLimit, func(line []byte, _ bool) bool {
 		var record codexRecord
 		if json.Unmarshal(line, &record) != nil {
 			return true
@@ -180,7 +187,8 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 	if strings.TrimSpace(session.Cwd) == "" {
 		return ForeignSession{}, false
 	}
-	session.UpdatedAt = fileModTime(root, path)
+	session.source = snapshot
+	session.UpdatedAt = snapshot.modTime
 	if session.StartedAt.IsZero() {
 		session.StartedAt = session.UpdatedAt
 	}

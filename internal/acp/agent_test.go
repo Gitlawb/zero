@@ -293,6 +293,39 @@ func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
 	}
 }
 
+func TestACPLoadImportedSessionDoesNotRestoreUnadvertisedForeignModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:   "legacy imported session",
+		Cwd:     t.TempDir(),
+		ModelID: "foreign-expensive-model",
+		Tag:     "imported:claude-code:foreign-id",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: meta.SessionID,
+		Cwd:       t.TempDir(),
+	}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "workspace-model" || modelChoiceExists(option.Options, "foreign-expensive-model") {
+		t.Fatalf("imported model gained ACP authority: %+v", option)
+	}
+}
+
 func TestACPModelDiscoveryFiltersProviderIncompatibleModels(t *testing.T) {
 	a := &Agent{deps: Deps{
 		ResolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {

@@ -101,6 +101,9 @@ func TestAnAgentWithNoSessionsGetsNoTab(t *testing.T) {
 	agentsessions.InvalidateDiscovery()
 	m := model{agentSessionsEnv: env, cwd: workspace}
 	foreign := m.foreignSessionItems(nil, time.Now())
+	if len(foreign) != 1 || foreign[0].ForeignSource == nil || foreign[0].ForeignSource.Path != transcript {
+		t.Fatalf("foreign picker row lost exact source identity: %+v", foreign)
+	}
 	picker := pickerFromParts([]pickerItem{sessionRow("a", "zero")}, foreign)
 	if picker == nil {
 		t.Fatal("controlled Claude transcript produced no picker")

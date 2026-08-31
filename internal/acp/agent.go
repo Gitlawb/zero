@@ -180,7 +180,9 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
 	}
-	if persistedModel := strings.TrimSpace(meta.ModelID); persistedModel != "" && (!restrictModels || modelChoiceExists(models, persistedModel)) {
+	persistedModel := strings.TrimSpace(meta.ModelID)
+	imported := strings.HasPrefix(strings.TrimSpace(meta.Tag), "imported:")
+	if persistedModel != "" && !imported && (!restrictModels || modelChoiceExists(models, persistedModel)) {
 		model = persistedModel
 		if !modelChoiceExists(models, persistedModel) {
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
