@@ -575,19 +575,20 @@ func TestACPLoadWarnsWhenHistoryReadFails(t *testing.T) {
 	}
 }
 
-func TestACPLoadWithoutCwdUsesOperationalWorkspaceKey(t *testing.T) {
+func TestACPLoadImportedSessionRequiresClientWorkspace(t *testing.T) {
 	deps := testDeps(t)
 	displayCwd := "/work/[REDACTED]/repo"
-	operationalCwd := "/work/sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA/repo"
+	foreignCwd := "/work/sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA/repo"
 	meta, err := deps.Store.Create(sessions.CreateInput{
 		Title:        "imported session",
 		Cwd:          displayCwd,
-		WorkspaceKey: operationalCwd,
+		WorkspaceKey: foreignCwd,
+		Tag:          "imported:claude-code:foreign-id",
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	var resolved string
+	resolved := ""
 	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) {
 		resolved = cwd
 		return cwd, nil
@@ -597,11 +598,19 @@ func TestACPLoadWithoutCwdUsesOperationalWorkspaceKey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID}, &LoadSessionResult{}); err != nil {
-		t.Fatalf("session/load: %v", err)
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID}, &LoadSessionResult{}); err == nil {
+		t.Fatal("session/load accepted an imported session without an ACP client workspace")
 	}
-	if resolved != operationalCwd {
-		t.Fatalf("implicit session/load resolved %q, want operational workspace %q", resolved, operationalCwd)
+	if resolved != "" {
+		t.Fatalf("foreign workspace reached resolver: %q", resolved)
+	}
+
+	clientCwd := t.TempDir()
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: clientCwd}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load with client workspace: %v", err)
+	}
+	if resolved != clientCwd {
+		t.Fatalf("resolved workspace = %q, want ACP client workspace %q", resolved, clientCwd)
 	}
 }
 

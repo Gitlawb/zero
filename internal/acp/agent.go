@@ -160,7 +160,13 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	}
 	cwdInput := p.Cwd
 	if strings.TrimSpace(cwdInput) == "" {
-		cwdInput = sessions.OperationalCwd(*meta)
+		// WorkspaceKey is populated from foreign transcript metadata. It is useful
+		// for matching/provenance, but it is not execution authority: only the ACP
+		// client may bind an imported session to a workspace tool boundary.
+		if strings.TrimSpace(meta.WorkspaceKey) != "" {
+			return nil, RPCError(codeInvalidParams, "cwd is required when loading an imported session")
+		}
+		cwdInput = meta.Cwd
 	}
 	root, err := a.deps.ResolveWorkspaceRoot(cwdInput)
 	if err != nil {

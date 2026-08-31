@@ -543,6 +543,8 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		return Metadata{}, err
 	}
 	copyInputs := []AppendEventInput{}
+	copiedCheckpoints := 0
+	skippedCheckpoints := 0
 	for _, event := range events {
 		// Do NOT copy usage accounting into the fork. It already counted against the
 		// parent, and a usage report that aggregates the parent and the fork would
@@ -550,6 +552,13 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		// (messages, tool calls, checkpoints) to continue; usage is not replayed.
 		if event.Type == EventUsage {
 			continue
+		}
+		if event.Type == EventSessionCheckpoint {
+			if !checkpointCanFollowFork(event.Payload, *parent, input.Cwd) {
+				skippedCheckpoints++
+				continue
+			}
+			copiedCheckpoints++
 		}
 		copyInputs = append(copyInputs, AppendEventInput{Type: event.Type, Payload: event.Payload})
 	}
@@ -561,17 +570,20 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	// copied EventSessionCheckpoint events resolve to real blobs and a rewind on
 	// the fork can restore file content (otherwise rewind reads missing blobs
 	// and silently skips the files).
-	if err := store.copyBlobs(parent.SessionID, fork.SessionID); err != nil {
-		return Metadata{}, err
+	if copiedCheckpoints > 0 {
+		if err := store.copyBlobs(parent.SessionID, fork.SessionID); err != nil {
+			return Metadata{}, err
+		}
 	}
 	if _, err := store.AppendEvent(fork.SessionID, AppendEventInput{
 		Type: EventSessionFork,
 		Payload: map[string]any{
-			"parentSessionId":    parent.SessionID,
-			"parentEventCount":   parent.EventCount,
-			"copiedEventCount":   copied,
-			"forkedFromEventId":  last.ID,
-			"forkedFromSequence": last.Sequence,
+			"parentSessionId":        parent.SessionID,
+			"parentEventCount":       parent.EventCount,
+			"copiedEventCount":       copied,
+			"skippedCheckpointCount": skippedCheckpoints,
+			"forkedFromEventId":      last.ID,
+			"forkedFromSequence":     last.Sequence,
 		},
 	}); err != nil {
 		return Metadata{}, err
@@ -581,6 +593,53 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		return Metadata{}, err
 	}
 	return loaded, nil
+}
+
+// checkpointCanFollowFork keeps location-bound restore side effects out of a
+// fork that explicitly selects another workspace. A fork that inherits its
+// parent's workspace preserves legacy behavior. With an explicit workspace,
+// only checkpoints carrying that same verified binding are portable; corrupt
+// or unbound payloads fail closed unless the explicit workspace is also the
+// parent's locally authored workspace.
+func checkpointCanFollowFork(payload json.RawMessage, parent Metadata, explicitCwd string) bool {
+	if strings.TrimSpace(explicitCwd) == "" {
+		return true
+	}
+	var checkpoint CheckpointPayload
+	if err := json.Unmarshal(payload, &checkpoint); err != nil {
+		return false
+	}
+	boundRoot := strings.TrimSpace(checkpoint.WorkspaceRoot)
+	if boundRoot == "" {
+		boundRoot = OperationalCwd(parent)
+	}
+	return sessionWorkspacePathEqual(boundRoot, explicitCwd)
+}
+
+func sessionWorkspacePathEqual(left, right string) bool {
+	normalize := func(path string) string {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			return ""
+		}
+		cleaned := filepath.Clean(trimmed)
+		if absolute, err := filepath.Abs(cleaned); err == nil {
+			cleaned = absolute
+		}
+		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+			cleaned = resolved
+		}
+		return filepath.Clean(cleaned)
+	}
+	left = normalize(left)
+	right = normalize(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func (store *Store) RecordSpec(sessionID string, input RecordSpecInput) (Metadata, Event, error) {
