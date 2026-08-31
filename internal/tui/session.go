@@ -524,6 +524,31 @@ func (m model) importForeignSessionCmd(ref string) tea.Cmd {
 	}
 }
 
+func (m model) startForeignSessionImport(source agentsessions.ForeignSession) (model, string, tea.Cmd) {
+	if m.sessionImportInFlight {
+		return m, "Sessions\na foreign session import is already in progress", nil
+	}
+	m.sessionImportInFlight = true
+	return m, "", m.importForeignSessionSourceCmd(source)
+}
+
+func (m model) importForeignSessionSourceCmd(source agentsessions.ForeignSession) tea.Cmd {
+	store := m.sessionStore
+	env := m.agentSessionsEnv
+	originSession := m.activeSession.SessionID
+	return func() tea.Msg {
+		if store == nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: errors.New("no session store")}
+		}
+		adapter, _, err := agentsessions.ParseRef(env, source.Agent+":"+source.ID)
+		if err != nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: err}
+		}
+		result, err := agentsessions.ImportSource(store, adapter, source, agentsessions.ReadOptions{})
+		return foreignSessionImportedMsg{result: result, originSession: originSession, err: err}
+	}
+}
+
 func (m model) finishForeignSessionImport(msg foreignSessionImportedMsg) (model, string) {
 	m.sessionImportInFlight = false
 	if msg.err != nil {
@@ -621,11 +646,13 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 		if when := sessionWhenTime(session.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
+		source := session
 		items = append(items, pickerItem{
-			Label: label,
-			Value: ref,
-			Meta:  session.Agent,
-			Tab:   session.Agent,
+			Label:         label,
+			Value:         ref,
+			Meta:          session.Agent,
+			Tab:           session.Agent,
+			ForeignSource: &source,
 		})
 	}
 	return items

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,11 +80,27 @@ func (reader *countingReader) Read(buffer []byte) (int, error) {
 // which is the right outcome: a record too large to fit the head budget is a
 // giant tool result, never the small metadata record discovery is looking for.
 func scanHead(root string, path string, limit headLimit, visit func(line []byte, truncated bool) bool) (int64, error) {
+	read, _, err := scanHeadSnapshot(root, path, limit, visit)
+	return read, err
+}
+
+// scanHeadSnapshot binds discovery metadata and its source identity to the same
+// open file handle. Taking the snapshot in a second open leaves a replacement
+// window where metadata can describe one transcript while Read is authorized
+// to import another.
+func scanHeadSnapshot(root string, path string, limit headLimit, visit func(line []byte, truncated bool) bool) (int64, sourceSnapshot, error) {
 	file, err := openContained(root, path)
 	if err != nil {
-		return 0, err
+		return 0, sourceSnapshot{}, err
 	}
 	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return 0, sourceSnapshot{}, err
+	}
+	if !before.Mode().IsRegular() {
+		return 0, sourceSnapshot{}, errors.New("agentsessions: transcript is not a regular file")
+	}
 
 	counter := &countingReader{inner: io.LimitReader(file, limit.MaxBytes)}
 	reader := bufio.NewReaderSize(counter, 64<<10)
@@ -103,10 +120,17 @@ func scanHead(root string, path string, limit headLimit, visit func(line []byte,
 			if err == io.EOF {
 				break
 			}
-			return counter.count, err
+			return counter.count, sourceSnapshot{}, err
 		}
 	}
-	return counter.count, nil
+	after, err := file.Stat()
+	if err != nil {
+		return counter.count, sourceSnapshot{}, err
+	}
+	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return counter.count, sourceSnapshot{}, errors.New("agentsessions: transcript changed during discovery")
+	}
+	return counter.count, sourceSnapshot{info: after, size: after.Size(), modTime: after.ModTime()}, nil
 }
 
 // openContained opens path through a handle on root, so the containment checked
@@ -305,6 +329,38 @@ func fileModTime(root string, path string) time.Time {
 		return time.Time{}
 	}
 	return info.ModTime()
+}
+
+func snapshotTranscript(root string, path string) (sourceSnapshot, error) {
+	file, err := openContained(root, path)
+	if err != nil {
+		return sourceSnapshot{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return sourceSnapshot{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return sourceSnapshot{}, errors.New("agentsessions: transcript is not a regular file")
+	}
+	return sourceSnapshot{info: info, size: info.Size(), modTime: info.ModTime()}, nil
+}
+
+func validateTranscriptSnapshot(root string, source ForeignSession) error {
+	if source.source.info == nil {
+		return errors.New("agentsessions: session source was not produced by discovery")
+	}
+	current, err := snapshotTranscript(root, source.Path)
+	if err != nil {
+		return fmt.Errorf("agentsessions: reopen selected session source: %w", err)
+	}
+	if !os.SameFile(source.source.info, current.info) ||
+		source.source.size != current.size ||
+		!source.source.modTime.Equal(current.modTime) {
+		return errors.New("agentsessions: selected session source changed after discovery; discover it again before importing")
+	}
+	return nil
 }
 
 // topLevelStrings pulls named top-level string fields out of a JSON object that

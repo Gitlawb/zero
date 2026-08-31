@@ -99,8 +99,11 @@ type Metadata struct {
 	Cwd         string      `json:"cwd,omitempty"`
 	// WorkspaceKey is the operational workspace identity when Cwd is a
 	// display-safe, lossy representation. Never render this field directly.
-	WorkspaceKey        string     `json:"workspaceKey,omitempty"`
-	ModelID             string     `json:"modelId,omitempty"`
+	WorkspaceKey string `json:"workspaceKey,omitempty"`
+	ModelID      string `json:"modelId,omitempty"`
+	// SourceModelID records a foreign transcript's model as provenance only.
+	// Runtime/provider selection must use ModelID, never this field.
+	SourceModelID       string     `json:"sourceModelId,omitempty"`
 	Provider            string     `json:"provider,omitempty"`
 	Tag                 string     `json:"tag,omitempty"`
 	Depth               int        `json:"depth,omitempty"`
@@ -135,6 +138,7 @@ type CreateInput struct {
 	Cwd                 string
 	WorkspaceKey        string
 	ModelID             string
+	SourceModelID       string
 	Provider            string
 	Tag                 string
 	Depth               int
@@ -293,6 +297,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		Cwd:                 strings.TrimSpace(input.Cwd),
 		WorkspaceKey:        strings.TrimSpace(input.WorkspaceKey),
 		ModelID:             strings.TrimSpace(input.ModelID),
+		SourceModelID:       strings.TrimSpace(input.SourceModelID),
 		Provider:            strings.TrimSpace(input.Provider),
 		Tag:                 strings.TrimSpace(input.Tag),
 		Depth:               input.Depth,
@@ -525,13 +530,23 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if kind != SessionKindFork && kind != SessionKindSide {
 		return Metadata{}, fmt.Errorf("invalid zero fork session kind %q", kind)
 	}
+	parentModelID := parent.ModelID
+	sourceModelID := parent.SourceModelID
+	if strings.HasPrefix(strings.TrimSpace(parent.Tag), "imported:") && sourceModelID == "" {
+		// Older imports stored the foreign model in the operational field. A new
+		// fork must migrate that value to provenance instead of inheriting it as a
+		// local provider choice.
+		sourceModelID = parentModelID
+		parentModelID = ""
+	}
 	fork, err := store.Create(CreateInput{
 		SessionID:          input.SessionID,
 		SessionKind:        kind,
 		Title:              title,
 		Cwd:                firstNonEmpty(input.Cwd, parent.Cwd),
 		WorkspaceKey:       derivedWorkspaceKey(input.Cwd, parent.WorkspaceKey),
-		ModelID:            firstNonEmpty(input.ModelID, parent.ModelID),
+		ModelID:            firstNonEmpty(input.ModelID, parentModelID),
+		SourceModelID:      sourceModelID,
 		Provider:           firstNonEmpty(input.Provider, parent.Provider),
 		Tag:                input.Tag,
 		ParentSessionID:    parent.SessionID,

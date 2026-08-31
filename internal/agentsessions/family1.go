@@ -43,12 +43,21 @@ func (adapter family1) Discover(cwd string) ([]ForeignSession, error) {
 // Unlike Discover, this reports its errors: the user has named a specific
 // session, and returning an empty conversation because the file moved would be
 // a lie about what that session contained.
-func (adapter family1) Read(id string, options ReadOptions) ([]sessions.AppendEventInput, error) {
-	path, err := findTranscript(adapter.root, id)
+func (adapter family1) Read(source ForeignSession, options ReadOptions) ([]sessions.AppendEventInput, error) {
+	if source.Agent != adapter.name || source.ID != transcriptID(source.Path) {
+		return nil, errors.New("agentsessions: selected session does not belong to " + adapter.name)
+	}
+	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
+		return nil, err
+	}
+	events, err := translateFamily1(adapter.root, source.Path, options)
 	if err != nil {
 		return nil, err
 	}
-	return translateFamily1(adapter.root, path, options)
+	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 // ClaudeCode reads Claude Code's transcripts.
@@ -174,7 +183,7 @@ func indexFamily1Transcript(agent string, root string, path string) (ForeignSess
 	}
 	firstPrompt := ""
 
-	_, err := scanHead(root, path, defaultHeadLimit, func(line []byte, truncated bool) bool {
+	_, snapshot, err := scanHeadSnapshot(root, path, defaultHeadLimit, func(line []byte, truncated bool) bool {
 		var record family1Record
 		if json.Unmarshal(line, &record) != nil {
 			// A RECORD TOO LONG TO PARSE STILL CARRIES ITS METADATA AT THE FRONT.
@@ -240,7 +249,8 @@ func indexFamily1Transcript(agent string, root string, path string) (ForeignSess
 	if strings.TrimSpace(session.Cwd) == "" {
 		return ForeignSession{}, false
 	}
-	session.UpdatedAt = fileModTime(root, path)
+	session.source = snapshot
+	session.UpdatedAt = snapshot.modTime
 	if session.StartedAt.IsZero() {
 		session.StartedAt = session.UpdatedAt
 	}

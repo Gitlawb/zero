@@ -432,7 +432,7 @@ func TestCapDoesNotKeepAToolResultAfterDroppingItsCall(t *testing.T) {
 
 func TestReadRejectsAnUnknownSession(t *testing.T) {
 	adapter := ClaudeCode(testEnv(t.TempDir(), nil))
-	if _, err := adapter.Read("nope", ReadOptions{}); err == nil {
+	if _, err := adapter.Read(ForeignSession{Agent: adapter.Name(), ID: "nope", Path: "nope.jsonl"}, ReadOptions{}); err == nil {
 		t.Error("Read of an unknown id returned no error — the caller named a " +
 			"specific session and an empty result would misrepresent it")
 	}

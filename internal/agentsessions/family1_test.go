@@ -335,13 +335,13 @@ func TestASymlinkedSlugDirectoryIsNotListedThenRefused(t *testing.T) {
 			t.Errorf("Discover followed a symlink out of the store and listed %q from %s", session.ID, elsewhere)
 		}
 	}
-	if _, err := adapter.Read("sneaky", ReadOptions{}); err == nil {
+	if _, err := adapter.Read(ForeignSession{Agent: adapter.Name(), ID: "sneaky", Path: filepath.Join(root, "-w", "sneaky.jsonl")}, ReadOptions{}); err == nil {
 		t.Errorf("Read followed a symlink out of the store and imported %s", elsewhere)
 	}
 	// AND THEN agreement, which is what the original fast path broke: it listed
 	// "sneaky" by globbing through the symlink while Read refused it.
 	for _, session := range found {
-		if _, err := adapter.Read(session.ID, ReadOptions{}); err != nil {
+		if _, err := adapter.Read(session, ReadOptions{}); err != nil {
 			t.Errorf("Discover listed %q but Read refuses it: %v — list-then-refuse", session.ID, err)
 		}
 	}

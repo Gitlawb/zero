@@ -316,3 +316,30 @@ func TestFileModTimeRefusesASymlinkOutOfTheRoot(t *testing.T) {
 		t.Errorf("fileModTime = %v, want the zero time for a path it must not open", got.UTC())
 	}
 }
+
+func TestScanHeadSnapshotRejectsMutationDuringDiscovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "changing.jsonl")
+	if err := os.WriteFile(path, []byte("first\nsecond\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mutated := false
+	_, _, err := scanHeadSnapshot("", path, defaultHeadLimit, func(_ []byte, _ bool) bool {
+		if !mutated {
+			mutated = true
+			file, openErr := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			if _, writeErr := file.WriteString("replacement\n"); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+		}
+		return true
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed during discovery") {
+		t.Fatalf("scanHeadSnapshot error = %v, want mutation rejection", err)
+	}
+}

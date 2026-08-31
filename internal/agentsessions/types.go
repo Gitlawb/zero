@@ -24,6 +24,7 @@
 package agentsessions
 
 import (
+	"os"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -58,6 +59,16 @@ type ForeignSession struct {
 	// Path is the file or directory backing the session, shown for
 	// troubleshooting and used by Read to reopen it.
 	Path string
+	// source binds this index row to the exact regular file observed during
+	// discovery. It is intentionally unexported: paths and foreign IDs are
+	// display/provenance, not authority for opening an arbitrary file.
+	source sourceSnapshot
+}
+
+type sourceSnapshot struct {
+	info    os.FileInfo
+	size    int64
+	modTime time.Time
 }
 
 // ReadOptions tunes a full read. The zero value is the intended default:
@@ -92,6 +103,8 @@ type Adapter interface {
 	// Discover returns the sessions this adapter believes belong to cwd. An
 	// empty cwd means "every session this adapter can see".
 	Discover(cwd string) ([]ForeignSession, error)
-	// Read translates one session into Zero events, ready for AppendEvents.
-	Read(id string, options ReadOptions) ([]sessions.AppendEventInput, error)
+	// Read translates the exact session returned by Discover into Zero events.
+	// Implementations verify the source identity before and after reading so
+	// metadata and content cannot come from independently-resolved files.
+	Read(source ForeignSession, options ReadOptions) ([]sessions.AppendEventInput, error)
 }

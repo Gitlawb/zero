@@ -1,9 +1,13 @@
 package agentsessions
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/sessions"
 )
@@ -14,7 +18,95 @@ func (invalidImportAdapter) Name() string { return "invalid" }
 func (invalidImportAdapter) Discover(string) ([]ForeignSession, error) {
 	return []ForeignSession{{Agent: "invalid", ID: "broken", Title: "broken"}}, nil
 }
-func (invalidImportAdapter) Read(string, ReadOptions) ([]sessions.AppendEventInput, error) {
+
+func TestImportBindsMetadataAndContentToExactDiscoveredTranscript(t *testing.T) {
+	home := t.TempDir()
+	older := filepath.Join(home, ".claude", "projects", "-old", "duplicate.jsonl")
+	newer := filepath.Join(home, ".claude", "projects", "-new", "duplicate.jsonl")
+	writeFile(t, older, `{"type":"user","cwd":"/old","sessionId":"duplicate","message":{"role":"user","content":"older content","model":"older-model"}}`+"\n")
+	writeFile(t, newer, `{"type":"user","cwd":"/new","sessionId":"duplicate","message":{"role":"user","content":"newer content","model":"newer-model"}}`+"\n")
+	oldTime := time.Now().Add(-time.Hour)
+	newTime := time.Now()
+	if err := os.Chtimes(older, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newer, newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+	adapter := ClaudeCode(testEnv(home, nil))
+	found, err := adapter.Discover("")
+	if err != nil || len(found) != 2 {
+		t.Fatalf("discover duplicate IDs: %v (%d results)", err, len(found))
+	}
+	if found[0].Cwd != "/new" {
+		t.Fatalf("newest selected row = %+v, want /new", found[0])
+	}
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	result, err := ImportSource(store, adapter, found[0], ReadOptions{})
+	if err != nil {
+		t.Fatalf("ImportSource: %v", err)
+	}
+	if result.Session.Cwd != "/new" || result.Session.SourceModelID != "newer-model" {
+		t.Fatalf("imported metadata = %+v, want selected /new transcript", result.Session)
+	}
+	events, err := store.ReadEvents(result.Session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedEvents, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encodedEvents), "newer content") || strings.Contains(string(encodedEvents), "older content") {
+		t.Fatalf("imported events did not come from selected transcript: %+v", events)
+	}
+
+	if _, err := Import(store, adapter, "duplicate", ReadOptions{}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ID-only import error = %v, want duplicate ambiguity", err)
+	}
+	listed, problems := DiscoverAll(testEnv(home, nil), "")
+	for _, session := range listed {
+		if session.Agent == "claude-code" && session.ID == "duplicate" {
+			t.Fatalf("ambiguous duplicate was presented as importable: %+v", session)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(problems), "ambiguous") {
+		t.Fatalf("duplicate discovery problems = %v, want ambiguity", problems)
+	}
+}
+
+func TestImportRejectsTranscriptChangedAfterDiscovery(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".claude", "projects", "-w", "changing.jsonl")
+	writeFile(t, path, `{"type":"user","cwd":"/w","sessionId":"changing","message":{"role":"user","content":"before"}}`+"\n")
+	adapter := ClaudeCode(testEnv(home, nil))
+	found, err := adapter.Discover("")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("discover: %v (%d results)", err, len(found))
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(`{"type":"assistant","cwd":"/w","message":{"role":"assistant","content":"after"}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	if _, err := ImportSource(store, adapter, found[0], ReadOptions{}); err == nil || !strings.Contains(err.Error(), "changed after discovery") {
+		t.Fatalf("changed-source import error = %v", err)
+	}
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("changed source left an imported session: %+v", metas)
+	}
+}
+func (invalidImportAdapter) Read(ForeignSession, ReadOptions) ([]sessions.AppendEventInput, error) {
 	return []sessions.AppendEventInput{{Type: sessions.EventMessage, Payload: map[string]any{"invalid": make(chan int)}}}, nil
 }
 
@@ -64,8 +156,8 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 		t.Errorf("workspace key = %q, want %q", result.Session.WorkspaceKey, filepath.Clean(wantWorkspaceKey))
 	}
 	const wantModel = "claude[2K-opus [REDACTED]"
-	if result.Session.ModelID != wantModel {
-		t.Errorf("stored model = %q, want %q", result.Session.ModelID, wantModel)
+	if result.Session.ModelID != "" || result.Session.SourceModelID != wantModel {
+		t.Errorf("stored operational/source model = %q / %q, want empty / %q", result.Session.ModelID, result.Session.SourceModelID, wantModel)
 	}
 
 	// And the record on disk, not merely the value handed back: the metadata is
@@ -74,9 +166,9 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	if err != nil || reloaded == nil {
 		t.Fatalf("reloading the imported session: %v", err)
 	}
-	if reloaded.Title != wantTitle || reloaded.Cwd != wantCwd || reloaded.WorkspaceKey != filepath.Clean(wantWorkspaceKey) || reloaded.ModelID != wantModel {
-		t.Errorf("reloaded title/cwd/model = %q / %q / %q, want %q / %q / %q",
-			reloaded.Title, reloaded.Cwd, reloaded.ModelID, wantTitle, wantCwd, wantModel)
+	if reloaded.Title != wantTitle || reloaded.Cwd != wantCwd || reloaded.WorkspaceKey != filepath.Clean(wantWorkspaceKey) || reloaded.ModelID != "" || reloaded.SourceModelID != wantModel {
+		t.Errorf("reloaded title/cwd/operational/source model = %q / %q / %q / %q, want %q / %q / empty / %q",
+			reloaded.Title, reloaded.Cwd, reloaded.ModelID, reloaded.SourceModelID, wantTitle, wantCwd, wantModel)
 	}
 	if got := sessions.OperationalCwd(*reloaded); got != filepath.Clean(wantWorkspaceKey) {
 		t.Errorf("operational cwd = %q, want canonical key %q", got, filepath.Clean(wantWorkspaceKey))

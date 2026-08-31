@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -50,6 +51,9 @@ type pickerItem struct {
 	// /model picker can switch providers when a model from a non-active provider is
 	// chosen. Empty for non-model items.
 	OwnerProvider string
+	// ForeignSource binds a /resume picker row to the exact transcript indexed
+	// for that row. Manual <agent>:<id> input leaves it nil and resolves at import.
+	ForeignSource *agentsessions.ForeignSession
 	Remote        bool
 	Local         bool
 	Favorite      bool
