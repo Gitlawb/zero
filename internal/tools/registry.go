@@ -343,6 +343,17 @@ func scrubResultSecrets(res Result) Result {
 		res.Display.Preview = scrubbed
 		res.Redacted = true
 	}
+	for index := range res.FileDiffs {
+		diff := &res.FileDiffs[index]
+		if scrubbed := redaction.RedactString(diff.OldText, redaction.Options{}); scrubbed != diff.OldText {
+			diff.OldText = scrubbed
+			res.Redacted = true
+		}
+		if scrubbed := redaction.RedactString(diff.NewText, redaction.Options{}); scrubbed != diff.NewText {
+			diff.NewText = scrubbed
+			res.Redacted = true
+		}
+	}
 	// Meta values carry model-controlled strings (e.g. glob pattern, bash cwd) and
 	// are forwarded into the transcript, so they are part of the boundary too.
 	for key, value := range res.Meta {

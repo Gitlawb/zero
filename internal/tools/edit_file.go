@@ -196,6 +196,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
+	if diff, ok := boundedFileDiff(relativePath, content, updated); ok {
+		result.FileDiffs = []FileDiff{diff}
+	}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line
 	// summary, so the red/green diff costs zero model tokens.
 	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: boundedUnifiedDiff(relativePath, content, updated)}

@@ -183,8 +183,39 @@ func applyPatchOperations(applyRoot, relativeRoot string, operations []structure
 	}
 	result := okResult(summary)
 	result.ChangedFiles = changedFilesFromStructuredPatch(relativeRoot, changes)
+	result.FileDiffs = fileDiffsFromStructuredPatch(relativeRoot, changes)
 	result.Display = Display{Summary: summary, Kind: "diff", Preview: structuredPatchPreview(changes)}
 	return result
+}
+
+func fileDiffsFromStructuredPatch(relativeRoot string, changes []structuredPatchChange) []FileDiff {
+	diffs := make([]FileDiff, 0, len(changes)*2)
+	appendDiff := func(path, before, after string) {
+		if relativeRoot != "" && relativeRoot != "." {
+			path = filepath.ToSlash(filepath.Join(relativeRoot, path))
+		}
+		if diff, ok := boundedFileDiff(path, before, after); ok {
+			diffs = append(diffs, diff)
+		}
+	}
+	for _, change := range changes {
+		switch {
+		case change.kind == structuredPatchDelete:
+			appendDiff(change.from.relative, change.before, "")
+		case change.kind == structuredPatchAdd:
+			appendDiff(change.to.relative, "", change.after)
+		case change.kind == structuredPatchCopy && change.from.absolute != change.to.absolute:
+			// A copy leaves its source unchanged; the destination is a create.
+			appendDiff(change.to.relative, "", change.after)
+		case change.kind == structuredPatchUpdate && change.from.absolute != change.to.absolute:
+			// A move is two filesystem changes, not a destination overwrite.
+			appendDiff(change.from.relative, change.before, "")
+			appendDiff(change.to.relative, "", change.after)
+		default:
+			appendDiff(change.to.relative, change.before, change.after)
+		}
+	}
+	return diffs
 }
 
 func parseStructuredPatch(patch string) ([]structuredPatchOperation, error) {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -387,6 +388,9 @@ func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 			t.Fatalf("edit preview missing diff marker %q: %q", want, res.Display.Preview)
 		}
 	}
+	if got := res.FileDiffs; len(got) != 1 || got[0].Path != "code.go" || got[0].OldText != "const a = 1\nconst b = 2\n" || got[0].NewText != "const a = 42\nconst b = 2\n" {
+		t.Fatalf("file diffs = %#v", got)
+	}
 }
 
 func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
@@ -407,6 +411,9 @@ func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
 	}
 	if strings.Contains(res.Display.Preview, "\n-line") {
 		t.Fatalf("a fresh-create diff must have no removed lines: %q", res.Display.Preview)
+	}
+	if got := res.FileDiffs; len(got) != 1 || got[0].Path != "new.txt" || got[0].OldText != "" || got[0].NewText != "line one\nline two\n" {
+		t.Fatalf("file diffs = %#v", got)
 	}
 }
 
@@ -583,6 +590,13 @@ func TestApplyPatchToolAppliesStructuredAddAndMove(t *testing.T) {
 	}
 	if got := result.ChangedFiles; strings.Join(got, ",") != "nested/new.txt,old.txt,moved.txt" {
 		t.Fatalf("ChangedFiles = %v", got)
+	}
+	if got, want := result.FileDiffs, []FileDiff{
+		{Path: "nested/new.txt", OldText: "", NewText: "created\n"},
+		{Path: "old.txt", OldText: "old\n", NewText: ""},
+		{Path: "moved.txt", OldText: "", NewText: "moved\n"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("FileDiffs = %#v, want %#v", got, want)
 	}
 }
 

@@ -140,6 +140,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
+	if diff, ok := boundedFileDiff(relativePath, priorContent, content); ok {
+		result.FileDiffs = []FileDiff{diff}
+	}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for
 	// an overwrite) on Display.Preview. Output stays the summary, so the model never
 	// re-reads the file — the rich preview costs zero model tokens.
