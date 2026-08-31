@@ -445,12 +445,18 @@ func (t denyTool) Run(context.Context, map[string]any) Result { return Result{St
 // must be scrubbed too, not just the tool-execution paths.
 func TestScrubResultSecretsRedactsPreview(t *testing.T) {
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	res := scrubResultSecrets(Result{Display: Display{Preview: "+++ b/x\n+token := \"" + secret + "\""}})
+	res := scrubResultSecrets(Result{
+		Display:   Display{Preview: "+++ b/x\n+token := \"" + secret + "\""},
+		FileDiffs: []FileDiff{{Path: "x", OldText: secret, NewText: secret}},
+	})
 	if strings.Contains(res.Display.Preview, secret) {
 		t.Errorf("Display.Preview (the card-only code preview) must be redacted, leaked: %q", res.Display.Preview)
 	}
 	if !res.Redacted {
 		t.Error("scrubbing a secret from the preview should set Redacted")
+	}
+	if strings.Contains(res.FileDiffs[0].OldText, secret) || strings.Contains(res.FileDiffs[0].NewText, secret) {
+		t.Errorf("FileDiff must be redacted: %#v", res.FileDiffs)
 	}
 }
 
