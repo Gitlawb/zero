@@ -78,6 +78,21 @@ func enableWindowsPrincipalLaunchPrivileges() error {
 			return fmt.Errorf("enable %s: %w", name, err)
 		}
 	}
+	return principalLaunchPrivilegeError(missing)
+}
+
+// principalLaunchPrivilegeError renders the refusal for a set of missing
+// privileges, and is separate from the token work so it can be driven for every
+// combination.
+//
+// It has to be, because WHICH privilege is missing depends on the account
+// running the test. An ordinary unelevated user typically holds neither, but not
+// always: this developer box holds SeAssignPrimaryTokenPrivilege and not
+// SeIncreaseQuotaPrivilege, so a test that named one of them and ran the real
+// preflight asserted a machine's configuration rather than the code. Splitting
+// the rendering out makes each case deterministic and leaves the token path with
+// only the question that genuinely varies.
+func principalLaunchPrivilegeError(missing []string) error {
 	if len(missing) == 0 {
 		return nil
 	}
