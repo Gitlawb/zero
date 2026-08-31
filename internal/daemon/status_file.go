@@ -116,8 +116,8 @@ func validateStatusRoot(root *os.Root) error {
 	if !info.IsDir() {
 		return fmt.Errorf("status directory is not a directory")
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("status directory permissions are %04o, want owner-only", info.Mode().Perm())
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("status directory permissions are %04o, want no group/other write access", info.Mode().Perm())
 	}
 	if err := checkStatusDirOwner(root, info); err != nil {
 		return err

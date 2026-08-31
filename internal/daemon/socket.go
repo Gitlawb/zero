@@ -30,7 +30,10 @@ func secureRuntimeParents(paths Paths) error {
 		}
 		return nil
 	}
+	return secureCustomRuntimeParents(paths)
+}
 
+func secureCustomRuntimeParents(paths Paths) error {
 	parents := []struct {
 		name string
 		path string
@@ -51,6 +54,18 @@ func secureRuntimeParents(paths Paths) error {
 		seen[absolute] = struct{}{}
 		if err := os.MkdirAll(absolute, 0o700); err != nil {
 			return fmt.Errorf("daemon: create %s directory: %w", parent.name, err)
+		}
+		root, err := os.OpenRoot(absolute)
+		if err != nil {
+			return fmt.Errorf("daemon: open custom %s directory: %w", parent.name, err)
+		}
+		validateErr := validateStatusRoot(root)
+		closeErr := root.Close()
+		if validateErr != nil {
+			return fmt.Errorf("daemon: validate custom %s directory: %w", parent.name, validateErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("daemon: close custom %s directory: %w", parent.name, closeErr)
 		}
 	}
 	return nil
@@ -134,6 +149,21 @@ func samePaths(left, right Paths) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func runtimeRootStillNamesPath(root *os.Root, path string) error {
+	opened, err := root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("inspect bound runtime directory: %w", err)
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect runtime directory entry: %w", err)
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) {
+		return fmt.Errorf("daemon: default runtime directory changed after it was secured")
+	}
+	return nil
 }
 
 func openRootAppendRegular(root *os.Root, name string) (*os.File, error) {

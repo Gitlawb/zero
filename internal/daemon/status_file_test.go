@@ -379,7 +379,7 @@ func TestWriteStatusFileBindsDirectoryDuringAncestorSwap(t *testing.T) {
 	assertNoStatusTemps(t, movedDir)
 }
 
-func TestWriteStatusFileRejectsBroadStatusDirectory(t *testing.T) {
+func TestWriteStatusFileAllowsReadOnlyCustomStatusDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows directory access is governed by DACLs, not Unix mode bits")
 	}
@@ -397,11 +397,34 @@ func TestWriteStatusFileRejectsBroadStatusDirectory(t *testing.T) {
 		},
 	}
 	err := server.writeStatusFile()
-	if err == nil || !strings.Contains(err.Error(), "want owner-only") {
-		t.Fatalf("writeStatusFile error = %v, want owner-only directory rejection", err)
+	if err != nil {
+		t.Fatalf("writeStatusFile in 0755 directory: %v", err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("status file not created in read-only custom directory: %v", err)
+	}
+	assertNoStatusTemps(t, dir)
+}
+
+func TestWriteStatusFileRejectsWritableStatusDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory access is governed by DACLs, not Unix mode bits")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "daemon.status")
+	server := &Server{
+		startedAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
+		opts:      ServerOptions{Paths: Paths{Status: path}, Version: 6},
+	}
+	err := server.writeStatusFile()
+	if err == nil || !strings.Contains(err.Error(), "no group/other write access") {
+		t.Fatalf("writeStatusFile error = %v, want writable-directory rejection", err)
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("status file created in broad directory: %v", err)
+		t.Fatalf("status file created in writable directory: %v", err)
 	}
 	assertNoStatusTemps(t, dir)
 }
