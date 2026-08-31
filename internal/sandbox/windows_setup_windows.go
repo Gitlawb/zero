@@ -101,7 +101,18 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		// stamp. Taking it afterwards would record this run's own stamp as the
 		// state to restore, so a failed setup would put its own artifact back
 		// rather than what it found.
-		runtimeRollback.stamp = snapshotWindowsSandboxRuntimeStamp(root)
+		//
+		// AND REFUSED IF IT CANNOT BE ESTABLISHED. The stamp writer uses
+		// FILE_OVERWRITE_IF, so it can replace an existing stamp even where this
+		// read was denied. Continuing on an unknown prior state would let a setup
+		// that then fails delete an attestation it never recorded, leaving the
+		// previous run's marker pointing at a runtime root it can no longer
+		// prove. No privileged state is applied until this is known.
+		snapshot, snapshotErr := snapshotWindowsSandboxRuntimeStamp(root)
+		if snapshotErr != nil {
+			return failed(snapshotErr)
+		}
+		runtimeRollback.stamp = snapshot
 	}
 	rollback, err := applyWindowsACLPlanWithStamp(plan, stamp)
 	if err != nil {

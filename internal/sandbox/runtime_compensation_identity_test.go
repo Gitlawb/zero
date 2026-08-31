@@ -27,8 +27,11 @@ func TestStampCompensationRefusesAReplacementDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot := snapshotWindowsSandboxRuntimeStamp(root)
-	if !snapshot.existed {
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if snapshot.priorState != runtimeStampPresent {
 		t.Fatal("SETUP INVALID: the snapshot did not record the pre-existing stamp")
 	}
 
@@ -45,7 +48,7 @@ func TestStampCompensationRefusesAReplacementDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := snapshot.restore()
+	err = snapshot.restore()
 	if err == nil {
 		t.Fatal("compensation mutated a directory it never touched and reported success")
 	}

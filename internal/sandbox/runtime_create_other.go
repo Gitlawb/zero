@@ -10,6 +10,6 @@ func createRuntimeDirIdentified(path string) (string, bool, error) {
 	if err := os.Mkdir(path, 0o700); err != nil {
 		return "", false, err
 	}
-	identity, ok := runtimeDirIdentity(path)
+	identity, ok := runtimeIdentityAfterCreate(path)
 	return identity, ok, nil
 }

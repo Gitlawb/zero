@@ -659,10 +659,35 @@ type windowsCreatedRuntimeDir struct {
 // stamp, which reads as "the runtime directory was removed since setup ran" --
 // a healthy machine reporting itself broken because an unrelated later setup
 // failed.
+// runtimeStampState is what the snapshot could actually establish about the
+// stamp that was there BEFORE this run.
+//
+// Two booleans could not say it. "Read it, and there was nothing" and "could not
+// read it" both arrived as existed=false, so compensation could not tell an undo
+// from destruction: it deleted the current stamp and returned immediately with
+// nothing to put back, and a setup attempt that REPORTED FAILURE had destroyed
+// the attestation belonging to the previous successful setup.
+type runtimeStampState int
+
+const (
+	// runtimeStampUnknown is the zero value on purpose: a snapshot nobody filled
+	// in must never read as proven absence.
+	runtimeStampUnknown runtimeStampState = iota
+	// runtimeStampAbsent is a POSITIVE observation of nothing there, and only
+	// ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND produces it.
+	runtimeStampAbsent
+	// runtimeStampPresent means the prior bytes were read completely.
+	runtimeStampPresent
+)
+
 type windowsSandboxStampSnapshot struct {
-	path    string
-	prior   []byte
-	existed bool
+	path  string
+	prior []byte
+	// priorState is what was actually observed. See runtimeStampState: an
+	// encoding, directory-open, identity, child-open or read failure stays
+	// UNKNOWN and must stop the forward mutation rather than authorizing a
+	// delete-without-restore later.
+	priorState runtimeStampState
 	// root and rootIdentity identify the DIRECTORY the stamp lives in, captured
 	// when the snapshot was taken. The stamp file itself may not exist yet, so the
 	// directory is the object whose replacement this has to detect.
@@ -676,25 +701,33 @@ type windowsSandboxStampSnapshot struct {
 	rootIdentified bool
 }
 
-func snapshotWindowsSandboxRuntimeStamp(root string) windowsSandboxStampSnapshot {
+// snapshotWindowsSandboxRuntimeStamp captures what compensation will need, and
+// FAILS rather than guessing. An error here must stop setup before the ACL and
+// stamp are applied: the writer can replace an existing stamp even when the
+// earlier read was denied, and compensation would then delete it with nothing
+// recorded to restore.
+func snapshotWindowsSandboxRuntimeStamp(root string) (windowsSandboxStampSnapshot, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
-		return windowsSandboxStampSnapshot{}
+		return windowsSandboxStampSnapshot{}, nil
 	}
 	path := windowsSandboxRuntimeStampPath(root)
 	// ONE HANDLE FOR BOTH FACTS. Taking the identity and then re-resolving the
 	// pathname to read the stamp let a rename in between pair one directory's
 	// identity with another's bytes, so a rollback could verify the right object
 	// and then write the wrong contents into it.
-	rootIdentity, rootIdentified, prior, existed := snapshotRuntimeStampBound(root)
+	rootIdentity, rootIdentified, prior, state, err := snapshotRuntimeStampBound(root)
+	if err != nil {
+		return windowsSandboxStampSnapshot{}, fmt.Errorf("record the sandbox runtime stamp at %s before changing it: %w", path, err)
+	}
 	return windowsSandboxStampSnapshot{
 		path:           path,
 		prior:          prior,
-		existed:        existed,
+		priorState:     state,
 		root:           root,
 		rootIdentity:   rootIdentity,
 		rootIdentified: rootIdentified,
-	}
+	}, nil
 }
 
 func (snapshot windowsSandboxStampSnapshot) restore() error {
@@ -720,9 +753,19 @@ func (snapshot windowsSandboxStampSnapshot) restore() error {
 		}
 		return nil
 	}
+	// AN UNPROVEN PRIOR STATE IS NOT PERMISSION TO DELETE. Absence has to have
+	// been observed, not inferred from a generic error: compensation for
+	// "existed=false" removes the current stamp and returns with nothing to put
+	// back, so reaching here on an unreadable snapshot would destroy the
+	// attestation of the previous successful setup on behalf of a run that
+	// failed. Setup refuses before the apply for exactly this reason, and this is
+	// the second half of that guard for any path that assembled a record anyway.
+	if snapshot.priorState == runtimeStampUnknown {
+		return fmt.Errorf("the stamp at %s could not be read when setup began, so removing or restoring it now cannot be shown to be an undo; leaving it untouched", snapshot.path)
+	}
 	// BOUND TO THE OBJECT, not to the name. The identity check and the mutation
 	// now share one handle, so a rename and replacement cannot land between them.
-	return compensateRuntimeStampBound(snapshot.root, snapshot.rootIdentity, snapshot.prior, snapshot.existed)
+	return compensateRuntimeStampBound(snapshot.root, snapshot.rootIdentity, snapshot.prior, snapshot.priorState == runtimeStampPresent)
 }
 
 // run removes what was created, innermost first.

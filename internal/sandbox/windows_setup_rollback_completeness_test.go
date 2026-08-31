@@ -24,7 +24,10 @@ func TestRollbackRemovesTheStampItWroteAndThenTheRoot(t *testing.T) {
 	}
 
 	// Snapshot BEFORE the stamp exists, which is the fresh-setup case.
-	snapshot := snapshotWindowsSandboxRuntimeStamp(root)
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
 	if err := writeWindowsSandboxRuntimeStamp(root, "planhash"); err != nil {
 		t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
 	}
@@ -58,7 +61,10 @@ func TestRollbackRestoresAPreviousSetupsStamp(t *testing.T) {
 		t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
 	}
 
-	snapshot := snapshotWindowsSandboxRuntimeStamp(root)
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
 	if err := writeWindowsSandboxRuntimeStamp(root, "this-run"); err != nil {
 		t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
 	}
@@ -115,7 +121,7 @@ func TestRollbackContinuesAfterACompensationFails(t *testing.T) {
 	stamp := windowsSandboxStampSnapshot{
 		path:           windowsSandboxRuntimeStampPath(root),
 		prior:          []byte("x"),
-		existed:        true,
+		priorState:     runtimeStampPresent,
 		root:           root,
 		rootIdentity:   "0:0:0",
 		rootIdentified: true,

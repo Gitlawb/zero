@@ -31,7 +31,7 @@ func TestStampCompensationRefusesAnUnidentifiedRoot(t *testing.T) {
 	snapshot := windowsSandboxStampSnapshot{
 		path:           stamp,
 		prior:          []byte("this run's stamp"),
-		existed:        true,
+		priorState:     runtimeStampPresent,
 		root:           root,
 		rootIdentified: false,
 	}

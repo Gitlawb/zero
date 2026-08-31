@@ -26,7 +26,11 @@ func TestStampSnapshotPairsIdentityWithItsOwnBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	identity, identified, prior, existed := snapshotRuntimeStampBound(root)
+	identity, identified, prior, state, err := snapshotRuntimeStampBound(root)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	existed := state == runtimeStampPresent
 	if !identified {
 		t.Fatal("the snapshot established no identity for a directory that exists")
 	}
@@ -45,7 +49,11 @@ func TestStampSnapshotIdentifiesARootWithNoStamp(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	identity, identified, _, existed := snapshotRuntimeStampBound(root)
+	identity, identified, _, state, err := snapshotRuntimeStampBound(root)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	existed := state == runtimeStampPresent
 	if !identified || identity == "" {
 		t.Error("a root with no stamp established no identity")
 	}
