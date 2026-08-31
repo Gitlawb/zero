@@ -11,6 +11,21 @@ import (
 // runtime root necessary in the first place.
 func runtimeRootTestConfig(t *testing.T) WindowsSandboxCommandConfig {
 	t.Helper()
+	// REDIRECT THE AMBIENT CACHE PRODUCER, not only the obvious inputs.
+	//
+	// The workspace and sandbox home below are test-owned, but
+	// windowsSandboxRuntimeCandidates still derives a candidate from
+	// sandboxUserCacheDir, and the runtime-root test creates every candidate and
+	// registers os.RemoveAll cleanup for them. That reaches into the real user
+	// cache: it fails outright on a read-only home, and on an ordinary developer
+	// or CI account it creates and then deletes a path outside the test's
+	// storage. The workspace hash makes a collision unlikely; it does not make
+	// somebody else's directory test-owned.
+	cache := t.TempDir()
+	previousCache := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = previousCache })
+
 	workspace := t.TempDir()
 	return WindowsSandboxCommandConfig{
 		SandboxHome:    t.TempDir(),
