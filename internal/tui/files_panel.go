@@ -394,36 +394,26 @@ func (m model) runDetailsFileAtMouse(msg tea.MouseMsg) (string, bool) {
 		return "", false
 	}
 	inner := m.runDetailsInnerWidth()
-	fileLines, hits := m.sidebarFileLines(inner)
-	content := m.runDetailsLines(inner)
-	fileStart := -1
-	if len(fileLines) > 0 {
-		for i, line := range content {
-			if line == fileLines[0] {
-				fileStart = i
-				break
-			}
-		}
-	}
+	layout := m.runDetailsLayout(inner)
 	overlayLines := viewLines(overlay)
 	_, overlayLines, _ = normalizeOverlayBlock(overlayLines, width)
 	contentOrigin := -1
-	if len(content) > 0 {
+	if len(layout.lines) > 0 {
 		for i, line := range overlayLines {
-			if line == content[0] {
+			if line == layout.lines[0] {
 				contentOrigin = i
 				break
 			}
 		}
 	}
-	if fileStart < 0 || contentOrigin < 0 {
+	if layout.fileStart < 0 || contentOrigin < 0 {
 		return "", false
 	}
 	y := hit.y - contentOrigin
 	var match fileHit
 	found := false
-	for _, h := range hits {
-		if y == fileStart+h.lineOffset {
+	for _, h := range layout.fileHits {
+		if y == layout.fileStart+h.lineOffset {
 			match = h
 			found = true
 			break

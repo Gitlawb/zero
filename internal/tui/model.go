@@ -2932,6 +2932,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if isPlanCommandTool(msg.row.tool) {
 				var sweep tea.Cmd
 				m, sweep = m.maybeGitSweep()
+				if m.fileView.active && m.fileView.mode == fileViewFull {
+					var loadCmd tea.Cmd
+					m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+					return m, tea.Batch(sweep, loadCmd)
+				}
 				return m, sweep
 			}
 			if m.fileView.active && m.fileView.mode == fileViewFull {

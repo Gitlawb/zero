@@ -461,6 +461,12 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 				// Re-format for the new width or changed markers using cached display and lines
 				rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
+				if fileViewBeforeCacheCommit != nil {
+					fileViewBeforeCacheCommit()
+				}
+				if fileViewSuperseded(liveSeq, seq) {
+					return "", errFileViewSuperseded
+				}
 				entry.putRender(renderKey, rendered)
 				return rendered, nil
 			}
@@ -694,9 +700,18 @@ func (m model) startFileViewLoad(width int, refreshSource bool) (model, tea.Cmd)
 // Re-opening the file that is ALREADY being viewed is a no-op: a stray
 // re-click must not bounce the user from full mode back to diff or reset
 // their scroll position.
+func (m model) revokeFileViewRequest() {
+	if m.fileView.liveSeq != nil {
+		m.fileView.liveSeq.Add(1)
+	}
+}
+
 func (m model) openFileView(path string) (model, tea.Cmd) {
 	if m.fileView.active && m.fileView.path == path {
 		return m, nil
+	}
+	if m.fileView.active {
+		m.revokeFileViewRequest()
 	}
 	if !m.fileView.active {
 		m.fileView.parentScrollOffset = m.chatScrollOffset
@@ -727,6 +742,7 @@ func (m model) exitFileView() model {
 	if !m.fileView.active {
 		return m
 	}
+	m.revokeFileViewRequest()
 	m.chatScrollOffset = m.fileView.parentScrollOffset
 	m.fileView = fileViewState{}
 	m = m.clearHover()
@@ -738,6 +754,9 @@ func (m model) exitFileView() model {
 func (m model) setFileViewMode(mode int) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode == mode {
 		return m, nil
+	}
+	if m.fileView.mode == fileViewFull && mode != fileViewFull {
+		m.revokeFileViewRequest()
 	}
 	m.fileView.mode = mode
 	m.chatScrollOffset = 0

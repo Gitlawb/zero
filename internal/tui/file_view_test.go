@@ -1956,3 +1956,105 @@ func TestFileViewLifecycle_SupersededHighlightMustNotClobberCache(t *testing.T) 
 		t.Fatalf("expected package new, got %s", got)
 	}
 }
+
+func TestFileViewExitRevokesWorkerToken(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "leave.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package p\nfunc B() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m, cmd := m.openFileView(name)
+	if cmd == nil {
+		t.Fatal("load cmd")
+	}
+	token := m.fileView.liveSeq
+	if token == nil {
+		t.Fatal("liveSeq")
+	}
+	seq := token.Load()
+	m = m.exitFileView()
+	if token.Load() == seq {
+		t.Fatal("exitFileView must revoke the token the worker still holds")
+	}
+}
+
+func TestFileViewCacheHitRespectsLiveSeq(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "hit.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package p\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m, cmd := m.openFileView(name)
+	if cmd == nil {
+		t.Fatal("cache miss must yield load cmd")
+	}
+	updated, _ := m.Update(cmd())
+	m = updated.(model)
+	if m.fileView.liveSeq == nil {
+		t.Fatal("liveSeq")
+	}
+	seq := m.fileView.liveSeq.Load()
+	live := m.fileView.liveSeq
+	fileViewBeforeCacheCommit = func() { live.Store(seq + 1) }
+	defer func() { fileViewBeforeCacheCommit = nil }()
+	target := filepath.Join(dir, name)
+	gen := defaultFileViewCache.generation()
+	_, err := defaultFileViewCache.loadAndRender(target, name, m.fileView.loadedWidth+17, nil, m.fileView.loadedFingerprint, gen, zeroTheme, false, live, seq)
+	if !errors.Is(err, errFileViewSuperseded) {
+		t.Fatalf("cache-hit put after supersede: err=%v", err)
+	}
+}
+
+func TestFileViewPlanToolRefreshesWhenGitSweepNil(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "mut.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 7
+	m.gitFileBaseline = nil
+	m.gitSweepUnavailable = true
+	m = testOpenFile(m, name)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(agentRowMsg{
+		runID: 7,
+		row: transcriptRow{
+			kind:         rowToolResult,
+			tool:         "bash",
+			status:       tools.StatusOK,
+			changedFiles: []string{name},
+		},
+	})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("bash/plan mutation must refresh the file view even when maybeGitSweep is nil")
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			updated, _ = m.Update(c())
+			m = updated.(model)
+		}
+	} else {
+		updated, _ = m.Update(msg)
+		m = updated.(model)
+	}
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("stale view after git-nil mutation: %s", got)
+	}
+}
