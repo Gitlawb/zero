@@ -784,3 +784,66 @@ func denyACECountForSID(t *testing.T, path, wantSID string) int {
 	}
 	return count
 }
+
+func TestWindowsPreservedReadDenyAccessEntriesSkipsInheritedACEs(t *testing.T) {
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	sid, err := windows.StringToSid(caps.ReadOnly)
+	if err != nil {
+		t.Fatalf("StringToSid: %v", err)
+	}
+
+	parent := t.TempDir()
+	// Add an inheritable DenyRead on parent.
+	sd, err := windows.GetNamedSecurityInfo(parent, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo %s: %v", parent, err)
+	}
+	oldDACL, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+	parentDACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.FILE_GENERIC_READ | windows.FILE_EXECUTE,
+		AccessMode:        windows.DENY_ACCESS,
+		Inheritance:       windows.CONTAINER_INHERIT_ACE | windows.OBJECT_INHERIT_ACE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, oldDACL)
+	if err != nil {
+		t.Fatalf("ACLFromEntries: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(parent, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, parentDACL, nil); err != nil {
+		t.Fatalf("SetNamedSecurityInfo parent: %v", err)
+	}
+
+	// Create child directory — it inherits the DenyRead ACE with INHERITED_ACE set.
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatalf("Mkdir child: %v", err)
+	}
+
+	// Read child's DACL.
+	childSD, err := windows.GetNamedSecurityInfo(child, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo child: %v", err)
+	}
+	childDACL, _, err := childSD.DACL()
+	if err != nil {
+		t.Fatalf("child DACL: %v", err)
+	}
+
+	// Preserving read deny entries on child must skip the inherited ACE.
+	preserved, err := windowsPreservedReadDenyAccessEntries(childDACL, sid, true)
+	if err != nil {
+		t.Fatalf("windowsPreservedReadDenyAccessEntries: %v", err)
+	}
+	if len(preserved) != 0 {
+		t.Fatalf("expected inherited ACE to be skipped, got %d preserved entries: %#v", len(preserved), preserved)
+	}
+}

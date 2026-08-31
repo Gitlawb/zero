@@ -403,6 +403,9 @@ func windowsPreservedReadDenyAccessEntries(oldDACL *windows.ACL, wantSID *window
 		if ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE && ace.Header.AceType != windowsAccessDeniedObjectAceType {
 			continue
 		}
+		if ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			continue
+		}
 		sid, ok := windowsAceSID(ace)
 		if !ok || !sid.Equals(wantSID) {
 			continue
