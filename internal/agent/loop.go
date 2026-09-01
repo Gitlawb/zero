@@ -647,9 +647,25 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// recorded. They travel as user messages, and a user message between two
 		// tool_results breaks strict provider replay — Anthropic coalesces them
 		// into one user block list and requires the tool_result blocks first, so
-		// interleaving yields [tool_result, text, image, tool_result] and a 400.
-		// Same reason the self-correction feedback below is deferred.
-		var toolImageMessages []zeroruntime.Message
+		// Images ride a following USER message rather than the tool result
+		// above. Every provider drops images on a tool-role message —
+		// Anthropic's tool_result content is a string, Gemini's is a
+		// functionResponse, and OpenAI guards its image parts to the user role
+		// — so attaching them there would silently deliver nothing. A separate
+		// message also keeps the one-tool-result-per-tool-call pairing intact,
+		// which the providers validate. Vision-gate evaluation is deferred until
+		// after any model switch this turn resolves, so images can reach an
+		// escalated vision-capable model.
+		var toolResultsWithImages []ToolResult
+		buildToolImageMessages := func() []zeroruntime.Message {
+			var out []zeroruntime.Message
+			for _, tr := range toolResultsWithImages {
+				if imageMessage, ok := toolResultImageMessage(tr, options); ok {
+					out = append(out, imageMessage)
+				}
+			}
+			return out
+		}
 		// Parallel read-ahead state: results for calls[precomputedStart:precomputedEnd]
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
@@ -706,15 +722,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				IsError:            toolResult.Status == tools.StatusError,
 				ChangedFiles:       append([]string(nil), toolResult.ChangedFiles...),
 			})
-			// Images ride a following USER message rather than the tool result
-			// above. Every provider drops images on a tool-role message —
-			// Anthropic's tool_result content is a string, Gemini's is a
-			// functionResponse, and OpenAI guards its image parts to the user role
-			// — so attaching them there would silently deliver nothing. A separate
-			// message also keeps the one-tool-result-per-tool-call pairing intact,
-			// which the providers validate.
-			if imageMessage, ok := toolResultImageMessage(toolResult, options); ok {
-				toolImageMessages = append(toolImageMessages, imageMessage)
+			if len(toolResult.Images) > 0 {
+				toolResultsWithImages = append(toolResultsWithImages, toolResult)
 			}
 
 			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
@@ -726,13 +735,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if abortErr != nil {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				messages = append(messages, buildToolImageMessages()...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				messages = append(messages, buildToolImageMessages()...)
 				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
@@ -756,7 +765,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				messages = append(messages, buildToolImageMessages()...)
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
 				result.Messages = copyMessages(messages)
 				return result, nil
@@ -775,10 +784,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				postEditDiagnostics.enqueue(ctx, toolResult.ChangedFiles)
 			}
 		}
-		// Every tool_result for this turn is now recorded, including aborted
-		// placeholders, so the images can follow without splitting them.
-		messages = append(messages, toolImageMessages...)
-		toolImageMessages = nil
 
 		// Run post-edit self-correction once over the union of files this turn
 		// changed, then append any feedback after every tool_result is recorded so
@@ -865,6 +870,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				}
 			}
 		}
+
+		// Every tool_result, self-correct notice, and model-switch update for this
+		// turn is now in place; evaluate and append image messages against the
+		// effective (potentially escalated) model.
+		messages = append(messages, buildToolImageMessages()...)
+		toolResultsWithImages = nil
 
 		// A turn can mix valid tool calls with a dropped (nameless) one. The valid
 		// calls executed above; surface the dropped call too so it is never
