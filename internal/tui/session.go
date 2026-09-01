@@ -647,11 +647,12 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 			label = sessionPickerLabel(when, label)
 		}
 		source := session
+		agent := displayAgentName(session.Agent, "unknown")
 		items = append(items, pickerItem{
 			Label:         label,
 			Value:         ref,
-			Meta:          session.Agent,
-			Tab:           session.Agent,
+			Meta:          agent,
+			Tab:           agent,
 			ForeignSource: &source,
 		})
 	}
@@ -666,9 +667,13 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 // two fields recording the same fact would drift (repo invariant #5).
 func sessionAgentName(tag string) string {
 	if agent := agentsessions.ImportedAgent(tag); agent != "" {
-		return agent
+		return displayAgentName(agent, "zero")
 	}
 	return "zero"
+}
+
+func displayAgentName(agent, fallback string) string {
+	return displayValue(agentsessions.DisplayField(agent), fallback)
 }
 
 // sessionPickerTabs builds the tab strip: "All" first, then one tab per agent

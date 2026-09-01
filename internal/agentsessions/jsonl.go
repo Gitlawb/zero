@@ -212,10 +212,11 @@ func streamTailLines(root string, path string, maxLineBytes int, maxBytes int, v
 	if err != nil {
 		return false, err
 	}
+	extent := info.Size()
 	start := int64(0)
-	if maxBytes > 0 && info.Size() > int64(maxBytes) {
+	if maxBytes > 0 && extent > int64(maxBytes) {
 		prefixOmitted = true
-		start = info.Size() - int64(maxBytes)
+		start = extent - int64(maxBytes)
 		if _, err := file.Seek(start-1, io.SeekStart); err != nil {
 			return false, err
 		}
@@ -227,7 +228,7 @@ func streamTailLines(root string, path string, maxLineBytes int, maxBytes int, v
 			return false, err
 		}
 		if previous[0] != '\n' {
-			reader := bufio.NewReaderSize(file, 64<<10)
+			reader := bufio.NewReaderSize(io.LimitReader(file, extent-start), 64<<10)
 			if _, _, err := readBoundedLineTruncated(reader, 0); err != nil && err != io.EOF {
 				return false, err
 			}
@@ -237,7 +238,11 @@ func streamTailLines(root string, path string, maxLineBytes int, maxBytes int, v
 		return false, err
 	}
 
-	return prefixOmitted, streamReaderLines(bufio.NewReaderSize(file, 64<<10), maxLineBytes, visit)
+	return prefixOmitted, streamReaderLines(
+		bufio.NewReaderSize(io.LimitReader(file, extent-start), 64<<10),
+		maxLineBytes,
+		visit,
+	)
 }
 
 func streamReaderLines(reader *bufio.Reader, maxLineBytes int, visit func(line []byte, truncated bool) bool) error {
