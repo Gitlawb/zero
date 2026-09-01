@@ -62,6 +62,7 @@ func TestRunDeliversToolResultImagesToTheModel(t *testing.T) {
 	result, err := Run(context.Background(), "screenshot please", provider, Options{
 		Registry: registry,
 		MaxTurns: 2,
+		Model:    "gpt-4o",
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -136,7 +137,7 @@ func TestRunKeepsToolResultsContiguousWhenAToolReturnsAnImage(t *testing.T) {
 		{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}},
 	}}
 
-	result, err := Run(context.Background(), "two calls", provider, Options{Registry: registry, MaxTurns: 2})
+	result, err := Run(context.Background(), "two calls", provider, Options{Registry: registry, MaxTurns: 2, Model: "gpt-4o"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -204,4 +205,85 @@ func messageShape(messages []zeroruntime.Message) string {
 		parts = append(parts, part)
 	}
 	return "[" + strings.Join(parts, " ") + "]"
+}
+
+func TestRunDeliversToolResultImagesToAVisionModel(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(imageTool{media: "image/png", data: []byte("\x89PNG\r\n\x1a\nfake")})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "capture"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{{Type: zeroruntime.StreamEventText, Content: "I can see it."}, {Type: zeroruntime.StreamEventDone}},
+	}}
+
+	result, err := Run(context.Background(), "screenshot please", provider, Options{
+		Registry: registry,
+		MaxTurns: 2,
+		Model:    "gpt-4o",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var carrier *zeroruntime.Message
+	var toolText string
+	for index := range result.Messages {
+		if result.Messages[index].Role == zeroruntime.MessageRoleTool {
+			toolText = result.Messages[index].Content
+		}
+		if len(result.Messages[index].Images) > 0 {
+			carrier = &result.Messages[index]
+		}
+	}
+	if toolText != "Captured a screenshot." {
+		t.Fatalf("tool text = %q, want preserved", toolText)
+	}
+	if carrier == nil {
+		t.Fatal("vision model must receive the tool image")
+	}
+}
+
+func TestRunDropsToolResultImagesForANonVisionModel(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(imageTool{media: "image/png", data: []byte("\x89PNG\r\n\x1a\nfake")})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "capture"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{{Type: zeroruntime.StreamEventText, Content: "ok"}, {Type: zeroruntime.StreamEventDone}},
+	}}
+
+	result, err := Run(context.Background(), "screenshot please", provider, Options{
+		Registry: registry,
+		MaxTurns: 2,
+		Model:    "totally-made-up-model",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var toolText string
+	var noticed bool
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			toolText = message.Content
+		}
+		if len(message.Images) > 0 {
+			t.Fatalf("non-vision model received image bytes on %q: %s", message.Role, messageShape(result.Messages))
+		}
+		if strings.Contains(message.Content, "does not support image input") {
+			noticed = true
+		}
+	}
+	if toolText != "Captured a screenshot." {
+		t.Fatalf("tool text = %q, want preserved on the non-vision path", toolText)
+	}
+	if !noticed {
+		t.Fatalf("non-vision model was not told the image was dropped; recorded %s", messageShape(result.Messages))
+	}
 }

@@ -322,6 +322,28 @@ func TestImageContentJSONDecodesDataAndStaysCompatibleWithoutIt(t *testing.T) {
 	}
 }
 
+func TestAnExactlyMaxImageBytesPaddedPNGIsForwarded(t *testing.T) {
+	payload := paddedPNGBase64(imageinput.MaxImageBytes)
+	if got := base64.StdEncoding.DecodedLen(len(payload)); got <= imageinput.MaxImageBytes {
+		t.Fatalf("fixture DecodedLen = %d, want > %d so the old bound would reject it", got, imageinput.MaxImageBytes)
+	}
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "image", MimeType: "image/png", Data: payload},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+	if len(result.Images) != 1 {
+		t.Fatalf("at-limit padded PNG was dropped: images=%d output=%q", len(result.Images), result.Output)
+	}
+	if got := len(result.Images[0].Data); got != imageinput.MaxImageBytes {
+		t.Fatalf("forwarded size = %d, want %d", got, imageinput.MaxImageBytes)
+	}
+}
+
 func TestAnOversizedImageIsDroppedAndNamed(t *testing.T) {
 	tool := registryTool{
 		client: &nonTextClient{content: []Content{
