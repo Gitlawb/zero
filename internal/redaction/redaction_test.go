@@ -164,18 +164,62 @@ func TestRedactStringCatchesSecretsSplitByControlBytes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			input := prefix + tc.split + body
-			got := RedactString(input, Options{})
-			if strings.Contains(got, body) {
-				t.Fatalf("secret split by %s leaked in %q", tc.name, got)
+			inputs := []struct {
+				placement string
+				input     string
+			}{
+				{placement: "prefix-body boundary", input: prefix + tc.split + body},
+				{placement: "inside body", input: prefix + body[:13] + tc.split + body[13:]},
 			}
-			if strings.Contains(got, prefix) {
-				t.Fatalf("secret prefix split by %s leaked in %q", tc.name, got)
-			}
-			if !strings.Contains(got, RedactedSecret) {
-				t.Fatalf("expected %q after %s split, got %q", RedactedSecret, tc.name, got)
+			for _, input := range inputs {
+				t.Run(input.placement, func(t *testing.T) {
+					got := RedactString(input.input, Options{})
+					if strings.Contains(got, body) {
+						t.Fatalf("secret split by %s %s leaked in %q", tc.name, input.placement, got)
+					}
+					if strings.Contains(got, prefix) {
+						t.Fatalf("secret prefix split by %s %s leaked in %q", tc.name, input.placement, got)
+					}
+					if !strings.Contains(got, RedactedSecret) {
+						t.Fatalf("expected %q after %s %s split, got %q", RedactedSecret, tc.name, input.placement, got)
+					}
+				})
 			}
 		})
+	}
+}
+
+func TestRedactStringPreservesControlAfterCredential(t *testing.T) {
+	const secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+	input := "key=" + secret + "\x00path/one.go\x00path/two.go"
+	want := "key=" + RedactedSecret + "\x00path/one.go\x00path/two.go"
+	if got := RedactString(input, Options{}); got != want {
+		t.Fatalf("terminal credential separator changed:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+func TestRedactStringSuffixCannotDisableOpenAIKeyMatch(t *testing.T) {
+	const secret = "sk-aaaaaaaaaaaaaaaaaaaabcdefgh"
+	input := "key " + secret + "\x1bkebab-case tail"
+	want := "key " + RedactedSecret + "\x1bkebab-case tail"
+	if got := RedactString(input, Options{}); got != want {
+		t.Fatalf("suffix changed OpenAI key classification:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+func TestRedactStringDistinguishesInvalidC1FromValidReplacementRune(t *testing.T) {
+	const prefix = "sk-ant-api03-"
+	const body = "abcdefghijklmnopqrstuvwxyz"
+
+	invalidC1 := prefix + body[:13] + "\x9b" + body[13:]
+	if got := RedactString(invalidC1, Options{}); got != RedactedSecret {
+		t.Fatalf("raw invalid C1 split was not redacted: %q", got)
+	}
+
+	validReplacement := prefix + body[:13] + "\uFFFD" + body[13:]
+	got := RedactString(validReplacement, Options{})
+	if !strings.Contains(got, "\uFFFD"+body[13:]) {
+		t.Fatalf("valid U+FFFD was treated as a control gap: %q", got)
 	}
 }
 

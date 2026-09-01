@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -73,24 +74,46 @@ var sensitiveKeys = map[string]struct{}{
 // between characters of a secret shape. Matching stays on the original string:
 // a deleted control is never a join, so \b still treats wordchar+control as a
 // boundary and tokens that were never adjacent stay that way. Tab/LF/CR are
-// excluded so log line structure is unchanged. \x{FFFD} is how Go's regexp
-// engine reports a lone invalid UTF-8 C1 byte such as 0x9B.
+// excluded so log line structure is unchanged. \x{FFFD} lets the regexp locate
+// a lone invalid UTF-8 byte; validSecretControlGaps subsequently accepts only
+// raw C1 bytes and rejects a real, valid UTF-8 U+FFFD rune.
 const ctrlGap = `[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f\x{FFFD}]*`
 
-// ctrlLit quotes s as a regexp literal with ctrlGap after every rune, so a
-// NUL/ESC/C1 may split the literal without breaking the match.
+// ctrlLit quotes s as a regexp literal with ctrlGap strictly between runes, so
+// a NUL/ESC/C1 may split the literal without letting a match end on a gap.
 func ctrlLit(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) * (1 + len(ctrlGap)))
+	first := true
 	for _, r := range s {
+		if !first {
+			b.WriteString(ctrlGap)
+		}
 		b.WriteString(regexp.QuoteMeta(string(r)))
-		b.WriteString(ctrlGap)
+		first = false
 	}
 	return b.String()
 }
 
-func secretBody(class, quant string) string {
-	return `(?:` + class + ctrlGap + `)` + quant
+func ctrlJoin(parts ...string) string {
+	return strings.Join(parts, ctrlGap)
+}
+
+// secretBody keeps gaps strictly between the minimum required body characters.
+// Once an unbounded shape has reached that high-confidence minimum, its
+// optional tail stays contiguous: a later control is a suffix delimiter rather
+// than permission to absorb the following token into the secret (which could
+// feed unrelated suffix text into the OpenAI kebab-case exception).
+func secretBody(class string, minimum int, unbounded bool) string {
+	if minimum <= 0 {
+		return ""
+	}
+	quantifier := strconv.Itoa(minimum - 1)
+	body := class + `(?:` + ctrlGap + class + `){` + quantifier + `}`
+	if unbounded {
+		body += class + `*`
+	}
+	return body
 }
 
 // openaiKeyPattern mirrors secrets.Scan's broad sk- body. Known OpenAI
@@ -98,7 +121,7 @@ func secretBody(class, quant string) string {
 // digit-free matches with an interior hyphen are left alone (kebab-case false
 // positives), while digit-free legacy sk- credentials are still redacted.
 // Applied via ReplaceAllStringFunc rather than the plain list below.
-var openaiKeyPattern = regexp.MustCompile(`\b` + ctrlLit("sk-") + secretBody(`[A-Za-z0-9_-]`, `{20,}`))
+var openaiKeyPattern = regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("sk-"), secretBody(`[A-Za-z0-9_-]`, 20, true)))
 
 // textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
 // shared high-confidence shapes. A leading \b keeps each pattern from firing
@@ -112,15 +135,15 @@ var openaiKeyPattern = regexp.MustCompile(`\b` + ctrlLit("sk-") + secretBody(`[A
 // ctrlGap between shape characters keeps NUL/ESC/C1 split secrets matching
 // without stripping those bytes out of the subject first.
 var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\b` + ctrlLit("sk-ant-") + `(?:` + ctrlLit("api") + `\d` + ctrlGap + `\d` + ctrlGap + ctrlLit("-") + `)?` + secretBody(`[A-Za-z0-9_-]`, `{20,}`)),
-	regexp.MustCompile(`\b` + ctrlLit("github_pat_") + secretBody(`[A-Za-z0-9_]`, `{22,}`)),
-	regexp.MustCompile(`\b` + ctrlLit("gh") + `[pousr]` + ctrlGap + `_` + ctrlGap + secretBody(`[A-Za-z0-9]`, `{36,}`)),
-	regexp.MustCompile(`\b` + ctrlLit("glpat-") + secretBody(`[A-Za-z0-9_-]`, `{12,}`)),
-	regexp.MustCompile(`\b` + ctrlLit("AIza") + secretBody(`[0-9A-Za-z\-_]`, `{35,}`)),
-	regexp.MustCompile(`\b` + ctrlLit("xox") + `[baprs]` + ctrlGap + `-` + ctrlGap + secretBody(`[A-Za-z0-9-]`, `{10,}`)),
-	regexp.MustCompile(`\b(?:` + ctrlLit("AKIA") + `|` + ctrlLit("ASIA") + `)` + secretBody(`[A-Z0-9]`, `{16}`)),
-	regexp.MustCompile(`\b` + ctrlLit("eyJ") + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + ctrlLit("eyJ") + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + secretBody(`[A-Za-z0-9_-]`, `{10,}`)),
-	regexp.MustCompile(`\b` + ctrlLit("eyJ") + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + secretBody(`[A-Za-z0-9_-]`, `{10,}`) + `\.` + ctrlGap + secretBody(`[A-Za-z0-9_-]`, `{10,}`)),
+	regexp.MustCompile(`\b` + ctrlLit("sk-ant-") + ctrlGap + `(?:` + ctrlJoin(ctrlLit("api"), `\d`, `\d`, `-`) + ctrlGap + `)?` + secretBody(`[A-Za-z0-9_-]`, 20, true)),
+	regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("github_pat_"), secretBody(`[A-Za-z0-9_]`, 22, true))),
+	regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("gh"), `[pousr]`, `_`, secretBody(`[A-Za-z0-9]`, 36, true))),
+	regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("glpat-"), secretBody(`[A-Za-z0-9_-]`, 12, true))),
+	regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("AIza"), secretBody(`[0-9A-Za-z\-_]`, 35, true))),
+	regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("xox"), `[baprs]`, `-`, secretBody(`[A-Za-z0-9-]`, 10, true))),
+	regexp.MustCompile(`\b` + ctrlJoin(`(?:`+ctrlLit("AKIA")+`|`+ctrlLit("ASIA")+`)`, secretBody(`[A-Z0-9]`, 16, false))),
+	regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("eyJ"), secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, ctrlLit("eyJ"), secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, secretBody(`[A-Za-z0-9_-]`, 10, true))),
+	regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("eyJ"), secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, secretBody(`[A-Za-z0-9_-]`, 10, true))),
 }
 
 var (
@@ -256,6 +279,26 @@ func stripControlBytesFrom(s string, start int) string {
 	return b.String()
 }
 
+// validSecretControlGaps disambiguates RuneError matches at the byte boundary.
+// Go's regexp engine represents both a malformed single byte and a legitimate
+// U+FFFD rune as RuneError. Only raw invalid C1 bytes (0x80-0x9F) are supported
+// gaps; a valid UTF-8 replacement rune, or another malformed byte, must keep
+// the candidate split and prevent redaction.
+func validSecretControlGaps(match string) bool {
+	for i := 0; i < len(match); {
+		r, size := utf8.DecodeRuneInString(match[i:])
+		if r != utf8.RuneError {
+			i += size
+			continue
+		}
+		if size != 1 || match[i] < 0x80 || match[i] > 0x9F {
+			return false
+		}
+		i++
+	}
+	return true
+}
+
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
 	// Match on the original string. Shape patterns allow C0/C1 gaps between
@@ -313,9 +356,24 @@ func RedactString(value string, options Options) string {
 		}
 		return parts[1] + parts[2] + "=" + replacement
 	})
-	// openai keys first so the filter can drop kebab-case false positives
-	// before any other pattern rewrites nearby text.
+	// Match high-confidence specialized shapes first. In particular, the broad
+	// sk- pattern may reach its minimum before a control inside a longer
+	// Anthropic key; letting the Anthropic shape consume that split first avoids
+	// leaving a recognizable credential suffix behind.
+	for _, pattern := range textSecretPatterns {
+		redacted = pattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			if !validSecretControlGaps(match) {
+				return match
+			}
+			return replacement
+		})
+	}
+	// Apply the broad OpenAI shape after specialized keys so its kebab-case
+	// false-positive filter considers only the matched key, never suffix text.
 	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+		if !validSecretControlGaps(match) {
+			return match
+		}
 		normalized := stripControlBytes(match)
 		if !knownOpenAIKeyPrefix(normalized) && !secretMatchHasDigit(normalized) &&
 			strings.Contains(strings.TrimPrefix(normalized, "sk-"), "-") {
@@ -323,9 +381,6 @@ func RedactString(value string, options Options) string {
 		}
 		return replacement
 	})
-	for _, pattern := range textSecretPatterns {
-		redacted = pattern.ReplaceAllString(redacted, replacement)
-	}
 	return redacted
 }
 
