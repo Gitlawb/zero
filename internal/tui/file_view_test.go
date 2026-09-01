@@ -1615,7 +1615,10 @@ func TestFileViewLifecycle_ReverseOrderToolMutationCompletions(t *testing.T) {
 		t.Fatal("expected cmdA for mutation A")
 	}
 
-	// Mutation B immediately modifies file to v2 before A completes
+	// Capture A while v1 is still on disk so msgA contains the genuine v1 snapshot
+	msgA := cmdA()
+
+	// Mutation B immediately modifies file to v2 before A is applied
 	if err := os.WriteFile(filePath, []byte("version 2 state\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1640,8 +1643,7 @@ func TestFileViewLifecycle_ReverseOrderToolMutationCompletions(t *testing.T) {
 		t.Fatalf("expected version 2 state after B completes, got: %s", plainRender(t, m.renderFileViewFull(80)))
 	}
 
-	// A arrives late (reverse-order)
-	msgA := cmdA()
+	// A arrives late (reverse-order delivery of stale snapshot)
 	updated, _ = m.Update(msgA)
 	m = updated.(model)
 
@@ -1652,6 +1654,55 @@ func TestFileViewLifecycle_ReverseOrderToolMutationCompletions(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "version 2 state") {
 		t.Fatalf("expected version 2 state still visible, got: %s", rendered)
+	}
+}
+
+func TestFileViewSanitizesControlSequencesInHighlightedSource(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	// Recognized Go source with OSC 52 clipboard hijacking sequence in a comment
+	// and ANSI CSI styling codes inside a string literal.
+	goContent := `package main
+
+// \x1b]52;c;cGFzc3dvcmQ=\x07 malicious comment
+func main() {
+	const escape = "\x1b[31;1mred\x1b[0m"
+}
+`
+	// Replace raw escape escapes with actual byte values 0x1b and 0x07
+	goContent = strings.ReplaceAll(goContent, `\x1b`, "\x1b")
+	goContent = strings.ReplaceAll(goContent, `\x07`, "\x07")
+
+	filePath := filepath.Join(dir, "malicious.go")
+	if err := os.WriteFile(filePath, []byte(goContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, "malicious.go")
+
+	rendered := m.renderFileViewFull(80)
+
+	// Verify that raw hostile control sequences never reach the rendered output
+	if strings.Contains(rendered, "\x1b]52;") {
+		t.Fatalf("rendered output must not contain raw OSC 52 sequence, got: %q", rendered)
+	}
+	if strings.Contains(rendered, "\x07") {
+		t.Fatalf("rendered output must not contain BEL character, got: %q", rendered)
+	}
+	if strings.Contains(rendered, "\x1b[31;1m") {
+		t.Fatalf("rendered output must not contain raw source-supplied CSI sequence, got: %q", rendered)
+	}
+
+	// Verify that the sanitized printable representation is present and styled
+	plain := plainRender(t, rendered)
+	if !strings.Contains(plain, "^[") {
+		t.Fatalf("expected sanitized escape prefix '^[' in plain view, got: %q", plain)
+	}
+	if !strings.Contains(plain, "malicious comment") {
+		t.Fatalf("expected safe comment text in plain view, got: %q", plain)
 	}
 }
 
