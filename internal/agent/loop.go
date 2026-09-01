@@ -13,6 +13,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/streamjson"
@@ -712,7 +713,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// — so attaching them there would silently deliver nothing. A separate
 			// message also keeps the one-tool-result-per-tool-call pairing intact,
 			// which the providers validate.
-			if imageMessage, ok := toolResultImageMessage(toolResult); ok {
+			if imageMessage, ok := toolResultImageMessage(toolResult, options); ok {
 				toolImageMessages = append(toolImageMessages, imageMessage)
 			}
 
@@ -3457,8 +3458,10 @@ func copyMessages(messages []Message) []Message {
 //
 // The text names the tool so the model can tell which call an image came from
 // when several ran in one turn — the images arrive detached from their tool
-// result, so nothing else associates them.
-func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
+// result, so nothing else associates them. If the effective model cannot
+// accept images, the tool's text result is left unchanged and this follow-up
+// is a notice with no image parts, matching the CLI/TUI vision gate.
+func toolResultImageMessage(result ToolResult, options Options) (zeroruntime.Message, bool) {
 	images := make([]zeroruntime.ImageBlock, 0, len(result.Images))
 	for _, image := range result.Images {
 		if len(image.Data) == 0 {
@@ -3479,9 +3482,26 @@ func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
 	if label == "" {
 		label = "tool"
 	}
+	if !modelAcceptsToolImages(options) {
+		return zeroruntime.Message{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: "Image output from " + label + " was not sent because the current model does not support image input.",
+		}, true
+	}
 	return zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
 		Content: "Image output from " + label + ":",
 		Images:  images,
 	}, true
+}
+
+func modelAcceptsToolImages(options Options) bool {
+	if options.SupportsVision != nil {
+		return options.SupportsVision(options.Model)
+	}
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return modelregistry.VisionCapableByName(options.Model)
+	}
+	return modelregistry.SupportsVision(registry, options.Model)
 }

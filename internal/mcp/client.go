@@ -649,7 +649,12 @@ func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {
 	if raw == "" {
 		return zeroruntime.ImageBlock{}, false
 	}
-	if base64.StdEncoding.DecodedLen(len(raw)) > imageinput.MaxImageBytes {
+	// EncodedLen(MaxImageBytes) is the encoded size of an image that decodes
+	// to exactly the inclusive cap, including "==" padding. DecodedLen is an
+	// upper bound and reports cap+2 for that input, so using it here would
+	// reject a valid at-limit PNG. The post-decode len(data) check is the
+	// exact backstop.
+	if len(raw) > base64.StdEncoding.EncodedLen(imageinput.MaxImageBytes) {
 		return zeroruntime.ImageBlock{}, false
 	}
 	data, err := decodeImageBase64(raw)
