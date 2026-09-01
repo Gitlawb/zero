@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -299,10 +301,12 @@ func recoverBundleDir(dir string, logf func(string, ...any)) {
 	// One link can have several staged backups: a cleanup that could not finish
 	// leaves one behind, and a later crash adds another. Newest first, so the
 	// tree that comes back is the most recent one rather than whichever the
-	// directory happened to list first. The order comes from the stamp the
-	// extract wrote into the staging name, not from a directory mtime: mtimes
-	// track a tree's contents, and a coarse filesystem gives two of them the
-	// same value anyway.
+	// directory happened to list first. The order comes from the sequence the
+	// extract allocated against the entries already in the directory, not from a
+	// wall clock and not from a directory mtime. A clock can move backward and
+	// invert two stamps; an extract that read an existing entry always numbers
+	// above it. Mtimes stay rejected for their own reasons: they track a tree's
+	// contents, and a coarse filesystem gives two of them the same value anyway.
 	staged := make([]stagedExtract, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), stagingPrefix) {
@@ -357,7 +361,10 @@ type stagedExtract struct {
 	stamped bool
 }
 
-// stagingStamp reads back the creation time extractBundle put in a staging name.
+// stagingStamp reads back the ordering stamp extractBundle put in a staging
+// name. New names carry a per-directory sequence; names written by released
+// versions carry wall-clock nanoseconds. Both are plain int64s and compare the
+// same way, which is what lets one directory hold a mix of them.
 func stagingStamp(name string) (int64, bool) {
 	digits, _, found := strings.Cut(strings.TrimPrefix(name, stagingPrefix), "-")
 	if !found {
@@ -368,6 +375,86 @@ func stagingStamp(name string) (int64, bool) {
 		return 0, false
 	}
 	return stamp, true
+}
+
+// stagingSeqSuffix closes a sequenced staging name. The parsers cut on the first
+// '-' after the digits, so a name that ends at the digits reads back as
+// unstamped, which is silent: an unstamped entry sorts last and is always
+// retained, so the ordering key would simply stop existing with nothing failing.
+// os.MkdirTemp used to supply this separator with its random suffix.
+const stagingSeqSuffix = "-seq"
+
+// stagingSeqAttempts bounds the walk up from a taken number, in the spirit of
+// the retry limit os.MkdirTemp applies to its own random names.
+const stagingSeqAttempts = 10000
+
+// nextStagingSeq is the number a new staging dir should claim: one past the
+// highest already in the directory. That is what makes the order survive a
+// clock that moves backward. An extract that reads an existing entry always
+// allocates above it, and no clock correction can invert that, whereas the
+// wall-clock stamp this replaces inverted whenever the clock did.
+//
+// Kept backups count. parkKeptBackup derives the parked name from the staging
+// name, so a number handed out twice makes the second park land on an occupied
+// name; that rename refuses, the backup stays under stagingPrefix, and the next
+// pass deletes it as superseded. Counting kept names keeps a parked number out
+// of circulation. Recovery still does not enumerate them.
+func nextStagingSeq(dir string) (int64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	var high int64
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, keptPrefix) {
+			name = stagingPrefix + strings.TrimPrefix(name, keptPrefix)
+		}
+		if stamp, ok := stagingStamp(name); ok && stamp > high {
+			high = stamp
+		}
+	}
+	if high == math.MaxInt64 {
+		// The addition below would wrap negative, and %020d of a negative
+		// renders a '-' the parser reads as empty digits, so the entry would
+		// drop out of the ordering without saying so. Refuse instead.
+		return 0, fmt.Errorf("remote: %s holds a staging name at the maximum sequence; remove it before extracting again", dir)
+	}
+	return high + 1, nil
+}
+
+// createSequencedStagingDir claims the first free name from n upward. Exclusive
+// creation is what arbitrates: two extracts racing in one directory cannot both
+// win a name, and the loser walks up to a number strictly above the winner's.
+func createSequencedStagingDir(dir string, n int64) (string, error) {
+	if n < 1 {
+		return "", fmt.Errorf("remote: refusing to allocate staging sequence %d", n)
+	}
+	for i := 0; i < stagingSeqAttempts; i++ {
+		name := fmt.Sprintf("%s%020d%s", stagingPrefix, n, stagingSeqSuffix)
+		// The writer and the reader agree on the format or nothing is written.
+		// Checking here rather than trusting the format string is what keeps a
+		// silently unstamped name from reaching disk.
+		if stamp, ok := stagingStamp(name); !ok || stamp != n {
+			return "", fmt.Errorf("remote: staging name %q does not read back as sequence %d", name, n)
+		}
+		path := filepath.Join(dir, name)
+		err := os.Mkdir(path, 0o700)
+		if err == nil {
+			return path, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		if n == math.MaxInt64 {
+			return "", fmt.Errorf("remote: staging sequence exhausted in %s", dir)
+		}
+		n++
+	}
+	return "", fmt.Errorf("remote: could not claim a staging name in %s after %d attempts", dir, stagingSeqAttempts)
 }
 
 // restoreStagedBackup puts a staged backup back if its link has no live tree.
@@ -475,9 +562,18 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	}
 	defer unlockFile()
 
-	// The stamp records this extract's place in the order, which is what lets
-	// recovery tell an older leftover staging dir from a newer one.
-	staging, err := os.MkdirTemp(parent, fmt.Sprintf("%s%020d-*", stagingPrefix, time.Now().UnixNano()))
+	// The sequence records this extract's place in the order, which is what lets
+	// recovery tell an older leftover staging dir from a newer one. It is one
+	// past the highest number already in the directory, claimed by exclusive
+	// creation, so a concurrent extract for another link cannot take the same
+	// value and a clock that moves backward cannot invert the order. Numbers
+	// written by released versions are wall-clock nanoseconds; seeding from the
+	// highest present keeps those sorting older with no migration step.
+	seq, err := nextStagingSeq(parent)
+	if err != nil {
+		return err
+	}
+	staging, err := createSequencedStagingDir(parent, seq)
 	if err != nil {
 		return err
 	}
