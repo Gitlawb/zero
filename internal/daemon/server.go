@@ -29,6 +29,12 @@ type Server struct {
 	// verify the unavoidable AF_UNIX pathname bind still names the same object.
 	runtimeRoot *os.Root
 	runtimeDir  string
+	// socketRoot captures the directory that actually received the pathname
+	// bind. It can differ from runtimeRoot only when the configured directory is
+	// exchanged in the final pre-bind window; retaining it makes rollback target
+	// the socket that was really created rather than re-resolving the pathname.
+	socketRoot *os.Root
+	socketName string
 	// statusRoot binds status publication and shutdown cleanup to the same
 	// directory object. statusCommitted is set only after this server publishes
 	// its document, so a failed startup never removes a previous daemon's status.
@@ -59,7 +65,8 @@ type ServerOptions struct {
 	replaceStatusFile    func(root *os.Root, src, dst string) error
 	syncStatusParent     func(root *os.Root) error
 	afterRuntimeRootOpen func() // test hook at the default-root trust boundary
-	beforeSocketBind     func() // test hook after rooted lock acquisition
+	beforeSocketBind     func() // test hook before the final root verification
+	afterSocketPreflight func() // test hook in the unavoidable pathname-bind window
 }
 
 // NewServer validates options and builds a Server.
@@ -151,6 +158,9 @@ func (s *Server) Serve() error {
 		if err := runtimeRootStillNamesPath(s.runtimeRoot, s.runtimeDir); err != nil {
 			return err
 		}
+		if s.opts.afterSocketPreflight != nil {
+			s.opts.afterSocketPreflight()
+		}
 	} else {
 		_ = os.Remove(s.opts.Paths.Socket)
 	}
@@ -163,6 +173,13 @@ func (s *Server) Serve() error {
 	s.listener = listener
 	s.mu.Unlock()
 	if s.runtimeRoot != nil {
+		boundRoot, boundName, err := captureBoundSocketRoot(s.opts.Paths.Socket)
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("daemon: capture bound control socket: %w", err)
+		}
+		s.socketRoot = boundRoot
+		s.socketName = boundName
 		if err := runtimeRootStillNamesPath(s.runtimeRoot, s.runtimeDir); err != nil {
 			return err
 		}
@@ -260,7 +277,11 @@ func (s *Server) cleanup() {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
-	if s.runtimeRoot != nil {
+	if s.socketRoot != nil {
+		if err := s.socketRoot.Remove(s.socketName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logf("daemon: remove control socket: %v", err)
+		}
+	} else if s.runtimeRoot != nil {
 		if err := s.runtimeRoot.Remove(filepath.Base(s.opts.Paths.Socket)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			s.logf("daemon: remove control socket: %v", err)
 		}
@@ -288,6 +309,12 @@ func (s *Server) hardenSocket() error {
 }
 
 func (s *Server) closeRuntimeRoots() {
+	if s.socketRoot != nil {
+		if err := s.socketRoot.Close(); err != nil {
+			s.logf("daemon: close bound socket directory: %v", err)
+		}
+	}
+	s.socketRoot = nil
 	if s.statusRoot != nil && s.statusRoot != s.runtimeRoot {
 		if err := s.statusRoot.Close(); err != nil {
 			s.logf("daemon: close status directory: %v", err)

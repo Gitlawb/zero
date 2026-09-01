@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -148,6 +149,57 @@ func TestServeKeepsDefaultRootBoundAcrossCoordination(t *testing.T) {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("substitute runtime entry %s was touched: %v", path, err)
 		}
+	}
+}
+
+func TestServeRemovesSocketBoundAfterFinalRuntimeSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows may deny renaming a directory with an open AF_UNIX lifecycle handle")
+	}
+	home, err := os.MkdirTemp("/tmp", "zero-bind-swap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(paths.Socket)
+	moved := filepath.Join(home, "trusted-runtime")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	srv.opts.afterSocketPreflight = func() {
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = srv.Serve()
+	if err == nil || !strings.Contains(err.Error(), "changed after it was secured") {
+		t.Fatalf("Serve error = %v, want post-bind runtime replacement rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, filepath.Base(paths.Lock))); err != nil {
+		t.Fatalf("rooted lock was not retained in the trusted directory: %v", err)
+	}
+	if _, err := os.Lstat(paths.Socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("substitute runtime retained stale socket: %v", err)
+	}
+	listener, err := net.Listen("unix", paths.Socket)
+	if err != nil {
+		t.Fatalf("substitute runtime remained unbindable after rollback: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
