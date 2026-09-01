@@ -165,7 +165,6 @@ func shouldReconnect(ctx context.Context, err error) bool {
 // connection was lost. Issue #973 names WSAECONNABORTED / connection reset /
 // unexpected stream EOF.
 var midStreamAbortNeedles = []string{
-	"eof",
 	"unexpected end",
 	"connection reset",
 	"broken pipe",
@@ -192,12 +191,37 @@ func isMidStreamTransportAbort(message string) bool {
 	if errhint.HasStatusCode(lowered, "500", "502", "503", "504") {
 		return false
 	}
+	if containsWordBoundary(lowered, "eof") {
+		return true
+	}
 	for _, needle := range midStreamAbortNeedles {
 		if strings.Contains(lowered, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+func containsWordBoundary(text, word string) bool {
+	start := 0
+	for {
+		idx := strings.Index(text[start:], word)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		endPos := pos + len(word)
+		leftBoundary := pos == 0 || !isAlphaNumByte(text[pos-1])
+		rightBoundary := endPos == len(text) || !isAlphaNumByte(text[endPos])
+		if leftBoundary && rightBoundary {
+			return true
+		}
+		start = pos + 1
+	}
+}
+
+func isAlphaNumByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // backoffFor is the deterministic exponential base delay for a 1-based attempt,

@@ -362,10 +362,65 @@ func TestIsMidStreamTransportAbort(t *testing.T) {
 		"dial tcp 10.0.0.1:443: connect: connection refused",
 		"i/o timeout",
 		"504 Gateway Timeout",
+		"provider request error: request does not satisfy oneOf schema",
+		"schema error: property oneOf is invalid",
 	}
 	for _, m := range notAborts {
 		if isMidStreamTransportAbort(m) {
 			t.Fatalf("must NOT classify as mid-stream transport abort: %q", m)
 		}
+	}
+}
+
+func TestRunDoesNotRetryApplicationErrorContainingEOFSubstring(t *testing.T) {
+	p := &midStreamAbortProvider{
+		abortBefore: 1,
+		abortError:  "provider request error: request does not satisfy oneOf schema",
+	}
+	var notices string
+	opts := Options{
+		Registry:    tools.NewRegistry(),
+		OnReasoning: func(s string) { notices += s },
+	}
+	_, err := Run(context.Background(), "go", p, opts)
+	if err == nil {
+		t.Fatal("expected application error, got nil")
+	}
+	if got := atomic.LoadInt32(&p.calls); got != 1 {
+		t.Fatalf("application error with 'oneOf' must not retry (got %d calls, want 1)", got)
+	}
+	if notices != "" {
+		t.Fatalf("expected no reconnect notices, got %q", notices)
+	}
+	if !strings.Contains(err.Error(), "oneOf") {
+		t.Fatalf("expected original error preserved, got %v", err)
+	}
+}
+
+func TestRunRetriesMidStreamUnexpectedEOF(t *testing.T) {
+	defer func(orig time.Duration) { streamReconnectBase = orig }(streamReconnectBase)
+	streamReconnectBase = time.Millisecond
+	p := &midStreamAbortProvider{
+		abortBefore: 1,
+		abortError:  "provider stream error: unexpected EOF",
+	}
+	var notices string
+	opts := Options{
+		Registry:    tools.NewRegistry(),
+		OnReasoning: func(s string) { notices += s },
+	}
+	result, err := Run(context.Background(), "go", p, opts)
+	if err != nil {
+		t.Fatalf("unexpected EOF should retry to success, got %v", err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q, want %q", result.FinalAnswer, "done")
+	}
+	if got := atomic.LoadInt32(&p.calls); got != 2 {
+		t.Fatalf("want 2 calls (1 abort + 1 retry), got %d", got)
+	}
+	lower := strings.ToLower(notices)
+	if !strings.Contains(lower, "connection lost") || !strings.Contains(lower, "reconnecting") {
+		t.Fatalf("expected reconnect notice, got %q", notices)
 	}
 }
