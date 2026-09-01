@@ -35,6 +35,29 @@ func isDriveLetter(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
+// isDriveAbsoluteWindowsPath reports whether path begins with a drive letter and
+// a directory separator (e.g. C:\foo or C:/foo).
+func isDriveAbsoluteWindowsPath(path string) bool {
+	raw := strings.TrimSpace(path)
+	if len(raw) >= 3 && raw[1] == ':' && isDriveLetter(raw[0]) {
+		return raw[2] == '/' || raw[2] == '\\'
+	}
+	return false
+}
+
+// isDriveRelativeWindowsPath reports whether path begins with a drive letter
+// without a directory separator (e.g. C:foo or C:), which designates a drive-relative
+// path on Windows rather than an absolute path.
+func isDriveRelativeWindowsPath(path string) bool {
+	raw := strings.TrimSpace(path)
+	if len(raw) >= 2 && raw[1] == ':' && isDriveLetter(raw[0]) {
+		if len(raw) == 2 || (raw[2] != '/' && raw[2] != '\\') {
+			return true
+		}
+	}
+	return false
+}
+
 // isAbsForGOOS reports whether path is absolute on goos, independently of the
 // host. Non-Windows goos treats a leading "/" as absolute rather than calling
 // host filepath.IsAbs. On Windows a POSIX leading "/" is not absolute (no
@@ -47,15 +70,16 @@ func isAbsForGOOS(goos, path string) bool {
 	if path == "" {
 		return false
 	}
-	n := filepath.ToSlash(path)
+	raw := strings.TrimSpace(path)
+	n := filepath.ToSlash(raw)
 	if strings.HasPrefix(n, "//") {
 		return true
 	}
-	if len(path) >= 2 && path[1] == ':' && isDriveLetter(path[0]) {
+	if isDriveAbsoluteWindowsPath(raw) {
 		return true
 	}
 	// Volume-relative Windows abs uses a leading backslash, not POSIX "/".
-	return path[0] == '\\'
+	return raw[0] == '\\'
 }
 
 // joinAgainstRoot joins target onto root using goos path rules. Windows

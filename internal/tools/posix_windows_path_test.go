@@ -583,3 +583,109 @@ func errorMustNotNameWorkspaceRoot(t *testing.T, msg, root string) {
 		}
 	}
 }
+
+func TestWindowsPathCategoriesResolution(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "child.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Drive-relative paths must be rejected without retargeting.
+	driveRelativeCases := []string{
+		"C:file.txt",
+		"C:",
+		"C:sub/child.txt",
+		"C:sub\\child.txt",
+		"d:other.txt",
+	}
+	for _, p := range driveRelativeCases {
+		t.Run("drive-relative "+p, func(t *testing.T) {
+			_, _, err := resolveWorkspacePathForGOOS("windows", root, p)
+			if err == nil {
+				t.Fatalf("expected error for drive-relative path %q, got nil", p)
+			}
+			if !strings.Contains(err.Error(), "must stay inside the workspace") {
+				t.Fatalf("expected outside workspace error for %q, got %v", p, err)
+			}
+
+			_, _, err = resolveWorkspaceTargetPathForGOOS("windows", root, p)
+			if err == nil {
+				t.Fatalf("expected target error for drive-relative path %q, got nil", p)
+			}
+			if !strings.Contains(err.Error(), "must stay inside the workspace") {
+				t.Fatalf("expected outside workspace error for target %q, got %v", p, err)
+			}
+		})
+	}
+
+	// 2. Ordinary relative paths must resolve within root.
+	relCases := []struct {
+		input   string
+		wantRel string
+	}{
+		{"file.txt", "file.txt"},
+		{"./file.txt", "file.txt"},
+		{"sub/child.txt", "sub/child.txt"},
+		{filepath.Join("sub", "child.txt"), "sub/child.txt"},
+	}
+	for _, tc := range relCases {
+		t.Run("relative "+tc.input, func(t *testing.T) {
+			target, rel, err := resolveWorkspacePathForGOOS("windows", root, tc.input)
+			if err != nil {
+				t.Fatalf("resolve error for %q: %v", tc.input, err)
+			}
+			if rel != tc.wantRel {
+				t.Fatalf("rel = %q, want %q", rel, tc.wantRel)
+			}
+			if target != filepath.Join(root, filepath.FromSlash(tc.wantRel)) {
+				t.Fatalf("target = %q, want joined path", target)
+			}
+		})
+	}
+
+	// 3. Synthetic POSIX path including workspace basename.
+	posixCases := []struct {
+		input   string
+		wantRel string
+	}{
+		{"/home/alice/zero/file.txt", "file.txt"},
+		{"/Users/alice/zero/sub/child.txt", "sub/child.txt"},
+		{"/tmp/zero/file.txt", "file.txt"},
+		{"/var/tmp/zero/sub/child.txt", "sub/child.txt"},
+	}
+	for _, tc := range posixCases {
+		t.Run("synthetic posix "+tc.input, func(t *testing.T) {
+			target, rel, err := resolveWorkspacePathForGOOS("windows", root, tc.input)
+			if err != nil {
+				t.Fatalf("resolve error for %q: %v", tc.input, err)
+			}
+			if rel != tc.wantRel {
+				t.Fatalf("rel = %q, want %q", rel, tc.wantRel)
+			}
+			if target != filepath.Join(root, filepath.FromSlash(tc.wantRel)) {
+				t.Fatalf("target = %q, want joined path", target)
+			}
+		})
+	}
+
+	// 4. UNC / rooted current-drive / outside absolute paths must be rejected.
+	outsideCases := []string{
+		"//unc-server/share/file.txt",
+		`\\unc-server\share\file.txt`,
+		`\Windows\System32\cmd.exe`,
+	}
+	for _, p := range outsideCases {
+		t.Run("outside "+p, func(t *testing.T) {
+			_, _, err := resolveWorkspacePathForGOOS("windows", root, p)
+			if err == nil {
+				t.Fatalf("expected error for outside path %q, got nil", p)
+			}
+		})
+	}
+}
