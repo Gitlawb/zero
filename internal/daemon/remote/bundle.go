@@ -405,7 +405,7 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 		// is what makes the backup superseded -- not a timestamp comparison,
 		// which two directories can tie on and which tracks a tree's contents
 		// rather than when it was promoted.
-		if from, ours := restored[dest]; ours && !(s.stamped && from.stamped && s.stamp < from.stamp) {
+		if from, ours := restored[dest]; ours && (!s.stamped || !from.stamped || s.stamp >= from.stamp) {
 			// dest is a tree THIS pass put back, so nothing published over this
 			// backup and the reasoning above does not apply. Without an order
 			// both names agree on, which of the two is current is unknown.

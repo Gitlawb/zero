@@ -639,7 +639,14 @@ func TestEnsureLocalEngineRecoversARealInterruptedPromotionOffline(t *testing.T)
 // '[' is the one that silently matches nothing -- must not cost a user the
 // install recovery exists to put back.
 func TestRestoreInterruptedPromotionFindsHoldersUnderAnAwkwardPath(t *testing.T) {
-	for _, dirName := range []string{"plain", "wei[rd", "sta*r", "que?ry", "br]ack"} {
+	dirNames := []string{"plain", "wei[rd", "br]ack"}
+	if runtime.GOOS != "windows" {
+		// Windows refuses these two in a filename outright, so there is no such
+		// path to defend there. The bracket cases above still cover the
+		// metacharacter that matches nothing instead of failing.
+		dirNames = append(dirNames, "sta*r", "que?ry")
+	}
+	for _, dirName := range dirNames {
 		t.Run(dirName, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), dirName)
 			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
