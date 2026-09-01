@@ -561,34 +561,38 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	profile, _ := plan["permissionProfile"].(map[string]any)
 	fileSystem, _ := profile["fileSystem"].(map[string]any)
 	wantDenyRead := []string(nil)
-	credentialHome := emptyHome
 	if runtime.GOOS != "windows" {
-		if resolved, err := filepath.EvalSymlinks(emptyHome); err == nil {
-			credentialHome = resolved
+		homes := []string{emptyHome}
+		if resolved, err := filepath.EvalSymlinks(emptyHome); err == nil && resolved != emptyHome {
+			homes = append(homes, resolved)
 		}
-		wantDenyRead = []string{
-			filepath.Join(credentialHome, ".aws"),
-			filepath.Join(credentialHome, ".azure"),
-			filepath.Join(credentialHome, ".gnupg"),
-			filepath.Join(credentialHome, ".ssh", "id_rsa"),
-			filepath.Join(credentialHome, ".ssh", "id_dsa"),
-			filepath.Join(credentialHome, ".ssh", "id_ecdsa"),
-			filepath.Join(credentialHome, ".ssh", "id_ed25519"),
-			filepath.Join(credentialHome, ".ssh", "id_ecdsa_sk"),
-			filepath.Join(credentialHome, ".ssh", "id_ed25519_sk"),
-			// git's cleartext credential stores, in both the home and XDG
-			// layouts (#816). Listed here so the exported policy JSON is what
-			// catches a regression: this baseline is the contract a user reads
-			// with `zero sandbox policy --json`.
-			filepath.Join(credentialHome, ".git-credentials"),
-			filepath.Join(credentialHome, ".config", "git", "credentials"),
-			filepath.Join(credentialHome, ".npmrc"),
-			filepath.Join(credentialHome, ".netrc"),
-			filepath.Join(credentialHome, ".kube", "config"),
-			filepath.Join(credentialHome, ".docker", "config.json"),
-			filepath.Join(credentialHome, ".config", "gh", "hosts.yml"),
-			filepath.Join(credentialHome, ".config", "gcloud"),
-			filepath.Join(credentialHome, ".config", "zero"),
+		for _, credentialHome := range homes {
+			for _, rel := range []string{
+				".aws",
+				".azure",
+				".gnupg",
+				filepath.Join(".ssh", "id_rsa"),
+				filepath.Join(".ssh", "id_dsa"),
+				filepath.Join(".ssh", "id_ecdsa"),
+				filepath.Join(".ssh", "id_ed25519"),
+				filepath.Join(".ssh", "id_ecdsa_sk"),
+				filepath.Join(".ssh", "id_ed25519_sk"),
+				// git's cleartext credential stores, in both the home and XDG
+				// layouts (#816). Listed here so the exported policy JSON is what
+				// catches a regression: this baseline is the contract a user reads
+				// with `zero sandbox policy --json`.
+				".git-credentials",
+				filepath.Join(".config", "git", "credentials"),
+				".npmrc",
+				".netrc",
+				filepath.Join(".kube", "config"),
+				filepath.Join(".docker", "config.json"),
+				filepath.Join(".config", "gh", "hosts.yml"),
+				filepath.Join(".config", "gcloud"),
+				filepath.Join(".config", "zero"),
+			} {
+				wantDenyRead = append(wantDenyRead, filepath.Join(credentialHome, rel))
+			}
 		}
 	}
 	gotDenyRead := jsonStringSlice(fileSystem["denyReadIfExists"])
@@ -600,18 +604,30 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	wantCarveouts := []string(nil)
 	wantEnsureDirs := []string(nil)
 	if runtime.GOOS != "windows" {
-		zeroDir := filepath.Join(credentialHome, ".config", "zero")
-		wantCarveouts = []string{
-			filepath.Join(zeroDir, "plugins"),
-			filepath.Join(zeroDir, "specialists"),
-			filepath.Join(zeroDir, "commands"),
+		homes := []string{emptyHome}
+		if resolved, err := filepath.EvalSymlinks(emptyHome); err == nil && resolved != emptyHome {
+			homes = append(homes, resolved)
 		}
-		wantEnsureDirs = []string{zeroDir}
+		for _, credentialHome := range homes {
+			zeroDir := filepath.Join(credentialHome, ".config", "zero")
+			wantCarveouts = append(wantCarveouts,
+				filepath.Join(zeroDir, "plugins"),
+				filepath.Join(zeroDir, "specialists"),
+				filepath.Join(zeroDir, "commands"),
+			)
+			wantEnsureDirs = append(wantEnsureDirs, zeroDir)
+		}
 	}
-	if gotCarveouts := jsonStringSlice(fileSystem["denyReadCarveouts"]); !reflect.DeepEqual(gotCarveouts, wantCarveouts) {
+	gotCarveouts := jsonStringSlice(fileSystem["denyReadCarveouts"])
+	sort.Strings(gotCarveouts)
+	sort.Strings(wantCarveouts)
+	if !reflect.DeepEqual(gotCarveouts, wantCarveouts) {
 		t.Fatalf("manager credential carveouts = %#v, want %#v", gotCarveouts, wantCarveouts)
 	}
-	if gotEnsureDirs := jsonStringSlice(fileSystem["ensureDenyReadDirs"]); !reflect.DeepEqual(gotEnsureDirs, wantEnsureDirs) {
+	gotEnsureDirs := jsonStringSlice(fileSystem["ensureDenyReadDirs"])
+	sort.Strings(gotEnsureDirs)
+	sort.Strings(wantEnsureDirs)
+	if !reflect.DeepEqual(gotEnsureDirs, wantEnsureDirs) {
 		t.Fatalf("manager credential ensure dirs = %#v, want %#v", gotEnsureDirs, wantEnsureDirs)
 	}
 	delete(fileSystem, "denyReadIfExists")

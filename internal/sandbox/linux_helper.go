@@ -630,7 +630,7 @@ func appendUnreadableLinuxDirArgs(args []string, path string, carveouts []string
 	// --remount-ro, which is what freezes the tmpfs.
 	args = append(args, "--perms", "111", "--tmpfs", path)
 	for _, carveout := range nested {
-		if info, err := os.Lstat(carveout); err == nil && info.IsDir() {
+		if info, err := os.Lstat(carveout); err == nil && info.Mode()&os.ModeSymlink == 0 {
 			args = append(args, "--ro-bind", carveout, carveout)
 		}
 	}
@@ -656,7 +656,7 @@ func linuxCredentialParentSafeToTmpfs(parent string, writeRoots []WritableRoot) 
 	}
 	for _, wr := range writeRoots {
 		root := filepath.Clean(strings.TrimSpace(wr.Root))
-		if root != "" && parent == root {
+		if root != "" && (parent == root || pathWithinRoot(parent, root) || pathWithinRoot(root, parent)) {
 			return false
 		}
 	}

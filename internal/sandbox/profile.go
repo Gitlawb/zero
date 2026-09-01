@@ -883,10 +883,10 @@ func normalizeCredentialCarveoutPath(entry string) string {
 		return ""
 	}
 	// A missing fixed subtree may be installed later by trusted host code, but
-	// an existing entry must be a real directory. In particular, never turn a
-	// plugins symlink into an allow rule for its credential-file target.
+	// an existing entry must be a real directory or regular file. Never turn a
+	// symlink into an allow rule for its credential target.
 	if info, err := os.Lstat(carveout); err == nil {
-		if !info.IsDir() {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return ""
 		}
 	} else if !os.IsNotExist(err) {
