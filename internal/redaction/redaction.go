@@ -99,21 +99,18 @@ func ctrlJoin(parts ...string) string {
 	return strings.Join(parts, ctrlGap)
 }
 
-// secretBody keeps gaps strictly between the minimum required body characters.
-// Once an unbounded shape has reached that high-confidence minimum, its
-// optional tail stays contiguous: a later control is a suffix delimiter rather
-// than permission to absorb the following token into the secret (which could
-// feed unrelated suffix text into the OpenAI kebab-case exception).
+// secretBody generates a regex matching at least minimum body characters,
+// allowing C0/C1 control gaps between any characters. It always starts and ends
+// on a class character (never on a gap).
 func secretBody(class string, minimum int, unbounded bool) string {
 	if minimum <= 0 {
 		return ""
 	}
 	quantifier := strconv.Itoa(minimum - 1)
-	body := class + `(?:` + ctrlGap + class + `){` + quantifier + `}`
 	if unbounded {
-		body += class + `*`
+		return class + `(?:` + ctrlGap + class + `){` + quantifier + `,}`
 	}
-	return body
+	return class + `(?:` + ctrlGap + class + `){` + quantifier + `}`
 }
 
 // openaiKeyPattern mirrors secrets.Scan's broad sk- body. Known OpenAI
@@ -362,26 +359,60 @@ func RedactString(value string, options Options) string {
 	// leaving a recognizable credential suffix behind.
 	for _, pattern := range textSecretPatterns {
 		redacted = pattern.ReplaceAllStringFunc(redacted, func(match string) string {
-			if !validSecretControlGaps(match) {
-				return match
-			}
-			return replacement
+			return redactMatchedPattern(match, pattern, replacement, nil)
 		})
 	}
 	// Apply the broad OpenAI shape after specialized keys so its kebab-case
 	// false-positive filter considers only the matched key, never suffix text.
 	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !validSecretControlGaps(match) {
-			return match
-		}
-		normalized := stripControlBytes(match)
-		if !knownOpenAIKeyPrefix(normalized) && !secretMatchHasDigit(normalized) &&
-			strings.Contains(strings.TrimPrefix(normalized, "sk-"), "-") {
-			return match
-		}
-		return replacement
+		return redactMatchedPattern(match, openaiKeyPattern, replacement, func(m string) bool {
+			normalized := stripControlBytes(m)
+			if !knownOpenAIKeyPrefix(normalized) && !secretMatchHasDigit(normalized) &&
+				strings.Contains(strings.TrimPrefix(normalized, "sk-"), "-") {
+				return false
+			}
+			return true
+		})
 	})
 	return redacted
+}
+
+func firstControlIndex(s string) int {
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < 0x80 {
+			if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c == 0x7F) {
+				return i
+			}
+			i++
+			continue
+		}
+		if c <= 0x9F {
+			return i
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if unicode.IsControl(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
+}
+
+func redactMatchedPattern(match string, pattern *regexp.Regexp, replacement string, isValid func(string) bool) string {
+	if !validSecretControlGaps(match) {
+		return match
+	}
+	if ctrlIdx := firstControlIndex(match); ctrlIdx >= 0 {
+		pre := match[:ctrlIdx]
+		if pattern.MatchString(pre) && (isValid == nil || isValid(pre)) {
+			return replacement + match[ctrlIdx:]
+		}
+	}
+	if isValid != nil && !isValid(match) {
+		return match
+	}
+	return replacement
 }
 
 // knownOpenAIKeyPrefix is the redaction-side twin of secrets.knownOpenAIKeyPrefix:
