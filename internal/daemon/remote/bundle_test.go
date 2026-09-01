@@ -1182,6 +1182,33 @@ func TestStagingNamesAllocateInOrderAndParse(t *testing.T) {
 	})
 }
 
+// A bundle dir's ordinary contents are the per-link work trees, and a link id is
+// whatever the uploading client sent. The allocator must read only the names it
+// owns: a link id is not a sequence, however much it looks like one.
+func TestStagingSeqIgnoresNamesItDoesNotOwn(t *testing.T) {
+	// sanitizeLinkID permits digits, '-' and letters, so every id here is one a
+	// client can actually upload under.
+	for _, id := range []string{"12345-abc", "2024-project", "09223372036854775807-seq"} {
+		t.Run(id, func(t *testing.T) {
+			if _, err := sanitizeLinkID(id); err != nil {
+				t.Fatalf("fixture is not a link id a client could send: %v", err)
+			}
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, id), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			seq, err := nextStagingSeq(dir)
+			if err != nil {
+				t.Fatalf("a link work tree must not stop the allocator: %v", err)
+			}
+			if seq != 1 {
+				t.Errorf("next sequence = %d, want 1: a link name is not a staging name", seq)
+			}
+		})
+	}
+}
+
 // The retry branch: another writer already holds the number this one started
 // from, so it walks up rather than failing or reusing.
 func TestCreateSequencedStagingDirSkipsAnOccupiedNumber(t *testing.T) {
@@ -1238,7 +1265,9 @@ func TestCreateSequencedStagingDirRefusesOutOfRange(t *testing.T) {
 // than argued: no two allocators may come away with the same name or number.
 func TestStagingSeqAllocatesDistinctValuesConcurrently(t *testing.T) {
 	dir := t.TempDir()
-	const writers = 16
+	// 128, not a smaller number: against a check-then-create allocator this
+	// detects the duplicate in every run, where 16 caught it about half the time.
+	const writers = 128
 
 	var wg sync.WaitGroup
 	paths := make([]string, writers)
@@ -1290,12 +1319,33 @@ func TestStagingDirKeepsOwnerOnlyPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requireUmaskAllowsWiderThan0700(t, dir)
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := info.Mode().Perm(); got != 0o700 {
 		t.Errorf("staging dir mode = %o, want 0700", got)
+	}
+}
+
+// requireUmaskAllowsWiderThan0700 skips when the process umask would strip the
+// group and other bits anyway. Without it this assertion is vacuous under a
+// umask of 077: a wrongly widened 0o755 comes back as 0700 and passes, so the
+// one test guarding the mode would silently stop guarding it.
+func requireUmaskAllowsWiderThan0700(t *testing.T, parent string) {
+	t.Helper()
+	control := filepath.Join(parent, ".umask-control")
+	if err := os.Mkdir(control, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(control) }()
+	info, err := os.Stat(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Skipf("umask masks a 0755 request down to %o, so this assertion cannot tell 0700 from a widened mode", info.Mode().Perm())
 	}
 }
 
