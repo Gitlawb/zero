@@ -393,9 +393,60 @@ func TestRestoreInterruptedPromotionPutsTheInstallBack(t *testing.T) {
 	}
 }
 
+// A promotion that published its install but could not remove the holder leaves
+// a complete copy of the OLD install beside a live one. Nothing else ever
+// removes it, and every later replacement adds another, so recovery reaps it.
+// The holder is filled by renaming destDir aside, so a destDir that holds
+// something means a later promotion published over this holder.
+func TestRestoreInterruptedPromotionReapsAHolderSupersededByALiveInstall(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "engine"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stranded := plantHolder(t, dest, 100, "old")
+	older := plantHolder(t, dest, 50, "older")
+
+	restoreInterruptedPromotion(dest)
+
+	// The live install is never touched. This is the assertion that matters most.
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("the live install must be left alone: got %q err %v", got, err)
+	}
+	for _, holder := range []string{stranded, older} {
+		if _, err := os.Stat(holder); !os.IsNotExist(err) {
+			t.Errorf("a holder superseded by the live install should be reaped, got %v", err)
+		}
+	}
+}
+
+// An empty destDir is not evidence that anything was published: it is a husk a
+// failed or partial promotion can leave. Reaping on its account would delete the
+// only surviving install, so the holder stays.
+func TestRestoreInterruptedPromotionKeepsAHolderWhenDestIsAnEmptyHusk(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	holder := plantHolder(t, dest, 100, "the only copy")
+
+	restoreInterruptedPromotion(dest)
+
+	got, err := os.ReadFile(filepath.Join(holder, "install", "engine"))
+	if err != nil || string(got) != "the only copy" {
+		t.Errorf("an empty dest must not cost the holder its install: got %q err %v", got, err)
+	}
+}
+
 // A holder is a leftover, never a replacement for whatever is already at destDir,
 // empty or not. os.Rename refuses an existing directory either way, so this
-// pins the behavior rather than one implementation of it.
+// pins the behavior rather than one implementation of it. What happens to the
+// holder afterwards differs by case and is asserted below.
 func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
 	for _, tc := range []struct{ name, live string }{
 		{"empty dest", ""},
@@ -431,8 +482,15 @@ func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
 			} else if err != nil || string(got) != tc.live {
 				t.Fatalf("engine = %q, err %v, want the live %q", got, err, tc.live)
 			}
-			if _, err := os.Stat(install); err != nil {
-				t.Errorf("the holder must be left intact when dest exists: %v", err)
+			// A live dest supersedes the holder and reaps it; an empty husk is
+			// no such evidence and the holder stays. Either way the assertion
+			// above stands: dest is never replaced by a holder.
+			_, err = os.Stat(install)
+			if tc.live == "" && err != nil {
+				t.Errorf("an empty dest must leave the holder intact: %v", err)
+			}
+			if tc.live != "" && !os.IsNotExist(err) {
+				t.Errorf("a live dest should reap the holder it superseded, got %v", err)
 			}
 		})
 	}
