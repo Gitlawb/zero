@@ -532,6 +532,22 @@ func TestRecheckWorkspaceWriteTargetAfterPosixRewrite(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "must not traverse symlink") {
 		t.Fatalf("expected symlink rejection, got %q", err)
 	}
+
+	// Also verify with an outer symlinked parent directory (mirroring macOS /var -> /private/var).
+	aliasParent := filepath.Join(t.TempDir(), "parent-alias")
+	if err := os.Symlink(filepath.Dir(root), aliasParent); err == nil {
+		aliasRoot := filepath.Join(aliasParent, filepath.Base(root))
+		aliasJoined := joinAgainstRoot("windows", aliasRoot, original)
+		if err := recheckWorkspaceWriteTarget(aliasRoot, aliasJoined); err != nil {
+			t.Fatalf("recheck with alias root %q should miss (path does not exist), got %v", aliasJoined, err)
+		}
+		aliasAbsolute := filepath.Join(aliasRoot, "dir", "file")
+		if err := recheckWorkspaceWriteTarget(aliasRoot, aliasAbsolute); err == nil {
+			t.Fatal("recheck with alias root must see the swapped symlink")
+		} else if !strings.Contains(err.Error(), "must not traverse symlink") {
+			t.Fatalf("expected symlink rejection with alias root, got %q", err)
+		}
+	}
 }
 
 func workspaceRootSpellings(t *testing.T, root string) []string {

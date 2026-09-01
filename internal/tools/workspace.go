@@ -189,6 +189,8 @@ func recheckWorkspaceWriteTarget(workspaceRoot string, requestedPath string) err
 		return err
 	}
 
+	target = sandbox.NormalizePrefixForRoot(target, root)
+
 	relative, err := filepath.Rel(root, target)
 	if err != nil {
 		return outsideWorkspaceError(requestedPath)
@@ -235,6 +237,7 @@ func outsideWorkspaceError(requestedPath string) error {
 // (a missing ../../path must not skip confinement) and after EvalSymlinks
 // (symlink escapes).
 func workspaceRelative(root, target, requestedPath string) (string, error) {
+	target = sandbox.NormalizePrefixForRoot(target, root)
 	relative, err := filepath.Rel(root, target)
 	if err != nil {
 		return "", outsideWorkspaceError(requestedPath)
