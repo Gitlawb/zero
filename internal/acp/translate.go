@@ -135,7 +135,11 @@ func toolResultContent(result agent.ToolResult) []ToolCallContent {
 
 func appendToolResultDiffs(content []ToolCallContent, diffs []tools.FileDiff) []ToolCallContent {
 	for _, diff := range diffs {
-		if !filepath.IsAbs(diff.Path) || (!diff.OldExists && !diff.NewExists) {
+		// ACP's diff block has no file-existence bit. A deleted file and an
+		// existing file replaced with empty content would otherwise serialize
+		// identically, so omit deletions rather than present a false truncation.
+		// ChangedFiles remains the conservative fallback for the operation.
+		if !filepath.IsAbs(diff.Path) || !diff.NewExists {
 			continue
 		}
 		newText := diff.NewText

@@ -104,11 +104,12 @@ func TestToolCallResult(t *testing.T) {
 	}
 }
 
-func TestToolCallDiffJSONPreservesRequiredEmptyNewText(t *testing.T) {
+func TestToolCallDiffJSONPreservesEmptyFilesWithoutClaimingDeletion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "empty.txt")
 	content := appendToolResultDiffs(nil, []tools.FileDiff{
 		{Path: path, OldExists: false, NewExists: true, NewText: ""},
-		{Path: path, OldExists: true, NewExists: false, OldText: ""},
+		{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: ""},
+		{Path: path, OldExists: true, NewExists: false, OldText: "before"},
 	})
 	if len(content) != 2 {
 		t.Fatalf("diff content = %#v", content)
