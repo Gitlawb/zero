@@ -31,39 +31,49 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
-	w, ok := h.(*execWorker)
-	if !ok {
-		t.Fatalf("launcher returned %T, want *execWorker", h)
-	}
-	var childPID int
+	// Phase 1: Arm generic handle cleanup immediately upon launch.
+	t.Cleanup(func() {
+		_ = h.Kill()
+		_, _ = h.Wait()
+	})
+
+	// Phase 2: Obtain descendant PID and arm direct descendant fallback before leader exits.
+	childPID := readWorkerPIDLine(t, h)
 	t.Cleanup(func() {
 		if childPID > 0 {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 		}
-		if w.cmd != nil && w.cmd.Process != nil {
-			_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGKILL)
-			_ = w.cmd.Process.Kill()
-			if w.cmd.ProcessState == nil {
-				_, _ = w.Wait()
-			}
-		}
 	})
+
+	w, ok := h.(*execWorker)
+	if !ok {
+		t.Fatalf("launcher returned %T, want *execWorker", h)
+	}
+	if w.cmd != nil && w.cmd.Process != nil {
+		leaderPID := w.cmd.Process.Pid
+		t.Cleanup(func() {
+			_ = syscall.Kill(-leaderPID, syscall.SIGKILL)
+			_ = syscall.Kill(leaderPID, syscall.SIGKILL)
+		})
+	}
+
+	// Phase 3: Setup validation — only now assert process group configuration.
 	if w.cmd.SysProcAttr == nil || !w.cmd.SysProcAttr.Setpgid || w.cmd.SysProcAttr.Pgid != 0 {
 		t.Fatal("worker was not configured as its own process-group leader")
 	}
 
-	childPID = readWorkerPIDLine(t, w)
-
-	// echo $! races ahead of exit 0. Wait until the leader is an unreaped
-	// zombie without calling Wait, so Kill exercises Darwin Getpgid ESRCH.
+	// Phase 4: Wait until leader is unreaped zombie.
 	waitUntilUnreapedZombie(t, w.cmd.Process.Pid)
 
+	// Phase 5: Production action.
 	if err := w.Kill(); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	if w.cmd.ProcessState != nil {
 		t.Fatal("Kill must not reap; Wait still owns the child")
 	}
+
+	// Phase 6: Finalization.
 	if _, err := w.Wait(); err != nil {
 		t.Fatalf("Wait after Kill: %v", err)
 	}
@@ -90,31 +100,44 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
-	w, ok := h.(*execWorker)
-	if !ok {
-		t.Fatalf("launcher returned %T, want *execWorker", h)
-	}
-	var childPID int
+	// Phase 1: Arm generic handle cleanup immediately upon launch.
+	t.Cleanup(func() {
+		_ = h.Kill()
+		_, _ = h.Wait()
+	})
+
+	// Phase 2: Obtain descendant PID and arm direct descendant fallback.
+	childPID := readWorkerPIDLine(t, h)
 	t.Cleanup(func() {
 		if childPID > 0 {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 		}
-		if w.cmd != nil && w.cmd.Process != nil {
-			_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGKILL)
-			_ = w.cmd.Process.Kill()
-			if w.cmd.ProcessState == nil {
-				_, _ = w.Wait()
-			}
-		}
 	})
+
+	w, ok := h.(*execWorker)
+	if !ok {
+		t.Fatalf("launcher returned %T, want *execWorker", h)
+	}
+	if w.cmd != nil && w.cmd.Process != nil {
+		leaderPID := w.cmd.Process.Pid
+		t.Cleanup(func() {
+			_ = syscall.Kill(-leaderPID, syscall.SIGKILL)
+			_ = syscall.Kill(leaderPID, syscall.SIGKILL)
+		})
+	}
+
+	// Phase 3: Setup validation.
 	if w.cmd.SysProcAttr == nil || !w.cmd.SysProcAttr.Setpgid || w.cmd.SysProcAttr.Pgid != 0 {
 		t.Fatal("worker was not configured as its own process-group leader")
 	}
 
-	childPID = readWorkerPIDLine(t, w)
-
+	// Phase 4: Wait until leader is unreaped zombie.
 	waitUntilUnreapedZombie(t, w.cmd.Process.Pid)
+
+	// Phase 5: Production action.
 	cancel()
+
+	// Phase 6: Finalization.
 	if _, err := w.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Wait after cancel: %v", err)
 	}
@@ -124,7 +147,7 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 	assertProcessStopped(t, childPID)
 }
 
-func readWorkerPIDLine(t *testing.T, w *execWorker) int {
+func readWorkerPIDLine(t *testing.T, h WorkerHandle) int {
 	t.Helper()
 	type res struct {
 		pid int
@@ -132,7 +155,7 @@ func readWorkerPIDLine(t *testing.T, w *execWorker) int {
 	}
 	ch := make(chan res, 1)
 	go func() {
-		line, ok, err := w.Stdout().Next()
+		line, ok, err := h.Stdout().Next()
 		if err != nil {
 			ch <- res{err: err}
 			return
