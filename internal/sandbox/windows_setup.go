@@ -145,6 +145,10 @@ func RunWindowsSandboxSetup(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 2
 	}
+	if err := windowsDenyReadRestrictedTokenUnsupportedProfile(config.PermissionProfile); err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
 	return runWindowsSandboxSetup(config, stderr)
 }
 
