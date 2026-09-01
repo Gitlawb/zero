@@ -57,8 +57,14 @@ func unsafeDiffText(text string) bool {
 // boundedUnifiedDiff returns a unified diff of oldContent -> newContent labelled
 // with path, suitable for the TUI's diff card renderer. A create (oldContent "")
 // yields an all-additions (green) preview; an overwrite/edit yields red/green.
-// Returns "" when there is no change or the diff exceeds maxToolPreviewBytes.
+// Returns "" when there is no change, either side is unsafe text, or the diff
+// exceeds maxToolPreviewBytes. This must use the same unsafe-text gate as
+// FileDiff: Display.Preview is another durable human-facing rich-diff surface.
 func boundedUnifiedDiff(path, oldContent, newContent string) string {
+	if !utf8.ValidString(oldContent) || !utf8.ValidString(newContent) ||
+		unsafeDiffText(oldContent) || unsafeDiffText(newContent) {
+		return ""
+	}
 	diff := udiff.Unified(path, path, oldContent, newContent)
 	if diff == "" || len(diff) > maxToolPreviewBytes {
 		return ""
