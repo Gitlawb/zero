@@ -382,6 +382,8 @@ func TestIsAbsForGOOS(t *testing.T) {
 		{goos: "windows", path: "//unc/share", want: true},
 		{goos: "windows", path: "relative/path", want: false},
 		{goos: "windows", path: "\\Windows\\System32", want: true},
+		{goos: "windows", path: "", want: false},
+		{goos: "windows", path: "   ", want: false},
 	}
 	for _, tt := range tests {
 		if got := isAbsForGOOS(tt.goos, tt.path); got != tt.want {
@@ -629,6 +631,7 @@ func TestWindowsPathCategoriesResolution(t *testing.T) {
 		input   string
 		wantRel string
 	}{
+		{"", "."},
 		{"file.txt", "file.txt"},
 		{"./file.txt", "file.txt"},
 		{"sub/child.txt", "sub/child.txt"},

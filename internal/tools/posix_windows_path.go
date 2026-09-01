@@ -67,10 +67,10 @@ func isAbsForGOOS(goos, path string) bool {
 	if goos != "windows" {
 		return strings.HasPrefix(filepath.ToSlash(path), "/")
 	}
-	if path == "" {
+	raw := strings.TrimSpace(path)
+	if raw == "" {
 		return false
 	}
-	raw := strings.TrimSpace(path)
 	n := filepath.ToSlash(raw)
 	if strings.HasPrefix(n, "//") {
 		return true
