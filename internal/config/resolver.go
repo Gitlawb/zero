@@ -61,6 +61,18 @@ const MaxTurnsCeiling = 500
 // (set 0 to always advertise every schema, e.g. for a model without tool_search).
 const defaultDeferThreshold = 3
 
+// defaultNotifyMode and defaultNotifyFocus are the fallback values used when
+// config.json is missing, has no notify block, or has an empty notify block.
+// both = terminal bell + OSC-9 desktop notification; unfocused = fire only
+// when the TUI window is not the active window so users looking at the prompt
+// are not spammed. The defaults make the permission-prompt alert "just work"
+// for new users; the TUI /notify command and `zero config notify` let users
+// change or opt out.
+const (
+	defaultNotifyMode  = "both"
+	defaultNotifyFocus = "unfocused"
+)
+
 func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	cfg := FileConfig{
 		MaxTurns: defaultMaxTurns,
@@ -94,6 +106,18 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	}
 
 	applyOverrides(&cfg, options.Overrides)
+
+	// Notify defaults: when the user has not configured notify (no block, or
+	// an empty block), apply the built-in defaults so the permission-prompt
+	// alert works out of the box. A user who explicitly sets notify.mode=off
+	// or notify.focusMode=focused still wins because their value is
+	// non-empty after the trim in the validation step below.
+	if strings.TrimSpace(cfg.Notify.Mode) == "" {
+		cfg.Notify.Mode = defaultNotifyMode
+	}
+	if strings.TrimSpace(cfg.Notify.FocusMode) == "" {
+		cfg.Notify.FocusMode = defaultNotifyFocus
+	}
 
 	if !cfg.Tools.deferThresholdSet && cfg.Tools.DeferThreshold == 0 {
 		cfg.Tools.DeferThreshold = defaultDeferThreshold

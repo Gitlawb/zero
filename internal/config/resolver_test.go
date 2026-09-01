@@ -1515,8 +1515,59 @@ func TestResolveNotifyDefaultEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if resolved.Notify.Mode != "" || resolved.Notify.FocusMode != "" {
-		t.Fatalf("unset notify should be empty, got %+v", resolved.Notify)
+	// Missing notify block falls back to the built-in defaults so the
+	// permission-prompt alert works for users who never ran setup.
+	if resolved.Notify.Mode != "both" {
+		t.Errorf("unset notify.mode should default to %q, got %q", "both", resolved.Notify.Mode)
+	}
+	if resolved.Notify.FocusMode != "unfocused" {
+		t.Errorf("unset notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
+	}
+}
+
+func TestResolveNotifyDefaultEmptyBlock(t *testing.T) {
+	// An explicit empty notify block should behave the same as a missing one:
+	// fall back to the built-in defaults.
+	path := writeConfig(t, `{"notify":{}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Notify.Mode != "both" {
+		t.Errorf("empty notify.mode should default to %q, got %q", "both", resolved.Notify.Mode)
+	}
+	if resolved.Notify.FocusMode != "unfocused" {
+		t.Errorf("empty notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
+	}
+}
+
+func TestResolveNotifyDefaultPartialEmpty(t *testing.T) {
+	// Only one field is set; the other should still get the default.
+	path := writeConfig(t, `{"notify":{"mode":"off"}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Notify.Mode != "off" {
+		t.Errorf("notify.mode should be preserved as %q, got %q", "off", resolved.Notify.Mode)
+	}
+	if resolved.Notify.FocusMode != "unfocused" {
+		t.Errorf("empty notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
+	}
+}
+
+func TestResolveNotifyDefaultNoConfigFile(t *testing.T) {
+	// No config file at all: defaults should still apply so the
+	// permission-prompt alert is on for first-run users.
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: "", Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Notify.Mode != "both" {
+		t.Errorf("missing config: notify.mode should default to %q, got %q", "both", resolved.Notify.Mode)
+	}
+	if resolved.Notify.FocusMode != "unfocused" {
+		t.Errorf("missing config: notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
 	}
 }
 

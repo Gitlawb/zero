@@ -968,7 +968,8 @@ func TestRunExecUsesProjectConfigAndOpenAICompatibleProvider(t *testing.T) {
 			"base_url": "` + server.URL + `",
 			"api_key": "sk-local",
 			"model": "local-model"
-		}]
+		}],
+		"notify": {"mode": "off"}
 	}`
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(writeConfig), 0o600); err != nil {
 		t.Fatal(err)

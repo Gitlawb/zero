@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/notify"
 )
 
 func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileConfig, error) {
@@ -170,6 +172,48 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	cfg.Preferences.Theme = strings.TrimSpace(theme)
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
+// SetNotify persists the TUI notification preference. Both fields are trimmed
+// and validated against the accepted vocab (mode in {off,bell,notify,both};
+// focusMode in {unfocused,always,focused}) so a bad caller cannot write a value
+// the resolver would later reject at startup. An empty Mode or FocusMode is
+// stored as-is — the resolver applies the built-in defaults at read time, so a
+// blank value means "use defaults" rather than "no notify" or "no focus rule".
+func SetNotify(path string, value NotifyConfig) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	value.Mode = strings.TrimSpace(value.Mode)
+	value.FocusMode = strings.TrimSpace(value.FocusMode)
+	if mode := value.Mode; mode != "" {
+		switch notify.Mode(mode) {
+		case notify.ModeOff, notify.ModeBell, notify.ModeNotify, notify.ModeBoth:
+		default:
+			return FileConfig{}, fmt.Errorf("invalid notify.mode %q: expected off, bell, notify, or both", mode)
+		}
+	}
+	if focus := value.FocusMode; focus != "" {
+		switch notify.FocusMode(focus) {
+		case notify.FocusUnfocused, notify.FocusAlways, notify.FocusFocused:
+		default:
+			return FileConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focus)
+		}
+	}
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg.Notify = value
 	if err := writeConfigFile(path, cfg); err != nil {
 		return FileConfig{}, err
 	}

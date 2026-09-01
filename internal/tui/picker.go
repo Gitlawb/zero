@@ -25,6 +25,7 @@ const (
 	pickerSession
 	pickerTheme
 	pickerSkill
+	pickerNotify
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
@@ -905,6 +906,32 @@ func (m model) newThemePicker() *commandPicker {
 	// allItems lets the query filter restore rows on Backspace (one-way narrowing
 	// otherwise, since applyQuery falls back to the current items without it).
 	return &commandPicker{kind: pickerTheme, title: "select theme", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
+}
+
+// newNotifyPicker lists the four (mode, focus) pairs from notifyChoices. Each
+// row's Value is the same synthetic string the text /notify handler accepts
+// ("<mode> <focus>"), so /notify with no arg and the picker share one commit
+// path through handleNotifyCommand. The currently active pair is preselected so
+// the user can press Enter to keep it. There is no live preview — notify
+// affects the next permission prompt, not the current view — so the picker
+// does not call a preview function on move.
+func (m model) newNotifyPicker() *commandPicker {
+	items := make([]pickerItem, 0, len(notifyChoices))
+	selected := 0
+	activeMode := m.notifyCurrentMode()
+	activeFocus := m.notifyCurrentFocusMode()
+	for _, c := range notifyChoices {
+		items = append(items, pickerItem{
+			Group: "When Zero needs your input",
+			Label: c.label,
+			Value: c.mode + " " + c.focusMode,
+			Meta:  c.subtitle,
+		})
+		if c.mode == activeMode && c.focusMode == activeFocus {
+			selected = len(items) - 1
+		}
+	}
+	return &commandPicker{kind: pickerNotify, title: "select notify mode", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
 }
 
 // pickerMoved advances the open picker's cursor by delta and live-previews the new

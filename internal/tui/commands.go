@@ -35,6 +35,7 @@ const (
 	commandEffort
 	commandStyle
 	commandTheme
+	commandNotify
 	commandTranscript
 	commandBash
 	commandImage
@@ -341,6 +342,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Pick a color theme (no arg opens the picker; auto detects the terminal background).",
 		kind:        commandTheme,
+	},
+	{
+		name:        "/notify",
+		usage:       "/notify [list|off|bell|notify|both [unfocused|always]]",
+		group:       commandGroupSession,
+		description: "Pick when Zero alerts you it needs input. No arg opens the picker.",
+		kind:        commandNotify,
 	},
 	{
 		name:        "/exit",

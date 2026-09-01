@@ -130,16 +130,21 @@ type model struct {
 	keyBindings        keyBindings
 	themeMode          themeMode // palette preference: auto (default), dark, light
 	hasDarkBg          bool      // last terminal background-detection result (auto mode)
-	userAgent          string
-	compactRequests    int
-	compactInFlight    bool
-	compactFrame       int
-	lastCompactResult  *CompactResult
-	lastCompactError   string
-	unpricedRequests   int
-	unpricedTokens     int
-	lastUsage          usage.Normalized
-	lastUsageSeen      bool
+	// notifyMode and notifyFocusMode track the user's in-session notify
+	// preference (from options.Notify, updated by /notify). The notifier built
+	// at startup is independent, so changes apply on the NEXT permission prompt.
+	notifyMode        string
+	notifyFocusMode   string
+	userAgent         string
+	compactRequests   int
+	compactInFlight   bool
+	compactFrame      int
+	lastCompactResult *CompactResult
+	lastCompactError  string
+	unpricedRequests  int
+	unpricedTokens    int
+	lastUsage         usage.Normalized
+	lastUsageSeen     bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -673,6 +678,20 @@ type tuiAgentRunOptions struct {
 	specDraft      bool
 }
 
+// effectiveTUINotifyMode returns the notification mode the TUI should use. An
+// empty/unconfigured mode falls back to the resolver default ("both": terminal
+// bell + OSC-9 desktop notification) so the permission-prompt alert works for
+// new users without requiring them to hand-edit config.json. The /notify
+// command persists explicit choices; the resolver applies the same default at
+// read time, so this function and the resolver always agree.
+func effectiveTUINotifyMode(mode string) notify.Mode {
+	m := notify.Mode(strings.TrimSpace(mode))
+	if m == "" {
+		return notify.ModeBoth
+	}
+	return m
+}
+
 func newModel(ctx context.Context, options Options) model {
 	if ctx == nil {
 		ctx = context.Background()
@@ -736,7 +755,7 @@ func newModel(ctx context.Context, options Options) model {
 	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
 	notifier := notify.New(os.Stderr, notify.Config{
-		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
+		Mode:      effectiveTUINotifyMode(options.Notify.Mode),
 		FocusMode: notify.FocusMode(strings.TrimSpace(options.Notify.FocusMode)),
 	})
 	// Opt-in webhook fan-out (ZERO_NOTIFY_WEBHOOK_URL). Delivery failures stay
@@ -788,6 +807,8 @@ func newModel(ctx context.Context, options Options) model {
 		keyBindings:                 resolvedKeyBindings,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
+		notifyMode:                  string(effectiveTUINotifyMode(options.Notify.Mode)),
+		notifyFocusMode:             strings.TrimSpace(options.Notify.FocusMode),
 		userAgent:                   options.UserAgent,
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
@@ -3796,6 +3817,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			// text /theme dispatch (M17).
 			return m, tea.RequestBackgroundColor
 		}
+	case pickerNotify:
+		// The picker item's Value is "<mode> <focus>"; reusing the text handler
+		// keeps validation, persistence, and the user-facing message in one
+		// place. There is no live preview for notify, so no follow-up command
+		// is needed here.
+		text := ""
+		m, text = m.handleNotifyCommand(item.Value)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, cmd
 }
@@ -4119,6 +4148,18 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			// handler re-applies the auto palette with the fresh result (M17).
 			return m, tea.RequestBackgroundColor
 		}
+		return m, nil
+	case commandNotify:
+		// Bare `/notify` opens the popup picker so the user can pick mode + focus
+		// with arrow keys, matching /model and /theme. An explicit
+		// `/notify off|bell|notify|both [unfocused|always]` runs the text handler.
+		if strings.TrimSpace(command.text) == "" {
+			m.picker = m.newNotifyPicker()
+			return m, nil
+		}
+		text := ""
+		m, text = m.handleNotifyCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)

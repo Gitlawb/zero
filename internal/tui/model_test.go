@@ -2619,6 +2619,29 @@ func TestModelNotifierFocusAndCompletion(t *testing.T) {
 	}
 }
 
+func TestEffectiveTUINotifyMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want notify.Mode
+	}{
+		// Empty input falls through to the resolver default ("both": bell +
+		// OSC-9 desktop notification) so the permission-prompt alert works
+		// for users who never configured notify.
+		{"", notify.ModeBoth},
+		{"   ", notify.ModeBoth},
+		{"off", notify.ModeOff},
+		{"bell", notify.ModeBell},
+		{"notify", notify.ModeNotify},
+		{"both", notify.ModeBoth},
+		{" bell ", notify.ModeBell},
+	}
+	for _, c := range cases {
+		if got := effectiveTUINotifyMode(c.in); got != c.want {
+			t.Errorf("effectiveTUINotifyMode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestScrimViewportLine(t *testing.T) {
 	// Blank lines are left untouched (no scrim).
 	if got := scrimViewportLine("   ", 10); got != "   " {
