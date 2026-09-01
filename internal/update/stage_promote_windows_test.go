@@ -485,6 +485,9 @@ func TestPersistFailedRestoreSignalDoesNotRelocateLiveBinary(t *testing.T) {
 		t.Fatalf("error = %v, compensation must not claim a relocation", err)
 	}
 
+	if err := live.Close(); err != nil {
+		t.Fatalf("close live recovery handle: %v", err)
+	}
 	got, readErr := os.ReadFile(targetPath)
 	if readErr != nil || string(got) != "restored-live-binary" {
 		t.Fatalf("target = %q err=%v, want the live binary left in place", got, readErr)
@@ -500,6 +503,65 @@ func TestPersistFailedRestoreSignalDoesNotRelocateLiveBinary(t *testing.T) {
 		if strings.HasSuffix(strings.ToLower(entry.Name()), ".recovery") {
 			t.Fatalf("compensation relocated an object to %s", entry.Name())
 		}
+	}
+}
+
+func TestWriteRecoveryCleanupQueuePropagatesSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	recordPath, err := recoveryCleanupRecordPath(targetPath)
+	if err != nil {
+		t.Fatalf("recoveryCleanupRecordPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(recordPath, []byte(`{"records":[]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile existing record: %v", err)
+	}
+
+	syncErr := errors.New("injected FlushFileBuffers failure")
+	originalSync := syncRecoveryCleanupFile
+	originalMove := moveRecoveryCleanupFile
+	syncRecoveryCleanupFile = func(*os.File) error { return syncErr }
+	moveCalled := false
+	moveRecoveryCleanupFile = func(*uint16, *uint16, uint32) error {
+		moveCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		syncRecoveryCleanupFile = originalSync
+		moveRecoveryCleanupFile = originalMove
+	})
+
+	err = writeRecoveryCleanupQueue(targetPath, recoveryCleanupQueue{Records: []recoveryCleanupRecord{{Path: "unpublished"}}})
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("writeRecoveryCleanupQueue error = %v, want sync failure", err)
+	}
+	if moveCalled {
+		t.Fatal("recovery record was replaced after its content flush failed")
+	}
+	got, readErr := os.ReadFile(recordPath)
+	if readErr != nil || string(got) != `{"records":[]}` {
+		t.Fatalf("record after sync failure = %q err=%v, want prior durable state", got, readErr)
+	}
+}
+
+func TestReplaceRecoveryCleanupFileUsesWriteThrough(t *testing.T) {
+	originalMove := moveRecoveryCleanupFile
+	var gotFlags uint32
+	moveRecoveryCleanupFile = func(_ *uint16, _ *uint16, flags uint32) error {
+		gotFlags = flags
+		return nil
+	}
+	t.Cleanup(func() { moveRecoveryCleanupFile = originalMove })
+
+	if err := replaceRecoveryCleanupFile(`C:\\state\\record.tmp`, `C:\\state\\record.json`); err != nil {
+		t.Fatalf("replaceRecoveryCleanupFile: %v", err)
+	}
+	wantFlags := uint32(windows.MOVEFILE_REPLACE_EXISTING | windows.MOVEFILE_WRITE_THROUGH)
+	if gotFlags != wantFlags {
+		t.Fatalf("MoveFileEx flags = %#x, want %#x", gotFlags, wantFlags)
 	}
 }
 

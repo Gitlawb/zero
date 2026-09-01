@@ -522,6 +522,19 @@ func unresolvedRecordedRecoveryPaths(targetPath string) ([]string, error) {
 	return paths, nil
 }
 
+var (
+	syncRecoveryCleanupFile = (*os.File).Sync
+	moveRecoveryCleanupFile = windows.MoveFileEx
+)
+
+func replaceRecoveryCleanupFile(sourcePath string, targetPath string) error {
+	return moveRecoveryCleanupFile(
+		windows.StringToUTF16Ptr(sourcePath),
+		windows.StringToUTF16Ptr(targetPath),
+		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
+	)
+}
+
 func writeRecoveryCleanupQueue(targetPath string, queue recoveryCleanupQueue) error {
 	data, err := json.Marshal(queue)
 	if err != nil {
@@ -549,10 +562,18 @@ func writeRecoveryCleanupQueue(targetPath string, queue recoveryCleanupQueue) er
 		_ = temporary.Close()
 		return err
 	}
+	// This queue may carry an unresolved fail-closed promotion signal, not merely
+	// an advisory cleanup backlog. Flush its complete contents before publishing,
+	// then use Windows' write-through replacement so success is not reported in
+	// the crash window between the namespace update and durable storage.
+	if err := syncRecoveryCleanupFile(temporary); err != nil {
+		_ = temporary.Close()
+		return err
+	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporaryPath, recordPath)
+	return replaceRecoveryCleanupFile(temporaryPath, recordPath)
 }
 
 type fileDispositionInfo struct {
