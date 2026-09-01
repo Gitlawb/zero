@@ -496,7 +496,10 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 	// A previous run may have been stopped mid-promotion, leaving the only
 	// install in a holder beside engineDir. Put it back before deciding whether
 	// anything needs downloading.
-	restoreInterruptedPromotion(engineDir)
+	restoreInterruptedPromotion(engineDir, func(dir string) bool {
+		bin, _ := resolveEnginePaths(dir, targetWindows)
+		return fileExists(bin)
+	})
 	binPath, serverPath := resolveEnginePaths(engineDir, targetWindows)
 	if !fileExists(binPath) {
 		pinned := ""
@@ -528,7 +531,7 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 	// promoteStagedDir is shared with the model, so a stop mid-promotion leaves
 	// the model in a holder too. Put it back before deciding anything is
 	// missing: without this an offline user has no download to fall back on.
-	restoreInterruptedPromotion(modelDir)
+	restoreInterruptedPromotion(modelDir, dirHasModel)
 	if !dirHasModel(modelDir) {
 		asset, err := resolveAsset(ctx, client, apiBase, modelReleaseTag, modelName, "")
 		if err != nil {
@@ -866,19 +869,29 @@ func createSequencedHolder(destDir string, n int64) (string, error) {
 // nothing else looks at. Anything already at destDir wins, and the check for it
 // is explicit rather than leaning on os.Rename refusing an existing directory.
 // Best effort by design, since the caller can still download a fresh engine.
-func restoreInterruptedPromotion(destDir string) {
+// published reports whether destDir holds an install this caller can actually
+// use. Recovery needs it because "there is something at destDir" and "a
+// promotion published there" are different claims, and only the second one
+// makes a holder beside it superseded.
+func restoreInterruptedPromotion(destDir string, published func(string) bool) {
 	if _, err := os.Lstat(destDir); err == nil {
 		// destDir is live. A holder is only ever filled by renaming destDir
-		// aside, so a destDir that holds something means a later promotion
+		// aside, so a destDir holding a USABLE install means a later promotion
 		// published over every holder beside it. Those are superseded copies of
 		// whole installs, and promoteStagedDir's cleanup is the only thing that
 		// removes them: when it fails the copy is stranded for good, and each
 		// later replacement strands another.
 		//
-		// An EMPTY destDir is not that evidence. A husk can outlive a failed or
-		// partial promotion, and reaping on its account would delete the only
-		// surviving install, so a holder beside one is left alone.
-		if dirHasEntries(destDir) {
+		// Merely non-empty is not that evidence. An empty husk, or a half
+		// populated directory left by something outside this transaction, can
+		// sit at destDir while the only usable copy is in the holder; reaping on
+		// either would delete exactly what the caller is about to need, and an
+		// offline caller has no download to fall back on. So the holder only
+		// loses to a destination that is genuinely usable.
+		//
+		// A removal that fails is left for the next call, which reaches this
+		// same branch and tries again.
+		if published != nil && published(destDir) {
 			for _, holder := range holdersBeside(destDir) {
 				_ = os.RemoveAll(holder)
 			}
@@ -915,14 +928,6 @@ func restoreInterruptedPromotion(destDir string) {
 		_ = os.RemoveAll(holder)
 		return
 	}
-}
-
-// dirHasEntries reports whether dir holds anything at all. An unreadable or
-// absent dir reads as empty, which is the conservative answer everywhere this is
-// used: it withholds the evidence a reap needs rather than supplying it.
-func dirHasEntries(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	return err == nil && len(entries) > 0
 }
 
 // holdersBeside lists the holders promoteStagedDir may have left for destDir.
