@@ -8,8 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,7 +20,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Auto-download of the local engine + a default model (opt-in, behind a confirm
@@ -765,14 +767,18 @@ func resolveEnginePaths(engineDir string, targetWindows bool) (bin, server strin
 }
 
 // holderSuffix is what promoteStagedDir appends to an install's own name for the
-// holder it sets that install aside in. The creation time goes in the name
+// holder it sets that install aside in. An ordering number goes in the name
 // because recovery has to pick the NEWEST holder when a failed cleanup left an
 // older one behind, and nothing else records that order: Glob sorts lexically
-// and a directory mtime tracks the install's contents, not its promotion.
+// and a directory mtime tracks the install's contents, not its promotion. The
+// number is one past the highest already beside this install, so a clock moving
+// backward cannot invert it the way the wall-clock stamp it replaces could.
 const holderSuffix = ".previous-"
 
-// holderStamp reads back the creation time in a holder name, reporting false for
-// a name it cannot order (one this package did not write).
+// holderStamp reads back the ordering number in a holder name, reporting false
+// for a name it cannot order (one this package did not write). New names carry a
+// per-install sequence; names written by released versions carry wall-clock
+// nanoseconds. Both compare the same way.
 func holderStamp(destDir, holder string) (int64, bool) {
 	rest := strings.TrimPrefix(filepath.Base(holder), filepath.Base(destDir)+holderSuffix)
 	digits, _, found := strings.Cut(rest, "-")
@@ -784,6 +790,74 @@ func holderStamp(destDir, holder string) (int64, bool) {
 		return 0, false
 	}
 	return stamp, true
+}
+
+// holderSeqSuffix closes a sequenced holder name. holderStamp cuts on the first
+// '-' after the digits, so a name ending at the digits reads back as unstamped,
+// which is silent: an unstamped holder sorts last and is still restorable, so
+// the ordering key would stop existing with nothing failing. os.MkdirTemp used
+// to supply this separator with its random suffix.
+const holderSeqSuffix = "-seq"
+
+// holderSeqAttempts bounds the walk up from a taken number, in the spirit of the
+// retry limit os.MkdirTemp applies to its own random names.
+const holderSeqAttempts = 10000
+
+// nextHolderSeq is the number a new holder should claim: one past the highest
+// already set aside for this install. That is what makes the order survive a
+// clock that moves backward, since a promotion that reads an existing holder
+// always allocates above it. Holders for a different install are a separate
+// sequence and are never compared against this one.
+func nextHolderSeq(destDir string) (int64, error) {
+	entries, err := os.ReadDir(filepath.Dir(destDir))
+	if err != nil {
+		return 0, err
+	}
+	prefix := filepath.Base(destDir) + holderSuffix
+	var high int64
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		if stamp, ok := holderStamp(destDir, entry.Name()); ok && stamp > high {
+			high = stamp
+		}
+	}
+	if high == math.MaxInt64 {
+		// The addition below would wrap negative, and %020d of a negative
+		// renders a '-' the parser reads as empty digits, so the holder would
+		// drop out of the ordering without saying so. Refuse instead.
+		return 0, fmt.Errorf("a previous install of %s is named at the maximum sequence; remove it before installing again", filepath.Base(destDir))
+	}
+	return high + 1, nil
+}
+
+// createSequencedHolder claims the first free holder name from n upward. Nothing
+// locks this directory, so exclusive creation is what arbitrates: two promotions
+// racing cannot both win a name, and the loser walks up above the winner.
+func createSequencedHolder(destDir string, n int64) (string, error) {
+	if n < 1 {
+		return "", fmt.Errorf("refusing to allocate holder sequence %d", n)
+	}
+	for i := 0; i < holderSeqAttempts; i++ {
+		path := fmt.Sprintf("%s%s%020d%s", destDir, holderSuffix, n, holderSeqSuffix)
+		// The writer and the reader agree on the format or nothing is written.
+		if stamp, ok := holderStamp(destDir, path); !ok || stamp != n {
+			return "", fmt.Errorf("holder name %q does not read back as sequence %d", filepath.Base(path), n)
+		}
+		err := os.Mkdir(path, 0o700)
+		if err == nil {
+			return path, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		if n == math.MaxInt64 {
+			return "", fmt.Errorf("holder sequence exhausted for %s", filepath.Base(destDir))
+		}
+		n++
+	}
+	return "", fmt.Errorf("could not claim a holder name for %s after %d attempts", filepath.Base(destDir), holderSeqAttempts)
 }
 
 // restoreInterruptedPromotion puts back an install that promoteStagedDir set
@@ -855,8 +929,12 @@ func promoteStagedDir(stageDir, destDir, label string) error {
 
 	restore := func() error { return nil }
 	if _, err := os.Lstat(destDir); err == nil {
-		holder, err = os.MkdirTemp(filepath.Dir(destDir),
-			fmt.Sprintf("%s%s%020d-*", filepath.Base(destDir), holderSuffix, time.Now().UnixNano()))
+		var seq int64
+		seq, err = nextHolderSeq(destDir)
+		if err != nil {
+			return fmt.Errorf("setting aside previous %s install: %w", label, err)
+		}
+		holder, err = createSequencedHolder(destDir, seq)
 		if err != nil {
 			return fmt.Errorf("setting aside previous %s install: %w", label, err)
 		}

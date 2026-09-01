@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1066,6 +1067,256 @@ func TestBridgeRecoversARealInterruptedExtractOnStart(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(dest, "a.txt")); err != nil || string(got) != "v3" {
 		t.Fatalf("after re-upload a.txt = %q, err %v, want %q", got, err, "v3")
 	}
+}
+
+// A backward clock leaves an OLDER backup carrying a LARGER stamp. Recovery must
+// still restore the tree that was actually live last, and must not delete it as
+// superseded on the way.
+//
+// Fixture order is load-bearing: NewBridge repairs the directory before it
+// serves, so a backup planted before the bridge starts is consumed by that first
+// pass and this test would pass without proving anything. Publish first, plant
+// second.
+func TestExtractBundleOutOrdersALeftoverStampedInTheFuture(t *testing.T) {
+	// A nanosecond stamp decades ahead, which is what a clock correction
+	// backward leaves behind on the earlier of two writes.
+	const farFuture = int64(4_000_000_000_000_000_000)
+
+	srv := newBridgeServer(t, staticLauncher())
+	auth, _ := NewTokenAuthenticator("tok")
+	bundleRoot := t.TempDir()
+	addr, ca := startBridge(t, srv, BridgeOptions{Authenticator: auth, BundleDir: bundleRoot})
+	cfg := RemoteConfig{Address: addr, Token: "tok", CACertFile: ca}
+	dest := filepath.Join(bundleRoot, "proj-1")
+
+	if _, err := UploadRepoBundle(cfg, initTestRepo(t, "a.txt", "v1"), "proj-1"); err != nil {
+		t.Fatalf("first upload: %v", err)
+	}
+
+	// Only now, with the bridge already up and its recovery pass behind us.
+	stale := stageBackup(t, bundleRoot, "old", "proj-1", "v-old", farFuture)
+
+	real := renameDir
+	renameDir = func(string, string) error { return errors.New("injected rename failure") }
+	_, err := UploadRepoBundle(cfg, initTestRepo(t, "a.txt", "v2"), "proj-1")
+	renameDir = real
+	if err == nil {
+		t.Fatal("an upload whose publish and restore both fail must report an error")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("the interrupted swap should leave dest absent, got %v", err)
+	}
+
+	recoverBundleDir(bundleRoot, nil)
+
+	// The interrupted extract set the LIVE tree aside, so v1 is what recovery
+	// owes back. The interrupted clone of v2 never reached dest.
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Errorf("recovery restored %q (err %v), want the tree that was live last, %q", got, err, "v1")
+		// Distinguish "restored the wrong one" from "restored the wrong one AND
+		// destroyed the right one", which is the data loss this test exists for.
+		if !liveTreeSurvivesSomewhere(t, bundleRoot, "v1") {
+			t.Error("the tree that was live last was deleted as superseded; no copy of it is left on disk")
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the genuinely older backup should be superseded once the newer one is restored, got %v", err)
+	}
+}
+
+// The allocator and the parser must agree, and a number already spoken for by a
+// kept backup must never come round again.
+func TestStagingNamesAllocateInOrderAndParse(t *testing.T) {
+	t.Run("counts up and parses", func(t *testing.T) {
+		dir := t.TempDir()
+		for want := int64(1); want <= 2; want++ {
+			seq, err := nextStagingSeq(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := createSequencedStagingDir(dir, seq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stamp, ok := stagingStamp(filepath.Base(path))
+			if !ok {
+				t.Fatalf("the allocator wrote a name recovery cannot order: %q", filepath.Base(path))
+			}
+			if stamp != want {
+				t.Errorf("stamp = %d, want %d", stamp, want)
+			}
+		}
+	})
+
+	// The upgrade case: a released binary wrote wall-clock nanoseconds, so
+	// seeding from the highest present is the whole migration.
+	t.Run("seeds above a legacy nanosecond name", func(t *testing.T) {
+		dir := t.TempDir()
+		const legacy = int64(1_700_000_000_000_000_000)
+		if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d-x7Kq3", stagingPrefix, legacy)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		seq, err := nextStagingSeq(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seq <= legacy {
+			t.Errorf("next sequence = %d, want strictly greater than the legacy stamp %d", seq, legacy)
+		}
+	})
+
+	// A parked backup owns its number for as long as it exists.
+	t.Run("skips a number already parked", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d%s", keptPrefix, 7, stagingSeqSuffix)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		seq, err := nextStagingSeq(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seq <= 7 {
+			t.Errorf("next sequence = %d, want strictly greater than the parked 7", seq)
+		}
+	})
+}
+
+// The retry branch: another writer already holds the number this one started
+// from, so it walks up rather than failing or reusing.
+func TestCreateSequencedStagingDirSkipsAnOccupiedNumber(t *testing.T) {
+	dir := t.TempDir()
+	taken := fmt.Sprintf("%s%020d%s", stagingPrefix, 1, stagingSeqSuffix)
+	if err := os.Mkdir(filepath.Join(dir, taken), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := createSequencedStagingDir(dir, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, 2, stagingSeqSuffix))
+	if got != want {
+		t.Errorf("claimed %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, taken)); err != nil {
+		t.Errorf("the occupied name must be left alone: %v", err)
+	}
+}
+
+// A name at the maximum would make the seeding addition wrap negative, and a
+// negative renders a '-' the parser reads as empty digits, so the entry would
+// leave the ordering silently. Refusing is the loud version, and the refusal
+// belongs where the addition is.
+func TestNextStagingSeqRefusesOverflow(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d-x", stagingPrefix, int64(math.MaxInt64))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if seq, err := nextStagingSeq(dir); err == nil {
+		t.Errorf("nextStagingSeq returned %d, want an error rather than a wrapped value", seq)
+	}
+}
+
+func TestCreateSequencedStagingDirRefusesOutOfRange(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []int64{0, -1, math.MinInt64} {
+		if _, err := createSequencedStagingDir(dir, n); err == nil {
+			t.Errorf("createSequencedStagingDir(%d) succeeded, want an error", n)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a refused allocation must create nothing, got %v", entries)
+	}
+}
+
+// Exclusive creation is the whole concurrency story, so it gets executed rather
+// than argued: no two allocators may come away with the same name or number.
+func TestStagingSeqAllocatesDistinctValuesConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	const writers = 16
+
+	var wg sync.WaitGroup
+	paths := make([]string, writers)
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			seq, err := nextStagingSeq(dir)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			paths[i], errs[i] = createSequencedStagingDir(dir, seq)
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	stamps := map[int64]bool{}
+	for i, path := range paths {
+		if errs[i] != nil {
+			t.Fatalf("writer %d: %v", i, errs[i])
+		}
+		if seen[path] {
+			t.Errorf("two writers claimed the same name %q", path)
+		}
+		seen[path] = true
+		stamp, ok := stagingStamp(filepath.Base(path))
+		if !ok {
+			t.Errorf("writer %d wrote an unorderable name %q", i, filepath.Base(path))
+			continue
+		}
+		if stamps[stamp] {
+			t.Errorf("two writers claimed sequence %d", stamp)
+		}
+		stamps[stamp] = true
+	}
+}
+
+// The staging dir holds the only copy of a link's tree mid-swap, so it keeps the
+// owner-only mode os.MkdirTemp gave it.
+func TestStagingDirKeepsOwnerOnlyPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Go permission bits do not map to Windows ACLs")
+	}
+	dir := t.TempDir()
+	path, err := createSequencedStagingDir(dir, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("staging dir mode = %o, want 0700", got)
+	}
+}
+
+// liveTreeSurvivesSomewhere reports whether any staging or kept dir under root
+// still holds a backup with the given content.
+func liveTreeSurvivesSomewhere(t *testing.T, root, content string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		got, err := os.ReadFile(filepath.Join(root, entry.Name(), "backup", "a.txt"))
+		if err == nil && string(got) == content {
+			return true
+		}
+	}
+	return false
 }
 
 // Recovery decides each link on its own: restoring one link's tree must not make

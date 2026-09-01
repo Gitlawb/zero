@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -662,6 +664,195 @@ func TestRestoreInterruptedPromotionFindsHoldersUnderAnAwkwardPath(t *testing.T)
 				t.Fatalf("the install was not restored under %q: got %q err %v", dirName, got, err)
 			}
 		})
+	}
+}
+
+// A backward clock leaves a STALE holder carrying a LARGER stamp. Recovery must
+// still put back the install that was actually live last. Nothing is deleted
+// either way at this site, so the failure is a stale restore, and the negative
+// half of the assertion pins that the loser is kept.
+func TestRestoreInterruptedPromotionPrefersTheRealNewerInstallOverAFutureStampedHolder(t *testing.T) {
+	const farFuture = int64(4_000_000_000_000_000_000)
+
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "engine"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := plantHolder(t, dest, farFuture, "stale")
+
+	// The real transaction sets "new" aside and never publishes.
+	interruptPromotion(t, dest, "engine")
+
+	restoreInterruptedPromotion(dest)
+
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "new" {
+		t.Errorf("restored %q (err %v), want the install that was live last, %q", got, err, "new")
+	}
+	// Whichever holder won, the one that lost is left for a human.
+	if _, err := os.Stat(filepath.Join(stale, "install", "engine")); err != nil {
+		t.Errorf("a holder that lost the ordering must be kept, not deleted: %v", err)
+	}
+}
+
+// The allocator and the parser must agree, and the sequence must seed above a
+// name a released binary wrote.
+func TestHolderNamesAllocateInOrderAndParse(t *testing.T) {
+	t.Run("counts up and parses", func(t *testing.T) {
+		root := t.TempDir()
+		dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+		for want := int64(1); want <= 2; want++ {
+			seq, err := nextHolderSeq(dest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := createSequencedHolder(dest, seq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stamp, ok := holderStamp(dest, path)
+			if !ok {
+				t.Fatalf("the allocator wrote a name recovery cannot order: %q", filepath.Base(path))
+			}
+			if stamp != want {
+				t.Errorf("stamp = %d, want %d", stamp, want)
+			}
+		}
+	})
+
+	t.Run("seeds above a legacy nanosecond name", func(t *testing.T) {
+		root := t.TempDir()
+		dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+		const legacy = int64(1_700_000_000_000_000_000)
+		// Both shapes a released binary could have left: the MkdirTemp random
+		// suffix, and the digits-only one the test helper plants.
+		for _, suffix := range []string{"x7Kq3", "12345"} {
+			if err := os.MkdirAll(fmt.Sprintf("%s%s%020d-%s", dest, holderSuffix, legacy, suffix), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		seq, err := nextHolderSeq(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seq <= legacy {
+			t.Errorf("next sequence = %d, want strictly greater than the legacy stamp %d", seq, legacy)
+		}
+	})
+}
+
+func TestCreateSequencedHolderSkipsAnOccupiedNumber(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	taken := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 1, holderSeqSuffix)
+	if err := os.MkdirAll(taken, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := createSequencedHolder(dest, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 2, holderSeqSuffix)
+	if got != want {
+		t.Errorf("claimed %q, want %q", got, want)
+	}
+}
+
+func TestNextHolderSeqRefusesOverflow(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	if err := os.MkdirAll(fmt.Sprintf("%s%s%020d-x", dest, holderSuffix, int64(math.MaxInt64)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if seq, err := nextHolderSeq(dest); err == nil {
+		t.Errorf("nextHolderSeq returned %d, want an error rather than a wrapped value", seq)
+	}
+}
+
+func TestCreateSequencedHolderRefusesOutOfRange(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{0, -1, math.MinInt64} {
+		if _, err := createSequencedHolder(dest, n); err == nil {
+			t.Errorf("createSequencedHolder(%d) succeeded, want an error", n)
+		}
+	}
+	if holders := holdersFor(t, dest); len(holders) != 0 {
+		t.Errorf("a refused allocation must create nothing, got %v", holders)
+	}
+}
+
+// This site holds no lock, so exclusive creation is the only thing arbitrating.
+func TestHolderSeqAllocatesDistinctValuesConcurrently(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	const writers = 16
+
+	var wg sync.WaitGroup
+	paths := make([]string, writers)
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			seq, err := nextHolderSeq(dest)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			paths[i], errs[i] = createSequencedHolder(dest, seq)
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	stamps := map[int64]bool{}
+	for i, path := range paths {
+		if errs[i] != nil {
+			t.Fatalf("writer %d: %v", i, errs[i])
+		}
+		if seen[path] {
+			t.Errorf("two writers claimed the same name %q", path)
+		}
+		seen[path] = true
+		stamp, ok := holderStamp(dest, path)
+		if !ok {
+			t.Errorf("writer %d wrote an unorderable name %q", i, filepath.Base(path))
+			continue
+		}
+		if stamps[stamp] {
+			t.Errorf("two writers claimed sequence %d", stamp)
+		}
+		stamps[stamp] = true
+	}
+}
+
+// The holder wraps a complete previous install for as long as it exists, so it
+// keeps the owner-only mode os.MkdirTemp gave it.
+func TestHolderKeepsOwnerOnlyPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Go permission bits do not map to Windows ACLs")
+	}
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	path, err := createSequencedHolder(dest, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("holder mode = %o, want 0700", got)
 	}
 }
 
