@@ -377,37 +377,68 @@ func RedactString(value string, options Options) string {
 	return redacted
 }
 
-func firstControlIndex(s string) int {
+type controlSpan struct {
+	start int
+	end   int
+}
+
+func findControlSpans(s string) []controlSpan {
+	var spans []controlSpan
 	for i := 0; i < len(s); {
 		c := s[i]
 		if c < 0x80 {
 			if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c == 0x7F) {
-				return i
+				start := i
+				for i < len(s) && s[i] < 0x80 && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' && (s[i] < 0x20 || s[i] == 0x7F) {
+					i++
+				}
+				spans = append(spans, controlSpan{start: start, end: i})
+				continue
 			}
 			i++
 			continue
 		}
 		if c <= 0x9F {
-			return i
+			start := i
+			for i < len(s) && s[i] >= 0x80 && s[i] <= 0x9F {
+				i++
+			}
+			spans = append(spans, controlSpan{start: start, end: i})
+			continue
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if unicode.IsControl(r) {
-			return i
+		if unicode.IsControl(r) || r == utf8.RuneError {
+			start := i
+			i += size
+			for i < len(s) {
+				nr, nsize := utf8.DecodeRuneInString(s[i:])
+				if unicode.IsControl(nr) || nr == utf8.RuneError {
+					i += nsize
+				} else {
+					break
+				}
+			}
+			spans = append(spans, controlSpan{start: start, end: i})
+			continue
 		}
 		i += size
 	}
-	return -1
+	return spans
 }
 
 func redactMatchedPattern(match string, pattern *regexp.Regexp, replacement string, isValid func(string) bool) string {
+	spans := findControlSpans(match)
+	for _, span := range spans {
+		pre := match[:span.start]
+		if pre == "" {
+			continue
+		}
+		if validSecretControlGaps(pre) && pattern.MatchString(pre) && (isValid == nil || isValid(pre)) {
+			return replacement + match[span.start:]
+		}
+	}
 	if !validSecretControlGaps(match) {
 		return match
-	}
-	if ctrlIdx := firstControlIndex(match); ctrlIdx >= 0 {
-		pre := match[:ctrlIdx]
-		if pattern.MatchString(pre) && (isValid == nil || isValid(pre)) {
-			return replacement + match[ctrlIdx:]
-		}
 	}
 	if isValid != nil && !isValid(match) {
 		return match

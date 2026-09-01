@@ -62,6 +62,82 @@ func TestSplitRedactionHarness(t *testing.T) {
 	}
 }
 
+func TestSplitRedactionMultiControlCases(t *testing.T) {
+	t.Run("Internal gap before minimum then terminal delimiter", func(t *testing.T) {
+		input := "sk-ant-api03-\x00abcdefghijklmnopqrstuvwxyz\x00path/file.go"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + "\x00path/file.go"
+		if got != want {
+			t.Fatalf("multi-control anthropic mismatch:\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("OpenAI internal gap then terminal delimiter before kebab suffix", func(t *testing.T) {
+		input := "sk-\x00abcdefghijklmnopqrstuv\x1bkebab-case tail"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + "\x1bkebab-case tail"
+		if got != want {
+			t.Fatalf("multi-control openai mismatch:\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("OpenAI internal gap before digit suffix then terminal delimiter", func(t *testing.T) {
+		input := "sk-aaaaaaaaaa-bbbbbbbbb\x001234567890\x00path/one.go"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + "\x00path/one.go"
+		if got != want {
+			t.Fatalf("multi-control openai with digits mismatch:\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("JWT multiple internal gaps and terminal delimiter", func(t *testing.T) {
+		input := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\x00.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ\x1b.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\x00trailing/text"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + "\x00trailing/text"
+		if got != want {
+			t.Fatalf("multi-control jwt mismatch:\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("Multiple internal controls in credential body", func(t *testing.T) {
+		input := "sk-ant-\x00api03-\x1babcdefghijklmnopqrstuvwxyz"
+		got := RedactString(input, Options{})
+		if got != RedactedSecret {
+			t.Fatalf("multiple internal gaps in anthropic key mismatch: got %q, want %q", got, RedactedSecret)
+		}
+	})
+
+	t.Run("Terminal delimiter separating two credentials", func(t *testing.T) {
+		input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz\x00ghp_123456789012345678901234567890123456"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + "\x00" + RedactedSecret
+		if got != want {
+			t.Fatalf("two credentials separated by delimiter mismatch: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("Complete credential followed by invalid bytes", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			suffix string
+		}{
+			{"valid U+FFFD", "\uFFFDsuffix"},
+			{"malformed byte 0xFF", "\xffsuffix"},
+			{"malformed byte 0xC0", "\xc0suffix"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz" + tc.suffix
+				got := RedactString(input, Options{})
+				want := RedactedSecret + tc.suffix
+				if got != want {
+					t.Fatalf("suffix %s mismatch: got %q, want %q", tc.name, got, want)
+				}
+			})
+		}
+	})
+}
+
 func TestSplitRedactionNegativeCases(t *testing.T) {
 	controls := []string{"\x00", "\x1b", "\x9b", "\u009b"}
 
