@@ -102,8 +102,8 @@ func stripMatchingQuotes(s string) (string, bool) {
 //     fetched it) — this carries InputModalities from models.dev, which
 //     includes "image" for vision-capable models
 //  3. Falls back to the name heuristic for unknown models
-func (m model) modelSupportsVisionTUI() bool {
-	trimmed := strings.TrimSpace(m.modelName)
+func (m model) modelSupportsVisionFor(modelID string) bool {
+	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {
 		return false
 	}
@@ -134,9 +134,12 @@ func (m model) modelSupportsVisionTUI() bool {
 			}
 		}
 	}
-	// Fall back to the name heuristic for models not in the catalog or
-	// discovered list.
-	return modelregistry.VisionCapableByName(trimmed)
+	// Fall back to curated catalog or the name heuristic.
+	return modelregistry.SupportsVision(m.modelCatalog, trimmed)
+}
+
+func (m model) modelSupportsVisionTUI() bool {
+	return m.modelSupportsVisionFor(m.modelName)
 }
 
 // attachClipboardImage attaches an image read from the OS clipboard (a

@@ -5575,6 +5575,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ContextWindowFor = func(modelID string) int {
 			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
 		}
+<<<<<<< HEAD
 		// And make that switch reachable, when the operator asked for it. The
 		// consequences of an escalation were already handled here (the window
 		// above, and the summarizer resolved against the active profile) while
@@ -5595,6 +5596,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				// to the escalated model, not the one the run started on.
 				func(modelID string) { usageModelID = modelID },
 			)
+		}
+		options.SupportsVision = func(modelID string) bool {
+			return m.modelSupportsVisionFor(modelID)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
