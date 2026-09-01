@@ -78,20 +78,57 @@ func browserToolDetails(name string) (*BrowserToolDetails, bool) {
 // carry credentials or session data; the UI only needs the operation and, for
 // navigation, a human-recognisable origin.
 func browserToolTitle(command, rawArgs string) string {
-	if command != "open" {
+	switch command {
+	case "action":
+		action, ok := exactJSONStringArg(rawArgs, "command")
+		if !ok {
+			return "browser action"
+		}
+		if action, ok := tools.NormalizedBrowserActionCommand(action); ok {
+			return "browser action " + action
+		}
+		return "browser action"
+	case "open":
+		rawURL, ok := exactJSONStringArg(rawArgs, "url")
+		if !ok {
+			return "browser open"
+		}
+		normalized, err := tools.NormalizeBrowserOpenURL(rawURL)
+		if err != nil {
+			return "browser open"
+		}
+		u, err := url.Parse(normalized)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return "browser open"
+		}
+		origin := u.Scheme + "://" + u.Host
+		if !utf8.ValidString(origin) {
+			return "browser open"
+		}
+		return "browser open " + truncateHint(origin)
+	default:
 		return "browser " + command
 	}
-	var args struct {
-		URL string `json:"url"`
-	}
+}
+
+// exactJSONStringArg mirrors ZERO's map-based tool argument decoding: only the
+// exact JSON key is considered, and a non-string value is invalid. In
+// particular, an incidental "URL" key must not change a permission title when
+// browser_open will only read "url".
+func exactJSONStringArg(rawArgs, key string) (string, bool) {
+	var args map[string]json.RawMessage
 	if json.Unmarshal([]byte(rawArgs), &args) != nil {
-		return "browser open"
+		return "", false
 	}
-	u, err := url.Parse(strings.TrimSpace(args.URL))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "browser open"
+	raw, ok := args[key]
+	if !ok {
+		return "", false
 	}
-	return "browser open " + u.Scheme + "://" + u.Host
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	return value, true
 }
 
 // primaryArgHint extracts the most relevant argument (path/pattern/command) from

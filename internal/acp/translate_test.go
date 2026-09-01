@@ -98,6 +98,15 @@ func TestBrowserToolUpdatesAreStructuredAndPresentationSafe(t *testing.T) {
 		t.Fatalf("browser type title = %q", typed.Title)
 	}
 
+	action := toolCallStart(agent.ToolCall{
+		ID:        "browser-3",
+		Name:      "browser_action",
+		Arguments: `{"command":"keyboard_insert_text","args":["secret@example.test"]}`,
+	})
+	if action.Title != "browser action keyboard_insert_text" {
+		t.Fatalf("browser action title = %q", action.Title)
+	}
+
 	result := toolCallResult(agent.ToolResult{
 		ToolCallID: "browser-2",
 		Name:       "browser_type",
@@ -105,6 +114,27 @@ func TestBrowserToolUpdatesAreStructuredAndPresentationSafe(t *testing.T) {
 	})
 	if result.Browser == nil || result.Browser.Command != "type" {
 		t.Fatalf("browser result descriptor = %#v", result.Browser)
+	}
+}
+
+func TestBrowserPermissionTitlesMirrorSafeToolArguments(t *testing.T) {
+	if got := browserToolTitle("open", `{"url":"evil.example.test/pay?token=hidden#fragment"}`); got != "browser open https://evil.example.test" {
+		t.Fatalf("bare-host title = %q", got)
+	}
+	if got := browserToolTitle("open", `{"URL":"https://different.example.test"}`); got != "browser open" {
+		t.Fatalf("case-variant URL title = %q", got)
+	}
+	if got := browserToolTitle("open", `{"URL":"https://different.example.test","url":"https://actual.example.test/path"}`); got != "browser open https://actual.example.test" {
+		t.Fatalf("exact URL key title = %q", got)
+	}
+	if got := browserToolTitle("action", `{"command":"not an action"}`); got != "browser action" {
+		t.Fatalf("unknown browser action title = %q", got)
+	}
+
+	longHost := "https://" + strings.Repeat("a", 200) + ".example.test/path?token=hidden"
+	title := browserToolTitle("open", `{"url":"`+longHost+`"}`)
+	if !utf8.ValidString(title) || utf8.RuneCountInString(title) > len("browser open ")+61 || strings.Contains(title, "token=") {
+		t.Fatalf("bounded browser origin title = %q", title)
 	}
 }
 
