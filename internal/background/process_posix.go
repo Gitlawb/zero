@@ -3,7 +3,9 @@
 package background
 
 import (
+	"errors"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execution"
@@ -67,4 +69,15 @@ func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
 		return alreadyExited, execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
 	}
 	return alreadyExited, terminateProcess(cmd.Process.Pid)
+}
+
+// terminationTargetGoneAfterReap independently checks the exact signal target
+// used for an owned command. In particular, reaping a zombie group leader does
+// not make this return true while any descendant still occupies that group.
+func terminationTargetGoneAfterReap(cmd *exec.Cmd) bool {
+	target := cmd.Process.Pid
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		target = -target
+	}
+	return errors.Is(syscall.Kill(target, syscall.Signal(0)), syscall.ESRCH)
 }
