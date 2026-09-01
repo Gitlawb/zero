@@ -167,8 +167,8 @@ func TestAnnotatePosixWindowsPathError(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected wrapped missing-path error")
 	}
-	if !errors.Is(got, missing) {
-		t.Fatalf("wrapped error should unwrap to original, got %v", got)
+	if !errors.Is(got, os.ErrNotExist) {
+		t.Fatalf("wrapped error should unwrap to os.ErrNotExist, got %v", got)
 	}
 	msg := got.Error()
 	if !strings.Contains(msg, "Windows") {
@@ -177,9 +177,7 @@ func TestAnnotatePosixWindowsPathError(t *testing.T) {
 	if !strings.Contains(msg, "POSIX") {
 		t.Fatalf("hint missing POSIX path wording: %q", msg)
 	}
-	if strings.Contains(msg, root) {
-		t.Fatalf("hint must not name the workspace root %q: %q", root, msg)
-	}
+	errorMustNotNameWorkspaceRoot(t, msg, root)
 	if strings.Contains(msg, "workspace root") {
 		t.Fatalf("hint must not name the workspace root: %q", msg)
 	}
@@ -193,9 +191,21 @@ func TestAnnotatePosixWindowsPathError(t *testing.T) {
 	if !strings.Contains(msg, "/etc/passwd") {
 		t.Fatalf("hint should name the requested POSIX path: %q", msg)
 	}
-	if strings.Contains(msg, root) {
-		t.Fatalf("hint must not name the workspace root %q: %q", root, msg)
+	errorMustNotNameWorkspaceRoot(t, msg, root)
+
+	// The real resolver's PathError.Path is the joined workspace path, not the
+	// POSIX argument. Wrapping that PathError would echo the root next to %q.
+	joinedEtc := filepath.Join(root, "etc", "passwd")
+	joinedMiss := &os.PathError{Op: "GetFileAttributesEx", Path: joinedEtc, Err: os.ErrNotExist}
+	got = annotatePosixWindowsPathError("windows", root, "/etc/passwd", joinedMiss)
+	if got == nil {
+		t.Fatal("expected wrapped missing-path error for joined /etc/passwd")
 	}
+	msg = got.Error()
+	if !strings.Contains(msg, "/etc/passwd") {
+		t.Fatalf("hint should name the requested POSIX path: %q", msg)
+	}
+	errorMustNotNameWorkspaceRoot(t, msg, root)
 
 	if got := annotatePosixWindowsPathError("linux", root, "/tmp/does-not-exist-xyz", missing); got != missing {
 		t.Fatalf("linux should not wrap missing-path errors, got %v", got)
@@ -256,9 +266,20 @@ func TestResolveWorkspacePathAnnotatesPosixMissOnWindows(t *testing.T) {
 	if strings.Contains(msg, "workspace root") {
 		t.Fatalf("hint must not name the workspace root: %q", msg)
 	}
+	errorMustNotNameWorkspaceRoot(t, msg, root)
 	if strings.Contains(msg, "must stay inside the workspace") {
 		t.Fatalf("POSIX miss used confinement instead of a missing-path hint: %q", msg)
 	}
+
+	_, _, err = resolveWorkspacePathForGOOS("windows", root, "/etc/passwd")
+	if err == nil {
+		t.Fatal("expected missing-path error for /etc/passwd")
+	}
+	msg = err.Error()
+	if !strings.Contains(msg, "/etc/passwd") {
+		t.Fatalf("hint should name the requested POSIX path: %q", msg)
+	}
+	errorMustNotNameWorkspaceRoot(t, msg, root)
 }
 
 func TestResolveWorkspacePathDoesNotRewriteForeignRepo(t *testing.T) {
@@ -419,5 +440,129 @@ func TestJoinAgainstRootWindowsPosix(t *testing.T) {
 	got = joinAgainstRoot("linux", root, "/tmp/does-not-exist-xyz")
 	if got != filepath.Clean("/tmp/does-not-exist-xyz") && got != "/tmp/does-not-exist-xyz" {
 		t.Fatalf("joinAgainstRoot(linux, ...) should keep POSIX abs, got %q", got)
+	}
+}
+
+func TestResolveWorkspacePathPrefersExistingLiteralOverRewrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "tmp", "zero", "only.md"), "literal\n")
+	writeTestFile(t, filepath.Join(root, "only.md"), "rewritten\n")
+
+	absolute, relative, err := resolveWorkspacePathForGOOS("windows", root, "/tmp/zero/only.md")
+	if err != nil {
+		t.Fatalf("existing literal POSIX path should resolve: %v", err)
+	}
+	wantRel := filepath.ToSlash(filepath.Join("tmp", "zero", "only.md"))
+	if relative != wantRel {
+		t.Fatalf("relative = %q, want %q (literal must win over rewrite)", relative, wantRel)
+	}
+	got, err := os.ReadFile(absolute)
+	if err != nil {
+		t.Fatalf("read resolved path: %v", err)
+	}
+	if string(got) != "literal\n" {
+		t.Fatalf("content = %q, want literal file, not rewritten workspace-root file", got)
+	}
+}
+
+func TestResolveWorkspaceTargetPathPrefersExistingLiteralOverRewrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "tmp", "zero", "only.md"), "literal\n")
+
+	absolute, relative, err := resolveWorkspaceTargetPathForGOOS("windows", root, "/tmp/zero/only.md")
+	if err != nil {
+		t.Fatalf("existing literal write target should resolve: %v", err)
+	}
+	wantRel := filepath.ToSlash(filepath.Join("tmp", "zero", "only.md"))
+	if relative != wantRel {
+		t.Fatalf("relative = %q, want %q (literal must win over rewrite)", relative, wantRel)
+	}
+	got, err := os.ReadFile(absolute)
+	if err != nil {
+		t.Fatalf("read resolved write target: %v", err)
+	}
+	if string(got) != "literal\n" {
+		t.Fatalf("content = %q, want literal file", got)
+	}
+}
+
+func TestRecheckWorkspaceWriteTargetAfterPosixRewrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	dir := filepath.Join(root, "dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("mkdir dir: %v", err)
+	}
+
+	original := "/home/alice/zero/dir/file"
+	if got := rewritePosixWorkspacePath("windows", root, original); got != filepath.ToSlash(filepath.Join("dir", "file")) && got != "dir/file" {
+		t.Fatalf("rewritePosixWorkspacePath(%q) = %q, want dir/file", original, got)
+	}
+
+	absolute, relative, err := resolveWorkspaceTargetPathForGOOS("windows", root, original)
+	if err != nil {
+		t.Fatalf("resolve rewritten write target: %v", err)
+	}
+	if relative != "dir/file" {
+		t.Fatalf("relative = %q, want dir/file", relative)
+	}
+
+	outside := t.TempDir()
+	if err := os.Remove(dir); err != nil {
+		t.Fatalf("remove dir: %v", err)
+	}
+	if err := os.Symlink(outside, dir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	joinedOriginal := joinAgainstRoot("windows", root, original)
+	if err := recheckWorkspaceWriteTarget(root, joinedOriginal); err != nil {
+		t.Fatalf("recheck of the original POSIX join %q should miss (path does not exist), got %v", joinedOriginal, err)
+	}
+	if err := recheckWorkspaceWriteTarget(root, absolute); err == nil {
+		t.Fatal("recheck of the resolved write target must see the swapped symlink")
+	} else if !strings.Contains(err.Error(), "must not traverse symlink") {
+		t.Fatalf("expected symlink rejection, got %q", err)
+	}
+}
+
+func workspaceRootSpellings(t *testing.T, root string) []string {
+	t.Helper()
+	seen := make(map[string]bool)
+	var out []string
+	add := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	add(root)
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return out
+	}
+	add(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		add(resolved)
+	}
+	return out
+}
+
+func errorMustNotNameWorkspaceRoot(t *testing.T, msg, root string) {
+	t.Helper()
+	for _, spelling := range workspaceRootSpellings(t, root) {
+		if strings.Contains(msg, spelling) {
+			t.Fatalf("error names workspace root %q: %q", spelling, msg)
+		}
 	}
 }

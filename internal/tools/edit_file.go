@@ -150,7 +150,10 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return okResult("No changes: new_string is identical to old_string.")
 	}
 	editedSpans := replacementByteSpans(content, oldString, newString, replaceAll)
-	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
+	// Recheck the resolved target, not the original argument: a Windows POSIX
+	// rewrite maps /home/<user>/<repo>/dir/file onto dir/file, and walking the
+	// original path would miss a symlink swapped into dir before WriteFile.
+	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, absolutePath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {

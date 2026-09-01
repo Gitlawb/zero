@@ -39,9 +39,11 @@ func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, s
 func resolveWorkspacePathForGOOS(goos, workspaceRoot, requestedPath string) (string, string, error) {
 	original := requestedPath
 	// Windows-only rewrite of synthetic POSIX prefixes that include the
-	// workspace basename. Real Windows absolute paths are left unchanged;
-	// missing files are not invented.
-	requestedPath = rewritePosixWorkspacePath(goos, workspaceRoot, requestedPath)
+	// workspace basename. Keep the literal path when that join already
+	// exists so the rewrite cannot shadow an on-disk file.
+	if !existingLiteralPosixWorkspacePath(goos, workspaceRoot, requestedPath) {
+		requestedPath = rewritePosixWorkspacePath(goos, workspaceRoot, requestedPath)
+	}
 
 	fail := func(err error) (string, string, error) {
 		return "", "", annotatePosixWindowsPathError(goos, workspaceRoot, original, err)
@@ -93,9 +95,11 @@ func resolveWorkspaceTargetPath(workspaceRoot string, requestedPath string) (str
 func resolveWorkspaceTargetPathForGOOS(goos, workspaceRoot, requestedPath string) (string, string, error) {
 	original := requestedPath
 	// Windows-only rewrite of synthetic POSIX prefixes that include the
-	// workspace basename. Real Windows absolute paths are left unchanged;
-	// missing files are not invented.
-	requestedPath = rewritePosixWorkspacePath(goos, workspaceRoot, requestedPath)
+	// workspace basename. Keep the literal path when that join already
+	// exists so a write cannot retarget an on-disk file to the workspace root.
+	if !existingLiteralPosixWorkspacePath(goos, workspaceRoot, requestedPath) {
+		requestedPath = rewritePosixWorkspacePath(goos, workspaceRoot, requestedPath)
+	}
 
 	fail := func(err error) (string, string, error) {
 		return "", "", annotatePosixWindowsPathError(goos, workspaceRoot, original, err)

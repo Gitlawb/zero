@@ -104,7 +104,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
+	// Recheck the resolved target, not the original argument: a Windows POSIX
+	// rewrite maps /home/<user>/<repo>/dir/file onto dir/file, and walking the
+	// original path would miss a symlink swapped into dir before WriteFile.
+	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, absolutePath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {

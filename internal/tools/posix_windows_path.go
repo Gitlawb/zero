@@ -187,7 +187,9 @@ func stripSyntheticPosixWorkspacePrefix(workspaceRoot, requested string) (string
 // rewritePosixWorkspacePath is a Windows-only rewrite of synthetic POSIX
 // prefixes (/home/<user>/<repo>, /Users/<user>/<repo>, /tmp/<repo>,
 // /var/tmp/<repo>) when they include the workspace basename. It does not
-// rewrite real Windows absolute paths and does not invent files.
+// rewrite real Windows absolute paths and does not invent files. Callers
+// must keep the original argument when existingLiteralPosixWorkspacePath
+// is true so an on-disk file at the literal join is not shadowed.
 func rewritePosixWorkspacePath(goos, workspaceRoot, requested string) string {
 	if goos != "windows" {
 		return requested
@@ -196,6 +198,38 @@ func rewritePosixWorkspacePath(goos, workspaceRoot, requested string) string {
 		return stripped
 	}
 	return requested
+}
+
+// existingLiteralPosixWorkspacePath reports whether the un-rewritten POSIX
+// path already names an existing file inside the workspace. When it does,
+// the rewrite must not steal the request: a model that named
+// /tmp/<repo>/x when that file exists should read and write that file,
+// not a different x at the workspace root.
+func existingLiteralPosixWorkspacePath(goos, workspaceRoot, requested string) bool {
+	if goos != "windows" {
+		return false
+	}
+	if rewritePosixWorkspacePath(goos, workspaceRoot, requested) == requested {
+		return false
+	}
+	root, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	target := joinAgainstRoot(goos, root, requested)
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return false
+	}
+	if _, err := workspaceRelative(root, target, requested); err != nil {
+		return false
+	}
+	_, err = os.Lstat(target)
+	return err == nil
 }
 
 func isMissingPathError(err error) bool {
@@ -230,5 +264,19 @@ func annotatePosixWindowsPathError(goos, workspaceRoot, requested string, err er
 	if !isMissingPathError(err) {
 		return err
 	}
-	return fmt.Errorf("%w; host is Windows and %q looks like a POSIX absolute path; use a workspace-relative path or a Windows path", err, requested)
+	return fmt.Errorf("%w; host is Windows and %q looks like a POSIX absolute path; use a workspace-relative path or a Windows path", redactPathErrorWorkspaceRoot(err, requested), requested)
+}
+
+// redactPathErrorWorkspaceRoot replaces PathError.Path with the original
+// request so a missing POSIX path such as /etc/passwd cannot echo the
+// joined workspace root next to the hint. The PathError.Err value is kept
+// so errors.Is(..., os.ErrNotExist) still holds.
+func redactPathErrorWorkspaceRoot(err error, requested string) error {
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr == nil {
+		return err
+	}
+	redacted := *pathErr
+	redacted.Path = requested
+	return &redacted
 }
