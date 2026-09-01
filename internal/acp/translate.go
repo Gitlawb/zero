@@ -3,6 +3,7 @@ package acp
 import (
 	"encoding/json"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -252,10 +253,16 @@ func toolResultContent(result agent.ToolResult) []ToolCallContent {
 
 func appendToolResultDiffs(content []ToolCallContent, diffs []tools.FileDiff) []ToolCallContent {
 	for _, diff := range diffs {
-		if strings.TrimSpace(diff.Path) == "" || diff.OldText == diff.NewText {
+		if !filepath.IsAbs(diff.Path) || (!diff.OldExists && !diff.NewExists) {
 			continue
 		}
-		content = append(content, ToolCallContent{Type: "diff", Path: diff.Path, OldText: diff.OldText, NewText: diff.NewText})
+		newText := diff.NewText
+		var oldText *string
+		if diff.OldExists {
+			old := diff.OldText
+			oldText = &old
+		}
+		content = append(content, ToolCallContent{Type: "diff", Path: diff.Path, OldText: oldText, NewText: &newText})
 	}
 	return content
 }

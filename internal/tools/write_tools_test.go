@@ -324,6 +324,10 @@ func TestEditFileToolReplacesExactStrings(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "code.go")
 	writeTestFile(t, path, "const a = 1\nconst b = 2\n")
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":       "code.go",
@@ -368,7 +372,12 @@ func TestEditFileToolReplacesCRLF(t *testing.T) {
 
 func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")
+	path := filepath.Join(root, "code.go")
+	writeTestFile(t, path, "const a = 1\nconst b = 2\n")
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	res := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "code.go", "old_string": "const a = 1", "new_string": "const a = 42",
 	})
@@ -388,7 +397,7 @@ func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 			t.Fatalf("edit preview missing diff marker %q: %q", want, res.Display.Preview)
 		}
 	}
-	if got := res.FileDiffs; len(got) != 1 || got[0].Path != "code.go" || got[0].OldText != "const a = 1\nconst b = 2\n" || got[0].NewText != "const a = 42\nconst b = 2\n" {
+	if got := res.FileDiffs; len(got) != 1 || got[0].Path != path || !got[0].OldExists || !got[0].NewExists || got[0].OldText != "const a = 1\nconst b = 2\n" || got[0].NewText != "const a = 42\nconst b = 2\n" {
 		t.Fatalf("file diffs = %#v", got)
 	}
 }
@@ -412,7 +421,11 @@ func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
 	if strings.Contains(res.Display.Preview, "\n-line") {
 		t.Fatalf("a fresh-create diff must have no removed lines: %q", res.Display.Preview)
 	}
-	if got := res.FileDiffs; len(got) != 1 || got[0].Path != "new.txt" || got[0].OldText != "" || got[0].NewText != "line one\nline two\n" {
+	path, err := filepath.EvalSymlinks(filepath.Join(root, "new.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.FileDiffs; len(got) != 1 || got[0].Path != path || got[0].OldExists || !got[0].NewExists || got[0].OldText != "" || got[0].NewText != "line one\nline two\n" {
 		t.Fatalf("file diffs = %#v", got)
 	}
 }
@@ -433,6 +446,28 @@ func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
 		if !strings.Contains(res.Display.Preview, want) {
 			t.Fatalf("overwrite preview missing %q: %q", want, res.Display.Preview)
 		}
+	}
+}
+
+func TestWriteFileToolOmitsDiffWhenOverwritePreimageCannotBeRead(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "private.txt")
+	writeTestFile(t, path, "before\n")
+	tool := NewScopedWriteFileTool(root, nil).(writeFileTool)
+	tool.readFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	registry := NewRegistry()
+	registry.Register(tool)
+	result := registry.RunWithOptions(context.Background(), tool.Name(), map[string]any{
+		"path": "private.txt", "content": "after\n", "overwrite": true,
+	}, RunOptions{PermissionGranted: true})
+	if result.Status != StatusOK {
+		t.Fatalf("write = %s", result.Output)
+	}
+	if len(result.FileDiffs) != 0 {
+		t.Fatalf("unreadable preimage must not produce a create-like diff: %#v", result.FileDiffs)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "after\n" {
+		t.Fatalf("written content = %q, err = %v", got, err)
 	}
 }
 
@@ -591,10 +626,14 @@ func TestApplyPatchToolAppliesStructuredAddAndMove(t *testing.T) {
 	if got := result.ChangedFiles; strings.Join(got, ",") != "nested/new.txt,old.txt,moved.txt" {
 		t.Fatalf("ChangedFiles = %v", got)
 	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got, want := result.FileDiffs, []FileDiff{
-		{Path: "nested/new.txt", OldText: "", NewText: "created\n"},
-		{Path: "old.txt", OldText: "old\n", NewText: ""},
-		{Path: "moved.txt", OldText: "", NewText: "moved\n"},
+		{Path: filepath.Join(resolvedRoot, "nested", "new.txt"), OldExists: false, NewExists: true, OldText: "", NewText: "created\n"},
+		{Path: filepath.Join(resolvedRoot, "old.txt"), OldExists: true, NewExists: false, OldText: "old\n", NewText: ""},
+		{Path: filepath.Join(resolvedRoot, "moved.txt"), OldExists: false, NewExists: true, OldText: "", NewText: "moved\n"},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("FileDiffs = %#v, want %#v", got, want)
 	}

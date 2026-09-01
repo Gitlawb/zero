@@ -1834,6 +1834,10 @@ func runToolForUnsandboxedRetry(ctx context.Context, registry *tools.Registry, n
 }
 
 func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolResult {
+	// PrePermissionRejecter runs before Registry.RunWithOptions, so it must
+	// explicitly cross the same transcript/redaction boundary before its result
+	// can be forwarded through ACP.
+	result = tools.ScrubResultSecrets(result)
 	output, outputRedacted := scrubInterceptedOutput(result.Output)
 	display := result.Display
 	summary, summaryRedacted := scrubInterceptedOutput(display.Summary)

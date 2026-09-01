@@ -188,32 +188,56 @@ func applyPatchOperations(applyRoot, relativeRoot string, operations []structure
 	return result
 }
 
-func fileDiffsFromStructuredPatch(relativeRoot string, changes []structuredPatchChange) []FileDiff {
+func fileDiffsFromStructuredPatch(_ string, changes []structuredPatchChange) []FileDiff {
+	const maxToolResultFileDiffs = 64
 	diffs := make([]FileDiff, 0, len(changes)*2)
-	appendDiff := func(path, before, after string) {
-		if relativeRoot != "" && relativeRoot != "." {
-			path = filepath.ToSlash(filepath.Join(relativeRoot, path))
+	usedBytes := 0
+	appendGroup := func(group ...FileDiff) {
+		if len(group) == 0 || len(diffs)+len(group) > maxToolResultFileDiffs {
+			return
 		}
-		if diff, ok := boundedFileDiff(path, before, after); ok {
-			diffs = append(diffs, diff)
+		groupBytes := 0
+		for _, diff := range group {
+			groupBytes += len(diff.Path) + len(diff.OldText) + len(diff.NewText)
 		}
+		if usedBytes+groupBytes > maxToolPreviewBytes {
+			return
+		}
+		diffs = append(diffs, group...)
+		usedBytes += groupBytes
+	}
+	makeDiff := func(path, before, after string, oldExists, newExists bool) (FileDiff, bool) {
+		return boundedFileDiff(path, before, after, oldExists, newExists)
 	}
 	for _, change := range changes {
+		var group []FileDiff
 		switch {
 		case change.kind == structuredPatchDelete:
-			appendDiff(change.from.relative, change.before, "")
+			if diff, ok := makeDiff(change.from.absolute, change.before, "", true, false); ok {
+				group = append(group, diff)
+			}
 		case change.kind == structuredPatchAdd:
-			appendDiff(change.to.relative, "", change.after)
+			if diff, ok := makeDiff(change.to.absolute, "", change.after, false, true); ok {
+				group = append(group, diff)
+			}
 		case change.kind == structuredPatchCopy && change.from.absolute != change.to.absolute:
 			// A copy leaves its source unchanged; the destination is a create.
-			appendDiff(change.to.relative, "", change.after)
+			if diff, ok := makeDiff(change.to.absolute, "", change.after, false, true); ok {
+				group = append(group, diff)
+			}
 		case change.kind == structuredPatchUpdate && change.from.absolute != change.to.absolute:
 			// A move is two filesystem changes, not a destination overwrite.
-			appendDiff(change.from.relative, change.before, "")
-			appendDiff(change.to.relative, "", change.after)
+			from, fromOK := makeDiff(change.from.absolute, change.before, "", true, false)
+			to, toOK := makeDiff(change.to.absolute, "", change.after, false, true)
+			if fromOK && toOK {
+				group = append(group, from, to)
+			}
 		default:
-			appendDiff(change.to.relative, change.before, change.after)
+			if diff, ok := makeDiff(change.to.absolute, change.before, change.after, true, true); ok {
+				group = append(group, diff)
+			}
 		}
+		appendGroup(group...)
 	}
 	return diffs
 }

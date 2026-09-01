@@ -343,8 +343,15 @@ func scrubResultSecrets(res Result) Result {
 		res.Display.Preview = scrubbed
 		res.Redacted = true
 	}
-	for index := range res.FileDiffs {
-		diff := &res.FileDiffs[index]
+	fileDiffs := res.FileDiffs[:0]
+	for _, diff := range res.FileDiffs {
+		// Never normalize control bytes in a diff: normalizing after redaction can
+		// reassemble a split credential. Decline unsafe rich content entirely and
+		// leave ChangedFiles as the safe fallback.
+		if unsafeDiffText(diff.OldText) || unsafeDiffText(diff.NewText) {
+			res.Redacted = true
+			continue
+		}
 		if scrubbed := redaction.RedactString(diff.OldText, redaction.Options{}); scrubbed != diff.OldText {
 			diff.OldText = scrubbed
 			res.Redacted = true
@@ -353,7 +360,9 @@ func scrubResultSecrets(res Result) Result {
 			diff.NewText = scrubbed
 			res.Redacted = true
 		}
+		fileDiffs = append(fileDiffs, diff)
 	}
+	res.FileDiffs = fileDiffs
 	// Meta values carry model-controlled strings (e.g. glob pattern, bash cwd) and
 	// are forwarded into the transcript, so they are part of the boundary too.
 	for key, value := range res.Meta {
@@ -363,6 +372,13 @@ func scrubResultSecrets(res Result) Result {
 		}
 	}
 	return res
+}
+
+// ScrubResultSecrets applies the registry's transcript boundary to a result
+// that was produced before Registry.RunWithOptions could own it, such as a
+// local pre-permission rejection in the agent loop.
+func ScrubResultSecrets(res Result) Result {
+	return scrubResultSecrets(res)
 }
 
 func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
