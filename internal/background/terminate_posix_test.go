@@ -4,6 +4,7 @@ package background
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -54,20 +55,21 @@ func TestTerminateOwnedProcessKillsChildAfterLeaderExits(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	line, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		t.Fatalf("read forked child pid: %v", err)
-	}
-	childPID, err := strconv.Atoi(strings.TrimSpace(line))
-	if err != nil {
-		t.Fatalf("parse forked child pid %q: %v", line, err)
-	}
+	var childPID int
 	t.Cleanup(func() {
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-		if cmd.ProcessState == nil {
-			_ = cmd.Wait()
+		if childPID > 0 {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+			if cmd.ProcessState == nil {
+				_ = cmd.Wait()
+			}
 		}
 	})
+
+	childPID = readPIDWithTimeout(t, stdout, 3*time.Second)
 
 	// echo $! races ahead of exit 0. Wait until the leader is an unreaped
 	// zombie without calling Wait, so this exercises Darwin Getpgid ESRCH.
@@ -143,4 +145,32 @@ func isUnreapedZombie(pid int) bool {
 		return false
 	}
 	return strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
+}
+
+func readPIDWithTimeout(t *testing.T, r io.Reader, timeout time.Duration) int {
+	t.Helper()
+	type res struct {
+		pid int
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		if err != nil {
+			ch <- res{err: err}
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		ch <- res{pid: pid, err: err}
+	}()
+	select {
+	case out := <-ch:
+		if out.err != nil {
+			t.Fatalf("read child PID: %v", out.err)
+		}
+		return out.pid
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for child PID after %v", timeout)
+		return 0
+	}
 }

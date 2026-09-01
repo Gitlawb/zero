@@ -35,17 +35,24 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 	if !ok {
 		t.Fatalf("launcher returned %T, want *execWorker", h)
 	}
+	var childPID int
+	t.Cleanup(func() {
+		if childPID > 0 {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+		if w.cmd != nil && w.cmd.Process != nil {
+			_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGKILL)
+			_ = w.cmd.Process.Kill()
+			if w.cmd.ProcessState == nil {
+				_, _ = w.Wait()
+			}
+		}
+	})
 	if w.cmd.SysProcAttr == nil || !w.cmd.SysProcAttr.Setpgid || w.cmd.SysProcAttr.Pgid != 0 {
 		t.Fatal("worker was not configured as its own process-group leader")
 	}
 
-	childPID := readWorkerPIDLine(t, w)
-	t.Cleanup(func() {
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-		if w.cmd.ProcessState == nil {
-			_, _ = w.Wait()
-		}
-	})
+	childPID = readWorkerPIDLine(t, w)
 
 	// echo $! races ahead of exit 0. Wait until the leader is an unreaped
 	// zombie without calling Wait, so Kill exercises Darwin Getpgid ESRCH.
@@ -87,17 +94,24 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 	if !ok {
 		t.Fatalf("launcher returned %T, want *execWorker", h)
 	}
+	var childPID int
+	t.Cleanup(func() {
+		if childPID > 0 {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+		if w.cmd != nil && w.cmd.Process != nil {
+			_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGKILL)
+			_ = w.cmd.Process.Kill()
+			if w.cmd.ProcessState == nil {
+				_, _ = w.Wait()
+			}
+		}
+	})
 	if w.cmd.SysProcAttr == nil || !w.cmd.SysProcAttr.Setpgid || w.cmd.SysProcAttr.Pgid != 0 {
 		t.Fatal("worker was not configured as its own process-group leader")
 	}
 
-	childPID := readWorkerPIDLine(t, w)
-	t.Cleanup(func() {
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-		if w.cmd.ProcessState == nil {
-			_, _ = w.Wait()
-		}
-	})
+	childPID = readWorkerPIDLine(t, w)
 
 	waitUntilUnreapedZombie(t, w.cmd.Process.Pid)
 	cancel()
@@ -112,18 +126,35 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 
 func readWorkerPIDLine(t *testing.T, w *execWorker) int {
 	t.Helper()
-	line, ok, err := w.Stdout().Next()
-	if err != nil {
-		t.Fatalf("read worker stdout: %v", err)
+	type res struct {
+		pid int
+		err error
 	}
-	if !ok {
-		t.Fatal("worker stdout ended before printing the forked child pid")
+	ch := make(chan res, 1)
+	go func() {
+		line, ok, err := w.Stdout().Next()
+		if err != nil {
+			ch <- res{err: err}
+			return
+		}
+		if !ok {
+			ch <- res{err: errors.New("worker stdout ended before printing the forked child pid")}
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		ch <- res{pid: pid, err: err}
+	}()
+
+	select {
+	case out := <-ch:
+		if out.err != nil {
+			t.Fatalf("read worker stdout: %v", out.err)
+		}
+		return out.pid
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for worker child pid")
+		return 0
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(line))
-	if err != nil {
-		t.Fatalf("parse forked child pid %q: %v", line, err)
-	}
-	return pid
 }
 
 func assertProcessStopped(t *testing.T, pid int) {
