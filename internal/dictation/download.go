@@ -868,23 +868,27 @@ func createSequencedHolder(destDir string, n int64) (string, error) {
 // Best effort by design, since the caller can still download a fresh engine.
 func restoreInterruptedPromotion(destDir string) {
 	if _, err := os.Lstat(destDir); err == nil {
+		// destDir is live. A holder is only ever filled by renaming destDir
+		// aside, so a destDir that holds something means a later promotion
+		// published over every holder beside it. Those are superseded copies of
+		// whole installs, and promoteStagedDir's cleanup is the only thing that
+		// removes them: when it fails the copy is stranded for good, and each
+		// later replacement strands another.
+		//
+		// An EMPTY destDir is not that evidence. A husk can outlive a failed or
+		// partial promotion, and reaping on its account would delete the only
+		// surviving install, so a holder beside one is left alone.
+		if dirHasEntries(destDir) {
+			for _, holder := range holdersBeside(destDir) {
+				_ = os.RemoveAll(holder)
+			}
+		}
 		return
 	}
 	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
 	// and a '[' anywhere in it opens a character class to Glob, which then
 	// matches nothing and strands the install this exists to put back.
-	parent := filepath.Dir(destDir)
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return
-	}
-	prefix := filepath.Base(destDir) + holderSuffix
-	holders := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-			holders = append(holders, filepath.Join(parent, entry.Name()))
-		}
-	}
+	holders := holdersBeside(destDir)
 	// Newest first: an unstamped holder is the least recent thing we can claim
 	// to know about, so it is only reached once every stamped one has failed.
 	slices.SortStableFunc(holders, func(a, b string) int {
@@ -911,6 +915,36 @@ func restoreInterruptedPromotion(destDir string) {
 		_ = os.RemoveAll(holder)
 		return
 	}
+}
+
+// dirHasEntries reports whether dir holds anything at all. An unreadable or
+// absent dir reads as empty, which is the conservative answer everywhere this is
+// used: it withholds the evidence a reap needs rather than supplying it.
+func dirHasEntries(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) > 0
+}
+
+// holdersBeside lists the holders promoteStagedDir may have left for destDir.
+// The prefix is the attribution: a holder for a different install is a separate
+// concern and is never touched on this one's account.
+func holdersBeside(destDir string) []string {
+	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
+	// and a '[' anywhere in it opens a character class to Glob, which then
+	// matches nothing and strands the install this exists to put back.
+	parent := filepath.Dir(destDir)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return nil
+	}
+	prefix := filepath.Base(destDir) + holderSuffix
+	holders := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+			holders = append(holders, filepath.Join(parent, entry.Name()))
+		}
+	}
+	return holders
 }
 
 // promoteStagedDir moves stageDir into place at destDir. os.Rename refuses to

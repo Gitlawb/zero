@@ -1182,6 +1182,31 @@ func TestStagingNamesAllocateInOrderAndParse(t *testing.T) {
 	})
 }
 
+// A publish that succeeded but could not clear its staging dir reports success to
+// the client while a whole copy of the prior tree stays on disk. The next
+// recovery pass reclaims it, and must say so: with no bridge logger configured
+// nothing else ever mentions the space that was being held.
+func TestRecoverBundleDirReportsReclaimingASupersededTree(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	// The publish landed, so dest holds the new tree.
+	if err := os.MkdirAll(filepath.Join(dest, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The cleanup did not, so the old tree is still staged beside it.
+	staging := stageBackup(t, dir, "leftover", "proj-1", "v-old", 100)
+
+	var logged []string
+	recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("a staged tree the live one superseded should be reclaimed, got %v", err)
+	}
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, staging) }) {
+		t.Errorf("reclaiming a superseded staged tree should name it, got %v", logged)
+	}
+}
+
 // A bundle dir's ordinary contents are the per-link work trees, and a link id is
 // whatever the uploading client sent. The allocator must read only the names it
 // owns: a link id is not a sequence, however much it looks like one.

@@ -518,6 +518,12 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 			parkKeptBackup(dir, staging, id, logf)
 			return true
 		}
+		// The upload that published dest reported success to its client while
+		// this whole copy of the prior tree was still on disk, and
+		// extractBundle's own cleanup failure is only logged. Say what is being
+		// reclaimed, so a bridge that ran without a logger configured is not the
+		// difference between the space being accounted for and not.
+		logf("remote: reclaiming the staged tree in %s that %s's live tree superseded", staging, id)
 		if err := os.RemoveAll(staging); err != nil {
 			logf("remote: could not remove superseded staging dir %s: %v", staging, err)
 		}
