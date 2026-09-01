@@ -651,8 +651,7 @@ func linuxCredentialParentSafeToTmpfs(parent string, writeRoots []WritableRoot) 
 	case "/tmp", "/etc", "/var", "/usr", "/home", "/root", "/opt", "/dev", "/proc", "/sys", "/run", "/mnt", "/media":
 		return false
 	}
-	switch strings.ToLower(filepath.Base(parent)) {
-	case "tmp", "etc", "var", "usr", "home", "root", "opt", "dev", "proc", "sys", "run":
+	if !linuxCredentialDirPath(parent) {
 		return false
 	}
 	for _, wr := range writeRoots {
@@ -660,9 +659,6 @@ func linuxCredentialParentSafeToTmpfs(parent string, writeRoots []WritableRoot) 
 		if root != "" && parent == root {
 			return false
 		}
-	}
-	if !linuxCredentialDirPath(parent) {
-		return false
 	}
 	info, err := os.Lstat(parent)
 	if err != nil || !info.IsDir() {

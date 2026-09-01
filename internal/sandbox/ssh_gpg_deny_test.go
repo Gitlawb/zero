@@ -1115,6 +1115,7 @@ func TestLinuxBwrapMasksLiveAndDanglingCredentialSymlinks(t *testing.T) {
 	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(liveTarget))
 	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(gitTarget))
 	if argsContainSequence(args, "--ro-bind", "/dev/null", danglingTarget) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", normalizeProfilePath(danglingTarget)) ||
 		argsContainSequence(args, "--ro-bind", "/dev/null", lexicalDangling) {
 		t.Fatalf("dangling symlink must not be a hard --ro-bind dest: %#v", args)
 	}
