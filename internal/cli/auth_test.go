@@ -196,10 +196,39 @@ func TestRunAuthHelp(t *testing.T) {
 	if code := runWithDeps([]string{"auth", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
 		t.Fatalf("exit = %d", code)
 	}
-	for _, want := range []string{"zero auth", "login", "logout", "status", "refresh", "--device"} {
+	for _, want := range []string{"zero auth", "login", "logout", "status", "refresh", "reset", "--device"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing %q:\n%s", want, stdout.String())
 		}
+	}
+}
+
+func TestRunAuthReset(t *testing.T) {
+	path := withAuthStore(t)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "secret"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "reset"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Reset OAuth token store") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	// Verify store is now empty.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"auth", "status"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("status exit = %d", code)
+	}
+	if !strings.Contains(stdout.String(), "No OAuth provider logins are stored.") {
+		t.Fatalf("expected empty store after reset, got: %q", stdout.String())
 	}
 }
 

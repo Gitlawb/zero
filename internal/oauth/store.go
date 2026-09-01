@@ -326,21 +326,11 @@ func (s *Store) Load(key string) (Token, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var (
-		token Token
-		ok    bool
-	)
-	err := s.blob.withLock(s.now, func() error {
-		state, err := s.readState()
-		if err != nil {
-			return err
-		}
-		token, ok = state.Tokens[key]
-		return nil
-	})
+	state, err := s.readState()
 	if err != nil {
 		return Token{}, false, err
 	}
+	token, ok := state.Tokens[key]
 	return token, ok, nil
 }
 
@@ -367,17 +357,21 @@ func (s *Store) Delete(key string) (bool, error) {
 	return removed, err
 }
 
+// Reset clears all persistent state in the store (removing files or deleting all keyring entries).
+func (s *Store) Reset() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.blob.withLock(s.now, func() error {
+		return s.blob.reset()
+	})
+}
+
 // Status returns redaction-safe summaries of every stored token, sorted by key.
 // An optional prefix filters to one namespace (e.g. KeyPrefixProvider).
 func (s *Store) Status(prefix string) ([]Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var state storeFile
-	err := s.blob.withLock(s.now, func() error {
-		var err error
-		state, err = s.readState()
-		return err
-	})
+	state, err := s.readState()
 	if err != nil {
 		return nil, err
 	}
@@ -467,6 +461,8 @@ type blobStore interface {
 	read() (data []byte, ok bool, err error)
 	// write replaces the stored blob.
 	write(data []byte) error
+	// reset removes all stored state and entries.
+	reset() error
 	// withLock runs fn under whatever cross-process exclusion the backend offers
 	// (a lock file for the file backend; none for the keyring, which is the
 	// authoritative store and is serialized within the process by Store.mu).
@@ -478,6 +474,17 @@ type blobStore interface {
 // fileBlob persists the blob as a 0600 JSON file, written atomically and guarded
 // by a cross-process lock file. Behavior matches the original file store.
 type fileBlob struct{ path string }
+
+func (b fileBlob) reset() error {
+	var errs []error
+	if err := os.Remove(b.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, err)
+	}
+	if err := os.Remove(b.path + ".secret"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
 
 func (b fileBlob) read() ([]byte, bool, error) {
 	data, err := os.ReadFile(b.path)
@@ -594,43 +601,69 @@ type keyringManifest struct {
 	digest string
 }
 
+func (b keyringBlob) corruptError(detail string) error {
+	return fmt.Errorf("oauth: keyring token data at %s (account %q) %s; run `zero auth reset` or remove entries %q and %q.[A|B].0..%d to recover",
+		b.location(), b.account, detail, b.account, b.account, keyringMaxChunks-1)
+}
+
 func (b keyringBlob) read() ([]byte, bool, error) {
-	head, ok, err := b.kr.Get(b.service, b.account)
-	if err != nil || !ok {
-		return nil, ok, err
-	}
-	head = strings.TrimSpace(head)
-	if !strings.HasPrefix(head, keyringManifestPrefix) {
-		data, err := decodeKeyringBlob(head)
-		return data, err == nil, err
-	}
-	manifest, err := parseKeyringManifest(head)
-	if err != nil {
-		return nil, false, err
-	}
-	count := manifest.counts[manifest.live]
-	var encoded strings.Builder
-	for index := range count {
-		part, ok, err := b.kr.Get(b.service, b.chunkAccount(manifest.live, index))
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		head, ok, err := b.kr.Get(b.service, b.account)
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		head = strings.TrimSpace(head)
+		if !strings.HasPrefix(head, keyringManifestPrefix) {
+			data, err := decodeKeyringBlob(head)
+			if err != nil {
+				lastErr = b.corruptError("contains invalid base64 data: " + err.Error())
+				continue
+			}
+			return data, true, nil
+		}
+		manifest, err := parseKeyringManifest(head)
 		if err != nil {
-			return nil, false, err
+			lastErr = b.corruptError("has a malformed manifest (" + err.Error() + ")")
+			continue
 		}
-		if !ok {
-			return nil, false, fmt.Errorf("oauth: keyring token blob at %s is missing chunk %d of %d; the entries are incomplete, so log in again", b.location(), index+1, count)
+		count := manifest.counts[manifest.live]
+		var encoded strings.Builder
+		var chunkErr error
+		for index := range count {
+			part, ok, err := b.kr.Get(b.service, b.chunkAccount(manifest.live, index))
+			if err != nil {
+				chunkErr = err
+				break
+			}
+			if !ok {
+				chunkErr = b.corruptError(fmt.Sprintf("is missing chunk %d of %d", index+1, count))
+				break
+			}
+			encoded.WriteString(strings.TrimSpace(part))
 		}
-		encoded.WriteString(strings.TrimSpace(part))
+		if chunkErr != nil {
+			lastErr = chunkErr
+			continue
+		}
+		data, err := decodeKeyringBlob(encoded.String())
+		if err != nil {
+			lastErr = b.corruptError("contains invalid chunk data: " + err.Error())
+			continue
+		}
+		// The corruption this guards against is the one that motivated chunking:
+		// `security -i` splits an overlong line into two garbage commands rather
+		// than refusing it, so a stored chunk can come back truncated.
+		if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != manifest.digest {
+			lastErr = b.corruptError("failed its integrity check")
+			continue
+		}
+		return data, true, nil
 	}
-	data, err := decodeKeyringBlob(encoded.String())
-	if err != nil {
-		return nil, false, err
-	}
-	// The corruption this guards against is the one that motivated chunking:
-	// `security -i` splits an overlong line into two garbage commands rather
-	// than refusing it, so a stored chunk can come back truncated.
-	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != manifest.digest {
-		return nil, false, fmt.Errorf("oauth: keyring token blob at %s failed its integrity check; the entries are inconsistent, so log in again", b.location())
-	}
-	return data, true, nil
+	return nil, false, lastErr
 }
 
 func (b keyringBlob) write(data []byte) error {
@@ -669,7 +702,7 @@ func (b keyringBlob) writeWhole(encoded string, previous keyringManifest) error 
 	return nil
 }
 
-func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringManifest) error {
+func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringManifest) (retErr error) {
 	family := keyringChunkFamilyA
 	if previous.live == keyringChunkFamilyA {
 		family = keyringChunkFamilyB
@@ -725,11 +758,22 @@ func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringM
 		previous.counts[family] = count
 	}
 
+	writtenChunks := 0
+	defer func() {
+		if retErr != nil && previous.live == "" && writtenChunks > 0 {
+			// During the first migration from whole-entry to chunked layout,
+			// a failure before the manifest commit point must clean up any chunks
+			// written so far to avoid leaving orphaned credential material in the keychain.
+			_ = b.deleteChunkRange(family, 0, writtenChunks, nil)
+		}
+	}()
+
 	for index := range count {
 		offset := index * budget
 		if err := b.kr.Set(b.service, b.chunkAccount(family, index), encoded[offset:min(offset+budget, len(encoded))]); err != nil {
 			return err
 		}
+		writtenChunks++
 	}
 	// This generation is not live yet, so trimming a longer previous one of it
 	// now is safe, and it makes the count the manifest is about to publish true
@@ -759,6 +803,16 @@ func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringM
 	return nil
 }
 
+func (b keyringBlob) reset() error {
+	var err error
+	err = b.deleteChunkRange(keyringChunkFamilyA, 0, keyringMaxChunks, nil)
+	err = b.deleteChunkRange(keyringChunkFamilyB, 0, keyringMaxChunks, err)
+	if _, kerr := b.kr.Delete(b.service, b.account); kerr != nil && err == nil {
+		err = fmt.Errorf("remove %s: %w", b.account, kerr)
+	}
+	return err
+}
+
 // readManifest returns the live manifest, or a zero manifest when the anchor
 // holds a whole blob or nothing at all. A malformed manifest is an error: the
 // chunks it names are unreachable without it, and overwriting it would strand
@@ -772,7 +826,11 @@ func (b keyringBlob) readManifest() (keyringManifest, error) {
 	if !strings.HasPrefix(head, keyringManifestPrefix) {
 		return keyringManifest{counts: map[string]int{}}, nil
 	}
-	return parseKeyringManifest(head)
+	m, err := parseKeyringManifest(head)
+	if err != nil {
+		return keyringManifest{counts: map[string]int{}}, b.corruptError("has a malformed manifest (" + err.Error() + ")")
+	}
+	return m, nil
 }
 
 // deleteChunkRange removes chunks [from, to) of family, joining onto prior. It

@@ -235,6 +235,12 @@ func TestStoreKeyringWriteFailsOnFinalManifestPublication(t *testing.T) {
 		t.Fatalf("Save with failing final manifest publication: err = %v, want %v", err, boom)
 	}
 	kr.failSet = nil
+	if anchorSets != 2 {
+		t.Errorf("anchor writes = %d, want 2", anchorSets)
+	}
+	if kr.sets[keyringAccount] < 1 {
+		t.Errorf("successful anchor sets = %d, want at least 1", kr.sets[keyringAccount])
+	}
 
 	if got := mustLoad(t, s, "first"); got.AccessToken != bigToken("a").AccessToken {
 		t.Error("a failed final manifest publication damaged the committed blob")
@@ -484,11 +490,10 @@ func TestStoreKeyringSweepsStrayChunksOnFirstGrowth(t *testing.T) {
 	}
 }
 
-// TestStoreKeyringReadSerializedWithLockDuringChunkedWrite verifies that readers
-// executing concurrently with a chunked writer hold the cross-process lock so they
-// do not observe a torn state (such as reading an old manifest after the writer
-// has deleted old-generation chunks).
-func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
+// TestStoreKeyringReaderDoesNotBlockOrMissDuringSlowWriter verifies that readers
+// (Load, Status, FirstStored) executing concurrently with a slow writer holding
+// the cross-process lock do not block or treat contention as a missing credential.
+func TestStoreKeyringReaderDoesNotBlockOrMissDuringSlowWriter(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
@@ -515,67 +520,37 @@ func TestStoreKeyringReadSerializedWithLockDuringChunkedWrite(t *testing.T) {
 		t.Fatalf("acquireFileLock: %v", err)
 	}
 
-	// While lock is held, Load and Status should block.
-	loaded := make(chan Token, 1)
-	loadErr := make(chan error, 1)
-	go func() {
-		tok, _, err := reader.Load(ProviderKey("first"))
-		loadErr <- err
-		loaded <- tok
-	}()
-
-	statused := make(chan []Status, 1)
-	statusErr := make(chan error, 1)
-	go func() {
-		st, err := reader.Status(KeyPrefixProvider)
-		statusErr <- err
-		statused <- st
-	}()
-
-	// Ensure reader is waiting on lock.
-	select {
-	case <-loaded:
-		t.Fatal("reader.Load returned while lock was held")
-	case <-statused:
-		t.Fatal("reader.Status returned while lock was held")
-	case <-time.After(50 * time.Millisecond):
+	// While lock is held by writer, reader operations (Load, Status, FirstStored)
+	// should complete immediately without blocking or timing out.
+	tok, ok, err := reader.Load(ProviderKey("first"))
+	if err != nil {
+		t.Fatalf("reader.Load failed while writer held lock: %v", err)
+	}
+	if !ok || tok.AccessToken != bigToken("a").AccessToken {
+		t.Fatalf("reader.Load returned unexpected token while writer held lock: ok=%v, token=%v", ok, tok)
 	}
 
-	// Release lock, allowing reader to complete.
+	firstTok, key, found := FirstStored(reader, []string{"first", "second"})
+	if !found || key != ProviderKey("first") || firstTok.AccessToken != bigToken("a").AccessToken {
+		t.Fatalf("FirstStored returned (%v, %q, %v), want valid 'first' token", firstTok, key, found)
+	}
+
+	st, err := reader.Status(KeyPrefixProvider)
+	if err != nil {
+		t.Fatalf("reader.Status failed while writer held lock: %v", err)
+	}
+	if len(st) != 2 {
+		t.Fatalf("reader.Status returned %d entries, want 2", len(st))
+	}
+
 	unlock()
-
-	select {
-	case err := <-loadErr:
-		if err != nil {
-			t.Fatalf("reader.Load failed after unlock: %v", err)
-		}
-		tok := <-loaded
-		if tok.AccessToken != bigToken("a").AccessToken {
-			t.Errorf("reader.Load returned unexpected token: %v", tok)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("reader.Load timed out waiting for lock release")
-	}
-
-	select {
-	case err := <-statusErr:
-		if err != nil {
-			t.Fatalf("reader.Status failed after unlock: %v", err)
-		}
-		st := <-statused
-		if len(st) != 2 {
-			t.Errorf("reader.Status returned %d entries, want 2", len(st))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("reader.Status timed out waiting for lock release")
-	}
 }
 
 // TestStoreKeyringSharedLockAcrossDifferentEnvironmentRoots is the regression for
 // split lock domains when processes run with different ZERO_OAUTH_TOKENS_PATH,
 // FilePath, or XDG_CONFIG_HOME. Because the OS keychain is single-domain for the
 // user ("zero"/"oauth-tokens"), all stores must share the same lock file so
-// concurrent reads, writes, and manifest rotations remain strictly serialized.
+// concurrent writes and manifest rotations remain strictly serialized.
 func TestStoreKeyringSharedLockAcrossDifferentEnvironmentRoots(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -622,43 +597,7 @@ func TestStoreKeyringSharedLockAcrossDifferentEnvironmentRoots(t *testing.T) {
 
 	mustSave(t, storeA, "keyA", bigToken("a"))
 
-	// 1. Force overlapping save/read: hold the lock manually to simulate an
-	// in-flight multi-step write by storeA, and verify storeB's Load / Status blocks.
-	unlock, err := acquireFileLock(lockA, time.Now)
-	if err != nil {
-		t.Fatalf("acquireFileLock: %v", err)
-	}
-
-	loaded := make(chan Token, 1)
-	loadErr := make(chan error, 1)
-	go func() {
-		tok, _, err := storeB.Load(ProviderKey("keyA"))
-		loadErr <- err
-		loaded <- tok
-	}()
-
-	select {
-	case <-loaded:
-		t.Fatal("storeB.Load completed while storeA's lock was held")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	unlock()
-
-	select {
-	case err := <-loadErr:
-		if err != nil {
-			t.Fatalf("storeB.Load failed after unlock: %v", err)
-		}
-		tok := <-loaded
-		if tok.AccessToken != bigToken("a").AccessToken {
-			t.Errorf("storeB.Load got unexpected token: %v", tok)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("storeB.Load timed out waiting for lock release")
-	}
-
-	// 2. Force overlapping save/save: write from storeB and storeA consecutively,
+	// Force overlapping save/save: write from storeB and storeA consecutively,
 	// verifying both updates are preserved and readable by either store.
 	if err := storeB.Save(ProviderKey("keyB"), bigToken("b")); err != nil {
 		t.Fatalf("storeB.Save: %v", err)
@@ -674,6 +613,188 @@ func TestStoreKeyringSharedLockAcrossDifferentEnvironmentRoots(t *testing.T) {
 		gotB.AccessToken != bigToken("b").AccessToken ||
 		gotC.AccessToken != bigToken("c").AccessToken {
 		t.Errorf("concurrent state was not preserved across stores")
+	}
+}
+
+// TestStoreKeyringFirstMigrationFailureCleansUpWrittenChunks is the regression for
+// P1: during the first migration from a whole-entry layout to a chunked layout,
+// if a chunk write fails partway through, the written chunks must be cleaned up
+// so future small saves (which do not sweep chunk ranges) do not leave orphaned
+// token material in the keychain.
+func TestStoreKeyringFirstMigrationFailureCleansUpWrittenChunks(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	s := newCappedKeyringStore(t, kr)
+
+	smallToken := Token{
+		AccessToken: "small-secret-token",
+		TokenType:   "Bearer",
+		Account:     "user@example.com",
+	}
+	mustSave(t, s, "small", smallToken)
+
+	// Verify initial store is a single whole entry (not chunked).
+	head, ok, err := kr.Get(keyringService, keyringAccount)
+	if err != nil || !ok {
+		t.Fatalf("initial Get failed: %v", err)
+	}
+	if strings.HasPrefix(head, keyringManifestPrefix) {
+		t.Fatal("initial small save unexpectedly created a manifest")
+	}
+
+	// Inject failure on writing the second chunk during the first oversized save.
+	boom := errors.New("keychain write failed on chunk 1")
+	kr.failSet = func(account string) error {
+		if strings.HasSuffix(account, "."+keyringChunkFamilyA+".1") {
+			return boom
+		}
+		return nil
+	}
+
+	// Try saving an oversized token (triggering first migration to chunked layout).
+	hugeToken := bigToken("x")
+	hugeToken.AccessToken = strings.Repeat("x", 4000)
+	if err := s.Save(ProviderKey("big"), hugeToken); !errors.Is(err, boom) {
+		t.Fatalf("Save with chunk write failure: got %v, want %v", err, boom)
+	}
+	kr.failSet = nil
+
+	// Verify the original small token remains intact and readable.
+	if got := mustLoad(t, s, "small"); got.AccessToken != smallToken.AccessToken {
+		t.Fatalf("small token was damaged by failed migration: %v", got)
+	}
+
+	// Verify no chunks survived in either chunk family.
+	if chunksA := kr.chunkAccounts(keyringChunkFamilyA); len(chunksA) != 0 {
+		t.Fatalf("chunks for family A survived failed first migration: %v", chunksA)
+	}
+	if chunksB := kr.chunkAccounts(keyringChunkFamilyB); len(chunksB) != 0 {
+		t.Fatalf("chunks for family B survived failed first migration: %v", chunksB)
+	}
+
+	// A subsequent small save succeeds and stays whole without strays.
+	mustSave(t, s, "small2", smallToken)
+	if chunksA := kr.chunkAccounts(keyringChunkFamilyA); len(chunksA) != 0 {
+		t.Fatalf("chunks for family A found after subsequent small save: %v", chunksA)
+	}
+	if got := mustLoad(t, s, "small"); got.AccessToken != smallToken.AccessToken {
+		t.Errorf("small token not readable: %v", got)
+	}
+	if got := mustLoad(t, s, "small2"); got.AccessToken != smallToken.AccessToken {
+		t.Errorf("small2 token not readable: %v", got)
+	}
+}
+
+// TestStoreKeyringFirstMigrationFinalManifestFailureCleansUpWrittenChunks verifies that
+// if the final manifest write fails during first migration, written chunks are removed.
+func TestStoreKeyringFirstMigrationFinalManifestFailureCleansUpWrittenChunks(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	s := newCappedKeyringStore(t, kr)
+
+	smallToken := Token{
+		AccessToken: "small-secret-token",
+		TokenType:   "Bearer",
+		Account:     "user@example.com",
+	}
+	mustSave(t, s, "small", smallToken)
+
+	boom := errors.New("keychain write failed on anchor manifest commit")
+	kr.failSet = func(account string) error {
+		if account == keyringAccount {
+			return boom
+		}
+		return nil
+	}
+
+	hugeToken := bigToken("x")
+	hugeToken.AccessToken = strings.Repeat("x", 4000)
+	if err := s.Save(ProviderKey("big"), hugeToken); !errors.Is(err, boom) {
+		t.Fatalf("Save with final manifest commit failure: got %v, want %v", err, boom)
+	}
+	kr.failSet = nil
+
+	// Verify original small token is still intact.
+	if got := mustLoad(t, s, "small"); got.AccessToken != smallToken.AccessToken {
+		t.Fatalf("small token was damaged by failed migration: %v", got)
+	}
+
+	// Verify all chunks in family A were cleaned up.
+	if chunksA := kr.chunkAccounts(keyringChunkFamilyA); len(chunksA) != 0 {
+		t.Fatalf("chunks for family A survived failed first migration: %v", chunksA)
+	}
+}
+
+// TestStoreKeyringCorruptStateActionableErrorAndRecovery verifies that corrupt
+// manifests, missing chunks, and digest mismatches fail closed with actionable
+// error messages naming the anchor and remediation command, and that Reset()
+// provides a full recovery path.
+func TestStoreKeyringCorruptStateActionableErrorAndRecovery(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	s := newCappedKeyringStore(t, kr)
+
+	mustSave(t, s, "first", bigToken("a"))
+	mustSave(t, s, "second", bigToken("b"))
+
+	manifest := manifestOf(t, kr)
+
+	// 1. Missing chunk error test
+	firstChunk := keyringAccount + "." + manifest.live + ".0"
+	savedChunk := kr.data[keyringService+"/"+firstChunk]
+	delete(kr.data, keyringService+"/"+firstChunk)
+
+	_, _, err := s.Load(ProviderKey("first"))
+	if err == nil || !strings.Contains(err.Error(), "zero auth reset") || !strings.Contains(err.Error(), keyringAccount) {
+		t.Fatalf("Load with missing chunk did not return actionable recovery error: %v", err)
+	}
+	if err := s.Save(ProviderKey("third"), bigToken("c")); err == nil || !strings.Contains(err.Error(), "zero auth reset") {
+		t.Fatalf("Save with missing chunk did not fail closed with actionable recovery error: %v", err)
+	}
+	if _, err := s.Status(KeyPrefixProvider); err == nil || !strings.Contains(err.Error(), "zero auth reset") {
+		t.Fatalf("Status with missing chunk did not return actionable recovery error: %v", err)
+	}
+	if _, err := s.Delete(ProviderKey("first")); err == nil || !strings.Contains(err.Error(), "zero auth reset") {
+		t.Fatalf("Delete with missing chunk did not return actionable recovery error: %v", err)
+	}
+
+	// Restore chunk
+	kr.data[keyringService+"/"+firstChunk] = savedChunk
+
+	// 2. Digest mismatch test: modify one character in the chunk while keeping it valid base64
+	mutated := []byte(savedChunk)
+	if mutated[0] == 'A' {
+		mutated[0] = 'B'
+	} else {
+		mutated[0] = 'A'
+	}
+	kr.data[keyringService+"/"+firstChunk] = string(mutated)
+	_, _, err = s.Load(ProviderKey("first"))
+	if err == nil || !strings.Contains(err.Error(), "failed its integrity check") || !strings.Contains(err.Error(), "zero auth reset") {
+		t.Fatalf("Load with digest mismatch did not return actionable recovery error: %v", err)
+	}
+
+	// 3. Malformed manifest test
+	kr.data[keyringService+"/"+keyringAccount] = "zc1:invalid-manifest-data"
+	_, _, err = s.Load(ProviderKey("first"))
+	if err == nil || !strings.Contains(err.Error(), "malformed manifest") || !strings.Contains(err.Error(), "zero auth reset") {
+		t.Fatalf("Load with malformed manifest did not return actionable recovery error: %v", err)
+	}
+	if err := s.Save(ProviderKey("fourth"), bigToken("d")); err == nil || !strings.Contains(err.Error(), "zero auth reset") {
+		t.Fatalf("Save with malformed manifest did not fail closed: %v", err)
+	}
+
+	// 4. Test recovery via Reset()
+	if err := s.Reset(); err != nil {
+		t.Fatalf("Reset() failed: %v", err)
+	}
+
+	// Verify all entries in fake keyring were purged.
+	if len(kr.data) != 0 {
+		t.Fatalf("Reset did not clear all keyring entries, remaining: %v", kr.data)
+	}
+
+	// 5. Fresh save and load after reset succeeds
+	mustSave(t, s, "fresh", bigToken("e"))
+	if got := mustLoad(t, s, "fresh"); got.AccessToken != bigToken("e").AccessToken {
+		t.Fatalf("fresh load after reset returned %v", got)
 	}
 }
 
