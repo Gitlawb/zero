@@ -179,6 +179,14 @@ func streamFramesToFile(r io.Reader, w io.Writer, size int64) error {
 // sanitizeLinkID refuses every dot-prefixed id so a link can never name one.
 const stagingPrefix = ".staging-"
 
+// keptPrefix names a staged backup that recovery decided to keep rather than
+// order against a tree it had just put back. Recovery runs again on every start,
+// and by then it can no longer tell that tree from one a later extract
+// published, so the copy is parked under a name the scan does not enumerate.
+// sanitizeLinkID refuses every dot-prefixed id, so this can never take a link's
+// name.
+const keptPrefix = ".kept-"
+
 // lockDirName holds the per-link advisory lock files that serialize extracts
 // across processes. Dot-prefixed for the same reason stagingPrefix is.
 const lockDirName = ".extract-locks"
@@ -409,7 +417,8 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 			// dest is a tree THIS pass put back, so nothing published over this
 			// backup and the reasoning above does not apply. Without an order
 			// both names agree on, which of the two is current is unknown.
-			logf("remote: staged tree in %s cannot be ordered against the tree just restored for %s; leaving it in place", staging, id)
+			logf("remote: staged tree in %s cannot be ordered against the tree just restored for %s; keeping it", staging, id)
+			parkKeptBackup(dir, staging, id, logf)
 			return true
 		}
 		if err := os.RemoveAll(staging); err != nil {
@@ -427,6 +436,19 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 		logf("remote: could not remove staging dir %s after restoring %s: %v", staging, id, err)
 	}
 	return true
+}
+
+// parkKeptBackup moves a staging dir out of the prefix recovery scans, so the
+// next pass leaves alone what this one deliberately kept instead of reading the
+// restored tree at dest as a later extract publishing over it. A rename onto an
+// existing directory fails rather than replacing it, so a legacy link that
+// happens to carry the parked name is never clobbered; the copy just stays where
+// it is, which is the same fail-safe one pass later.
+func parkKeptBackup(dir, staging, id string, logf func(string, ...any)) {
+	parked := filepath.Join(dir, keptPrefix+strings.TrimPrefix(filepath.Base(staging), stagingPrefix))
+	if err := os.Rename(staging, parked); err != nil {
+		logf("remote: could not park the kept backup for %s at %s: %v", id, parked, err)
+	}
 }
 
 // extractBundle clones bundleFile into a staging dir beside dest, then swaps the

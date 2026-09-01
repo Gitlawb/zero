@@ -802,6 +802,13 @@ func TestRecoverBundleDirRestoresTheNewestOfSeveralBackups(t *testing.T) {
 // is not true of a tree recovery itself just put back. A second backup that
 // carries no order recovery can compare against that restore may be the newer
 // copy, so it is kept rather than dropped.
+// parkedStaging is where recovery moves a staging dir it kept, so a later pass
+// does not read the restored tree at dest as a later extract publishing over it.
+func parkedStaging(staging string) string {
+	base := filepath.Base(staging)
+	return filepath.Join(filepath.Dir(staging), keptPrefix+strings.TrimPrefix(base, stagingPrefix))
+}
+
 func TestRecoverBundleDirKeepsAnUnorderableBackupAgainstATreeItRestored(t *testing.T) {
 	dir := t.TempDir()
 	stamped := stageBackup(t, dir, "current", "proj-1", "v1", 200)
@@ -817,11 +824,97 @@ func TestRecoverBundleDirKeepsAnUnorderableBackupAgainstATreeItRestored(t *testi
 	if _, err := os.Stat(filepath.Join(stamped, "backup")); !os.IsNotExist(err) {
 		t.Errorf("the restored staging dir should be cleared, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(unordered, "backup", "a.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(parkedStaging(unordered), "backup", "a.txt")); err != nil {
 		t.Errorf("a backup that cannot be ordered against the restore must be kept: %v", err)
+	}
+	if _, err := os.Stat(unordered); !os.IsNotExist(err) {
+		t.Errorf("the kept backup should be parked out of the scanned prefix, got %v", err)
 	}
 	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "cannot be ordered") }) {
 		t.Errorf("keeping an unorderable backup should be reported, got %v", logged)
+	}
+}
+
+// Recovery runs on every start. A backup the pass above deliberately kept must
+// still be there after the next one, where the restore is already at dest and
+// nothing records that this pass, not a later extract, put it there.
+func TestRecoverBundleDirKeepsAnUnorderableBackupAcrossRestarts(t *testing.T) {
+	dir := t.TempDir()
+	stageBackup(t, dir, "current", "proj-1", "v1", 200)
+	unordered := stageBackup(t, dir, "leftover", "proj-1", "v2", 0)
+
+	recoverBundleDir(dir, nil)
+	if _, err := os.Stat(filepath.Join(parkedStaging(unordered), "backup", "a.txt")); err != nil {
+		t.Fatalf("the first pass should keep the unorderable backup: %v", err)
+	}
+
+	// The daemon restarts: same dir, a fresh recovery pass with no memory of the
+	// first.
+	recoverBundleDir(dir, nil)
+
+	if !keptBackupSurvives(t, dir, "v2") {
+		t.Error("a backup kept as unorderable must survive the next recovery pass")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Errorf("the restored tree must be left alone across restarts: got %q err %v", got, err)
+	}
+
+	// And it must not be re-restored or re-parked on every start after that.
+	recoverBundleDir(dir, nil)
+	if !keptBackupSurvives(t, dir, "v2") {
+		t.Error("the kept backup must survive a third pass too")
+	}
+}
+
+// keptBackupSurvives reports whether a backup holding content is still somewhere
+// under dir, wherever recovery decided to keep it.
+func keptBackupSurvives(t *testing.T, dir, content string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		got, err := os.ReadFile(filepath.Join(dir, entry.Name(), "backup", "a.txt"))
+		if err == nil && string(got) == content {
+			return true
+		}
+	}
+	return false
+}
+
+// Parking is a rename, and a rename onto a directory that already holds
+// something must fail rather than replace it. Recovery then leaves the copy
+// where it is, which is still a copy, and never eats the occupant.
+func TestRecoverBundleDirDoesNotClobberAnOccupiedParkedName(t *testing.T) {
+	dir := t.TempDir()
+	stageBackup(t, dir, "current", "proj-1", "v1", 200)
+	unordered := stageBackup(t, dir, "leftover", "proj-1", "v2", 0)
+
+	occupied := parkedStaging(unordered)
+	if err := os.MkdirAll(occupied, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(occupied, "keep.txt"), []byte("not mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logged []string
+	recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+
+	got, err := os.ReadFile(filepath.Join(occupied, "keep.txt"))
+	if err != nil || string(got) != "not mine" {
+		t.Errorf("the occupant of the parked name must be untouched: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(unordered, "backup", "a.txt")); err != nil {
+		t.Errorf("a backup that could not be parked must stay where it is: %v", err)
+	}
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "could not park") }) {
+		t.Errorf("a failed park should be reported, got %v", logged)
 	}
 }
 
@@ -1056,8 +1149,10 @@ func TestRecoverBundleDirKeepsABackupItCannotTellApartFromTheRestore(t *testing.
 	}
 	kept := 0
 	for _, staging := range []string{first, second} {
-		if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err == nil {
-			kept++
+		for _, at := range []string{staging, parkedStaging(staging)} {
+			if _, err := os.Stat(filepath.Join(at, "backup", "a.txt")); err == nil {
+				kept++
+			}
 		}
 	}
 	if kept != 1 {
