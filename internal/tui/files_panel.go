@@ -395,21 +395,12 @@ func (m model) runDetailsFileAtMouse(msg tea.MouseMsg) (string, bool) {
 	}
 	inner := m.runDetailsInnerWidth()
 	layout := m.runDetailsLayout(inner)
-	overlayLines := viewLines(overlay)
-	_, overlayLines, _ = normalizeOverlayBlock(overlayLines, width)
-	contentOrigin := -1
-	if len(layout.lines) > 0 {
-		for i, line := range overlayLines {
-			if line == layout.lines[0] {
-				contentOrigin = i
-				break
-			}
-		}
-	}
-	if layout.fileStart < 0 || contentOrigin < 0 {
+	if layout.fileStart < 0 {
 		return "", false
 	}
-	y := hit.y - contentOrigin
+	// styledBlockFillTitle contributes a 1-line top border with title before the content rows.
+	const topBorderHeight = 1
+	y := hit.y - topBorderHeight
 	var match fileHit
 	found := false
 	for _, h := range layout.fileHits {

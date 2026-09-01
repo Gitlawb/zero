@@ -502,15 +502,17 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	c.statsData.HighlightCalls++
 	c.mu.Unlock()
 
-	display, ok := highlightCodeForPathWithTheme(readRes.lines, displayPath, 1<<20, nil, theme)
-	if !ok || len(display) != len(readRes.lines) {
-		display = make([]string, len(readRes.lines))
-		for i, l := range readRes.lines {
-			display[i] = sanitizeRawFileLine(l)
-		}
+	cleanLines := make([]string, len(readRes.lines))
+	for i, l := range readRes.lines {
+		cleanLines[i] = sanitizeRawFileLine(l)
 	}
 
-	rendered := formatFileViewLines(readRes.lines, display, changed, readRes.truncated, readRes.omittedLines, width, theme)
+	display, ok := highlightCodeForPathWithTheme(cleanLines, displayPath, 1<<20, nil, theme)
+	if !ok || len(display) != len(cleanLines) {
+		display = cleanLines
+	}
+
+	rendered := formatFileViewLines(cleanLines, display, changed, readRes.truncated, readRes.omittedLines, width, theme)
 
 	if fileViewBeforeCacheCommit != nil {
 		fileViewBeforeCacheCommit()
@@ -524,7 +526,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		displayPath:  displayPath,
 		modTime:      modTime,
 		size:         size,
-		lines:        readRes.lines,
+		lines:        cleanLines,
 		display:      display,
 		truncated:    readRes.truncated,
 		omittedLines: readRes.omittedLines,
