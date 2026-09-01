@@ -602,7 +602,7 @@ type keyringManifest struct {
 }
 
 func (b keyringBlob) corruptError(detail string) error {
-	return fmt.Errorf("oauth: keyring token data at %s (account %q) %s; run `zero auth reset` or remove entries %q and %q.[A|B].0..%d to recover",
+	return fmt.Errorf("oauth: keyring token data at %s (account %q) %s; run `zero auth reset` or remove entries %q and %q.[a|b].0..%d to recover",
 		b.location(), b.account, detail, b.account, b.account, keyringMaxChunks-1)
 }
 

@@ -600,7 +600,7 @@ func runAuthReset(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, "Reset OAuth token store. All stored credentials and entries cleared."); err != nil {
+	if _, err := fmt.Fprintln(stdout, "Reset OAuth token store."); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
