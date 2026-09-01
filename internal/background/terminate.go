@@ -22,13 +22,14 @@ func TerminateProcess(pid int) error {
 	return terminateProcess(pid)
 }
 
-// TerminateOwnedProcess stops a started command using the launch-time process
-// group identity established by ConfigureChildProcessGroup, without reaping.
-// Unlike TerminateProcess, this does not rediscover the group via Getpgid, so
-// Darwin ESRCH on an unreaped group leader cannot leave descendants running
-// (see execution.TerminateProcessGroup). Unlike TerminateCommand, this does
-// not Wait: callers such as execWorker.Kill and CommandContext Cancel still
-// own the subsequent reap.
+// TerminateOwnedProcess stops a started command without reaping it. On POSIX,
+// commands prepared by ConfigureChildProcessGroup are stopped through their
+// launch-time process-group identity, so Darwin ESRCH on an unreaped leader
+// cannot leave descendants running (see execution.TerminateProcessGroup).
+// Commands without that configuration use the platform's safe PID/process-tree
+// fallback; Windows always uses its rooted process-tree implementation. Unlike
+// TerminateCommand, this does not Wait: callers such as execWorker.Kill and
+// CommandContext Cancel still own the subsequent reap.
 func TerminateOwnedProcess(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return errors.New("terminate owned process: process was never started")

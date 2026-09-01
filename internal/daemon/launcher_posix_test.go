@@ -65,14 +65,15 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 
 func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 	// CommandContext Cancel must use the same launch-time group identity as
-	// Kill, not TerminateProcess(pid). The leader stays alive (wait) so the
-	// context-cancel goroutine is the path under test.
+	// Kill, not TerminateProcess(pid). The leader exits without being reaped,
+	// while its descendant keeps the stdout pipe open. That makes cancellation
+	// exercise the Darwin Getpgid -> ESRCH failure shape fixed by this change.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	launcher, err := NewExecLauncher(ExecLauncherConfig{
 		Executable: "/bin/sh",
-		BaseArgs:   []string{"-c", "sleep 300 & echo $!; wait"},
+		BaseArgs:   []string{"-c", "sleep 300 & echo $!; exit 0"},
 		Env:        []string{},
 	})
 	if err != nil {
@@ -98,9 +99,13 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 		}
 	})
 
+	waitUntilUnreapedZombie(t, w.cmd.Process.Pid)
 	cancel()
-	if _, err := w.Wait(); err != nil {
+	if _, err := w.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Wait after cancel: %v", err)
+	}
+	if w.cmd.ProcessState == nil {
+		t.Fatal("Wait after cancel did not reap the exited worker leader")
 	}
 	assertProcessStopped(t, childPID)
 }
