@@ -12,6 +12,7 @@ type writeFileTool struct {
 	baseTool
 	workspaceRoot string
 	scope         PathScope
+	readFile      func(string) ([]byte, error)
 }
 
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -34,6 +35,7 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
+		readFile:      os.ReadFile,
 	}
 }
 
@@ -82,7 +84,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
 			// unknown (it may have been replaced or removed out from under us).
-			current, rerr := os.ReadFile(absolutePath)
+			current, rerr := tool.readFile(absolutePath)
 			if rerr != nil {
 				return errorResult(fileConflictMessage(relativePath))
 			}
@@ -95,9 +97,11 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Capture the prior content (before we replace it) so an overwrite can show a
 	// real diff; a fresh create stays "" and previews as all-additions.
 	priorContent := ""
+	priorContentKnown := !existed
 	if existed {
-		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
+		if prev, rerr := tool.readFile(absolutePath); rerr == nil {
 			priorContent = string(prev)
+			priorContentKnown = true
 		}
 	}
 
@@ -140,8 +144,12 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	if diff, ok := boundedFileDiff(relativePath, priorContent, content); ok {
-		result.FileDiffs = []FileDiff{diff}
+	// Do not pretend an unreadable overwrite was a creation. The write may be
+	// valid, but ACP only receives an exact before/after pair we actually saw.
+	if priorContentKnown {
+		if diff, ok := boundedFileDiff(absolutePath, priorContent, content, existed, true); ok {
+			result.FileDiffs = []FileDiff{diff}
+		}
 	}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for
 	// an overwrite) on Display.Preview. Output stays the summary, so the model never

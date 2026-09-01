@@ -220,9 +220,30 @@ type ToolCallContent struct {
 	// type == "content"
 	Content *ContentBlock `json:"content,omitempty"`
 	// type == "diff"
-	Path    string `json:"path,omitempty"`
-	OldText string `json:"oldText,omitempty"`
-	NewText string `json:"newText,omitempty"`
+	Path    string  `json:"path,omitempty"`
+	OldText *string `json:"oldText,omitempty"`
+	NewText *string `json:"newText,omitempty"`
+}
+
+// MarshalJSON preserves ACP's discriminated content union. A diff always has
+// path and newText (including an intentionally empty deletion value); oldText
+// is JSON null for a newly created file. Other content variants omit all diff
+// fields rather than serializing irrelevant nulls.
+func (content ToolCallContent) MarshalJSON() ([]byte, error) {
+	if content.Type == "diff" {
+		return json.Marshal(struct {
+			Type    string  `json:"type"`
+			Path    string  `json:"path"`
+			OldText *string `json:"oldText"`
+			NewText *string `json:"newText"`
+		}{
+			Type: content.Type, Path: content.Path, OldText: content.OldText, NewText: content.NewText,
+		})
+	}
+	return json.Marshal(struct {
+		Type    string        `json:"type"`
+		Content *ContentBlock `json:"content,omitempty"`
+	}{Type: content.Type, Content: content.Content})
 }
 
 func ToolContent(block ContentBlock) ToolCallContent {

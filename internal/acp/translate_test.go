@@ -1,6 +1,8 @@
 package acp
 
 import (
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -74,13 +76,14 @@ func TestToolCallStart(t *testing.T) {
 }
 
 func TestToolCallResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.go")
 	ok := toolCallResult(agent.ToolResult{
 		ToolCallID:   "tc1",
 		Name:         "edit_file",
 		Status:       tools.StatusOK,
 		Output:       "applied\n",
 		ChangedFiles: []string{"a.go", ""},
-		FileDiffs:    []tools.FileDiff{{Path: "a.go", OldText: "before\n", NewText: "after\n"}},
+		FileDiffs:    []tools.FileDiff{{Path: path, OldExists: true, NewExists: true, OldText: "before\n", NewText: "after\n"}},
 	})
 	if ok.SessionUpdate != UpdateToolCallUpdate || ok.Status != ToolStatusCompleted {
 		t.Fatalf("unexpected ok result: %+v", ok)
@@ -88,7 +91,7 @@ func TestToolCallResult(t *testing.T) {
 	if len(ok.Content) != 2 || ok.Content[0].Type != "content" || ok.Content[0].Content.Text != "applied" {
 		t.Fatalf("unexpected content: %+v", ok.Content)
 	}
-	if diff := ok.Content[1]; diff.Type != "diff" || diff.Path != "a.go" || diff.OldText != "before\n" || diff.NewText != "after\n" {
+	if diff := ok.Content[1]; diff.Type != "diff" || diff.Path != path || diff.OldText == nil || *diff.OldText != "before\n" || diff.NewText == nil || *diff.NewText != "after\n" {
 		t.Fatalf("unexpected diff content: %+v", diff)
 	}
 	if len(ok.Locations) != 1 || ok.Locations[0].Path != "a.go" {
@@ -98,6 +101,45 @@ func TestToolCallResult(t *testing.T) {
 	failed := toolCallResult(agent.ToolResult{ToolCallID: "tc2", Status: tools.StatusError, Output: "boom"})
 	if failed.Status != ToolStatusFailed {
 		t.Fatalf("error result should be failed, got %q", failed.Status)
+	}
+}
+
+func TestToolCallDiffJSONPreservesRequiredEmptyNewText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.txt")
+	content := appendToolResultDiffs(nil, []tools.FileDiff{
+		{Path: path, OldExists: false, NewExists: true, NewText: ""},
+		{Path: path, OldExists: true, NewExists: false, OldText: ""},
+	})
+	if len(content) != 2 {
+		t.Fatalf("diff content = %#v", content)
+	}
+	for index, diff := range content {
+		encoded, err := json.Marshal(diff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(encoded, &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire["path"] != path || wire["newText"] != "" {
+			t.Fatalf("wire diff %d = %s", index, encoded)
+		}
+		if index == 0 && wire["oldText"] != nil {
+			t.Fatalf("create oldText = %#v, want null", wire["oldText"])
+		}
+	}
+}
+
+func TestToolCallResultEmitsOnlyRedactedFileDiffs(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	path := filepath.Join(t.TempDir(), "secret.txt")
+	scrubbed := tools.ScrubResultSecrets(tools.Result{FileDiffs: []tools.FileDiff{{
+		Path: path, OldExists: true, NewExists: true, OldText: "token=" + secret, NewText: "safe",
+	}}})
+	update := toolCallResult(agent.ToolResult{ToolCallID: "call", Status: tools.StatusError, FileDiffs: scrubbed.FileDiffs})
+	if len(update.Content) != 1 || update.Content[0].OldText == nil || strings.Contains(*update.Content[0].OldText, secret) {
+		t.Fatalf("ACP content leaked unredacted diff: %#v", update.Content)
 	}
 }
 

@@ -196,7 +196,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	if diff, ok := boundedFileDiff(relativePath, content, updated); ok {
+	if diff, ok := boundedFileDiff(absolutePath, content, updated, true, true); ok {
 		result.FileDiffs = []FileDiff{diff}
 	}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line

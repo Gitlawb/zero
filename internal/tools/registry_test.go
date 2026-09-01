@@ -447,7 +447,7 @@ func TestScrubResultSecretsRedactsPreview(t *testing.T) {
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	res := scrubResultSecrets(Result{
 		Display:   Display{Preview: "+++ b/x\n+token := \"" + secret + "\""},
-		FileDiffs: []FileDiff{{Path: "x", OldText: secret, NewText: secret}},
+		FileDiffs: []FileDiff{{Path: filepath.Join(t.TempDir(), "x"), OldExists: true, NewExists: true, OldText: secret, NewText: secret}},
 	})
 	if strings.Contains(res.Display.Preview, secret) {
 		t.Errorf("Display.Preview (the card-only code preview) must be redacted, leaked: %q", res.Display.Preview)
@@ -457,6 +457,20 @@ func TestScrubResultSecretsRedactsPreview(t *testing.T) {
 	}
 	if strings.Contains(res.FileDiffs[0].OldText, secret) || strings.Contains(res.FileDiffs[0].NewText, secret) {
 		t.Errorf("FileDiff must be redacted: %#v", res.FileDiffs)
+	}
+}
+
+func TestScrubResultSecretsDropsControlSplitFileDiff(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	res := scrubResultSecrets(Result{FileDiffs: []FileDiff{{
+		Path:      filepath.Join(t.TempDir(), "x"),
+		OldExists: true,
+		NewExists: true,
+		OldText:   "token=" + secret[:12] + "\x00" + secret[12:],
+		NewText:   "safe",
+	}}})
+	if len(res.FileDiffs) != 0 || !res.Redacted {
+		t.Fatalf("unsafe FileDiff = %#v, redacted = %t", res.FileDiffs, res.Redacted)
 	}
 }
 
