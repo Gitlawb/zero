@@ -439,6 +439,7 @@ func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) crede
 	}
 	return credentialPathOptions{
 		Homes:              homes,
+		GPGHomes:           resolveCredentialOverridePaths(credentialEnvValue(env, "GNUPGHOME"), baseDirs),
 		ConfigDirs:         dedupeStrings(configDirs),
 		CloudSDKConfigDirs: dedupeStrings(cloudSDKConfigDirs),
 		GoogleCredentials:  resolveCredentialOverridePaths(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDirs),
@@ -466,6 +467,7 @@ func credentialEnvValue(env []string, key string) string {
 
 type credentialPathOptions struct {
 	Homes              []string
+	GPGHomes           []string
 	ConfigDirs         []string
 	CloudSDKConfigDirs []string
 	GoogleCredentials  []string
@@ -535,6 +537,19 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// backend gap, not introduced here.
 		lexicalCandidates = append(lexicalCandidates, gnupg, gitCredentials)
 		lexicalCandidates = append(lexicalCandidates, sshKeys...)
+		lexicalDirs = append(lexicalDirs, gnupg)
+	}
+	for _, gnupg := range options.GPGHomes {
+		gnupg = strings.TrimSpace(gnupg)
+		if gnupg == "" {
+			continue
+		}
+		// GnuPG's effective home is GNUPGHOME when set, not only ~/.gnupg.
+		// Treat it as the same directory-shaped secret store so inherited and
+		// command-supplied values reach DenyReadIfExists.
+		candidates = append(candidates, gnupg)
+		dirs = append(dirs, gnupg)
+		lexicalCandidates = append(lexicalCandidates, gnupg)
 		lexicalDirs = append(lexicalDirs, gnupg)
 	}
 	candidates = append(candidates, options.GoogleCredentials...)
