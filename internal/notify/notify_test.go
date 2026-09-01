@@ -50,6 +50,44 @@ func TestSequence(t *testing.T) {
 	}
 }
 
+// Configure swaps the policy at runtime: after turning a silent notifier on,
+// the next Notify emits; after turning a noisy one off, it stays silent. Sinks
+// survive the swap (the TUI relies on this when /notify reconfigures mid-run).
+func TestConfigureAppliesImmediatelyAndKeepsSinks(t *testing.T) {
+	var buf bytes.Buffer
+	n := New(&buf, Config{Mode: ModeOff})
+	n.SetFocused(true)
+
+	n.Notify(Completion, "x")
+	if buf.Len() != 0 {
+		t.Fatalf("off should be silent, got %q", buf.String())
+	}
+
+	sink := &recordingSink{}
+	n.AddSink(sink)
+	n.Configure(Config{Mode: ModeBell, FocusMode: FocusAlways})
+	n.Notify(Completion, "x")
+	if buf.String() != "\x07" {
+		t.Fatalf("after Configure(bell) should bell, got %q", buf.String())
+	}
+	sink.mu.Lock()
+	got := len(sink.events)
+	sink.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("sink should still receive events after Configure, got %d", got)
+	}
+
+	n.Configure(Config{Mode: ModeOff})
+	buf.Reset()
+	n.Notify(Completion, "x")
+	sink.mu.Lock()
+	got = len(sink.events)
+	sink.mu.Unlock()
+	if buf.Len() != 0 || got != 1 {
+		t.Fatalf("after Configure(off) should be fully silent, buf=%q events=%d", buf.String(), got)
+	}
+}
+
 func TestSanitizeMessage(t *testing.T) {
 	if got := sanitizeMessage("ok\x1b]0;evil\x07more\nx"); got != "ok]0;evilmorex" {
 		t.Fatalf("sanitize=%q", got)

@@ -57,7 +57,7 @@ type Sink interface {
 // attached Sinks. Safe for concurrent use.
 type Notifier struct {
 	w   io.Writer
-	cfg Config // immutable after New; reads outside the lock are safe
+	cfg Config // swap at runtime via Configure; reads outside the lock are safe
 
 	mu      sync.Mutex
 	focused bool
@@ -69,6 +69,16 @@ type Notifier struct {
 // interactive caller should call SetFocused(true) at launch.
 func New(w io.Writer, cfg Config) *Notifier {
 	return &Notifier{w: w, cfg: cfg}
+}
+
+// Configure swaps the mode/focus policy at runtime. Sinks, focus state, and the
+// writer are preserved, so an in-session preference change (e.g. the TUI's
+// /notify command) applies from the next Notify call. Safe to call concurrently
+// with Notify.
+func (n *Notifier) Configure(cfg Config) {
+	n.mu.Lock()
+	n.cfg = cfg
+	n.mu.Unlock()
 }
 
 // AddSink registers an additional destination that receives every eligible
