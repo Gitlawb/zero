@@ -128,9 +128,8 @@ an approved feature.
 
 ## Supported platforms
 
-Zero is released for the same five platforms that `scripts/install.sh`,
-`scripts/install.ps1`, and the npm wrapper resolve, and that
-`.github/workflows/release-artifacts.yml` packages:
+Zero publishes five native prebuilt artifacts from
+`.github/workflows/release-artifacts.yml`:
 
 - `linux-x64` (`linux/amd64`)
 - `linux-arm64` (`linux/arm64`)
@@ -138,9 +137,19 @@ Zero is released for the same five platforms that `scripts/install.sh`,
 - `macos-x64` (`darwin/amd64`)
 - `windows-x64` (`windows/amd64`)
 
-Other `GOOS`/`GOARCH` values, including Plan 9, are unsupported. They are not
-a review criterion. Do not block a pull request for failing to compile on an
-unsupported `GOOS`. Tests may use `plan9` as a fixture for an unsupported OS.
+The shell installer and npm wrapper resolve the applicable artifacts from that
+list. The PowerShell installer supports the published `windows-x64` artifact;
+there is no native Windows ARM64 artifact. Windows on ARM users can run the x64
+build under emulation or build from source.
+
+Android/Termux is also supported even though it has no distinct release
+artifact. The npm wrapper maps Android to the Linux artifact, and
+`docs/INSTALL.md` documents the native `android/arm64` source build needed on
+devices whose seccomp policy blocks the Linux build's syscall path.
+
+Other `GOOS`/`GOARCH` values, including Plan 9, are unsupported. They are not a
+review criterion. Do not block a pull request for failing to compile on an
+unsupported target. Tests may use `plan9` as a fixture for an unsupported OS.
 
 ## What We Prioritize
 
