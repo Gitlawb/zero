@@ -665,6 +665,39 @@ func TestRestoreInterruptedPromotionFindsHoldersUnderAnAwkwardPath(t *testing.T)
 	}
 }
 
+// A holder this package did not name carries no ordering anyone can read, so it
+// is the least recent thing recovery can claim to know about and must lose to
+// any stamped holder, however old that one's stamp is.
+func TestRestoreInterruptedPromotionPrefersAStampedHolderOverAnUnstampedOne(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	// The unstamped name sorts after the stamped one lexically, so a pass that
+	// ignored the stamp entirely would still get this right; give it a name that
+	// sorts FIRST, so only the stamped-wins rule can produce the wanted answer.
+	unstamped := dest + holderSuffix + "aaa"
+	if err := os.MkdirAll(filepath.Join(unstamped, "install"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unstamped, "install", "engine"), []byte("unstamped"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stamped := plantHolder(t, dest, 100, "stamped")
+
+	restoreInterruptedPromotion(dest)
+
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "stamped" {
+		t.Fatalf("a stamped holder must win over an unstamped one: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(stamped); !os.IsNotExist(err) {
+		t.Errorf("the restored holder should be cleared, got %v", err)
+	}
+	// The one recovery did not use is left for a human, never deleted on a guess.
+	if _, err := os.Stat(filepath.Join(unstamped, "install", "engine")); err != nil {
+		t.Errorf("the unused holder must be kept: %v", err)
+	}
+}
+
 // A holder can be there without an install in it: the promotion creates the
 // holder first, so a stop before the rename leaves an empty one. Recovery must
 // step over it and keep looking rather than treating it as the newest word on
