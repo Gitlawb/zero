@@ -201,8 +201,8 @@ func TestAnImageWithPayloadIsForwarded(t *testing.T) {
 
 	result := tool.Run(context.Background(), map[string]any{})
 
-	if result.Output != "[image forwarded]" {
-		t.Fatalf("image-only Output = %q, want [image forwarded] so the tool_result is not an empty body", result.Output)
+	if result.Output != "[image returned by tool]" {
+		t.Fatalf("image-only Output = %q, want [image returned by tool] so the tool_result is not an empty body", result.Output)
 	}
 	if strings.Contains(result.Output, "cannot forward") {
 		t.Fatalf("a forwarded image is still described as unforwardable:\n%s", result.Output)
@@ -392,23 +392,23 @@ func TestAggregateImageBudgetForwardsTheFirstAndNamesTheRest(t *testing.T) {
 	if got := len(result.Images[0].Data); got != imageinput.MaxImageBytes/2+1 {
 		t.Errorf("forwarded image size = %d, want %d", got, imageinput.MaxImageBytes/2+1)
 	}
-	if !strings.Contains(result.Output, "[image forwarded]") {
+	if !strings.Contains(result.Output, "[image returned by tool]") {
 		t.Errorf("the forwarded first image has no placeholder:\n%s", result.Output)
 	}
 	if !strings.Contains(result.Output, "image/png") {
 		t.Errorf("the dropped second image was not named:\n%s", result.Output)
 	}
-	if !strings.Contains(result.Output, "which exceeded this result's image budget") {
-		t.Errorf("the dropped second image is not described as a budget skip:\n%s", result.Output)
+	if !strings.Contains(result.Output, "which exceeded this result's remaining image budget") {
+		t.Errorf("the dropped second image is not described as a budget exceeded:\n%s", result.Output)
 	}
 	if !strings.Contains(result.Output, "Retrying with fewer images can recover this payload.") {
 		t.Errorf("the output does not tell the model a retry can recover the payload:\n%s", result.Output)
 	}
 	if strings.Contains(result.Output, "cannot forward yet") {
-		t.Errorf("a budget-skipped image is described as unforwardable:\n%s", result.Output)
+		t.Errorf("a budget-exceeded image is described as unforwardable:\n%s", result.Output)
 	}
 	if strings.Contains(result.Output, "Retrying cannot recover this payload.") {
-		t.Errorf("a budget-skipped image is described as unrecoverable:\n%s", result.Output)
+		t.Errorf("a budget-exceeded image is described as unrecoverable:\n%s", result.Output)
 	}
 }
 
@@ -429,7 +429,8 @@ func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
 		{Type: "image", MimeType: "image/png", Data: payload},
 		{Type: "image", MimeType: "image/png", Data: payload},
 		{Type: "image", MimeType: "image/png", Data: payload},
-		{Type: "image", MimeType: "image/png", Data: payload},
+		{Type: "image", MimeType: "image/png", Data: "not-even-valid-base64!"},
+		{Type: "image", MimeType: "image/png", Data: ""},
 		{Type: "audio", MimeType: "audio/wav"},
 	}
 
@@ -442,8 +443,8 @@ func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
 		t.Fatalf("ImageBlocks len = %d, want 2", len(images))
 	}
 	n = 0
-	if got := DroppedContentSummary(content); got != "2 image/png blocks, 1 audio/wav block" {
-		t.Fatalf("DroppedContentSummary() = %q, want the two skipped images and the audio", got)
+	if got := DroppedContentSummary(content); got != "3 image/png blocks, 1 audio/wav block" {
+		t.Fatalf("DroppedContentSummary() = %q, want the three skipped images and the audio", got)
 	}
 	if n != 2 {
 		t.Fatalf("DroppedContentSummary decoded %d payloads, want 2 (same single pass as ImageBlocks)", n)
@@ -461,17 +462,17 @@ func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
 	if len(result.Images) != 2 {
 		t.Fatalf("Images len = %d, want 2", len(result.Images))
 	}
-	if !strings.Contains(result.Output, "[image forwarded]") {
+	if !strings.Contains(result.Output, "[image returned by tool]") {
 		t.Errorf("forwarded images have no placeholder:\n%s", result.Output)
 	}
 	if !strings.Contains(result.Output, "image/png") {
 		t.Errorf("skipped images were not named:\n%s", result.Output)
 	}
-	if !strings.Contains(result.Output, "which exceeded this result's image budget") {
-		t.Errorf("budget-skipped images are not described as a budget drop:\n%s", result.Output)
+	if !strings.Contains(result.Output, "which was not inspected because the aggregate image budget was reached") {
+		t.Errorf("uninspected images are not described correctly:\n%s", result.Output)
 	}
-	if !strings.Contains(result.Output, "Retrying with fewer images can recover this payload.") {
-		t.Errorf("budget-skipped images do not say a retry can recover them:\n%s", result.Output)
+	if strings.Contains(result.Output, "Retrying with fewer images can recover this payload.") {
+		t.Errorf("uninspected images must not make unsupported recovery claims:\n%s", result.Output)
 	}
 	if !strings.Contains(result.Output, "audio/wav") {
 		t.Errorf("audio was not named:\n%s", result.Output)
@@ -496,11 +497,50 @@ func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
 	if len(oneResult.Images) != 1 {
 		t.Fatalf("one-image Images len = %d, want 1", len(oneResult.Images))
 	}
-	if oneResult.Output != "[image forwarded]" {
-		t.Fatalf("one-image Output = %q, want [image forwarded]", oneResult.Output)
+	if oneResult.Output != "[image returned by tool]" {
+		t.Fatalf("one-image Output = %q, want [image returned by tool]", oneResult.Output)
 	}
 	if strings.Contains(oneResult.Output, "cannot forward") {
 		t.Fatalf("a forwarded image is still described as unforwardable:\n%s", oneResult.Output)
+	}
+}
+
+func TestImageBudgetNonZeroResidueAllowsSmallerLaterImage(t *testing.T) {
+	// First image: 8 MiB (fits, 2 MiB left)
+	// Second image: 3 MiB (exceeds remaining 2 MiB, budgetExceeded)
+	// Third image: 1 MiB (fits in remaining 2 MiB, forwarded, 1 MiB left)
+	img8 := paddedPNGBase64(8 * 1024 * 1024)
+	img3 := paddedPNGBase64(3 * 1024 * 1024)
+	img1 := paddedPNGBase64(1 * 1024 * 1024)
+
+	content := []Content{
+		{Type: "image", MimeType: "image/png", Data: img8},
+		{Type: "image", MimeType: "image/png", Data: img3},
+		{Type: "image", MimeType: "image/png", Data: img1},
+	}
+
+	images, disp := forwardImages(content)
+	if len(images) != 2 {
+		t.Fatalf("forwardImages len = %d, want 2 (8 MiB + 1 MiB)", len(images))
+	}
+	if disp[0] != dispForwarded || disp[1] != dispBudgetExceeded || disp[2] != dispForwarded {
+		t.Fatalf("dispositions = %v, want [forwarded, budgetExceeded, forwarded]", disp)
+	}
+
+	result := registryTool{
+		client: &nonTextClient{content: content},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}.Run(context.Background(), map[string]any{})
+
+	if len(result.Images) != 2 {
+		t.Fatalf("result Images len = %d, want 2", len(result.Images))
+	}
+	if !strings.Contains(result.Output, "exceeded this result's remaining image budget") {
+		t.Fatalf("expected remaining budget notice in output:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Retrying with fewer images can recover this payload.") {
+		t.Fatalf("expected retry recovery guidance for validated exceeded image:\n%s", result.Output)
 	}
 }
 

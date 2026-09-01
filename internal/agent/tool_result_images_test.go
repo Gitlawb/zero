@@ -287,3 +287,130 @@ func TestRunDropsToolResultImagesForANonVisionModel(t *testing.T) {
 		t.Fatalf("non-vision model was not told the image was dropped; recorded %s", messageShape(result.Messages))
 	}
 }
+
+type switchAndCaptureTool struct {
+	targetModel string
+}
+
+func (switchAndCaptureTool) Name() string        { return "switch_and_capture" }
+func (switchAndCaptureTool) Description() string { return "Switches model and captures image" }
+func (switchAndCaptureTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", Properties: map[string]tools.PropertySchema{}}
+}
+func (switchAndCaptureTool) Safety() tools.Safety {
+	return tools.Safety{Permission: tools.PermissionAllow}
+}
+func (t switchAndCaptureTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "[image returned by tool]",
+		Images: []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("\x89PNG\r\n\x1a\nfake")}},
+		Meta:   map[string]string{"escalate_to_model": t.targetModel},
+	}
+}
+
+func TestRunToolImagesRespectsModelSwitch(t *testing.T) {
+	t.Run("Non-vision to vision model escalation forwards images", func(t *testing.T) {
+		registry := tools.NewRegistry()
+		registry.Register(switchAndCaptureTool{targetModel: "gpt-4o"})
+
+		provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "switch_and_capture"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "I see it on gpt-4o."},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		}}
+
+		switched := false
+		switcher := func(_ context.Context, modelID string) (Provider, error) {
+			switched = true
+			return provider, nil
+		}
+
+		result, err := Run(context.Background(), "test", provider, Options{
+			Registry:      registry,
+			MaxTurns:      2,
+			Model:         "non-vision-initial",
+			ModelSwitcher: switcher,
+			SupportsVision: func(modelID string) bool {
+				return modelID == "gpt-4o"
+			},
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !switched {
+			t.Fatal("expected model switch to occur")
+		}
+
+		var carrier *zeroruntime.Message
+		for index := range result.Messages {
+			if len(result.Messages[index].Images) > 0 {
+				carrier = &result.Messages[index]
+			}
+			if strings.Contains(result.Messages[index].Content, "does not support image input") {
+				t.Fatalf("images were unexpectedly dropped after switch to vision model: %v", result.Messages[index])
+			}
+		}
+		if carrier == nil {
+			t.Fatal("expected image carrier message after escalation to vision model")
+		}
+	})
+
+	t.Run("Vision to non-vision model switch drops images with notice", func(t *testing.T) {
+		registry := tools.NewRegistry()
+		registry.Register(switchAndCaptureTool{targetModel: "text-only-dest"})
+
+		provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "switch_and_capture"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "ok."},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		}}
+
+		switcher := func(_ context.Context, modelID string) (Provider, error) {
+			return provider, nil
+		}
+
+		result, err := Run(context.Background(), "test", provider, Options{
+			Registry:      registry,
+			MaxTurns:      2,
+			Model:         "gpt-4o",
+			ModelSwitcher: switcher,
+			SupportsVision: func(modelID string) bool {
+				return modelID == "gpt-4o"
+			},
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		var noticed bool
+		for _, m := range result.Messages {
+			if len(m.Images) > 0 {
+				t.Fatalf("image delivered to non-vision destination model: %v", m)
+			}
+			if strings.Contains(m.Content, "does not support image input") {
+				noticed = true
+			}
+			if strings.Contains(m.Content, "[image forwarded]") {
+				t.Fatalf("contradictory forwarded text found in message: %v", m)
+			}
+		}
+		if !noticed {
+			t.Fatal("expected drop notice when switching to non-vision model")
+		}
+	})
+}

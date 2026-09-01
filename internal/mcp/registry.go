@@ -352,12 +352,19 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 	// retry with fewer images can recover the payload — so they get their
 	// own sentence.
 	if output == "" && len(images) > 0 {
-		output = "[image forwarded]"
+		output = "[image returned by tool]"
 	}
-	if skipped := droppedContentNote(result.Content, disp, dispBudgetSkipped); skipped != "" {
-		note := "[zero] this server also returned " + skipped + ", which exceeded this result's image budget. Retrying with fewer images can recover this payload."
+	if exceeded := droppedContentNote(result.Content, disp, dispBudgetExceeded); exceeded != "" {
+		note := "[zero] this server also returned " + exceeded + ", which exceeded this result's remaining image budget. Retrying with fewer images can recover this payload."
 		if output == "" {
-			note = "[zero] this server returned " + skipped + ", which exceeded this result's image budget. Retrying with fewer images can recover this payload."
+			note = "[zero] this server returned " + exceeded + ", which exceeded this result's remaining image budget. Retrying with fewer images can recover this payload."
+		}
+		output = strings.TrimSpace(output + "\n\n" + note)
+	}
+	if uninspected := droppedContentNote(result.Content, disp, dispUninspected); uninspected != "" {
+		note := "[zero] this server also returned " + uninspected + ", which was not inspected because the aggregate image budget was reached."
+		if output == "" {
+			note = "[zero] this server returned " + uninspected + ", which was not inspected because the aggregate image budget was reached."
 		}
 		output = strings.TrimSpace(output + "\n\n" + note)
 	}

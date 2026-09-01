@@ -5496,6 +5496,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ContextWindowFor = func(modelID string) int {
 			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
 		}
+		options.SupportsVision = func(modelID string) bool {
+			return m.modelSupportsVisionFor(modelID)
+		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,

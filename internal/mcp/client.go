@@ -529,7 +529,7 @@ func TextContent(content []Content) string {
 // result always produces the same sentence.
 func DroppedContentSummary(content []Content) string {
 	_, disp := forwardImages(content)
-	return droppedContentNote(content, disp, dispDropped, dispBudgetSkipped)
+	return droppedContentNote(content, disp, dispDropped, dispBudgetExceeded, dispUninspected)
 }
 
 // ImageBlocks converts MCP image content into the same ImageBlock channel
@@ -559,7 +559,8 @@ const (
 	dispText itemDisp = iota
 	dispForwarded
 	dispDropped
-	dispBudgetSkipped
+	dispBudgetExceeded
+	dispUninspected
 )
 
 // decodeImageBase64 is the MCP image payload decoder. Tests replace it to
@@ -577,7 +578,7 @@ func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 		}
 		if item.Type == "image" {
 			if remaining == 0 {
-				disp[i] = dispBudgetSkipped
+				disp[i] = dispUninspected
 				continue
 			}
 			if image, ok := imageBlockFromContent(item); ok {
@@ -587,7 +588,7 @@ func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 					disp[i] = dispForwarded
 					continue
 				}
-				disp[i] = dispBudgetSkipped
+				disp[i] = dispBudgetExceeded
 				continue
 			}
 		}
