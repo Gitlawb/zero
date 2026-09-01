@@ -491,6 +491,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				notify = stallRetryNoticeFor(options)
 			} else {
 				notify = reconnectNoticeFor(options)
+				// Count this post-connect reissue even when the replacement
+				// connect succeeds immediately. streamWithReconnect only
+				// increments reconnect_count after a failed connect attempt.
+				options.Trace.Counter(trace.CounterReconnectCount, 1)
 			}
 			if notify != nil {
 				notify(attempt, maxStreamStallRetries)
@@ -505,6 +509,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
 				result.Messages = copyMessages(messages)
+				if ctx.Err() != nil {
+					return result, ctx.Err()
+				}
 				return result, retryErr
 			}
 			stallGenSpan := options.Trace.Span(trace.SpanGeneration)

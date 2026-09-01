@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -16,6 +17,8 @@ import (
 // StreamEventError on the first abortBefore calls, then succeeds with "done".
 // hangOnCall, if > 0, makes that 1-based call block until ctx is done so a
 // cancel during the retried CollectStream can be reproduced.
+// connectFailFrom, if > 0, makes that 1-based call and later return a
+// reconnectable connect error so streamWithReconnect enters its backoff.
 type midStreamAbortProvider struct {
 	calls           int32
 	abortBefore     int32
@@ -24,11 +27,27 @@ type midStreamAbortProvider struct {
 	emptyTextEvent  bool
 	partialToolCall string
 	hangOnCall      int32
+	connectFailFrom int32
+	connectErr      string
 	started         chan struct{}
 }
 
 func (p *midStreamAbortProvider) StreamCompletion(ctx context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	n := atomic.AddInt32(&p.calls, 1)
+	if p.connectFailFrom > 0 && n >= p.connectFailFrom {
+		if p.started != nil {
+			select {
+			case <-p.started:
+			default:
+				close(p.started)
+			}
+		}
+		errMsg := p.connectErr
+		if errMsg == "" {
+			errMsg = "connection reset by peer"
+		}
+		return nil, errors.New(errMsg)
+	}
 	if p.hangOnCall > 0 && n == p.hangOnCall {
 		if p.started != nil {
 			close(p.started)
@@ -247,6 +266,60 @@ func TestRunCancelDuringMidStreamRetryPreservesContextCanceled(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel during retried stream must keep the sentinel, got %q (errors.Is Canceled = false)", err)
+	}
+}
+
+func TestRunCancelDuringReplacementConnectBackoffPreservesContextCanceled(t *testing.T) {
+	defer func(orig time.Duration) { streamReconnectBase = orig }(streamReconnectBase)
+	streamReconnectBase = 200 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	p := &midStreamAbortProvider{abortBefore: 1, connectFailFrom: 2, started: started}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, "go", p, Options{Registry: tools.NewRegistry()})
+		errCh <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for replacement connect failure")
+	}
+	cancel()
+	err := <-errCh
+	if err == nil {
+		t.Fatal("want context.Canceled after cancel during replacement connect backoff")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel during replacement connect backoff must keep the sentinel, got %q (errors.Is Canceled = false)", err)
+	}
+}
+
+func TestRunMidStreamAbortRecordsReconnectCountOnImmediateReplacement(t *testing.T) {
+	defer func(orig time.Duration) { streamReconnectBase = orig }(streamReconnectBase)
+	streamReconnectBase = time.Millisecond
+	rec := trace.NewRecorder("midstream-abort", "run-1", "test")
+	p := &midStreamAbortProvider{abortBefore: 1}
+	result, err := Run(context.Background(), "go", p, Options{
+		Registry: tools.NewRegistry(),
+		Trace:    rec,
+	})
+	if err != nil {
+		t.Fatalf("retry should succeed, got %v", err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q, want %q", result.FinalAnswer, "done")
+	}
+	if got := atomic.LoadInt32(&p.calls); got != 2 {
+		t.Fatalf("want 2 calls (1 abort + 1 immediate replacement), got %d", got)
+	}
+	gotTrace := rec.Finish()
+	if got := gotTrace.Counter(trace.CounterReconnectCount); got != 1 {
+		t.Fatalf("reconnect_count = %d, want 1 for a successful replacement connection", got)
+	}
+	if got := gotTrace.Counter(trace.CounterModelRequests); got != 2 {
+		t.Fatalf("model_requests = %d, want 2 (initial + replacement)", got)
 	}
 }
 
