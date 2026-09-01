@@ -166,6 +166,24 @@ func runtimeRootStillNamesPath(root *os.Root, path string) error {
 	return nil
 }
 
+func captureBoundSocketRoot(path string) (*os.Root, string, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, "", fmt.Errorf("open bound socket directory: %w", err)
+	}
+	name := filepath.Base(path)
+	info, err := root.Lstat(name)
+	if err != nil {
+		_ = root.Close()
+		return nil, "", fmt.Errorf("inspect bound socket: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		_ = root.Close()
+		return nil, "", fmt.Errorf("bound socket path is not a socket")
+	}
+	return root, name, nil
+}
+
 func openRootAppendRegular(root *os.Root, name string) (*os.File, error) {
 	info, err := root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
