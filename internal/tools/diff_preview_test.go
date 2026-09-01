@@ -50,6 +50,21 @@ func TestBoundedFileDiffPreservesEmptyFileOperations(t *testing.T) {
 	}
 }
 
+func TestBoundedUnifiedDiffRejectsUnsafeRichText(t *testing.T) {
+	if got := boundedUnifiedDiff("safe.txt", "before\n", "after\n"); got == "" {
+		t.Fatal("safe unified diff was unexpectedly omitted")
+	}
+	for _, content := range []string{
+		"token=sk-proj-abc\x00def",
+		"token=sk-proj-abc\x1bdef",
+		string([]byte{0xff}),
+	} {
+		if got := boundedUnifiedDiff("secret.txt", content, "safe\n"); got != "" {
+			t.Fatalf("unsafe rich diff = %q", got)
+		}
+	}
+}
+
 func TestStructuredPatchFileDiffsPreserveEmptyOperationsAndResultBudget(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
