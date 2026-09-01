@@ -2,6 +2,7 @@ package tools
 
 import (
 	"path/filepath"
+	"unicode"
 	"unicode/utf8"
 
 	udiff "github.com/aymanbagabas/go-udiff"
@@ -29,8 +30,9 @@ type FileDiff struct {
 // boundedFileDiff declines rather than truncating: a truncated side would look
 // like an exact file replacement. Callers keep ChangedFiles as the safe
 // fallback for large, unsafe, or unchanged content. Newlines, carriage returns,
-// and tabs are normal text; the remaining C0/C1 controls are rejected rather
-// than normalized, so they cannot split a secret before transcript redaction.
+// tabs, and ASCII spaces are normal text. Other controls, Unicode format
+// characters, and non-ASCII whitespace are rejected rather than normalized, so
+// invisible separators cannot split a secret before transcript redaction.
 func boundedFileDiff(path, oldText, newText string, oldExists, newExists bool) (FileDiff, bool) {
 	if !filepath.IsAbs(path) || (!oldExists && !newExists) ||
 		(oldExists == newExists && oldText == newText) ||
@@ -43,11 +45,15 @@ func boundedFileDiff(path, oldText, newText string, oldExists, newExists bool) (
 }
 
 func unsafeDiffText(text string) bool {
+	if !utf8.ValidString(text) {
+		return true
+	}
 	for _, r := range text {
-		if r == '\n' || r == '\r' || r == '\t' {
+		switch r {
+		case '\n', '\r', '\t', ' ':
 			continue
 		}
-		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
 			return true
 		}
 	}
@@ -57,16 +63,13 @@ func unsafeDiffText(text string) bool {
 // boundedUnifiedDiff returns a unified diff of oldContent -> newContent labelled
 // with path, suitable for the TUI's diff card renderer. A create (oldContent "")
 // yields an all-additions (green) preview; an overwrite/edit yields red/green.
-// Returns "" when there is no change, either side is unsafe text, or the diff
-// exceeds maxToolPreviewBytes. This must use the same unsafe-text gate as
-// FileDiff: Display.Preview is another durable human-facing rich-diff surface.
+// Returns "" when there is no change, the rendered diff is unsafe text, or the
+// diff exceeds maxToolPreviewBytes. This applies the same unsafe-text gate as
+// FileDiff to what reaches Display.Preview, without discarding a safe hunk only
+// because an unrelated part of the source file contains an unsafe byte.
 func boundedUnifiedDiff(path, oldContent, newContent string) string {
-	if !utf8.ValidString(oldContent) || !utf8.ValidString(newContent) ||
-		unsafeDiffText(oldContent) || unsafeDiffText(newContent) {
-		return ""
-	}
 	diff := udiff.Unified(path, path, oldContent, newContent)
-	if diff == "" || len(diff) > maxToolPreviewBytes {
+	if diff == "" || !utf8.ValidString(diff) || unsafeDiffText(diff) || len(diff) > maxToolPreviewBytes {
 		return ""
 	}
 	return diff

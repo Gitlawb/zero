@@ -22,6 +22,11 @@ func TestBoundedFileDiffRefusesPartialOrBinaryContent(t *testing.T) {
 		{"nul old", "token=sk-proj-abc\x00def", "text"},
 		{"escape new", "text", "token=sk-proj-abc\x1bdef"},
 		{"c1 old", "token=sk-proj-abc\u0085def", "text"},
+		{"zero width space", "token=sk-proj-abc\u200bdef", "text"},
+		{"zero width joiner", "token=sk-proj-abc\u200ddef", "text"},
+		{"byte order mark", "token=sk-proj-abc\ufeffdef", "text"},
+		{"soft hyphen", "token=sk-proj-abc\u00addef", "text"},
+		{"non breaking space", "token=sk-proj-abc\u00a0def", "text"},
 		{"too large", strings.Repeat("a", maxToolPreviewBytes), "b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -57,11 +62,18 @@ func TestBoundedUnifiedDiffRejectsUnsafeRichText(t *testing.T) {
 	for _, content := range []string{
 		"token=sk-proj-abc\x00def",
 		"token=sk-proj-abc\x1bdef",
+		"token=sk-proj-abc\u200bdef",
 		string([]byte{0xff}),
 	} {
 		if got := boundedUnifiedDiff("secret.txt", content, "safe\n"); got != "" {
 			t.Fatalf("unsafe rich diff = %q", got)
 		}
+	}
+
+	old := strings.Repeat("unchanged\n", 12) + "form\ffeed\n" + strings.Repeat("unchanged\n", 12)
+	updated := strings.Replace(old, "unchanged\n", "changed\n", 1)
+	if got := boundedUnifiedDiff("safe-hunk.txt", old, updated); got == "" || strings.Contains(got, "\f") {
+		t.Fatalf("safe hunk near unrelated unsafe text = %q", got)
 	}
 }
 
