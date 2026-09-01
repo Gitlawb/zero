@@ -197,6 +197,40 @@ func TestStreamTailLinesBoundsTheReadAndDropsAPartialLeadingRecord(t *testing.T)
 	}
 }
 
+func TestStreamTailLinesDoesNotReadPastCapturedLiveExtent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "live.jsonl")
+	writeFile(t, path, "first\n")
+
+	var got []string
+	appended := false
+	_, err := streamTailLines("", path, 64<<10, 32<<20, func(line []byte, truncated bool) bool {
+		if truncated {
+			t.Fatal("short live record was reported truncated")
+		}
+		got = append(got, string(line))
+		if !appended {
+			appended = true
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteString("appended-after-stat\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "first" {
+		t.Fatalf("captured tail records = %v, want only the pre-stat extent", got)
+	}
+}
+
 // THE LINE TERMINATOR IS NOT CONTENT. A record whose content exactly fills the
 // per-line cap has been read in full, and reporting it truncated made the import
 // path emit "could not be read" for records it had in fact read — a false alarm
