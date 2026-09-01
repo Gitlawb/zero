@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -77,6 +78,43 @@ func TestNotifyCommandSetsModeAndFocus(t *testing.T) {
 	}
 	if m.notifyFocusMode != "unfocused" {
 		t.Errorf("notifyFocusMode = %q, want unfocused", m.notifyFocusMode)
+	}
+}
+
+// The choice reaches the LIVE notifier immediately, so the change applies on
+// the next permission prompt in this session (not only after a restart).
+func TestNotifyCommandAppliesToLiveNotifier(t *testing.T) {
+	var buf bytes.Buffer
+	// Construct through newModel so both fields are populated the way the real
+	// session does; then swap in a buffer-backed notifier to observe output.
+	m := newModel(context.Background(), Options{Notify: config.NotifyConfig{Mode: "off", FocusMode: "always"}})
+	m.notifier = notify.New(&buf, notify.Config{Mode: notify.ModeOff, FocusMode: notify.FocusAlways})
+	m.notifier.SetFocused(true)
+
+	m, _ = m.handleNotifyCommand("bell")
+	m.notifier.Notify(notify.Completion, "x")
+	if buf.String() != "\x07" {
+		t.Fatalf("live notifier should bell after /notify bell, got %q", buf.String())
+	}
+
+	m, _ = m.handleNotifyCommand("off")
+	m.notifier.Notify(notify.Completion, "x")
+	if buf.String() != "\x07" {
+		t.Fatalf("live notifier should go silent after /notify off, got %q", buf.String())
+	}
+}
+
+// `/notify off always typo` (more than two tokens) is rejected, not silently
+// accepted as a successful change.
+func TestNotifyCommandRejectsTrailingArguments(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.notifyMode = "both"
+	m, out := m.handleNotifyCommand("off always typo")
+	if m.notifyMode != "both" {
+		t.Errorf("trailing args should not mutate state, got %q", m.notifyMode)
+	}
+	if !strings.Contains(out, "Too many arguments") {
+		t.Errorf("output should explain the rejection, got: %s", out)
 	}
 }
 

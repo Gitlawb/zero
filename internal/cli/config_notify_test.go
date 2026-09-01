@@ -110,7 +110,8 @@ func TestRunConfigNotifyWritesModeChange(t *testing.T) {
 			"baseUrl": "https://api.openai.com/v1",
 			"model": "gpt-4.1",
 			"apiKeyEnv": "OPENAI_API_KEY"
-		}]
+		}],
+		"notify": {"mode": "both", "focusMode": "always"}
 	}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
@@ -131,8 +132,50 @@ func TestRunConfigNotifyWritesModeChange(t *testing.T) {
 	if cfg.Notify.Mode != "off" {
 		t.Errorf("Notify.Mode = %q, want off", cfg.Notify.Mode)
 	}
+	// A mode-only update must preserve the configured focusMode, not wipe it.
+	if cfg.Notify.FocusMode != "always" {
+		t.Errorf("Notify.FocusMode = %q, want preserved %q", cfg.Notify.FocusMode, "always")
+	}
 	if !strings.Contains(stdout.String(), "mode:      off") {
 		t.Errorf("stdout should confirm the change, got: %s", stdout.String())
+	}
+}
+
+// A focus-only update preserves the configured mode.
+func TestRunConfigNotifyFocusOnlyPreservesMode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := `{
+		"activeProvider": "openai",
+		"providers": [{
+			"name": "openai",
+			"providerKind": "openai",
+			"baseUrl": "https://api.openai.com/v1",
+			"model": "gpt-4.1",
+			"apiKeyEnv": "OPENAI_API_KEY"
+		}],
+		"notify": {"mode": "bell", "focusMode": "unfocused"}
+	}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{"OPENAI_API_KEY": "sk-test"}})
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"config", "notify", "--focus", "always"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if cfg.Notify.Mode != "bell" {
+		t.Errorf("Notify.Mode = %q, want preserved %q", cfg.Notify.Mode, "bell")
+	}
+	if cfg.Notify.FocusMode != "always" {
+		t.Errorf("Notify.FocusMode = %q, want always", cfg.Notify.FocusMode)
 	}
 }
 

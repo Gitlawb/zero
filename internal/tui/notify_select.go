@@ -56,6 +56,9 @@ func (m model) handleNotifyCommand(args string) (model, string) {
 	if len(tokens) == 0 || tokens[0] == "list" {
 		return m, m.notifyStateText()
 	}
+	if len(tokens) > 2 {
+		return m, "Notify\nToo many arguments: " + args + " (usage: /notify <off|bell|notify|both> [unfocused|always|focused])"
+	}
 	mode := strings.ToLower(strings.TrimSpace(tokens[0]))
 	if !isValidNotifyMode(mode) {
 		return m, "Notify\nUnknown mode: " + tokens[0] + " (expected off, bell, notify, or both; run /notify with no argument to pick from the list)"
@@ -71,10 +74,17 @@ func (m model) handleNotifyCommand(args string) (model, string) {
 	}
 	m.notifyMode = mode
 	m.notifyFocusMode = focus
+	// Apply to the live notifier so the change takes effect on the next
+	// permission prompt in this session, not just after a restart.
+	if m.notifier != nil {
+		m.notifier.Configure(notify.Config{
+			Mode:      notify.Mode(mode),
+			FocusMode: notify.FocusMode(focus),
+		})
+	}
 	lines := []string{
 		"Notify",
 		"active mode: " + mode + ", focus: " + focus,
-		"Changes apply on the next permission prompt in this session.",
 	}
 	if note := m.persistNotifyPreference(mode, focus); note != "" {
 		lines = append(lines, note)

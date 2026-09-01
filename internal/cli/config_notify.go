@@ -34,9 +34,22 @@ func runConfigNotify(args []string, stdout io.Writer, stderr io.Writer, deps app
 		if err != nil {
 			return writeAppError(stderr, err.Error(), exitCrash)
 		}
-		notify := config.NotifyConfig{Mode: options.mode, FocusMode: options.focus}
+		// Omitted flags preserve the current value — a full replace would let
+		// `--mode bell` silently wipe a configured focusMode. --reset is the
+		// only path that clears both fields.
+		notify := config.NotifyConfig{
+			Mode:      resolved.Notify.Mode,
+			FocusMode: resolved.Notify.FocusMode,
+		}
 		if options.reset {
 			notify = config.NotifyConfig{}
+		} else {
+			if options.mode != "" {
+				notify.Mode = options.mode
+			}
+			if options.focus != "" {
+				notify.FocusMode = options.focus
+			}
 		}
 		if _, err := config.SetNotify(configPath, notify); err != nil {
 			return writeAppError(stderr, err.Error(), exitUsage)
