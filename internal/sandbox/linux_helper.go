@@ -399,10 +399,6 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
 }
 
-func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	return appendUnreadableLinuxPaths(args, []string{path}, carveouts, nil)
-}
-
 // appendUnreadableLinuxPaths emits bwrap args that hide the given deny paths.
 // Directories keep the existing tmpfs mask. Regular files stay `--ro-bind
 // /dev/null path`. Symlink dests cannot use that bind: mount(2) LOOKUP_FOLLOW
