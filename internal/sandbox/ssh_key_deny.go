@@ -78,11 +78,21 @@ func sshPrivateKeyDenyCandidates(home string) []string {
 
 func walkSSHPrivateKeyFiles(sshDir string) []string {
 	var out []string
+	visitedDirs := make(map[string]bool)
 	var walk func(dir string, depth int)
 	walk = func(dir string, depth int) {
 		if depth > sshPrivateKeyWalkMaxDepth {
 			return
 		}
+		realDir := dir
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			realDir = resolved
+		}
+		if visitedDirs[realDir] {
+			return
+		}
+		visitedDirs[realDir] = true
+
 		d, err := os.Open(dir)
 		if err != nil {
 			return
@@ -112,9 +122,13 @@ func walkSSHPrivateKeyFiles(sshDir string) []string {
 			}
 			mode := info.Mode()
 			if mode.Type() == os.ModeSymlink {
+				targetStat, err := os.Stat(path)
+				if err == nil && targetStat.IsDir() {
+					walk(path, depth+1)
+					continue
+				}
 				// Inspect leaf symlinks (bounded, specials rejected) so a
 				// custom-named link to a PEM/OpenSSH key is still denied.
-				// Directory symlinks are not traversed.
 				if isSSHPrivateKeyFileName(name) || sshFileLooksLikePrivateKey(path) {
 					out = append(out, path)
 				}
@@ -357,6 +371,11 @@ func splitSSHTokens(s string) []string {
 			cur.WriteByte(c)
 			continue
 		}
+		if c == '\\' && i+1 < len(s) {
+			cur.WriteByte(s[i+1])
+			i++
+			continue
+		}
 		switch c {
 		case '\'', '"':
 			inQuote = c
@@ -378,10 +397,10 @@ func expandSSHConfigPath(value, home, sshDir string) string {
 	if value == "" || strings.EqualFold(value, "none") || strings.EqualFold(value, "SSH_AUTH_SOCK") {
 		return ""
 	}
-	// OpenSSH expands environment variables in IdentityFile. Only ${HOME}/$HOME
-	// from the supplied home argument (never process env). Unknown $VAR is
-	// treated like an unsupported percent token: drop the path so we never deny
-	// or follow an unresolved pattern.
+	// OpenSSH expands environment variables in IdentityFile. ${HOME}/$HOME
+	// resolves to the supplied home argument. Other variables resolve from the
+	// process environment. Unset or invalid $VAR is treated like an unsupported
+	// token: drop the path so we never deny or follow an unresolved pattern.
 	expandedEnv, ok := expandSSHConfigPathEnv(value, home)
 	if !ok {
 		return ""
@@ -405,9 +424,9 @@ func expandSSHConfigPath(value, home, sshDir string) string {
 	}
 }
 
-// expandSSHConfigPathEnv resolves ${HOME} and $HOME from the supplied home
-// argument. Any other ${VAR}/$VAR, a dangling $, or a malformed ${...} drops
-// the path. No live process environment map is consulted.
+// expandSSHConfigPathEnv resolves ${VAR} and $VAR. ${HOME} and $HOME resolve
+// to the supplied home argument. Other variables resolve from the environment.
+// An undefined variable, dangling $, or malformed ${...} drops the path.
 func expandSSHConfigPathEnv(value, home string) (string, bool) {
 	if !strings.Contains(value, "$") {
 		return value, true
@@ -422,31 +441,34 @@ func expandSSHConfigPathEnv(value, home string) (string, bool) {
 		if i+1 >= len(value) {
 			return "", false
 		}
+		var name string
 		if value[i+1] == '{' {
 			end := strings.IndexByte(value[i+2:], '}')
 			if end < 0 {
 				return "", false
 			}
-			name := value[i+2 : i+2+end]
-			if name != "HOME" {
+			name = value[i+2 : i+2+end]
+			i += 2 + end
+		} else {
+			if !sshEnvVarStart(value[i+1]) {
 				return "", false
 			}
+			j := i + 1
+			for j < len(value) && sshEnvVarChar(value[j]) {
+				j++
+			}
+			name = value[i+1 : j]
+			i = j - 1
+		}
+		if name == "HOME" {
 			b.WriteString(home)
-			i += 2 + end
-			continue
+		} else {
+			val := os.Getenv(name)
+			if val == "" {
+				return "", false
+			}
+			b.WriteString(val)
 		}
-		if !sshEnvVarStart(value[i+1]) {
-			return "", false
-		}
-		j := i + 1
-		for j < len(value) && sshEnvVarChar(value[j]) {
-			j++
-		}
-		if value[i+1:j] != "HOME" {
-			return "", false
-		}
-		b.WriteString(home)
-		i = j - 1
 	}
 	return b.String(), true
 }
