@@ -379,7 +379,7 @@ func TestRestoreInterruptedPromotionPutsTheInstallBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restoreInterruptedPromotion(dest)
+	restoreInterruptedPromotion(dest, testPublished)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil {
@@ -410,7 +410,7 @@ func TestRestoreInterruptedPromotionReapsAHolderSupersededByALiveInstall(t *test
 	stranded := plantHolder(t, dest, 100, "old")
 	older := plantHolder(t, dest, 50, "older")
 
-	restoreInterruptedPromotion(dest)
+	restoreInterruptedPromotion(dest, testPublished)
 
 	// The live install is never touched. This is the assertion that matters most.
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
@@ -424,22 +424,61 @@ func TestRestoreInterruptedPromotionReapsAHolderSupersededByALiveInstall(t *test
 	}
 }
 
-// An empty destDir is not evidence that anything was published: it is a husk a
-// failed or partial promotion can leave. Reaping on its account would delete the
-// only surviving install, so the holder stays.
-func TestRestoreInterruptedPromotionKeepsAHolderWhenDestIsAnEmptyHusk(t *testing.T) {
-	root := t.TempDir()
-	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	holder := plantHolder(t, dest, 100, "the only copy")
+// A destDir that is merely NOT EMPTY is no evidence a promotion published there.
+// An empty husk and a half-populated one are the same thing to recovery, and
+// reaping on either would delete the copy the user still needs, so the holder
+// only loses to a destination that holds a genuinely usable install.
+func TestRestoreInterruptedPromotionKeepsAHolderWhenDestIsNotAUsableInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		seed   func(t *testing.T, dest string)
+		usable func(string) bool
+	}{
+		{
+			name:   "empty husk",
+			seed:   func(t *testing.T, dest string) {},
+			usable: func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+		},
+		{
+			name: "non-empty but no engine binary",
+			seed: func(t *testing.T, dest string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(dest, "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dest, "bin", "README"), []byte("partial"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			usable: func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+		},
+		{
+			name: "model dir without tokens.txt",
+			seed: func(t *testing.T, dest string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dest, "something.onnx"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			usable: dirHasModel,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+			if err := os.MkdirAll(dest, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.seed(t, dest)
+			holder := plantHolder(t, dest, 100, "the only copy")
 
-	restoreInterruptedPromotion(dest)
+			restoreInterruptedPromotion(dest, tc.usable)
 
-	got, err := os.ReadFile(filepath.Join(holder, "install", "engine"))
-	if err != nil || string(got) != "the only copy" {
-		t.Errorf("an empty dest must not cost the holder its install: got %q err %v", got, err)
+			got, err := os.ReadFile(filepath.Join(holder, "install", "engine"))
+			if err != nil || string(got) != "the only copy" {
+				t.Errorf("a dest that is not a usable install must not cost the holder its copy: got %q err %v", got, err)
+			}
+		})
 	}
 }
 
@@ -472,7 +511,7 @@ func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			restoreInterruptedPromotion(dest)
+			restoreInterruptedPromotion(dest, testPublished)
 
 			got, err := os.ReadFile(filepath.Join(dest, "engine"))
 			if tc.live == "" {
@@ -546,6 +585,13 @@ func offlineAPIBase(t *testing.T) string {
 	return url
 }
 
+// testPublished is the "is this a real install" predicate these tests use: the
+// fixtures write an "engine" file, so its presence is what publication means here.
+func testPublished(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "engine"))
+	return err == nil
+}
+
 // plantHolder writes an install into a holder named the way promoteStagedDir
 // names one, so recovery sees the same shape it does in production.
 func plantHolder(t *testing.T, destDir string, stamp int64, content string) string {
@@ -570,7 +616,7 @@ func TestRestoreInterruptedPromotionPrefersTheNewestHolder(t *testing.T) {
 	stale := plantHolder(t, dest, 100, "stale")
 	current := plantHolder(t, dest, 200, "current")
 
-	restoreInterruptedPromotion(dest)
+	restoreInterruptedPromotion(dest, testPublished)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "current" {
@@ -715,7 +761,7 @@ func TestRestoreInterruptedPromotionFindsHoldersUnderAnAwkwardPath(t *testing.T)
 				t.Fatal(err)
 			}
 
-			restoreInterruptedPromotion(dest)
+			restoreInterruptedPromotion(dest, testPublished)
 
 			got, err := os.ReadFile(filepath.Join(dest, "engine"))
 			if err != nil || string(got) != "kept" {
@@ -745,7 +791,7 @@ func TestRestoreInterruptedPromotionPrefersTheRealNewerInstallOverAFutureStamped
 	// The real transaction sets "new" aside and never publishes.
 	interruptPromotion(t, dest, "engine")
 
-	restoreInterruptedPromotion(dest)
+	restoreInterruptedPromotion(dest, testPublished)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "new" {
@@ -954,7 +1000,7 @@ func TestRestoreInterruptedPromotionPrefersAStampedHolderOverAnUnstampedOne(t *t
 	}
 	stamped := plantHolder(t, dest, 100, "stamped")
 
-	restoreInterruptedPromotion(dest)
+	restoreInterruptedPromotion(dest, testPublished)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "stamped" {
@@ -983,7 +1029,7 @@ func TestRestoreInterruptedPromotionSkipsAHolderWithNoInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restoreInterruptedPromotion(dest)
+	restoreInterruptedPromotion(dest, testPublished)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "kept" {
