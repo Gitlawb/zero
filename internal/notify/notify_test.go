@@ -147,6 +147,21 @@ func TestNotifyRaceSafe(t *testing.T) {
 	wg.Wait()
 }
 
+// Configure mutates cfg under the lock while Notify reads it; this pair must
+// be race-clean (run under -race). Regression for the unsynchronized cfg read
+// Notify used to perform before acquiring the lock.
+func TestConfigureConcurrentWithNotify(t *testing.T) {
+	n := New(&bytes.Buffer{}, Config{Mode: ModeBell, FocusMode: FocusAlways})
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(3)
+		go func() { defer wg.Done(); n.Configure(Config{Mode: ModeBoth, FocusMode: FocusAlways}) }()
+		go func() { defer wg.Done(); n.Configure(Config{Mode: ModeOff}) }()
+		go func() { defer wg.Done(); n.Notify(AwaitingInput, "x") }()
+	}
+	wg.Wait()
+}
+
 func TestDefaultMessage(t *testing.T) {
 	if DefaultMessage(Completion) != "Zero: ready" {
 		t.Fatal("completion message")

@@ -112,18 +112,21 @@ func (n *Notifier) SetFocused(focused bool) {
 // Sinks are invoked outside the lock so a slow/blocking sink cannot stall a
 // concurrent Notify or SetFocused.
 func (n *Notifier) Notify(event Event, message string) {
-	if n.cfg.Mode == ModeOff || n.cfg.Mode == "" {
+	n.mu.Lock()
+	// cfg is mutable at runtime (Configure), so every read happens under the
+	// lock; shouldEmit/sequence work on the local copy.
+	cfg := n.cfg
+	if cfg.Mode == ModeOff || cfg.Mode == "" {
+		n.mu.Unlock()
 		return
 	}
-
-	n.mu.Lock()
-	eligible := shouldEmit(n.cfg, event, n.focused)
+	eligible := shouldEmit(cfg, event, n.focused)
 	var sinks []Sink
 	if eligible && len(n.sinks) > 0 {
 		sinks = append(sinks, n.sinks...)
 	}
 	if eligible && n.w != nil {
-		if seq := sequence(n.cfg.Mode, message); seq != "" {
+		if seq := sequence(cfg.Mode, message); seq != "" {
 			_, _ = io.WriteString(n.w, seq)
 		}
 	}
