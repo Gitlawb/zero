@@ -409,9 +409,19 @@ func nextStagingSeq(dir string) (int64, error) {
 		if !entry.IsDir() {
 			continue
 		}
+		// Read only the names this package writes. The sibling directories here
+		// are the per-link work trees, and a link id is whatever the uploading
+		// client sent; stagingStamp trims its prefix with TrimPrefix, which is a
+		// no-op on a name that lacks it, so an unfiltered scan would read a link
+		// named "2024-project" as sequence 2024 and one named for int64's
+		// maximum as a permanent refusal to allocate anything.
 		name := entry.Name()
-		if strings.HasPrefix(name, keptPrefix) {
+		switch {
+		case strings.HasPrefix(name, keptPrefix):
 			name = stagingPrefix + strings.TrimPrefix(name, keptPrefix)
+		case strings.HasPrefix(name, stagingPrefix):
+		default:
+			continue
 		}
 		if stamp, ok := stagingStamp(name); ok && stamp > high {
 			high = stamp

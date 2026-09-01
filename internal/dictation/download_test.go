@@ -794,7 +794,9 @@ func TestCreateSequencedHolderRefusesOutOfRange(t *testing.T) {
 func TestHolderSeqAllocatesDistinctValuesConcurrently(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	const writers = 16
+	// 128, not a smaller number: against a check-then-create allocator this
+	// detects the duplicate in every run, where 16 caught it about half the time.
+	const writers = 128
 
 	var wg sync.WaitGroup
 	paths := make([]string, writers)
@@ -847,12 +849,32 @@ func TestHolderKeepsOwnerOnlyPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requireUmaskAllowsWiderThan0700(t, root)
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := info.Mode().Perm(); got != 0o700 {
 		t.Errorf("holder mode = %o, want 0700", got)
+	}
+}
+
+// requireUmaskAllowsWiderThan0700 skips when the process umask would strip the
+// group and other bits anyway. Without it this assertion is vacuous under a
+// umask of 077: a wrongly widened 0o755 comes back as 0700 and passes.
+func requireUmaskAllowsWiderThan0700(t *testing.T, parent string) {
+	t.Helper()
+	control := filepath.Join(parent, ".umask-control")
+	if err := os.Mkdir(control, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(control) }()
+	info, err := os.Stat(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Skipf("umask masks a 0755 request down to %o, so this assertion cannot tell 0700 from a widened mode", info.Mode().Perm())
 	}
 }
 
