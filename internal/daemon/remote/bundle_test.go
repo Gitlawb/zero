@@ -1334,7 +1334,8 @@ func TestStagingSeqAllocatesDistinctValuesConcurrently(t *testing.T) {
 }
 
 // The staging dir holds the only copy of a link's tree mid-swap, so it keeps the
-// owner-only mode os.MkdirTemp gave it.
+// owner-only mode it has always had. os.Mkdir takes
+// a mode where os.MkdirTemp did not, so the allocator has to name it.
 func TestStagingDirKeepsOwnerOnlyPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Go permission bits do not map to Windows ACLs")

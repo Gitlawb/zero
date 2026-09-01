@@ -942,7 +942,8 @@ func TestHolderSeqAllocatesDistinctValuesConcurrently(t *testing.T) {
 }
 
 // The holder wraps a complete previous install for as long as it exists, so it
-// keeps the owner-only mode os.MkdirTemp gave it.
+// keeps the owner-only mode it has always had. os.Mkdir takes
+// a mode where os.MkdirTemp did not, so the allocator has to name it.
 func TestHolderKeepsOwnerOnlyPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Go permission bits do not map to Windows ACLs")
