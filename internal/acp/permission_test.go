@@ -82,3 +82,17 @@ func TestPermissionToolCall(t *testing.T) {
 		t.Error("expected rawInput from args")
 	}
 }
+
+func TestPermissionToolCallKeepsTheBrowserDescriptor(t *testing.T) {
+	call := permissionToolCall(agent.PermissionRequest{
+		ToolCallID: "browser-1",
+		ToolName:   "browser_connect",
+		Args:       map[string]any{"target": "127.0.0.1:9222"},
+	})
+	if call.Browser == nil || call.Browser.Version != 1 || call.Browser.Command != "connect" {
+		t.Fatalf("browser descriptor = %#v", call.Browser)
+	}
+	if call.Title != "browser connect" {
+		t.Fatalf("title = %q", call.Title)
+	}
+}

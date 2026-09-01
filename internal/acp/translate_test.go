@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -53,6 +54,71 @@ func TestToolTitleAndHint(t *testing.T) {
 	}
 	if got := toolTitle("noargs", ``); got != "noargs" {
 		t.Errorf("empty args should yield bare name, got %q", got)
+	}
+}
+
+func TestBrowserToolUpdatesAreStructuredAndPresentationSafe(t *testing.T) {
+	start := toolCallStart(agent.ToolCall{
+		ID:        "browser-1",
+		Name:      "browser_open",
+		Arguments: `{"url":"https://example.com/settings?token=not-for-a-title#account"}`,
+	})
+	if start.Browser == nil || start.Browser.Version != 1 || start.Browser.Command != "open" {
+		t.Fatalf("browser descriptor = %#v, want open", start.Browser)
+	}
+	if start.Title != "browser open https://example.com" {
+		t.Fatalf("browser title = %q", start.Title)
+	}
+	if strings.Contains(start.Title, "token=") || strings.Contains(start.Title, "#account") {
+		t.Fatalf("browser title leaked URL-sensitive data: %q", start.Title)
+	}
+	encoded, err := json.Marshal(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Browser BrowserToolDetails `json:"browser"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.Browser != (BrowserToolDetails{Version: 1, Command: "open"}) {
+		t.Fatalf("browser wire descriptor = %#v", wire.Browser)
+	}
+
+	typed := toolCallStart(agent.ToolCall{
+		ID:        "browser-2",
+		Name:      "browser_type",
+		Arguments: `{"ref":"email","text":"secret@example.test"}`,
+	})
+	if typed.Browser == nil || typed.Browser.Command != "type" {
+		t.Fatalf("browser type descriptor = %#v", typed.Browser)
+	}
+	if typed.Title != "browser type" || strings.Contains(typed.Title, "secret@example.test") {
+		t.Fatalf("browser type title = %q", typed.Title)
+	}
+
+	result := toolCallResult(agent.ToolResult{
+		ToolCallID: "browser-2",
+		Name:       "browser_type",
+		Status:     tools.StatusOK,
+	})
+	if result.Browser == nil || result.Browser.Command != "type" {
+		t.Fatalf("browser result descriptor = %#v", result.Browser)
+	}
+}
+
+func TestBrowserDescriptorDoesNotClaimSimilarlyNamedMCPTools(t *testing.T) {
+	start := toolCallStart(agent.ToolCall{ID: "mcp-1", Name: "browser_plugin_open", Arguments: `{}`})
+	if start.Browser != nil {
+		t.Fatalf("MCP-like tool received built-in browser descriptor: %#v", start.Browser)
+	}
+	encoded, err := json.Marshal(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"browser"`) {
+		t.Fatalf("non-browser tool encoded browser field: %s", encoded)
 	}
 }
 

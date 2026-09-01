@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 
@@ -44,10 +45,53 @@ func toolKindFor(name string) string {
 
 // toolTitle builds a concise human title, e.g. "read_file src/main.go".
 func toolTitle(name, rawArgs string) string {
+	if browser, ok := browserToolDetails(name); ok {
+		return browserToolTitle(browser.Command, rawArgs)
+	}
 	if hint := primaryArgHint(rawArgs); hint != "" {
 		return name + " " + hint
 	}
 	return name
+}
+
+// browserToolDetails identifies ZERO's local browser helpers without treating
+// similarly named MCP tools as browser automation. The descriptor intentionally
+// contains no request data: ACP tool input is already protocol-visible, but a
+// durable UI must not need to retain text, local CDP targets, or full URLs just
+// to recognise the browser operation.
+func browserToolDetails(name string) (*BrowserToolDetails, bool) {
+	const prefix = "browser_"
+	command, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return nil, false
+	}
+	switch command {
+	case "install", "launch", "connect", "open", "snapshot", "click", "type", "press", "action":
+		return &BrowserToolDetails{Version: 1, Command: command}, true
+	default:
+		return nil, false
+	}
+}
+
+// browserToolTitle avoids putting browser_type text, an attached DevTools
+// endpoint, or a URL query/fragment in a tool-card title. Those values can
+// carry credentials or session data; the UI only needs the operation and, for
+// navigation, a human-recognisable origin.
+func browserToolTitle(command, rawArgs string) string {
+	if command != "open" {
+		return "browser " + command
+	}
+	var args struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal([]byte(rawArgs), &args) != nil {
+		return "browser open"
+	}
+	u, err := url.Parse(strings.TrimSpace(args.URL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "browser open"
+	}
+	return "browser open " + u.Scheme + "://" + u.Host
 }
 
 // primaryArgHint extracts the most relevant argument (path/pattern/command) from
@@ -89,7 +133,7 @@ func rawInput(args string) json.RawMessage {
 // toolCallStart maps an advertised ZERO tool call to the initial ACP "tool_call"
 // update (status in_progress — ZERO executes immediately after advertising).
 func toolCallStart(call agent.ToolCall) ToolCallUpdate {
-	return ToolCallUpdate{
+	upd := ToolCallUpdate{
 		SessionUpdate: UpdateToolCall,
 		ToolCallID:    call.ID,
 		Title:         toolTitle(call.Name, call.Arguments),
@@ -97,6 +141,10 @@ func toolCallStart(call agent.ToolCall) ToolCallUpdate {
 		Status:        ToolStatusInProgress,
 		RawInput:      rawInput(call.Arguments),
 	}
+	if browser, ok := browserToolDetails(call.Name); ok {
+		upd.Browser = browser
+	}
+	return upd
 }
 
 // toolCallResult maps a finished ZERO tool result to a "tool_call_update".
@@ -115,6 +163,9 @@ func toolCallResult(result agent.ToolResult) ToolCallUpdate {
 	}
 	if locs := toolResultLocations(result); len(locs) > 0 {
 		upd.Locations = locs
+	}
+	if browser, ok := browserToolDetails(result.Name); ok {
+		upd.Browser = browser
 	}
 	return upd
 }

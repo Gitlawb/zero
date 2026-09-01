@@ -142,13 +142,17 @@ func actionOffered(optionID string, offered []PermissionOption) bool {
 // session/request_permission request from a ZERO permission request.
 func permissionToolCall(req agent.PermissionRequest) ToolCallUpdate {
 	args := marshalArgs(req.Args)
-	return ToolCallUpdate{
+	upd := ToolCallUpdate{
 		ToolCallID: req.ToolCallID,
 		Title:      toolTitle(req.ToolName, string(args)),
 		Kind:       toolKindFor(req.ToolName),
 		Status:     ToolStatusPending,
 		RawInput:   rawInputBytes(args),
 	}
+	if browser, ok := browserToolDetails(req.ToolName); ok {
+		upd.Browser = browser
+	}
+	return upd
 }
 
 func marshalArgs(args map[string]any) []byte {
