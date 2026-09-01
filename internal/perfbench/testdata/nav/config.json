@@ -1,0 +1,5 @@
+{
+  "port": 8080,
+  "name": "nav-fixture",
+  "retries": 3
+}

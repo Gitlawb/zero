@@ -6,14 +6,51 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
+
+// ensureLoginProviderProfile makes a freshly stored OAuth login visible as a
+// provider: without a profile in config.json the login shows up nowhere — not in
+// `zero providers list`, not in the TUI picker — and `zero providers use <name>`
+// fails "not found", so the user's working active provider looks broken while
+// the new login looks lost. Returns user-facing guidance lines ("" when the
+// login has no catalog entry to scaffold from). Best-effort by design: the
+// token is already stored, so a profile-write failure degrades to a warning
+// line instead of failing a login that succeeded.
+func ensureLoginProviderProfile(deps appDeps, provider string) string {
+	if _, ok := providercatalog.Get(provider); !ok {
+		// Custom OAuth server without a catalog entry — no endpoint/model defaults
+		// to scaffold a profile from; the user wires their own profile.
+		return ""
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return "warning: login saved, but no provider profile was written: " + err.Error()
+	}
+	ensured, err := config.EnsureCatalogProvider(configPath, provider)
+	if err != nil {
+		return "warning: login saved, but no provider profile was written: " + err.Error()
+	}
+	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	switch {
+	case ensured.Created && active:
+		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name)
+	case ensured.Created:
+		return fmt.Sprintf("Added provider %q to your config; the active provider is still %q.\nSwitch with: zero providers use %s", ensured.Name, ensured.Active, ensured.Name)
+	case active:
+		return fmt.Sprintf("Provider %q is configured and active.", ensured.Name)
+	default:
+		return fmt.Sprintf("Provider %q is already configured.\nSwitch with: zero providers use %s", ensured.Name, ensured.Name)
+	}
+}
 
 // runAuth dispatches `zero auth <command>` for provider OAuth login. It is
 // additive and independent of `zero mcp oauth` (MCP server auth), which is
@@ -46,11 +83,11 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 }
 
-// runAuthOpenRouter runs OpenRouter's browser PKCE login and prints the freshly
-// minted API key. Unlike `auth login` (which stores an OAuth bearer token),
-// OpenRouter's flow mints a normal API key; the setup wizard saves it to a
-// provider profile, while this command prints it for manual configuration.
-func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appDeps) int {
+// runAuthOpenRouter runs OpenRouter's browser PKCE login and saves the freshly
+// minted API key into the user's provider credential store. Unlike `auth login`
+// (which stores an OAuth bearer token), OpenRouter's flow mints a normal API key;
+// persist it immediately so the provider is usable after the command completes.
+func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	for _, a := range args {
 		if a == "-h" || a == "--help" || a == "help" {
 			_ = writeAuthHelp(stdout)
@@ -62,7 +99,7 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appD
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth openrouter takes no arguments (got %q)", args[0]))
 	}
-	key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
+	key, err := deps.openRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 		Out:        stdout,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 		// ZERO_OPENROUTER_BASE_URL overrides the endpoint (self-hosted gateway or tests).
@@ -71,10 +108,57 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appD
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted.\nUse it with zero, e.g.:\n  export OPENROUTER_API_KEY=%s\n(or add it to a provider profile with catalogID \"openrouter\").\n", key); err != nil {
+	key = strings.TrimSpace(key)
+	line, err := saveOpenRouterProviderKey(deps, key)
+	if err != nil {
+		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it: %s\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", err, key); writeErr != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key saved.\n%s\n", line); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("OpenRouter returned an empty API key")
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return "", err
+	}
+	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
+	if err != nil {
+		return "", err
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		return "", err
+	}
+	if err := store.Set(ensured.Name, key); err != nil {
+		return "", err
+	}
+	if err := config.MarkProviderAPIKeyStored(configPath, ensured.Name); err != nil {
+		// Best-effort rollback: don't leave the key orphaned in the credential
+		// store while config.json still says it isn't there.
+		_, _ = store.Delete(ensured.Name)
+		return "", err
+	}
+	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	switch {
+	case ensured.Created && active:
+		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name), nil
+	case ensured.Created:
+		return fmt.Sprintf("Added provider %q to your config; the active provider is still %q.\nSwitch with: zero providers use %s", ensured.Name, ensured.Active, ensured.Name), nil
+	case active:
+		return fmt.Sprintf("Provider %q is configured, active, and ready to use.", ensured.Name), nil
+	default:
+		return fmt.Sprintf("Provider %q is configured with the new key.\nSwitch with: zero providers use %s", ensured.Name, ensured.Name), nil
+	}
 }
 
 // runAuthChatGPT runs the ChatGPT (Codex) browser PKCE login, persists the
@@ -138,8 +222,10 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if _, err := fmt.Fprint(stdout, statuses); err != nil {
 		return exitCrash
 	}
-	if _, err := fmt.Fprint(stdout, "\nUse it with zero, e.g.:\n  zero --provider chatgpt --model gpt-5.5\n"); err != nil {
-		return exitCrash
+	if line := ensureLoginProviderProfile(deps, "chatgpt"); line != "" {
+		if _, err := fmt.Fprintf(stdout, "\n%s\n", line); err != nil {
+			return exitCrash
+		}
 	}
 	return exitSuccess
 }
@@ -330,6 +416,11 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	if _, err := fmt.Fprintf(stdout, "Logged in to %s.\n%s\n", parsed.positional[0], oauth.FormatStatuses([]oauth.Status{status})); err != nil {
 		return exitCrash
+	}
+	if line := ensureLoginProviderProfile(deps, provider); line != "" {
+		if _, err := fmt.Fprintln(stdout, line); err != nil {
+			return exitCrash
+		}
 	}
 	return exitSuccess
 }

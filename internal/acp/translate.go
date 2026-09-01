@@ -3,6 +3,7 @@ package acp
 import (
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -70,8 +71,8 @@ func primaryArgHint(rawArgs string) string {
 func truncateHint(s string) string {
 	s = strings.TrimSpace(s)
 	const max = 60
-	if len(s) > max {
-		return s[:max] + "…"
+	if utf8.RuneCountInString(s) > max {
+		return string([]rune(s)[:max]) + "…"
 	}
 	return s
 }

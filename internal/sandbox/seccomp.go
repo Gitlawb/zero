@@ -82,6 +82,24 @@ var networkDenySyscallsAARCH64 = []uint32{
 	427, // io_uring_register
 }
 
+var isolatedNetworkGuardSyscallsX86_64 = []uint32{
+	101, // ptrace
+	310, // process_vm_readv
+	311, // process_vm_writev
+	425, // io_uring_setup
+	426, // io_uring_enter
+	427, // io_uring_register
+}
+
+var isolatedNetworkGuardSyscallsAARCH64 = []uint32{
+	117, // ptrace
+	270, // process_vm_readv
+	271, // process_vm_writev
+	425, // io_uring_setup
+	426, // io_uring_enter
+	427, // io_uring_register
+}
+
 // unixSocketBlockFilter builds a classic-BPF seccomp program that denies
 // socket(2)/AF_UNIX with EPERM on x86-64 and arm64 and allows everything else.
 // An unrecognized architecture is allowed (fail-open on arch is intentional: the
@@ -132,6 +150,35 @@ func networkDenySeccompFilter() []sockFilter {
 	program = append(program, armSection...)
 	program = append(program, sockFilter{Code: bpfRETK, K: seccompRetAllow})
 	return program
+}
+
+// isolatedNetworkGuardFilter preserves the non-network defense-in-depth rules
+// from networkDenySeccompFilter without blocking sockets. The bubblewrap outer
+// stage supplies network isolation with a private namespace, so socket, bind,
+// and connect must remain available for localhost-only test servers.
+func isolatedNetworkGuardFilter() []sockFilter {
+	x86Section := syscallDenySection(isolatedNetworkGuardSyscallsX86_64)
+	armSection := syscallDenySection(isolatedNetworkGuardSyscallsAARCH64)
+	program := []sockFilter{
+		{Code: bpfLDWABS, K: seccompOffsetArch},
+		{Code: bpfJEQK, K: auditArchX86_64, Jt: 0, Jf: uint8(len(x86Section))},
+	}
+	program = append(program, x86Section...)
+	program = append(program, sockFilter{Code: bpfJEQK, K: auditArchAARCH64, Jt: 0, Jf: uint8(len(armSection))})
+	program = append(program, armSection...)
+	program = append(program, sockFilter{Code: bpfRETK, K: seccompRetAllow})
+	return program
+}
+
+func syscallDenySection(deniedSyscalls []uint32) []sockFilter {
+	section := []sockFilter{{Code: bpfLDWABS, K: seccompOffsetNr}}
+	for _, nr := range deniedSyscalls {
+		section = append(section,
+			sockFilter{Code: bpfJEQK, K: nr, Jt: 0, Jf: 1},
+			sockFilter{Code: bpfRETK, K: seccompRetErrno | errnoEPERM},
+		)
+	}
+	return append(section, sockFilter{Code: bpfRETK, K: seccompRetAllow})
 }
 
 func networkDenySection(socketNr uint32, socketpairNr uint32, deniedSyscalls []uint32) []sockFilter {

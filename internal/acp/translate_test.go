@@ -1,7 +1,9 @@
 package acp
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -124,5 +126,37 @@ func TestPromptText(t *testing.T) {
 	})
 	if got != "hello world" {
 		t.Fatalf("promptText = %q", got)
+	}
+}
+
+func TestToolTitleTruncateHintRuneSafe(t *testing.T) {
+	// A 61-character string containing multi-byte UTF-8 runes (emojis / CJK characters).
+	// We want to verify that it is truncated without cutting any runes or producing invalid UTF-8.
+	longPath := "📁/项目/非常长的路径名称/测试/🚀/emoji-and-cjk-characters-which-are-very-long-and-exceed-sixty-characters"
+
+	// Create JSON args for read_file
+	rawArgs := `{"path":"` + longPath + `"}`
+	got := toolTitle("read_file", rawArgs)
+
+	expectedPrefix := "read_file "
+	if !strings.HasPrefix(got, expectedPrefix) {
+		t.Fatalf("expected title to start with %q, got %q", expectedPrefix, got)
+	}
+
+	hint := strings.TrimPrefix(got, expectedPrefix)
+	// Hint should end with the ellipsis character
+	if !strings.HasSuffix(hint, "…") {
+		t.Fatalf("expected truncated hint to end with ellipsis, got %q", hint)
+	}
+
+	// Check that we don't have invalid UTF-8 runes
+	if !utf8.ValidString(hint) {
+		t.Fatalf("truncated hint is not a valid UTF-8 string: %q", hint)
+	}
+
+	// The rune count of the hint (excluding ellipsis) should be exactly 60
+	runes := []rune(strings.TrimSuffix(hint, "…"))
+	if len(runes) != 60 {
+		t.Fatalf("expected exactly 60 runes before ellipsis, got %d (hint: %q)", len(runes), hint)
 	}
 }

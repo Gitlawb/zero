@@ -64,6 +64,18 @@ type Swarm struct {
 	baseCtx context.Context
 	cancel  context.CancelFunc
 
+	// lifecycleMu guards closed and orders admission against shutdown. It is held
+	// only for the flag check plus the lifecycleWork increment — never across a
+	// launcher call, which would deadlock Close (see beginLifecycleAdmission).
+	lifecycleMu sync.RWMutex
+	closed      bool
+	// lifecycleWork counts admitted-but-unfinished lifecycle operations (spawn,
+	// handoff, adoption, retry, queue drain). Close waits it out so no admitted
+	// operation is still touching the swarm when Close returns.
+	lifecycleWork sync.WaitGroup
+	watchers      sync.WaitGroup
+	closeOnce     sync.Once
+
 	mu        sync.Mutex
 	teams     map[string]*Team
 	taskCwd   map[string]string // taskID -> cwd, for handoff/adoption relaunch
@@ -137,30 +149,92 @@ func New(opts Options) (*Swarm, error) {
 }
 
 // Close cancels every running member's context and releases resources. It is
-// safe to call more than once. The scheduler is closed first so no new spawn
-// fires after shutdown begins.
+// safe to call more than once. It closes lifecycle admission before canceling
+// members, fails queued tasks, and waits for every member watcher to exit.
 func (s *Swarm) Close() {
-	s.mu.Lock()
-	sched := s.scheduler
-	s.mu.Unlock()
-	if sched != nil {
-		sched.Close()
-	}
-	if s.cancel != nil {
-		s.cancel()
-	}
+	s.closeOnce.Do(func() {
+		// Closing admission and cancelling are separate steps on purpose. The flag
+		// flips under lifecycleMu so no further work is admitted, and the lock is
+		// released BEFORE cancelling: a member already being launched holds no lock
+		// here, but it may be blocked inside MemberLauncher.Launch waiting for the
+		// context this cancel provides, and it can only release its admission ticket
+		// once that cancellation lands.
+		s.lifecycleMu.Lock()
+		s.closed = true
+		s.mu.Lock()
+		sched := s.scheduler
+		s.mu.Unlock()
+		s.lifecycleMu.Unlock()
+
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if sched != nil {
+			sched.Close()
+		}
+		// Wait for every already-admitted lifecycle operation (spawn, handoff,
+		// adoption, retry, queue drain) to finish BEFORE sweeping queues below.
+		// Such work can create teams as well as append to their queues, so snapshot
+		// the teams only after every ticket is back. At that point no team or queue
+		// can gain a new entry, and the sweep cannot miss late-admitted work.
+		s.lifecycleWork.Wait()
+		s.mu.Lock()
+		teams := make([]*Team, 0, len(s.teams))
+		for _, team := range s.teams {
+			teams = append(teams, team)
+		}
+		s.mu.Unlock()
+		for _, team := range teams {
+			for _, spec := range team.clearQueue() {
+				_ = s.coord.Fail(spec.TaskID, ErrSwarmClosed.Error())
+			}
+		}
+		// Every watcher is added while its admitting lifecycle ticket is still held,
+		// so lifecycleWork.Wait above also orders every Add before this Wait. The
+		// watcher itself can outlive that ticket, which is why both waits are needed.
+		s.watchers.Wait()
+	})
 }
 
 // Scheduler returns the swarm's recurring-spawn scheduler, creating it on first
 // use. Scheduling is opt-in: until a job is added the scheduler does nothing.
+//
+// The post-close handoff between this method and Close relies on the ORDER in
+// which each reads/writes s.scheduler and s.closed, not on holding one lock across
+// both: Close takes lifecycleMu.Lock() (excluding this RLock), sets closed, reads
+// whatever s.scheduler currently is, and only THEN releases lifecycleMu and calls
+// sched.Close() on what it captured. So a call here either:
+//   - runs entirely before Close's write lock — sees closed == false, and the
+//     scheduler it creates/returns is exactly the one Close's later snapshot will
+//     capture and close; or
+//   - runs entirely after Close's write lock — sees closed == true (memory model:
+//     the RLock/Lock pair orders the read after Close's write) and closes the
+//     scheduler itself here, because Close already captured its own snapshot
+//     (possibly nil, if this call is what first creates one) and will not look
+//     again.
+//
+// Either way exactly one of the two call sites closes the scheduler that ends up
+// installed, and neither can observe a "created after close but never closed"
+// scheduler — that would require reading closed == false here while also reading
+// a scheduler Close had already passed over, which the lock ordering rules out.
 func (s *Swarm) Scheduler() *Scheduler {
+	s.lifecycleMu.RLock()
+	closed := s.closed
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.scheduler == nil {
 		s.scheduler = newScheduler(s)
 	}
-	return s.scheduler
+	sched := s.scheduler
+	s.mu.Unlock()
+	s.lifecycleMu.RUnlock()
+	if closed {
+		sched.Close()
+	}
+	return sched
 }
+
+// ErrSwarmClosed reports lifecycle work submitted after shutdown begins.
+var ErrSwarmClosed = errors.New("swarm: closed")
 
 // rememberCwd records a task's working dir so a handoff/adoption relaunch keeps it.
 func (s *Swarm) rememberCwd(taskID, cwd string) {
@@ -286,6 +360,22 @@ func (t *Team) onExit() (MemberSpec, bool) {
 		return next, true
 	}
 	return MemberSpec{}, false
+}
+
+func (t *Team) releaseSlot() {
+	t.mu.Lock()
+	if t.running > 0 {
+		t.running--
+	}
+	t.mu.Unlock()
+}
+
+func (t *Team) clearQueue() []MemberSpec {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	queued := t.queue
+	t.queue = nil
+	return queued
 }
 
 func (t *Team) addMember(m *Member) {

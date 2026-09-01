@@ -103,10 +103,6 @@ type ContentBlock struct {
 
 func TextBlock(text string) ContentBlock { return ContentBlock{Type: "text", Text: text} }
 
-func ImageBlock(base64Data, mimeType string) ContentBlock {
-	return ContentBlock{Type: "image", Data: base64Data, MimeType: mimeType}
-}
-
 // ---- sessions ----
 
 // McpServer mirrors the editor-provided MCP server entry. ZERO owns its own MCP
@@ -233,10 +229,6 @@ func ToolContent(block ContentBlock) ToolCallContent {
 	return ToolCallContent{Type: "content", Content: &block}
 }
 
-func ToolDiff(path, oldText, newText string) ToolCallContent {
-	return ToolCallContent{Type: "diff", Path: path, OldText: oldText, NewText: newText}
-}
-
 type ToolCallLocation struct {
 	Path string `json:"path"`
 	Line *int   `json:"line,omitempty"`
@@ -337,19 +329,22 @@ type SetSessionModeParams struct {
 
 type SetSessionModeResult struct{}
 
-// ---- session config options (model selection) ----
+// ---- session config options ----
 
 type SessionConfigOptionValue struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 type SessionConfigOption struct {
-	ID          string                     `json:"id"`
-	Name        string                     `json:"name"`
-	Description string                     `json:"description,omitempty"`
-	Value       string                     `json:"value"`
-	Values      []SessionConfigOptionValue `json:"values,omitempty"`
+	ID           string                     `json:"id"`
+	Name         string                     `json:"name"`
+	Description  string                     `json:"description,omitempty"`
+	Category     string                     `json:"category,omitempty"`
+	Type         string                     `json:"type"`
+	CurrentValue string                     `json:"currentValue"`
+	Options      []SessionConfigOptionValue `json:"options"`
 }
 
 type SetSessionConfigOptionParams struct {
@@ -373,6 +368,11 @@ type ZeroSetModelResult struct {
 	Model string `json:"model"`
 }
 
-// configIDModel is the SessionConfigOption id ZERO uses to expose model choice
-// through the standard session/set_config_option method.
-const configIDModel = "model"
+const (
+	configIDModel = "model"
+	configIDMode  = "mode"
+
+	configOptionTypeSelect = "select"
+	configCategoryModel    = "model"
+	configCategoryMode     = "mode"
+)

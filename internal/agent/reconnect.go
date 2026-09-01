@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/errhint"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -74,13 +75,20 @@ func stallRetryNoticeFor(options Options) reconnectNotifier {
 // already past its deadline is returned immediately (no retry) — those have
 // their own handling (compaction for context-limit, image-rejection, etc.).
 func streamWithReconnect(ctx context.Context, provider Provider, request zeroruntime.CompletionRequest, notify reconnectNotifier) (<-chan zeroruntime.StreamEvent, error) {
+	recorder := trace.FromContext(ctx)
 	stream, err := provider.StreamCompletion(ctx, request)
 	if err == nil {
+		if recorder != nil {
+			recorder.Counter(trace.CounterModelRequests, 1)
+		}
 		return stream, nil
 	}
 	for attempt := 1; attempt <= maxStreamReconnects; attempt++ {
 		if !shouldReconnect(ctx, err) {
 			return nil, err
+		}
+		if recorder != nil {
+			recorder.Counter(trace.CounterReconnectCount, 1)
 		}
 		if notify != nil {
 			notify(attempt, maxStreamReconnects)
@@ -90,6 +98,9 @@ func streamWithReconnect(ctx context.Context, provider Provider, request zerorun
 		}
 		stream, err = provider.StreamCompletion(ctx, request)
 		if err == nil {
+			if recorder != nil {
+				recorder.Counter(trace.CounterModelRequests, 1)
+			}
 			return stream, nil
 		}
 	}

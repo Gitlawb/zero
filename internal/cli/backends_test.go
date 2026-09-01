@@ -23,10 +23,10 @@ import (
 
 func TestRunBackendsJSONUsesLifecycleSnapshotWithoutConnectingMCP(t *testing.T) {
 	cwd := t.TempDir()
-	secret := "sk-proj-" + strings.Repeat("a", 24)
+	secret := "sk-proj-" + strings.Repeat("a", 23) + "0"
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -123,7 +123,7 @@ func TestRunBackendsJSONUsesLifecycleSnapshotWithoutConnectingMCP(t *testing.T) 
 func TestRunBackendsTextAndHelp(t *testing.T) {
 	deps := appDeps{
 		getwd: func() (string, error) { return t.TempDir(), nil },
-		resolveMCPConfig: func(string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
 			return config.MCPConfig{}, nil
 		},
 		loadHooks: func(hooks.LoadOptions) (hooks.LoadResult, error) {
@@ -161,10 +161,10 @@ func TestRunBackendsTextAndHelp(t *testing.T) {
 
 func TestRunBackendsDoctorJSONAndTextWithoutConnectingMCP(t *testing.T) {
 	cwd := t.TempDir()
-	secret := "sk-proj-" + strings.Repeat("b", 24)
+	secret := "sk-proj-" + strings.Repeat("b", 23) + "0"
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -301,7 +301,7 @@ func TestRunBackendsDoctorDoesNotConnectOrExecuteConfiguredBackends(t *testing.T
 
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"remote": {Type: "http", URL: server.URL + "/mcp"},
 			}}, nil

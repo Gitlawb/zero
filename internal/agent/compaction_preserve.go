@@ -30,6 +30,10 @@ const (
 const (
 	maxRecentEdits   = 20
 	maxEditNoteBytes = 160
+	// maxTaskObjectiveBytes keeps the original objective recognizable after
+	// compaction without allowing an unusually large prompt to recreate the
+	// context pressure the compaction just removed.
+	maxTaskObjectiveBytes = 512
 )
 
 const (
@@ -76,32 +80,14 @@ func extractLatestPlan(messages []zeroruntime.Message) string {
 // ({"plan":[{content,status,...}]}) as terse status-tagged bullet lines. Returns
 // "" on malformed arguments or an empty plan.
 func formatPlanArguments(arguments string) string {
-	var parsed struct {
-		Plan []struct {
-			Content string `json:"content"`
-			Step    string `json:"step"`
-			Status  string `json:"status"`
-			Notes   string `json:"notes"`
-		} `json:"plan"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(arguments)), &parsed); err != nil {
+	plan, ok := parseTaskPlan(arguments)
+	if !ok {
 		return ""
 	}
-	lines := make([]string, 0, len(parsed.Plan))
-	for _, item := range parsed.Plan {
-		content := strings.TrimSpace(item.Content)
-		if content == "" {
-			content = strings.TrimSpace(item.Step)
-		}
-		if content == "" {
-			continue
-		}
-		status := strings.TrimSpace(item.Status)
-		if status == "" {
-			status = "pending"
-		}
-		line := "- [" + status + "] " + content
-		if notes := strings.TrimSpace(item.Notes); notes != "" {
+	lines := make([]string, 0, len(plan))
+	for _, item := range plan {
+		line := "- [" + item.Status + "] " + item.Content
+		if notes := item.Notes; notes != "" {
 			line += "\n  Notes: " + notes
 		}
 		lines = append(lines, line)
@@ -116,7 +102,7 @@ type skillEntry struct {
 	body string
 }
 
-// recentEdits returns the files mutated by write_file/edit_file calls in messages
+// recentEdits returns files mutated by editing calls in messages
 // — latest note per path, in last-seen order — as skillEntry{name: path, body:
 // note}. After compaction elides the editing turns, this tells the model WHAT it
 // changed in each file (from the tool's result) so it need not re-read to
@@ -127,6 +113,7 @@ type skillEntry struct {
 // rather than an earlier, now-stale entry.
 func recentEdits(messages []zeroruntime.Message) []skillEntry {
 	pathByID := map[string]string{}
+	noteByPath := map[string]string{}
 	sequence := make([]string, 0)
 	for _, message := range messages {
 		for _, call := range message.ToolCalls {
@@ -143,12 +130,24 @@ func recentEdits(messages []zeroruntime.Message) []skillEntry {
 			sequence = append(sequence, path)
 		}
 	}
+	for _, message := range messages {
+		if message.Role != zeroruntime.MessageRoleTool || len(message.ChangedFiles) == 0 {
+			continue
+		}
+		for _, path := range message.ChangedFiles {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			sequence = append(sequence, path)
+			noteByPath[path] = editNote(message.Content)
+		}
+	}
 	order := lastSeenOrder(sequence)
 	if len(order) == 0 {
 		return nil
 	}
 
-	noteByPath := map[string]string{}
 	for _, message := range messages {
 		if message.Role != zeroruntime.MessageRoleTool || message.ToolCallID == "" {
 			continue
@@ -431,10 +430,28 @@ func capBody(body string) string {
 // preservedState is the JSON shape of the carried-across-compaction block.
 type preservedState struct {
 	Plan                string                 `json:"plan,omitempty"`
+	Task                *preservedTaskState    `json:"task,omitempty"`
 	RecentEdits         []preservedEdit        `json:"recent_edits,omitempty"`
 	Tools               []preservedTool        `json:"tools,omitempty"`
 	Skills              []preservedSkill       `json:"skills,omitempty"`
 	ProjectInstructions []preservedInstruction `json:"project_instructions,omitempty"`
+}
+
+type preservedTaskState struct {
+	Objective           string              `json:"objective"`
+	Status              taskStatus          `json:"status,omitempty"`
+	Pending             int                 `json:"pending,omitempty"`
+	InProgress          int                 `json:"in_progress,omitempty"`
+	Completed           int                 `json:"completed,omitempty"`
+	Failed              int                 `json:"failed,omitempty"`
+	VerificationPassed  int                 `json:"verification_passed,omitempty"`
+	VerificationFailed  int                 `json:"verification_failed,omitempty"`
+	VerificationOutcome Outcome             `json:"verification_outcome,omitempty"`
+	Constraints         []string            `json:"constraints,omitempty"`
+	ChangedFiles        []string            `json:"changed_files,omitempty"`
+	UnresolvedFailures  []taskFailureState  `json:"unresolved_failures,omitempty"`
+	Approvals           []taskApprovalState `json:"approvals,omitempty"`
+	Artifacts           []taskArtifactState `json:"artifacts,omitempty"`
 }
 
 type preservedEdit struct {
@@ -464,8 +481,39 @@ type preservedInstruction struct {
 // may live only inside the injected summary message, which on a later compaction
 // lands in middle with no real tool calls left to extract. Fresh tool calls and
 // instruction blocks override the carried-forward copy by name/source.
-func appendPreservedState(summary string, middle []zeroruntime.Message) string {
+func appendPreservedState(summary string, middle []zeroruntime.Message, taskSnapshot *taskStateSnapshot) string {
 	priorState := parsePreservedStateBlock(latestSummaryContent(middle))
+	task := priorState.Task
+	if taskSnapshot != nil {
+		task = &preservedTaskState{
+			Objective:          capTaskObjective(taskSnapshot.Objective),
+			Constraints:        mergeBoundedComparable(priorTaskConstraints(priorState.Task), taskSnapshot.Constraints, maxTaskConstraints),
+			ChangedFiles:       mergeBoundedComparable(priorTaskChangedFiles(priorState.Task), taskSnapshot.ChangedFiles, maxTaskEvidenceEntries),
+			UnresolvedFailures: mergeTaskFailures(priorTaskFailures(priorState.Task), taskSnapshot.UnresolvedFailures, taskSnapshot.ResolvedFailureKeys),
+			Approvals:          mergeBoundedComparable(priorTaskApprovals(priorState.Task), taskSnapshot.Approvals, maxTaskEvidenceEntries),
+			Artifacts:          mergeBoundedComparable(priorTaskArtifacts(priorState.Task), taskSnapshot.Artifacts, maxTaskEvidenceEntries),
+		}
+		// Plan parity corroborates only the mutable task projection. The objective
+		// comes directly from the run prompt and is immutable, so it must survive
+		// even after compaction removes the plan tool call needed for comparison.
+		if taskSnapshot.PlanParity == taskPlanParityMatch {
+			task.Status = taskSnapshot.Status
+			task.Pending = taskSnapshot.Plan.Pending
+			task.InProgress = taskSnapshot.Plan.InProgress
+			task.Completed = taskSnapshot.Plan.Completed
+			task.Failed = taskSnapshot.Plan.Failed
+			task.VerificationPassed = taskSnapshot.Verification.Passed
+			task.VerificationFailed = taskSnapshot.Verification.Failed
+			task.VerificationOutcome = taskSnapshot.Verification.LastOutcome
+		}
+	}
+	freshConstraints := explicitConstraintsFromMessages(middle)
+	if len(freshConstraints) > 0 {
+		if task == nil {
+			task = &preservedTaskState{}
+		}
+		task.Constraints = mergeBoundedComparable(task.Constraints, freshConstraints, maxTaskConstraints)
+	}
 
 	// Plan: a fresh update_plan in middle is authoritative; otherwise carry the
 	// plan preserved by an earlier compaction.
@@ -493,10 +541,112 @@ func appendPreservedState(summary string, middle []zeroruntime.Message) string {
 		projectInstructionEntries(middle),
 	)
 
-	if block := formatPreservedState(plan, edits, tools, skills, instructions); block != "" {
+	if block := formatPreservedState(plan, task, edits, tools, skills, instructions); block != "" {
 		summary += "\n\n" + block
 	}
 	return summary
+}
+
+func explicitConstraintsFromMessages(messages []zeroruntime.Message) []string {
+	var constraints []string
+	for _, message := range messages {
+		if message.Role != zeroruntime.MessageRoleUser || strings.Contains(message.Content, preservedStateLabel) {
+			continue
+		}
+		if _, body := projectInstructionBlock(message.Content); body != "" {
+			continue
+		}
+		constraints = mergeBoundedComparable(constraints, extractExplicitConstraints(message.Content), maxTaskConstraints)
+	}
+	return constraints
+}
+
+func priorTaskConstraints(task *preservedTaskState) []string {
+	if task == nil {
+		return nil
+	}
+	return task.Constraints
+}
+
+func priorTaskChangedFiles(task *preservedTaskState) []string {
+	if task == nil {
+		return nil
+	}
+	return task.ChangedFiles
+}
+
+func priorTaskFailures(task *preservedTaskState) []taskFailureState {
+	if task == nil {
+		return nil
+	}
+	return task.UnresolvedFailures
+}
+
+func priorTaskApprovals(task *preservedTaskState) []taskApprovalState {
+	if task == nil {
+		return nil
+	}
+	return task.Approvals
+}
+
+func priorTaskArtifacts(task *preservedTaskState) []taskArtifactState {
+	if task == nil {
+		return nil
+	}
+	return task.Artifacts
+}
+
+func mergeTaskFailures(older, newer []taskFailureState, resolved []string) []taskFailureState {
+	resolvedSet := make(map[string]struct{}, len(resolved))
+	for _, key := range resolved {
+		resolvedSet[key] = struct{}{}
+	}
+	merged := make([]taskFailureState, 0, len(older)+len(newer))
+	for _, failure := range append(append([]taskFailureState(nil), older...), newer...) {
+		if _, ok := resolvedSet[failure.Key]; ok {
+			continue
+		}
+		withoutSameKey := make([]taskFailureState, 0, len(merged))
+		for _, existing := range merged {
+			if existing.Key != failure.Key {
+				withoutSameKey = append(withoutSameKey, existing)
+			}
+		}
+		merged = append(withoutSameKey, failure)
+	}
+	if len(merged) > maxTaskEvidenceEntries {
+		merged = merged[len(merged)-maxTaskEvidenceEntries:]
+	}
+	return merged
+}
+
+func mergeBoundedComparable[T comparable](older, newer []T, limit int) []T {
+	merged := make([]T, 0, len(older)+len(newer))
+	seen := make(map[T]struct{}, len(older)+len(newer))
+	for _, value := range append(append([]T(nil), older...), newer...) {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	if len(merged) > limit {
+		merged = merged[len(merged)-limit:]
+	}
+	return merged
+}
+
+func capTaskObjective(objective string) string {
+	objective = strings.TrimSpace(objective)
+	if len(objective) <= maxTaskObjectiveBytes {
+		return objective
+	}
+	const suffix = "…"
+	limit := maxTaskObjectiveBytes - len(suffix)
+	for limit > 0 && !utf8.RuneStart(objective[limit]) {
+		limit--
+	}
+	return strings.TrimSpace(objective[:limit]) + suffix
 }
 
 // mergeRecentEdits overlays fresh edits onto edits preserved by an earlier
@@ -555,11 +705,11 @@ func preservedEditsToEntries(edits []preservedEdit) []skillEntry {
 
 // formatPreservedState renders state as the labelled, single-line
 // JSON block. Returns "" when there is nothing to preserve.
-func formatPreservedState(plan string, edits, tools, skills, instructions []skillEntry) string {
-	if plan == "" && len(edits) == 0 && len(tools) == 0 && len(skills) == 0 && len(instructions) == 0 {
+func formatPreservedState(plan string, task *preservedTaskState, edits, tools, skills, instructions []skillEntry) string {
+	if plan == "" && task == nil && len(edits) == 0 && len(tools) == 0 && len(skills) == 0 && len(instructions) == 0 {
 		return ""
 	}
-	state := preservedState{Plan: plan}
+	state := preservedState{Plan: plan, Task: task}
 	for _, e := range edits {
 		state.RecentEdits = append(state.RecentEdits, preservedEdit{Path: e.name, Note: e.body})
 	}
@@ -577,15 +727,6 @@ func formatPreservedState(plan string, edits, tools, skills, instructions []skil
 		return ""
 	}
 	return preservedStateLabel + "\n" + string(encoded)
-}
-
-// parsePreservedState recovers the plan + skills from a prior summary's preserved
-// block. JSON escaping makes this lossless even when a skill body contains
-// markdown headings, code fences, or quotes. Returns ("", nil) when absent or
-// malformed.
-func parsePreservedState(summaryContent string) (string, []skillEntry) {
-	state := parsePreservedStateBlock(summaryContent)
-	return state.Plan, preservedSkillsToEntries(state.Skills)
 }
 
 func parsePreservedStateBlock(summaryContent string) preservedState {

@@ -6,18 +6,14 @@
 // transcript's tool-result rows (their changedFiles), so it survives resume for
 // free and can never drift from what the chat shows.
 //
-// Interaction (see handleTranscriptSelectionMouse): the first click on a row
-// SELECTS the file — its edit cards tint in the chat and the transcript scrolls
-// to the most recent one; a second click (or a click while the drill-in is
-// already open) opens the file view (file_view.go). Esc clears the selection.
+// The same compact rows feed the run-details overlay; selecting a file from a
+// visible transcript card opens the file drill-in (file_view.go).
 package tui
 
 import (
 	"fmt"
 	"sort"
 	"strings"
-
-	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -35,7 +31,9 @@ type touchedFile struct {
 	edits        int  // number of mutations
 	created      bool // first touch created the file (write_file "Created …")
 	failed       bool // the latest touch errored
-	lastRowIndex int  // transcript index of the most recent result touching it
+	summarized   bool // generated tree summary; never selectable as a file
+	changeKind   string
+	lastRowIndex int // transcript index of the most recent result touching it
 }
 
 // touchedFiles recovers the session's touched-file roster from the transcript,
@@ -47,7 +45,7 @@ func (m model) touchedFiles() []touchedFile {
 	var files []touchedFile
 	index := map[string]int{}
 	for i, row := range m.transcript {
-		if row.kind != rowToolResult || len(row.changedFiles) == 0 {
+		if row.kind != rowToolResult || (len(row.changedFiles) == 0 && len(row.changeSummaries) == 0) {
 			continue
 		}
 		adds, dels := planDiffStat(row.detail)
@@ -81,6 +79,22 @@ func (m model) touchedFiles() []touchedFile {
 			}
 			files[at].adds += fileAdds
 			files[at].dels += fileDels
+			files[at].edits++
+			files[at].failed = row.status == tools.StatusError
+			files[at].lastRowIndex = i
+		}
+		for _, summary := range row.changeSummaries {
+			if summary.Path == "" {
+				continue
+			}
+			at, seen := index[summary.Path]
+			if !seen {
+				index[summary.Path] = len(files)
+				files = append(files, touchedFile{path: summary.Path, summarized: true, lastRowIndex: i})
+				at = len(files) - 1
+			}
+			files[at].summarized = true
+			files[at].changeKind = string(summary.Kind)
 			files[at].edits++
 			files[at].failed = row.status == tools.StatusError
 			files[at].lastRowIndex = i
@@ -229,7 +243,9 @@ func (m model) sidebarFileLines(width int) ([]string, []fileHit) {
 			break
 		}
 		shown++
-		hits = append(hits, fileHit{lineOffset: len(lines), path: f.path})
+		if !f.summarized {
+			hits = append(hits, fileHit{lineOffset: len(lines), path: f.path})
+		}
 		lines = append(lines, m.renderFileRow(f, room))
 	}
 	return lines, hits
@@ -241,6 +257,8 @@ func (m model) sidebarFileLines(width int) ([]string, []fileHit) {
 func (m model) renderFileRow(f touchedFile, room int) string {
 	badge := zeroTheme.muted.Render("M")
 	switch {
+	case f.summarized:
+		badge = zeroTheme.muted.Render("Σ")
 	case f.failed:
 		badge = zeroTheme.red.Render("✗")
 	case f.created:
@@ -290,33 +308,6 @@ func (m model) sidebarFileSelectables(width int) []fileHit {
 	return hits
 }
 
-// fileRowAtMouse maps a left-click in the context sidebar to a touched file,
-// mirroring planStepAtMouse's column/x gate. Rows truncated away by the
-// sidebar's height budget (or colliding with the token floor line) never match.
-func (m model) fileRowAtMouse(msg tea.MouseMsg) (string, bool) {
-	if !m.sidebarActive() {
-		return "", false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
-		return "", false
-	}
-	sidebarW := sidebarWidth(m.width)
-	if sidebarW <= 0 {
-		return "", false
-	}
-	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
-	x, y := mouseX(msg), mouseY(msg)
-	if x < x0 || x >= x0+sidebarW {
-		return "", false
-	}
-	for _, hit := range m.sidebarFileSelectables(sidebarW) {
-		if hit.lineOffset == y && hit.lineOffset < m.height-1 && hit.path != "" {
-			return hit.path, true
-		}
-	}
-	return "", false
-}
-
 // rowTouchesSelectedFile reports whether a transcript row's mutation touched
 // the currently selected file, so its card renders with the selection tint.
 func (m model) rowTouchesSelectedFile(row transcriptRow) bool {
@@ -348,12 +339,29 @@ func (m model) lastRowIndexForFile(path string) int {
 	return -1
 }
 
+func (m *model) setSelectedFile(path string) {
+	if m.selectedFile == path {
+		return
+	}
+	oldPath := m.selectedFile
+	m.selectedFile = path
+	for i := 0; i < m.flushed && i < len(m.transcript); i++ {
+		for _, changedPath := range m.transcript[i].changedFiles {
+			if changedPath == oldPath || changedPath == path {
+				m.altScreenSettledWidth = 0
+				return
+			}
+		}
+	}
+}
+
 // selectFile marks path as the selected file and scrolls the transcript so its
 // most recent edit card is in view; the card tint comes from the renderers
 // reading selectedFile (rowTouchesSelectedFile).
 func (m model) selectFile(path string) model {
-	m.selectedFile = path
-	if offset, ok := m.scrollOffsetForTranscriptRow(m.lastRowIndexForFile(path)); ok {
+	rowIndex := m.lastRowIndexForFile(path)
+	m.setSelectedFile(path)
+	if offset, ok := m.scrollOffsetForTranscriptRow(rowIndex); ok {
 		m.chatScrollOffset = offset
 		if offset == 0 {
 			m.chatBodyLines = 0

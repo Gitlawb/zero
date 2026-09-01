@@ -61,7 +61,8 @@ const (
 	streamingFadeDuration = 1200 * time.Millisecond
 
 	// streamingFadeTickInterval is the cadence at which we re-render the
-	// fading text. Independent of the 80ms spinner tick — a slower cadence
+	// fading text. Independent of the active-status animation tick — a slower
+	// cadence
 	// is enough for a smooth-feeling fade and keeps the per-frame work
 	// cheap.
 	streamingFadeTickInterval = 150 * time.Millisecond
@@ -267,6 +268,13 @@ func (m *model) resetStreamingFade() {
 // returned unchanged so live colors match committed colors instead of snapping at
 // turn end.
 func (m model) styleStreamingLine(line string, visualIndex, visualCount int) string {
+	// Inline markdown uses private SGR markers while it is being parsed. They
+	// include reverse-video for code spans, which must be converted to the
+	// palette-aware final style before the line reaches the terminal. Otherwise
+	// a streaming frame briefly flashes the terminal's reverse background.
+	if hasMarkdownDisplayControls(line) {
+		return styleAssistantMarkdownLine(line, zeroTheme.ink)
+	}
 	if strings.Contains(line, "\x1b") {
 		return line
 	}
@@ -275,15 +283,4 @@ func (m model) styleStreamingLine(line string, visualIndex, visualCount int) str
 	}
 	bornAt := streamingLineBornAt(visualIndex, visualCount, m.lineAges, m.lastStreamActivity)
 	return ageDimLine(line, bornAt, m.now(), zeroTheme.ink)
-}
-
-// ensureAgeTickReschedule is a small helper used after a fade-state change
-// to start the tick if it's not already running. The age-tick case
-// short-circuits when fadeActive is false, so calling this on a no-op
-// transition (e.g. a 0-byte delta) is safe.
-func (m model) ensureAgeTickReschedule() tea.Cmd {
-	if !m.fadeActive {
-		return nil
-	}
-	return streamingFadeTick()
 }

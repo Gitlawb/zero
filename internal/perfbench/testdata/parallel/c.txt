@@ -1,0 +1,4 @@
+first line of c.txt
+second line of c.txt
+third line of c.txt
+gamma gamma gamma

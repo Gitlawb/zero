@@ -39,6 +39,13 @@ func BuildAuthorizationURL(cfg Config, pkce PKCE, state, redirectURI string, ext
 	if endpoint == "" {
 		return "", errors.New("oauth: no authorization endpoint configured")
 	}
+	// Backstop: validate the authorization endpoint at the shared choke point
+	// both the provider and MCP flows build their browser URL through, so a
+	// discovery-downgraded endpoint can never open in the browser even if a
+	// merge site missed it.
+	if err := ValidateEndpointURL(endpoint); err != nil {
+		return "", err
+	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
 		return "", fmt.Errorf("oauth: parse authorization endpoint: %w", err)
@@ -83,13 +90,15 @@ func isReservedAuthParam(key string) bool {
 	}
 }
 
-// validateTokenEndpoint refuses to send a credential to a token endpoint that is
-// not https, unless it is a loopback host (mirrors oauth2-client.js
-// validateTokenEndpointURL). This prevents leaking codes/tokens over cleartext.
-func validateTokenEndpoint(endpoint string) error {
+// ValidateEndpointURL refuses an OAuth endpoint that is not https, unless it is
+// a loopback host (mirrors oauth2-client.js validateTokenEndpointURL). Every
+// credential-bearing endpoint — configured OR learned from discovery — must
+// pass this single rule, so discovery metadata can never downgrade a login to
+// cleartext or redirect it to an attacker-controlled http origin.
+func ValidateEndpointURL(endpoint string) error {
 	parsed, err := url.Parse(trimmed(endpoint))
 	if err != nil || parsed.Host == "" {
-		return fmt.Errorf("oauth: invalid token endpoint %q", endpoint)
+		return fmt.Errorf("oauth: invalid endpoint %q", endpoint)
 	}
 	if parsed.Scheme == "https" {
 		return nil
@@ -98,6 +107,30 @@ func validateTokenEndpoint(endpoint string) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrInsecureTokenEndpoint, parsed.Scheme+"://"+parsed.Host)
+}
+
+// validateTokenEndpoint checks a token endpoint against the shared endpoint rule
+// (kept as a named helper for the token-exchange and device call sites). This
+// prevents leaking codes/tokens over cleartext.
+func validateTokenEndpoint(endpoint string) error {
+	return ValidateEndpointURL(endpoint)
+}
+
+// withoutRedirects returns a shallow copy of client whose redirect policy
+// refuses to follow ANY redirect. A credential-bearing OAuth POST (token
+// exchange/refresh, device authorization, device-token poll) must never let a
+// 307/308 replay its form body — codes, PKCE verifiers, refresh tokens, client
+// secrets — to a target that was never endpoint-validated. The caller's client
+// is left unmodified.
+func withoutRedirects(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	copied := *client
+	copied.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return ErrUnsafeRedirect
+	}
+	return &copied
 }
 
 func isLoopbackHost(host string) bool {
@@ -160,9 +193,9 @@ func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, f
 	if err := validateTokenEndpoint(tokenEndpoint); err != nil {
 		return Token{}, err
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
+	// Refuse redirects so a 307/308 from the token endpoint can't replay this
+	// credential-bearing POST body to another (unvalidated) origin.
+	client = withoutRedirects(client)
 	if now == nil {
 		now = time.Now
 	}

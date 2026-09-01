@@ -91,6 +91,60 @@ func TestStoreFileMode0600(t *testing.T) {
 	}
 }
 
+// TestStorePublishesThroughProtectedDirectory pins the publication contract the
+// sandbox profile relies on: the plaintext blob is never written to a path a
+// same-user process can predict (a fixed `.tmp` sibling), only to a random name
+// inside the directory the profile denies by name, and nothing is left behind.
+func TestStorePublishesThroughProtectedDirectory(t *testing.T) {
+	s, path := newTestStore(t)
+	if err := os.WriteFile(path+".tmp", []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("x"), Token{AccessToken: "secret"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// A predictable sibling is never used, so a pre-existing one is untouched
+	// rather than becoming the file the plaintext passes through.
+	if data, err := os.ReadFile(path + ".tmp"); err != nil || string(data) != "stale" {
+		t.Fatalf("fixed sibling data = %q, err = %v, want the untouched placeholder", data, err)
+	}
+	assertEmptyPublicationDir(t, path)
+}
+
+func TestEncryptedStorePublishesSecretThroughProtectedDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(path+".secret.tmp", []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(StoreOptions{FilePath: path, Storage: "encrypted-file"})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Save(ProviderKey("x"), Token{AccessToken: "secret"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if data, err := os.ReadFile(path + ".secret.tmp"); err != nil || string(data) != "stale" {
+		t.Fatalf("fixed secret sibling data = %q, err = %v, want the untouched placeholder", data, err)
+	}
+	assertEmptyPublicationDir(t, path)
+	assertEmptyPublicationDir(t, path+".secret")
+}
+
+// assertEmptyPublicationDir asserts the store's publication directory exists
+// (so the sandbox has a mount target to mask on Linux) and holds no leftover
+// copy of the secret it published.
+func assertEmptyPublicationDir(t *testing.T, storePath string) {
+	t.Helper()
+	dir := PublicationDir(storePath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read publication dir %s: %v", dir, err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("publication dir %s = %v, want empty after publish", dir, entries)
+	}
+}
+
 func TestStoreMalformedFailsClosed(t *testing.T) {
 	s, path := newTestStore(t)
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
@@ -124,5 +178,22 @@ func TestResolveStorePathHonorsOverride(t *testing.T) {
 	}
 	if path != override {
 		t.Fatalf("path = %q, want %q", path, override)
+	}
+}
+
+// TestProviderKeyNormalizesCase: every provider-login write and lookup funnels
+// through ProviderKey, so `zero auth login xAI` and the scaffolded profile's
+// candidate "xai" must resolve to the SAME store entry — the raw-typed casing
+// previously produced an invisible login.
+func TestProviderKeyNormalizesCase(t *testing.T) {
+	if got := ProviderKey(" xAI "); got != "provider:xai" {
+		t.Fatalf("ProviderKey must trim and lower-case, got %q", got)
+	}
+	store, _ := newTestStore(t)
+	if err := store.Save(ProviderKey("xAI"), Token{AccessToken: "tok"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, key, ok := FirstStored(store, []string{"xai"}); !ok || key != "provider:xai" {
+		t.Fatalf("candidate \"xai\" must find the mixed-case login, ok=%v key=%q", ok, key)
 	}
 }

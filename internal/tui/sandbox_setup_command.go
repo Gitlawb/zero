@@ -111,6 +111,12 @@ func (m model) setSandboxSetupStatusRow(text string) model {
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		if m.transcript[i].id == sandboxSetupStatusRowID {
 			m.transcript[i] = row
+			// Settled alt-screen rows are cached across frames; force a rebuild
+			// so an in-place update is reflected immediately instead of serving
+			// the stale cached snapshot.
+			if i < m.flushed {
+				m.altScreenSettledWidth = 0
+			}
 			return m
 		}
 	}

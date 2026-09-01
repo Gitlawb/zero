@@ -99,17 +99,6 @@ func (t *specialistTracker) incrementToolCount(childSessionID string) {
 	}
 }
 
-// addTokens adds tokens to the running total for the specialist with
-// childSessionID. Unknown specialists are ignored.
-func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
-	for index := range t.specialists {
-		if t.specialists[index].childSessionID == childSessionID {
-			t.specialists[index].tokenCount += tokens
-			return
-		}
-	}
-}
-
 // setCurrentTool updates the live tool-call progress for the specialist with
 // childSessionID. Used by specialistProgressMsg to show ↳ toolName detail.
 func (t *specialistTracker) setCurrentTool(childSessionID, toolName, detail string) {
@@ -159,16 +148,6 @@ func (t *specialistTracker) all() []specialistInfo {
 	out := make([]specialistInfo, len(t.specialists))
 	copy(out, t.specialists)
 	return out
-}
-
-// hasRunning reports whether any tracked specialist is still running.
-func (t *specialistTracker) hasRunning() bool {
-	for index := range t.specialists {
-		if t.specialists[index].status == specialistRunning {
-			return true
-		}
-	}
-	return false
 }
 
 // specialistStatusString returns the lowercase human label for a status.
@@ -414,10 +393,10 @@ func toolCallSummary(event streamjson.Event) string {
 	case "write_stdin":
 		sessionID := toolCallIntArg(args, "session_id")
 		chars, _ := args["chars"].(string)
-		switch {
-		case chars == "":
+		switch chars {
+		case "":
 			return fmt.Sprintf("poll session %d", sessionID)
-		case chars == "\x03":
+		case "\x03":
 			return fmt.Sprintf("interrupt session %d", sessionID)
 		default:
 			return fmt.Sprintf("send input to session %d", sessionID)

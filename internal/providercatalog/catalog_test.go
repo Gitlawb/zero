@@ -9,6 +9,7 @@ import (
 
 var expectedCatalogIDs = []string{
 	"gitlawb-opengateway",
+	"aimlapi",
 	"openai",
 	"anthropic",
 	"google",
@@ -21,8 +22,10 @@ var expectedCatalogIDs = []string{
 	"groq",
 	"deepseek",
 	"together",
+	"fireworks",
 	"dashscope",
 	"moonshot",
+	"atlascloud",
 	"longcat",
 	"nvidia-nim",
 	"minimax",
@@ -40,6 +43,7 @@ var expectedCatalogIDs = []string{
 	"kilocode",
 	"opencode",
 	"opencode-go",
+	"opencode-go-anthropic-compatible",
 	"atomic-chat",
 	"chatgpt-proxy",
 	"custom-openai-compatible",
@@ -67,25 +71,31 @@ func TestAllHasStableUniqueIDs(t *testing.T) {
 	}
 }
 
-func TestRecommendedProviderIsFirstAndUnique(t *testing.T) {
+func TestRecommendedProvidersAreTopOfCatalog(t *testing.T) {
 	descriptors := All()
-	if len(descriptors) == 0 {
-		t.Fatal("All() returned no descriptors")
+	// The recommended providers are badged and pinned to the top of the catalog,
+	// in this order (OpenGateway remains the default; aimlapi.com is also badged).
+	wantTop := []string{"gitlawb-opengateway", "aimlapi"}
+	if len(descriptors) < len(wantTop) {
+		t.Fatalf("All() returned %d descriptors, want at least %d", len(descriptors), len(wantTop))
 	}
-	if !descriptors[0].Recommended {
-		t.Fatalf("All()[0] = %q, want it to be the recommended provider", descriptors[0].ID)
+	for index, id := range wantTop {
+		if descriptors[index].ID != id {
+			t.Fatalf("descriptors[%d] = %q, want %q", index, descriptors[index].ID, id)
+		}
+		if !descriptors[index].Recommended {
+			t.Fatalf("descriptors[%d] (%q) should be recommended", index, id)
+		}
 	}
-	if descriptors[0].ID != "gitlawb-opengateway" {
-		t.Fatalf("recommended provider = %q, want %q", descriptors[0].ID, "gitlawb-opengateway")
-	}
+	// Exactly those are recommended, and they are contiguous at the top.
 	recommended := 0
 	for _, descriptor := range descriptors {
 		if descriptor.Recommended {
 			recommended++
 		}
 	}
-	if recommended != 1 {
-		t.Fatalf("recommended descriptor count = %d, want exactly 1", recommended)
+	if recommended != len(wantTop) {
+		t.Fatalf("recommended descriptor count = %d, want %d", recommended, len(wantTop))
 	}
 }
 
@@ -99,6 +109,28 @@ func TestRecommendedProviderEndpoint(t *testing.T) {
 	}
 	if descriptor.Transport != TransportOpenAICompatible {
 		t.Fatalf("OpenGateway transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+}
+
+func TestAIMLAPIDescriptor(t *testing.T) {
+	descriptor, err := Require("aimlapi")
+	if err != nil {
+		t.Fatalf("Require(aimlapi) error = %v", err)
+	}
+	if descriptor.Name != "aimlapi.com" {
+		t.Fatalf("Name = %q, want aimlapi.com", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.aimlapi.com/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want aimlapi.com endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "anthropic/claude-sonnet-5" {
+		t.Fatalf("DefaultModel = %q, want anthropic/claude-sonnet-5", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"AIMLAPI_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want AIMLAPI_API_KEY", descriptor.AuthEnvVars)
 	}
 }
 
@@ -121,6 +153,50 @@ func TestLongCatDescriptor(t *testing.T) {
 	}
 	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"LONGCAT_API_KEY"}) {
 		t.Fatalf("AuthEnvVars = %#v, want LONGCAT_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
+func TestFireworksDescriptor(t *testing.T) {
+	descriptor, err := Require("fireworks")
+	if err != nil {
+		t.Fatalf("Require(fireworks) error = %v", err)
+	}
+	if descriptor.Name != "Fireworks AI" {
+		t.Fatalf("Name = %q, want Fireworks AI", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.fireworks.ai/inference/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want Fireworks OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "accounts/fireworks/models/kimi-k2p7-code" {
+		t.Fatalf("DefaultModel = %q, want accounts/fireworks/models/kimi-k2p7-code", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"FIREWORKS_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want FIREWORKS_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
+func TestAtlasCloudDescriptor(t *testing.T) {
+	descriptor, err := Require("atlascloud")
+	if err != nil {
+		t.Fatalf("Require(atlascloud) error = %v", err)
+	}
+	if descriptor.Name != "Atlas Cloud" {
+		t.Fatalf("Name = %q, want Atlas Cloud", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.atlascloud.ai/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want Atlas Cloud OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "qwen/qwen3.5-flash" {
+		t.Fatalf("DefaultModel = %q, want qwen/qwen3.5-flash", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"ATLASCLOUD_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want ATLASCLOUD_API_KEY", descriptor.AuthEnvVars)
 	}
 }
 
@@ -242,6 +318,7 @@ func TestLookupNormalizesIDsAndAliases(t *testing.T) {
 		"lm-studio":                    "lmstudio",
 		"mini_max":                     "minimax",
 		"Moonshot":                     "moonshot",
+		"Atlas Cloud":                  "atlascloud",
 		"nvidia nim":                   "nvidia-nim",
 		"xiaomi mimo":                  "xiaomi-mimo",
 		"custom_openai_compatible":     "custom-openai-compatible",
@@ -291,8 +368,8 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportGoogle:          {"google"},
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
-		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {

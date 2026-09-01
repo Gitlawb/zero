@@ -51,6 +51,7 @@ const (
 type SandboxManagerOptions struct {
 	GOOS             string
 	LookupExecutable func(string) (string, error)
+	DetectWSL        func() WSLInfo
 	Backend          Backend
 }
 
@@ -96,7 +97,7 @@ func NewSandboxManager(options SandboxManagerOptions) SandboxManager {
 		goos = runtime.GOOS
 	}
 	if backend.Name == "" {
-		backend = selectPlatformBackend(goos, options.LookupExecutable)
+		backend = selectPlatformBackend(goos, options.LookupExecutable, options.DetectWSL)
 	}
 	if backend.Platform == "" {
 		backend.Platform = goos
@@ -168,9 +169,12 @@ func lookupExecutable(name string) (string, error) {
 	return "", errors.New("executable file not found")
 }
 
-func selectPlatformBackend(goos string, lookup func(string) (string, error)) Backend {
+func selectPlatformBackend(goos string, lookup func(string) (string, error), detect func() WSLInfo) Backend {
 	if lookup == nil {
 		lookup = lookupExecutable
+	}
+	if detect == nil {
+		detect = detectWSL
 	}
 	switch goos {
 	case "linux":
@@ -180,7 +184,7 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 			}
 			return nativeBackend(goos, BackendLinuxBwrap, helper, "Linux sandbox helper available")
 		}
-		if info := detectWSL(); info.IsWSL {
+		if info := detect(); info.IsWSL {
 			return wslBackend(goos, info)
 		}
 		return unavailableBackend(goos, "Linux sandbox helper is not available")
@@ -227,6 +231,9 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	}
 	if request.ValidateExecution && preference == SandboxPreferenceRequire && backend.SupportLevel() != BackendSupportNative {
 		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
+	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && backend.SupportLevel() != BackendSupportNative && policyHasExplicitDeny(policy) {
+		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny_read or deny_write rules cannot be enforced")
 	}
 	// Windows: the FULL OS sandbox needs a one-time elevated `zero sandbox setup`
 	// (it applies WFP network filters + workspace ACLs and writes a marker).
@@ -281,6 +288,10 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		SupportLevel:            backend.SupportLevel(),
 		RequiresPlatformSandbox: requiresPlatformSandbox,
 	}, nil
+}
+
+func policyHasExplicitDeny(policy Policy) bool {
+	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
 }
 
 func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest) (CommandPlan, error) {

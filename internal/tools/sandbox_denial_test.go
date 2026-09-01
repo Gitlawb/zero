@@ -3,42 +3,16 @@ package tools
 import (
 	"testing"
 
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
-func TestLikelySandboxDeniedDetectsReferenceKeywords(t *testing.T) {
-	plan := zeroSandbox.CommandPlan{
-		Wrapped:       true,
-		TargetBackend: zeroSandbox.BackendLinuxBwrap,
-	}
-	output := "touch: cannot touch '/home/user/.npm/cache': Read-only file system"
-	if !likelySandboxDenied(plan, 1, output) {
-		t.Fatalf("expected reference sandbox denial keyword to be classified as sandbox denied")
-	}
-}
-
-func TestLikelySandboxDeniedDetectsNetworkDenialEvenWithZeroExit(t *testing.T) {
-	plan := zeroSandbox.CommandPlan{
-		Wrapped:       true,
-		TargetBackend: zeroSandbox.BackendLinuxBwrap,
-		Policy:        zeroSandbox.Policy{Network: zeroSandbox.NetworkDeny},
-		PermissionProfile: zeroSandbox.PermissionProfile{
-			Network: zeroSandbox.NetworkPolicy{Mode: zeroSandbox.NetworkDeny},
-		},
-	}
-	if !likelySandboxDenied(plan, 0, "Cannot open a network socket.") {
-		t.Fatal("network-denied socket output with exit 0 must be classified as sandbox denied")
-	}
+func TestStructuredSandboxDenialMetadata(t *testing.T) {
 	meta := map[string]string{}
-	markLikelySandboxDenial(meta, plan, 0, "Cannot open a network socket.")
-	if meta[SandboxLikelyDeniedMeta] != "true" || meta[SandboxDenialKindMeta] != SandboxDenialKindNetwork {
-		t.Fatalf("network denial meta = %#v", meta)
-	}
-}
-
-func TestLikelySandboxDeniedIgnoresUnsandboxedFailure(t *testing.T) {
-	plan := zeroSandbox.CommandPlan{Wrapped: false}
-	if likelySandboxDenied(plan, 1, "permission denied") {
-		t.Fatal("unsandboxed command output must not be classified as a sandbox denial")
+	markStructuredSandboxDenial(meta, execution.Denial{
+		Capability: execution.Capability{Kind: execution.CapabilityProtectedMetadata, Scope: "/workspace/.zero"},
+		Reason:     "protected metadata is denied",
+	})
+	if meta["sandbox_denial_capability"] != string(execution.CapabilityProtectedMetadata) || meta["sandbox_denial_scope"] != "/workspace/.zero" {
+		t.Fatalf("structured metadata = %#v", meta)
 	}
 }

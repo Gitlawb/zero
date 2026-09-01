@@ -17,14 +17,17 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/localcontrol"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/observability"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -41,6 +44,7 @@ import (
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zerogit"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/charmbracelet/x/term"
 )
 
 var version = "dev"
@@ -50,42 +54,63 @@ type appDeps struct {
 	stdin            io.Reader
 	userConfigPath   func() (string, error)
 	resolveConfig    func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	resolveMCPConfig func(workspaceRoot string) (config.MCPConfig, error)
+	resolveMCPConfig func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error)
 	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
 	// exportActiveProvider pins spawned children to the run's provider (production:
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
 	// inject it). nil ⇒ no export.
-	exportActiveProvider   func(providerName string)
-	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
-	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
-	detectLocalRuntimes    func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
-	newSessionStore        func() *sessions.Store
-	loadPlugins            func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks              func(hooks.LoadOptions) (hooks.LoadResult, error)
-	skillsDir              func() string
-	pluginsDir             func() string
-	toolsDir               func() string
-	newMCPStore            func() (*mcp.PermissionStore, error)
-	newMCPTokenStore       func() (*mcp.TokenStore, error)
-	newSandboxStore        func() (*sandbox.GrantStore, error)
-	selectSandboxBackend   func(sandbox.BackendOptions) sandbox.Backend
-	runSandboxSetupHelper  func(path string, args []string, stdout io.Writer, stderr io.Writer) error
-	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
-	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
-	detectVerifyPlan       func(string) (verify.Plan, error)
-	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runSelfVerify          func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
-	runAgentEval           func(context.Context, agentEvalOptions) (agentEvalReport, error)
-	inspectChanges         func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
-	commitChanges          func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
-	pushChanges            func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
-	createPR               func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
-	runTUI                 func(context.Context, tui.Options) int
-	runEditor              func(string) error
-	checkUpdate            func(context.Context, update.Options) (update.Result, error)
-	applyUpdate            func(context.Context, update.Options) (update.ApplyResult, error)
-	now                    func() time.Time
+	exportActiveProvider func(providerName string)
+	// getenv reads a process environment variable (production: os.Getenv, set in
+	// defaultAppDeps — deliberately NOT filled by fillAppDeps, so tests are hermetic
+	// against ambient vars like ZERO_PROVIDER unless they inject it). nil ⇒ empty.
+	getenv                       func(string) string
+	probeProviderHealth          func(context.Context, providerhealth.Options) providerhealth.Result
+	discoverProviderModels       func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	detectLocalRuntimes          func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
+	openRouterLogin              func(context.Context, provideroauth.OpenRouterOptions) (string, error)
+	newSessionStore              func() *sessions.Store
+	loadPlugins                  func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks                    func(hooks.LoadOptions) (hooks.LoadResult, error)
+	skillsDir                    func() string
+	pluginsDir                   func() string
+	toolsDir                     func() string
+	newMCPStore                  func() (*mcp.PermissionStore, error)
+	newMCPTokenStore             func() (*mcp.TokenStore, error)
+	newSandboxStore              func() (*sandbox.GrantStore, error)
+	selectSandboxBackend         func(sandbox.BackendOptions) sandbox.Backend
+	runSandboxSetupHelper        func(path string, args []string, stdout io.Writer, stderr io.Writer) error
+	registerMCPTools             func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree              func(context.Context, worktrees.Options) (worktrees.Result, error)
+	releaseWorktree              func(context.Context, worktrees.Options, string) error
+	detectVerifyPlan             func(string) (verify.Plan, error)
+	runVerify                    func(context.Context, verify.Plan, verify.RunOptions) verify.Report
+	runSelfVerify                func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	runAgentEval                 func(context.Context, agentEvalOptions) (agentEvalReport, error)
+	inspectChanges               func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
+	commitChanges                func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	pushChanges                  func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
+	createPR                     func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
+	createBranch                 func(context.Context, zerogit.BranchOptions) (zerogit.BranchResult, error)
+	isDefaultBranch              func(context.Context, zerogit.DefaultBranchOptions) (bool, string, string, error)
+	currentGitUser               func(context.Context, string) string
+	headCommitSubject            func(context.Context, string) string
+	commitsAhead                 func(context.Context, string, string, string) (int, error)
+	isUnbornRemote               func(context.Context, string, string) (bool, error)
+	refreshTrackingRef           func(context.Context, string, string, string) error
+	branchUpstreamRemote         func(context.Context, string, string) string
+	branchUpstreamRemoteAndMerge func(context.Context, string, string) (string, string)
+	resolveRemoteBranchTip       func(context.Context, string, string, string) (string, error)
+	remoteHasBranch              func(context.Context, string, string, string) (bool, error)
+	currentGitBranch             func(context.Context, string) string
+	currentBranchTip             func(context.Context, string) string
+	deleteBranch                 func(context.Context, string, string, string) error
+	resetBranchRef               func(context.Context, string, string, string, string) error
+	runTUI                       func(context.Context, tui.Options) int
+	runEditor                    func(string) error
+	checkUpdate                  func(context.Context, update.Options) (update.Result, error)
+	applyUpdate                  func(context.Context, update.Options) (update.ApplyResult, error)
+	now                          func() time.Time
 }
 
 type mcpToolRuntime interface {
@@ -115,6 +140,7 @@ func defaultAppDeps() appDeps {
 		stdin:                os.Stdin,
 		userConfigPath:       config.DefaultUserConfigPath,
 		exportActiveProvider: config.SetActiveProviderEnv,
+		getenv:               os.Getenv,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
 			if err != nil {
@@ -123,11 +149,12 @@ func defaultAppDeps() appDeps {
 			options.Overrides = overrides
 			return config.Resolve(options)
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
 			if err != nil {
 				return config.MCPConfig{}, err
 			}
+			options.ExcludeProject = excludeProject
 			return config.ResolveMCP(options)
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -144,6 +171,7 @@ func defaultAppDeps() appDeps {
 		probeProviderHealth:    providerhealth.Probe,
 		discoverProviderModels: defaultDiscoverProviderModels,
 		detectLocalRuntimes:    provideronboarding.DetectLocalRuntimes,
+		openRouterLogin:        provideroauth.OpenRouterLogin,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -176,6 +204,7 @@ func defaultAppDeps() appDeps {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
 		prepareWorktree:  worktrees.Prepare,
+		releaseWorktree:  worktrees.Release,
 		detectVerifyPlan: verify.DetectPlan,
 		runVerify:        verify.Run,
 		runSelfVerify:    selfverify.Run,
@@ -184,11 +213,52 @@ func defaultAppDeps() appDeps {
 		commitChanges:    zerogit.Commit,
 		pushChanges:      zerogit.Push,
 		createPR:         zerogit.CreatePR,
-		runTUI:           tui.Run,
-		runEditor:        openEditor,
-		checkUpdate:      update.Check,
-		applyUpdate:      update.Apply,
-		now:              time.Now,
+		createBranch:     zerogit.CreateBranch,
+		isDefaultBranch:  zerogit.IsDefaultBranch,
+		currentGitUser: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentGitUser(ctx, cwd, nil)
+		},
+		headCommitSubject: func(ctx context.Context, cwd string) string {
+			return zerogit.HeadCommitSubject(ctx, cwd, nil)
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return zerogit.CommitsAhead(ctx, cwd, remote, branch, nil)
+		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			return zerogit.IsUnbornRemote(ctx, cwd, remote, nil)
+		},
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+			return zerogit.RefreshTrackingRef(ctx, cwd, remote, branch, nil)
+		},
+		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
+			return zerogit.UpstreamRemote(ctx, cwd, branch, nil)
+		},
+		branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
+			return zerogit.UpstreamRemoteAndMergeBranch(ctx, cwd, branch, nil)
+		},
+		resolveRemoteBranchTip: func(ctx context.Context, cwd, remote, branch string) (string, error) {
+			return zerogit.ResolveRemoteBranchTip(ctx, cwd, remote, branch, nil)
+		},
+		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+			return zerogit.RemoteHasBranch(ctx, cwd, remote, branch, nil)
+		},
+		currentGitBranch: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentBranch(ctx, cwd, nil)
+		},
+		currentBranchTip: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentBranchTip(ctx, cwd, nil)
+		},
+		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
+			return zerogit.DeleteBranch(ctx, cwd, fallbackBranch, branchToDelete, nil)
+		},
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
+			return zerogit.ResetBranchRef(ctx, cwd, branch, newTip, nil, expectedOld)
+		},
+		runTUI:      tui.Run,
+		runEditor:   openEditor,
+		checkUpdate: update.Check,
+		applyUpdate: update.Apply,
+		now:         time.Now,
 	}
 }
 
@@ -335,7 +405,17 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return 0
 			}
 		}
-		if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
+		// Pipes and redirects keep the machine-readable contract exactly as it
+		// was: a single "zero <version>" line. Scripts, command substitutions,
+		// and the NPM wrapper smoke check all parse that record, so the banner
+		// is strictly a TTY affordance.
+		if !stdoutIsTerminal(stdout) {
+			if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
+				return 1
+			}
+			return 0
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\n\nzero %s\n", tui.Wordmark(), version); err != nil {
 			return 1
 		}
 		return 0
@@ -353,6 +433,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	case "exec":
 		// Forward leading --add-dir occurrences so exec's own parser collects them.
 		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+	case "completions":
+		return runCompletions(args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
@@ -403,6 +485,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runWorktrees(args[1:], stdout, stderr, deps)
 	case "verify":
 		return runVerifyCommand(args[1:], stdout, stderr, deps)
+	case "trust":
+		return runTrust(args[1:], stdout, stderr, deps)
 	case "eval":
 		return runAgentEvalCommand(args[1:], stdout, stderr, deps)
 	case "changes", "change":
@@ -465,6 +549,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.detectLocalRuntimes == nil {
 		deps.detectLocalRuntimes = defaults.detectLocalRuntimes
 	}
+	if deps.openRouterLogin == nil {
+		deps.openRouterLogin = defaults.openRouterLogin
+	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore
 	}
@@ -504,6 +591,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.prepareWorktree == nil {
 		deps.prepareWorktree = defaults.prepareWorktree
 	}
+	if deps.releaseWorktree == nil {
+		deps.releaseWorktree = defaults.releaseWorktree
+	}
 	if deps.detectVerifyPlan == nil {
 		deps.detectVerifyPlan = defaults.detectVerifyPlan
 	}
@@ -528,6 +618,45 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.createPR == nil {
 		deps.createPR = defaults.createPR
 	}
+	if deps.createBranch == nil {
+		deps.createBranch = defaults.createBranch
+	}
+	if deps.isDefaultBranch == nil {
+		deps.isDefaultBranch = defaults.isDefaultBranch
+	}
+	if deps.currentGitUser == nil {
+		deps.currentGitUser = defaults.currentGitUser
+	}
+	if deps.headCommitSubject == nil {
+		deps.headCommitSubject = defaults.headCommitSubject
+	}
+	if deps.commitsAhead == nil {
+		deps.commitsAhead = defaults.commitsAhead
+	}
+	if deps.isUnbornRemote == nil {
+		deps.isUnbornRemote = defaults.isUnbornRemote
+	}
+	if deps.refreshTrackingRef == nil {
+		deps.refreshTrackingRef = defaults.refreshTrackingRef
+	}
+	if deps.branchUpstreamRemote == nil {
+		deps.branchUpstreamRemote = defaults.branchUpstreamRemote
+	}
+	if deps.branchUpstreamRemoteAndMerge == nil {
+		deps.branchUpstreamRemoteAndMerge = defaults.branchUpstreamRemoteAndMerge
+	}
+	if deps.remoteHasBranch == nil {
+		deps.remoteHasBranch = defaults.remoteHasBranch
+	}
+	if deps.currentGitBranch == nil {
+		deps.currentGitBranch = defaults.currentGitBranch
+	}
+	if deps.currentBranchTip == nil {
+		deps.currentBranchTip = defaults.currentBranchTip
+	}
+	// resolveRemoteBranchTip, deleteBranch, and resetBranchRef stay nil when
+	// unset so unit tests that mock createBranch without a real git tree do not
+	// hit real git restore/delete commands.
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
 	}
@@ -553,6 +682,14 @@ func fillAppDeps(deps appDeps) appDeps {
 	userConfigPath := deps.userConfigPath
 	deps.newProvider = func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 		return baseNewProvider(applyStoredProviderKeyAt(profile, userConfigPath))
+	}
+	baseProbeProviderHealth := deps.probeProviderHealth
+	deps.probeProviderHealth = func(ctx context.Context, options providerhealth.Options) providerhealth.Result {
+		options.Profile = applyStoredProviderKeyAt(options.Profile, userConfigPath)
+		if options.OAuthResolver == nil {
+			options.OAuthResolver, _ = oauthLoginForProfile(options.Profile)
+		}
+		return baseProbeProviderHealth(ctx, options)
 	}
 	return deps
 }
@@ -653,12 +790,42 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+	executionRunner := execution.NewRunner(nil)
+	sandboxStore, err := deps.newSandboxStore()
+	if err != nil {
+		return writeAppError(stderr, "failed to initialize sandbox grants: "+err.Error(), 1)
+	}
+	if notice, err := sandboxStore.ConsumeMigrationNotice(); err != nil {
+		return writeAppError(stderr, "failed to migrate sandbox grants: "+err.Error(), 1)
+	} else if notice != "" {
+		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
+	}
+	sandboxBackend := deps.selectSandboxBackend(sandbox.BackendOptions{})
+	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot:    workspaceRoot,
+		Policy:           applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
+		Store:            sandboxStore,
+		Backend:          sandboxBackend,
+		Scope:            scope,
+		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
+	})
+	executionRunner.SetPreparer(sandboxEngine)
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
-	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot)
+	// The TUI has no --worktree reassignment, so trustRoot == workspaceRoot here.
+	// Gate the project MCP layer behind the workspace-trust check (fail-closed): an
+	// untrusted workspace must not spawn its ./.zero/config.json stdio MCP servers.
+	// Keep the store-read error so the notice below can distinguish a fail-closed
+	// store error from a clean untrusted verdict.
+	mcpExcludeProject, mcpTrustErrored := resolveTrust(workspaceRoot)
+	mcpSkip := trustSkip{
+		excludedProjectConfig: mcpExcludeProject && projectMCPConfigExists(workspaceRoot),
+		trustCheckErrored:     mcpTrustErrored,
+	}
+	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot, mcpExcludeProject)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
@@ -672,29 +839,42 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		mcpTokenStore = nil
 		err = nil
 	}
+	criticalMCPConfig, optionalMCPConfig := splitMCPStartupConfig(mcpConfig)
 	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
-	if len(mcpConfig.Servers) > 0 {
-		mcpRuntime, err = deps.registerMCPTools(context.Background(), registry, mcpConfig, mcp.RegisterOptions{
+	if len(criticalMCPConfig.Servers) > 0 {
+		runtime, registerErr := deps.registerMCPTools(context.Background(), registry, criticalMCPConfig, mcp.RegisterOptions{
 			PermissionStore: mcpPermissionStore,
 			Autonomy:        mcp.AutonomyLow,
+			Execution:       executionRunner,
+			WorkspaceRoot:   workspaceRoot,
 		})
-	}
-	if err != nil {
-		closeMCPRuntime(stderr, mcpRuntime)
-		return writeAppError(stderr, err.Error(), 1)
+		if registerErr != nil {
+			closeMCPRuntime(stderr, runtime)
+			return writeAppError(stderr, redaction.ErrorMessage(registerErr, redaction.Options{}), 1)
+		}
+		mcpRuntime = runtime
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
 	// A server that could not be reached or validated is skipped, not fatal (one
 	// bad MCP server must not abort startup) — surface each so a missing tool set is
-	// explained rather than silently absent.
+	// explained rather than silently absent. A built-in default the user never
+	// configured (e.g. keyless Exa with no credentials) is the exception: it
+	// was never asked for, so its failure is not worth a startup warning — only
+	// servers the user actually configured warn on failure (issue #552).
 	for _, skipped := range mcpRuntime.Skipped() {
+		if skipped.UnconfiguredDefault {
+			continue
+		}
 		fmt.Fprintf(stderr, "warning: MCP server %s unavailable, skipped: %s\n", skipped.Name, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
 	}
 	// Make local plugins live: register their declared tools into the registry and
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
 	// deferral count, and it fails OPEN — a malformed plugin is warned and skipped.
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr)
+	// The interactive TUI is not worktree-reassigned, so the trust root is the
+	// launch directory itself.
+	trustRoot := workspaceRoot
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
@@ -709,31 +889,81 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAsk
 	}
+	sessionStore := deps.newSessionStore()
+	peerClass := peermsg.PermissionPrompting
+	if permissionMode == agent.PermissionModeUnsafe {
+		peerClass = peermsg.PermissionBypass
+	}
+	peerService, peerErr := peermsg.New(peermsg.Options{
+		Identity: peermsg.Identity{
+			Cwd:             workspaceRoot,
+			PermissionClass: peerClass,
+		},
+		InboundPolicy: peermsg.InboundPolicy(resolved.CrossSessionInbound),
+	})
+	if peerErr != nil {
+		fmt.Fprintf(stderr, "warning: cross-session messaging unavailable: %s\n", peerErr)
+		peerService = nil
+	} else {
+		for _, tool := range tools.NewPeerSessionTools(peerService) {
+			registry.Register(tool)
+		}
+	}
 	// Activate deferred MCP-tool loading for the interactive run only when the
 	// VISIBLE deferred-eligible count meets the resolved threshold, matching exec.
-	// The registry is complete (core + specialist + MCP + plugins) here, so the
-	// count is accurate; below threshold this is a no-op and the surface is
-	// unchanged. The interactive surface applies no operator tool filters, so
-	// enabled/disabled are nil — matching the AgentOptions below.
+	// This first pass covers every prompt-critical tool. Optional built-in MCP
+	// defaults re-run the same gate after publishing their atomic batch, so a
+	// later catalog generation cannot miss its loader. The interactive surface
+	// applies no operator tool filters, so enabled/disabled are nil — matching the
+	// AgentOptions below.
 	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
-	sandboxStore, err := deps.newSandboxStore()
-	if err != nil {
-		return writeAppError(stderr, "failed to initialize sandbox grants: "+err.Error(), 1)
+	var optionalMCPRuntime *optionalMCPStartup
+	var awaitToolReadiness func(context.Context)
+	if len(optionalMCPConfig.Servers) > 0 {
+		optionalMCPRuntime = startOptionalMCP(
+			context.Background(),
+			registry,
+			optionalMCPConfig,
+			mcp.RegisterOptions{
+				PermissionStore: mcpPermissionStore,
+				Autonomy:        mcp.AutonomyLow,
+				Execution:       executionRunner,
+				WorkspaceRoot:   workspaceRoot,
+			},
+			deps.registerMCPTools,
+			func() {
+				registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
+			},
+		)
+		defer closeMCPRuntime(stderr, optionalMCPRuntime)
+		awaitToolReadiness = func(ctx context.Context) {
+			optionalMCPRuntime.Await(ctx, optionalMCPPromptGrace)
+		}
 	}
-	sandboxBackend := deps.selectSandboxBackend(sandbox.BackendOptions{})
-	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
-		WorkspaceRoot: workspaceRoot,
-		Policy:        applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
-		Store:         sandboxStore,
-		Backend:       sandboxBackend,
-		Scope:         scope,
-	})
 	lastKnownMCPConfig := mcpConfig
+	fileTracker := tools.NewFileTracker()
+	var scratchBaseline scratchFileBaseline
+	sttServerManager := newDictationServerManager(resolved.STT)
+	// Keep STT downloads in the SAME config tree the rest of the TUI uses. Deriving
+	// from userConfigPath (rather than config.UserConfigDir()) matters when the config
+	// root is overridden — e.g. in tests or a custom ZERO config dir — so the two
+	// don't diverge. userConfigPath points at .../zero/config.json, so its dir is the
+	// zero config dir.
+	sttDownloadRoot := ""
+	if userConfigPath != "" {
+		sttDownloadRoot = filepath.Join(filepath.Dir(userConfigPath), "stt")
+	}
+	// Build the hooks dispatcher out of the AgentOptions literal so its trust skip
+	// report can be combined with the plugin activation's, and emit at most one
+	// notice when project hooks/plugins were dropped for an untrusted workspace.
+	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
+	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
+		SavedPet:             resolved.Preferences.Pet,
 		UserConfigPath:       userConfigPath,
 		DoctorUserConfigPath: doctorUserConfigPath,
 		ProjectConfigPath:    projectConfigPath,
@@ -742,17 +972,36 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		ProviderProfile:      resolved.Provider,
 		SavedProviders:       usableSavedProviders(resolved.Providers),
 		FavoriteModels:       resolved.Preferences.FavoriteModels,
+		RecentModels:         resolved.Preferences.RecentModels,
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
+		CompactionModel:      resolved.Preferences.CompactionModel,
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
-		ProbeProviderHealth:  deps.probeProviderHealth,
-		UserAgent:            userAgent(),
-		Registry:             registry,
-		SessionStore:         deps.newSessionStore(),
-		SandboxStore:         sandboxStore,
-		MCPConfig:            mcpConfig,
-		MCPPermissionStore:   mcpPermissionStore,
-		MCPTokenStore:        mcpTokenStore,
+		NewTurnSessionProvider: func(profile config.ProviderProfile, provider zeroruntime.Provider) zeroruntime.TurnSessionProvider {
+			if provider == nil {
+				return nil
+			}
+			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+				return optimized
+			}
+			return providers.DefaultTurnSessions(profile, provider, providers.Options{})
+		},
+		ProbeProviderHealth: deps.probeProviderHealth,
+		UserAgent:           userAgent(),
+		PrepareRunCompletionWarning: func() {
+			scratchBaseline = scratchFileSnapshot(workspaceRoot)
+		},
+		RunCompletionWarning: func() string {
+			return scratchFileWarning(workspaceRoot, scratchBaseline)
+		},
+		Registry:           registry,
+		AwaitToolReadiness: awaitToolReadiness,
+		SessionStore:       sessionStore,
+		PeerService:        peerService,
+		SandboxStore:       sandboxStore,
+		MCPConfig:          mcpConfig,
+		MCPPermissionStore: mcpPermissionStore,
+		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
 			if ctx == nil {
 				ctx = context.Background()
@@ -760,7 +1009,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			var stdout, stderr bytes.Buffer
 			exitCode := runMCPWithContext(ctx, args, &stdout, &stderr, deps)
 			nextConfig := lastKnownMCPConfig
-			if refreshed, err := deps.resolveMCPConfig(workspaceRoot); err == nil {
+			if refreshed, err := deps.resolveMCPConfig(workspaceRoot, mcpExcludeProject); err == nil {
 				lastKnownMCPConfig = refreshed
 				nextConfig = refreshed
 			}
@@ -778,8 +1027,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			PermissionMode: permissionMode,
 			Autonomy:       "low",
 			Sandbox:        sandboxEngine,
-			FileTracker:    tools.NewFileTracker(),
-			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
+			FileTracker:    fileTracker,
+			Hooks:          hookDispatcher,
 			DeferThreshold: resolved.Tools.DeferThreshold,
 			Specialists:    specialistRuntime.specialists,
 			Skills:         pluginActivation.skillInfos(deps.skillsDir()),
@@ -792,9 +1041,15 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			merged, _ := plugins.MergedSkillsLoaded(deps.skillsDir(), pluginActivation.skillRoots)
 			return merged
 		}),
-		PermissionMode: permissionMode,
-		Notify:         resolved.Notify,
-		KeyBindings:    resolved.KeyBindings,
+		PermissionMode:            permissionMode,
+		Notify:                    resolved.Notify,
+		KeyBindings:               resolved.KeyBindings,
+		STT:                       resolved.STT,
+		BuildDictationTranscriber: newDictationTranscriberFactory(resolved, userConfigPath, sttServerManager),
+		ShutdownDictationServer:   sttServerManager.Shutdown,
+		STTDownloadRoot:           sttDownloadRoot,
+		STTKeyStatus:              newSTTKeyStatus(resolved, userConfigPath),
+		SaveSTTKey:                newSaveSTTKey(userConfigPath),
 		Setup: tui.SetupOptions{
 			Visible:    setupVisible,
 			Required:   needsSetup,
@@ -1052,6 +1307,17 @@ func closeSpecialistRuntime(stderr io.Writer, runtime *agentToolRuntime) {
 	}
 }
 
+// stdoutIsTerminal reports whether w is an interactive terminal. Tests pass
+// bytes.Buffer writers and pipes/redirects fail term.IsTerminal, so both take
+// the machine-readable path.
+func stdoutIsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(f.Fd())
+}
+
 func writeAppError(stderr io.Writer, message string, exitCode int) int {
 	if _, err := fmt.Fprintf(stderr, "[zero] %s\n", message); err != nil {
 		return 1
@@ -1071,6 +1337,7 @@ Usage:
 
 Commands:
   exec       Run a one-shot prompt through the Go agent runtime
+  completions Generate shell completion scripts
   daemon     Manage the local background worker daemon (start/stop/status/run/attach)
   setup      Guide first-run provider setup
   config     Inspect resolved Go configuration without leaking secrets
@@ -1092,7 +1359,8 @@ Commands:
   mcp        Manage MCP backend settings
   auth       Log in to model providers via OAuth
   sandbox    Inspect sandbox policy and persistent grants
-  update     Check for Zero CLI updates
+  update     Check or apply Zero CLI updates (requires --check or --apply)
+  upgrade    Download, verify, and install available Zero CLI updates
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
   eval       Validate offline agent eval suites
@@ -1254,7 +1522,14 @@ Flags:
       --spec-model <model>           Override the draft model when --use-spec is set
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
+      --plan                         Read-only planning mode: write and shell tools are hidden
+      --permission-mode <mode>       Set permission mode directly (plan, spec-draft, auto, member,
+                                    ask, unsafe). Outranks --auto; prefer --plan / --auto for
+                                    interactive use. Used by specialist/swarm child processes.
       --max-turns <number>           Override the maximum agent loop turns
+      --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
+                                    posture only (turn budget, effort, self-correction, escalation);
+                                    composes with --mode (which picks the model) and explicit flags win
       --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools
@@ -1284,6 +1559,8 @@ Flags:
       --notify <off|bell|notify|both>
                                     Override notification mode for this run
       --no-notify                   Disable notifications for this run
+      --no-completion-gate          Accept a no-tool-call reply as final without the INCOMPLETE
+                                    downgrade (for conversational callers with an operator present)
 `)
 	return err
 }

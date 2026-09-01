@@ -172,18 +172,6 @@ func (d *streamingDecoder) lineTotal() int {
 	return n
 }
 
-// tailLines returns the last tailCap content lines, including the in-progress one.
-func (d *streamingDecoder) tailLines() []string {
-	out := append([]string(nil), d.tail...)
-	if len(d.cur) > 0 {
-		out = append(out, string(d.cur))
-	}
-	if len(out) > d.tailCap {
-		out = out[len(out)-d.tailCap:]
-	}
-	return out
-}
-
 // jsonStringValueStart finds `"key"` then, tolerating whitespace around the colon,
 // returns the index just past the opening quote of its string value, or -1.
 func jsonStringValueStart(s, key string) int {

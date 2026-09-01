@@ -12,6 +12,54 @@ import (
 	"time"
 )
 
+// Mirror internal/cli/exec.go exit codes so wrapper doctor fallback tests assert
+// the same CLI contract as the Go doctor command.
+const (
+	wrapperExitSuccess = 0
+	wrapperExitUsage   = 2
+	wrapperExitDoctor  = 1
+)
+
+// Canonical Bun recovery copy from bin/zero.js bunRecoveryParagraph() — shared
+// by the generic missing-binary path and the doctor text fallback.
+const (
+	bunRecoveryLead        = "You installed with Bun, which does not run dependency lifecycle scripts"
+	bunPmTrustProject      = "bun pm trust @gitlawb/zero"
+	bunPmTrustGlobal       = "bun pm -g trust @gitlawb/zero"
+	bunRecoveryTrustedDeps = `"trustedDependencies": ["@gitlawb/zero"]`
+	buildFromSourceLead    = "If this platform has no prebuilt binary, build from source:"
+)
+
+func runWrapperFixture(t *testing.T, wrapperPath string, args ...string) (stdout string, stderr string, exitCode int) {
+	return runWrapperFixtureWithEnv(t, wrapperPath, nil, args...)
+}
+
+func runWrapperFixtureWithEnv(t *testing.T, wrapperPath string, extraEnv []string, args ...string) (stdout string, stderr string, exitCode int) {
+	t.Helper()
+	node := requireNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, args...)
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_WRAPPER_SIMULATE_BUN"), extraEnv...)
+	var stdoutBuf, stderrBuf strings.Builder
+	command.Stdout = &stdoutBuf
+	command.Stderr = &stderrBuf
+	err := command.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out: %v; stdout: %s stderr: %s", ctx.Err(), stdoutBuf.String(), stderrBuf.String())
+	}
+	exitCode = wrapperExitSuccess
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("wrapper err = %v, want *exec.ExitError; stdout=%s stderr=%s", err, stdoutBuf.String(), stderrBuf.String())
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	return stdoutBuf.String(), stderrBuf.String(), exitCode
+}
+
 func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	root := repoRoot(t)
 	bytes, err := os.ReadFile(filepath.Join(root, "package.json"))
@@ -41,16 +89,13 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	if pkg.Module != "bin/zero.js" {
 		t.Fatalf("module = %q, want bin/zero.js", pkg.Module)
 	}
-	// Only a postinstall hook (which downloads the prebuilt binary) is allowed.
-	// Repository build scripts (build/prepare/prepack/…) must not ship in the
-	// published package — the tarball has no Go source to build from.
-	if pkg.Scripts["postinstall"] != "node scripts/postinstall.mjs" {
-		t.Fatalf("scripts.postinstall = %q, want node scripts/postinstall.mjs", pkg.Scripts["postinstall"])
-	}
+	// The published package must carry NO lifecycle scripts at all: the native
+	// binary arrives as a platform optionalDependency, with scripts/postinstall.mjs
+	// kept only as a first-run fallback the wrapper invokes itself. Any script
+	// here would resurrect the npm/Bun/pnpm install-script warnings the platform
+	//-package model exists to eliminate (see docs/NPM_PACKAGING.md).
 	for name := range pkg.Scripts {
-		if name != "postinstall" {
-			t.Fatalf("package.json scripts contains %q; only a postinstall hook is allowed (no repository build scripts)", name)
-		}
+		t.Fatalf("package.json scripts contains %q; the published package must have no lifecycle scripts", name)
 	}
 	if pkg.License == "" {
 		t.Fatalf("package.json license is empty; set it (ties to the pending LICENSE file) so npm publish is not unlicensed")
@@ -256,9 +301,359 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	if !ok || exitErr.ExitCode() != 1 {
 		t.Fatalf("wrapper err = %v, want exit 1; output: %s", err, output)
 	}
-	if !strings.Contains(string(output), "No native binary found next to the npm wrapper") {
+	if !strings.Contains(string(output), "No native binary is available for this install") {
 		t.Fatalf("missing-native output = %q", string(output))
 	}
+}
+
+func TestNodeWrapperPrefersPlatformPackageBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+
+	// A stale downloaded binary next to the wrapper must lose to the platform
+	// package: the platform version is pinned to the wrapper release, the
+	// downloaded copy is whatever a previous fallback fetched.
+	if err := os.WriteFile(filepath.Join(root, "zero"), []byte("#!/usr/bin/env sh\nprintf 'downloaded-zero\\n'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile downloaded fixture: %v", err)
+	}
+
+	platformDir := filepath.Join(root, "node_modules", "@gitlawb", "zero-"+nodePlatformName()+"-"+nodeArchName())
+	if err := os.MkdirAll(platformDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll platform package: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(platformDir, "package.json"), []byte(`{"name":"@gitlawb/zero"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile platform package.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(platformDir, "zero"), []byte("#!/usr/bin/env sh\nprintf 'platform-zero'; for arg in \"$@\"; do printf ' %s' \"$arg\"; done; printf '\\n'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile platform binary: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out launching platform binary: %v; output: %s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
+	}
+	if got := strings.TrimSpace(string(output)); got != "platform-zero --version" {
+		t.Fatalf("wrapper output = %q, want platform-zero --version", got)
+	}
+}
+
+func TestNodeWrapperFallsBackToDownloadedBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+	if err := os.WriteFile(filepath.Join(root, "zero"), []byte("#!/usr/bin/env sh\nprintf 'downloaded-zero\\n'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile downloaded fixture: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out launching downloaded binary: %v; output: %s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
+	}
+	if got := strings.TrimSpace(string(output)); got != "downloaded-zero" {
+		t.Fatalf("wrapper output = %q, want downloaded-zero", got)
+	}
+}
+
+func TestNodeWrapperRunsFirstRunDownloaderWhenBinaryMissing(t *testing.T) {
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+
+	// Give the fixture the real downloader so the wrapper's first-run path
+	// executes it; ZERO_SKIP_DOWNLOAD keeps the test offline, so the download
+	// "succeeds" without producing a binary and the wrapper must exit 1 with
+	// guidance.
+	scriptsDir := filepath.Join(root, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll scripts: %v", err)
+	}
+	postinstall, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "postinstall.mjs"))
+	if err != nil {
+		t.Fatalf("ReadFile postinstall: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "postinstall.mjs"), postinstall, 0o644); err != nil {
+		t.Fatalf("WriteFile postinstall fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"type":"module","name":"@gitlawb/zero","version":"0.0.0"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile package fixture: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	command.Env = append(command.Env, "ZERO_SKIP_DOWNLOAD=1")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out on first-run download path: %v; output: %s", ctx.Err(), output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("wrapper err = %v, want exit 1; output: %s", err, output)
+	}
+	text := string(output)
+	if !strings.Contains(text, "fetching the native binary from the GitHub Release") {
+		t.Fatalf("output missing fallback download notice: %q", text)
+	}
+	if !strings.Contains(text, "skipping native binary download") {
+		t.Fatalf("output shows the downloader did not run: %q", text)
+	}
+	if !strings.Contains(text, "No native binary is available for this install") {
+		t.Fatalf("output missing guidance: %q", text)
+	}
+}
+
+func nodePlatformName() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "darwin"
+	case "windows":
+		return "win32"
+	default:
+		return runtime.GOOS
+	}
+}
+
+func nodeArchName() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	default:
+		return runtime.GOARCH
+	}
+}
+
+// Issue #405: `zero doctor` is the diagnostic command, so when the native
+// binary is the thing that's broken it must NOT bail with the generic wrapper
+// error; that's exactly the blind alley the bug report calls out. Instead it
+// emits a doctor-shaped FAIL line for the runtime so the user's own diagnostic
+// surfaces the real cause. We assert on the doctor-report shape (so the doctor
+// UX matches what the Go-side doctor.Format produces) and on exit 1 (a missing
+// binary is still a hard failure, not a pass).
+func TestNodeWrapperDoctorReportsMissingNativeBinaryAsDoctorFail(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor text report must go to stdout only, got stderr=%q", stderr)
+	}
+	// Doctor-shaped report, not the generic wrapper bail. Matches the shape the
+	// Go-side doctor.Format emits: a header, "Overall: <pass/fail>", then
+	// "[<status>] <id> - <message>" lines.
+	if !strings.Contains(stdout, "Zero doctor report (") {
+		t.Fatalf("doctor output should start with a doctor report header, got stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "Overall: fail") {
+		t.Fatalf("doctor overall must be fail when the native binary is missing, got stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "[fail] runtime.go") {
+		t.Fatalf("doctor must report a failing runtime.go check, got stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "Native zero binary is missing next to the npm wrapper") {
+		t.Fatalf("doctor must name the actual cause (missing native binary), got stdout=%q", stdout)
+	}
+	// The actionable remedy must point at the postinstall script that would fix
+	// the install, not just "build from source".
+	if !strings.Contains(stdout, "postinstall.mjs") {
+		t.Fatalf("doctor remedy should name the postinstall script, got stdout=%q", stdout)
+	}
+	// Regression guard for the original blind-alley bug: the doctor path must
+	// NOT emit the generic wrapper bail (that's what sent users debugging the
+	// wrong thing).
+	if strings.Contains(stdout, "[zero] No native binary is available for this install") {
+		t.Fatalf("doctor must not emit the generic wrapper bail, got stdout=%q", stdout)
+	}
+}
+
+func TestNodeWrapperDoctorJSONReportsMissingNativeBinaryAsJSONFail(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor", "--json")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor --json exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor --json should write machine-readable output to stdout only, got stderr=%q", stderr)
+	}
+	var report struct {
+		GeneratedAt string `json:"generatedAt"`
+		OK          bool   `json:"ok"`
+		Checks      []struct {
+			ID      string         `json:"id"`
+			Label   string         `json:"label"`
+			Status  string         `json:"status"`
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("doctor --json stdout should be valid JSON, got %q: %v", stdout, err)
+	}
+	if report.GeneratedAt == "" {
+		t.Fatalf("doctor --json report should include generatedAt: %#v", report)
+	}
+	if report.OK {
+		t.Fatalf("doctor --json ok = true, want false: %#v", report)
+	}
+	if len(report.Checks) != 1 {
+		t.Fatalf("doctor --json checks length = %d, want 1: %#v", len(report.Checks), report.Checks)
+	}
+	check := report.Checks[0]
+	if check.ID != "runtime.go" || check.Label != "Go runtime" || check.Status != "fail" {
+		t.Fatalf("doctor --json runtime check = %#v, want failing runtime.go check", check)
+	}
+	if !strings.Contains(check.Message, "Native zero binary is missing next to the npm wrapper") {
+		t.Fatalf("doctor --json must name the actual cause, got %#v", check)
+	}
+	remedy, _ := check.Details["remedy"].(string)
+	if !strings.Contains(remedy, "postinstall.mjs") {
+		t.Fatalf("doctor --json remedy should name the postinstall script, got %#v", check.Details)
+	}
+}
+
+func TestNodeWrapperDoctorHelpShowsUsage(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	for _, args := range [][]string{{"doctor", "--help"}, {"doctor", "help"}, {"doctor", "-h"}} {
+		stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, args...)
+		if exitCode != wrapperExitSuccess {
+			t.Fatalf("%v exit = %d, want %d; stdout=%s stderr=%s", args, exitCode, wrapperExitSuccess, stdout, stderr)
+		}
+		if strings.TrimSpace(stderr) != "" {
+			t.Fatalf("%v help must write to stdout only, got stderr=%q", args, stderr)
+		}
+		if !strings.Contains(stdout, "Usage:") || !strings.Contains(stdout, "zero doctor [flags]") {
+			t.Fatalf("%v help output = %q, want doctor usage text", args, stdout)
+		}
+	}
+}
+
+func TestNodeWrapperDoctorRejectsUnknownFlag(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor", "--bogus")
+	if exitCode != wrapperExitUsage {
+		t.Fatalf("doctor --bogus exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitUsage, stdout, stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("invalid doctor flag should not write stdout, got %q", stdout)
+	}
+	if stderr != "[zero] unknown doctor flag \"--bogus\"\n" {
+		t.Fatalf("invalid doctor flag stderr = %q", stderr)
+	}
+}
+
+// `doctor --connectivity` (a valid doctor invocation with a trailing flag) must
+// take the same doctor-shaped path: parseDoctorArgs accepts --connectivity and
+// the missing-binary fallback still reports the runtime failure.
+func TestNodeWrapperDoctorWithFlagsStillReportsDoctorFail(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor", "--connectivity")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor --connectivity exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor --connectivity must write to stdout only, got stderr=%q", stderr)
+	}
+	if !strings.Contains(stdout, "[fail] runtime.go") {
+		t.Fatalf("doctor --connectivity must still emit the failing runtime.go line, got stdout=%q", stdout)
+	}
+	if strings.Contains(stdout, "[zero] No native binary is available for this install") {
+		t.Fatalf("doctor --connectivity must not fall back to the generic bail, got stdout=%q", stdout)
+	}
+}
+
+func TestNodeWrapperGenericReportsBunRecoveryWhenInstalledByBun(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	_, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, []string{"ZERO_WRAPPER_SIMULATE_BUN=1"}, "--version")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("generic missing-binary exit = %d, want %d; stderr=%s", exitCode, wrapperExitDoctor, stderr)
+	}
+	assertBunRecoveryMessage(t, stderr)
+	if !strings.Contains(stderr, buildFromSourceLead) {
+		t.Fatalf("generic bun stderr should include build-from-source guidance, got %q", stderr)
+	}
+}
+
+func TestNodeWrapperDoctorReportsBunRecoveryWhenInstalledByBun(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, []string{"ZERO_WRAPPER_SIMULATE_BUN=1"}, "doctor")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor bun exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor bun report must go to stdout only, got stderr=%q", stderr)
+	}
+	if !strings.Contains(stdout, "[fail] runtime.go") {
+		t.Fatalf("doctor bun report must still fail runtime.go, got stdout=%q", stdout)
+	}
+	assertBunRecoveryMessage(t, stdout)
+	if !strings.Contains(stdout, buildFromSourceLead) {
+		t.Fatalf("doctor bun report should reuse generic build-from-source guidance, got stdout=%q", stdout)
+	}
+	if strings.Contains(stdout, "If reinstall fails") {
+		t.Fatalf("doctor bun report must not use a separate build-from-source string, got stdout=%q", stdout)
+	}
+}
+
+func TestNodeWrapperDoctorAndGenericShareBunRecoveryCopy(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	simulateBun := []string{"ZERO_WRAPPER_SIMULATE_BUN=1"}
+	_, genericStderr, _ := runWrapperFixtureWithEnv(t, wrapperPath, simulateBun, "--version")
+	doctorStdout, _, _ := runWrapperFixtureWithEnv(t, wrapperPath, simulateBun, "doctor")
+	genericBun := extractBunRecoveryBlock(genericStderr)
+	doctorBun := extractBunRecoveryBlock(doctorStdout)
+	if genericBun != doctorBun {
+		t.Fatalf("bun recovery copy drift:\ngeneric=%q\ndoctor=%q", genericBun, doctorBun)
+	}
+}
+
+func assertBunRecoveryMessage(t *testing.T, output string) {
+	t.Helper()
+	if !strings.Contains(output, bunRecoveryLead) {
+		t.Fatalf("output should include bun recovery lead, got %q", output)
+	}
+	if !strings.Contains(output, bunPmTrustProject) {
+		t.Fatalf("output should include project bun pm trust guidance, got %q", output)
+	}
+	if !strings.Contains(output, bunPmTrustGlobal) {
+		t.Fatalf("output should include global bun pm trust guidance, got %q", output)
+	}
+	if !strings.Contains(output, bunRecoveryTrustedDeps) {
+		t.Fatalf("output should include trustedDependencies fallback guidance, got %q", output)
+	}
+	if !strings.Contains(output, "to your project package.json and reinstall.") {
+		t.Fatalf("output should mention package.json reinstall fallback, got %q", output)
+	}
+}
+
+func extractBunRecoveryBlock(output string) string {
+	start := strings.Index(output, bunRecoveryLead)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(output[start:], buildFromSourceLead)
+	if end < 0 {
+		return strings.TrimSpace(output[start:])
+	}
+	return strings.TrimSpace(output[start : start+end])
 }
 
 func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {

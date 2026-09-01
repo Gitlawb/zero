@@ -43,7 +43,7 @@ func TestUpdateTitle(t *testing.T) {
 		t.Fatalf("title not trimmed/stored: %q", updated.Title)
 	}
 	if updated.UpdatedAt != before.UpdatedAt {
-		t.Fatalf("UpdatedAt must not change on retitle: before=%q after=%q", before.UpdatedAt, updated.UpdatedAt)
+		t.Fatalf("UpdatedAt must not change on rename: before=%q after=%q", before.UpdatedAt, updated.UpdatedAt)
 	}
 	if updated.EventCount != before.EventCount {
 		t.Fatalf("EventCount changed: before=%d after=%d", before.EventCount, updated.EventCount)
@@ -67,11 +67,65 @@ func TestUpdateTitle(t *testing.T) {
 
 	// An unchanged title is a no-op (still succeeds).
 	if _, err := store.UpdateTitle(session.SessionID, "Clean Generated Title"); err != nil {
-		t.Fatalf("no-op retitle should succeed: %v", err)
+		t.Fatalf("no-op rename should succeed: %v", err)
 	}
 
 	// An invalid session id is rejected.
 	if _, err := store.UpdateTitle("../escape", "whatever"); err == nil {
 		t.Fatal("expected an invalid session id to be rejected")
+	}
+}
+
+func TestUpdateTitleIfCurrent(t *testing.T) {
+	store := newTitleTestStore(t)
+	session, err := store.Create(CreateInput{Title: "Automatic title"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, applied, err := store.UpdateTitleIfCurrent(session.SessionID, "Automatic title", "Generated title")
+	if err != nil || !applied || updated.Title != "Generated title" {
+		t.Fatalf("matching update = (%#v, %v, %v)", updated, applied, err)
+	}
+
+	if _, err := store.UpdateTitle(session.SessionID, "Manual title"); err != nil {
+		t.Fatalf("manual rename: %v", err)
+	}
+	updated, applied, err = store.UpdateTitleIfCurrent(session.SessionID, "Generated title", "Late generated title")
+	if err != nil {
+		t.Fatalf("stale update: %v", err)
+	}
+	if applied || updated.Title != "Manual title" {
+		t.Fatalf("stale update should preserve manual title: (%#v, %v)", updated, applied)
+	}
+}
+
+func TestUpdateModel(t *testing.T) {
+	store := newTitleTestStore(t)
+	session, err := store.Create(CreateInput{ModelID: "model-a"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"role": "user"}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	before, err := store.Get(session.SessionID)
+	if err != nil || before == nil {
+		t.Fatalf("get before: %v", err)
+	}
+
+	updated, err := store.UpdateModel(session.SessionID, "  model-b  ")
+	if err != nil {
+		t.Fatalf("update model: %v", err)
+	}
+	if updated.ModelID != "model-b" {
+		t.Fatalf("model = %q, want model-b", updated.ModelID)
+	}
+	if updated.UpdatedAt != before.UpdatedAt || updated.EventCount != before.EventCount {
+		t.Fatalf("model update changed activity metadata: before=%+v after=%+v", before, updated)
+	}
+	persisted, err := store.Get(session.SessionID)
+	if err != nil || persisted == nil || persisted.ModelID != "model-b" {
+		t.Fatalf("persisted model: metadata=%+v err=%v", persisted, err)
 	}
 }

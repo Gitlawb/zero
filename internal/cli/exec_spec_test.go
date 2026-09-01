@@ -51,7 +51,7 @@ func TestRunExecUseSpecCreatesDraftSession(t *testing.T) {
 				MaxTurns: 3,
 			}, nil
 		},
-		resolveMCPConfig: func(string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
 			return config.MCPConfig{}, nil
 		},
 		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {

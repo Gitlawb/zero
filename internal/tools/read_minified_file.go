@@ -16,6 +16,10 @@ type readMinifiedFileTool struct {
 	scope         PathScope
 }
 
+func (readMinifiedFileTool) outputCategory(map[string]any) outputCategory {
+	return outputCategoryFile
+}
+
 func NewReadMinifiedFileTool(workspaceRoot string) Tool {
 	return NewScopedReadMinifiedFileTool(workspaceRoot, nil)
 }
@@ -24,16 +28,19 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readMinifiedFileTool{
 		baseTool: baseTool{
 			name:        "read_minified_file",
-			description: "Read a source file in a dense, token-cheap form: comments and redundant whitespace removed, no line numbers. Use it to scan or understand code for far fewer tokens than read_file. For exact text, comments, line numbers, or before editing, use read_file instead.",
+			description: "Read source code in a token-efficient, language-aware form. Use for exploratory understanding of large or unfamiliar source when no exact edit is planned; use read_file directly for likely edit targets. Do not immediately reread the same file exactly unless a new need for exact text or line numbers appears.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"path": {Type: "string", Description: "Path of the file to read in minified form."},
+					"path":   {Type: "string", Description: "Source file path."},
+					"offset": {Type: "integer", Description: "Optional 1-based source line to start from.", Minimum: intPtr(1)},
+					"limit":  {Type: "integer", Description: "Optional maximum number of source lines to minify.", Minimum: intPtr(1)},
 				},
 				Required:             []string{"path"},
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Reads a minified view of file contents without modifying files."),
+			safety:       readOnlySafety("Reads a minified view of file contents without modifying files."),
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -41,11 +48,23 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool readMinifiedFileTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.RunWithOptions(ctx, args, RunOptions{})
+	return tool.run(args, RunOptions{}, true)
 }
 
 func (tool readMinifiedFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(args, options, false)
+}
+
+func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, directBudget bool) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filepath", "filename"}, "", true, false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_minified_file: " + err.Error())
+	}
+	offset, err := intArg(args, "offset", 1, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_minified_file: " + err.Error())
+	}
+	limit, err := intArg(args, "limit", 0, 1, 0)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_minified_file: " + err.Error())
 	}
@@ -65,11 +84,19 @@ func (tool readMinifiedFileTool) RunWithOptions(_ context.Context, args map[stri
 	info, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, content, info)
 
-	result := minify.File(relativePath, content)
-	rawLines := lineCount(string(content))
+	selected := selectSourceLines(content, offset, limit)
+	if selected.pastEnd {
+		return okResult(fmt.Sprintf("File: %s\n(offset %d is past the end of the file, which has %d lines)", relativePath, offset, selected.totalLines))
+	}
+	ranged := offset > 1 || limit > 0
+	result := minify.File(relativePath, selected.content)
+	if ranged {
+		result = minify.ContextualFragment(relativePath, content, selected.content, selected.startByte)
+	}
+	rawLines := lineCount(string(selected.content))
 	minLines := lineCount(result.Content)
 	pct := 0
-	if rawBytes := len(content); rawBytes > 0 {
+	if rawBytes := len(selected.content); rawBytes > 0 {
 		if saved := rawBytes - len(result.Content); saved > 0 {
 			pct = saved * 100 / rawBytes
 		}
@@ -79,35 +106,74 @@ func (tool readMinifiedFileTool) RunWithOptions(_ context.Context, args map[stri
 	if result.Applied {
 		header = fmt.Sprintf("File: %s — minified %s view (comments stripped, no line numbers; %d→%d lines, ~%d%% fewer bytes). For exact text/comments or before editing, use read_file.",
 			relativePath, result.Language, rawLines, minLines, pct)
+	} else if ranged {
+		header = fmt.Sprintf("File: %s — safe ranged view (whitespace normalized, no line numbers; %d→%d lines; context-sensitive stripping disabled because the range may begin inside a multiline construct). For exact text, use read_file.",
+			relativePath, rawLines, minLines)
 	} else {
 		header = fmt.Sprintf("File: %s — whitespace-normalized view (no line numbers; %d→%d lines; full minification not available for this file type). For exact text, use read_file.",
 			relativePath, rawLines, minLines)
 	}
 
-	rawBytes := len(content)
+	rawBytes := len(selected.content)
 	compactBytes := len(result.Content)
 	savedTokens := 0
 	if savedBytes := rawBytes - compactBytes; savedBytes > 0 {
 		savedTokens = estimatedTokensFromBytes(savedBytes)
 	}
 	output := header + "\n\n" + result.Content
-	budgeted := applyOutputBudget(output, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for a smaller exact range")
-	meta := outputBudgetMeta(budgeted)
+	meta := map[string]string{}
 	meta["path"] = relativePath
 	meta["mode"] = result.Language
 	meta["compacted"] = strconv.FormatBool(result.Applied)
 	meta["raw_bytes"] = strconv.Itoa(rawBytes)
 	meta["compact_bytes"] = strconv.Itoa(compactBytes)
-	meta["emitted_bytes"] = strconv.Itoa(budgeted.EmittedBytes)
+	meta["emitted_bytes"] = strconv.Itoa(len(output))
 	meta["raw_lines"] = strconv.Itoa(rawLines)
 	meta["emitted_lines"] = strconv.Itoa(minLines)
 	meta["estimated_tokens_saved"] = strconv.Itoa(savedTokens)
-	if budgeted.Truncated {
-		meta["truncated"] = "true"
-		meta["truncation_reason"] = "byte_budget"
+	toolResult := Result{Status: StatusOK, Output: output, Meta: meta}
+	if directBudget {
+		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use offset/limit to request a smaller source range, or read_file when exact text is required")
 	}
+	return toolResult
+}
 
-	return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
+type sourceSelection struct {
+	content    []byte
+	startByte  int
+	totalLines int
+	pastEnd    bool
+}
+
+func selectSourceLines(content []byte, offset, limit int) sourceSelection {
+	if offset <= 1 && limit == 0 {
+		return sourceSelection{content: content, totalLines: sourceLineCount(content)}
+	}
+	lines := strings.Split(string(content), "\n")
+	totalLines := sourceLineCount(content)
+	start := offset - 1
+	if start >= totalLines {
+		return sourceSelection{startByte: len(content), totalLines: totalLines, pastEnd: true}
+	}
+	startByte := 0
+	for index := 0; index < start; index++ {
+		startByte += len(lines[index]) + 1
+	}
+	end := totalLines
+	if limit > 0 && limit < end-start {
+		end = start + limit
+	}
+	return sourceSelection{
+		content:    []byte(strings.Join(lines[start:end], "\n")),
+		startByte:  startByte,
+		totalLines: totalLines,
+	}
+}
+
+func sourceLineCount(content []byte) int {
+	// One implementation for reader and writer: the tracker contract lives on
+	// trackedLineTotal, and this must never drift from it.
+	return trackedLineTotal(string(content))
 }
 
 // lineCount reports the number of newline-separated lines in s (an empty string
@@ -117,4 +183,21 @@ func lineCount(s string) int {
 		return 0
 	}
 	return strings.Count(s, "\n") + 1
+}
+
+// trackedLineTotal reports a file's line count the way read_file reports it
+// to the FileTracker (newline-terminated lines, plus an unterminated last
+// line; an empty file is one line). Writers must record this same number:
+// RecordSeenRange resets every observation when the total changes, so a
+// writer that recorded lineCount (one higher for a trailing newline) made the
+// next partial read_file wipe whole-file knowledge and refuse the next edit.
+func trackedLineTotal(s string) int {
+	if s == "" {
+		return 1
+	}
+	total := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		total++
+	}
+	return total
 }

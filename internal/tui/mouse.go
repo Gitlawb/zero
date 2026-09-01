@@ -8,6 +8,70 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// mouseModeEnv forces a mouse mode: "all", "cell", or "off"/"none". It exists
+// because the failure it guards against is invisible from here and total for the
+// user: a terminal we guessed wrong about delivers no mouse events at all, and
+// there is no in-app way to recover. Anything unrecognised is ignored rather
+// than treated as "off", so a typo cannot silently kill the mouse.
+const mouseModeEnv = "ZERO_MOUSE_MODE"
+
+// mouseModeFor picks the mouse reporting mode, preferring the widest support
+// over the nicest behaviour.
+//
+// The trade is asymmetric. AllMotion (1003) buys exactly one thing, hover
+// highlighting, because wheel, click and drag all arrive under CellMotion
+// (1002). But when a terminal does not implement 1003, it does not degrade to
+// 1002: no mouse event arrives at all. The app holds the alternate screen, so
+// the terminal's own scrollback and wheel are gone too, and the user is left
+// with no way to scroll by mouse. A long answer then looks like a hang rather
+// than like a missing highlight, which is how #870 was reported.
+//
+// So AllMotion is asked for only where it is known to work.
+func mouseModeFor(goos string, env func(string) string, underPRoot bool) tea.MouseMode {
+	switch strings.ToLower(strings.TrimSpace(env(mouseModeEnv))) {
+	case "all":
+		return tea.MouseModeAllMotion
+	case "cell":
+		return tea.MouseModeCellMotion
+	case "off", "none":
+		return tea.MouseModeNone
+	}
+	if underPRoot {
+		return tea.MouseModeCellMotion
+	}
+	if goos == "windows" && !windowsTerminalReportsAllMotion(env) {
+		return tea.MouseModeCellMotion
+	}
+	return tea.MouseModeAllMotion
+}
+
+// windowsTerminalReportsAllMotion reports whether the Windows terminal in use is
+// one that handles 1003.
+//
+// Identified terminals are trusted: Windows Terminal sets WT_SESSION, and hosts
+// like VS Code and mintty set TERM_PROGRAM. The legacy console host sets
+// neither, and it is what a user gets by double-clicking zero.exe or running it
+// from an old cmd window, so an unidentified Windows terminal is assumed to be
+// that one. Guessing wrong in this direction costs a hover highlight; guessing
+// wrong in the other direction costs every mouse event.
+// KNOWN LIMIT: these variables are INHERITED, so they answer for the process
+// that set them rather than for the console host attached right now. A shell
+// launched from Windows Terminal, or from Git Bash, that later runs zero.exe
+// against the legacy console still carries them, and this returns true for a
+// host that may drop every mouse event.
+//
+// Left as is on purpose. Deciding it properly means asking the console host
+// rather than the environment, and erring the other way costs every Windows
+// Terminal user their hover highlighting for a case that needs an unusual
+// launch path to reach. ZERO_MOUSE_MODE=cell is the recourse in the meantime,
+// which is the main reason that override exists.
+// TestInheritedWindowsTerminalEnvStillAsksForAllMotion pins this, so it is a
+// documented limit rather than a surprise.
+func windowsTerminalReportsAllMotion(env func(string) string) bool {
+	return strings.TrimSpace(env("WT_SESSION")) != "" ||
+		strings.TrimSpace(env("TERM_PROGRAM")) != ""
+}
+
 // parseTracerPid returns true when /proc/self/status contains a non-zero
 // TracerPid. This detects any ptrace tracer (PRoot, gdb, strace, dlv, etc.),
 // not PRoot specifically. That's intentional: under any ptrace tracer the
@@ -87,6 +151,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if mouseRightPress(msg) {
 		return m, pasteFromClipboardCmd()
 	}
+	if next, cmd, handled := m.handlePetMouse(msg); handled {
+		return next, cmd
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:
@@ -123,6 +190,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					return m.choosePicker()
 				}
 				m.lastMouseSelection = target
+				if m.picker.kind == pickerPet {
+					return m.schedulePetPreview()
+				}
 				return m, nil
 			}
 		case m.suggestionsActive():
@@ -169,8 +239,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if m.modelPickerIsLoading() {
 				return m, nil
 			}
-			m.pickerMoved(-1)
-			return m, nil
+			return m.pickerMoved(-1)
 		}
 		if m.suggestionsActive() {
 			m.moveSuggestion(-1)
@@ -201,8 +270,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if m.modelPickerIsLoading() {
 				return m, nil
 			}
-			m.pickerMoved(1)
-			return m, nil
+			return m.pickerMoved(1)
 		}
 		if m.suggestionsActive() {
 			m.moveSuggestion(1)
@@ -217,38 +285,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
-}
-
-// sidebarLineAtMouse maps a left-click in the AGENTS sidebar column to the swarm
-// member whose row was clicked, when that member's session is known. Geometry:
-// twoColumnTranscriptView is the full screen (sidebarActive ⇒ alt-screen), and
-// joinColumns lays out [chat(chatColumnWidth)][" │ " 3-cell divider][sidebar],
-// zipping row-by-row — so a sidebar line's screen Y equals its sidebar index and
-// the sidebar starts at screen X = chatColumnWidth + 3. Recomputed on demand
-// (View can't persist a registry on the value-receiver model), like
-// transcriptLineAtMouse.
-func (m model) sidebarLineAtMouse(msg tea.MouseMsg) (sidebarAgentHit, bool) {
-	if !m.sidebarActive() {
-		return sidebarAgentHit{}, false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
-		return sidebarAgentHit{}, false
-	}
-	sidebarW := sidebarWidth(m.width)
-	if sidebarW <= 0 {
-		return sidebarAgentHit{}, false
-	}
-	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
-	x, y := mouseX(msg), mouseY(msg)
-	if x < x0 || x >= x0+sidebarW {
-		return sidebarAgentHit{}, false
-	}
-	for _, hit := range m.sidebarAgentSelectables(sidebarW) {
-		if hit.lineOffset == y && hit.sessionID != "" {
-			return hit, true
-		}
-	}
-	return sidebarAgentHit{}, false
 }
 
 func (m model) repeatMouseSelection(target mouseSelectionTarget) bool {
@@ -463,11 +499,26 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	if !ok {
 		return mouseSelectionTarget{}, false
 	}
+	// The theme picker has a right-hand visual preview on wider terminals. It is
+	// deliberately non-interactive: clicking a color sample must not select a
+	// list item merely because it shares that row's y-coordinate.
+	if m.picker.kind == pickerTheme {
+		overlayWidth := minInt(width, pickerOverlayMaxWidth)
+		if overlayWidth < pickerOverlayMinWidth {
+			overlayWidth = width
+		}
+		listWidth, _, showPreview := themePickerColumnWidths(maxInt(1, overlayWidth-4))
+		// styledBlockFillTitle contributes a left border and one-cell inset.
+		if showPreview && hit.x >= listWidth+2 {
+			return mouseSelectionTarget{}, false
+		}
+	}
 	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
 	selected := clampInt(m.picker.selected, 0, len(m.picker.items)-1)
 	start := selectableListStart(len(m.picker.items), maxVisible, selected)
 	visible := m.picker.items[start : start+maxVisible]
-	line := 2
+	// y=0 titled top border, y=1 search line, y=2 separator; rows begin at y=3.
+	line := 3
 	lastGroup := ""
 	for offset, item := range visible {
 		if item.Group != "" && item.Group != lastGroup {
@@ -480,9 +531,6 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 		if hit.y == line {
 			index := start + offset
 			m.picker.selected = index
-			// Clicking (or hovering onto) a row live-previews it, like arrow keys,
-			// so the theme picker repaints before the confirming second click.
-			m.previewSelectedTheme()
 			return mouseSelectionTarget{Scope: "picker", Kind: int(m.picker.kind), Value: item.Value, Index: index}, true
 		}
 		line++
@@ -565,10 +613,6 @@ func (m model) overlayMouseHit(msg tea.MouseMsg, overlay string, width int) (mou
 		return mouseOverlayHit{}, false
 	}
 	return mouseOverlayHit{x: mouseX(msg) - left, y: mouseY(msg) - rect.y}, true
-}
-
-func (m model) overlayMouseTop(overlayHeight int, width int) int {
-	return m.overlayMouseRect(overlayHeight, width).y
 }
 
 func (m model) overlayMouseRect(overlayHeight int, width int) tuiRect {

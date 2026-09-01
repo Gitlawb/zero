@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
@@ -106,6 +109,65 @@ func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
 	}
 	if strings.Contains(output, "not wired") {
 		t.Fatalf("doctor still returned placeholder connectivity message: %q", output)
+	}
+}
+
+func TestRunDoctorConnectivityUsesOAuthLogin(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: tokenPath})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{
+		AccessToken: "oauth-doctor-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("seed OAuth token: %v", err)
+	}
+
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	profile := config.ProviderProfile{
+		Name:         "xai",
+		CatalogID:    "xai",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/v1",
+		Model:        "grok-4",
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"doctor", "--connectivity"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return t.TempDir(), nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				Provider:       profile,
+				Providers:      []config.ProviderProfile{profile},
+				ActiveProvider: profile.Name,
+			}, nil
+		},
+		probeProviderHealth: providerhealth.Probe,
+		now:                 fixedCLITime("2026-07-29T20:00:00Z"),
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("doctor exit = %d, want success; stderr=%q\n%s", exitCode, stderr.String(), stdout.String())
+	}
+	if gotAuth != "Bearer oauth-doctor-token" {
+		t.Fatalf("Authorization = %q, want OAuth bearer", gotAuth)
+	}
+	if !strings.Contains(stdout.String(), "[pass] provider.connectivity") {
+		t.Fatalf("doctor did not report passing connectivity:\n%s", stdout.String())
 	}
 }
 

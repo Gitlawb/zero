@@ -3,11 +3,14 @@ package tui
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
+	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -22,6 +25,13 @@ type providerModelsDiscoveredMsg struct {
 	// secrets are redacted from any surfaced error (e.g. a resolved OAuth token
 	// used to authenticate discovery, which must never be logged or shown).
 	secrets []string
+}
+
+type aimlapiExistingBalanceMsg struct {
+	wizard  *providerWizardState
+	gen     int
+	balance aimlapi.BalanceResult
+	err     error
 }
 
 func (m model) advanceProviderWizard() (model, tea.Cmd) {
@@ -43,6 +53,18 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	// A non-OAuth provider that already has a key in the credential store: offer
 	// keep/replace/remove before re-entering credentials.
 	if m.providerWizard.step == providerWizardStepProvider && !m.providerWizard.oauthMode {
+		if providerWizardIsAimlapi(m.providerWizard.currentProvider()) {
+			if profile, runtimeKey, ok := m.existingAimlapiConfiguration(); ok {
+				m.providerWizard.aimlapiExistingProfile = profile
+				m.providerWizard.aimlapiRuntimeKey = runtimeKey
+				m.providerWizard.aimlapiConfiguredCursor = 0
+				m.providerWizard.err = ""
+				m.providerWizard.step = providerWizardStepAimlapiConfigured
+				return m, nil
+			}
+			m.providerWizard.enterAimlapi()
+			return m, nil
+		}
 		if name, ok := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); ok {
 			// Generic/custom providers (custom-openai-compatible etc.) all share
 			// the same CatalogID — matching on CatalogID would block creating a
@@ -65,6 +87,133 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 		return m, m.providerModelDiscoveryCmd()
 	}
 	return m, nil
+}
+
+// existingAimlapiConfiguration returns a usable persisted credential source and
+// its current runtime key. The active aimlapi profile wins; otherwise the first
+// usable saved profile is used. A bare AIMLAPI_API_KEY is represented as an env
+// profile so choosing it never snapshots the secret into the credential store.
+func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, bool) {
+	descriptor, descriptorErr := providercatalog.Require("aimlapi")
+	profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
+	activeName := strings.TrimSpace(m.providerProfile.Name)
+	if activeName != "" {
+		for index, profile := range profiles {
+			if strings.EqualFold(strings.TrimSpace(profile.Name), activeName) && aimlapiProfile(profile) {
+				profiles[0], profiles[index] = profiles[index], profiles[0]
+				break
+			}
+		}
+	}
+	var store config.APIKeyGetter
+	if strings.TrimSpace(m.userConfigPath) != "" {
+		store, _ = config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath))
+	}
+	for _, persisted := range profiles {
+		if !aimlapiProfile(persisted) {
+			continue
+		}
+		// The guided balance/top-up client talks to AIMLAPI's production account
+		// API. Never send a credential saved for a proxy, staging service, or other
+		// custom inference endpoint to that API. Such profiles remain available to
+		// the normal provider runtime; they are simply ineligible for this preflight.
+		if descriptorErr != nil || (strings.TrimSpace(persisted.BaseURL) != "" && !sameProviderBaseURL(persisted.BaseURL, descriptor.DefaultBaseURL)) {
+			continue
+		}
+		resolved := persisted
+		if strings.TrimSpace(resolved.APIKey) == "" && strings.TrimSpace(resolved.APIKeyEnv) != "" {
+			resolved.APIKey = strings.TrimSpace(os.Getenv(resolved.APIKeyEnv))
+		}
+		resolved = config.ApplyStoredAPIKey(resolved, store)
+		if key := strings.TrimSpace(resolved.APIKey); key != "" {
+			// ResolvedConfig materializes APIKeyEnv into APIKey for runtime use.
+			// Strip that materialized value (and any loaded stored key) from the
+			// persisted copy so finalization retains the reference, not the secret.
+			if strings.TrimSpace(persisted.APIKeyEnv) != "" || persisted.APIKeyStored {
+				persisted.APIKey = ""
+			}
+			return persisted, key, true
+		}
+	}
+	if key := strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY")); key != "" {
+		if descriptorErr == nil {
+			profile := providerWizardProfile(
+				descriptor,
+				descriptor.DefaultModel,
+				"",
+				aimlapi.ResolveEndpoints().InferenceBaseURL,
+				"",
+			)
+			return profile, key, true
+		}
+	}
+	return config.ProviderProfile{}, "", false
+}
+
+func aimlapiProfile(profile config.ProviderProfile) bool {
+	return strings.EqualFold(strings.TrimSpace(profile.CatalogID), "aimlapi") ||
+		strings.EqualFold(strings.TrimSpace(profile.Name), "aimlapi")
+}
+
+func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil || wizard.step != providerWizardStepAimlapiConfigured || wizard.aimlapiExistingBusy {
+		return m, nil
+	}
+	wizard.aimlapiExistingBusy = true
+	wizard.err = ""
+	wizard.aimlapiExistingGen++
+	gen := wizard.aimlapiExistingGen
+	key := wizard.aimlapiRuntimeKey
+	endpoints := aimlapi.ResolveEndpoints()
+	if baseURL := strings.TrimSpace(wizard.aimlapiExistingProfile.BaseURL); baseURL != "" {
+		endpoints.InferenceBaseURL = baseURL
+	} else if descriptor, ok := providercatalog.Get("aimlapi"); ok {
+		// An empty stored BaseURL means the catalog endpoint. Pin it explicitly so
+		// a process-wide inference override cannot redirect this saved key.
+		endpoints.InferenceBaseURL = descriptor.DefaultBaseURL
+	}
+	wizard.baseURL = endpoints.InferenceBaseURL
+	ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+	wizard.aimlapiExistingCancel = cancel
+	cmd := func() tea.Msg {
+		balance, err := aimlapi.NewClient(endpoints, nil).GetBalance(ctx, key)
+		return aimlapiExistingBalanceMsg{wizard: wizard, gen: gen, balance: balance, err: err}
+	}
+	return m, tea.Batch(cmd, m.ensureSpinnerTick())
+}
+
+func (m model) applyExistingAimlapiBalance(msg aimlapiExistingBalanceMsg) (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil || wizard != msg.wizard || wizard.step != providerWizardStepAimlapiConfigured || msg.gen != wizard.aimlapiExistingGen {
+		return m, nil
+	}
+	if wizard.aimlapiExistingCancel != nil {
+		wizard.aimlapiExistingCancel()
+		wizard.aimlapiExistingCancel = nil
+	}
+	wizard.aimlapiExistingBusy = false
+	if msg.err != nil {
+		if aimlapiIsUnauthorized(msg.err) {
+			wizard.err = "The existing AIMLAPI API key is invalid. Choose Configure again."
+		} else {
+			wizard.err = redaction.ErrorMessage(msg.err, redaction.Options{ExtraSecretValues: []string{wizard.aimlapiRuntimeKey}})
+		}
+		return m, nil
+	}
+	wizard.apiKey = wizard.aimlapiRuntimeKey
+	if msg.balance.LowBalance {
+		state := newAimlapiOnboard(browser.OpenURL)
+		state.apiKey = wizard.aimlapiRuntimeKey
+		state.baseURL = wizard.baseURL
+		state.byKey = true
+		state.step = aimlapiStepLowBalance
+		wizard.aimlapi = state
+		wizard.step = providerWizardStepAimlapi
+		return m, nil
+	}
+	wizard.step = providerWizardStepModel
+	return m, m.providerModelDiscoveryCmd()
 }
 
 func (m model) providerModelDiscoveryCmd() tea.Cmd {
@@ -96,6 +245,7 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 	wizard.discoveryToken++
 	token := wizard.discoveryToken
 	providerID := provider.ID
+	baseURL := wizard.baseURL
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 		defer cancel()
@@ -105,7 +255,7 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 				apiKey = resolved
 			}
 		}
-		profile := providerWizardDiscoveryProfile(provider, apiKey)
+		profile := providerWizardDiscoveryProfile(provider, apiKey, baseURL)
 		models, err := discover(ctx, profile)
 		return providerModelsDiscoveredMsg{providerID: providerID, token: token, models: models, err: err, secrets: []string{apiKey, profile.APIKey}}
 	}
@@ -165,8 +315,8 @@ func providerWizardModelsSource(models []providermodeldiscovery.Model) string {
 	return ""
 }
 
-func providerWizardDiscoveryProfile(provider providercatalog.Descriptor, apiKey string) config.ProviderProfile {
-	profile := providerWizardProfile(provider, provider.DefaultModel, apiKey, "", "")
+func providerWizardDiscoveryProfile(provider providercatalog.Descriptor, apiKey string, baseURL string) config.ProviderProfile {
+	profile := providerWizardProfile(provider, provider.DefaultModel, apiKey, baseURL, "")
 	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}

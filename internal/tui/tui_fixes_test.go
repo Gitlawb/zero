@@ -42,19 +42,19 @@ func TestBashEscapeGatedByPermissionMode(t *testing.T) {
 	}
 }
 
-// The "!" escape must use the platform shell (cmd.exe on Windows, /bin/sh
-// elsewhere), not a hardcoded "bash" that is absent on stock Windows.
+// The "!" escape must use the same detected host shell as the agent tools.
 func TestEscapeShellWrapsCommandForPlatform(t *testing.T) {
 	name, args := escapeShell("echo hi")
 	if name == "" {
 		t.Fatal("escapeShell returned an empty executable")
 	}
-	if len(args) == 0 || args[len(args)-1] != "echo hi" {
-		t.Fatalf("escapeShell args = %v, want the command as the final arg", args)
+	if len(args) == 0 || !strings.Contains(args[len(args)-1], "echo hi") {
+		t.Fatalf("escapeShell args = %v, want the command in the final arg", args)
 	}
 	if runtime.GOOS == "windows" {
-		if name != "cmd.exe" || args[0] != "/d" {
-			t.Fatalf("windows shell = %q %v, want cmd.exe /d /s /c", name, args)
+		lowerName := strings.ToLower(filepath.Base(name))
+		if lowerName != "pwsh.exe" && lowerName != "powershell.exe" && lowerName != "cmd.exe" {
+			t.Fatalf("windows shell = %q %v, want PowerShell or cmd.exe fallback", name, args)
 		}
 	} else if name != "/bin/sh" || args[0] != "-c" {
 		t.Fatalf("unix shell = %q %v, want /bin/sh -c", name, args)
@@ -159,4 +159,22 @@ func suggestionNames2(s []commandSuggestion) []string {
 		out = append(out, x.Name)
 	}
 	return out
+}
+
+func TestGitBranchInSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	gitdir := filepath.Join(root, ".git")
+	if err := os.MkdirAll(gitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitdir, "HEAD"), []byte("ref: refs/heads/feature-tui-branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(root, "nested", "sub", "dir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitBranch(subdir); got != "feature-tui-branch" {
+		t.Fatalf("gitBranch in subdirectory = %q, want feature-tui-branch", got)
+	}
 }

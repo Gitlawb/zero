@@ -8,6 +8,7 @@ func TestVisionCapableByName(t *testing.T) {
 		"grok-4.3", "grok-4-fast", "grok-2-vision",
 		"gpt-4o", "gpt-4.1-mini", "gpt-4-turbo", "gpt-5", "o3-mini", "o1",
 		"claude-sonnet-4.5", "claude-3-haiku",
+		"MiniMax-M3",
 		"llava:13b", "qwen2.5-vl-7b", "llama3.2-vision", "pixtral-12b", "moondream",
 	}
 	textOnly := []string{
@@ -38,7 +39,7 @@ func TestSupportsVisionFallbackForUnknownModels(t *testing.T) {
 		t.Error("gpt-4o should be vision (catalog)")
 	}
 	// Unknown-to-catalog but real vision models now pass via the name fallback.
-	for _, m := range []string{"gemini-3-flash-preview", "grok-4.3"} {
+	for _, m := range []string{"gemini-3-flash-preview", "grok-4.3", "MiniMax-M3"} {
 		if !SupportsVision(reg, m) {
 			t.Errorf("%q should be vision via name fallback", m)
 		}

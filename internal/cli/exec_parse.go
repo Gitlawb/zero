@@ -20,6 +20,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":
 			return options, true, nil
+		case arg == "--permission-mode":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.permissionMode = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--permission-mode="):
+			value, err := requiredInlineFlagValue(arg, "--permission-mode")
+			if err != nil {
+				return options, false, err
+			}
+			options.permissionMode = value
 		case arg == "--skip-permissions-unsafe":
 			options.skipPermissionsUnsafe = true
 		case arg == "--list-tools":
@@ -30,6 +43,17 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.selfCorrect = true
 		case arg == "--no-notify":
 			options.noNotify = true
+		case arg == "--no-completion-gate":
+			options.noCompletionGate = true
+		case arg == "--trace":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.tracePath = value
+			index = next
+		case strings.HasPrefix(arg, "--trace="):
+			options.tracePath = strings.TrimSpace(strings.TrimPrefix(arg, "--trace="))
 		case arg == "--notify":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -136,6 +160,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--profile="):
 			options.modelProfile = strings.TrimSpace(strings.TrimPrefix(arg, "--profile="))
+		case arg == "--exec-profile":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.execProfile = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--exec-profile="):
+			value, err := requiredInlineFlagValue(arg, "--exec-profile")
+			if err != nil {
+				return options, false, err
+			}
+			options.execProfile = value
 		case arg == "-r" || arg == "--reasoning-effort":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -147,6 +184,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.reasoningEffort = strings.TrimSpace(strings.TrimPrefix(arg, "--reasoning-effort="))
 		case arg == "--use-spec":
 			options.useSpec = true
+		case arg == "--plan":
+			options.plan = true
 		case arg == "--spec-model":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -402,11 +441,37 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		// rather than pretend it took effect.
 		return options, false, execUsageError{"--self-correct cannot be combined with --use-spec."}
 	}
+	if options.useSpec && options.noCompletionGate {
+		// Same reasoning as --self-correct above: the spec-draft path never consults
+		// the completion gate, so the flag would be silently ignored.
+		return options, false, execUsageError{"--no-completion-gate cannot be combined with --use-spec."}
+	}
 	if !options.useSpec && options.specModel != "" {
 		return options, false, execUsageError{"--spec-model requires --use-spec."}
 	}
 	if !options.useSpec && options.specReasoningEffort != "" {
 		return options, false, execUsageError{"--spec-reasoning-effort requires --use-spec."}
+	}
+	// Plan mode may be entered via --plan or --permission-mode plan. Combination
+	// guards must key off both: otherwise --permission-mode plan bypasses the
+	// worktree/unsafe/use-spec rejects that --plan alone enforces, and worktree
+	// prep mutates the filesystem before the read-only mode is assigned.
+	planMode := options.plan || strings.EqualFold(strings.TrimSpace(options.permissionMode), "plan")
+	if planMode && options.useSpec {
+		return options, false, execUsageError{"Use either --plan or --use-spec, not both."}
+	}
+	if planMode && options.skipPermissionsUnsafe {
+		return options, false, execUsageError{"Use either --plan or --skip-permissions-unsafe, not both."}
+	}
+	if planMode && options.worktree {
+		// Worktree prep (copying/branching the workspace) runs before the plan
+		// permission mode is assigned, so it would happen even under plan mode's
+		// read-only, no-side-effects promise. Reject the combination outright
+		// rather than let a mutation slip in ahead of the mode gate.
+		return options, false, execUsageError{"--plan cannot be combined with --worktree."}
+	}
+	if options.plan && options.permissionMode != "" && strings.ToLower(options.permissionMode) != "plan" {
+		return options, false, execUsageError{"--plan cannot be combined with --permission-mode=" + options.permissionMode + "."}
 	}
 	if options.initSessionID != "" && (options.resume != "" || options.resumeLatest) {
 		return options, false, execUsageError{"Use --init-session-id only when creating or forking a session."}
@@ -461,6 +526,49 @@ func nextFlagValue(args []string, index int, flag string) (string, int, error) {
 	if next == "" || flagValueLooksLikeOption(next) {
 		return "", index, execUsageError{fmt.Sprintf("%s requires a value", flag)}
 	}
+
+	// Validate specific flag values to prevent consuming positional prompt text
+	switch flag {
+	case "--auto":
+		switch strings.ToLower(next) {
+		case "low", "medium", "high", "member":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, or high.", next)}
+		}
+	case "--notify":
+		switch strings.ToLower(next) {
+		case "off", "bell", "notify", "both":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid --notify %q. Expected off, bell, notify, or both.", next)}
+		}
+	case "-o", "--output":
+		switch strings.ToLower(next) {
+		case "text", "json", "stream-json", "debug":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid output format %q. Expected text, json, stream-json, or debug.", next)}
+		}
+	case "-i", "--input":
+		switch strings.ToLower(next) {
+		case "text", "stream-json":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("Invalid input format %q. Expected text or stream-json.", next)}
+		}
+	case "--reasoning-effort", "--spec-reasoning-effort":
+		switch strings.ToLower(next) {
+		case "low", "medium", "high":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected low, medium, or high.", flag, next)}
+		}
+	case "--depth":
+		if _, err := strconv.Atoi(next); err != nil {
+			return "", index, execUsageError{fmt.Sprintf("invalid --depth %q. Expected a non-negative integer.", next)}
+		}
+	case "--max-turns":
+		if _, err := strconv.Atoi(next); err != nil {
+			return "", index, execUsageError{fmt.Sprintf("invalid --max-turns %q. Expected a positive integer.", next)}
+		}
+	}
+
 	return next, index + 1, nil
 }
 

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"image/color"
 	"math"
 	"strconv"
 	"strings"
@@ -123,19 +125,20 @@ func TestAllThemesContrastAndHierarchy(t *testing.T) {
 	}
 }
 
-// resolveThemeMode precedence: explicit flag > ZERO_THEME env > auto.
+// resolveThemeMode precedence: explicit flag > ZERO_THEME env > system.
 func TestResolveThemeModePrecedence(t *testing.T) {
 	cases := []struct {
 		flag, env string
 		want      themeMode
 	}{
-		{"light", "dark", themeLight}, // flag wins
-		{"dark", "light", themeDark},  // flag wins
-		{"", "light", themeLight},     // env
-		{"", "dark", themeDark},       // env
-		{"", "", themeAuto},           // default
-		{"garbage", "also-bad", themeAuto},
-		{"AUTO", "", themeAuto},
+		{"light", "dark", themeSystem}, // retired preference migrates
+		{"dark", "light", themeSystem}, // retired preference migrates
+		{"", "light", themeSystem},     // retired env value migrates
+		{"", "dark", themeSystem},      // retired env value migrates
+		{"dracula", "dune", themeMode("dracula")},
+		{"", "", themeSystem}, // default
+		{"garbage", "also-bad", themeSystem},
+		{"AUTO", "", themeSystem},
 	}
 	for _, c := range cases {
 		if got := resolveThemeMode(c.flag, c.env); got != c.want {
@@ -144,7 +147,19 @@ func TestResolveThemeModePrecedence(t *testing.T) {
 	}
 }
 
-// applyTheme: auto resolves from background; explicit dark/light ignore it.
+func TestLegacyThemeArgumentsRemainAcceptedOutsidePicker(t *testing.T) {
+	for _, value := range []string{"dark", "light"} {
+		if !ValidThemeArg(value) {
+			t.Errorf("ValidThemeArg(%q) = false, want true for migration compatibility", value)
+		}
+		if validThemeMode(value) {
+			t.Errorf("validThemeMode(%q) = true, retired values must stay out of the picker", value)
+		}
+	}
+}
+
+// applyTheme keeps system canvas-native and mirrors named palettes when their
+// intended surface polarity differs from the terminal.
 func TestApplyThemeResolution(t *testing.T) {
 	defer applyTheme(themeDark, true) // restore the global default
 	cases := []struct {
@@ -153,20 +168,49 @@ func TestApplyThemeResolution(t *testing.T) {
 		want    themeMode
 		wantInk string
 	}{
-		{themeAuto, true, themeDark, darkPalette.ink},
-		{themeAuto, false, themeLight, lightPalette.ink},
-		{themeDark, false, themeDark, darkPalette.ink},   // explicit ignores bg
-		{themeLight, true, themeLight, lightPalette.ink}, // explicit ignores bg
+		{themeSystem, true, themeSystem, ""},
+		{themeAuto, false, themeSystem, ""},
+		{themeDark, true, themeDark, darkPalette.ink},
+		{themeDark, false, themeDark, invertPaletteColor(darkPalette.ink)},
+		{themeLight, false, themeLight, lightPalette.ink},
+		{themeLight, true, themeLight, invertPaletteColor(lightPalette.ink)},
 	}
 	for _, c := range cases {
 		got := applyTheme(c.mode, c.darkBg)
 		if got != c.want {
 			t.Errorf("applyTheme(%q, darkBg=%v) = %q, want %q", c.mode, c.darkBg, got, c.want)
 		}
+		if c.wantInk == "" {
+			if _, ok := zeroTheme.bgPanel.(lipgloss.NoColor); !ok {
+				t.Errorf("applyTheme(%q,%v): system mode painted canvas with %T", c.mode, c.darkBg, zeroTheme.bgPanel)
+			}
+			continue
+		}
 		wantR, wantG, wantB, _ := lipgloss.Color(c.wantInk).RGBA()
 		gotR, gotG, gotB, _ := zeroTheme.inkColor.RGBA()
 		if gotR != wantR || gotG != wantG || gotB != wantB {
 			t.Errorf("applyTheme(%q,%v): zeroTheme.inkColor not the %q ink", c.mode, c.darkBg, c.want)
+		}
+	}
+}
+
+func TestInvertedPalettePreservesSemanticHues(t *testing.T) {
+	inverted := invertedPalette(nordPalette)
+	for _, test := range []struct {
+		name     string
+		value    string
+		dominant int
+	}{
+		{"success", inverted.green, 1},
+		{"error", inverted.red, 0},
+	} {
+		r, g, b, _ := lipgloss.Color(test.value).RGBA()
+		channels := []uint32{r, g, b}
+		for index, channel := range channels {
+			if index != test.dominant && channels[test.dominant] <= channel {
+				t.Errorf("inverted %s color %s lost its semantic hue", test.name, test.value)
+				break
+			}
 		}
 	}
 }
@@ -234,22 +278,23 @@ func TestLightPaletteContrastAndHierarchy(t *testing.T) {
 // /theme switches the active theme live and shows state with no arg.
 func TestHandleThemeCommand(t *testing.T) {
 	defer applyTheme(themeDark, true)
-	m := model{themeMode: themeAuto, hasDarkBg: true}
+	m := model{themeMode: themeSystem, hasDarkBg: true}
 
-	m, out := m.handleThemeCommand("light")
-	if m.themeMode != themeLight {
-		t.Fatalf("after /theme light, mode = %q", m.themeMode)
+	m, out := m.handleThemeCommand("dracula")
+	if m.themeMode != themeMode("dracula") {
+		t.Fatalf("after /theme dracula, mode = %q", m.themeMode)
 	}
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, lightPalette.ink) {
-		t.Error("/theme light did not swap the active palette")
+	if got, want := colorHex(t, zeroTheme.inkColor), draculaPalette.ink; got != want {
+		t.Errorf("/theme dracula ink = %s, want %s", got, want)
 	}
-	if !strings.Contains(out, "light") {
-		t.Errorf("output should confirm light: %q", out)
+	if !strings.Contains(out, "dracula") {
+		t.Errorf("output should confirm dracula: %q", out)
 	}
 
-	m, _ = m.handleThemeCommand("dark")
-	if m.themeMode != themeDark {
-		t.Fatalf("after /theme dark, mode = %q", m.themeMode)
+	before := m.themeMode
+	m, removed := m.handleThemeCommand("dark")
+	if m.themeMode != before || !strings.Contains(removed, "Unknown theme") {
+		t.Fatalf("retired dark theme should not be selectable: mode=%q output=%q", m.themeMode, removed)
 	}
 
 	_, state := m.handleThemeCommand("")
@@ -261,8 +306,227 @@ func TestHandleThemeCommand(t *testing.T) {
 	}
 }
 
-func mustR(t *testing.T, hex string) uint32 {
+func TestNewThemePresetsWired(t *testing.T) {
+	neon, ok := lookupTheme("neon")
+	if !ok {
+		t.Fatal("theme 'neon' is not registered")
+	}
+	if !neon.IsDark {
+		t.Error("theme 'neon' should be marked as dark")
+	}
+
+	dune, ok := lookupTheme("dune")
+	if !ok {
+		t.Fatal("theme 'dune' is not registered")
+	}
+	if dune.IsDark {
+		t.Error("theme 'dune' should be marked as light")
+	}
+
+	for _, name := range []string{"neon", "dune"} {
+		if !validThemeMode(name) {
+			t.Errorf("%q should be a valid --theme/ZERO_THEME value", name)
+		}
+	}
+
+	if !contains(themeModes, "neon") || !contains(themeModes, "dune") {
+		t.Errorf("themeModes = %v, want it to include neon and dune (the /theme picker list)", themeModes)
+	}
+}
+
+// The --theme flag and ZERO_THEME both resolve through resolveThemeMode, and
+// applyTheme must actually swap zeroTheme to the resolved preset, adapting only
+// its contrast direction when the terminal has the opposite polarity.
+func TestNewThemePresetsResolveThroughCLIAndEnvPath(t *testing.T) {
+	defer applyTheme(themeDark, true)
+
+	if got := resolveThemeMode("dune", ""); got != themeMode("dune") {
+		t.Fatalf(`resolveThemeMode("dune", "") = %q, want "dune"`, got)
+	}
+	if got := resolveThemeMode("", "neon"); got != themeMode("neon") {
+		t.Fatalf(`resolveThemeMode("", "neon") = %q, want "neon"`, got)
+	}
+
+	applyTheme(themeMode("dune"), true)
+	if got, want := colorHex(t, zeroTheme.inkColor), invertPaletteColor(dunePalette.ink); got != want {
+		t.Errorf("applying dune ink = %s, want %s", got, want)
+	}
+
+	applyTheme(themeMode("neon"), true)
+	if got, want := colorHex(t, zeroTheme.inkColor), neonPalette.ink; got != want {
+		t.Errorf("applying neon ink = %s, want %s", got, want)
+	}
+}
+
+func TestExtendedThemeContrastInvariants(t *testing.T) {
+	// Skip validation for old built-in themes if they have established, non-compliant palettes,
+	// but enforce strict compliance on the newly introduced 'neon' and 'dune' themes.
+	for _, entry := range themeRegistry {
+		if entry.Name != "neon" && entry.Name != "dune" {
+			continue
+		}
+		name, pal := entry.Name, entry.Palette
+
+		// Finding 1: Permission and status/success surfaces
+		if r := wcagRatio(t, pal.amber, pal.permBg); r < 4.5 {
+			t.Errorf("%s: amber on permBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.onAccent, pal.amber); r < 4.5 {
+			t.Errorf("%s: onAccent on amber contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.green, pal.panel); r < 4.5 {
+			t.Errorf("%s: green on panel contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.amber, pal.panel); r < 4.5 {
+			t.Errorf("%s: amber on panel contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.red, pal.panel); r < 4.5 {
+			t.Errorf("%s: red on panel contrast %.2f < 4.5", name, r)
+		}
+
+		// Finding 2: Selected row secondary text
+		if r := wcagRatio(t, pal.faint, pal.selBg); r < 4.5 {
+			t.Errorf("%s: faint on selBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.faintest, pal.selBg); r < 4.5 {
+			t.Errorf("%s: faintest on selBg contrast %.2f < 4.5", name, r)
+		}
+
+		// Finding 3: Diff gutter pairings
+		if r := wcagRatio(t, pal.faintest, pal.addBg); r < 4.5 {
+			t.Errorf("%s: faintest on addBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.faintest, pal.delBg); r < 4.5 {
+			t.Errorf("%s: faintest on delBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.green, pal.addBg); r < 4.5 {
+			t.Errorf("%s: green on addBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.red, pal.delBg); r < 4.5 {
+			t.Errorf("%s: red on delBg contrast %.2f < 4.5", name, r)
+		}
+	}
+}
+
+// hexChannels splits a #rrggbb token into its 8-bit channels.
+func hexChannels(t *testing.T, hexColor string) (int, int, int) {
 	t.Helper()
-	r, _, _, _ := lipgloss.Color(hex).RGBA()
-	return r
+	h := strings.TrimPrefix(hexColor, "#")
+	v, err := strconv.ParseUint(h, 16, 32)
+	if err != nil || len(h) != 6 {
+		t.Fatalf("bad hex %q", hexColor)
+	}
+	return int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff)
+}
+
+// xterm256Hex returns the nearest xterm-256 color (the 6x6x6 cube plus the
+// 24-step grayscale ramp, by squared RGB distance): how a terminal without
+// truecolor support downsamples the palette's hex tokens before rendering.
+func xterm256Hex(t *testing.T, hexColor string) string {
+	t.Helper()
+	r, g, b := hexChannels(t, hexColor)
+	levels := []int{0, 95, 135, 175, 215, 255}
+	bestR, bestG, bestB := 0, 0, 0
+	bestDistance := math.MaxFloat64
+	try := func(cr, cg, cb int) {
+		d := float64((r-cr)*(r-cr) + (g-cg)*(g-cg) + (b-cb)*(b-cb))
+		if d < bestDistance {
+			bestDistance, bestR, bestG, bestB = d, cr, cg, cb
+		}
+	}
+	for _, cr := range levels {
+		for _, cg := range levels {
+			for _, cb := range levels {
+				try(cr, cg, cb)
+			}
+		}
+	}
+	for i := 0; i < 24; i++ {
+		gray := 8 + 10*i
+		try(gray, gray, gray)
+	}
+	return fmt.Sprintf("#%02x%02x%02x", bestR, bestG, bestB)
+}
+
+// Hex-level AA does not guarantee the rendered pairs hold on a 256-color
+// terminal, which quantizes every token to its nearest xterm entry first.
+// Guard the pairs that regressed: Dune's selected-row affordances (accent
+// caret/favorite star and blue local-model dot over selBg via onSel) and
+// Neon's diff bands, whose previous values all quantized to the same grays.
+func TestExtendedThemeANSI256Contrast(t *testing.T) {
+	palettes := map[string]palette{}
+	for _, entry := range themeRegistry {
+		palettes[entry.Name] = entry.Palette
+	}
+	q := func(hexColor string) string { return xterm256Hex(t, hexColor) }
+
+	dune := palettes["dune"]
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"accent on selBg", dune.accent, dune.selBg},
+		{"blue on selBg", dune.blue, dune.selBg},
+		{"faintest on selBg", dune.faintest, dune.selBg},
+		{"ink on selBg", dune.ink, dune.selBg},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("dune: %s = %.2f < 4.5 after xterm-256 quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+
+	neon := palettes["neon"]
+	greenish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return g > r && g > b
+	}
+	reddish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return r > g && r > b
+	}
+	if q(neon.addBg) == q(neon.delBg) || !greenish(q(neon.addBg)) || !reddish(q(neon.delBg)) {
+		t.Errorf("neon: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
+			neon.addBg, q(neon.addBg), neon.delBg, q(neon.delBg))
+	}
+	if q(neon.addBgWord) == q(neon.delBgWord) || !greenish(q(neon.addBgWord)) || !reddish(q(neon.delBgWord)) {
+		t.Errorf("neon: word-span bands lose their green/red identity after quantization: addBgWord %s -> %s, delBgWord %s -> %s",
+			neon.addBgWord, q(neon.addBgWord), neon.delBgWord, q(neon.delBgWord))
+	}
+	if q(neon.addBgWord) == q(neon.addBg) {
+		t.Errorf("neon: changed span is indistinguishable from its add row after quantization (both %s)", q(neon.addBg))
+	}
+	if q(neon.delBgWord) == q(neon.delBg) {
+		t.Errorf("neon: changed span is indistinguishable from its del row after quantization (both %s)", q(neon.delBg))
+	}
+	if r := wcagRatio(t, q(neon.green), q(neon.addBg)); r < 4.5 {
+		t.Errorf("neon: green on addBg = %.2f < 4.5 after quantization", r)
+	}
+	if r := wcagRatio(t, q(neon.red), q(neon.delBg)); r < 4.5 {
+		t.Errorf("neon: red on delBg = %.2f < 4.5 after quantization", r)
+	}
+	// The two rendered diff-content pairs a 256-color terminal actually
+	// shows: line numbers (faintest on addBg/delBg) and highlighted changed
+	// spans (addInk/delInk on their word bands).
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"faintest on addBg", neon.faintest, neon.addBg},
+		{"faintest on delBg", neon.faintest, neon.delBg},
+		{"addInk on addBgWord", neon.addInk, neon.addBgWord},
+		{"delInk on delBgWord", neon.delInk, neon.delBgWord},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("neon: %s = %.2f < 4.5 after quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+	// Error-card borders are non-text UI components: they need 3:1 against
+	// the panel (WCAG 1.4.11) to be distinguishable at all, in both truecolor
+	// and 256-color renderings.
+	if r := wcagRatio(t, neon.cardErr, neon.panel); r < 3.0 {
+		t.Errorf("neon: cardErr border on panel = %.2f < 3.0", r)
+	}
+	if r := wcagRatio(t, q(neon.cardErr), q(neon.panel)); r < 3.0 {
+		t.Errorf("neon: cardErr border on panel = %.2f < 3.0 after quantization", r)
+	}
+}
+
+func colorHex(t *testing.T, value color.Color) string {
+	t.Helper()
+	r, g, b, _ := value.RGBA()
+	return fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
 }

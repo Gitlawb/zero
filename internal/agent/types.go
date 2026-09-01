@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -24,6 +26,15 @@ const (
 	PermissionModeAsk       PermissionMode = "ask"
 	PermissionModeUnsafe    PermissionMode = "unsafe"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	// PermissionModePlan is an interactive, read-only planning mode. It applies
+	// to the CURRENT session (unlike spec-draft, which drafts in a separate
+	// session): the agent may inspect the workspace and shape the plan with
+	// update_plan/ask_user, but no mutating tool is advertised, so it cannot
+	// write files, run shell, or implement while planning. Entry points:
+	// the TUI's /plan on (exit with /plan off, which restores whatever mode
+	// was active before), `zero exec --plan`, and the ACP session mode
+	// selector ("plan").
+	PermissionModePlan PermissionMode = "plan"
 	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
 	// advertises the in-workspace mutators a member needs to build (write/edit +
 	// shell) on top of the Auto set, while the sandbox engine still gates them at
@@ -60,17 +71,33 @@ const (
 )
 
 type ToolResult struct {
-	ToolCallID   string
-	Name         string
-	Status       tools.Status
-	Output       string
-	Meta         map[string]string
+	ToolCallID string
+	Name       string
+	Status     tools.Status
+	Output     string
+	// Truncated reports that the tool's model-visible output omitted content.
+	// The full result may be recoverable through Meta["spill_path"].
+	Truncated bool
+	Meta      map[string]string
+	// Images the tool produced, delivered to the model as a following user
+	// message rather than on this result. See tools.Result.Images.
+	Images       []zeroruntime.ImageBlock
 	Redacted     bool
 	ChangedFiles []string
-	Display      tools.Display
+	// ChangeSummaries are non-selectable generated-tree summaries emitted by
+	// command execution; callers must not schedule per-file work from them.
+	ChangeSummaries []execution.Change
+	Display         tools.Display
+	Outcome         tools.ToolOutcome
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory
+	// Risk is the sandbox risk classification of this call, stamped for EXECUTED
+	// results so run-policy observers (the execution-profile controller) can see
+	// the risk level of an allowed mutation. It mirrors the classification the
+	// permission path already computes; denied or canceled results keep the zero
+	// value. Pure observation: nothing about permissions or sandboxing changes.
+	Risk sandbox.Risk
 	// LoadedTools carries the deferred-tool names a tool_search call asked the
 	// loop to expose next turn (lifted from Meta["load_tools"]). nil for every
 	// ordinary tool result; only tool_search populates it.
@@ -80,6 +107,24 @@ type ToolResult struct {
 	// for every normal tool result; the Run loop performs the switch when it is
 	// set and Options.ModelSwitcher is wired.
 	RequestedModel string
+}
+
+// ModelOutput returns the bounded provider-facing result while preserving
+// compatibility with synthetic and restored results created before outcomes
+// were finalized.
+func (result ToolResult) ModelOutput() string {
+	if result.Outcome.Finalized() {
+		return result.Outcome.ModelView
+	}
+	return result.Output
+}
+
+// HumanDisplay returns the presentation intended for interactive surfaces.
+func (result ToolResult) HumanDisplay() tools.Display {
+	if result.Outcome.Finalized() {
+		return result.Outcome.HumanView
+	}
+	return result.Display
 }
 
 // DenialCategory classifies why a tool call was blocked before it executed.
@@ -93,6 +138,54 @@ const (
 	DenialSandboxBlock     DenialCategory = "sandbox_block"     // blocked by the sandbox
 	DenialHookBlocked      DenialCategory = "hook_blocked"      // vetoed by a beforeTool hook
 )
+
+// ProfilePolicy is the loop-facing slice of a selected execution profile.
+// The surface (exec flag, TUI command) resolves a named profile into this
+// policy; the loop only ever sees the policy, never the catalog.
+type ProfilePolicy struct {
+	// Name labels trace counters and diagnostics (e.g. "fast"). The trace
+	// recorder's profile label is set by the caller at recorder construction.
+	Name string
+	// Escalate, when non-nil, arms one-shot in-run posture escalation.
+	Escalate *PostureEscalation
+}
+
+// PostureEscalation describes a one-shot escalation to stricter knob values,
+// applied mid-run when an armed trigger fires. Targets are the values the
+// selected profile DISPLACED at run start (i.e. "restore the balanced
+// posture"), so escalation can never introduce a value that was not already
+// valid for this run and model. Zero-valued targets leave that knob untouched.
+type PostureEscalation struct {
+	// MaxTurns raises the turn ceiling to this value when greater than the
+	// ceiling in effect. 0 leaves the ceiling untouched.
+	MaxTurns int
+	// ReasoningEffort replaces the run's effort when non-empty.
+	ReasoningEffort string
+	// RestoreDefaultEffort clears the run's effort override (back to the
+	// provider/model default) when true. It exists because the displaced value
+	// of a profile-filled effort is "" — which as a ReasoningEffort target
+	// means "leave untouched" — so restoring the default needs its own signal.
+	// Ignored when ReasoningEffort is non-empty.
+	RestoreDefaultEffort bool
+	// RestoreCompletionGate re-enables RequireCompletionSignal (headless
+	// completion semantics) when true.
+	RestoreCompletionGate bool
+
+	// Triggers. A zero value disables that signal entirely.
+	// OnToolFailureStreak fires when the repeated-failure guard observes a
+	// same-tool retriable-failure streak of at least this length.
+	OnToolFailureStreak int
+	// OnCompletionUncertain fires on the Nth uncertain completion evaluation
+	// (continue nudge or semantic check). Headless only: the completion gate
+	// never runs interactively.
+	OnCompletionUncertain int
+	// OnSelfCorrectFailure fires when a post-edit verification cycle reports a
+	// failing outcome (correcting, reported, or aborted).
+	OnSelfCorrectFailure bool
+	// OnRiskyMutation fires when an EXECUTED tool result carries a sandbox risk
+	// level at or above this threshold. Empty disables the signal.
+	OnRiskyMutation sandbox.RiskLevel
+}
 
 type PermissionRequest struct {
 	ToolCallID         string                     `json:"toolCallId"`
@@ -111,6 +204,22 @@ type PermissionRequest struct {
 	Grant              *sandbox.Grant             `json:"grant,omitempty"`
 	CommandPrefix      []string                   `json:"commandPrefix,omitempty"`
 	AvailableDecisions []PermissionDecisionAction `json:"availableDecisions,omitempty"`
+	// PrefixApprovalEscalates reports that approving a command prefix will also
+	// run the command OUTSIDE the sandbox, not merely stop asking about it.
+	//
+	// It exists because that consequence was real but invisible. Approving a
+	// prefix rewrites the call to sandbox_permissions: require_escalated, which
+	// resolves to a nil engine and genuinely unsandboxed execution, and the
+	// engine's own escalation prompt is then satisfied by the approval just
+	// given for the sandboxed form. So the operator authorized one thing and got
+	// a wider one, having been shown only "allow command prefix for session".
+	//
+	// The escalation itself is deliberate and guarded: proposedCommandPrefix
+	// refuses to offer a prefix while any other segment of the command is not
+	// known-safe, precisely so an unreviewed segment cannot ride out of the
+	// sandbox on it. What was missing was telling the person deciding, so this
+	// surfaces it rather than removing it.
+	PrefixApprovalEscalates bool `json:"prefixApprovalEscalates,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -216,8 +325,12 @@ type Options struct {
 	ProviderName     string
 	Model            string
 	ReasoningEffort  string
+	ServiceTier      string
 	Cwd              string
 	SystemPrompt     string
+	// TransientSystemPrompt adds trusted runtime guidance for this run only.
+	// Empty preserves the ordinary system prompt byte-for-byte.
+	TransientSystemPrompt string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the
@@ -235,10 +348,26 @@ type Options struct {
 	// CompactionPreserveLast is how many trailing messages compaction keeps
 	// verbatim. <= 0 falls back to defaultCompactionPreserveLast.
 	CompactionPreserveLast int
-	Registry               *tools.Registry
-	PermissionMode         PermissionMode
-	Autonomy               string
-	Sandbox                *sandbox.Engine
+	// Summarizer, when set, lazily builds the provider used for compaction
+	// summarization calls — typically a cheap/fast model, since summaries at
+	// main-model prices are the single most expensive recurring event in a
+	// long run. It receives the main model currently in force and may return
+	// (nil, nil) when no dedicated summarizer applies to it (the main model is
+	// already the cheap one). Built on the first paid compaction and again
+	// after a mid-run model switch. Any failure (build or call) falls back to
+	// the run's main provider until the next switch, so a misconfigured
+	// summarizer can never break compaction. nil keeps today's behavior.
+	Summarizer func(ctx context.Context, mainModelID string) (Provider, error)
+	// ContextWindowFor, when set, resolves a model ID to its context window so
+	// the compactor can re-derive its threshold after a mid-run model switch
+	// (escalate_model). Without it a switch keeps compacting against the
+	// original model's window — overflowing a smaller target or over-compacting
+	// a larger one. Return <= 0 when the model is unknown (window unchanged).
+	ContextWindowFor func(modelID string) int
+	Registry         *tools.Registry
+	PermissionMode   PermissionMode
+	Autonomy         string
+	Sandbox          *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Zero since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.
@@ -268,9 +397,11 @@ type Options struct {
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.
 	OnToolProgress func(toolCallID string, event streamjson.Event)
-	// OnContext, when set, is called once per turn with the per-category context
-	// budget of the request about to be sent, so a surface (TUI/CLI) can show
-	// context utilization. Opt-in like the other callbacks; nil is a no-op.
+	// OnContext, when set, is called for each main agent request with its
+	// per-category context budget, including a replacement request after
+	// compaction or a stall retry. Internal summarizer requests are excluded so
+	// surfaces keep showing the active conversation budget. Opt-in like the other
+	// callbacks; nil is a no-op.
 	OnContext func(ContextBreakdown)
 	// ModelSwitcher, when set, lets a tool escalate the run to a stronger model
 	// mid-run: the loop calls it with the requested model id and, on success,
@@ -279,6 +410,37 @@ type Options struct {
 	// request), so every existing caller is unaffected. A returned error is
 	// non-fatal: the run continues on the current model.
 	ModelSwitcher func(ctx context.Context, modelID string) (Provider, error)
+	// TurnSessionProvider, when set, supplies the turn session the run streams
+	// through — the seam an optimized provider session (connection reuse,
+	// prewarm, native compaction) plugs into without touching the loop. nil
+	// keeps the default: the loop wraps the passed provider in a no-op session
+	// whose Stream IS provider.StreamCompletion, so behavior is byte-identical
+	// and every existing caller is unaffected.
+	TurnSessionProvider zeroruntime.TurnSessionProvider
+	// ModelSessionSwitcher, when set, is the target-aware escalation hook: the
+	// loop prefers it over ModelSwitcher, and its TurnSessionProvider keeps an
+	// optimized session (and its capabilities) across a mid-run model switch.
+	// nil falls back to ModelSwitcher, whose bare Provider is wrapped in the
+	// default no-op session — today's behavior, unchanged. Same non-fatal error
+	// contract as ModelSwitcher: a returned error records a note and the run
+	// continues on the current model and session.
+	ModelSessionSwitcher func(ctx context.Context, modelID string) (zeroruntime.TurnSessionProvider, error)
+	// Profile, when set, arms the execution-profile posture controller for this
+	// run (auto-escalation to stricter knob values on failure/uncertainty/risky
+	// mutation signals). nil — the default everywhere today — leaves the loop
+	// byte-identical: no observation, no escalation, no counters. Same opt-in
+	// convention as Trace and SelfCorrect.
+	Profile *ProfilePolicy
+	// Trace, when set, records per-turn timing for the run: the loop stamps
+	// spans (prompt build, generation, tool execution, permission wait,
+	// compaction, provider connect) and counters (model requests, tool calls,
+	// retries, tokens) into it. nil DISABLES tracing entirely — every stamp is
+	// nil-safe and the loop is byte-identical to an untraced run. The caller
+	// owns the recorder: Run stamps into it but does not Finish or emit it.
+	// A fresh Recorder is required per Run — reusing one across runs merges
+	// their spans, counters, and first-event timestamps, and Finish freezes a
+	// recorder so no further stamps take.
+	Trace *trace.Recorder
 	// SelfCorrect, when set, runs a post-edit verify-and-correct cycle after a
 	// mutating tool call: it verifies the changed files (LSP diagnostics + project
 	// tests) and feeds failures back to the model to fix, bounded by an attempt
@@ -301,8 +463,11 @@ type Options struct {
 	// continuation cue ("…Let me check the config:"). The loop then nudges the
 	// model to continue instead, bounded by maxContinueNudges (and still by
 	// MaxTurns and the run deadline); if the model keeps stalling, the run
-	// finalizes as INCOMPLETE (Result.Incomplete) rather than success. Default
-	// false leaves the loop byte-identical, so the interactive TUI is unaffected.
+	// finalizes as INCOMPLETE (Result.Incomplete) rather than success. When the
+	// run's profile also enables SelfCorrect, an otherwise-complete turn gets one
+	// task-grounded semantic check before success; profiles without SelfCorrect
+	// add no model call. Default false leaves the loop byte-identical, so the
+	// interactive TUI is unaffected.
 	RequireCompletionSignal bool
 
 	runPermissions *permissionRunState
@@ -329,13 +494,6 @@ type Result struct {
 	// marked Incomplete (e.g. "pending plan items remain"). Empty when Incomplete
 	// is false. Surfaced in logs / run_end so an abandoned run is debuggable.
 	IncompleteReason string
-}
-
-// Truncated reports whether the final response ended abnormally (cut off at the
-// output token cap or withheld by a content filter) rather than completing
-// naturally. Callers can use it to warn the user that FinalAnswer is incomplete.
-func (result Result) Truncated() bool {
-	return result.FinishReason != ""
 }
 
 // TruncationNotice returns a user-facing warning when the final response was

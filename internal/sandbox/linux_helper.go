@@ -26,6 +26,7 @@ type LinuxSandboxCommandArgsOptions struct {
 	ApplySeccompThenExec bool
 	BlockUnixSockets     bool
 	NoProc               bool
+	PolicyReportPath     string
 	Command              []string
 }
 
@@ -37,6 +38,7 @@ type LinuxSandboxHelperConfig struct {
 	ApplySeccompThenExec bool
 	BlockUnixSockets     bool
 	NoProc               bool
+	PolicyReportPath     string
 	Command              []string
 }
 
@@ -49,6 +51,16 @@ type LinuxSandboxHelperCommand struct {
 type LinuxSandboxBwrapOptions struct {
 	Config     LinuxSandboxHelperConfig
 	HelperPath string
+}
+
+type linuxSandboxBwrapPlan struct {
+	Args                   []string
+	ProtectedCreateTargets []string
+}
+
+type linuxBwrapFilesystemPlan struct {
+	Args                   []string
+	ProtectedCreateTargets []string
 }
 
 var linuxSandboxHelperCommand = findLinuxSandboxHelperCommand
@@ -86,6 +98,9 @@ func BuildLinuxSandboxCommandArgs(options LinuxSandboxCommandArgsOptions) ([]str
 	if options.NoProc {
 		args = append(args, "--no-proc")
 	}
+	if strings.TrimSpace(options.PolicyReportPath) != "" {
+		args = append(args, "--policy-report-path", options.PolicyReportPath)
+	}
 	args = append(args, "--")
 	args = append(args, options.Command...)
 	return args, nil
@@ -103,6 +118,7 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 	flags.BoolVar(&config.ApplySeccompThenExec, "apply-seccomp-then-exec", false, "apply seccomp before exec")
 	flags.BoolVar(&config.BlockUnixSockets, "block-unix-sockets", false, "block AF_UNIX sockets before exec")
 	flags.BoolVar(&config.NoProc, "no-proc", false, "skip proc mount")
+	flags.StringVar(&config.PolicyReportPath, "policy-report-path", "", "structured policy report path")
 	if err := flags.Parse(args); err != nil {
 		return LinuxSandboxHelperConfig{}, err
 	}
@@ -122,6 +138,7 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 		return LinuxSandboxHelperConfig{}, fmt.Errorf("invalid --permission-profile: %w", err)
 	}
 	config.Command = flags.Args()
+	config.PolicyReportPath = strings.TrimSpace(config.PolicyReportPath)
 	if len(config.Command) == 0 {
 		return LinuxSandboxHelperConfig{}, errors.New("missing command after --")
 	}
@@ -129,16 +146,27 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 }
 
 func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, error) {
+	plan, err := buildLinuxSandboxBwrapPlan(options)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Args, nil
+}
+
+func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxBwrapPlan, error) {
 	config := options.Config
 	if config.ApplySeccompThenExec {
-		return nil, errors.New("inner seccomp stage cannot be wrapped by bubblewrap again")
+		return linuxSandboxBwrapPlan{}, errors.New("inner seccomp stage cannot be wrapped by bubblewrap again")
 	}
 	if config.UseLandlock {
-		return nil, errors.New("linux landlock helper mode is not implemented yet")
+		return linuxSandboxBwrapPlan{}, errors.New("linux landlock helper mode is not implemented yet")
+	}
+	if err := validateLinuxBwrapPermissionProfile(config.PermissionProfile); err != nil {
+		return linuxSandboxBwrapPlan{}, err
 	}
 	helperPath := strings.TrimSpace(options.HelperPath)
 	if helperPath == "" {
-		return nil, errors.New("linux sandbox helper path is required")
+		return linuxSandboxBwrapPlan{}, errors.New("linux sandbox helper path is required")
 	}
 	commandCWD := strings.TrimSpace(config.CommandCWD)
 	if commandCWD == "" {
@@ -154,13 +182,14 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 		Command:              config.Command,
 	})
 	if err != nil {
-		return nil, err
+		return linuxSandboxBwrapPlan{}, err
 	}
 	args := []string{
 		"--new-session",
 		"--die-with-parent",
 	}
-	args = append(args, linuxBwrapFilesystemArgs(config.PermissionProfile)...)
+	filesystemPlan := buildLinuxBwrapFilesystemPlan(config.PermissionProfile)
+	args = append(args, filesystemPlan.Args...)
 	if pathExists(helperPath) {
 		args = append(args, "--ro-bind", helperPath, helperPath)
 	}
@@ -185,10 +214,41 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 	}
 	args = append(args, "--", helperPath)
 	args = append(args, innerArgs...)
-	return args, nil
+	return linuxSandboxBwrapPlan{
+		Args:                   args,
+		ProtectedCreateTargets: filesystemPlan.ProtectedCreateTargets,
+	}, nil
+}
+
+func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
+	if files := profile.FileSystem.ProcessTrustedDenyReadFiles; len(files) > 0 {
+		return fmt.Errorf("bubblewrap cannot securely deny credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
+	}
+	// The same limitation, for a token store named by the command's own
+	// environment. A /dev/null bind over the pathname is detached by the store's
+	// next atomic rename, and an absent one is skipped entirely — so plaintext
+	// published during the run stays readable. Refusing the command is the only
+	// honest answer bubblewrap can give; a pathname-policy backend enforces
+	// these without help. The path is not created or mutated to make the mask
+	// work: doing that for a command-supplied value would let a command steer
+	// Zero into creating host directories.
+	if files := profile.FileSystem.CommandDenyReadFinalFiles; len(files) > 0 {
+		return fmt.Errorf("bubblewrap cannot securely deny command-supplied credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
+	}
+	for _, dir := range profile.FileSystem.CommandDenyReadDirs {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("bubblewrap cannot securely deny command-supplied credential directory created after launch: %s; create the directory before running the command, move it outside the command environment, or add its path to sandbox allowRead", dir)
+		}
+	}
+	return nil
 }
 
 func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
+	return buildLinuxBwrapFilesystemPlan(profile).Args
+}
+
+func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesystemPlan {
 	fs := profile.FileSystem
 	if fs.Kind == FileSystemUnrestricted {
 		// Disabled filesystem policy means no write jail: expose the host root
@@ -200,10 +260,11 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 				args = append(args, "--bind", root.Root, root.Root)
 			}
 		}
-		return args
+		return linuxBwrapFilesystemPlan{Args: args}
 	}
 
 	args := []string{}
+	protectedCreateTargets := []string{}
 	if linuxProfileHasFullReadRoot(fs) {
 		args = append(args, "--ro-bind", "/", "/", "--dev", "/dev")
 	} else {
@@ -231,16 +292,41 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 			args = appendReadOnlyLinuxPathArgs(args, subpath)
 		}
 		for _, name := range root.ProtectedMetadataNames {
-			args = appendReadOnlyLinuxPathArgs(args, filepath.Join(root.Root, name))
+			path := filepath.Join(root.Root, name)
+			if pathExists(path) {
+				args = appendReadOnlyLinuxPathArgs(args, path)
+			} else {
+				protectedCreateTargets = append(protectedCreateTargets, path)
+			}
 		}
 	}
 	for _, path := range fs.DenyWrite {
 		args = appendReadOnlyLinuxPathArgs(args, path)
 	}
 	for _, path := range fs.DenyRead {
-		args = appendUnreadableLinuxPathArgs(args, path)
+		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
 	}
-	return args
+	// The profile includes only trusted, process-environment-derived directories
+	// here. Command-controlled credential roots remain deny-if-present and must
+	// never cause host filesystem mutations before sandbox launch.
+	ensureLinuxDenyReadDirs(fs.EnsureDenyReadDirs)
+	for _, path := range fs.DenyReadIfExists {
+		if !pathExists(path) {
+			// A baseline credential path is emitted for every run, so an absent
+			// entry is the common case on a fresh machine — a third-party store
+			// such as ~/.aws that Zero must not create. The read-all profile starts
+			// from a read-only host-root bind where bubblewrap cannot create a
+			// missing mount destination, and masking the nearest existing parent
+			// could hide HOME, /tmp, or the workspace. Path-based backends
+			// (seatbelt) still deny these paths before they exist.
+			continue
+		}
+		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
+	}
+	return linuxBwrapFilesystemPlan{
+		Args:                   args,
+		ProtectedCreateTargets: dedupeStrings(protectedCreateTargets),
+	}
 }
 
 func linuxWriteRootsWithTemp(fs FileSystemPolicy) []WritableRoot {
@@ -311,15 +397,54 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
 }
 
-func appendUnreadableLinuxPathArgs(args []string, path string) []string {
-	path = strings.TrimSpace(path)
+func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
+	path = normalizeProfilePath(path)
 	if path == "" {
 		return args
 	}
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {
 		return append(args, "--ro-bind", "/dev/null", path)
 	}
-	return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
+	nested := nestedCarveoutPaths(path, carveouts)
+	if len(nested) == 0 {
+		return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
+	}
+	// A carveout has to stay reachable, and traversing into a directory needs the
+	// execute bit, so the mask is 111 (--x--x--x) instead of 000: the directory's
+	// contents remain unlistable and unreadable, while an explicitly re-bound
+	// subpath below it can still be resolved. The binds must precede the
+	// --remount-ro, which is what freezes the tmpfs.
+	args = append(args, "--perms", "111", "--tmpfs", path)
+	for _, carveout := range nested {
+		if info, err := os.Lstat(carveout); err == nil && info.IsDir() {
+			args = append(args, "--ro-bind", carveout, carveout)
+		}
+	}
+	return append(args, "--remount-ro", path)
+}
+
+// nestedCarveoutPaths returns the carveouts that sit strictly inside root,
+// shallowest first so a parent bind is created before a nested one.
+func nestedCarveoutPaths(root string, carveouts []string) []string {
+	if len(carveouts) == 0 {
+		return nil
+	}
+	out := credentialCarveoutPaths([]string{root}, carveouts)
+	sort.SliceStable(out, func(i, j int) bool { return pathDepth(out[i]) < pathDepth(out[j]) })
+	return dedupeStrings(out)
+}
+
+// ensureLinuxDenyReadDirs creates trusted Zero-process directories a deny mask
+// needs to exist for. Best effort: a failure leaves the path unmasked and never
+// blocks the command.
+func ensureLinuxDenyReadDirs(dirs []string) {
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || pathExists(dir) {
+			continue
+		}
+		_ = os.MkdirAll(dir, 0o700)
+	}
 }
 
 func shouldUnshareLinuxNetwork(policy NetworkPolicy) bool {

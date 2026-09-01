@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/credstore"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 // ProviderKeyStoreAt opens the encrypted credential store whose file backend lives
@@ -166,6 +167,86 @@ func (profile ProviderProfile) HasConfiguredCredential() bool {
 	return strings.TrimSpace(profile.APIKey) != "" ||
 		profile.APIKeyStored ||
 		strings.TrimSpace(profile.AuthHeaderValue) != ""
+}
+
+// MissingCredentialEnv reports the environment variable this profile is
+// expected to read an API key from, and whether that expectation is
+// currently unmet. It is the single source of truth for "does this saved
+// provider need a credential it doesn't have" — the CLI (`providers check`,
+// `usableSavedProviders`) and TUI (`/providers` status, provider wizard
+// summary) surfaces all delegate here so they never disagree about a
+// profile's status.
+//
+// For the catalog's two "bring your own endpoint" descriptors
+// (custom-openai-compatible, custom-anthropic-compatible), RequiresAuth is
+// just a wizard template default, not a fact about the user's actual
+// endpoint: a custom target may need no auth at all. So for those two only,
+// a credential is expected exclusively when this profile carries its own
+// explicit APIKeyEnv that differs from the catalog's guessed default — a
+// value matching that default is indistinguishable from the wizard's old
+// auto-stamp bug (issue #555) and is treated the same as unset, which also
+// self-heals profiles saved before that bug was fixed.
+func (profile ProviderProfile) MissingCredentialEnv() (string, bool) {
+	if profile.HasConfiguredCredential() {
+		return "", false
+	}
+	if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" {
+		descriptor, err := providercatalog.Require(catalogID)
+		if err != nil {
+			return "", false
+		}
+		defaultEnvVar := firstNonEmptyTrimmed(descriptor.AuthEnvVars...)
+		if descriptor.Custom {
+			envVar := strings.TrimSpace(profile.APIKeyEnv)
+			if envVar == "" || envVar == defaultEnvVar {
+				return "", false
+			}
+			return envVar, true
+		}
+		if !descriptor.RequiresAuth {
+			return "", false
+		}
+		if envVar := strings.TrimSpace(profile.APIKeyEnv); envVar != "" {
+			return envVar, true
+		}
+		return defaultEnvVar, true
+	}
+
+	switch profile.normalizedProviderKind() {
+	case ProviderKindOpenAI, ProviderKindOpenAICompatible:
+		return firstNonEmptyTrimmed(profile.APIKeyEnv, "OPENAI_API_KEY"), true
+	case ProviderKindAnthropic, ProviderKindAnthropicCompat:
+		return firstNonEmptyTrimmed(profile.APIKeyEnv, "ANTHROPIC_API_KEY"), true
+	case ProviderKindGoogle:
+		return firstNonEmptyTrimmed(profile.APIKeyEnv, "GEMINI_API_KEY"), true
+	default:
+		if envVar := strings.TrimSpace(profile.APIKeyEnv); envVar != "" {
+			return envVar, true
+		}
+		return "", false
+	}
+}
+
+// normalizedProviderKind resolves this profile's kind, falling back to the
+// legacy Provider string field (lowercased) when ProviderKind is unset —
+// matching how the resolver (resolver.go) treats the two fields as synonyms.
+func (profile ProviderProfile) normalizedProviderKind() ProviderKind {
+	if kind := strings.TrimSpace(string(profile.ProviderKind)); kind != "" {
+		return ProviderKind(strings.ToLower(kind))
+	}
+	if provider := strings.TrimSpace(profile.Provider); provider != "" {
+		return ProviderKind(strings.ToLower(provider))
+	}
+	return ""
+}
+
+func firstNonEmptyTrimmed(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // OAuthLoginCandidates returns the login names to try, in order, when resolving

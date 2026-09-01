@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 )
@@ -46,6 +48,611 @@ func TestSetupMethodOptionsDropsOAuthWithoutOAuthProviders(t *testing.T) {
 	}
 	if !hasOAuth {
 		t.Fatal("OAuth method must be offered when the setup has an OAuth provider")
+	}
+}
+
+func TestAimlapiCheckoutLinkWrapsWithoutTruncation(t *testing.T) {
+	link := "https://checkout.stripe.com/c/pay/cs_test_abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789#fidkdWxOYHwnPyd1blpxYHZxWjA0"
+	lines := aimlapiLinkLines(link, 32)
+	if len(lines) < 2 {
+		t.Fatalf("expected long checkout link to wrap, got %d line(s): %#v", len(lines), lines)
+	}
+	plain := plainRender(t, strings.Join(lines, "\n"))
+	for index, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "://") {
+			t.Fatalf("line %d still exposes an auto-detectable URL scheme: %q", index, line)
+		}
+	}
+	if strings.Contains(plain, "…") {
+		t.Fatalf("wrapped checkout link should not be truncated:\n%s", plain)
+	}
+	var joined strings.Builder
+	for _, line := range strings.Split(plain, "\n") {
+		joined.WriteString(strings.TrimSpace(line))
+	}
+	if got := joined.String(); got != link {
+		t.Fatalf("wrapped checkout link changed:\ngot  %q\nwant %q", got, link)
+	}
+	for index, line := range strings.Split(plain, "\n") {
+		if got := lipgloss.Width(line); got > 32 {
+			t.Fatalf("line %d width = %d, want <= 32: %q", index, got, line)
+		}
+	}
+}
+
+func TestAimlapiCheckoutLinkReplacesProgressSpinner(t *testing.T) {
+	link := "https://checkout.stripe.com/c/pay/cs_test_abcdefghijklmnopqrstuvwxyz0123456789"
+	state := &aimlapiOnboardState{
+		step:   aimlapiStepProgress,
+		detail: link,
+	}
+	view := plainRender(t, strings.Join(state.viewProgress(40, "spin"), "\n"))
+	assertContains(t, view, "Opening checkout in browser...")
+	assertContains(t, view, "https:")
+	assertContains(t, view, "//checkout.stripe.com")
+	assertNotContains(t, view, "spin")
+}
+
+func TestAimlapiEmailInputRejectsIncompleteDomain(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:  aimlapiStepEmailInput,
+		email: "123@123.",
+	}
+
+	cmd, outcome := state.handleKey(testKey(tea.KeyEnter))
+
+	if cmd != nil {
+		t.Fatal("invalid email should not start an account request")
+	}
+	if outcome != aimlapiContinue || state.busy {
+		t.Fatalf("invalid email returned outcome=%v busy=%v, want continue/false", outcome, state.busy)
+	}
+	if state.errText != aimlapi.MsgEmailInvalid {
+		t.Fatalf("error = %q, want %q", state.errText, aimlapi.MsgEmailInvalid)
+	}
+}
+
+func TestAimlapiEverythingReadyBackReturnsToProviderList(t *testing.T) {
+	m := newModel(context.Background(), Options{Setup: SetupOptions{
+		Visible: true,
+		Providers: []SetupProviderOption{
+			{ID: "openai", Name: "OpenAI"},
+			{ID: "aimlapi", Name: "aimlapi.com"},
+		},
+	}})
+	m.setup.selected = 1
+	m.setup.stage = setupStageAimlapi
+	m.setup.aimlapi = &aimlapiOnboardState{
+		step:         aimlapiStepDone,
+		successLines: []string{aimlapi.MsgEverythingRuns},
+	}
+
+	updated, cmd := m.Update(testKey(tea.KeyLeft))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("back from Everything is ready should not start a command")
+	}
+	if next.setup.stage != setupStageProvider {
+		t.Fatalf("stage = %v, want provider list", next.setup.stage)
+	}
+	if next.setup.aimlapi != nil {
+		t.Fatal("completed AIMLAPI sub-flow should be cleared when returning to providers")
+	}
+	if got := next.setupProvider().ID; got != "aimlapi" {
+		t.Fatalf("selected provider = %q, want aimlapi", got)
+	}
+}
+
+func TestSetupAimlapiCtrlCCancelsInFlightCheckout(t *testing.T) {
+	cancelled := false
+	m := newModel(context.Background(), Options{Setup: SetupOptions{Visible: true}})
+	m.setup.stage = setupStageAimlapi
+	m.setup.aimlapi = &aimlapiOnboardState{
+		step:        aimlapiStepProgress,
+		topupCancel: func() { cancelled = true },
+	}
+
+	_, cmd := m.Update(testKeyCtrl('c'))
+	if !cancelled {
+		t.Fatal("Ctrl+C did not cancel the in-flight AIMLAPI checkout")
+	}
+	if cmd == nil {
+		t.Fatal("Ctrl+C should still quit after cancelling the checkout")
+	}
+}
+
+func TestSetupAimlapiEnvKeyUsesResolvedInferenceEndpoint(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "env-secret")
+	t.Setenv("AIMLAPI_INFERENCE_URL", "https://staging.example.test/v1")
+	m := newModel(context.Background(), Options{Setup: SetupOptions{
+		Visible: true,
+		Providers: []SetupProviderOption{{
+			ID: "aimlapi", Name: "aimlapi.com", EnvVar: "AIMLAPI_API_KEY", RequiresAuth: true,
+		}},
+	}})
+
+	if got := m.setupBaseURL(m.setupProvider()); got != "https://staging.example.test/v1" {
+		t.Fatalf("setup base URL = %q, want resolved override", got)
+	}
+}
+
+func TestAimlapiKeyInputUsesAutomaticVerificationHint(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepKeyInput}
+	view := plainRender(t, strings.Join(state.view(64, ""), "\n"))
+	assertContains(t, view, "Your API key will be hidden and verified automatically.")
+	assertNotContains(t, view, "Pasted keys are hidden")
+}
+
+func TestAimlapiPastedKeyStartsBalanceValidation(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepKeyInput, apiKey: " key_test "}
+
+	cmd, outcome := state.handleKey(testKey(tea.KeyEnter))
+
+	if cmd == nil {
+		t.Fatal("pasted key should start balance validation")
+	}
+	if outcome != aimlapiContinue || !state.busy {
+		t.Fatalf("validation returned outcome=%v busy=%v, want continue/true", outcome, state.busy)
+	}
+}
+
+func TestAimlapiOnboardingErrorsStripBodiesAndRedactActiveSecrets(t *testing.T) {
+	const (
+		apiKey = "sk-super-secret"
+		code   = "654321"
+		bearer = "session-super-secret"
+		body   = "server echoed sk-super-secret 654321 session-super-secret"
+	)
+	newState := func(step aimlapiOnboardStep) *aimlapiOnboardState {
+		return &aimlapiOnboardState{step: step, apiKey: apiKey, code: code, sessionToken: bearer, busy: true}
+	}
+	err := aimlapi.APIError{Message: "onboarding request failed", Status: http.StatusInternalServerError, Body: body}
+	tests := []struct {
+		name  string
+		state *aimlapiOnboardState
+		apply func(*aimlapiOnboardState)
+	}{
+		{name: "key validation", state: newState(aimlapiStepKeyInput), apply: func(s *aimlapiOnboardState) { s.applyKeyValidation(aimlapiOnboardMsg{err: err}) }},
+		{name: "account check", state: newState(aimlapiStepEmailInput), apply: func(s *aimlapiOnboardState) { s.applyCheck(aimlapiOnboardMsg{err: err}) }},
+		{name: "code verification", state: newState(aimlapiStepCodeInput), apply: func(s *aimlapiOnboardState) { s.applyToken(aimlapiOnboardMsg{err: err}) }},
+		{name: "key mint", state: newState(aimlapiStepEmailInput), apply: func(s *aimlapiOnboardState) { s.applyKey(aimlapiOnboardMsg{err: err}) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.apply(test.state)
+			if strings.Contains(test.state.errText, body) || strings.Contains(test.state.errText, apiKey) ||
+				strings.Contains(test.state.errText, code) || strings.Contains(test.state.errText, bearer) {
+				t.Fatalf("credential leaked in error: %q", test.state.errText)
+			}
+			if !strings.Contains(test.state.errText, "HTTP 500") {
+				t.Fatalf("safe status missing from error: %q", test.state.errText)
+			}
+		})
+	}
+}
+
+func TestAimlapiPastedKeyRejectsUnauthorized(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:   aimlapiStepKeyInput,
+		apiKey: "bad-key",
+		busy:   true,
+	}
+
+	_, outcome := state.apply(aimlapiOnboardMsg{
+		state: state,
+		kind:  aimlapiMsgKeyValidation,
+		err:   aimlapi.APIError{Status: http.StatusUnauthorized},
+	})
+
+	if outcome != aimlapiContinue || state.busy {
+		t.Fatalf("invalid key returned outcome=%v busy=%v, want continue/false", outcome, state.busy)
+	}
+	if state.step != aimlapiStepKeyInput || state.apiKey != "" {
+		t.Fatalf("invalid key left step=%v key=%q, want key input with cleared key", state.step, state.apiKey)
+	}
+	if state.errText != aimlapi.MsgAPIKeyInvalid {
+		t.Fatalf("error = %q, want %q", state.errText, aimlapi.MsgAPIKeyInvalid)
+	}
+}
+
+func TestAimlapiVerifyCodeLabelsOnlyBadRequestAsIncorrect(t *testing.T) {
+	tests := []struct {
+		name          string
+		err           error
+		wantIncorrect bool
+	}{
+		{name: "invalid code", err: aimlapi.APIError{Status: http.StatusBadRequest}, wantIncorrect: true},
+		{name: "throttled", err: aimlapi.APIError{Status: http.StatusTooManyRequests}},
+		{name: "server failure", err: aimlapi.APIError{Status: http.StatusInternalServerError}},
+		{name: "network failure", err: errors.New("connection reset")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &aimlapiOnboardState{step: aimlapiStepCodeInput, code: "123456", busy: true}
+			state.applyToken(aimlapiOnboardMsg{err: tt.err})
+			if got := state.errText == aimlapi.MsgCodeIncorrect; got != tt.wantIncorrect {
+				t.Fatalf("incorrect-code label = %v, error text %q", got, state.errText)
+			}
+			if state.step != aimlapiStepCodeInput || state.code != "123456" {
+				t.Fatalf("verification retry lost its screen/code: step=%v code=%q", state.step, state.code)
+			}
+		})
+	}
+}
+
+func TestAimlapiPastedKeyValidationCompletesForValidKey(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:   aimlapiStepKeyInput,
+		apiKey: " key_test ",
+		busy:   true,
+	}
+
+	_, outcome := state.apply(aimlapiOnboardMsg{
+		state: state,
+		kind:  aimlapiMsgKeyValidation,
+	})
+
+	if outcome != aimlapiContinue || state.busy {
+		t.Fatalf("valid key returned outcome=%v busy=%v, want continue/false", outcome, state.busy)
+	}
+	if state.step != aimlapiStepDone || state.apiKey != "key_test" {
+		t.Fatalf("valid key left step=%v key=%q, want done with trimmed key", state.step, state.apiKey)
+	}
+	if len(state.successLines) != 1 || state.successLines[0] != aimlapi.MsgEverythingRuns {
+		t.Fatalf("success lines = %#v", state.successLines)
+	}
+}
+
+func TestAimlapiKeyBalanceLowBalanceOffersTopUp(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:   aimlapiStepProgress,
+		apiKey: "key_minted",
+		busy:   true,
+	}
+
+	_, outcome := state.apply(aimlapiOnboardMsg{
+		state:   state,
+		kind:    aimlapiMsgKeyBalance,
+		balance: aimlapi.BalanceResult{LowBalance: true},
+	})
+
+	if outcome != aimlapiContinue || state.busy {
+		t.Fatalf("low balance returned outcome=%v busy=%v, want continue/false", outcome, state.busy)
+	}
+	if state.step != aimlapiStepLowBalance || state.lowCursor != 0 {
+		t.Fatalf("low balance left step=%v cursor=%d, want low-balance prompt with cursor 0", state.step, state.lowCursor)
+	}
+}
+
+func TestAimlapiTopUpFailureRetainsSessionForRetry(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepProgress, paymentSessionID: "payment-live"}
+	state.applyTopup(aimlapiOnboardMsg{
+		topupOK: true,
+		topup:   aimlapiTopupEvent{session: "pcs_resume", hasSession: true},
+	})
+	state.applyTopup(aimlapiOnboardMsg{
+		topupOK: true,
+		topup:   aimlapiTopupEvent{done: true, err: errors.New("lost response")},
+	})
+	if state.resumeSessionToken != "pcs_resume" {
+		t.Fatalf("resume token = %q, want retained session", state.resumeSessionToken)
+	}
+	if state.paymentSessionID != "payment-live" {
+		t.Fatalf("payment session id = %q, want retained live id", state.paymentSessionID)
+	}
+	if state.step != aimlapiStepAmountInput {
+		t.Fatalf("step = %v, want retryable amount input", state.step)
+	}
+}
+
+func TestAimlapiRejectsUnknownAccountAction(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepProgress, email: "user@example.com", busy: true}
+	cmd, outcome := state.applyCheck(aimlapiOnboardMsg{check: aimlapi.CheckResult{Action: "future-action"}})
+
+	if cmd != nil || outcome != aimlapiContinue {
+		t.Fatalf("unknown action returned cmd=%v outcome=%v", cmd != nil, outcome)
+	}
+	if state.step != aimlapiStepEmailInput || state.newAccount || state.busy {
+		t.Fatalf("unknown action state = step %v new=%v busy=%v", state.step, state.newAccount, state.busy)
+	}
+	if state.errText != aimlapi.MsgAccountActionInvalid {
+		t.Fatalf("error = %q", state.errText)
+	}
+}
+
+func TestAimlapiChangedTopUpIntentDropsRetainedCheckout(t *testing.T) {
+	tests := []struct {
+		name      string
+		amount    int
+		autoTopUp bool
+		wantDrop  bool
+	}{
+		{name: "same intent", amount: 2500, autoTopUp: true, wantDrop: false},
+		{name: "changed amount", amount: 5000, autoTopUp: true, wantDrop: true},
+		{name: "changed auto top-up", amount: 2500, autoTopUp: false, wantDrop: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &aimlapiOnboardState{
+				resumeSessionToken:    "pcs_old",
+				paymentSessionID:      "payment-old",
+				paymentAmountUSDMinor: 2500,
+				paymentAutoTopUp:      true,
+				autoTopUp:             test.autoTopUp,
+			}
+			state.prepareTopUpIntent(test.amount)
+			dropped := state.resumeSessionToken == "" && state.paymentSessionID == ""
+			if dropped != test.wantDrop {
+				t.Fatalf("checkout dropped = %v, want %v", dropped, test.wantDrop)
+			}
+		})
+	}
+}
+
+func TestAimlapiTopUpSuccessShowsChargedCentAmount(t *testing.T) {
+	state := &aimlapiOnboardState{amount: "20.999", paymentAmountUSDMinor: 2100}
+	lines := state.topUpSuccessLines()
+	if got := strings.Join(lines, "\n"); !strings.Contains(got, "$21.00 has been added") || strings.Contains(got, "20.999") {
+		t.Fatalf("success lines do not show normalized charge: %q", got)
+	}
+}
+
+func TestAimlapiTerminalTopUpDropsByKeyIdempotencyID(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:               aimlapiStepProgress,
+		resumeSessionToken: "pcs_old",
+		paymentSessionID:   "payment-old",
+	}
+	state.applyTopup(aimlapiOnboardMsg{
+		topupOK: true,
+		topup: aimlapiTopupEvent{
+			done: true, err: errors.New("checkout expired"), session: "", hasSession: true,
+		},
+	})
+
+	if state.resumeSessionToken != "" || state.paymentSessionID != "" {
+		t.Fatalf("terminal checkout retained session ids: resume=%q payment=%q", state.resumeSessionToken, state.paymentSessionID)
+	}
+	if state.step != aimlapiStepAmountInput {
+		t.Fatalf("step = %v, want retryable amount input", state.step)
+	}
+}
+
+func TestAimlapiOnboardingKeepsSharedTickAlive(t *testing.T) {
+	m := newModel(context.Background(), Options{Setup: SetupOptions{Visible: true}})
+	m.reducedMotion = false
+	m.setup.stage = setupStageAimlapi
+	m.setup.aimlapi = &aimlapiOnboardState{step: aimlapiStepProgress}
+
+	// No agent run is in flight, but the aimlapi onboarding sub-flow must keep the
+	// shared tick loop alive so its spinner-only progress screen keeps re-rendering.
+	updated, cmd := m.Update(m.spinner.Tick())
+	next := updated.(model)
+	if cmd == nil || !next.spinnerTicking {
+		t.Fatal("aimlapi onboarding should keep the shared spinner tick loop alive")
+	}
+}
+
+func TestAimlapiAmountInputIgnoresLeft(t *testing.T) {
+	for _, newAccount := range []bool{false, true} {
+		t.Run(map[bool]string{false: "existing account", true: "new account"}[newAccount], func(t *testing.T) {
+			state := &aimlapiOnboardState{
+				step:       aimlapiStepAmountInput,
+				newAccount: newAccount,
+				errText:    "keep this error",
+			}
+
+			cmd, outcome := state.handleKey(testKey(tea.KeyLeft))
+
+			if cmd != nil {
+				t.Fatal("left on the top-up amount screen should not start a command")
+			}
+			if outcome != aimlapiContinue {
+				t.Fatalf("outcome = %v, want aimlapiContinue", outcome)
+			}
+			if state.step != aimlapiStepAmountInput {
+				t.Fatalf("step = %v, want amount input", state.step)
+			}
+			if state.amountField != 0 || state.errText != "keep this error" {
+				t.Fatalf("left changed amount-screen state: field=%d error=%q", state.amountField, state.errText)
+			}
+		})
+	}
+}
+
+func TestAimlapiAutoTopUpToggleUsesBothArrowKeys(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  rune
+	}{
+		{name: "left", key: tea.KeyLeft},
+		{name: "right", key: tea.KeyRight},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &aimlapiOnboardState{
+				step:        aimlapiStepAmountInput,
+				amountField: 1,
+				autoTopUp:   true,
+			}
+
+			cmd, outcome := state.handleKey(testKey(test.key))
+
+			if cmd != nil || outcome != aimlapiContinue {
+				t.Fatalf("arrow returned cmd=%v outcome=%v, want nil/continue", cmd != nil, outcome)
+			}
+			if state.autoTopUp {
+				t.Fatalf("%s did not toggle auto top-up", test.name)
+			}
+			if state.step != aimlapiStepAmountInput {
+				t.Fatalf("step = %v, want amount input", state.step)
+			}
+		})
+	}
+}
+
+func TestAimlapiAutoTopUpRendersOnOff(t *testing.T) {
+	idle := aimlapiToggleLine("auto top up > ", true, false)
+	view := plainRender(t, idle)
+	assertContains(t, view, "on/off")
+	assertNotContains(t, view, "yes/no")
+	if !strings.Contains(idle, zeroTheme.ink.Render("on")) ||
+		!strings.Contains(idle, zeroTheme.faint.Render("off")) {
+		t.Fatalf("idle toggle should render selected on white and unselected off faint: %q", idle)
+	}
+
+	focused := aimlapiToggleLine("auto top up > ", false, true)
+	if !strings.Contains(focused, zeroTheme.accent.Render("auto top up > ")) ||
+		!strings.Contains(focused, zeroTheme.faint.Render("on")) ||
+		!strings.Contains(focused, zeroTheme.ink.Render("off")) {
+		t.Fatalf("focused toggle should highlight its prompt, selected off, and dim unselected on: %q", focused)
+	}
+}
+
+func TestAimlapiPickPathShowsNewUserFirstAndRoutesSelections(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepPickPath}
+	view := plainRender(t, strings.Join(state.viewPickPath(64), "\n"))
+	newUserIndex := strings.Index(view, aimlapi.MsgPickPathNewUser)
+	haveKeyIndex := strings.Index(view, aimlapi.MsgPickPathHaveKey)
+	if newUserIndex < 0 || haveKeyIndex < 0 || newUserIndex >= haveKeyIndex {
+		t.Fatalf("new-user option should precede have-key option:\n%s", view)
+	}
+	state.pathCursor = 0
+	state.handlePickPathKey(testKey(tea.KeyEnter))
+	if state.step != aimlapiStepEmailInput {
+		t.Fatalf("first option routes to %v, want email input", state.step)
+	}
+	state.step = aimlapiStepPickPath
+	state.pathCursor = 1
+	state.handlePickPathKey(testKey(tea.KeyEnter))
+	if state.step != aimlapiStepKeyInput {
+		t.Fatalf("second option routes to %v, want key input", state.step)
+	}
+}
+
+func TestFirstRunAimlapiEnvSkipsGuidedOnboarding(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "env-runtime-secret")
+	m := newModel(context.Background(), Options{Setup: SetupOptions{
+		Visible: true,
+		Providers: []SetupProviderOption{{
+			ID: "aimlapi", Name: "aimlapi.com", DefaultModel: "anthropic/claude-sonnet-5",
+		}},
+	}})
+	m.setup.stage = setupStageProvider
+	m.setup.selected = 0
+
+	updated, cmd := m.advanceSetup()
+	next := updated.(model)
+	if next.setup.stage != setupStageModel {
+		t.Fatalf("stage = %v, want model selection", next.setup.stage)
+	}
+	if next.setup.aimlapi != nil {
+		t.Fatal("env credential should not create the guided onboarding state")
+	}
+	if cmd == nil {
+		t.Fatal("env credential should start authenticated model discovery")
+	}
+}
+
+func TestAimlapiWizardDoesNotFilterDiscoveredModelsByDefault(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "aimlapi")
+	m.providerWizard.aimlapi = &aimlapiOnboardState{
+		apiKey: "sk-issued",
+		model:  "anthropic/claude-sonnet-5",
+	}
+
+	next, cmd := m.resolveProviderWizardAimlapi(nil, aimlapiDone)
+	if next.providerWizard.step != providerWizardStepModel || cmd == nil {
+		t.Fatalf("AIMLAPI completion should enter model discovery: step=%v cmd=%v", next.providerWizard.step, cmd != nil)
+	}
+	if next.providerWizard.modelSearch != "" {
+		t.Fatalf("model search = %q, want empty so the full discovered list is visible", next.providerWizard.modelSearch)
+	}
+}
+
+func TestAimlapiAmountDollarUsesInkStyle(t *testing.T) {
+	line := aimlapiAmountInputLine("", "25", 40, true)
+	if !strings.Contains(line, zeroTheme.ink.Render("$")) {
+		t.Fatalf("amount dollar is not rendered with ink style: %q", line)
+	}
+	idle := aimlapiAmountInputLine("25", "25", 40, false)
+	if !strings.Contains(idle, zeroTheme.ink.Render("amount > ")) ||
+		strings.Contains(idle, zeroTheme.accent.Render("amount > ")) {
+		t.Fatalf("unfocused amount prompt should be white: %q", idle)
+	}
+}
+
+func TestAimlapiSafetyBackReturnsToProviderList(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  rune
+	}{
+		{name: "left", key: tea.KeyLeft},
+		{name: "escape", key: tea.KeyEsc},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{Setup: SetupOptions{
+				Visible: true,
+				Providers: []SetupProviderOption{
+					{ID: "openai", Name: "OpenAI"},
+					{ID: "aimlapi", Name: "aimlapi.com"},
+				},
+			}})
+			m.setup.selected = 1
+			m.setup.stage = setupStageSafety
+			m.setup.aimlapi = nil // Cleared after the AIMLAPI connect flow completes.
+
+			updated, cmd := m.Update(testKey(test.key))
+			next := updated.(model)
+
+			if cmd != nil {
+				t.Fatal("back from Safety should not start a command")
+			}
+			if next.setup.stage != setupStageProvider {
+				t.Fatalf("stage = %v, want provider list", next.setup.stage)
+			}
+			if got := next.setupProvider().ID; got != "aimlapi" {
+				t.Fatalf("selected provider = %q, want aimlapi", got)
+			}
+		})
+	}
+}
+
+func TestAimlapiModelBackReturnsToProviderList(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  rune
+	}{
+		{name: "left", key: tea.KeyLeft},
+		{name: "escape", key: tea.KeyEsc},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{Setup: SetupOptions{
+				Visible: true,
+				Providers: []SetupProviderOption{
+					{ID: "openai", Name: "OpenAI"},
+					{ID: "aimlapi", Name: "aimlapi.com"},
+				},
+			}})
+			m.setup.selected = 1
+			m.setup.stage = setupStageModel
+			m.setup.aimlapi = nil // Cleared once AIMLAPI has issued the key.
+
+			updated, cmd := m.Update(testKey(test.key))
+			next := updated.(model)
+
+			if cmd != nil {
+				t.Fatal("back from AIMLAPI model selection should not start a command")
+			}
+			if next.setup.stage != setupStageProvider {
+				t.Fatalf("stage = %v, want provider list", next.setup.stage)
+			}
+			if got := next.setupProvider().ID; got != "aimlapi" {
+				t.Fatalf("selected provider = %q, want aimlapi", got)
+			}
+		})
 	}
 }
 

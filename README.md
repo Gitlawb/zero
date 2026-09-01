@@ -6,8 +6,9 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.6+" src="https://img.shields.io/badge/Go-1.26.6+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+  <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
   <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
@@ -49,34 +50,15 @@ npm install -g @gitlawb/zero
 zero
 ```
 
-The npm package installs a small wrapper plus the matching Zero binary for your
-platform from GitHub Releases. It supports Linux, macOS, and Windows on x64 and
-arm64.
-
-### Bun
-
-Bun does not run dependency lifecycle scripts by default, so the `postinstall`
-that fetches the Zero binary is skipped and the first run fails with
-`No native binary found next to the npm wrapper`.
-
-The simplest fix is to trust the package after installing, which runs the
-blocked postinstall. This works for project and global installs:
-
-```bash
-# project install
-bun add @gitlawb/zero
-bun pm trust @gitlawb/zero
-
-# global install
-bun add -g @gitlawb/zero
-bun pm -g trust @gitlawb/zero
-```
-
-Alternatives: allow the postinstall up front by adding
-`"trustedDependencies": ["@gitlawb/zero"]` to your project's package.json
-before `bun add`, or run the installer manually
-(`node node_modules/@gitlawb/zero/scripts/postinstall.mjs`) on Bun versions
-that do not have `bun pm trust`.
+The npm package is a small wrapper whose platform build (Linux and macOS on
+x64/arm64, Windows on x64 — including the browser/terminal control helpers)
+installs as an optional dependency straight from the npm registry — no install
+scripts, no downloads outside npm. Bun, pnpm, and yarn work the same way with
+no trust or approval steps. Installs that skip optional dependencies
+(`--omit=optional`) still work: the wrapper fetches the binary from the
+matching GitHub Release whenever it is missing. Windows on ARM runs the x64
+build under emulation. See [docs/NPM_PACKAGING.md](docs/NPM_PACKAGING.md) for
+how the package is put together.
 
 ### Install scripts
 
@@ -94,7 +76,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### From source
 
-Source builds require Go 1.25+.
+Source builds require Go 1.26.6+.
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -148,13 +130,56 @@ the key in the wizard:
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
+export AIMLAPI_API_KEY=...
 export LONGCAT_API_KEY=...
+export FIREWORKS_API_KEY=...
+export MINIMAX_API_KEY=...
+export MINIMAXI_API_KEY=...
+```
+
+To configure AI/ML API directly, run:
+
+```bash
+zero providers setup aimlapi --set-active
 ```
 
 To configure Meituan LongCat (LongCat-2.0) directly, run:
 
 ```bash
 zero providers setup longcat --set-active
+```
+
+To configure Fireworks AI directly, run:
+
+```bash
+zero providers setup fireworks --set-active
+```
+
+MiniMax presets use the Anthropic-compatible endpoints for the global and China
+regions:
+
+```bash
+zero providers add minimax --set-active
+zero providers add minimaxi-cn --set-active
+```
+
+To use the OpenAI-compatible endpoints instead, add a custom compatible profile
+for the required region:
+
+```bash
+zero providers add custom-openai-compatible \
+  --name minimax-openai \
+  --model MiniMax-M3 \
+  --base-url https://api.minimax.io/v1 \
+  --api-key-env MINIMAX_API_KEY \
+  --set-active
+
+zero providers add custom-openai-compatible \
+  --name minimax-cn-openai \
+  --model MiniMax-M3 \
+  --base-url https://api.minimaxi.com/v1 \
+  --api-key-env MINIMAXI_API_KEY \
+  --set-active
 ```
 
 For local models, run Ollama or LM Studio and then use `zero setup` or
@@ -174,9 +199,11 @@ Useful controls:
 |---|---|
 | `Enter` | send the prompt |
 | `/` | open slash-command suggestions |
+| `Ctrl+X` then letter | common slash commands (e.g. `m` → `/model`; `Ctrl+X` `?` for full list) |
+| `Ctrl+P` / `Ctrl+N` | previous / next item in menus (arrows still work) |
 | `Shift+Tab` | cycle permission mode |
 | `Ctrl+B` | show/hide the sidebar |
-| `Ctrl+C` | cancel or exit |
+| `Ctrl+C` | cancel, exit, or return from a `/btw` conversation |
 
 Common slash commands:
 
@@ -186,6 +213,8 @@ Common slash commands:
 | `/spec`, `/plan` | draft and review a plan before building |
 | `/image` | attach an image for vision-capable models |
 | `/resume`, `/rewind` | continue or roll back local sessions |
+| `/new` | start a fresh session in place (previous session stays on disk) |
+| `/btw [question]` | ask in an isolated fork without adding the side conversation to the main session |
 | `/loop` | repeat a prompt or custom `/command` on an interval (`/loop 5m /babysit-prs`) or self-paced |
 | `/compact`, `/context` | manage context usage |
 | `/permissions`, `/tools` | inspect available tools and policy |
@@ -281,7 +310,8 @@ zero verify           detect and run local verification checks
 zero changes          inspect and commit local git changes
 zero usage            token usage and estimated cost
 zero cron             scheduled agent jobs
-zero update           check for newer releases
+zero update --check   check for newer releases
+zero upgrade          download, verify, and install the latest release
 ```
 
 ## Extending Zero
@@ -322,7 +352,7 @@ manifest.
 | Control | Effect |
 |---|---|
 | `NO_COLOR=<anything>` | disables color output |
-| `ZERO_THEME=<name>` | selects the startup theme (`auto`, `dark`, `light`, or a color theme like `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`, `solarized-light`) |
+| `ZERO_THEME=<name>` | selects the startup theme (`auto`, `dark`, `light`, or a color theme like `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`, `neon`, `solarized-light`, `dune`) |
 | `--theme <name>` | selects the TUI theme from the CLI (same names) |
 | `/theme` | opens the theme picker inside the TUI (live preview; `/theme <name>` switches directly) |
 | `ZERO_NO_FADE=1` | disables streaming fade animation |
@@ -339,7 +369,39 @@ go run ./cmd/zero-release smoke
 go run ./cmd/zero-perf-bench
 ```
 
-Cross-compile examples:
+Experimental: `ZERO_OPENAI_TURN_SESSION=1` enables the optimized OpenAI turn
+session (background connection prewarm + request-prefix telemetry) for headless
+`zero exec` runs against official OpenAI profiles. Off by default; `0`, `false`,
+or `off` disable it. A/B-benchmark it by running the same `zero-perf-bench` suite
+with the variable unset and set.
+
+Native ChatGPT Responses sessions are enabled by default. Set
+`ZERO_CHATGPT_TURN_SESSION=0`, `false`, or `off` to restore stateless HTTP/SSE
+transport.
+
+### Code Quality and Security Checks
+
+Before committing any changes, ensure all Go code quality and security checks pass. The `make` targets below pin each tool to this module's Go version, so they load correctly even when your default `go` toolchain is older — running the plain `go run ...@version` form yourself can select the tool module's own (older) toolchain and fail to load this module instead.
+
+1. **Formatting**: Run `make fmt` (or `go fmt ./...`).
+2. **Vetting**: Run `make vet` (or `go vet ./...`).
+3. **Linting**: Run `make lint-static`.
+4. **Vulnerability Scan**: Run `make vulncheck`.
+
+Use the repository-managed targets rather than globally installed binaries:
+the targets apply the module's required Go toolchain as well as the reviewed,
+pinned tool versions.
+
+The installed binaries land in `$GOBIN` when it is set, otherwise in
+`$GOPATH/bin` (default `~/go/bin`). That directory must be on your `PATH` to
+run them directly. If it isn't, add it:
+
+```bash
+gobin="$(go env GOBIN)"; [ -z "$gobin" ] && gobin="$(go env GOPATH)/bin"
+case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
+```
+
+### Cross-Compile Examples
 
 ```bash
 go run ./cmd/zero-release build --goos linux --goarch amd64
@@ -350,12 +412,33 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 
 - [Install](docs/INSTALL.md)
 - [Update flow](docs/UPDATE.md)
+- [Themes](docs/THEMES.md)
 - [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md)
 - [Specialists](docs/SPECIALISTS.md)
 - [GitHub Action](docs/GITHUB_ACTION.md)
 - [Benchmarks](docs/BENCHMARK.md)
 - [Performance](docs/PERFORMANCE.md)
 - [Agent evals](docs/AGENT_EVALS.md)
+
+## Community
+
+Real-time chat happens on the [Discord server](https://discord.gg/CaQDS6wdFn).
+
+Questions, setup help, ideas, and sharing all live in
+[GitHub Discussions](https://github.com/Gitlawb/zero/discussions):
+
+| Category | Use it for |
+|---|---|
+| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | Setup help, provider/model configuration, "how do I" questions |
+| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | Feature proposals and design discussion before any PR |
+| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | Your skills, plugins, MCP setups, themes, and workflows |
+| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | Releases and project news from the maintainers |
+
+For a good Q&A answer fast, include `zero --version`, your OS and install
+method, the provider/model in use, and `zero doctor` output. See
+[SUPPORT.md](SUPPORT.md). Bugs belong in
+[issues](https://github.com/Gitlawb/zero/issues/new/choose); security reports
+follow [SECURITY.md](SECURITY.md), never a public thread.
 
 ## Contributing
 

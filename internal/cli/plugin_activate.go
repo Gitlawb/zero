@@ -3,9 +3,12 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -13,11 +16,15 @@ import (
 
 // pluginActivation holds what plugin activation contributed to a bootstrap so the
 // later dispatcher + skill wiring can consume it: the plugin hook definitions and
-// the plugin skill search roots. The zero value (no plugins) is inert — the
-// dispatcher gets no extra hooks and the skill tool keeps only the default dir.
+// the plugin skill search roots. The zero value (no plugins) still overlays the
+// multi-root skill tool (primary + ~/.agents/skills) so discovery is identical
+// with or without plugins. The embedded trustSkip reports whether the project
+// plugin layer was dropped for an untrusted workspace, so the caller can fold it
+// into the single combined trust notice.
 type pluginActivation struct {
 	hooks      []hooks.Definition
 	skillRoots []string
+	trustSkip
 }
 
 // activatePlugins loads the workspace's plugins and makes their declared
@@ -27,12 +34,29 @@ type pluginActivation struct {
 //
 // It fails OPEN: any load error (or a malformed plugin) is surfaced as a warning
 // on stderr and otherwise skipped, so a broken plugin can never wedge startup —
-// mirroring how newHookDispatcher and skills.Load tolerate bad input.
-func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDeps, stderr io.Writer) pluginActivation {
-	loaded, err := deps.loadPlugins(plugins.LoadOptions{Cwd: workspaceRoot})
+// mirroring how newHookDispatcher and skills.Load tolerate bad input. That
+// fail-OPEN handling of MALFORMED plugins is separate from the trust gate below.
+//
+// The trust check lives here, inside the chokepoint, so no caller can bypass it:
+// the project plugin root is dropped (ExcludeProject) whenever trustRoot is empty,
+// the trust store cannot be read, or the workspace is not trusted (fail-closed).
+// trustRoot is the original launch directory (resolved before any --worktree
+// reassignment). The returned activation carries the skip report so the caller can
+// emit one combined notice; the notice itself is NOT emitted here.
+func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDeps, stderr io.Writer, trustRoot string, runners ...*execution.Runner) pluginActivation {
+	excludeProject, trustCheckErrored := resolveTrust(trustRoot)
+	skip := trustSkip{
+		excludedProjectConfig: excludeProject && projectPluginsDirExists(workspaceRoot),
+		trustCheckErrored:     trustCheckErrored,
+	}
+
+	loaded, err := deps.loadPlugins(plugins.LoadOptions{Cwd: workspaceRoot, ExcludeProject: excludeProject})
 	if err != nil {
 		writePluginActivationWarning(stderr, "failed to load plugins: "+err.Error())
-		return pluginActivation{}
+		// Still overlay multi-root discovery (primary + agents) so a plugin load
+		// failure cannot hide shared skills.
+		registry.Register(plugins.NewSkillTool(deps.skillsDir(), nil))
+		return pluginActivation{trustSkip: skip}
 	}
 
 	// Load fails OPEN per plugin: a malformed manifest is recorded as a diagnostic
@@ -42,26 +66,38 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 		writePluginActivationWarning(stderr, formatLoadDiagnostic(diagnostic))
 	}
 
-	result := plugins.Activate(registry, loaded.Plugins, plugins.ActivateOptions{Cwd: workspaceRoot})
+	var runner *execution.Runner
+	if len(runners) > 0 {
+		runner = runners[0]
+	}
+	result := plugins.Activate(registry, loaded.Plugins, plugins.ActivateOptions{Cwd: workspaceRoot, Execution: runner})
 	for _, warning := range result.Warnings {
 		writePluginActivationWarning(stderr, warning)
 	}
 
-	// Re-register the skill tool to also resolve plugin-declared skills. The core
-	// skill tool only reads the default skills dir; the plugin-aware replacement
-	// merges the default dir with the plugin skill roots (default dir wins a name
-	// clash), so plugin skills appear in the agent's skill list. With no plugin
-	// skill roots this is byte-equivalent to the default skills surface.
-	if len(result.SkillRoots) > 0 {
-		registry.Register(plugins.NewSkillTool(deps.skillsDir(), result.SkillRoots))
-	}
+	// Always overlay the multi-root skill tool so discovery is identical with or
+	// without plugins: primary DefaultDir + optional ~/.agents/skills + plugin
+	// roots (earlier wins). With empty SkillRoots and no agents dir this is
+	// byte-equivalent to the core single-dir skill surface.
+	registry.Register(plugins.NewSkillTool(deps.skillsDir(), result.SkillRoots))
 
-	return pluginActivation{hooks: result.Hooks, skillRoots: result.SkillRoots}
+	return pluginActivation{hooks: result.Hooks, skillRoots: result.SkillRoots, trustSkip: skip}
+}
+
+// projectPluginsDirExists reports whether a ./.zero/plugins directory is present
+// under workspaceRoot, so the caller only notices about config it actually
+// skipped.
+func projectPluginsDirExists(workspaceRoot string) bool {
+	if workspaceRoot == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(workspaceRoot, ".zero", "plugins"))
+	return err == nil && info.IsDir()
 }
 
 // skillInfos resolves the reusable skills the model can load via the skill tool —
-// the default skills dir merged with any plugin skill roots, the same set the
-// plugin-aware skill tool resolves against — as plain data for the agent's system
+// primary dir + optional ~/.agents/skills + plugin skill roots, the same set the
+// multi-root skill tool resolves against — as plain data for the agent's system
 // prompt. It returns nil when no skills are installed, so a skill-less run leaves
 // the prompt byte-identical.
 func (a pluginActivation) skillInfos(defaultDir string) []agent.SkillInfo {

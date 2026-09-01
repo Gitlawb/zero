@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,6 +193,37 @@ func TestInstallReinstallShowsHashChange(t *testing.T) {
 	}
 }
 
+func TestConcurrentInstallsPreserveEveryLockEntry(t *testing.T) {
+	destDir := t.TempDir()
+	const count = 12
+	sources := make([]string, count)
+	for index := range count {
+		content := fmt.Sprintf("---\nname: concurrent-%02d\ndescription: test\n---\nbody\n", index)
+		sources[index] = writeSourceSkill(t, filepath.Join(t.TempDir(), "src"), content)
+	}
+
+	errs := make(chan error, count)
+	for _, source := range sources {
+		go func() {
+			_, err := Install(context.Background(), InstallOptions{Source: source, Dir: destDir})
+			errs <- err
+		}()
+	}
+	for range count {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent Install: %v", err)
+		}
+	}
+
+	entries, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatalf("ReadLock: %v", err)
+	}
+	if len(entries) != count {
+		t.Fatalf("lockfile has %d entries, want %d: %#v", len(entries), count, entries)
+	}
+}
+
 // TestInstallSameLocalSourceDifferentSpellingIsNotAClash verifies that a local
 // source installed via one spelling (e.g. a relative path) and re-installed via
 // an equivalent spelling (the absolute path) is treated as the same source, not
@@ -374,5 +406,29 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 	}
 	if info.Hash != installed.Hash {
 		t.Fatalf("Info hash = %q, want %q", info.Hash, installed.Hash)
+	}
+	if info.HashDrift {
+		t.Fatal("expected no hash drift immediately after install")
+	}
+
+	if err := os.WriteFile(info.Skill.Path, []byte("---\nname: demo\ndescription: described\n---\nedited body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, ok = Info(destDir, "demo")
+	if !ok {
+		t.Fatal("Info(demo) not found after edit")
+	}
+	if !info.HashDrift {
+		t.Fatal("expected hash drift after SKILL.md edit")
+	}
+}
+
+func TestSkillHashDriftUnreadableLockedPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing", "SKILL.md")
+	if !skillHashDrift(Skill{Path: missing}, "sha256:deadbeef") {
+		t.Fatal("expected drift when locked SKILL.md cannot be read")
+	}
+	if skillHashDrift(Skill{Path: missing}, "") {
+		t.Fatal("missing lock hash must not count as drift")
 	}
 }

@@ -141,9 +141,11 @@ func TestRunAskUserCancellationAbortsRun(t *testing.T) {
 	registry := registryWithAskUser()
 	args := `{"questions":[{"question":"Which framework?"}]}`
 	provider := providerCallingAskUserThenAnswer(args, "done")
+	var toolResults []ToolResult
 
 	result, err := Run(context.Background(), "clarify", provider, Options{
-		Registry: registry,
+		Registry:     registry,
+		OnToolResult: func(result ToolResult) { toolResults = append(toolResults, result) },
 		OnAskUser: func(_ context.Context, _ AskUserRequest) (AskUserResponse, error) {
 			return AskUserResponse{}, context.Canceled
 		},
@@ -157,6 +159,9 @@ func TestRunAskUserCancellationAbortsRun(t *testing.T) {
 	// The model must not be asked for a follow-up turn after cancellation.
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected the run to stop after the canceled ask_user (1 turn), got %d", len(provider.requests))
+	}
+	if len(toolResults) != 1 || toolResults[0].ToolCallID == "" {
+		t.Fatalf("cancellation must emit exactly one result for the call, got %#v", toolResults)
 	}
 	// The recorded tool result must reflect cancellation, not a synthetic answer.
 	var toolMsg string

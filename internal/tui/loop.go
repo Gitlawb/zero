@@ -594,8 +594,8 @@ func (m model) loopListText() string {
 				when = "due"
 			}
 		}
-		b.WriteString(fmt.Sprintf("  %s · %s · iter %d · %s · %s\n",
-			l.id, l.cadenceText(), l.iteration, when, truncateLoopPrompt(l.prompt)))
+		fmt.Fprintf(&b, "  %s · %s · iter %d · %s · %s\n",
+			l.id, l.cadenceText(), l.iteration, when, truncateLoopPrompt(l.prompt))
 	}
 	b.WriteString("Stop with /loop stop <id> or /loop stop all.")
 	return b.String()

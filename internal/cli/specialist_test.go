@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/specialist"
 )
 
 func TestRunSpecialistListShowAndPath(t *testing.T) {
@@ -184,6 +185,42 @@ func TestRunSpecialistCreateDeleteAndEdit(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"deleted": true`) {
 		t.Fatalf("delete JSON missing deleted=true: %s", stdout.String())
+	}
+}
+
+func TestWriteSpecialistCreateResultSurfacesWarningsOnlyForHumanOutput(t *testing.T) {
+	manifest := specialist.Manifest{
+		Metadata: specialist.Metadata{Name: "triage"},
+		FilePath: "/specialists/triage.md",
+		Warnings: []string{"replacement backup /specialists/.triage.bak retained: access denied"},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := writeSpecialistCreateResult(manifest, false, &stdout, &stderr); code != exitSuccess {
+		t.Fatalf("human output exit code = %d", code)
+	}
+	if got, want := stdout.String(), "Created specialist triage at /specialists/triage.md\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	if got, want := stderr.String(), "warning: replacement backup /specialists/.triage.bak retained: access denied\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := writeSpecialistCreateResult(manifest, true, &stdout, &stderr); code != exitSuccess {
+		t.Fatalf("JSON output exit code = %d", code)
+	}
+	var payload specialist.Manifest
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if len(payload.Warnings) != 1 || payload.Warnings[0] != manifest.Warnings[0] {
+		t.Fatalf("JSON warnings = %#v", payload.Warnings)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("JSON warning duplicated to stderr: %q", stderr.String())
 	}
 }
 

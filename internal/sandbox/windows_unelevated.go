@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 const windowsUnelevatedSetupMarkerSchemaVersion = 1
@@ -138,7 +140,7 @@ func recordWindowsUnelevatedAppliedPlan(sandboxHome string, applied WindowsUnele
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close windows unelevated setup marker temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmpPath, path, nil); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("replace windows unelevated setup marker: %w", err)
 	}

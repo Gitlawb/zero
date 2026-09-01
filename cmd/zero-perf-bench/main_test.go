@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/perfbench"
 )
 
 func TestParseArgsUsesCliAndEnvOverrides(t *testing.T) {
@@ -91,4 +93,19 @@ func TestHelpText(t *testing.T) {
 
 func emptyEnv(string) string {
 	return ""
+}
+
+func TestTurnExitCodeFailsWhenEveryTaskErrored(t *testing.T) {
+	var stderr bytes.Buffer
+	allErrored := perfbench.TurnBenchResult{TasksAttempted: 3, TasksErrored: 3}
+	if code := turnExitCode(allErrored, &stderr); code != 1 {
+		t.Fatalf("exit=%d, want 1 when every task errored", code)
+	}
+	if !strings.Contains(stderr.String(), "no accepted benchmark sample") {
+		t.Fatalf("stderr missing explanation: %q", stderr.String())
+	}
+	partial := perfbench.TurnBenchResult{TasksAttempted: 3, TasksErrored: 2}
+	if code := turnExitCode(partial, &stderr); code != 0 {
+		t.Fatalf("exit=%d, want 0 for partial errors (summary surfaces them)", code)
+	}
 }

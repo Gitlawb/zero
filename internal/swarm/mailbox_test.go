@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -218,64 +219,75 @@ func TestMailboxRejectsSymlinkedInboxDir(t *testing.T) {
 	}
 }
 
-func TestMailboxLockReleaseIsOwnershipAware(t *testing.T) {
+func TestMailboxLockReleaseKeepsStablePath(t *testing.T) {
 	mb := newTestMailbox(t)
 	path, _ := mb.inboxPath("team", "bob")
 	if err := mb.ensureInboxDir(path); err != nil {
 		t.Fatalf("ensureInboxDir: %v", err)
 	}
 	lockPath := path + ".lock"
-	// Writer A acquires the lock.
-	releaseA, err := acquireLock(lockPath, time.Second)
+	releaseA, err := acquireLock(mb.BaseDir, lockPath, time.Second)
 	if err != nil {
 		t.Fatalf("acquire A: %v", err)
 	}
-	// Simulate a stale-break + takeover by writer B: overwrite the lock content
-	// with B's token (as a fresh acquire after a break would).
-	if err := os.WriteFile(lockPath, []byte("writer-B-token"), 0o600); err != nil {
-		t.Fatalf("simulate B takeover: %v", err)
-	}
-	// A's release must NOT delete B's lock (ownership-aware).
 	releaseA()
 	if _, err := os.Stat(lockPath); err != nil {
-		t.Fatalf("A's release deleted B's lock (split-brain): %v", err)
+		t.Fatalf("release removed stable advisory-lock path: %v", err)
 	}
-	// B's own release removes it.
-	os.Remove(lockPath)
 }
 
-func TestAcquireLockReclaimsStaleLock(t *testing.T) {
-	// A crashed holder's stale lock (old mtime) must be reclaimed via the atomic
-	// rename-with-verify path, leaving no sidelined .stale.* file (AUDIT-M13).
+func TestAcquireLockIgnoresOldUnlockedFile(t *testing.T) {
+	// A crashed holder can leave an old file behind, but the kernel releases its
+	// advisory lock. Acquisition must succeed without renaming the stable path.
 	lockPath := filepath.Join(t.TempDir(), "x.lock")
 	if err := os.WriteFile(lockPath, []byte("dead-holder"), 0o600); err != nil {
-		t.Fatalf("seed stale lock: %v", err)
+		t.Fatalf("seed old lock metadata: %v", err)
 	}
-	old := time.Now().Add(-2 * lockStaleAfter)
+	old := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(lockPath, old, old); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
-	release, err := acquireLock(lockPath, time.Second)
+	release, err := acquireLock(filepath.Dir(lockPath), lockPath, time.Second)
 	if err != nil {
-		t.Fatalf("acquireLock should reclaim a genuinely stale lock, got %v", err)
+		t.Fatalf("acquire over old unlocked file: %v", err)
 	}
 	release()
-	if matches, _ := filepath.Glob(lockPath + ".stale.*"); len(matches) != 0 {
-		t.Fatalf("reclaim left sidelined files: %v", matches)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("stable lock path missing after release: %v", err)
 	}
 }
 
-func TestAcquireLockDoesNotBreakFreshLock(t *testing.T) {
-	// A fresh, held lock (recent mtime) must never be broken — the stale-break must
-	// not steal a live lock (AUDIT-M13).
+func TestAcquireLockDoesNotBreakHeldLock(t *testing.T) {
+	// File age is irrelevant while the kernel reports an active holder.
 	lockPath := filepath.Join(t.TempDir(), "x.lock")
-	release, err := acquireLock(lockPath, time.Second)
+	release, err := acquireLock(filepath.Dir(lockPath), lockPath, time.Second)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	defer release()
-	if _, err := acquireLock(lockPath, 50*time.Millisecond); err == nil {
-		t.Fatal("acquireLock broke a fresh, held lock (split-brain risk)")
+	if _, err := acquireLock(filepath.Dir(lockPath), lockPath, 50*time.Millisecond); err == nil {
+		t.Fatal("acquireLock admitted a second holder")
+	}
+}
+
+func TestAcquireLockRefusesRedirectedPath(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	const sentinel = "do not overwrite"
+	if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := makeRedirectedLockPath(t, root, target)
+	if release, err := acquireLock(root, lockPath, time.Second); err == nil {
+		release()
+		t.Fatal("acquireLock followed a redirected lock path")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != sentinel {
+		t.Fatalf("redirected target was modified: %q", data)
 	}
 }
 
@@ -295,6 +307,7 @@ func TestMailboxConcurrentSends(t *testing.T) {
 			defer wg.Done()
 			if err := mb.Send("team", "bob", Message{From: "a", Body: "concurrent"}); err != nil {
 				failures.Add(1)
+				t.Logf("Send error: %v", err)
 			}
 		}()
 	}
@@ -308,5 +321,53 @@ func TestMailboxConcurrentSends(t *testing.T) {
 	}
 	if len(msgs) != n {
 		t.Fatalf("concurrent sends lost messages: got %d, want %d", len(msgs), n)
+	}
+}
+
+func TestMailboxRenameRetry(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("renameWithRetry only retries on Windows")
+	}
+	mb := newTestMailbox(t)
+
+	var attempts int
+	mb.rename = func(src, dst string) error {
+		attempts++
+		if attempts < 3 {
+			// Return a retryable Windows sharing violation error
+			return syscall.Errno(32)
+		}
+		// Then succeed
+		return os.Rename(src, dst)
+	}
+
+	err := mb.Send("team", "alice", Message{Body: "retry-test"})
+	if err != nil {
+		t.Fatalf("expected Send to succeed after retries, got: %v", err)
+	}
+	if attempts < 3 {
+		t.Errorf("expected at least 3 attempts, got %d", attempts)
+	}
+}
+
+func TestMailboxRenameNonRetryableError(t *testing.T) {
+	mb := newTestMailbox(t)
+
+	var attempts int
+	expectedErr := errors.New("non-retryable error")
+	mb.rename = func(src, dst string) error {
+		attempts++
+		return expectedErr
+	}
+
+	err := mb.Send("team", "alice", Message{Body: "retry-test"})
+	if err == nil {
+		t.Fatal("expected Send to fail immediately")
+	}
+	if !errors.Is(err, expectedErr) && !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Errorf("expected error %v, got %v", expectedErr, err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected only 1 attempt for non-retryable error, got %d", attempts)
 	}
 }

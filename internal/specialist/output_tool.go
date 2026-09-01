@@ -35,10 +35,6 @@ type outputParameters struct {
 	TimeoutMS int
 }
 
-func NewOutputTool(manager *background.Manager) *OutputTool {
-	return &OutputTool{manager: manager}
-}
-
 func newOutputToolWithManagerFunc(managerFunc BackgroundManagerFunc, sessionStore *sessions.Store) *OutputTool {
 	return &OutputTool{managerFunc: managerFunc, SessionStore: sessionStore}
 }

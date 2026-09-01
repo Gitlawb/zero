@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -36,6 +37,29 @@ type transcriptSelectionState struct {
 	dragging bool
 	anchor   transcriptSelectionPoint
 	cursor   transcriptSelectionPoint
+}
+
+// transcriptRenderInteraction lets settled-item render closures read the
+// current selection and hover state without rebuilding the cached descriptors.
+// The mutex keeps the shared cache state safe even if a renderer inspects a
+// model copy concurrently with an update.
+type transcriptRenderInteraction struct {
+	mu        sync.Mutex
+	selection transcriptSelectionState
+	hover     hoverTarget
+}
+
+func (s *transcriptRenderInteraction) set(selection transcriptSelectionState, hover hoverTarget) {
+	s.mu.Lock()
+	s.selection = selection
+	s.hover = hover
+	s.mu.Unlock()
+}
+
+func (s *transcriptRenderInteraction) get() (transcriptSelectionState, hoverTarget) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.selection, s.hover
 }
 
 type transcriptSelectableLine struct {
@@ -106,15 +130,6 @@ type transcriptBodyLayout struct {
 	spans      []transcriptBodyItemSpan
 }
 
-func (m model) transcriptBodyLayout(width int, emptyOverlay string) transcriptBodyLayout {
-	return layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay, false))
-}
-
-func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
-	layout := m.transcriptBodyLayout(width, emptyOverlay)
-	return layout.String(), layout.selectable
-}
-
 func (l transcriptBodyLayout) String() string {
 	return strings.Join(l.lines, "\n")
 }
@@ -125,12 +140,6 @@ func (l transcriptBodyLayout) totalLines() int {
 		return last.startY + last.height
 	}
 	return len(l.lines)
-}
-
-func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []string {
-	start := clampInt(window.start, 0, len(l.lines))
-	end := clampInt(window.end, start, len(l.lines))
-	return append([]string(nil), l.lines[start:end]...)
 }
 
 // padTranscriptBodyLines left-indents transcript body rows when a non-zero
@@ -167,6 +176,9 @@ func shiftSelectableX(lines []transcriptSelectableLine, gutter int) []transcript
 // so the highlight is computed in the same shifted coordinate the mouse maps to
 // and lands exactly where the user selected (instead of gutter cells off).
 func (m model) finalizeTranscriptBodyRow(rendered string, selectable []transcriptSelectableLine, gutter int, startBodyY int) transcriptBodyRenderedItem {
+	if m.transcriptInteraction != nil {
+		m.transcriptSelection, m.hover = m.transcriptInteraction.get()
+	}
 	lines := padTranscriptBodyLines(viewLines(rendered), gutter)
 	shifted := shiftSelectableX(selectable, gutter)
 	if m.transcriptSelection.active {
@@ -211,6 +223,21 @@ func (m model) renderHoverHighlight(rendered string, selectable []transcriptSele
 }
 
 func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool) []transcriptBodyItem {
+	if m.transcriptInteraction != nil {
+		m.transcriptInteraction.set(m.transcriptSelection, m.hover)
+	}
+	// Steady-state alt-screen frames (notably the idle cursor blink) can reuse
+	// the settled list directly. Keeping this fast path outside the closure-heavy
+	// builder also prevents the large model receiver from escaping to the heap.
+	if m.altScreen && !detailed && !m.fileView.active && !m.pending && m.pendingSpecReview == nil &&
+		m.flushedAny && m.flushed == len(m.transcript) &&
+		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed {
+		return m.altScreenSettledItems
+	}
+	return m.buildTranscriptBodyItems(width, emptyOverlay, detailed)
+}
+
+func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed bool) []transcriptBodyItem {
 	// File drill-in: the chat column's body swaps to the viewed file's
 	// diff/content. Swapping HERE (the single source every consumer reads) keeps
 	// the viewport, scroll engine, renderer, and mouse hit-tests consistent.
@@ -239,7 +266,6 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 			items = append(items, transcriptBlockBodyItem(transcriptBodyItemEmpty, -1, m.emptyState(width)))
 		}
 	} else {
-		rc := buildRowContext(m.transcript)
 		shownAny := false
 		// The detailed view shows the full transcript from index 0, not
 		// the managed region after m.flushed.
@@ -247,11 +273,32 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 		if detailed {
 			startIdx = 0
 		}
+		useSettledCache := m.altScreen && !detailed &&
+			m.altScreenSettledWidth == width &&
+			m.altScreenSettledFrontier == m.flushed
+		if useSettledCache {
+			// The cache reserves scratch capacity for live-tail descriptors, avoiding
+			// an O(history) slice copy on every streaming/spinner frame.
+			items = m.altScreenSettledItems[:len(m.altScreenSettledItems)]
+		} else if m.altScreen && !detailed {
+			// A directly-constructed model (not yet passed through Update), or an
+			// explicitly invalidated cache, must still render complete history.
+			// The next settle rebuilds the cache for subsequent frames.
+			startIdx = 0
+		}
+		// Dependencies for an unflushed row cannot live wholly before the
+		// frontier: such a row would have blocked the frontier. Build context only
+		// for the live tail instead of rescanning settled history each frame.
+		rc := buildRowContext(m.transcript[startIdx:])
 		renderRowFn := transcriptRowDispatchFn(m.renderTranscriptRow)
 		if detailed {
 			renderRowFn = transcriptRowDispatchFn(m.renderTranscriptDetailedRow)
 		}
-		previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, startIdx, rc)
+		if startIdx > 0 {
+			previousKind, havePreviousKind = m.flushedPreviousKind, m.flushedHavePreviousKind
+		} else {
+			previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, startIdx, rc)
+		}
 		specialistSummaryEmitted := false
 		for index := startIdx; index < len(m.transcript); index++ {
 			row := m.transcript[index]
@@ -392,7 +439,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 				rowIndex:          -1,
 				heightCacheStable: false, // the highlight changes with the cursor
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, width)
+					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, perm.typing, m.input.Value(), width)
 					options := permissionOptions(perm.request)
 					selectable := make([]transcriptSelectableLine, 0, len(offsets))
 					for index, offset := range offsets {
@@ -508,7 +555,7 @@ func (m model) renderExploreResultGroup(rows []transcriptRow, width int, rc rowC
 		body = append(body, exploreCardLine(toolRowName(row), rc.hints[key], rc.args[key], row.detail, width, opts, marker))
 	}
 	head := zeroTheme.green.Bold(true).Render("Explored")
-	return toolCard(head, zeroTheme.green.Render("•"), body, zeroTheme.faint.Render("▸ details"), zeroTheme.line, width)
+	return toolCard(head, zeroTheme.green.Render("•"), body, "", zeroTheme.line, width)
 }
 
 // transcriptBodyItemsFromRows builds body items from an arbitrary set of
@@ -669,17 +716,19 @@ func (m model) transcriptRowBodyHeightCacheKeyOpts(row transcriptRow, width int,
 }
 
 func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow, opts)
 }
 
 // renderTranscriptDetailedRow routes through renderTranscriptRowFn with
 // renderRowDetailed (bodyCap: 0) so tool output appears uncapped.
 func (m model) renderTranscriptDetailedRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRowDetailed)
+	opts := cardRenderOptions{bodyCap: 0, cwd: m.cwd}
+	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRowDetailed, opts)
 }
 
 // renderTranscriptRowFn dispatches row-kind rendering using the provided renderFn.
-func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
+func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn, toolOpts cardRenderOptions) (string, []transcriptSelectableLine) {
 	switch row.kind {
 	case rowUser:
 		return m.renderSelectableUserRow(rowIndex, row, width, startBodyY)
@@ -690,7 +739,7 @@ func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int,
 	case rowSystem, rowError, rowToolCall, rowPermission, rowAskUser:
 		return m.renderSelectableRenderedRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
 	case rowToolResult:
-		return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
+		return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, renderFn, toolOpts)
 	case rowSpecialist:
 		return m.renderSelectableSpecialistRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
 	default:
@@ -703,19 +752,19 @@ func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int,
 	}
 }
 
-// renderSelectableToolResultRow renders the tool result card and marks its head
-// (first line) as a clickable collapse/expand toggle. Body/footer text remains
-// selectable so copying a visible transcript range includes command output.
-func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
+// renderSelectableToolResultRow renders the tool result card. Only cards that
+// can actually collapse expose a clickable header; always-visible diff cards
+// retain normal text selection and never imply an unavailable action.
+func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn, opts cardRenderOptions) (string, []transcriptSelectableLine) {
 	rendered := renderFn(row, width, rc)
 	if rendered == "" {
 		return "", nil
 	}
-	// The first rendered line is the clickable toggle header; carry its text so a
-	// selection dragged through it copies the label too (the toggle flag still
-	// expands/collapses on a direct click, resolved on press before selection).
+	// Carry the first line's text so a selection dragged through the card copies
+	// its label too. It receives a toggle only when this card exposes a collapse
+	// affordance in the current transcript mode.
 	allLines := viewLines(rendered)
-	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}
+	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: toolResultCanToggle(row, width, rc, opts)}
 	if len(allLines) > 0 {
 		if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY, allLines[0], false); ok {
 			header.text = meta.text
@@ -731,8 +780,36 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	return rendered, selectable
 }
 
-func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
+func toolResultCanToggle(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) bool {
+	name := toolRowName(row)
+	if opts.bodyCap <= 0 || toolCardAlwaysExpands(name) {
+		return false
+	}
+	failed := row.status == tools.StatusError
+	if !failed && looksLikeRedundantConfirmation(row.detail) {
+		return false
+	}
+	collapsedFooter := ""
+	if failed || (!isExploreTool(name) && !isLocalControlTool(name)) {
+		collapsedFooter = collapsedToolFooter(row.detail)
+	}
+	if collapsedFooter != "" && !row.expanded {
+		return true
+	}
+	// Explore cards deliberately use their own compact "details" affordance
+	// instead of the generic long-output footer. Ask the body renderer whether
+	// it exposed that affordance so selection behavior stays coupled to the
+	// rendered card rather than matching display text.
+	if collapsedFooter == "" && !isExploreTool(name) {
+		return false
+	}
+	bodyOpts := opts
+	bodyOpts.expanded = row.expanded
+	body := toolCardBody(name, rc.hints[rcKey(row.runID, row.id)], rc.args[rcKey(row.runID, row.id)], row.detail, width, bodyOpts, failed)
+	if collapsedFooter != "" && row.expanded && body.footer == "" {
+		return true
+	}
+	return body.canToggle
 }
 
 func (m model) renderSelectableRenderedRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
@@ -891,13 +968,6 @@ func (m model) renderSelectableSpecialistRowFn(rowIndex int, row transcriptRow, 
 		selectable[i] = sl
 	}
 	return rendered, selectable
-}
-
-// renderSelectableSpecialistRow renders a specialist card and marks every line
-// as a clickable specialistCard selectable line carrying the childSessionID.
-// A left-click or Enter on any card line drills into that specialist's subchat.
-func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableSpecialistRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -1089,7 +1159,8 @@ func (m model) transcriptHitTestSource() (header string, items []transcriptBodyI
 // transcriptHitTestBlocked reports whether mouse hit-testing must be skipped
 // outright — a modal/overlay is up, or there's no alt-screen viewport at all.
 func (m model) transcriptHitTestBlocked() bool {
-	return !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive()
+	return !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
+		m.mcpManager != nil || m.picker != nil || m.renamePrompt != nil || m.suggestionsActive()
 }
 
 // transcriptHitTestLayout computes the frame/window/layout mouse hit-testing needs,
@@ -1270,21 +1341,6 @@ func (m model) stopEdgeScroll() model {
 	return m
 }
 
-func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	return transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)
-}
-
-func transcriptViewportStartForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForLayout(layout, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
-}
-
-func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForBody(body, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
-}
-
 func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) transcriptSelectionPoint {
 	lineEnd := line.textStart + lipgloss.Width(line.text)
 	return transcriptSelectionPoint{
@@ -1296,41 +1352,9 @@ func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) tran
 func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
 	switch {
 	case mouseLeftPress(msg):
-		// A click on a clickable AGENTS sidebar row drills into that swarm member's
-		// session, reusing the specialist-card subchat path. Checked before the
-		// transcript hit-test since the sidebar is outside the chat column.
-		if hit, ok := m.sidebarLineAtMouse(msg); ok {
-			// The subchat drill-in owns the whole (single-column) view; a file
-			// drill-in can't meaningfully stay open behind it.
-			m = m.exitFileView()
-			if errMsg := m.subchat.enter(m.sessionStore, hit.sessionID, hit.title, m.chatScrollOffset); errMsg != "" {
-				m = m.appendSystemNotice(errMsg)
-			}
-			m.chatScrollOffset = 0
-			m = m.clearHover() // bodyY numbering differs between subchat and the parent transcript
-			return m, nil, true
-		}
-		// A click on a PLAN step row drops a transcript card listing the file
-		// changes captured while that step was in progress.
-		if stepIndex, ok := m.planStepAtMouse(msg); ok {
-			// The card lands in the chat transcript; close the file drill-in so
-			// it isn't appended invisibly behind the swapped body.
-			m = m.exitFileView()
-			var cmd tea.Cmd
-			m, cmd = m.openPlanStepDetail(stepIndex)
-			return m, cmd, true
-		}
-		// A click on a FILES row: first click selects the file (its edit cards
-		// tint and the chat scrolls to the most recent one); a click on the
-		// already-selected file — or any FILES click while the drill-in is open —
-		// opens/switches the file view.
-		if path, ok := m.fileRowAtMouse(msg); ok {
-			if m.fileView.active || m.selectedFile == path {
-				m.selectedFile = path
-				return m.openFileView(path), nil, true
-			}
-			return m.selectFile(path), nil, true
-		}
+		// Context data is available through the run-details overlay. The former
+		// sidebar is no longer rendered, so its legacy hit targets must never
+		// intercept clicks in the full-width transcript.
 		line, ok := m.transcriptLineAtMouse(msg)
 		if !ok {
 			if m.transcriptSelection.active {
@@ -1339,8 +1363,14 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			}
 			return m, nil, false
 		}
-		if line.permOption {
-			// A left-click on a permission-popup option resolves it directly.
+		if line.permOption && (m.pendingPermission == nil || !m.pendingPermission.typing) {
+			// A left-click on a permission-popup option resolves it directly. The
+			// typing guard is defence-in-depth: renderFocusedPermissionPrompt already
+			// returns nil offsets in feedback mode, so no option row is registered as
+			// clickable then — but that single early-return is the only thing keeping
+			// a stray click (Allow included) off the decision path, and it lives in a
+			// function other PRs also edit. Guarding here makes the safety explicit
+			// rather than emergent.
 			next, cmd := m.resolvePermission(line.permChoice)
 			return next.(model), cmd, true
 		}
@@ -1442,6 +1472,11 @@ func (m model) toggleTranscriptRow(rowIndex int) model {
 	switch m.transcript[rowIndex].kind {
 	case rowReasoning, rowToolResult:
 		m.transcript[rowIndex].expanded = !m.transcript[rowIndex].expanded
+		// Settled alt-screen rows are cached across frames; force a rebuild so an
+		// expand/collapse interaction is reflected immediately.
+		if rowIndex < m.flushed {
+			m.altScreenSettledWidth = 0
+		}
 	}
 	return m
 }
@@ -1466,7 +1501,54 @@ func (m model) selectedTranscriptText() string {
 	return strings.Join(parts, "\n")
 }
 
+// clipboardSafeText removes the control characters a clipboard write cannot
+// carry, keeping newlines and tabs.
+//
+// A NUL PANICS THE WHOLE PROGRAM ON WINDOWS, and that is not a theoretical
+// concern: syscall.StringToUTF16 — which github.com/atotto/clipboard calls on
+// Windows — PANICS rather than erroring when the string contains one, so a
+// single copied NUL killed the TUI with "program experienced a panic". It
+// reached the clipboard because ansi.Strip removes escape SEQUENCES and leaves
+// C0 bytes untouched, and the transcript legitimately carries them from two
+// directions: tool output (a read of a binary file, git's -z NUL-separated
+// listings) and this package's own card protocol, whose row prefixes are
+// literally "\x00command-card\x00".
+//
+// Stripped at the WRITE, not at each source, because the sources are unbounded:
+// any tool result a user can select from is a source, and a fix per source is
+// one that the next tool re-breaks. The same pass protects the OSC52 fallback,
+// where a stray control byte would terminate the escape sequence early and
+// corrupt the copy rather than crash.
+//
+// \n and \t survive: a multi-line selection is the normal case, and both are
+// legal clipboard content.
+func clipboardSafeText(text string) string {
+	if !strings.ContainsFunc(text, unsafeClipboardRune) {
+		return text
+	}
+	var out strings.Builder
+	out.Grow(len(text))
+	for _, r := range text {
+		if unsafeClipboardRune(r) {
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
+func unsafeClipboardRune(r rune) bool {
+	if r == '\n' || r == '\t' {
+		return false
+	}
+	return r < 0x20 || r == 0x7f
+}
+
 func copyTranscriptSelectionCmd(text string) tea.Cmd {
+	// SANITISED ONCE, HERE, before either destination sees it — the native
+	// clipboard would panic on a NUL and the OSC52 fallback would be corrupted
+	// by one.
+	text = clipboardSafeText(text)
 	return func() tea.Msg {
 		// Prefer the native OS clipboard (pbcopy / clip.exe / xclip): it works on
 		// local terminals — including macOS Terminal.app, which has no OSC52 support

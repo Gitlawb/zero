@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -436,11 +437,27 @@ func TestFormatResult(t *testing.T) {
 	if !strings.Contains(output, "Release asset: zero-v0.2.0-linux-x64.tar.gz") || !strings.Contains(output, "Checksum asset: zero-v0.2.0-linux-x64.tar.gz.sha256") {
 		t.Fatalf("update output did not include release assets: %q", output)
 	}
-	if !strings.Contains(output, "Release target: linux-x64") || !strings.Contains(output, "Download the verified linux-x64 release asset") {
+	if !strings.Contains(output, "Release target: linux-x64") {
 		t.Fatalf("update output did not include target-specific guidance: %q", output)
 	}
 	if strings.Contains(output, "your platform") {
 		t.Fatalf("update output should not use ambiguous platform wording: %q", output)
+	}
+
+	// The upgrade recommendation is about THIS machine, so it depends on whether
+	// the checked target is this machine — assert it against the local target
+	// rather than the fixed linux-x64 fixture above, which is a cross-target
+	// check anywhere but linux/amd64.
+	local := Format(Result{
+		CurrentVersion:  "0.1.0",
+		LatestVersion:   "0.2.0",
+		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		TagName:         "v0.2.0",
+		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", runtime.GOOS, runtime.GOARCH),
+		UpdateAvailable: true,
+	})
+	if !strings.Contains(local, "Run `zero upgrade` to download, verify, and install") {
+		t.Fatalf("current-platform check did not recommend zero upgrade: %q", local)
 	}
 
 	output = Format(Result{
@@ -456,6 +473,186 @@ func TestFormatResult(t *testing.T) {
 	}
 	if !strings.Contains(output, "Release target: linux-x64") {
 		t.Fatalf("up-to-date output did not include release target: %q", output)
+	}
+}
+
+// TestFormatCustomSourceCheckRepeatsTheSourceFlag covers jatmn's #489 finding:
+// `zero upgrade` is a fresh invocation that reads from the DEFAULT source, so
+// recommending it bare after `--check --repo <fork>` sends the user to install
+// from a repository they never asked about. The pre-PR text pointed at the
+// printed asset URLs instead; this keeps a runnable command by naming the flag
+// to repeat.
+func TestFormatCustomSourceCheckRepeatsTheSourceFlag(t *testing.T) {
+	local := assetCheckForTest(t, "v0.2.0", runtime.GOOS, runtime.GOARCH)
+	for _, tc := range []struct {
+		name    string
+		options Options
+		want    string
+	}{
+		{name: "repo flag", options: Options{Repository: "someone/fork"}, want: "zero upgrade --repo someone/fork"},
+		{name: "endpoint flag", options: Options{Endpoint: "https://example.test/releases/latest?channel=$preview"}, want: "zero upgrade --endpoint 'https://example.test/releases/latest?channel=$preview'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := Format(Result{
+				CurrentVersion:  "0.1.0",
+				LatestVersion:   "0.2.0",
+				ReleaseURL:      "https://example.test/release",
+				TagName:         "v0.2.0",
+				ReleaseAsset:    local,
+				UpdateAvailable: true,
+				SourceFlag:      upgradeSourceFlag(tc.options),
+			})
+			if !strings.Contains(output, tc.want) {
+				t.Fatalf("output = %q, want it to repeat %q", output, tc.want)
+			}
+			if !strings.Contains(output, "bare `zero upgrade` does not repeat") {
+				t.Fatalf("output = %q, want it to distinguish a bare upgrade", output)
+			}
+		})
+	}
+
+	// The default source keeps the plain call to action, including when --repo
+	// names the default repository explicitly.
+	for _, options := range []Options{{}, {Repository: DefaultRepository}} {
+		output := Format(Result{
+			CurrentVersion:  "0.1.0",
+			LatestVersion:   "0.2.0",
+			ReleaseURL:      "https://example.test/release",
+			TagName:         "v0.2.0",
+			ReleaseAsset:    local,
+			UpdateAvailable: true,
+			SourceFlag:      upgradeSourceFlag(options),
+		})
+		if !strings.Contains(output, "Run `zero upgrade` to download") {
+			t.Fatalf("default-source output = %q, want the plain upgrade recommendation", output)
+		}
+	}
+}
+
+// TestCheckRecordsTheSourceFlagItWasGiven pins where SourceFlag comes from: the
+// per-invocation flags, and not ZERO_UPDATE_RELEASE_URL — the env var is read by
+// every Check including the one inside Apply, so a bare `zero upgrade` already
+// follows it and telling the user to repeat it would be wrong.
+func TestCheckRecordsTheSourceFlagItWasGiven(t *testing.T) {
+	t.Setenv("ZERO_UPDATE_RELEASE_URL", "")
+	fetch := func(context.Context, string) (Release, error) {
+		return releaseForTarget(t, "v0.2.0", "linux", "amd64"), nil
+	}
+	base := Options{CurrentVersion: "0.1.0", GOOS: "linux", GOARCH: "amd64", Fetch: fetch}
+
+	withRepo := base
+	withRepo.Repository = "someone/fork"
+	result, err := Check(context.Background(), withRepo)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if result.SourceFlag != "--repo someone/fork" {
+		t.Fatalf("SourceFlag = %q, want the repo flag recorded", result.SourceFlag)
+	}
+
+	result, err = Check(context.Background(), base)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if result.SourceFlag != "" {
+		t.Fatalf("SourceFlag = %q, want empty for the default source", result.SourceFlag)
+	}
+
+	t.Setenv("ZERO_UPDATE_RELEASE_URL", "https://example.test/releases/latest")
+	for _, options := range []Options{base, withRepo} {
+		result, err = Check(context.Background(), options)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		if result.SourceFlag != "" {
+			t.Fatalf("SourceFlag = %q, want empty: the env var wins over repo and carries over on its own", result.SourceFlag)
+		}
+	}
+
+	withEndpoint := withRepo
+	withEndpoint.Endpoint = "https://option.test/releases/latest"
+	result, err = Check(context.Background(), withEndpoint)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if result.SourceFlag != "--endpoint 'https://option.test/releases/latest'" {
+		t.Fatalf("SourceFlag = %q, want explicit endpoint recorded", result.SourceFlag)
+	}
+}
+
+func TestFormatNpmCustomSourceExplainsInstallSource(t *testing.T) {
+	result := Result{
+		CurrentVersion: "0.1.0", LatestVersion: "0.2.0", ReleaseURL: "https://example.test/release",
+		ReleaseAsset: assetCheckForTest(t, "v0.2.0", runtime.GOOS, runtime.GOARCH), UpdateAvailable: true,
+		SourceFlag: "--repo someone/fork", installMethod: InstallMethodNpm,
+	}
+	output := Format(result)
+	if strings.Contains(output, "zero upgrade --repo") || !strings.Contains(output, "npm install -g @gitlawb/zero@latest") || !strings.Contains(output, "only affects the release check and update gating") {
+		t.Fatalf("npm custom-source guidance is misleading: %q", output)
+	}
+}
+
+func TestFormatCrossTargetCustomSourceKeepsAccurateGuidance(t *testing.T) {
+	goos, goarch := "linux", "amd64"
+	if runtime.GOOS == goos && runtime.GOARCH == goarch {
+		goos, goarch = "darwin", "arm64"
+	}
+	output := Format(Result{
+		CurrentVersion: "0.1.0", LatestVersion: "0.2.0", ReleaseURL: "https://example.test/release",
+		ReleaseAsset: assetCheckForTest(t, "v0.2.0", goos, goarch), UpdateAvailable: true,
+		SourceFlag: "--repo someone/fork",
+	})
+	if strings.Contains(output, "Run `zero upgrade") || !strings.Contains(output, "Download the verified") || !strings.Contains(output, "custom source selected by `--repo someone/fork`") || !strings.Contains(output, "bare `zero upgrade` does not repeat that source") {
+		t.Fatalf("cross-target custom-source guidance is misleading: %q", output)
+	}
+}
+
+// TestFormatCrossTargetCheckDoesNotRecommendLocalUpgrade is the regression test
+// for jatmn's #489 finding: `zero update --check --target <other>` answers a
+// question about a different machine, but the output recommended `zero upgrade`,
+// which only ever installs onto this one. That replaced the target-specific
+// manual-download guidance the flag used to print.
+func TestFormatCrossTargetCheckDoesNotRecommendLocalUpgrade(t *testing.T) {
+	// Pick a target that is definitely not this machine.
+	goos, goarch := "linux", "amd64"
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		goos, goarch = "darwin", "arm64"
+	}
+	other := assetCheckForTest(t, "v0.2.0", goos, goarch)
+	output := Format(Result{
+		CurrentVersion:  "0.1.0",
+		LatestVersion:   "0.2.0",
+		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		TagName:         "v0.2.0",
+		ReleaseAsset:    other,
+		UpdateAvailable: true,
+	})
+	if strings.Contains(output, "Run `zero upgrade`") {
+		t.Fatalf("a cross-target check must not recommend the local upgrade: %q", output)
+	}
+	target := other.Platform + "-" + other.Arch
+	if !strings.Contains(output, "Download the verified "+target+" release asset") {
+		t.Fatalf("cross-target check lost its target-specific guidance: %q", output)
+	}
+	if localReleaseTarget() != "" && !strings.Contains(output, "installs onto this machine") {
+		t.Fatalf("cross-target check should say which machine zero upgrade would touch: %q", output)
+	}
+}
+
+func TestPublishedReleaseTargetRejectsUnsupportedCombinations(t *testing.T) {
+	tests := []struct {
+		goos, goarch, want string
+	}{
+		{goos: "linux", goarch: "amd64", want: "linux-x64"},
+		{goos: "darwin", goarch: "arm64", want: "macos-arm64"},
+		{goos: "windows", goarch: "amd64", want: "windows-x64"},
+		{goos: "windows", goarch: "arm64", want: ""},
+		{goos: "android", goarch: "arm64", want: ""},
+	}
+	for _, test := range tests {
+		if got := publishedReleaseTarget(test.goos, test.goarch); got != test.want {
+			t.Errorf("publishedReleaseTarget(%q, %q) = %q, want %q", test.goos, test.goarch, got, test.want)
+		}
 	}
 }
 

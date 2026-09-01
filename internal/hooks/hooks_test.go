@@ -86,6 +86,58 @@ func TestLoadConfigLayersProjectOverridesAndDiagnostics(t *testing.T) {
 	}
 }
 
+func TestLoadConfigExcludeProjectSkipsProjectLayer(t *testing.T) {
+	userConfig := map[string]any{
+		"enabled": true,
+		"hooks": []any{map[string]any{
+			"id":      "zero.user",
+			"event":   "beforeTool",
+			"command": "node",
+			"args":    []string{"user.mjs"},
+			"enabled": true,
+		}},
+	}
+	projectConfig := map[string]any{
+		"enabled": true,
+		"hooks": []any{map[string]any{
+			"id":      "zero.project",
+			"event":   "beforeTool",
+			"command": "node",
+			"args":    []string{"project.mjs"},
+			"enabled": true,
+		}},
+	}
+
+	for _, tc := range []struct {
+		name           string
+		excludeProject bool
+		wantIDs        []string
+	}{
+		{name: "include project (default)", excludeProject: false, wantIDs: []string{"zero.project", "zero.user"}},
+		{name: "exclude project", excludeProject: true, wantIDs: []string{"zero.user"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			userConfigPath := filepath.Join(dir, "user-hooks.json")
+			projectConfigPath := filepath.Join(dir, "project-hooks.json")
+			writeHookJSON(t, userConfigPath, userConfig)
+			writeHookJSON(t, projectConfigPath, projectConfig)
+
+			result, err := LoadConfig(LoadOptions{
+				UserConfigPath:    userConfigPath,
+				ProjectConfigPath: projectConfigPath,
+				ExcludeProject:    tc.excludeProject,
+			})
+			if err != nil {
+				t.Fatalf("LoadConfig returned error: %v", err)
+			}
+			if got := hookIDs(result.Config.Hooks); !reflect.DeepEqual(got, tc.wantIDs) {
+				t.Fatalf("hook ids = %#v, want %#v", got, tc.wantIDs)
+			}
+		})
+	}
+}
+
 func TestLoadConfigPreservesUserDisabledStateWhenProjectOmitsEnabled(t *testing.T) {
 	dir := t.TempDir()
 	userConfigPath := filepath.Join(dir, "user-hooks.json")

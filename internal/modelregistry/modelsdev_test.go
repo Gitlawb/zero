@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -155,6 +156,35 @@ func TestRefreshModelsDevCacheRejectsBadBodyWithoutClobbering(t *testing.T) {
 	content, err := os.ReadFile(cachePath)
 	if err != nil || string(content) != sampleModelsDev {
 		t.Fatal("bad fetch must not clobber the existing cache")
+	}
+}
+
+func TestRefreshModelsDevCacheRejectsOversizedResponse(t *testing.T) {
+	// Repro: valid JSON + padding up to the limit + one extra byte.
+	oversized := sampleModelsDev + strings.Repeat(" ", modelsDevFetchLimit-len(sampleModelsDev)+1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(oversized))
+	}))
+	defer server.Close()
+
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	if err := os.WriteFile(cachePath, []byte(sampleModelsDev), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(cachePath, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("ZERO_MODELS_URL", server.URL)
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+
+	if err := RefreshModelsDevCache(t.Context()); err == nil {
+		t.Fatal("oversized response must return an error")
+	}
+	content, err := os.ReadFile(cachePath)
+	if err != nil || string(content) != sampleModelsDev {
+		t.Fatal("oversized fetch must not clobber the existing cache")
 	}
 }
 

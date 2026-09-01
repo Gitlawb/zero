@@ -3,10 +3,10 @@
 package tools
 
 import (
-	"errors"
 	"os/exec"
-	"syscall"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 // bashWaitDelay bounds how long Wait blocks for the I/O pipes to drain after the
@@ -26,23 +26,16 @@ var bashWaitDelay = 2 * time.Second
 // if a child still holds the I/O pipes after the group is killed, Wait gives up
 // rather than blocking forever.
 func hardenProcessLifetime(command *exec.Cmd) {
-	if command.SysProcAttr == nil {
-		command.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	command.SysProcAttr.Setpgid = true
+	execution.ConfigureProcessGroup(command)
 	command.WaitDelay = bashWaitDelay
 	command.Cancel = func() error {
 		if command.Process == nil {
 			return nil
 		}
-		// Negative pid targets the process group led by the shell.
-		if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		return nil
+		return execution.KillProcessTree(command.Process.Pid)
 	}
 }
 
-// applyWindowsShellCommandLine is a no-op outside Windows; there is no
-// cmd.exe command-line-parsing quirk to work around here.
-func applyWindowsShellCommandLine(command *exec.Cmd, commandText string, wrapped bool) {}
+// applyWindowsShellCommandLine is a no-op outside Windows.
+func applyWindowsShellCommandLine(command *exec.Cmd, commandText string, wrapped bool, cmdFallback bool) {
+}

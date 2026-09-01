@@ -101,6 +101,70 @@ func TestSeatbeltEnforcesExtraWriteRoots(t *testing.T) {
 	})
 }
 
+// TestSeatbeltAllowsGitMetadataWritesExceptHooksAndConfig proves under a real
+// sandbox-exec run that git subprocesses can write their own metadata (the
+// fix for git fetch/commit/add failing under the sandbox), while .git/hooks
+// and .git/config - the two subpaths that can turn a write into code
+// execution or a credential/remote hijack - stay kernel-denied.
+func TestSeatbeltAllowsGitMetadataWritesExceptHooksAndConfig(t *testing.T) {
+	if _, err := exec.LookPath("sandbox-exec"); err != nil {
+		t.Skipf("sandbox-exec unavailable: %v", err)
+	}
+	backend := SelectBackend(BackendOptions{})
+	if !backend.Available || backend.Name != BackendMacOSSeatbelt {
+		t.Skipf("host sandbox backend is not sandbox-exec: %s", backend.Message)
+	}
+
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".git", "hooks"), 0o755); err != nil {
+		t.Fatalf("MkdirAll .git/hooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile .git/config: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Backend:       backend,
+	})
+	resolvedWorkspace := resolvedTestPath(t, workspace)
+
+	t.Run("WriteToGitMetadataSucceeds", func(t *testing.T) {
+		target := filepath.Join(resolvedWorkspace, ".git", "FETCH_HEAD")
+		output, runErr := runSeatbeltShellWrite(t, engine, target, "fetch-head-ok")
+		if runErr != nil {
+			t.Fatalf("git-managed write under .git failed: %v\noutput: %s", runErr, output)
+		}
+		assertSeatbeltFileContent(t, target, "fetch-head-ok")
+	})
+
+	t.Run("WriteToGitHooksIsDenied", func(t *testing.T) {
+		target := filepath.Join(resolvedWorkspace, ".git", "hooks", "pre-commit")
+		output, runErr := runSeatbeltShellWrite(t, engine, target, "backdoor")
+		if runErr == nil {
+			t.Fatalf("write to .git/hooks succeeded, want seatbelt denial\noutput: %s", output)
+		}
+		if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+			t.Fatalf("Lstat(%s) = %v, want not-exist", target, statErr)
+		}
+	})
+
+	t.Run("WriteToGitConfigIsDenied", func(t *testing.T) {
+		target := filepath.Join(resolvedWorkspace, ".git", "config")
+		output, runErr := runSeatbeltShellWrite(t, engine, target, "[credential]\n\thelper = evil\n")
+		if runErr == nil {
+			t.Fatalf("write to .git/config succeeded, want seatbelt denial\noutput: %s", output)
+		}
+		content, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read back .git/config: %v", err)
+		}
+		if string(content) != "[core]\n" {
+			t.Fatalf(".git/config content = %q, want unchanged", content)
+		}
+	})
+}
+
 // runSeatbeltShellWrite launches /bin/sh through the engine's sandbox-exec
 // wrapping and asks it to write content to target. It returns the combined
 // output and the run error so callers can assert success or kernel denial.

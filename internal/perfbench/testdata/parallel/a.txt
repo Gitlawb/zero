@@ -1,0 +1,4 @@
+first line of a.txt
+second line of a.txt
+third line of a.txt
+alpha alpha alpha

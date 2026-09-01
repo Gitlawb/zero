@@ -3,7 +3,6 @@ package openai
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -22,6 +21,19 @@ const (
 	codexAccountHeader     = "chatgpt-account-id"
 	codexOriginatorHeader  = "originator"
 )
+
+// ApplyCodexHeaders applies the non-bearer headers required by ChatGPT's Codex
+// backend. It is shared by runtime completions and auxiliary Codex endpoints
+// such as live model discovery so their authentication cannot drift apart.
+func ApplyCodexHeaders(req *http.Request, accountID, userAgent string) {
+	req.Header.Set(codexOriginatorHeader, codexDefaultOriginator)
+	if accountID = strings.TrimSpace(accountID); accountID != "" {
+		req.Header.Set(codexAccountHeader, accountID)
+	}
+	if userAgent = strings.TrimSpace(userAgent); userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+}
 
 // CodexAccountResolver returns the `chatgpt_account_id` claim for the bearer
 // that is about to be sent on a request. It is invoked once per request
@@ -168,15 +180,13 @@ func (p *CodexProvider) StreamCompletion(ctx context.Context, request zeroruntim
 // openai provider. It sets the three Codex-required headers; the bearer is
 // applied separately by the openai provider's auth path.
 func (p *CodexProvider) injectCodexHeaders(req *http.Request) {
-	req.Header.Set(codexOriginatorHeader, p.originator)
-	if account, ok, err := p.resolveAccount(req.Context()); err == nil && ok && account != "" {
-		req.Header.Set(codexAccountHeader, account)
+	account := ""
+	if resolved, ok, err := p.resolveAccount(req.Context()); err == nil && ok && resolved != "" {
+		account = strings.TrimSpace(resolved)
 	}
-	// Branded User-Agent overrides the openai provider's default. Set last
-	// so a caller that supplies a different UserAgent in custom-headers is
-	// still respected (the openai provider's setExtra already ran before us).
-	if p.userAgent != "" {
-		req.Header.Set("User-Agent", p.userAgent)
+	ApplyCodexHeaders(req, account, p.userAgent)
+	if p.originator != codexDefaultOriginator {
+		req.Header.Set(codexOriginatorHeader, p.originator)
 	}
 }
 
@@ -195,15 +205,4 @@ func (p *CodexProvider) resolveAccount(ctx context.Context) (string, bool, error
 		return account, ok, nil
 	}
 	return "", false, nil
-}
-
-// ValidateAccount is a convenience for tests/callers that want to confirm the
-// account id is the right shape (non-empty, trimmed). It is a no-op helper
-// rather than a constructor check so a Codex provider can be built before the
-// first login completes.
-func ValidateAccount(account string) error {
-	if strings.TrimSpace(account) == "" {
-		return errors.New("openai codex: account id is empty")
-	}
-	return nil
 }

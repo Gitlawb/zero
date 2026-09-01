@@ -4,10 +4,10 @@ package tools
 
 import (
 	"os/exec"
-	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -27,20 +27,16 @@ func hardenProcessLifetime(command *exec.Cmd) {
 		if command.Process == nil {
 			return nil
 		}
-		_ = exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(command.Process.Pid)).Run()
-		return nil
+		return execution.KillProcessTree(command.Process.Pid)
 	}
 }
 
-// applyWindowsShellCommandLine overrides command's raw child command line so
-// commandText reaches cmd.exe unescaped instead of auto-quoted the way
-// exec.Cmd would normally encode a single Args element. Skipped when wrapped
-// is true: the sandbox engine then routes execution through a separate
-// zero-windows-command-runner process, which builds its own child command
-// line from scratch (internal/sandbox/windows_process_windows.go) rather than
-// inheriting whatever this outer exec.Cmd is configured with.
-func applyWindowsShellCommandLine(command *exec.Cmd, commandText string, wrapped bool) {
-	if wrapped {
+// applyWindowsShellCommandLine overrides the cmd.exe fallback's raw child
+// command line so commandText reaches cmd.exe unescaped. PowerShell consumes
+// ordinary argv quoting and must not take this path. Wrapped commands are
+// handled after unwrapping by the Windows sandbox runner.
+func applyWindowsShellCommandLine(command *exec.Cmd, commandText string, wrapped bool, cmdFallback bool) {
+	if wrapped || !cmdFallback {
 		return
 	}
 	command.SysProcAttr = &syscall.SysProcAttr{CmdLine: zeroSandbox.WindowsShellCommandLine(commandText)}

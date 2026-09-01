@@ -2,9 +2,11 @@ package cron
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -71,6 +73,160 @@ func TestStoreAddListGetRemove(t *testing.T) {
 	}
 	if _, err := s.Get(added.ID); err == nil {
 		t.Fatal("Get of removed id must error")
+	}
+}
+
+func TestStoreAddReservesUniqueIDsAcrossConcurrentStores(t *testing.T) {
+	root := t.TempDir()
+	now := func() time.Time { return time.Unix(1000, 0).UTC() }
+	const adds = 32
+
+	start := make(chan struct{})
+	results := make(chan Job, adds)
+	errs := make(chan error, adds)
+	var wg sync.WaitGroup
+	for i := 0; i < adds; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			store := NewStore(StoreOptions{RootDir: root, Now: now})
+			<-start
+			job, err := store.Add(Job{Expr: "* * * * *", Prompt: fmt.Sprintf("job-%d", index)})
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- job
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent Add: %v", err)
+	}
+	seen := make(map[string]struct{}, adds)
+	reader := NewStore(StoreOptions{RootDir: root, Now: now})
+	for job := range results {
+		if _, duplicate := seen[job.ID]; duplicate {
+			t.Errorf("concurrent Add returned duplicate ID %q", job.ID)
+		}
+		seen[job.ID] = struct{}{}
+		persisted, err := reader.Get(job.ID)
+		if err != nil {
+			t.Errorf("Get(%q): %v", job.ID, err)
+			continue
+		}
+		if persisted.Prompt != job.Prompt {
+			t.Errorf("Get(%q).Prompt = %q, want %q", job.ID, persisted.Prompt, job.Prompt)
+		}
+	}
+	if len(seen) != adds {
+		t.Fatalf("unique jobs = %d, want %d", len(seen), adds)
+	}
+}
+
+// TestAddDoesNotLeakReservationToConcurrentRemove reproduces the audit
+// finding that Remove could observe and delete an in-flight Add's bare
+// reservation directory (Mkdir'd but not yet holding metadata.json) and
+// report success — after which Add's writeJob would silently resurrect the
+// directory and persist the job anyway. Add now holds the same per-ID lock
+// Remove takes, from reservation through initial persistence, so a
+// concurrent Remove for that id must wait until the reservation is either
+// committed or torn down, never observing the bare reservation in between.
+func TestAddDoesNotLeakReservationToConcurrentRemove(t *testing.T) {
+	store := newTestStore(t)
+
+	// Simulate the in-flight window Add now holds the lock across: the id is
+	// reserved (its directory exists) but metadata.json has not been written.
+	id, unlock, err := store.reserveID()
+	if err != nil {
+		t.Fatalf("reserveID: %v", err)
+	}
+	if _, statErr := os.Stat(store.jobDir(id)); statErr != nil {
+		t.Fatalf("reservation directory missing: %v", statErr)
+	}
+
+	removeErr := make(chan error, 1)
+	go func() {
+		removeErr <- store.Remove(id)
+	}()
+
+	// Remove cannot proceed past the shared per-ID lock we're holding, so it's
+	// safe to commit the job here, before releasing it: if Remove could race
+	// ahead of this write, it would delete the bare reservation instead of
+	// waiting to observe (and remove) the committed job.
+	job := Job{ID: id, Expr: "* * * * *", Prompt: "job", Status: StatusActive}
+	if err := store.writeJob(job); err != nil {
+		t.Fatalf("writeJob: %v", err)
+	}
+	unlock()
+
+	if err := <-removeErr; err != nil {
+		t.Fatalf("Remove of the committed job: %v", err)
+	}
+	if _, err := os.Stat(store.jobDir(id)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job directory should be gone after Remove: %v", err)
+	}
+	if _, err := store.Get(id); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Get after Remove = %v, want ErrJobNotFound", err)
+	}
+}
+
+// TestReserveIDSerializesOnPerIDLock covers the other half of the audit
+// finding: a second Add attempting the SAME candidate id while the first
+// reservation is still held must block on the shared per-ID lock (not just
+// race the directory Mkdir), so it never ends up writing metadata.json for
+// an id whose first writer is still in flight. It moves on to the next
+// candidate id instead.
+func TestReserveIDSerializesOnPerIDLock(t *testing.T) {
+	store := newTestStore(t)
+
+	id, unlock, err := store.reserveID()
+	if err != nil {
+		t.Fatalf("first reserveID: %v", err)
+	}
+
+	type reservation struct {
+		id  string
+		err error
+	}
+	second := make(chan reservation, 1)
+	go func() {
+		id2, unlock2, err := store.reserveID()
+		if err == nil {
+			unlock2()
+		}
+		second <- reservation{id: id2, err: err}
+	}()
+
+	// The second reserveID cannot observe an id until this lock is released:
+	// it contends on the same per-ID lock file before ever attempting Mkdir.
+	unlock()
+
+	got := <-second
+	if got.err != nil {
+		t.Fatalf("second reserveID: %v", got.err)
+	}
+	if got.id == id {
+		t.Fatalf("second reserveID returned the first id %q while its reservation was still held", got.id)
+	}
+}
+
+func TestWriteReservedJobRemovesReservationOnFailure(t *testing.T) {
+	store := newTestStore(t)
+	job := Job{ID: "reserved", Expr: "* * * * *", Prompt: "job"}
+	if err := os.MkdirAll(filepath.Join(store.jobDir(job.ID), "metadata.json.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.writeReservedJob(job); err == nil {
+		t.Fatal("writeReservedJob error = nil, want metadata write failure")
+	}
+	if _, err := os.Stat(store.jobDir(job.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed reservation still exists: %v", err)
 	}
 }
 

@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/providers"
 )
 
 type providerModelsOptions struct {
@@ -51,12 +53,37 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
 
+	// Apply provider-specific model filtering for catalog-backed profiles.
+	// For example, opencode-go-anthropic-compatible only permits Qwen and
+	// MiniMax model IDs; the raw /zen/go/v1/models endpoint returns many more.
+	if profile.CatalogID != "" {
+		filtered := make([]providermodeldiscovery.Model, 0, len(models))
+		for _, model := range models {
+			if providermodelcatalog.ModelIDAllowedForProvider(profile.CatalogID, model.ID) {
+				filtered = append(filtered, model)
+			}
+		}
+		models = filtered
+	}
+
 	if options.json {
 		items := make([]map[string]any, 0, len(models))
 		for _, model := range models {
 			entry := map[string]any{"id": model.ID}
 			if description := strings.TrimSpace(model.Description); description != "" {
 				entry["description"] = description
+			}
+			if len(model.ReasoningEfforts) > 0 {
+				entry["reasoning_efforts"] = append([]string{}, model.ReasoningEfforts...)
+			}
+			if effort := strings.TrimSpace(model.DefaultReasoningEffort); effort != "" {
+				entry["default_reasoning_effort"] = effort
+			}
+			if len(model.ServiceTiers) > 0 {
+				entry["service_tiers"] = append([]string{}, model.ServiceTiers...)
+			}
+			if tier := strings.TrimSpace(model.DefaultServiceTier); tier != "" {
+				entry["default_service_tier"] = tier
 			}
 			items = append(items, entry)
 		}
@@ -123,7 +150,12 @@ func discoveryCredentialProfile(profile config.ProviderProfile) config.ProviderP
 // the provider's model-listing endpoint with no curated-catalog merge or
 // coding-model filtering, so a custom provider's full model list is returned.
 func defaultDiscoverProviderModels(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{})
+	resolver, loginKey := oauthLoginForProfile(profile)
+	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{
+		OAuthResolver:        resolver,
+		CodexAccountResolver: providers.CodexAccountResolverForLogin(loginKey),
+		UserAgent:            userAgent(),
+	})
 }
 
 func parseProviderModelsArgs(args []string) (providerModelsOptions, bool, error) {

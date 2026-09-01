@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -26,6 +27,8 @@ type RegisterOptions struct {
 	// ConnectTimeout bounds the per-server connect+list at startup. Zero uses
 	// defaultConnectTimeout.
 	ConnectTimeout time.Duration
+	Execution      *execution.Runner
+	WorkspaceRoot  string
 }
 
 // SkippedServer records an MCP server that was not registered because it could
@@ -35,6 +38,10 @@ type RegisterOptions struct {
 type SkippedServer struct {
 	Name string
 	Err  error
+	// UnconfiguredDefault mirrors Server.UnconfiguredDefault: true when this
+	// server is an out-of-the-box default the user never configured, so a
+	// caller can skip warning loudly about it.
+	UnconfiguredDefault bool
 }
 
 type Runtime struct {
@@ -76,7 +83,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 	factory := options.ClientFactory
 	if factory == nil {
 		factory = func(ctx context.Context, server Server) (ToolClient, error) {
-			return Connect(ctx, server)
+			return ConnectWithOptions(ctx, server, ConnectOptions{Execution: options.Execution, WorkspaceRoot: options.WorkspaceRoot})
 		}
 	}
 
@@ -148,7 +155,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 	for index, server := range servers {
 		res := results[index]
 		if res.err != nil {
-			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err})
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault})
 			continue
 		}
 		serverTools, validateErr := buildServerTools(registry, server, res.remote, res.client, options, stagedNames)
@@ -157,7 +164,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 				res.cancel()
 			}
 			_ = res.client.Close()
-			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: validateErr})
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: validateErr, UnconfiguredDefault: server.UnconfiguredDefault})
 			continue
 		}
 		runtime.clients = append(runtime.clients, res.client)
@@ -169,9 +176,11 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 			staged = append(staged, tool)
 		}
 	}
-	for _, tool := range staged {
-		registry.Register(tool)
+	registered := make([]tools.Tool, 0, len(staged))
+	for index := range staged {
+		registered = append(registered, staged[index])
 	}
+	registry.RegisterBatch(registered)
 	return runtime, nil
 }
 
@@ -318,6 +327,24 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 		status = tools.StatusError
 	}
 	output := TextContent(result.Content)
+	// Say what was thrown away. Without this an image-only result reads as
+	// "(empty MCP tool result)", the model concludes the call produced nothing
+	// and retries, and the user never learns an image came back (#823). The note
+	// is appended only when something was actually dropped, so a text-only
+	// result is byte-for-byte what it was before.
+	//
+	// It says retrying cannot RECOVER the payload rather than that a retry
+	// returns the same thing. Each retry is a fresh call, so the server may well
+	// answer differently; what cannot change is that Zero still has nowhere to
+	// put a non-text block. Claiming the response would be identical would be a
+	// promise this code is in no position to make.
+	if dropped := DroppedContentSummary(result.Content); dropped != "" {
+		note := "[zero] this server also returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
+		if output == "" {
+			note = "[zero] this server returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
+		}
+		output = strings.TrimSpace(output + "\n\n" + note)
+	}
 	if output == "" {
 		output = "(empty MCP tool result)"
 	}

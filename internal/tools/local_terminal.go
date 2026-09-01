@@ -23,6 +23,7 @@ func newTerminalSessionTool(options localcontrol.TerminalOptions) Tool {
 	return terminalSessionTool{
 		baseTool: baseTool{
 			name:        "terminal_session",
+			deferred:    true,
 			description: "Launch or control a local virtual terminal session through the local terminal automation helper.",
 			parameters: Schema{
 				Type: "object",
@@ -45,7 +46,8 @@ func newTerminalSessionTool(options localcontrol.TerminalOptions) Tool {
 				Required:             []string{"action", "session"},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectLocalTerminal, "Launches or interacts with a local virtual terminal session."),
+			safety:       localControlSafety(options.Enabled, SideEffectLocalTerminal, "Launches or interacts with a local virtual terminal session."),
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false, ResourceKeys: processResourceKeys},
 		},
 		terminal: localcontrol.NewTerminal(options),
 	}

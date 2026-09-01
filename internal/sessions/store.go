@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 const (
@@ -43,6 +45,9 @@ const (
 	EventSpecDraft          EventType = "spec_draft"
 	EventSpecApproved       EventType = "spec_approved"
 	EventSpecRejected       EventType = "spec_rejected"
+	EventGoalCreated        EventType = "goal_created"
+	EventGoalUpdated        EventType = "goal_updated"
+	EventGoalCleared        EventType = "goal_cleared"
 )
 
 type SessionKind string
@@ -50,6 +55,7 @@ type SessionKind string
 const (
 	SessionKindFork      SessionKind = "fork"
 	SessionKindChild     SessionKind = "child"
+	SessionKindSide      SessionKind = "side"
 	SessionKindSpecDraft SessionKind = "spec-draft"
 	SessionKindSpecImpl  SessionKind = "spec-impl"
 )
@@ -61,6 +67,29 @@ const (
 	SpecStatusApproved SpecStatus = "approved"
 	SpecStatusRejected SpecStatus = "rejected"
 )
+
+type GoalStatus string
+
+const (
+	GoalStatusActive        GoalStatus = "active"
+	GoalStatusPaused        GoalStatus = "paused"
+	GoalStatusBlocked       GoalStatus = "blocked"
+	GoalStatusBudgetLimited GoalStatus = "budget_limited"
+	GoalStatusUsageLimited  GoalStatus = "usage_limited"
+	GoalStatusComplete      GoalStatus = "complete"
+)
+
+type Goal struct {
+	Objective         string     `json:"objective"`
+	Status            GoalStatus `json:"status"`
+	StatusReason      string     `json:"statusReason,omitempty"`
+	TokenBudget       int        `json:"tokenBudget,omitempty"`
+	TokensUsed        int        `json:"tokensUsed,omitempty"`
+	ContinuationCount int        `json:"continuationCount,omitempty"`
+	ContinuationLimit int        `json:"continuationLimit,omitempty"`
+	CreatedAt         string     `json:"createdAt"`
+	UpdatedAt         string     `json:"updatedAt"`
+}
 
 type Metadata struct {
 	SessionID           string      `json:"sessionId"`
@@ -88,6 +117,7 @@ type Metadata struct {
 	SpecRejectReason    string      `json:"specRejectReason,omitempty"`
 	SpecSourceSessionID string      `json:"specSourceSessionId,omitempty"`
 	SpecImplSessionID   string      `json:"specImplSessionId,omitempty"`
+	Goal                *Goal       `json:"goal,omitempty"`
 	CreatedAt           string      `json:"createdAt"`
 	UpdatedAt           string      `json:"updatedAt"`
 	EventCount          int         `json:"eventCount"`
@@ -120,14 +150,17 @@ type CreateInput struct {
 	SpecRejectReason    string
 	SpecSourceSessionID string
 	SpecImplSessionID   string
+	Goal                *Goal
 }
 
 type ForkInput struct {
-	SessionID string
-	Title     string
-	Cwd       string
-	ModelID   string
-	Provider  string
+	SessionID   string
+	SessionKind SessionKind
+	Title       string
+	Cwd         string
+	ModelID     string
+	Provider    string
+	Tag         string
 }
 
 type ChildInput struct {
@@ -274,6 +307,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		SpecRejectReason:    strings.TrimSpace(input.SpecRejectReason),
 		SpecSourceSessionID: strings.TrimSpace(input.SpecSourceSessionID),
 		SpecImplSessionID:   strings.TrimSpace(input.SpecImplSessionID),
+		Goal:                cloneGoal(input.Goal),
 		CreatedAt:           timestamp,
 		UpdatedAt:           timestamp,
 		EventCount:          0,
@@ -352,10 +386,9 @@ func (store *Store) Latest() (*Metadata, error) {
 }
 
 // IsResumableKind reports whether a session kind represents a standalone,
-// user-resumable conversation rather than an agent sub-run. Regular ("") and
-// user fork sessions are resumable; child (specialist/sub-agent) and spec
-// draft/impl sessions are not — each agent task and /spec run creates one, so
-// listing them in the resume picker floods it with non-conversation entries.
+// user-resumable conversation rather than a transient or agent-owned sub-run.
+// Regular ("") and user fork sessions are resumable; side, child, and spec
+// sessions are not, so they do not flood the resume picker.
 func IsResumableKind(kind SessionKind) bool {
 	switch kind {
 	case "", SessionKindFork:
@@ -416,13 +449,21 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if title == "" && parent.Title != "" {
 		title = parent.Title + " (fork)"
 	}
+	kind := input.SessionKind
+	if kind == "" {
+		kind = SessionKindFork
+	}
+	if kind != SessionKindFork && kind != SessionKindSide {
+		return Metadata{}, fmt.Errorf("invalid zero fork session kind %q", kind)
+	}
 	fork, err := store.Create(CreateInput{
 		SessionID:          input.SessionID,
-		SessionKind:        SessionKindFork,
+		SessionKind:        kind,
 		Title:              title,
 		Cwd:                firstNonEmpty(input.Cwd, parent.Cwd),
 		ModelID:            firstNonEmpty(input.ModelID, parent.ModelID),
 		Provider:           firstNonEmpty(input.Provider, parent.Provider),
+		Tag:                input.Tag,
 		ParentSessionID:    parent.SessionID,
 		RootSessionID:      firstNonEmpty(parent.RootSessionID, parent.SessionID),
 		ForkedFromEventID:  last.ID,
@@ -678,7 +719,7 @@ func (store *Store) appendPreparedEventsLocked(sessionID string, inputs []prepar
 // serialized under the same per-session lock as AppendEvent and re-reads the
 // latest metadata under that lock before rewriting, so a concurrent append can't
 // clobber the new title (nor the title clobber a concurrent append's event
-// count/timestamp). UpdatedAt is deliberately left untouched: a retitle is not
+// count/timestamp). UpdatedAt is deliberately left untouched: a rename is not
 // activity, so it must not reorder the session in the resumable list. A blank
 // title is rejected so a failed model generation can never erase a useful
 // first-message title, and an unchanged title is a no-op (no rewrite/fsync).
@@ -704,6 +745,67 @@ func (store *Store) UpdateTitle(sessionID string, title string) (Metadata, error
 		return session, nil
 	}
 	session.Title = trimmed
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, err
+	}
+	return session, nil
+}
+
+// UpdateTitleIfCurrent replaces a session title only when it still matches
+// expected. It lets background automatic naming avoid overwriting a newer manual
+// rename while keeping the check and write under the same per-session lock.
+func (store *Store) UpdateTitleIfCurrent(sessionID string, expected string, title string) (Metadata, bool, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, false, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	trimmed := strings.TrimSpace(title)
+	if trimmed == "" {
+		return Metadata{}, false, fmt.Errorf("zero session title is required")
+	}
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, false, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, false, err
+	}
+	if session.Title != strings.TrimSpace(expected) {
+		return session, false, nil
+	}
+	if session.Title == trimmed {
+		return session, true, nil
+	}
+	session.Title = trimmed
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, false, err
+	}
+	return session, true, nil
+}
+
+// UpdateModel replaces a session's selected model without changing its activity
+// timestamp or event counters. An empty model clears the session override.
+func (store *Store) UpdateModel(sessionID string, modelID string) (Metadata, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	modelID = strings.TrimSpace(modelID)
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if session.ModelID == modelID {
+		return session, nil
+	}
+	session.ModelID = modelID
 	if err := store.writeMetadata(session); err != nil {
 		return Metadata{}, err
 	}
@@ -841,7 +943,7 @@ func (store *Store) writeMetadata(session Metadata) error {
 	if err := writeFileSync(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write zero session metadata: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace zero session metadata: %w", err)
 	}
@@ -904,7 +1006,7 @@ func (store *Store) writeFileAtomicSync(path string, content []byte, perm os.Fil
 	if err := writeFileSync(tmp, content, perm); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}

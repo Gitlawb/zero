@@ -16,7 +16,7 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 	writeTestFile(t, root, "AGENTS.md", strings.Repeat("project rules\n", 200))
 
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 
@@ -28,7 +28,7 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 			Model:        "gpt-4.1",
 		},
 		Registry:      registry,
-		ContextWindow: 10_000,
+		ContextWindow: 20_000,
 	})
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
@@ -46,8 +46,8 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 	if report.ProviderName != "openai" || report.ModelID != "gpt-4.1" || report.APIModel != "gpt-4.1" {
 		t.Fatalf("provider metadata = %#v", report)
 	}
-	if report.ContextWindow != 10_000 {
-		t.Fatalf("ContextWindow = %d, want 10000", report.ContextWindow)
+	if report.ContextWindow != 20_000 {
+		t.Fatalf("ContextWindow = %d, want 20000", report.ContextWindow)
 	}
 	if report.ProjectGuidelineFile != "AGENTS.md" {
 		t.Fatalf("ProjectGuidelineFile = %q, want AGENTS.md", report.ProjectGuidelineFile)
@@ -59,7 +59,7 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 		t.Fatalf("UsedTokens = %d, want > 0", report.UsedTokens)
 	}
 	if report.FreeTokens <= 0 {
-		t.Fatalf("FreeTokens = %d, want > 0", report.FreeTokens)
+		t.Fatalf("FreeTokens = %d, UsedTokens = %d, ContextWindow = %d, want > 0", report.FreeTokens, report.UsedTokens, report.ContextWindow)
 	}
 	if report.FreeTokens+report.UsedTokens != report.ContextWindow {
 		t.Fatalf("free + used = %d, want %d", report.FreeTokens+report.UsedTokens, report.ContextWindow)
@@ -80,7 +80,7 @@ func TestBuildHasStableJSONContractAndCategoryMath(t *testing.T) {
 	writeTestFile(t, root, "ZERO.md", strings.Repeat("zero rules\n", 16))
 
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 
@@ -127,6 +127,35 @@ func TestBuildHasStableJSONContractAndCategoryMath(t *testing.T) {
 	}
 	if len(decoded.Categories) != len(report.Categories) {
 		t.Fatalf("decoded %d categories, want %d", len(decoded.Categories), len(report.Categories))
+	}
+}
+
+func TestBuildReportsInitialDeferredToolSurface(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
+		registry.Register(tool)
+	}
+
+	eager, err := Build(Options{WorkspaceRoot: root, Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, err := Build(Options{WorkspaceRoot: root, Registry: registry, DeferThreshold: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deferred.DeferredToolCount < 3 {
+		t.Fatalf("DeferredToolCount = %d, want at least 3", deferred.DeferredToolCount)
+	}
+	if deferred.AvailableToolCount != eager.ToolCount {
+		t.Fatalf("available tools = %d, want eager total %d", deferred.AvailableToolCount, eager.ToolCount)
+	}
+	if deferred.ToolCount >= deferred.AvailableToolCount {
+		t.Fatalf("initial exposed tools = %d, available = %d; expected a smaller initial surface", deferred.ToolCount, deferred.AvailableToolCount)
+	}
+	if categoryByKey(deferred, CategoryTools).Tokens >= categoryByKey(eager, CategoryTools).Tokens {
+		t.Fatalf("deferred tool schemas did not reduce the initial context")
 	}
 }
 

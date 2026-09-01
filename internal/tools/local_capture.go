@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Gitlawb/zero/internal/imageinput"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,6 +42,7 @@ func newCaptureArtifactTool(options LocalControlArtifactOptions) Tool {
 	return captureArtifactTool{
 		baseTool: baseTool{
 			name:        "capture_artifact",
+			deferred:    true,
 			description: "Capture local browser, desktop, or terminal state into the configured artifact directory.",
 			parameters: Schema{
 				Type: "object",
@@ -58,6 +61,8 @@ func newCaptureArtifactTool(options LocalControlArtifactOptions) Tool {
 				AdditionalProperties: false,
 			},
 			safety: localControlSafety(enabled, SideEffectLocalControl, "Captures local browser, desktop, or terminal state into the configured artifact directory."),
+			// Captures write artifacts under the configured directory.
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false},
 		},
 		browser:      localcontrol.NewBrowser(options.Browser),
 		desktop:      localcontrol.NewDesktop(options.Desktop),
@@ -342,9 +347,18 @@ func captureOKResult(driver string, request captureArtifactRequest, path string,
 	if helperOutput != "" {
 		output += "\n\n" + helperOutput
 	}
+	// Attach the artifact itself. Without this the model is told a screenshot
+	// exists and cannot look at it, which is the whole point of asking for one.
+	// A PDF or an unreadable file simply yields no image and the text stands on
+	// its own, so a capture is never failed over the attachment.
+	var images []zeroruntime.ImageBlock
+	if image, err := imageinput.LoadFile(path, ""); err == nil {
+		images = []zeroruntime.ImageBlock{image}
+	}
 	return Result{
 		Status: StatusOK,
 		Output: output,
+		Images: images,
 		Meta: map[string]string{
 			"artifact_path": path,
 			"action":        request.action,

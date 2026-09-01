@@ -106,7 +106,7 @@ func TUIHint(err error) string {
 func CLIHint(err error) string {
 	switch Classify(err) {
 	case Auth:
-		return "API key rejected — run `zero auth` or set the provider's API key, then retry"
+		return "API key rejected — run `zero setup`, `zero auth openrouter` for OpenRouter, or set the provider's API key"
 	case RateLimit:
 		return "Rate limited — wait a moment, or switch model with --model"
 	case Connectivity:

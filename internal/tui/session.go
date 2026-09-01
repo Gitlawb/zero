@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -28,8 +30,13 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 		return m, nil
 	}
 
+	title := strings.TrimSpace(m.pendingSessionTitle)
+	manuallyNamed := title != ""
+	if !manuallyNamed {
+		title = tuiSessionTitle(prompt)
+	}
 	session, err := m.sessionStore.Create(sessions.CreateInput{
-		Title:    tuiSessionTitle(prompt),
+		Title:    title,
 		Cwd:      m.cwd,
 		ModelID:  m.modelName,
 		Provider: m.providerName,
@@ -38,7 +45,15 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 		return m, err
 	}
 	m.activeSession = session
+	m.pendingSessionTitle = ""
 	m.sessionEvents = []sessions.Event{}
+	if manuallyNamed {
+		if m.titledSessions == nil {
+			m.titledSessions = map[string]bool{}
+		}
+		m.titledSessions[session.SessionID] = true
+	}
+	m = m.syncPeerIdentity()
 	return m, nil
 }
 
@@ -54,6 +69,7 @@ func (m model) startNewSession() model {
 	previousID := m.activeSession.SessionID
 
 	m.activeSession = sessions.Metadata{}
+	m.pendingSessionTitle = ""
 	m.sessionEvents = nil
 
 	// Reset the per-session usage + compaction display so the new session starts
@@ -80,6 +96,7 @@ func (m model) startNewSession() model {
 	// documents, or queued text.
 	m.pendingImages = nil
 	m.pendingImageLabels = nil
+	m.pendingImageThumbnails = nil
 	m.pendingDocuments = nil
 	m.queuedMessage = ""
 	// The remembered /retry attachment snapshot belongs to the previous session
@@ -105,6 +122,7 @@ func (m model) startNewSession() model {
 		m = updated
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", cleared)})
 	}
+	m = m.syncPeerIdentity()
 	return m
 }
 
@@ -216,6 +234,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// the already-active session, whose loops belong to it, not a "previous" one.
 	previousID := m.activeSession.SessionID
 	m.activeSession = *session
+	m.pendingSessionTitle = ""
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	if m.providerName == "" {
 		m.providerName = session.Provider
@@ -239,6 +258,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// frontier sends the whole resumed history to native scrollback in one
 	// batch — scrollable, selectable, and O(1) for every later frame.
 	m.resetFlushFrontier("· resumed ·")
+	m = m.syncPeerIdentity()
 	return m, ""
 }
 
@@ -246,11 +266,15 @@ func (m model) sessionPrompt(prompt string) string {
 	if m.activeSession.SessionID == "" || len(m.sessionEvents) == 0 {
 		return prompt
 	}
-	return sessions.FormatExecPrompt(prompt, sessions.PreparedExec{
+	formatted := sessions.FormatExecPrompt(prompt, sessions.PreparedExec{
 		Mode:          sessions.ModeResume,
 		Session:       m.activeSession,
 		ContextEvents: append([]sessions.Event{}, m.sessionEvents...),
 	})
+	if m.activeSession.SessionKind == sessions.SessionKindSide {
+		return btwContextBoundary + "\n\n" + formatted
+	}
+	return formatted
 }
 
 func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
@@ -275,6 +299,9 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 	}
 	if session == nil {
 		return nil, fmt.Errorf("zero session not found: %s", args)
+	}
+	if !sessions.IsResumableKind(session.SessionKind) {
+		return nil, fmt.Errorf("zero session is not resumable: %s", args)
 	}
 	return session, nil
 }
@@ -309,18 +336,26 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	if recorded := strings.TrimSpace(session.Provider); recorded != "" && !strings.EqualFold(recorded, m.providerName) {
 		providerLine += "  (recorded: " + recorded + ")"
 	}
+	lines := []string{
+		"id: " + session.SessionID,
+		"title: " + displayValue(session.Title, "untitled"),
+		modelLine,
+		providerLine,
+		fmt.Sprintf("events: %d", eventCount),
+	}
+	if session.Goal != nil {
+		goalLine := "goal: " + string(session.Goal.Status) + " — " + session.Goal.Objective
+		if session.Goal.Status == sessions.GoalStatusActive {
+			goalLine += " (run /goal resume to continue)"
+		}
+		lines = append(lines, goalLine)
+	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Resumed Zero session",
 		Status: commandStatusOK,
 		Sections: []commandSection{{
 			Title: "Session",
-			Lines: []string{
-				"id: " + session.SessionID,
-				"title: " + displayValue(session.Title, "untitled"),
-				modelLine,
-				providerLine,
-				fmt.Sprintf("events: %d", eventCount),
-			},
+			Lines: lines,
 		}},
 	})
 }
@@ -376,17 +411,16 @@ func (m model) newSessionPicker() *commandPicker {
 		if !m.sessionHasResumableContent(meta.SessionID) {
 			continue
 		}
-		// Lead with the timestamp so same-titled sessions (e.g. the same first
-		// prompt run several times) are visually distinct; the id (right, faint)
-		// stays for reference and is what selection actually resolves.
+		// Lead with a fixed-width timestamp so titles form one scannable column.
+		// The raw id remains the selection/search value but stays out of the row:
+		// rendering it consumed half the picker and truncated the useful title.
 		label := displayValue(meta.Title, "untitled")
 		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
-			label = when + "  " + label
+			label = sessionPickerLabel(when, label)
 		}
 		items = append(items, pickerItem{
 			Label: label,
 			Value: meta.SessionID,
-			Meta:  meta.SessionID,
 		})
 	}
 	if len(items) == 0 {
@@ -399,6 +433,12 @@ func (m model) newSessionPicker() *commandPicker {
 		allItems: append([]pickerItem{}, items...),
 		selected: 0,
 	}
+}
+
+const sessionPickerTimeWidth = len("Jan 02 15:04")
+
+func sessionPickerLabel(when, title string) string {
+	return fmt.Sprintf("%-*s  %s", sessionPickerTimeWidth, when, title)
 }
 
 // sessionHasResumableContent reports whether a session has anything worth
@@ -463,7 +503,7 @@ func (m model) sessionHasResumableContent(sessionID string) bool {
 // anything worth resuming: a tool call/result, or a non-user message with real
 // content (not the no-output guardrail stop). It is the pure core of
 // sessionHasResumableContent so callers that already hold the events (e.g. the
-// /retitle scan) don't re-read them.
+// session picker refresh) don't re-read them.
 func eventsHaveResumableContent(events []sessions.Event) bool {
 	for _, event := range events {
 		switch event.Type {
@@ -519,6 +559,15 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 		switch event.Type {
 		case sessions.EventMessage:
 			role := strings.ToLower(payloadString(payload, "role"))
+			if role == "user" && payloadString(payload, "origin") == "cross_session" {
+				from := payloadString(payload, "from")
+				content := payloadString(payload, "displayContent")
+				if content == "" {
+					content = payloadString(payload, "content")
+				}
+				rows = append(rows, peerTranscriptRow(from, content))
+				continue
+			}
 			switch role {
 			case "ask_user":
 				rows = append(rows, askUserTranscriptRow(askUserRequestFromPayload(payload)))
@@ -535,7 +584,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			}
 			switch role {
 			case "user":
-				rows = append(rows, transcriptRow{kind: rowUser, text: content})
+				rows = append(rows, transcriptRow{kind: rowUser, text: content, attachments: attachmentSummaryFromPayload(payload)})
 			case "assistant":
 				// A persisted assistant message was a turn's final answer. Tool/timing
 				// counters were not recorded; the completion line omits those segments.
@@ -593,14 +642,20 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				status = tools.StatusOK
 			}
 			output := payloadString(payload, "output")
+			detail := payloadString(payload, "displayPreview")
+			if detail == "" {
+				detail = output
+			}
 			rows = append(rows, transcriptRow{
-				kind:         rowToolResult,
-				id:           effectiveToolRowID(id, callSeq[id]),
-				text:         fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
-				tool:         name,
-				status:       status,
-				detail:       output,
-				changedFiles: payloadStringSlice(payload, "changedFiles"),
+				kind:            rowToolResult,
+				id:              effectiveToolRowID(id, callSeq[id]),
+				text:            fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
+				tool:            name,
+				status:          status,
+				detail:          detail,
+				meta:            payloadStringMap(payload, "meta"),
+				changedFiles:    payloadStringSlice(payload, "changedFiles"),
+				changeSummaries: payloadExecutionChanges(payload, "changeSummaries"),
 			})
 		case sessions.EventError:
 			if message := payloadString(payload, "message"); message != "" {
@@ -792,6 +847,39 @@ func payloadStringSlice(payload map[string]any, key string) []string {
 	}
 }
 
+func payloadStringMap(payload map[string]any, key string) map[string]string {
+	value, ok := payloadMap(payload, key)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(value))
+	for name, raw := range value {
+		if text, ok := raw.(string); ok {
+			out[name] = text
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func payloadExecutionChanges(payload map[string]any, key string) []execution.Change {
+	value, ok := payload[key]
+	if !ok {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var changes []execution.Change
+	if err := json.Unmarshal(data, &changes); err != nil {
+		return nil
+	}
+	return changes
+}
+
 func payloadBool(payload map[string]any, key string) bool {
 	value := payload[key]
 	switch typed := value.(type) {
@@ -802,6 +890,28 @@ func payloadBool(payload map[string]any, key string) bool {
 	default:
 		return false
 	}
+}
+
+func attachmentSummaryFromPayload(payload map[string]any) transcriptAttachmentSummary {
+	attachments, ok := payloadMap(payload, "attachments")
+	if !ok {
+		return transcriptAttachmentSummary{}
+	}
+	return transcriptAttachmentSummary{
+		images:    payloadNonNegativeInt(attachments, "images"),
+		documents: payloadNonNegativeInt(attachments, "documents"),
+	}
+}
+
+func payloadNonNegativeInt(payload map[string]any, key string) int {
+	value, ok := payload[key].(float64)
+	if !ok || value <= 0 || value != math.Trunc(value) {
+		return 0
+	}
+	if value > persistedAttachmentCountLimit {
+		return persistedAttachmentCountLimit
+	}
+	return int(value)
 }
 
 func payloadMap(payload map[string]any, key string) (map[string]any, bool) {

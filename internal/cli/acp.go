@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/acp"
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -25,6 +27,8 @@ Usage:
 Not meant to be run interactively — point your editor's ACP / external-agent
 setting at "zero acp".`
 
+var acpSignalContext = signalContext
+
 // runACP serves ACP over stdio so an editor can drive ZERO's agent core. It
 // speaks JSON-RPC 2.0 (newline-delimited JSON) on stdin/stdout; stderr stays free
 // for human-readable diagnostics. The session lifecycle maps onto ZERO's own
@@ -40,9 +44,14 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		}
 	}
 
-	conn := acp.NewConn(deps.stdin, stdout)
+	// The process's own stdin belongs exclusively to this Conn for the life of
+	// the command, so cancellation may close it to interrupt an idle read.
+	conn := acp.NewOwnedConn(deps.stdin, stdout)
 	acp.NewAgent(conn, acp.Deps{
 		ResolveConfig: deps.resolveConfig,
+		DiscoverModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return defaultDiscoverProviderModels(ctx, discoveryCredentialProfile(profile))
+		},
 		// deps.newProvider is wrapped in fillAppDeps to apply the stored API key,
 		// so ACP is authenticated for apiKeyStored profiles like every other
 		// surface — no ACP-specific credential handling needed.
@@ -68,9 +77,9 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		AgentInfo:            acp.Implementation{Name: "zero", Version: version},
 	})
 
-	ctx, stop := signalContext()
+	ctx, stop := acpSignalContext()
 	defer stop()
-	if err := conn.Serve(ctx); err != nil && ctx.Err() == nil {
+	if err := conn.Serve(ctx); err != nil {
 		return writeAppError(stderr, "acp: "+err.Error(), exitCrash)
 	}
 	return exitSuccess

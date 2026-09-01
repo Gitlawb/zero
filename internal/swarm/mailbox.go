@@ -8,16 +8,18 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Mailbox is a per-agent, per-team message inbox persisted as a JSON array on
 // disk at <baseDir>/<team>/inboxes/<agent>.json, written atomically under a
-// lock file. It is hardened for untrusted input:
+// advisory lock. It is hardened for untrusted input:
 //
 //   - inbox files and their parent dirs are owner-only (0600/0700);
-//   - every write takes an exclusive lock file (bounded retry, stale-break);
+//   - every write takes an exclusive advisory lock (bounded retry);
 //   - message bodies and whole inboxes are size-capped (fail closed on oversize);
 //   - team/agent names are sanitized so a name can never escape the base dir;
 //   - malformed inbox JSON is rejected rather than silently reset (fail closed).
@@ -32,13 +34,15 @@ type Mailbox struct {
 	MaxMessages int
 	// LockTimeout bounds how long Send/MarkRead wait for the inbox lock.
 	LockTimeout time.Duration
+
+	// rename is used to override the rename operation in tests.
+	rename func(src, dst string) error
 }
 
 const (
 	defaultMaxMessageBytes = 64 * 1024 // 64 KiB per message
 	defaultMaxMessages     = 1000      // per inbox
 	defaultLockTimeout     = 5 * time.Second
-	lockStaleAfter         = 30 * time.Second
 	inboxFileMode          = 0o600
 	inboxDirMode           = 0o700
 )
@@ -200,7 +204,7 @@ func (m *Mailbox) Send(team, recipient string, msg Message) error {
 	if err := m.ensureInboxDir(path); err != nil {
 		return err
 	}
-	release, err := acquireLock(path+".lock", m.lockTimeout())
+	release, err := acquireLock(m.BaseDir, path+".lock", m.lockTimeout())
 	if err != nil {
 		return err
 	}
@@ -214,7 +218,7 @@ func (m *Mailbox) Send(team, recipient string, msg Message) error {
 		return fmt.Errorf("%w: %d messages", ErrMailboxFull, len(messages))
 	}
 	messages = append(messages, msg)
-	return atomicWriteJSON(path, messages)
+	return m.atomicWriteJSON(path, messages)
 }
 
 // ReadAndConsume reads the recipient's inbox and marks every previously-unread
@@ -227,12 +231,12 @@ func (m *Mailbox) ReadAndConsume(team, recipient string) ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The lock file lives beside the inbox; create the dir so it can be taken
+	// The stable lock file lives beside the inbox; create the dir so it can be taken
 	// even on first read of a not-yet-existing inbox.
 	if err := m.ensureInboxDir(path); err != nil {
 		return nil, err
 	}
-	release, err := acquireLock(path+".lock", m.lockTimeout())
+	release, err := acquireLock(m.BaseDir, path+".lock", m.lockTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +260,7 @@ func (m *Mailbox) ReadAndConsume(team, recipient string) ([]Message, error) {
 		}
 	}
 	if changed {
-		if err := atomicWriteJSON(path, messages); err != nil {
+		if err := m.atomicWriteJSON(path, messages); err != nil {
 			return nil, err
 		}
 	}
@@ -299,7 +303,7 @@ func (m *Mailbox) readLocked(path string) ([]Message, error) {
 
 // atomicWriteJSON writes data as pretty JSON to a sibling temp file (0600) then
 // renames it over path, so a reader never observes a partial write.
-func atomicWriteJSON(path string, data any) error {
+func (m *Mailbox) atomicWriteJSON(path string, data any) error {
 	encoded, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("swarm: encode inbox: %w", err)
@@ -322,67 +326,24 @@ func atomicWriteJSON(path string, data any) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("swarm: close temp inbox: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := m.renameWithRetry(tmpName, path); err != nil {
 		return fmt.Errorf("swarm: commit inbox: %w", err)
 	}
 	return nil
 }
 
-// lockSeq makes each lock token unique within the process even when two
-// goroutines acquire in the same nanosecond.
-var lockSeq atomic.Uint64
-
-// acquireLock takes an exclusive lock by creating lockPath with O_EXCL. It
-// retries with a short backoff until timeout, breaking a lock whose file is
-// older than lockStaleAfter (so a crashed holder cannot deadlock the swarm).
-//
-// Each holder writes a unique token into the lock file and release is
-// OWNERSHIP-AWARE: it removes the lock only if it still holds our token. After a
-// stale-break another writer may legitimately own the lock; unconditionally
-// removing it would let a third writer in and create split-brain writers that
-// can corrupt or drop mailbox updates.
-func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
-	token := fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), lockSeq.Add(1))
+// acquireLock takes an exclusive advisory lock through a stable lock file. It
+// retries with a short backoff until timeout. The kernel releases the lock when
+// a holder exits, so crash recovery never moves or deletes the canonical path.
+func acquireLock(root, lockPath string, timeout time.Duration) (func(), error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, inboxFileMode)
+		lock, err := lockutil.TryAcquireFileLockAt(root, lockPath)
 		if err == nil {
-			// Record our ownership token; the exclusive create already holds the
-			// lock, so a write error only weakens diagnostics, not safety.
-			_, _ = f.WriteString(token)
-			f.Close()
-			var released bool
-			return func() {
-				if released {
-					return
-				}
-				released = true
-				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					os.Remove(lockPath)
-				}
-			}, nil
+			return func() { _ = lock.Release() }, nil
 		}
-		if !isLockContended(err) {
+		if !errors.Is(err, lockutil.ErrLockHeld) {
 			return nil, fmt.Errorf("swarm: acquire lock: %w", err)
-		}
-		// Lock held: break it if stale, otherwise wait. Reclaim ATOMICALLY via
-		// rename-with-verify. The previous content==content check read the same file
-		// twice microseconds apart, so it was always "unchanged" and gave no
-		// protection — two waiters could both Remove the lock while a third recreated
-		// it via O_EXCL, leaving two live holders. Renaming the file aside means only
-		// one racer wins the rename of a given inode; the moved file's mtime is then
-		// re-checked stale before deletion, and if a holder rotated a fresh lock in
-		// the gap it is renamed back rather than stolen. (AUDIT-M13)
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
-			reclaimed := lockPath + ".stale." + token
-			if os.Rename(lockPath, reclaimed) == nil {
-				if rinfo, rerr := os.Stat(reclaimed); rerr == nil && time.Since(rinfo.ModTime()) > lockStaleAfter {
-					os.Remove(reclaimed) // genuinely stale — drop it
-				} else {
-					_ = os.Rename(reclaimed, lockPath) // young again — restore, don't steal
-				}
-			}
-			continue
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("swarm: timed out acquiring lock %s", filepath.Base(lockPath))
@@ -391,4 +352,8 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		// contention (Windows file ops are slow; a coarse sleep starves waiters).
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+func (m *Mailbox) renameWithRetry(src, dst string) error {
+	return fsutil.RenameWithRetry(src, dst, m.rename)
 }

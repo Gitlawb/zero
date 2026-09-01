@@ -2,8 +2,8 @@ package tui
 
 import "strings"
 
-// theme_palettes.go is the sole home of raw color hex in the TUI: every palette
-// literal and the ordered theme registry live here, so theme.go stays hex-free
+// theme_palettes.go is the sole home of raw color hex in the TUI: every UI and
+// code palette literal and the ordered theme registry live here, so theme.go stays hex-free
 // (just the palette struct, buildTheme, and the resolved tuiTheme). Adding a theme
 // is a new palette{...} literal plus one themeRegistry entry — nothing else.
 //
@@ -12,6 +12,30 @@ import "strings"
 // and faintest ≥ AA on panel; onAccent ≥ AA on accent; addInk/delInk readable on
 // their diff bands and word spans; the muted>faint>faintest ramp monotonic toward
 // the surface; and selBg visibly separated from panel while its label stays legible.
+
+type systemSurfacePalette struct {
+	selection string
+	add       string
+	del       string
+	addWord   string
+	delWord   string
+}
+
+var darkSystemSurfaces = systemSurfacePalette{
+	selection: "#2b2f2d",
+	add:       "#212922",
+	del:       "#3c170f",
+	addWord:   "#212922",
+	delWord:   "#3c170f",
+}
+
+var lightSystemSurfaces = systemSurfacePalette{
+	selection: "#e7e9e7",
+	add:       "#dafbe1",
+	del:       "#ffebe9",
+	addWord:   "#aceebb",
+	delWord:   "#ffcecb",
+}
 
 // darkPalette is the original Lime palette: a near-black chat surface with one
 // lime accent. bg (#070708) is the terminal's own canvas — deliberately never
@@ -333,6 +357,38 @@ var everforestPalette = palette{
 	cardPerm:  "#96896b",
 }
 
+// neonPalette is a neon-on-black color scheme: pitch-black surface with
+// neon green ink and a cyan accent.
+var neonPalette = palette{
+	panel:     "#050b06",
+	promptBg:  "#0c180d",
+	line:      "#1c3820",
+	line2:     "#2c5230",
+	ink:       "#c9ffd2",
+	muted:     "#80db8f",
+	faint:     "#6eca7d",
+	faintest:  "#74c468", // brightened from #58af69 so line numbers quantize to #87d75f and stay AA on the xterm-green addBg (#005f00); still dimmer than faint, keeping the ramp monotonic
+	accent:    "#00e5c8",
+	green:     "#39ff6a",
+	red:       "#ff4d6d",
+	amber:     "#f4ff3a",
+	blue:      "#22e0ff",
+	gitAdd:    "#4fdc6a",
+	gitDel:    "#ff6f80",
+	addBg:     "#083c10", // quantizes to xterm green #005f00 instead of the same gray as delBg, keeping add/del rows distinct on 256-color terminals
+	delBg:     "#3c0810", // quantizes to xterm red #5f0000 (see addBg)
+	addBgWord: "#147828", // quantizes to xterm green #008700, distinct from both addBg's #005f00 and delBgWord's red
+	delBgWord: "#74202e", // quantizes to xterm red #870000 (see addBgWord)
+	permBg:    "#2a2a0c",
+	selBg:     "#123a1e",
+	addInk:    "#ecffdc", // quantizes to #ffffd7, which keeps AA on addBgWord's xterm #008700 (the old #c8ffcf quantized to #d7ffd7 at 4.29:1)
+	delInk:    "#ffd0d6",
+	onAccent:  "#001410",
+	cardRun:   "#1f8a6e",
+	cardErr:   "#9a4042", // raised from #8a2f42 for the 3:1 non-text border threshold against the panel (2.43:1 before), holding after xterm-256 quantization too
+	cardPerm:  "#8a8a1f",
+}
+
 // lightPalette is dark-on-light: a warm cream surface (so cards lift off the
 // terminal page, which Zero never paints) with near-black ink and an olive-lime
 // accent that keeps the brand identity while clearing AA on the light panel. The
@@ -401,9 +457,200 @@ var solarizedLightPalette = palette{
 	cardPerm:  "#c4ae63",
 }
 
+// dunePalette is a warm sand-and-cream color scheme: sand/cream surface,
+// charcoal ink, and a soft amber accent.
+var dunePalette = palette{
+	panel:     "#f2e9d8",
+	promptBg:  "#e9dcbf",
+	line:      "#d9c7a3",
+	line2:     "#c2a97c",
+	ink:       "#2b241a",
+	muted:     "#473e32",
+	faint:     "#554a3a",
+	faintest:  "#655648",
+	accent:    "#724028", // darkened from #8f5215 for AA on selBg (5.46:1) that also survives ANSI-256 downsampling (quantizes to #444444, 6.47:1 on quantized selBg; the previous #7c4712 quantized to #875f00 at 3.81:1)
+	green:     "#38572a",
+	red:       "#872d24", // darkened from #963328 so delBg contrast survives ANSI-256 downsampling (true 6.57:1, 256 7.86:1)
+	amber:     "#6d4600",
+	blue:      "#2f5680", // darkened from #3d6a9e for AA on selBg (was 3.61:1, now 4.90:1)
+	gitAdd:    "#38572a",
+	gitDel:    "#963328",
+	addBg:     "#dcecd0",
+	delBg:     "#f5dbd5",
+	addBgWord: "#b9dc9e",
+	delBgWord: "#eebba9",
+	permBg:    "#f0dfae",
+	selBg:     "#e0cf98",
+	addInk:    "#264018",
+	delInk:    "#5c1810",
+	onAccent:  "#fdf6ea",
+	cardRun:   "#b08a4a",
+	cardErr:   "#b57560",
+	cardPerm:  "#c2a04a",
+}
+
+// codeThemes provide syntax-token colors for named palettes. Zero continues to
+// use its cached Chroma lexers; this compact table avoids initializing an
+// unrelated global syntax-theme registry just to select a palette.
+var codeThemes = map[themeMode]codeSyntaxTheme{
+	"dracula": {
+		text:         codeStyle("#f8f8f2"),
+		keyword:      codeStyle("#ff79c6"),
+		typeName:     codeStyle("#8be9fd"),
+		function:     codeStyle("#50fa7b"),
+		name:         codeStyle("#50fa7b"),
+		string:       codeStyle("#f1fa8c"),
+		number:       codeStyle("#bd93f9"),
+		comment:      codeStyle("#6272a4"),
+		preprocessor: codeStyle("#ff79c6"),
+		operator:     codeStyle("#ff79c6"),
+		punctuation:  codeStyle("#f8f8f2"),
+	},
+	"nord": {
+		text:         codeStyle("#d8dee9"),
+		keyword:      boldCodeStyle("#81a1c1"),
+		typeName:     codeStyle("#81a1c1"),
+		function:     codeStyle("#88c0d0"),
+		name:         codeStyle("#8fbcbb"),
+		string:       codeStyle("#a3be8c"),
+		number:       codeStyle("#b48ead"),
+		comment:      italicCodeStyle("#616e87"),
+		preprocessor: codeStyle("#5e81ac"),
+		operator:     codeStyle("#81a1c1"),
+		punctuation:  codeStyle("#eceff4"),
+	},
+	"gruvbox": {
+		text:         codeStyle("#ebdbb2"),
+		keyword:      codeStyle("#fe8019"),
+		typeName:     codeStyle("#fabd2f"),
+		function:     codeStyle("#fabd2f"),
+		name:         boldCodeStyle("#b8bb26"),
+		string:       codeStyle("#b8bb26"),
+		number:       codeStyle("#d3869b"),
+		comment:      italicCodeStyle("#928374"),
+		preprocessor: codeStyle("#8ec07c"),
+		operator:     codeStyle("#fe8019"),
+		punctuation:  codeStyle("#ebdbb2"),
+	},
+	"tokyo-night": {
+		text:         codeStyle("#c0caf5"),
+		keyword:      codeStyle("#bb9af7"),
+		typeName:     codeStyle("#41a6b5"),
+		function:     codeStyle("#7aa2f7"),
+		name:         codeStyle("#9ece6a"),
+		string:       codeStyle("#9ece6a"),
+		number:       codeStyle("#e0af68"),
+		comment:      italicCodeStyle("#414868"),
+		preprocessor: italicCodeStyle("#414868"),
+		operator:     boldCodeStyle("#9ece6a"),
+		punctuation:  codeStyle("#c0caf5"),
+	},
+	"catppuccin": {
+		text:         codeStyle("#cdd6f4"),
+		keyword:      codeStyle("#cba6f7"),
+		typeName:     codeStyle("#f38ba8"),
+		function:     codeStyle("#89b4fa"),
+		name:         codeStyle("#f9e2af"),
+		string:       codeStyle("#a6e3a1"),
+		number:       codeStyle("#fab387"),
+		comment:      italicCodeStyle("#6c7086"),
+		preprocessor: italicCodeStyle("#6c7086"),
+		operator:     boldCodeStyle("#89dceb"),
+		punctuation:  codeStyle("#cdd6f4"),
+	},
+	"one-dark": {
+		text:        codeStyle("#abb2bf"),
+		keyword:     codeStyle("#c678dd"),
+		typeName:    codeStyle("#e5c07b"),
+		function:    boldCodeStyle("#61afef"),
+		name:        codeStyle("#e5c07b"),
+		string:      codeStyle("#98c379"),
+		number:      codeStyle("#d19a66"),
+		comment:     codeStyle("#7f848e"),
+		operator:    codeStyle("#56b6c2"),
+		punctuation: codeStyle("#abb2bf"),
+	},
+	"solarized-dark": {
+		text:         codeStyle("#839496"),
+		keyword:      codeStyle("#719e07"),
+		typeName:     codeStyle("#dc322f"),
+		function:     codeStyle("#268bd2"),
+		name:         codeStyle("#b58900"),
+		string:       codeStyle("#2aa198"),
+		number:       codeStyle("#2aa198"),
+		comment:      codeStyle("#586e75"),
+		preprocessor: codeStyle("#719e07"),
+		operator:     codeStyle("#719e07"),
+		punctuation:  codeStyle("#839496"),
+	},
+	"solarized-light": {
+		text:        codeStyle("#586e75"),
+		keyword:     codeStyle("#859900"),
+		typeName:    boldCodeStyle("#586e75"),
+		function:    codeStyle("#586e75"),
+		name:        codeStyle("#cb4b16"),
+		string:      codeStyle("#586e75"),
+		number:      boldCodeStyle("#586e75"),
+		comment:     italicCodeStyle("#93a1a1"),
+		operator:    codeStyle("#586e75"),
+		punctuation: codeStyle("#586e75"),
+	},
+	"rose-pine": {
+		text:        codeStyle("#e0def4"),
+		keyword:     codeStyle("#31748f"),
+		typeName:    codeStyle("#9ccfd8"),
+		function:    codeStyle("#ebbcba"),
+		name:        codeStyle("#ebbcba"),
+		string:      codeStyle("#f6c177"),
+		number:      codeStyle("#f6c177"),
+		comment:     codeStyle("#6e6a86"),
+		operator:    codeStyle("#908caa"),
+		punctuation: codeStyle("#908caa"),
+	},
+	"everforest": {
+		text:         codeStyle("#d3c6aa"),
+		keyword:      codeStyle("#a7c080"),
+		typeName:     codeStyle("#dbbc7f"),
+		function:     codeStyle("#7fbbb3"),
+		name:         codeStyle("#83c092"),
+		string:       codeStyle("#a7c080"),
+		number:       codeStyle("#e67e80"),
+		comment:      italicCodeStyle("#a4aea3"),
+		preprocessor: codeStyle("#dbbc7f"),
+		operator:     codeStyle("#7fbbb3"),
+		punctuation:  codeStyle("#d3c6aa"),
+	},
+	"neon": {
+		text:         codeStyle("#c9ffd2"),
+		keyword:      boldCodeStyle("#00e5c8"),
+		typeName:     codeStyle("#22e0ff"),
+		function:     codeStyle("#39ff6a"),
+		name:         codeStyle("#39ff6a"),
+		string:       codeStyle("#f4ff3a"),
+		number:       codeStyle("#ff4d6d"),
+		comment:      italicCodeStyle("#74c468"),
+		preprocessor: codeStyle("#00e5c8"),
+		operator:     codeStyle("#22e0ff"),
+		punctuation:  codeStyle("#c9ffd2"),
+	},
+	"dune": {
+		text:         codeStyle("#2b241a"),
+		keyword:      boldCodeStyle("#724028"),
+		typeName:     codeStyle("#2f5680"),
+		function:     codeStyle("#38572a"),
+		name:         codeStyle("#2f5680"),
+		string:       codeStyle("#38572a"),
+		number:       codeStyle("#872d24"),
+		comment:      italicCodeStyle("#655648"),
+		preprocessor: codeStyle("#6d4600"),
+		operator:     codeStyle("#724028"),
+		punctuation:  codeStyle("#2b241a"),
+	},
+}
+
 // themeEntry is one registered theme: Name is the /theme value + ZERO_THEME/--theme
 // token (lowercase, kebab), Label is the picker display text, and IsDark groups the
-// picker (Dark/Light sections) and drives which built-in `auto` resolves to.
+// picker into Dark/Light sections.
 type themeEntry struct {
 	Name    string
 	Label   string
@@ -414,7 +661,7 @@ type themeEntry struct {
 // themeRegistry is the ordered source of truth for every selectable theme. Order is
 // the picker order: all Dark themes first, then all Light, with the brand
 // dark/light built-ins leading their groups. themeModes (theme_select.go) prepends
-// `auto` to this. Append here to add a theme — nothing else needs editing.
+// `system` to this. Append here to add a theme — nothing else needs editing.
 var themeRegistry = []themeEntry{
 	{Name: "dark", Label: "dark", Palette: darkPalette, IsDark: true},
 	{Name: "dracula", Label: "Dracula", Palette: draculaPalette, IsDark: true},
@@ -426,13 +673,13 @@ var themeRegistry = []themeEntry{
 	{Name: "solarized-dark", Label: "Solarized Dark", Palette: solarizedDarkPalette, IsDark: true},
 	{Name: "rose-pine", Label: "Rosé Pine", Palette: rosePinePalette, IsDark: true},
 	{Name: "everforest", Label: "Everforest", Palette: everforestPalette, IsDark: true},
+	{Name: "neon", Label: "Neon", Palette: neonPalette, IsDark: true},
 	{Name: "light", Label: "light", Palette: lightPalette, IsDark: false},
 	{Name: "solarized-light", Label: "Solarized Light", Palette: solarizedLightPalette, IsDark: false},
+	{Name: "dune", Label: "Dune", Palette: dunePalette, IsDark: false},
 }
 
-// themeByName indexes the registry by lowercased name for O(1) lookup. Built as a
-// var initializer (not init()) so it is ready before themeModes' package-var
-// initializer calls themeNames().
+// themeByName indexes the registry by lowercased name for O(1) lookup.
 var themeByName = func() map[string]themeEntry {
 	byName := make(map[string]themeEntry, len(themeRegistry))
 	for _, entry := range themeRegistry {
@@ -445,13 +692,4 @@ var themeByName = func() map[string]themeEntry {
 func lookupTheme(name string) (themeEntry, bool) {
 	entry, ok := themeByName[strings.ToLower(strings.TrimSpace(name))]
 	return entry, ok
-}
-
-// themeNames returns every registered theme name in registry (picker) order.
-func themeNames() []string {
-	names := make([]string, len(themeRegistry))
-	for index, entry := range themeRegistry {
-		names[index] = entry.Name
-	}
-	return names
 }

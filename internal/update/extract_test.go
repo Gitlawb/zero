@@ -215,3 +215,96 @@ func TestFindByBasenameSearchesRecursively(t *testing.T) {
 		t.Fatalf("findByBasename = %q, want empty", notFound)
 	}
 }
+
+func symlinksSupported(t *testing.T) bool {
+	dir := t.TempDir()
+	err := os.Symlink("target", filepath.Join(dir, "link"))
+	return err == nil
+}
+
+func TestExtractTarGzAllowsSafeSymlink(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	gw := gzip.NewWriter(file)
+	tw := tar.NewWriter(gw)
+
+	h1 := &tar.Header{
+		Name:     "link.txt",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "target.txt",
+	}
+	if err := tw.WriteHeader(h1); err != nil {
+		t.Fatalf("WriteHeader link: %v", err)
+	}
+	h2 := &tar.Header{
+		Name:     "target.txt",
+		Typeflag: tar.TypeReg,
+		Mode:     0o644,
+		Size:     12,
+	}
+	if err := tw.WriteHeader(h2); err != nil {
+		t.Fatalf("WriteHeader target: %v", err)
+	}
+	if _, err := tw.Write([]byte("hello symbol")); err != nil {
+		t.Fatalf("Write target: %v", err)
+	}
+
+	tw.Close()
+	gw.Close()
+	file.Close()
+
+	destDir := filepath.Join(dir, "extracted")
+	if err := extractArchive(archivePath, destDir); err != nil {
+		t.Fatalf("extractArchive: %v", err)
+	}
+
+	targetPath := filepath.Join(destDir, "link.txt")
+	gotLink, err := os.Readlink(targetPath)
+	if err != nil {
+		t.Fatalf("Readlink: %v", err)
+	}
+	if gotLink != "target.txt" {
+		t.Fatalf("link target = %q, want %q", gotLink, "target.txt")
+	}
+}
+
+func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
+	if !symlinksSupported(t) {
+		t.Skip("symlinks not supported")
+	}
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "archive.tar.gz")
+
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	gw := gzip.NewWriter(file)
+	tw := tar.NewWriter(gw)
+
+	h1 := &tar.Header{
+		Name:     "link.txt",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "../../../outside.txt",
+	}
+	if err := tw.WriteHeader(h1); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	tw.Close()
+	gw.Close()
+	file.Close()
+
+	destDir := filepath.Join(dir, "extracted")
+	if err := extractArchive(archivePath, destDir); err == nil {
+		t.Fatal("expected error extracting escaping symlink")
+	}
+}

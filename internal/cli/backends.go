@@ -125,7 +125,9 @@ func backendLifecycleSnapshot(deps appDeps) (zerocommands.BackendLifecycleSnapsh
 		return zerocommands.BackendLifecycleSnapshot{}, fmt.Errorf("failed to resolve workspace: %w", err)
 	}
 
-	cfg, err := deps.resolveMCPConfig(cwd)
+	// Reporting/enumeration only, never spawns a server, so it is left ungated
+	// (excludeProject=false) to mirror the doctor/status hooks and plugins reports.
+	cfg, err := deps.resolveMCPConfig(cwd, false)
 	if err != nil {
 		return zerocommands.BackendLifecycleSnapshot{}, err
 	}
@@ -152,7 +154,9 @@ func backendDoctorReport(deps appDeps) (zerocommands.BackendDoctorReport, error)
 		return zerocommands.BackendDoctorReport{}, fmt.Errorf("failed to resolve workspace: %w", err)
 	}
 
-	cfg, err := deps.resolveMCPConfig(cwd)
+	// Reporting/enumeration only, never spawns a server, so it is left ungated
+	// (excludeProject=false) to mirror the doctor/status hooks and plugins reports.
+	cfg, err := deps.resolveMCPConfig(cwd, false)
 	if err != nil {
 		return zerocommands.BackendDoctorReport{}, err
 	}

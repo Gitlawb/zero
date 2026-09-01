@@ -148,11 +148,29 @@ func specialistAutonomy(permissionMode string) string {
 // read-only "low". An unsafe parent still yields "high" (full unsafe), and a
 // non-member (Task specialist) is unchanged. Authority stays sandbox-confined.
 func memberAwareAutonomy(permissionMode string, member bool) string {
+	pm := strings.TrimSpace(permissionMode)
+	if pm == "plan" || pm == "spec-draft" {
+		return "low"
+	}
 	autonomy := specialistAutonomy(permissionMode)
 	if member && autonomy == "low" {
 		return "member"
 	}
 	return autonomy
+}
+
+// childPermissionModeFlag returns the --permission-mode value to pass a child
+// process, or "" when the child's tool set must be driven by --auto alone.
+// Only plan and spec-draft require the flag: resolveExecPermissionMode prefers
+// --permission-mode over --auto, so forwarding auto/ask/member/unsafe would
+// discard the member rung and widen headless ask children.
+func childPermissionModeFlag(permissionMode string) string {
+	switch strings.TrimSpace(permissionMode) {
+	case "plan", "spec-draft":
+		return strings.TrimSpace(permissionMode)
+	default:
+		return ""
+	}
 }
 
 // permissionModeUnsafe mirrors agent.PermissionModeUnsafe without importing the
@@ -167,10 +185,13 @@ const permissionModeUnsafe = "unsafe"
 var readOnlySpecialistTools = map[string]bool{
 	"read_file":          true,
 	"read_minified_file": true,
-	"list_directory":     true,
-	"grep":               true,
-	"glob":               true,
-	"update_plan":        true,
+	// Reads one image file through read_file's own path scoping and mutates
+	// nothing, so it carries the same auto-approval as the other pure readers.
+	"view_image":     true,
+	"list_directory": true,
+	"grep":           true,
+	"glob":           true,
+	"update_plan":    true,
 }
 
 // IsReadOnlySpecialist reports whether the named specialist resolves to a
@@ -263,6 +284,15 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	args = append(args, promptArgs...)
 	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
 	args = append(args, "--auto", memberAwareAutonomy(input.PermissionMode, input.MemberAutonomy), "--output-format", "stream-json")
+	// Only plan/spec-draft need an explicit --permission-mode on the child.
+	// resolveExecPermissionMode short-circuits on --permission-mode and ignores
+	// --auto, so propagating auto/ask/member/unsafe would strip member write
+	// tools (member + --permission-mode auto) or widen headless ask children
+	// past the read-only --auto low tool set. Plan/spec-draft cannot be
+	// expressed via --auto alone, so they still require the flag.
+	if permMode := childPermissionModeFlag(input.PermissionMode); permMode != "" {
+		args = append(args, "--permission-mode", permMode)
+	}
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -315,6 +345,11 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	args := []string{"exec", "--resume", sessionID}
 	args = append(args, promptArgs...)
 	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
+	// See BuildArgs: only plan/spec-draft propagate --permission-mode so --auto
+	// remains the authority for member/auto/ask/unsafe child resolution.
+	if permMode := childPermissionModeFlag(input.PermissionMode); permMode != "" {
+		args = append(args, "--permission-mode", permMode)
+	}
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -827,7 +862,7 @@ func runChildProcess(ctx context.Context, binaryPath string, args []string, prog
 				// ExitCode() is -1 when the child was terminated by a signal rather
 				// than exiting. ProcessState.String() is the portable description
 				// (e.g. "signal: killed") — capture it so the failure isn't opaque.
-				signalDesc = exitErr.ProcessState.String()
+				signalDesc = exitErr.String()
 			}
 		} else {
 			return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: -1, Started: started}, fmt.Errorf("run specialist child: %w", err)

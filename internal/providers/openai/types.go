@@ -6,12 +6,15 @@ type chatCompletionRequest struct {
 	Tools               []toolDefinition `json:"tools,omitempty"`
 	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
 	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
+	ServiceTier         string           `json:"service_tier,omitempty"`
 	Stream              bool             `json:"stream"`
 	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
 	// PromptCacheKey asks the backend to route the request to a replica that
 	// already holds this conversation's prefix in its prompt cache (the OpenAI
 	// `prompt_cache_key` parameter). Omitted when the caller carries no session
-	// identity or when ZERO_DISABLE_PROMPT_CACHE_KEY is set.
+	// identity, when the provider was constructed with DisablePromptCacheKey
+	// (openai-compatible gateways that reject unknown fields), or when
+	// ZERO_DISABLE_PROMPT_CACHE_KEY is set.
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
@@ -106,7 +109,8 @@ type usage struct {
 }
 
 type promptTokenDetails struct {
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 type completionTokenDetails struct {

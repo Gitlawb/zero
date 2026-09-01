@@ -27,6 +27,10 @@ func ApplyLinuxNetworkDeny() error {
 	return applySeccompFilter(networkDenySeccompFilter(), "network deny")
 }
 
+func ApplyLinuxIsolatedNetworkGuard() error {
+	return applySeccompFilter(isolatedNetworkGuardFilter(), "isolated network guard")
+}
+
 func applySeccompFilter(filters []sockFilter, name string) error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("seccomp: set no_new_privs: %w", err)

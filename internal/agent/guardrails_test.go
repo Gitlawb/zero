@@ -138,7 +138,7 @@ func TestRunResetsEmptyTurnCounterOnToolCall(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -166,6 +166,37 @@ func TestRunResetsEmptyTurnCounterOnToolCall(t *testing.T) {
 	}
 	if len(provider.requests) != 6 {
 		t.Fatalf("expected 6 turns, got %d", len(provider.requests))
+	}
+}
+
+// The whole point of #702's fix: the unknown-session error's normalized
+// signature must not vary with the session id, so a model probing ids 1, 2,
+// 3, … produces one repeated signature the failure guard can count. If the id
+// leaked into the first 80 normalized chars, each probe would reset the streak
+// and the halt would never fire.
+func TestUnknownExecSessionErrorSignatureIsIDInvariant(t *testing.T) {
+	a := errorSignature(tools.UnknownExecSessionError(1))
+	b := errorSignature(tools.UnknownExecSessionError(999999))
+	if a != b {
+		t.Fatalf("unknown-session signature varies with id:\n  %q\n  %q", a, b)
+	}
+}
+
+// End to end: with an id-invariant signature, probing a different unknown id
+// each turn now trips the repeated-failure halt at toolFailureStopAt, where
+// before the fix it never would.
+func TestUnknownExecSessionProbingTripsFailureHalt(t *testing.T) {
+	var state guardState
+	var stoppedAt int
+	for i := 1; i <= toolFailureStopAt; i++ {
+		out := state.observeToolResult(tools.WriteStdinToolName, true, tools.UnknownExecSessionError(i))
+		if out.Stop {
+			stoppedAt = i
+			break
+		}
+	}
+	if stoppedAt != toolFailureStopAt {
+		t.Fatalf("probing distinct unknown ids stopped at %d, want %d", stoppedAt, toolFailureStopAt)
 	}
 }
 
@@ -226,19 +257,16 @@ func TestRunDoesNotCountDroppedToolCallTurnsAsEmpty(t *testing.T) {
 }
 
 func TestRunInjectsPlanNotCalledReminderForMultiStepTask(t *testing.T) {
+	const expectedThreshold = 7
+	if planReminderToolThreshold != expectedThreshold {
+		t.Fatalf("plan reminder tool threshold = %d, want %d", planReminderToolThreshold, expectedThreshold)
+	}
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
-	provider := &mockProvider{
-		turns: [][]zeroruntime.StreamEvent{
-			toolTurn("call-1", "read_file", `{"path":"notes.txt"}`), // turn 1: other tool call
-			toolTurn("call-2", "read_file", `{"path":"notes.txt"}`), // turn 2: still no update_plan
-			toolTurn("call-3", "read_file", `{"path":"notes.txt"}`), // turn 3: reminder fires here
-			textTurn("done"),
-		},
-	}
+	provider := &mockProvider{turns: append(repeatedReadTurns(expectedThreshold), textTurn("done"))}
 
 	result, err := Run(context.Background(), "go", provider, Options{
 		Registry: registry,
@@ -256,11 +284,49 @@ func TestRunInjectsPlanNotCalledReminderForMultiStepTask(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotInjectPlanReminderForBoundedToolSequence(t *testing.T) {
+	const expectedThreshold = 7
+	root := t.TempDir()
+	writeAgentTestFile(t, root+"/notes.txt", "alpha")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
+
+	provider := &mockProvider{turns: append(repeatedReadTurns(expectedThreshold-1), textTurn("done"))}
+	result, err := Run(context.Background(), "go", provider, Options{Registry: registry, MaxTurns: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if count := countUserMessagesContaining(result.Messages, planNotCalledReminderMarker); count != 0 {
+		t.Fatalf("bounded tool sequence must not draw a plan reminder, got %d", count)
+	}
+}
+
+func TestPlanReminderWaitsForTurnThresholdAfterEnoughToolCalls(t *testing.T) {
+	state := guardState{totalToolCalls: 7}
+	if got := state.planReminder(6); got != "" {
+		t.Fatalf("planReminder(6) = %q, want no reminder before turn threshold", got)
+	}
+	if state.notCalledReminderSent {
+		t.Fatal("early turn marked the not-called reminder as sent")
+	}
+}
+
+func repeatedReadTurns(count int) [][]zeroruntime.StreamEvent {
+	turns := make([][]zeroruntime.StreamEvent, 0, count)
+	for range count {
+		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
+	}
+	return turns
+}
+
 func TestRunDoesNotInjectPlanReminderForTrivialTask(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -288,7 +354,7 @@ func TestRunDoesNotInjectNotCalledReminderWhenPlanUsed(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(tools.NewUpdatePlanTool())
 
 	provider := &mockProvider{
@@ -318,7 +384,7 @@ func TestRunInjectsStalePlanReminderAfterManyToolCalls(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(tools.NewUpdatePlanTool())
 
 	// Turn 1 calls update_plan (so the not-called reminder never triggers), then
@@ -352,7 +418,7 @@ func TestRunStalePlanReminderIsOneShotPerInterval(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(tools.NewUpdatePlanTool())
 
 	turns := [][]zeroruntime.StreamEvent{
@@ -387,7 +453,7 @@ func TestRunInjectsToolOnlyProgressReminder(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	turns := make([][]zeroruntime.StreamEvent, 0, toolOnlyProgressReminderAt+1)
 	for i := 0; i < toolOnlyProgressReminderAt; i++ {

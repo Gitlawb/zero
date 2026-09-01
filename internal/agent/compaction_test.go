@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -58,12 +59,15 @@ func TestCompactKeepsSystemAndPreservedSuffix(t *testing.T) {
 	if last.Content != "most recent question" {
 		t.Fatalf("expected most recent message preserved, got %q", last.Content)
 	}
-	// The summarized middle excludes system and preserved suffix.
-	if len(captured) != 3 {
-		t.Fatalf("expected 3 summarized messages, got %d: %#v", len(captured), captured)
+	// The summarizer receives a compact semantic projection of the middle rather
+	// than reconstructible raw tool output.
+	if len(captured) != 1 || captured[0].Role != zeroruntime.MessageRoleUser {
+		t.Fatalf("expected one projected summary input, got %#v", captured)
 	}
-	if captured[0].Content != "first question" {
-		t.Fatalf("expected oldest non-system message first, got %#v", captured[0])
+	for _, want := range []string{"[user #0]", "first question", "[assistant #1]", "first answer", "second question"} {
+		if !strings.Contains(captured[0].Content, want) {
+			t.Fatalf("projected summary input missing %q: %q", want, captured[0].Content)
+		}
 	}
 	// Compaction must shrink the conversation.
 	if estimateTokens(result) >= estimateTokens(messages) {
@@ -271,6 +275,27 @@ func TestEstimateToolDefTokensCountsDefinitions(t *testing.T) {
 	if estimateToolDefTokens(one) <= 0 {
 		t.Fatal("a tool definition (name + description + schema) should estimate > 0 tokens")
 	}
+	typed := append([]zeroruntime.ToolDefinition(nil), one...)
+	typed[0].Type = zeroruntime.ToolDefinitionFreeform
+	if estimateToolDefTokens(typed) <= estimateToolDefTokens(one) {
+		t.Fatal("a non-empty tool type must increase the estimated request cost")
+	}
+	for _, test := range []struct {
+		name   string
+		format zeroruntime.ToolDefinitionFormat
+	}{
+		{name: "type", format: zeroruntime.ToolDefinitionFormat{Type: "grammar"}},
+		{name: "syntax", format: zeroruntime.ToolDefinitionFormat{Syntax: "lark"}},
+		{name: "definition", format: zeroruntime.ToolDefinitionFormat{Definition: "start: WORD"}},
+	} {
+		t.Run("format "+test.name, func(t *testing.T) {
+			formatted := append([]zeroruntime.ToolDefinition(nil), one...)
+			formatted[0].Format = &test.format
+			if estimateToolDefTokens(formatted) <= estimateToolDefTokens(one) {
+				t.Fatalf("a non-empty format %s must increase the estimated request cost", test.name)
+			}
+		})
+	}
 	two := append(append([]zeroruntime.ToolDefinition{}, one...), zeroruntime.ToolDefinition{
 		Name:        "write_file",
 		Description: "Write contents to a file in the workspace.",
@@ -336,7 +361,7 @@ func TestRunProactiveCompactionTriggers(t *testing.T) {
 	}
 
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	result, err := Run(context.Background(), strings.Repeat("y", 8000), provider, Options{
 		Registry:               registry,
@@ -364,7 +389,7 @@ func TestRunNoCompactionWhenContextWindowZero(t *testing.T) {
 		},
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	_, err := Run(context.Background(), strings.Repeat("y", 8000), provider, Options{
 		Registry:       registry,
@@ -379,6 +404,43 @@ func TestRunNoCompactionWhenContextWindowZero(t *testing.T) {
 	}
 }
 
+func TestMaybeCompactStopsAfterSupersededReadsReachThreshold(t *testing.T) {
+	body := strings.Repeat("same source line\n", 1000)
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		toolCallWithArgs("old", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "old", Content: body},
+		toolCallWithArgs("new", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "new", Content: body},
+	}
+	pruned, reclaimed := pruneSupersededReadResults(messages)
+	if reclaimed <= 0 {
+		t.Fatal("test setup did not reclaim superseded read output")
+	}
+	prunedSize := estimateTokens(pruned)
+	if estimateTokens(messages) <= prunedSize {
+		t.Fatal("test setup does not cross the compaction threshold")
+	}
+
+	provider := &summarizeRecordingProvider{}
+	state := &compactionState{
+		enabled:      true,
+		threshold:    prunedSize,
+		preserveLast: 2,
+	}
+	got := state.maybeCompact(context.Background(), provider, messages, nil)
+
+	if provider.summarizeCalls != 0 {
+		t.Fatalf("cheap pruning should avoid the summarizer, got %d calls", provider.summarizeCalls)
+	}
+	if state.lowWaterMark != prunedSize {
+		t.Fatalf("lowWaterMark = %d, want %d", state.lowWaterMark, prunedSize)
+	}
+	if !strings.Contains(got[2].Content, "superseded identical") || got[4].Content != body {
+		t.Fatalf("unexpected pruned messages: %#v", got)
+	}
+}
+
 // reactiveProvider builds up history with a tool call on turn 1, then errors
 // with a context-limit message on turn 2 (once the history is large enough that
 // compaction can shrink it), then succeeds on the same-turn retry. Summary
@@ -388,6 +450,7 @@ type reactiveProvider struct {
 	summarizeCalls int
 	turnRequests   int
 	failedOnce     bool
+	connectError   bool
 	bigText        string
 	finalText      string
 }
@@ -409,11 +472,47 @@ func (provider *reactiveProvider) StreamCompletion(ctx context.Context, request 
 		return streamEvents(toolTurnWithText(provider.bigText, "1", "read_file", `{"path":"x"}`)), nil
 	case provider.turnRequests == 2 && !provider.failedOnce:
 		provider.failedOnce = true
+		if provider.connectError {
+			return nil, errors.New("context_length_exceeded")
+		}
 		return streamEvents([]zeroruntime.StreamEvent{
 			{Type: zeroruntime.StreamEventError, Error: "This model's maximum context length is 1000 tokens. Please reduce the length of the messages."},
 		}), nil
 	default:
 		return streamEvents(textTurn(provider.finalText)), nil
+	}
+}
+
+func TestRunConnectErrorCompactionRecordsReplacementPlan(t *testing.T) {
+	provider := &reactiveProvider{
+		connectError: true,
+		bigText:      strings.Repeat("b", 6000),
+		finalText:    "recovered",
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
+	recorder := trace.NewRecorder("connect-compaction", "run-1", "test")
+	var contextPlans []ContextBreakdown
+
+	result, err := Run(context.Background(), strings.Repeat("z", 6000), provider, Options{
+		Registry:               registry,
+		PermissionMode:         PermissionModeUnsafe,
+		ContextWindow:          10_000_000,
+		CompactionPreserveLast: 2,
+		Trace:                  recorder,
+		OnContext: func(breakdown ContextBreakdown) {
+			contextPlans = append(contextPlans, breakdown)
+		},
+	})
+	if err != nil || result.FinalAnswer != "recovered" {
+		t.Fatalf("connect-error compaction failed: result=%#v err=%v", result, err)
+	}
+	if len(contextPlans) != 3 || contextPlans[2].MessageTokens >= contextPlans[1].MessageTokens {
+		t.Fatalf("replacement request context not reported: %#v", contextPlans)
+	}
+	gotTrace := recorder.Finish()
+	if len(gotTrace.PrefixHashes) != 4 || gotTrace.PrefixHashes[3].InvalidationReason != "unchanged" {
+		t.Fatalf("replacement request trace not recorded: %#v", gotTrace.PrefixHashes)
 	}
 }
 
@@ -427,7 +526,9 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 	// the compaction closure. read_file also returns a sizeable result that
 	// bloats the history.
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
+	recorder := trace.NewRecorder("reactive-compaction", "run-1", "test")
+	var contextPlans []ContextBreakdown
 
 	// ContextWindow large enough that proactive compaction never triggers, so
 	// only the reactive path can save the run.
@@ -436,6 +537,10 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 		PermissionMode:         PermissionModeUnsafe,
 		ContextWindow:          10_000_000,
 		CompactionPreserveLast: 2,
+		Trace:                  recorder,
+		OnContext: func(breakdown ContextBreakdown) {
+			contextPlans = append(contextPlans, breakdown)
+		},
 	})
 	if err != nil {
 		t.Fatalf("expected reactive compaction to recover the run, got error: %v", err)
@@ -445,6 +550,25 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 	}
 	if provider.summarizeCalls == 0 {
 		t.Fatal("expected reactive compaction to invoke the summarizer")
+	}
+	if len(contextPlans) != 3 {
+		t.Fatalf("main request context callbacks = %d, want initial turns plus compacted retry", len(contextPlans))
+	}
+	if contextPlans[2].MessageTokens >= contextPlans[1].MessageTokens {
+		t.Fatalf("retry context was not updated after compaction: before=%d after=%d", contextPlans[1].MessageTokens, contextPlans[2].MessageTokens)
+	}
+	gotTrace := recorder.Finish()
+	if len(gotTrace.PrefixHashes) != 4 {
+		t.Fatalf("prefix evidence count = %d, want two turns, compaction, and retry: %#v", len(gotTrace.PrefixHashes), gotTrace.PrefixHashes)
+	}
+	if gotTrace.PrefixHashes[0].InvalidationReason != "initial" ||
+		gotTrace.PrefixHashes[1].InvalidationReason != "unchanged" ||
+		gotTrace.PrefixHashes[2].InvalidationReason != "initial" ||
+		gotTrace.PrefixHashes[3].InvalidationReason != "unchanged" {
+		t.Fatalf("unexpected request-specific invalidation evidence: %#v", gotTrace.PrefixHashes)
+	}
+	if gotTrace.PrefixHashes[2].CompletePrefixHash == gotTrace.PrefixHashes[1].CompletePrefixHash {
+		t.Fatalf("compaction fingerprint reused the main request prefix: %#v", gotTrace.PrefixHashes)
 	}
 }
 
@@ -491,7 +615,7 @@ func TestRunReactiveRetryDoesNotDoubleEmitText(t *testing.T) {
 		finalText:   "recovered",
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	var deltas []string
 	result, err := Run(context.Background(), strings.Repeat("z", 6000), provider, Options{
@@ -581,7 +705,7 @@ func TestCompactNeverProducesConsecutiveUserMessages(t *testing.T) {
 }
 
 func TestRecoverNoopDoesNotConsumeReactiveBudget(t *testing.T) {
-	st := newCompactionState(Options{ContextWindow: 1000, CompactionPreserveLast: 2})
+	st := newCompactionState(Options{ContextWindow: 1000, CompactionPreserveLast: 2}, nil)
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
 		{Type: zeroruntime.StreamEventText, Content: "SUMMARY"}, {Type: zeroruntime.StreamEventDone},
 	}}}
@@ -628,7 +752,7 @@ func TestRecoverNoopDoesNotConsumeReactiveBudget(t *testing.T) {
 }
 
 func TestRecoverDisabledIsNoop(t *testing.T) {
-	st := newCompactionState(Options{ContextWindow: 0})
+	st := newCompactionState(Options{ContextWindow: 0}, nil)
 	msgs := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "x"}}
 	called := false
 	// recover must not invoke the provider/summarize when disabled, even on a

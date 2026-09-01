@@ -197,14 +197,6 @@ func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
 	return modelsDevCached
 }
 
-// resetModelsDevCacheForTest clears the process-level cache memoization and
-// disables the overlay.
-func resetModelsDevCacheForTest() {
-	modelsDevOnce = sync.Once{}
-	modelsDevCached = nil
-	modelsDevEnabled.Store(false)
-}
-
 // RefreshModelsDevCache fetches models.dev/api.json into the on-disk cache
 // when the cache is missing or older than modelsDevRefreshAfter. It is safe to
 // call fire-and-forget from startup (use a goroutine); it never affects the
@@ -241,9 +233,12 @@ func RefreshModelsDevCache(ctx context.Context) error {
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("modelregistry: models.dev fetch: HTTP %d", response.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, modelsDevFetchLimit))
+	data, err := io.ReadAll(io.LimitReader(response.Body, modelsDevFetchLimit+1))
 	if err != nil {
 		return err
+	}
+	if len(data) > modelsDevFetchLimit {
+		return fmt.Errorf("modelregistry: models.dev response is %d bytes, exceeds %d byte limit", len(data), modelsDevFetchLimit)
 	}
 	// Validate before persisting: a bad body must never clobber a good cache.
 	if _, err := parseModelsDev(data); err != nil {

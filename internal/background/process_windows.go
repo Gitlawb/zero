@@ -3,23 +3,50 @@
 package background
 
 import (
-	"os"
+	"fmt"
 	"os/exec"
-	"strconv"
+
+	"github.com/Gitlawb/zero/internal/execution"
+	"golang.org/x/sys/windows"
 )
 
-// ConfigureChildProcessGroup is a no-op on Windows: terminateProcess uses
-// `taskkill /T` to kill the whole process tree, so no launch-time process-group
+// stillActiveExitCode is the documented GetExitCodeProcess value for a process
+// that has not terminated. x/sys/windows does not expose Windows' STILL_ACTIVE
+// constant.
+const stillActiveExitCode uint32 = 259
+
+var terminateProcessForTest = terminateProcess
+
+// ConfigureChildProcessGroup is a no-op on Windows: process-tree termination is
+// delegated to execution.TerminateProcessTree, so no launch-time process-group
 // setup is required (the POSIX build sets Setpgid here instead).
-func ConfigureChildProcessGroup(cmd *exec.Cmd) {}
+func ConfigureChildProcessGroup(cmd *exec.Cmd) { execution.ConfigureProcessGroup(cmd) }
 
 func terminateProcess(pid int) error {
-	if err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).Run(); err == nil {
-		return nil
-	}
-	process, err := os.FindProcess(pid)
+	return execution.TerminateProcessTree(pid, 0, 0)
+}
+
+// terminateOwnedProcess asks taskkill /T to terminate the tree rooted at cmd,
+// with KillProcessTree's direct Process.Kill fallback if taskkill fails. taskkill
+// can discover descendants only while the root PID still exists; unlike a POSIX
+// process group, a Windows tree has no independently addressable identity after
+// its root exits.
+func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
+	var (
+		alreadyExited bool
+		terminateErr  error
+	)
+	err := cmd.Process.WithHandle(func(handle uintptr) {
+		var exitCode uint32
+		if windows.GetExitCodeProcess(windows.Handle(handle), &exitCode) == nil {
+			alreadyExited = exitCode != stillActiveExitCode
+		}
+		// Keep the exact process identity pinned while the PID-based taskkill
+		// operation runs, preventing the PID from being recycled underneath it.
+		terminateErr = terminateProcessForTest(cmd.Process.Pid)
+	})
 	if err != nil {
-		return err
+		return false, fmt.Errorf("pin process %d for termination: %w", cmd.Process.Pid, err)
 	}
-	return process.Kill()
+	return alreadyExited, terminateErr
 }

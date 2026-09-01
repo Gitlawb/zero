@@ -14,10 +14,6 @@ type editFileTool struct {
 	scope         PathScope
 }
 
-func NewEditFileTool(workspaceRoot string) Tool {
-	return NewScopedEditFileTool(workspaceRoot, nil)
-}
-
 func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 	return editFileTool{
 		baseTool: baseTool{
@@ -34,7 +30,8 @@ func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"path", "old_string", "new_string"},
 				AdditionalProperties: false,
 			},
-			safety: promptSafety(SideEffectWrite, "Edits files in place."),
+			safety:       promptSafety(SideEffectWrite, "Edits files in place."),
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -76,6 +73,11 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// now could silently corrupt the newer content.
 	if cerr := options.FileTracker.CheckConflict(absolutePath, contentBytes); cerr != nil {
 		return errorResult(fileConflictMessage(relativePath))
+	}
+	if options.FileTracker != nil {
+		if _, tracked := options.FileTracker.Version(absolutePath); !tracked {
+			return errorResult(fileUnseenMessage(relativePath))
+		}
 	}
 	content := string(contentBytes)
 	occurrences := strings.Count(content, oldString)
@@ -134,6 +136,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if !replaceAll && occurrences > 1 {
 		return errorResult(fmt.Sprintf("Error: old_string matches %d locations in %s. Either make old_string more specific, or pass replace_all: true to replace every occurrence.", occurrences, relativePath))
 	}
+	if options.FileTracker != nil && !allOccurrencesSeen(options.FileTracker, absolutePath, content, oldString, replaceAll) {
+		return errorResult(fileUnseenMessage(relativePath))
+	}
 
 	updated := strings.Replace(content, oldString, newString, 1)
 	replacedCount := 1
@@ -144,12 +149,14 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if updated == content {
 		return okResult("No changes: new_string is identical to old_string.")
 	}
+	editedSpans := replacementByteSpans(content, oldString, newString, replaceAll)
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
+	modelKnownContent := updated
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker re-baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
@@ -157,7 +164,29 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := os.Stat(absolutePath)
-	options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
+	if updated == modelKnownContent {
+		// OUR edit, so we know precisely which lines moved: RecordEdit carries
+		// across the reads this edit did not disturb instead of dropping them.
+		//
+		// Record would drop all of them, and did — a file read in three pieces
+		// lost every piece to a single two-line edit, and the next six edits into
+		// regions that had been read were refused as unseen. See RecordEdit.
+		//
+		// This SUBSUMES the previouslySeenWhole special-case #956 added here.
+		// That branch re-recorded 1..total when the file had been read whole;
+		// RecordEdit does the same thing one level down (its seenWhole arm
+		// re-baselines as a single covering observation) and additionally keeps
+		// the partial reads the old else-branch discarded. Two copies of the
+		// rule would drift, and only one of them sees the pre-edit observation.
+		options.FileTracker.RecordEdit(absolutePath, []byte(content), []byte(updated), newInfo)
+		for _, span := range editedSpans {
+			options.FileTracker.RecordSeenBytes(absolutePath, span.start, span.end, len(updated))
+		}
+	} else {
+		// A formatter rewrote the file after us. We no longer know which line
+		// holds what was read, so the conservative drop is the right answer here.
+		options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
+	}
 
 	suffix := ""
 	if replacedCount != 1 {
@@ -171,4 +200,55 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// summary, so the red/green diff costs zero model tokens.
 	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: boundedUnifiedDiff(relativePath, content, updated)}
 	return result
+}
+
+// replacementByteSpans returns every half-open post-edit byte range whose exact
+// contents came from newString. Offsets are translated from the original with a
+// cumulative delta so replace_all remains correct after earlier replacements.
+func replacementByteSpans(content, oldString, newString string, replaceAll bool) []lineRange {
+	spans := make([]lineRange, 0, 1)
+	offset := 0
+	delta := 0
+	for {
+		index := strings.Index(content[offset:], oldString)
+		if index < 0 {
+			return spans
+		}
+		index += offset
+		start := index + delta
+		spans = append(spans, lineRange{start: start, end: start + len(newString)})
+		if !replaceAll {
+			return spans
+		}
+		offset = index + len(oldString)
+		delta += len(newString) - len(oldString)
+	}
+}
+
+func allOccurrencesSeen(tracker *FileTracker, path, content, oldString string, replaceAll bool) bool {
+	offset := 0
+	for {
+		index := strings.Index(content[offset:], oldString)
+		if index < 0 {
+			return true
+		}
+		index += offset
+		start, end := lineSpanForOffset(content, index, len(oldString))
+		if !tracker.SeenBytes(path, index, index+len(oldString)) && !tracker.SeenRange(path, start, end) {
+			return false
+		}
+		if !replaceAll {
+			return true
+		}
+		offset = index + len(oldString)
+	}
+}
+
+func lineSpanForOffset(content string, offset, length int) (int, int) {
+	if offset < 0 {
+		return 1, 1
+	}
+	start := strings.Count(content[:offset], "\n") + 1
+	end := start + strings.Count(content[offset:min(len(content), offset+length)], "\n")
+	return start, end
 }

@@ -142,16 +142,21 @@ func (writer *execEventWriter) checkpoint(event sessions.Event) {
 }
 
 func (writer *execEventWriter) toolResult(result agent.ToolResult) {
+	modelOutput := result.ModelOutput()
+	display := result.HumanDisplay()
 	if writer.format == execOutputJSON {
 		payload := map[string]any{
 			"type":         "tool_result",
 			"tool_call_id": result.ToolCallID,
 			"name":         result.Name,
 			"status":       string(result.Status),
-			"output":       result.Output,
+			"output":       modelOutput,
 		}
 		if len(result.Meta) > 0 {
 			payload["meta"] = result.Meta
+		}
+		if result.Truncated {
+			payload["truncated"] = true
 		}
 		if result.Redacted {
 			payload["redacted"] = true
@@ -159,14 +164,15 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 		if len(result.ChangedFiles) > 0 {
 			payload["changed_files"] = result.ChangedFiles
 		}
-		if result.Display.Summary != "" || result.Display.Kind != "" {
-			payload["display"] = map[string]string{"summary": result.Display.Summary, "kind": result.Display.Kind}
+		if display.Summary != "" || display.Kind != "" {
+			payload["display"] = map[string]string{"summary": display.Summary, "kind": display.Kind}
 		}
 		writer.writeJSON(payload)
 		return
 	}
 	if writer.format == execOutputStreamJSON {
-		output, truncated := truncateForStreamJSONOutput(result.Output)
+		output, surfaceTruncated := truncateForStreamJSONOutput(modelOutput)
+		truncated := result.Truncated || surfaceTruncated
 		event := streamjson.Event{
 			Type:         streamjson.EventToolResult,
 			RunID:        writer.runID,
@@ -182,13 +188,13 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 			redacted := true
 			event.Redacted = &redacted
 		}
-		if result.Display.Summary != "" || result.Display.Kind != "" {
-			event.Display = &streamjson.Display{Summary: result.Display.Summary, Kind: result.Display.Kind}
+		if display.Summary != "" || display.Kind != "" {
+			event.Display = &streamjson.Display{Summary: display.Summary, Kind: display.Kind}
 		}
 		writer.writeStreamJSON(event)
 		return
 	}
-	writer.writeStderr("[result] " + truncateForStatus(result.Output) + "\n")
+	writer.writeStderr("[result] " + truncateForStatus(modelOutput) + "\n")
 }
 
 func (writer *execEventWriter) permission(event agent.PermissionEvent) {
@@ -261,23 +267,29 @@ func streamJSONPermissionEventType(event agent.PermissionEvent) streamjson.Event
 func (writer *execEventWriter) usage(usage agent.Usage) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{
-			"type":              "usage",
-			"prompt_tokens":     usage.PromptTokens,
-			"completion_tokens": usage.CompletionTokens,
-			"total_tokens":      usage.TotalTokens(),
+			"type":                "usage",
+			"prompt_tokens":       usage.PromptTokens,
+			"completion_tokens":   usage.CompletionTokens,
+			"cached_input_tokens": usage.CachedInputTokens,
+			"cache_write_tokens":  usage.CacheWriteTokens,
+			"total_tokens":        usage.TotalTokens(),
 		})
 		return
 	}
 	if writer.format == execOutputStreamJSON {
 		promptTokens := usage.EffectiveInputTokens()
 		completionTokens := usage.EffectiveOutputTokens()
+		cachedInputTokens := usage.CachedInputTokens
+		cacheWriteTokens := usage.CacheWriteTokens
 		totalTokens := usage.TotalTokens()
 		writer.writeStreamJSON(streamjson.Event{
-			Type:             streamjson.EventUsage,
-			RunID:            writer.runID,
-			PromptTokens:     &promptTokens,
-			CompletionTokens: &completionTokens,
-			TotalTokens:      &totalTokens,
+			Type:              streamjson.EventUsage,
+			RunID:             writer.runID,
+			PromptTokens:      &promptTokens,
+			CompletionTokens:  &completionTokens,
+			CachedInputTokens: &cachedInputTokens,
+			CacheWriteTokens:  &cacheWriteTokens,
+			TotalTokens:       &totalTokens,
 		})
 	}
 }

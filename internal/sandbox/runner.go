@@ -2,6 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +13,9 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+
+	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
@@ -27,6 +33,9 @@ type CommandSpec struct {
 	Args []string
 	Dir  string
 	Env  []string
+	// sensitiveEnvKeys is populated by Engine from config-derived credential
+	// variable names and carried through SandboxManager to the platform plan.
+	sensitiveEnvKeys []string
 }
 
 type CommandPlan struct {
@@ -57,6 +66,10 @@ type CommandPlan struct {
 	// cleanup releases resources tied to the plan's lifetime. It is never
 	// serialized; callers invoke it via Cleanup() once the command has finished.
 	cleanup func()
+	// executionReportPath is an adapter-owned side channel outside the
+	// workspace. It carries structured policy facts; command output is never
+	// parsed as the control protocol.
+	executionReportPath string
 }
 
 // Cleanup releases any resources the plan holds. It is safe to call on a zero
@@ -65,6 +78,26 @@ func (plan CommandPlan) Cleanup() {
 	if plan.cleanup != nil {
 		plan.cleanup()
 	}
+}
+
+// ExecutionReport reads the structured platform-adapter report for a finished
+// command. A command with no adapter report returns an empty report.
+func (plan CommandPlan) ExecutionReport() (execution.AdapterReport, error) {
+	if strings.TrimSpace(plan.executionReportPath) == "" {
+		return execution.AdapterReport{}, nil
+	}
+	data, err := os.ReadFile(plan.executionReportPath)
+	if os.IsNotExist(err) {
+		return execution.AdapterReport{}, nil
+	}
+	if err != nil {
+		return execution.AdapterReport{}, fmt.Errorf("read sandbox execution report: %w", err)
+	}
+	var report execution.AdapterReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return execution.AdapterReport{}, fmt.Errorf("decode sandbox execution report: %w", err)
+	}
+	return report, nil
 }
 
 func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*exec.Cmd, CommandPlan, error) {
@@ -81,26 +114,33 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 	return command, plan, nil
 }
 
-// writeRoots returns the full ordered write-root list for command plans:
-// the workspace root plus any granted extra roots. The single-root fallback
-// only applies to engines built without a workspace root (NewEngine always
-// builds a scope otherwise); it is kept as defense in depth.
-func (engine *Engine) writeRoots(workspaceRoot string) []string {
-	var roots []string
-	if engine.scope != nil {
-		roots = engine.scope.Roots()
-	} else {
-		roots = []string{workspaceRoot}
+// PrepareExecution adapts the platform-neutral execution interface to the
+// sandbox engine. Callers never need to construct native sandbox commands or
+// interpret adapter reports themselves.
+func (engine *Engine) PrepareExecution(ctx context.Context, request execution.Request) (execution.PreparedCommand, error) {
+	if err := request.Validate(); err != nil {
+		return execution.PreparedCommand{}, err
 	}
-	// Reflect the policy's AllowWrite roots in the OS backend write binds so a
-	// sandboxed shell command may write where the policy grants writes. DenyWrite
-	// is enforced at the policy gate, and on sandbox-exec additionally as an
-	// explicit deny rule (see sandboxExecProfile).
-	policy := engine.effectivePolicy(engine.policy)
-	if extra := resolveWriteRootPaths(policy.AllowWrite); len(extra) > 0 {
-		roots = dedupeStrings(append(roots, extra...))
+	command, plan, err := engine.CommandContext(ctx, CommandSpec{
+		Name: request.Command.Name,
+		Args: append([]string(nil), request.Command.Args...),
+		Dir:  request.WorkingDirectory,
+		Env:  append([]string(nil), request.Command.Env...),
+	})
+	if err != nil {
+		return execution.PreparedCommand{}, err
 	}
-	return roots
+	return execution.PreparedCommand{
+		Command: command,
+		Enforcement: execution.Enforcement{
+			Backend:         string(plan.TargetBackend),
+			Level:           string(plan.EnforcementLevel),
+			Degraded:        plan.EnforcementLevel == EnforcementDegraded,
+			DowngradeReason: plan.DowngradeReason,
+		},
+		Report:  plan.ExecutionReport,
+		Cleanup: plan.Cleanup,
+	}, nil
 }
 
 func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
@@ -120,11 +160,13 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		return CommandPlan{}, errors.New("sandbox command name is required")
 	}
 	spec.Dir = commandDir
+	spec.sensitiveEnvKeys = engine.sensitiveEnvKeys
 
 	backend := engine.backend
 	if backend.Name == "" {
 		backend = Backend{Name: BackendUnavailable, Message: "native sandbox backend was not selected"}
 	}
+	backend = inferBackendCapabilities(backend)
 	preference := SandboxPreferenceAuto
 	// Re-entrancy guard: a command spawned by a process we already wrapped (both
 	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
@@ -137,12 +179,28 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if policy.Mode == ModeDisabled {
 		preference = SandboxPreferenceForbid
 	}
-	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
+	profile := permissionProfileFromPolicy(workspaceRoot, policy, engine.scope, spec.Dir, spec.Env)
+	// Validate in the main process before creating runtime state or launching a
+	// potentially version-skewed helper. Keep the helper check as defense in depth.
+	if preference != SandboxPreferenceForbid && backend.Name == BackendLinuxBwrap && backend.Available && backend.CommandWrapping && backend.NativeIsolation {
+		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+			return CommandPlan{}, err
+		}
+	}
+	var runtimeCleanup func()
+	if preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled {
+		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot)
+		if runtimeErr != nil {
+			return CommandPlan{}, runtimeErr
+		}
+		runtimeCleanup = cleanup
+		profile = permissionProfileWithRuntime(profile, runtimeState)
+	}
 	manager := NewSandboxManager(SandboxManagerOptions{
 		GOOS:    backend.Platform,
 		Backend: backend,
 	})
-	return manager.BuildCommandPlan(SandboxManagerRequest{
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     workspaceRoot,
 		Command:           spec,
 		Policy:            policy,
@@ -151,6 +209,14 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		Preference:        preference,
 		ValidateExecution: true,
 	})
+	if err != nil {
+		if runtimeCleanup != nil {
+			runtimeCleanup()
+		}
+		return CommandPlan{}, err
+	}
+	plan.cleanup = combineSandboxCleanups(plan.cleanup, runtimeCleanup)
+	return plan, nil
 }
 
 func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy) (CommandPlan, error) {
@@ -195,36 +261,54 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 		helper = resolved
 	}
 	command := append([]string{spec.Name}, spec.Args...)
+	reportPath, err := newLinuxExecutionReportPath()
+	if err != nil {
+		return CommandPlan{}, err
+	}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
 		SandboxPolicyCWD:  execRequest.WorkspaceRoot,
 		CommandCWD:        spec.Dir,
 		PermissionProfile: execRequest.PermissionProfile,
 		BlockUnixSockets:  policy.BlockUnixSockets,
+		PolicyReportPath:  reportPath,
 		Command:           command,
 	})
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap)
+	env := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, BackendLinuxBwrap, "", spec.sensitiveEnvKeys)
+	env = sandboxRuntimeEnvironment(env, execRequest.PermissionProfile.Runtime)
 	planDir := spec.Dir
 	if helper.Dir != "" {
 		planDir = helper.Dir
 	}
 	plan := CommandPlan{
-		Backend:           execRequest.Backend,
-		TargetBackend:     execRequest.TargetBackend,
-		WorkspaceRoot:     execRequest.WorkspaceRoot,
-		Policy:            policy,
-		Wrapped:           true,
-		SandboxEnvMarkers: execRequest.SandboxEnvMarkers,
-		EnforcementLevel:  execRequest.EnforcementLevel,
-		Name:              helper.Name,
-		Args:              append(append([]string{}, helper.ArgsPrefix...), args...),
-		Dir:               planDir,
-		Env:               env,
-		SandboxDir:        spec.Dir,
+		Backend:             execRequest.Backend,
+		TargetBackend:       execRequest.TargetBackend,
+		WorkspaceRoot:       execRequest.WorkspaceRoot,
+		Policy:              policy,
+		Wrapped:             true,
+		SandboxEnvMarkers:   execRequest.SandboxEnvMarkers,
+		EnforcementLevel:    execRequest.EnforcementLevel,
+		Name:                helper.Name,
+		Args:                append(append([]string{}, helper.ArgsPrefix...), args...),
+		Dir:                 planDir,
+		Env:                 env,
+		SandboxDir:          spec.Dir,
+		executionReportPath: reportPath,
+		cleanup: func() {
+			_ = os.Remove(reportPath)
+		},
 	}
 	return withSandboxExecutionMetadata(plan, execRequest), nil
+}
+
+func newLinuxExecutionReportPath() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate sandbox execution report path: %w", err)
+	}
+	return filepath.Join("/tmp", "zero-sandbox-report-"+hex.EncodeToString(token[:])+".json"), nil
 }
 
 func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequest) CommandPlan {
@@ -251,8 +335,25 @@ func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspa
 		Name:              spec.Name,
 		Args:              cloneStrings(spec.Args),
 		Dir:               spec.Dir,
-		Env:               cloneStrings(spec.Env),
+		Env:               directCommandEnv(spec),
 	}
+}
+
+// directCommandEnv scrubs sensitive credentials from the environment for a
+// direct (unwrapped) command plan: the platform sandbox backend is
+// unavailable, disabled, or not required, so this is the actual environment
+// the child process inherits. Without scrubbing here, config-derived
+// apiKeyEnv and dynamic OAuth client-secret variables would leak into
+// commands that fall back to this path (e.g. EnforcementDegraded).
+func directCommandEnv(spec CommandSpec) []string {
+	env := cloneStrings(spec.Env)
+	if spec.Env == nil {
+		// Match the wrapped-plan behavior: an unset spec.Env means "inherit the
+		// caller's environment," so scrub a snapshot of it rather than passing
+		// nil through to exec.Cmd, which would skip scrubbing entirely.
+		env = os.Environ()
+	}
+	return scrubSensitiveEnv(env, spec.sensitiveEnvKeys...)
 }
 
 func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, string, error) {
@@ -316,7 +417,8 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend)
+	env := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, envBackend, "", spec.sensitiveEnvKeys)
+	env = sandboxRuntimeEnvironment(env, profile.Runtime)
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -337,44 +439,11 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	return plan
 }
 
-func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) PermissionProfile {
-	fs := FileSystemPolicy{
-		Kind:                 FileSystemUnrestricted,
-		ReadRoots:            []string{string(filepath.Separator)},
-		IncludePlatformRoots: true,
-		AllowTemp:            true,
-	}
-	if policy.EnforceWorkspace {
-		fs.Kind = FileSystemRestricted
-		fs.WriteRoots = make([]WritableRoot, 0, len(writeRoots))
-		for _, root := range writeRoots {
-			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
-		}
-	}
-	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
-	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
-	return PermissionProfile{
-		FileSystem: fs,
-		Network:    NetworkPolicy{Mode: policy.Network},
-	}
+func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
+	return sandboxEnvironmentForCommandWithSensitiveEnv(specEnv, policy, backend, workspaceRoot, nil)
 }
 
-func existingBubblewrapMounts() []string {
-	candidates := []string{"/bin", "/usr", "/lib", "/lib64", "/sbin", "/etc"}
-	mounts := []string{}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			mounts = append(mounts, candidate)
-		}
-	}
-	return mounts
-}
-
-func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
-	return sandboxEnvironmentForCommand(nil, policy, backend)
-}
-
-func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName) []string {
+func sandboxEnvironmentForCommandWithSensitiveEnv(specEnv []string, policy Policy, backend BackendName, workspaceRoot string, sensitiveEnvKeys []string) []string {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
 		// Preserve the caller environment for sandboxed commands. The sandbox
@@ -382,6 +451,7 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		// command env values still replace inherited values below.
 		env = os.Environ()
 	}
+	env = scrubSensitiveEnv(env, sensitiveEnvKeys...)
 	pathValue := envListValue(env, "PATH", defaultPath())
 	if runtime.GOOS == "darwin" {
 		// Preserve standard user tool locations so a bare `python3`/`node`
@@ -396,8 +466,15 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
 		EnvSandboxed + "=1",
 	}
-	if runtime.GOOS == "windows" {
-		overrides = append(overrides, "COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"))
+	if workspaceRoot != "" {
+		overrides = append(overrides, "HOME="+workspaceRoot)
+	}
+	if backend == BackendWindowsRestrictedToken || backend == BackendWindowsElevated {
+		overrides = append(overrides,
+			"COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"),
+			"SystemRoot="+envListValue(env, "SystemRoot", `C:\Windows`),
+			"WINDIR="+envListValue(env, "WINDIR", `C:\Windows`),
+		)
 	}
 	return upsertEnvList(env, overrides...)
 }
@@ -407,13 +484,6 @@ func cloneStrings(values []string) []string {
 		return nil
 	}
 	return append([]string{}, values...)
-}
-
-func firstEnv(key string, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
 }
 
 func envListValue(env []string, key string, fallback string) string {
@@ -554,10 +624,6 @@ func sandboxMachLookupRule() string {
 	return "(allow mach-lookup\n  " + strings.Join(filters, "\n  ") + ")"
 }
 
-func sandboxExecProfile(writeRoots []string, policy Policy, denialTag string) string {
-	return seatbeltProfileFromPermissionProfile(seatbeltCompatibilityPermissionProfile(writeRoots, policy), policy, denialTag)
-}
-
 func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Policy, denialTag string) string {
 	networkRule := networkRuleForProfile(profile.Network)
 	readRule := seatbeltReadRule(profile.FileSystem)
@@ -603,6 +669,15 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 		writeRule,
 	}
 	rules = append(rules, denyReadRules(profile.FileSystem)...)
+	// SBPL is last-match-wins, so the carveouts MUST follow the deny rules above:
+	// they re-include the supported non-secret subtrees of a directory-level
+	// credential deny (Zero's user plugin/specialist/command roots).
+	rules = append(rules, denyReadCarveoutRules(profile.FileSystem)...)
+	// A token override may live below a carveout. Reapply only those nested
+	// denies after the broad allow so credentials remain protected under
+	// Seatbelt's last-match-wins evaluation without hiding ordinary extension
+	// files.
+	rules = append(rules, denyReadRulesInsideCarveouts(profile.FileSystem)...)
 	rules = append(rules, writeRootCarveoutDenyRules(profile.FileSystem)...)
 	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
@@ -730,7 +805,66 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 }
 
 func denyReadRules(fs FileSystemPolicy) []string {
-	return denySeatbeltPathRules("file-read*", fs.DenyRead)
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	rules := denySeatbeltPathRules("file-read*", denied)
+	// Process-trusted final names have already had only their parent
+	// canonicalized. Preserve that terminal pathname here: normalizing it again
+	// would follow a terminal symlink and lose the atomic-replacement deny. The
+	// command-supplied finals get the same treatment: seatbelt denies a pathname
+	// whether or not it exists, so unlike bubblewrap it has no reason to refuse
+	// the command over them.
+	finals := dedupeStrings(append(append([]string{}, fs.ProcessTrustedDenyReadFiles...), fs.CommandDenyReadFinalFiles...))
+	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", finals)...))
+}
+
+// denyReadCarveoutRules re-allows reads for the non-secret subtrees of a denied
+// credential directory. Writes are untouched: the credential directory is not a
+// write root, so the profile's write rule keeps denying them. Only
+// DenyReadCarveouts entries are emitted, and the profile builder derives those
+// exclusively from Zero's own config directory (never from a user-configured
+// DenyRead root), so no user deny is weakened here.
+func denyReadCarveoutRules(fs FileSystemPolicy) []string {
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	resolved := credentialCarveoutPaths(denied, fs.DenyReadCarveouts)
+	if len(resolved) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(resolved)+1)
+	for _, path := range resolved {
+		escaped := sandboxProfileString(path)
+		out = append(out,
+			`(allow file-read* file-test-existence (subpath "`+escaped+`"))`,
+			`(allow file-read* file-test-existence (literal "`+escaped+`"))`,
+		)
+	}
+	// Resolving a path into the carveout also needs stat on its ancestors, and the
+	// deny rule above covers the denied directory itself. This grants metadata
+	// only, so the denied directory stays unreadable and unlistable — the same
+	// split seatbeltReadRule already relies on for deeply nested read roots.
+	if ancestors := seatbeltAncestorMetadataRule(resolved); ancestors != "" {
+		out = append(out, ancestors)
+	}
+	return out
+}
+
+func denyReadRulesInsideCarveouts(fs FileSystemPolicy) []string {
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	carveouts := credentialCarveoutPaths(denied, fs.DenyReadCarveouts)
+	if len(carveouts) == 0 {
+		return nil
+	}
+	inside := func(paths []string) []string {
+		var out []string
+		for _, path := range paths {
+			if credentialPathReincluded(carveouts, path) {
+				out = append(out, path)
+			}
+		}
+		return out
+	}
+	rules := denySeatbeltNormalizedPathRules("file-read*", inside(normalizeProfilePaths(denied)))
+	finals := dedupeStrings(append(append([]string{}, fs.ProcessTrustedDenyReadFiles...), fs.CommandDenyReadFinalFiles...))
+	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", inside(finals))...))
 }
 
 func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {
@@ -761,24 +895,21 @@ func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {
 	return out
 }
 
-// denyWriteRules returns seatbelt deny clauses for the policy's resolved
-// DenyWrite paths: a (subpath ...) clause for a directory, a (literal ...) clause
-// for a single file. Empty when DenyWrite is unset.
-func denyWriteRules(policy Policy) []string {
-	return denyWriteRulesFromPaths(resolvePolicyPaths(policy.DenyWrite))
-}
-
 func denyWriteRulesFromPaths(paths []string) []string {
 	return denySeatbeltPathRules("file-write*", paths)
 }
 
 func denySeatbeltPathRules(action string, paths []string) []string {
-	resolved := normalizeProfilePaths(paths)
-	if len(resolved) == 0 {
+	return denySeatbeltNormalizedPathRules(action, normalizeProfilePaths(paths))
+}
+
+func denySeatbeltNormalizedPathRules(action string, paths []string) []string {
+	paths = dedupeStrings(paths)
+	if len(paths) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(resolved)*2)
-	for _, path := range resolved {
+	out := make([]string, 0, len(paths)*2)
+	for _, path := range paths {
 		filters := []string{`(subpath "` + sandboxProfileString(path) + `")`}
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			filters = []string{`(literal "` + sandboxProfileString(path) + `")`}
@@ -795,16 +926,14 @@ func denySeatbeltPathRules(action string, paths []string) []string {
 	return out
 }
 
-// networkRuleFor returns the seatbelt network clause for a policy.
-func networkRuleFor(policy Policy) string {
-	return networkRuleForProfile(NetworkPolicy{Mode: policy.Network})
-}
-
 func networkRuleForProfile(network NetworkPolicy) string {
 	switch network.Mode {
 	case NetworkAllow:
 		return "(allow network*)"
 	default:
+		// Seatbelt has no private network namespace. Its localhost filters can
+		// reach services on the host and host interfaces, so the restricted
+		// profile must deny the entire network surface.
 		return "(deny network*)"
 	}
 }
@@ -962,4 +1091,98 @@ func regexpQuoteMeta(value string) string {
 		`$`, `\$`,
 	)
 	return replacer.Replace(value)
+}
+
+func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
+	// Secrets not covered by the provider catalog: cloud/VCS credentials and
+	// providers Zero talks to through generic OpenAI-compatible endpoints.
+	sensitiveKeys := []string{
+		"COHERE_API_KEY",
+		"PERPLEXITY_API_KEY",
+		"ANYSCALE_API_KEY",
+		"AZURE_OPENAI_API_KEY",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"GITLAB_TOKEN",
+		"GH_TOKEN",
+		"ZERO_WEBSEARCH_API_KEY",
+		"ZERO_DAEMON_REMOTE_TOKEN",
+		// The file form of the same bridge token. TokenFromEnv accepts either,
+		// so scrubbing only the inline variable left the pointer readable, and
+		// the default sandbox posture is read-all. There is no fallback
+		// location to guess at, the path comes from this variable alone, so
+		// removing it closes the leak rather than half of it. Same reasoning as
+		// GOOGLE_APPLICATION_CREDENTIALS below.
+		"ZERO_DAEMON_REMOTE_TOKEN_FILE",
+	}
+	for _, descriptor := range providercatalog.All() {
+		for _, key := range descriptor.AuthEnvVars {
+			// AWS_PROFILE is a profile name, not a secret, and scrubbing it
+			// protects nothing: the SDKs fall back to the default profile in
+			// ~/.aws/credentials, which credentialDenyReadPaths blocks at the
+			// filesystem level instead. GOOGLE_APPLICATION_CREDENTIALS IS
+			// scrubbed: it points at a service-account key file at an
+			// arbitrary path, so hiding the pointer complements the deny-read
+			// rule on the file itself.
+			if key == "AWS_PROFILE" {
+				continue
+			}
+			sensitiveKeys = append(sensitiveKeys, key)
+		}
+	}
+	sensitiveKeys = append(sensitiveKeys, normalizeSensitiveEnvKeys(additionalKeys)...)
+
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			out = append(out, kv)
+			continue
+		}
+		drop := isDynamicSensitiveEnvKey(key)
+		for _, sensitive := range sensitiveKeys {
+			if strings.EqualFold(key, sensitive) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func normalizeSensitiveEnvKeys(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		// A misconfigured value like "COMPANY_LLM_SECRET=..." would never
+		// match a real env key during scrubbing; keep only the name part.
+		if name, _, found := strings.Cut(key, "="); found {
+			key = strings.TrimSpace(name)
+		}
+		folded := strings.ToUpper(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[folded]; ok {
+			continue
+		}
+		seen[folded] = struct{}{}
+		out = append(out, key)
+	}
+	return out
+}
+
+func isDynamicSensitiveEnvKey(key string) bool {
+	const (
+		prefix = "ZERO_OAUTH_"
+		suffix = "_CLIENT_SECRET"
+	)
+	key = strings.ToUpper(strings.TrimSpace(key))
+	return strings.HasPrefix(key, prefix) &&
+		strings.HasSuffix(key, suffix) &&
+		len(key) > len(prefix)+len(suffix)
 }

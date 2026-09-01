@@ -135,7 +135,7 @@ func TestToolsCommandRendersCommandCard(t *testing.T) {
 	assertNotContains(t, emptyText, "registered tools:")
 
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m = newModel(context.Background(), Options{
 		Registry: registry,
 	})
@@ -244,7 +244,7 @@ func TestToolsCommandShowsFullSortedCatalog(t *testing.T) {
 
 func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
 	if err != nil {
@@ -253,7 +253,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	if _, err := store.Grant(sandbox.GrantInput{
 		ToolName: "bash",
 		Decision: sandbox.GrantAllow,
-		Reason:   "sk-proj-sensitive approved shell",
+		Reason:   "sk-proj-sensitive-credential-value approved shell",
 	}); err != nil {
 		t.Fatalf("Grant returned error: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	} {
 		assertContains(t, permissionText, want)
 	}
-	assertNotContains(t, permissionText, "sk-proj-sensitive")
+	assertNotContains(t, permissionText, "sk-proj-sensitive-credential-value")
 	assertNotContains(t, permissionText, "status: ok")
 	assertNotContains(t, permissionText, "Permission mode:")
 }

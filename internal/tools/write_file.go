@@ -14,10 +14,6 @@ type writeFileTool struct {
 	scope         PathScope
 }
 
-func NewWriteFileTool(workspaceRoot string) Tool {
-	return NewScopedWriteFileTool(workspaceRoot, nil)
-}
-
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 	return writeFileTool{
 		baseTool: baseTool{
@@ -33,7 +29,8 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"path", "content"},
 				AdditionalProperties: false,
 			},
-			safety: promptSafety(SideEffectWrite, "Creates or overwrites files."),
+			safety:       promptSafety(SideEffectWrite, "Creates or overwrites files."),
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -78,6 +75,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// stale view. Only read current bytes when there is a baseline to compare,
 	// so a first-touch create/overwrite stays a single write with no extra read.
 	if existed {
+		if options.FileTracker != nil && !options.FileTracker.SeenWhole(absolutePath) {
+			return errorResult(fileUnseenMessage(relativePath))
+		}
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
@@ -110,6 +110,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
@@ -118,6 +119,12 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	if content == modelKnownContent {
+		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
+	}
+	if !existed {
+		options.FileTracker.RecordCreated(absolutePath)
+	}
 
 	verb := "Created"
 	if existed {

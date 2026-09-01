@@ -233,6 +233,9 @@ func TestRunSessionsListFiltersByKind(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Create(sessions.CreateInput{SessionID: "side", SessionKind: sessions.SessionKindSide, Title: "BTW side"}); err != nil {
+		t.Fatal(err)
+	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -247,6 +250,17 @@ func TestRunSessionsListFiltersByKind(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "draft") || strings.Contains(output, "regular") || !strings.Contains(output, "spec=draft") {
 		t.Fatalf("filtered sessions output = %q", output)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sessions", "list", "--kind", "side"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess || !strings.Contains(stdout.String(), "side") || strings.Contains(stdout.String(), "regular") {
+		t.Fatalf("sessions list --kind side exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
 
 	stdout.Reset()

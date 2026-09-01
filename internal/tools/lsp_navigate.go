@@ -23,11 +23,6 @@ type lspNavigateTool struct {
 	manager       *lsp.Manager
 }
 
-// NewLSPNavigateTool builds the tool with workspace-only path confinement.
-func NewLSPNavigateTool(workspaceRoot string) Tool {
-	return NewScopedLSPNavigateTool(workspaceRoot, nil)
-}
-
 // NewScopedLSPNavigateTool builds the tool with its own lazily-started LSP
 // manager (servers spin up on first use and are reused across calls within a
 // session). The model-supplied path is resolved through the same scoped
@@ -37,7 +32,8 @@ func NewScopedLSPNavigateTool(workspaceRoot string, scope PathScope) Tool {
 	root := normalizeWorkspaceRoot(workspaceRoot)
 	return lspNavigateTool{
 		baseTool: baseTool{
-			name: "lsp_navigate",
+			name:     "lsp_navigate",
+			deferred: true,
 			description: "Navigate code semantically via the language server: jump to a symbol's " +
 				"definition, find all references, find implementations of an interface/method, or " +
 				"search workspace symbols by name. Use this instead of grep when you need precise " +
@@ -58,7 +54,8 @@ func NewScopedLSPNavigateTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"op", "path"},
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Queries the language server for code navigation; reads files, modifies nothing."),
+			safety:       readOnlySafety("Queries the language server for code navigation; reads files, modifies nothing."),
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: false, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: root,
 		scope:         scope,

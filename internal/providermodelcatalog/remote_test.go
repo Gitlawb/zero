@@ -81,9 +81,21 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 				"cost": {"input": 0, "output": 0}
 			},
 			{
-				"id": "image-route",
-				"name": "Image Route",
-				"modalities": {"input": ["text"], "output": ["image"]}
+				"id": "tencent/hy3",
+				"name": "Tencent HY3",
+				"description": "free Tencent chat route",
+				"context_window": 262144,
+				"tools": true,
+				"tags": ["free"]
+			},
+			{
+				"id": "auto",
+				"name": "Auto (smart routing)",
+				"description": "picks the cheapest capable model"
+			},
+			{
+				"id": "whisper-1",
+				"name": "Whisper"
 			}
 		]
 	}`)
@@ -92,10 +104,18 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOpenGatewayCatalog returned error: %v", err)
 	}
-	if got := strings.Join(modelIDs(models), ","); got != "minimax-m3" {
-		t.Fatalf("models = %#v, want one gateway coding model", got)
+	// Gateway list is trusted: keep auto + coding routes; drop known non-coding.
+	// Sorted by description label (agentic…, free…, picks…).
+	if got := strings.Join(modelIDs(models), ","); got != "minimax-m3,tencent/hy3,auto" {
+		t.Fatalf("models = %#v, want gateway live models including auto", got)
 	}
-	model := models[0]
+	var model Model
+	for _, entry := range models {
+		if entry.ID == "minimax-m3" {
+			model = entry
+			break
+		}
+	}
 	if model.ID != "minimax-m3" || model.Description != "agentic coding route" {
 		t.Fatalf("gateway model = %#v, want rich description", model)
 	}
@@ -108,10 +128,120 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 	if model.Source != "opengateway" {
 		t.Fatalf("gateway source = %q, want opengateway", model.Source)
 	}
+	var hy3 Model
+	for _, entry := range models {
+		if entry.ID == "tencent/hy3" {
+			hy3 = entry
+			break
+		}
+	}
+	if hy3.ID != "tencent/hy3" || hy3.ContextWindow != 262144 || !hy3.ToolCall {
+		t.Fatalf("gateway HY3 model = %#v, want Tencent HY3 with context/tools", hy3)
+	}
+}
+
+func TestParseOpenRouterCatalogMapsLiveMetadata(t *testing.T) {
+	body := []byte(`{
+		"data": [
+			{
+				"id": "anthropic/claude-sonnet-4.5",
+				"name": "Anthropic: Claude Sonnet 4.5",
+				"description": "A long marketing blurb that should not win the picker label.",
+				"context_length": 200000,
+				"pricing": {
+					"prompt": "0.000003",
+					"completion": "0.000015"
+				},
+				"architecture": {
+					"input_modalities": ["text", "image"],
+					"output_modalities": ["text"]
+				},
+				"supported_parameters": ["tools", "tool_choice", "reasoning", "temperature"]
+			},
+			{
+				"id": "vendor/image-only",
+				"name": "Image Only",
+				"architecture": {
+					"input_modalities": ["text"],
+					"output_modalities": ["image"]
+				}
+			},
+			{
+				"id": "openai/gpt-4o",
+				"name": "OpenAI: GPT-4o",
+				"context_length": 128000,
+				"supported_parameters": ["tools"]
+			}
+		]
+	}`)
+
+	models, err := ParseOpenRouterCatalog(body)
+	if err != nil {
+		t.Fatalf("ParseOpenRouterCatalog returned error: %v", err)
+	}
+	if got := strings.Join(modelIDs(models), ","); got != "anthropic/claude-sonnet-4.5,openai/gpt-4o" {
+		t.Fatalf("models = %#v, want coding OpenRouter models only", got)
+	}
+	var claude Model
+	for _, entry := range models {
+		if entry.ID == "anthropic/claude-sonnet-4.5" {
+			claude = entry
+			break
+		}
+	}
+	if claude.Description != "Anthropic: Claude Sonnet 4.5" {
+		t.Fatalf("description = %q, want short display name", claude.Description)
+	}
+	if claude.ContextWindow != 200000 || !claude.ToolCall || !claude.Reasoning {
+		t.Fatalf("claude capabilities = %#v, want context/tools/reasoning from live payload", claude)
+	}
+	if strings.Join(claude.InputModalities, ",") != "text,image" || strings.Join(claude.OutputModalities, ",") != "text" {
+		t.Fatalf("claude modalities = %#v/%#v", claude.InputModalities, claude.OutputModalities)
+	}
+	// Live pricing.prompt is USD per token; Model costs are USD per million tokens.
+	if claude.InputCost != 3 || claude.OutputCost != 15 {
+		t.Fatalf("claude costs = %f/%f, want 3/15 (per-million, matching models.dev)", claude.InputCost, claude.OutputCost)
+	}
+	if claude.Source != "openrouter" {
+		t.Fatalf("source = %q, want openrouter", claude.Source)
+	}
+}
+
+func TestParsePricingString(t *testing.T) {
+	cases := []struct {
+		in   string
+		want float64
+	}{
+		{"0.000003", 3},
+		{" 0.000015 ", 15},
+		{"-1", 0},
+		{"0", 0},
+		{"", 0},
+		{"not-a-number", 0},
+		{"Inf", 0},
+		{"+Inf", 0},
+		{"-Inf", 0},
+		{"NaN", 0},
+	}
+	for _, tc := range cases {
+		if got := parsePricingString(tc.in); got != tc.want {
+			t.Fatalf("parsePricingString(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestPublicLiveCatalog(t *testing.T) {
+	if !PublicLiveCatalog("openrouter") || !PublicLiveCatalog("gitlawb-opengateway") {
+		t.Fatal("openrouter and gitlawb-opengateway should advertise a public live catalog")
+	}
+	if PublicLiveCatalog("openai") {
+		t.Fatal("openai should not be treated as a public live catalog provider")
+	}
 }
 
 func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
 	tests := map[string]string{
+		"chatgpt":      "openai",
 		"github":       "github-models",
 		"moonshot":     "moonshotai",
 		"nvidia-nim":   "nvidia",
@@ -120,6 +250,7 @@ func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
 		"ollama-cloud": "ollama-cloud",
 		"zai-cn":       "zai",
 		"minimaxi-cn":  "minimax",
+		"fireworks":    "fireworks-ai",
 	}
 	for zeroID, want := range tests {
 		provider, ok := providercatalog.Get(zeroID)

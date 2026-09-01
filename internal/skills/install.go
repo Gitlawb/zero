@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // LockFileName is the name of the per-directory lockfile that maps an installed
@@ -74,9 +76,10 @@ type LockEntry struct {
 // SkillInfo bundles a discovered skill with its recorded source and hash, for
 // `skill info`.
 type SkillInfo struct {
-	Skill  Skill  `json:"skill"`
-	Source string `json:"source,omitempty"`
-	Hash   string `json:"hash,omitempty"`
+	Skill     Skill  `json:"skill"`
+	Source    string `json:"source,omitempty"`
+	Hash      string `json:"hash,omitempty"`
+	HashDrift bool   `json:"hashDrift"`
 }
 
 // Install fetches the skill at options.Source and copies its SKILL.md into
@@ -122,6 +125,34 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 
 	hash := hashContent(data)
 
+	staged, cleanupStage, err := installtxn.StageDir(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer cleanupStage()
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		return InstallResult{}, fmt.Errorf("create staged skill dir: %w", err)
+	}
+	stagedManifest := filepath.Join(staged, skillFileName)
+	if err := os.WriteFile(stagedManifest, data, 0o644); err != nil {
+		return InstallResult{}, fmt.Errorf("stage SKILL.md: %w", err)
+	}
+	stagedData, err := os.ReadFile(stagedManifest)
+	if err != nil || hashContent(stagedData) != hash {
+		if err != nil {
+			return InstallResult{}, fmt.Errorf("validate staged SKILL.md: %w", err)
+		}
+		return InstallResult{}, errors.New("validate staged SKILL.md: copied content hash differs from source")
+	}
+
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer unlock()
+
+	// Re-read under the cross-process lock. Another install may have updated the
+	// lockfile while this skill was fetched and staged.
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return InstallResult{}, err
@@ -133,23 +164,10 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 
 	target := filepath.Join(dir, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create skills dir: %w", err)
-	}
-	// Replace any existing install atomically-enough: write the new SKILL.md after
-	// clearing a prior directory so a re-install never mixes old and new files.
-	if err := os.RemoveAll(target); err != nil {
-		return InstallResult{}, fmt.Errorf("clear previous skill: %w", err)
-	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create skill dir: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, skillFileName), data, 0o644); err != nil {
-		return InstallResult{}, fmt.Errorf("write SKILL.md: %w", err)
-	}
-
 	lock[name] = LockEntry{Source: source, Hash: hash}
-	if err := writeLock(dir, lock); err != nil {
+	if err := installtxn.CommitDir(target, staged, func() error {
+		return writeLock(dir, lock)
+	}); err != nil {
 		return InstallResult{}, err
 	}
 
@@ -178,6 +196,12 @@ func Remove(dir string, name string) error {
 		return fmt.Errorf("invalid skill name %q", name)
 	}
 
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return err
@@ -191,11 +215,16 @@ func Remove(dir string, name string) error {
 	}
 
 	if present {
-		if err := os.RemoveAll(target); err != nil {
+		if err := installtxn.RemoveDir(target, func() error {
+			if !locked {
+				return nil
+			}
+			delete(lock, name)
+			return writeLock(dir, lock)
+		}); err != nil {
 			return fmt.Errorf("remove skill dir: %w", err)
 		}
-	}
-	if locked {
+	} else if locked {
 		delete(lock, name)
 		if err := writeLock(dir, lock); err != nil {
 			return err
@@ -204,20 +233,50 @@ func Remove(dir string, name string) error {
 	return nil
 }
 
-// Info returns the named skill plus its recorded source and hash, or ok=false if
-// it is not discoverable in dir.
-func Info(dir string, name string) (SkillInfo, bool) {
-	skill, ok := Get(dir, name)
-	if !ok {
+// InfoFromRoots resolves the named skill across discovery roots (earlier roots
+// win). Lock source/hash are attached only when the winning skill lives under
+// primaryDir and that dir's lockfile has an entry — agents-only skills return
+// frontmatter + path with empty Source/Hash. primaryDir is typically the Zero
+// write root (DefaultDir / skillsDir).
+func InfoFromRoots(primaryDir string, roots []string, name string) (SkillInfo, bool) {
+	loaded, _, err := LoadFromRoots(roots)
+	if err != nil {
+		return SkillInfo{}, false
+	}
+	target := strings.TrimSpace(name)
+	var skill Skill
+	found := false
+	for _, candidate := range loaded {
+		if candidate.Name == target {
+			skill = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
 		return SkillInfo{}, false
 	}
 	info := SkillInfo{Skill: skill}
-	if lock, err := ReadLock(dir); err == nil {
+	primaryDir = strings.TrimSpace(primaryDir)
+	if primaryDir == "" {
+		return info, true
+	}
+	// Only attach lock metadata when the winner is from the primary write root.
+	// Compare path prefixes after cleaning so agents-only skills never pick up a
+	// Zero lock entry by name coincidence.
+	skillPath := filepath.Clean(skill.Path)
+	primaryRoot := filepath.Clean(primaryDir)
+	rel, err := filepath.Rel(primaryRoot, skillPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return info, true
+	}
+	if lock, err := ReadLock(primaryDir); err == nil {
 		if entry, found := lock[skill.Name]; found {
 			info.Source = entry.Source
 			info.Hash = entry.Hash
 		}
 	}
+	info.HashDrift = skillHashDrift(skill, info.Hash)
 	return info, true
 }
 
@@ -255,7 +314,7 @@ func writeLock(dir string, entries map[string]LockEntry) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", LockFileName, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
+	if err := installtxn.WriteFileAtomically(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", LockFileName, err)
 	}
 	return nil
@@ -423,4 +482,20 @@ func validSkillName(name string) bool {
 func hashContent(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// skillHashDrift reports whether the on-disk SKILL.md no longer matches the
+// lockfile hash recorded at install time. Missing lock hashes never count as
+// drift (agents-only / unlocked skills). A locked skill whose SKILL.md cannot
+// be read is treated as drifted — not as a clean match.
+func skillHashDrift(skill Skill, lockHash string) bool {
+	lockHash = strings.TrimSpace(lockHash)
+	if lockHash == "" {
+		return false
+	}
+	data, err := os.ReadFile(skill.Path)
+	if err != nil {
+		return true
+	}
+	return hashContent(data) != lockHash
 }

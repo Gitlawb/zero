@@ -25,23 +25,19 @@ const defaultOutputCeilingTokens = 16_000
 // disables the ceiling entirely; unset or unparsable keeps the default.
 const outputCeilingEnv = "ZERO_TOOL_OUTPUT_CEILING_TOKENS"
 
-// selfBudgeting marks a tool that enforces its own deliberate output budget —
-// possibly model-raisable (exec_command) — which the registry ceiling must not
-// second-guess. The method is unexported on purpose: only tools in this
-// package can opt out, so an MCP-served tool can never exempt itself.
+// selfBudgeting marks a tool with a deliberate capture-aware output budget —
+// possibly model-raisable (exec_command). The registry applies semantic
+// retention within that explicit budget rather than replacing it with the
+// default ceiling. The method is unexported so an MCP-served tool cannot opt
+// into this path.
 type selfBudgeting interface{ managesOutputBudget() }
 
-// The exemption list, kept in one place. Each of these applies its own budget
-// before returning: bash (bashOutputBudgetBytes per stream + spill),
-// exec_command (model-raisable token budget + spill), read tools (128 KiB),
-// search tools (64 KiB).
-func (bashTool) managesOutputBudget()             {}
-func (execCommandTool) managesOutputBudget()      {}
-func (readFileTool) managesOutputBudget()         {}
-func (readMinifiedFileTool) managesOutputBudget() {}
-func (grepTool) managesOutputBudget()             {}
-func (globTool) managesOutputBudget()             {}
-func (listDirectoryTool) managesOutputBudget()    {}
+// The list is kept in one place. Shell/process tools retain their established
+// capture-aware budgets: bash (per-stream bounded capture) and exec_command
+// (model-raisable bounded session output). File/search tools use the standard
+// shared post-redaction boundary.
+func (bashTool) managesOutputBudget()        {}
+func (execCommandTool) managesOutputBudget() {}
 
 func resolveOutputCeilingTokens() int {
 	raw := strings.TrimSpace(os.Getenv(outputCeilingEnv))
@@ -61,6 +57,12 @@ func resolveOutputCeilingTokens() int {
 // and the spill file agree on what was hidden.
 func enforceOutputCeiling(toolName string, result Result) Result {
 	ceiling := resolveOutputCeilingTokens()
+	switch toolName {
+	case "read_file", "read_minified_file":
+		ceiling = readOutputBudgetBytes / 4
+	case "grep", "glob", "list_directory":
+		ceiling = searchOutputBudgetBytes / 4
+	}
 	if ceiling <= 0 {
 		return result
 	}

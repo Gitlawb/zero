@@ -27,6 +27,7 @@ func newDesktopWindowsTool(options localcontrol.DesktopOptions) Tool {
 	return desktopWindowsTool{
 		baseTool: baseTool{
 			name:        "desktop_windows",
+			deferred:    true,
 			description: "List native desktop windows through the local desktop automation helper.",
 			parameters: Schema{
 				Type: "object",
@@ -35,7 +36,8 @@ func newDesktopWindowsTool(options localcontrol.DesktopOptions) Tool {
 				},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads native desktop window metadata."),
+			safety:       localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads native desktop window metadata."),
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 		desktop: localcontrol.NewDesktop(options),
 	}
@@ -69,6 +71,7 @@ func newDesktopSnapshotTool(options localcontrol.DesktopOptions) Tool {
 	return desktopSnapshotTool{
 		baseTool: baseTool{
 			name:        "desktop_snapshot",
+			deferred:    true,
 			description: "Read a native desktop window accessibility snapshot through the local desktop automation helper.",
 			parameters: Schema{
 				Type: "object",
@@ -81,7 +84,8 @@ func newDesktopSnapshotTool(options localcontrol.DesktopOptions) Tool {
 				Required:             []string{"pid", "window_id"},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads a native desktop window state."),
+			safety:       localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads a native desktop window state."),
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 		desktop: localcontrol.NewDesktop(options),
 	}
@@ -115,6 +119,7 @@ func newDesktopActionTool(options localcontrol.DesktopOptions) Tool {
 	return desktopActionTool{
 		baseTool: baseTool{
 			name:        "desktop_action",
+			deferred:    true,
 			description: "Run an allowed native desktop action through the local desktop automation helper.",
 			parameters: Schema{
 				Type: "object",
@@ -125,7 +130,8 @@ func newDesktopActionTool(options localcontrol.DesktopOptions) Tool {
 				Required:             []string{"command", "input"},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectLocalDesktop, "Interacts with native desktop windows."),
+			safety:       localControlSafety(options.Enabled, SideEffectLocalDesktop, "Interacts with native desktop windows."),
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 		desktop: localcontrol.NewDesktop(options),
 	}
