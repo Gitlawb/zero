@@ -420,24 +420,27 @@ func appendUnreadableLinuxPaths(args []string, paths []string, carveouts []strin
 	for _, link := range classified.links {
 		args = appendUnreadableLinuxResolvedSymlinkArgs(args, link, carveouts)
 		parent := filepath.Clean(filepath.Dir(link))
-		if _, dup := seenParents[parent]; dup {
+		overlayParent := linuxCanonicalDest(parent)
+		if linuxParentOverlaid(seenParents, overlayParent) {
 			continue
 		}
-		if !linuxCredentialParentSafeToTmpfs(parent, writeRoots) {
+		if !linuxCredentialParentSafeToTmpfs(overlayParent, writeRoots) && !linuxCredentialParentSafeToTmpfs(parent, writeRoots) {
 			continue
 		}
 		var applied bool
-		args, applied = appendLinuxParentTmpfsOmitting(args, parent, omits[parent])
+		args, applied = appendLinuxParentTmpfsOmitting(args, overlayParent, omits[overlayParent])
 		if applied {
-			// Record the parent only after the overlay is actually added. A
-			// ReadDir failure leaves the directory intact, so denied regular
-			// files under it still need --ro-bind /dev/null.
-			seenParents[parent] = struct{}{}
+			// Record every spelling of the parent only after the overlay is
+			// actually added. macOS /var vs /private/var (and similar aliases)
+			// must skip file binds using either form, otherwise --ro-bind
+			// /dev/null and --tmpfs name different dests for the same directory.
+			recordLinuxParentSpellings(seenParents, parent)
+			recordLinuxParentSpellings(seenParents, overlayParent)
 		}
 	}
 	for _, file := range classified.files {
 		parent := filepath.Clean(filepath.Dir(file))
-		if _, overlaid := seenParents[parent]; overlaid {
+		if linuxParentOverlaid(seenParents, parent) {
 			// Parent was already tmpfs-overlaid (symlink sibling in the same
 			// credential dir). Re-binding /dev/null onto the regular file would
 			// target a dest that no longer exists after the overlay and can
@@ -458,35 +461,135 @@ type linuxUnreadableClassified struct {
 func classifyUnreadableLinuxPaths(paths []string) linuxUnreadableClassified {
 	var out linuxUnreadableClassified
 	seen := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		path = unreadableEnforcementPath(path)
+	add := func(bucket *[]string, path string) {
 		if path == "" {
-			continue
+			return
 		}
 		if _, ok := seen[path]; ok {
-			continue
+			return
 		}
 		seen[path] = struct{}{}
-		info, err := os.Lstat(path)
+		*bucket = append(*bucket, path)
+	}
+	for _, path := range paths {
+		lexical := normalizeProfilePathLexically(path)
+		canonical := normalizeProfilePath(path)
+		inspect := lexical
+		if inspect == "" {
+			inspect = canonical
+		}
+		if inspect == "" {
+			continue
+		}
+		info, err := os.Lstat(inspect)
+		if err != nil && canonical != "" && canonical != inspect {
+			info, err = os.Lstat(canonical)
+			inspect = canonical
+		}
 		if err != nil {
 			continue
 		}
 		switch {
 		case info.Mode().Type() == os.ModeSymlink:
-			out.links = append(out.links, path)
+			// Keep the lexical dentry so a later retarget still hits the dest.
+			add(&out.links, inspect)
 		case info.IsDir():
-			out.dirs = append(out.dirs, path)
+			dest := inspect
+			if canonical != "" && !linuxNonPlatformSymlinkInPath(inspect) {
+				dest = canonical
+			}
+			add(&out.dirs, dest)
 		default:
-			out.files = append(out.files, path)
+			dest := inspect
+			if canonical != "" && !linuxNonPlatformSymlinkInPath(inspect) {
+				dest = canonical
+			}
+			add(&out.files, dest)
 		}
 	}
 	return out
 }
 
+func linuxCanonicalDest(path string) string {
+	path = filepath.Clean(path)
+	if canonical := normalizeProfilePath(path); canonical != "" {
+		return canonical
+	}
+	return path
+}
+
+// linuxNonPlatformSymlinkInPath reports a symlink in path's resolution other
+// than host aliases such as macOS /var -> /private/var. Those aliases should
+// use the canonical bwrap dest so overlay and file binds name the same place.
+// A credential directory symlink (for example ~/.ssh -> a store) must keep the
+// lexical dest so a later retarget is still denied.
+func linuxNonPlatformSymlinkInPath(path string) bool {
+	current := normalizeProfilePathLexically(path)
+	if current == "" {
+		current = filepath.Clean(path)
+	}
+	for {
+		info, err := os.Lstat(current)
+		if err == nil && info.Mode().Type() == os.ModeSymlink && !linuxPlatformPrefixSymlink(current) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+}
+
+func linuxPlatformPrefixSymlink(path string) bool {
+	switch filepath.Clean(path) {
+	case "/var", "/etc", "/tmp", "/private/var", "/private/etc", "/private/tmp":
+		return true
+	default:
+		return false
+	}
+}
+
+func linuxParentSpellings(parent string) []string {
+	parent = filepath.Clean(parent)
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(path string) {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	add(parent)
+	add(normalizeProfilePathLexically(parent))
+	add(normalizeProfilePath(parent))
+	return out
+}
+
+func recordLinuxParentSpellings(seen map[string]struct{}, parent string) {
+	for _, spelling := range linuxParentSpellings(parent) {
+		seen[spelling] = struct{}{}
+	}
+}
+
+func linuxParentOverlaid(seen map[string]struct{}, parent string) bool {
+	for _, spelling := range linuxParentSpellings(parent) {
+		if _, ok := seen[spelling]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func linuxDeniedBasenamesByParent(files, links []string) map[string]map[string]struct{} {
 	out := make(map[string]map[string]struct{})
 	add := func(path string) {
-		parent := filepath.Clean(filepath.Dir(path))
+		parent := linuxCanonicalDest(filepath.Dir(path))
 		base := filepath.Base(path)
 		m, ok := out[parent]
 		if !ok {

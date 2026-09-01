@@ -569,6 +569,13 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 		wantDenyRead = []string{
 			filepath.Join(credentialHome, ".aws"),
 			filepath.Join(credentialHome, ".azure"),
+			filepath.Join(credentialHome, ".gnupg"),
+			filepath.Join(credentialHome, ".ssh", "id_rsa"),
+			filepath.Join(credentialHome, ".ssh", "id_dsa"),
+			filepath.Join(credentialHome, ".ssh", "id_ecdsa"),
+			filepath.Join(credentialHome, ".ssh", "id_ed25519"),
+			filepath.Join(credentialHome, ".ssh", "id_ecdsa_sk"),
+			filepath.Join(credentialHome, ".ssh", "id_ed25519_sk"),
 			// git's cleartext credential stores, in both the home and XDG
 			// layouts (#816). Listed here so the exported policy JSON is what
 			// catches a regression: this baseline is the contract a user reads

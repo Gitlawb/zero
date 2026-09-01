@@ -1276,3 +1276,51 @@ func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileNamedConfigOrAuthoriz
 		t.Fatalf("~/.ssh was denied wholesale")
 	}
 }
+
+func TestCredentialDenyReadPathsDeniesGNUPGHOME(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read is not applied on Windows")
+	}
+	home := t.TempDir()
+	alt := t.TempDir()
+	secring := filepath.Join(alt, "secring.gpg")
+	key := filepath.Join(alt, "private-keys-v1.d", "keygrip.key")
+	mustWriteFile(t, secring, "fake-secring")
+	mustWriteFile(t, key, "fake-keygrip")
+	env := []string{"HOME=" + home, "GNUPGHOME=" + alt}
+
+	t.Run("inherited environment", func(t *testing.T) {
+		options := credentialPathOptionsFromEnvironment([]string{home}, env)
+		denied := credentialDenyReadPathsIn(options, nil).Paths
+		if !denyCovered(denied, alt) {
+			t.Fatalf("inherited GNUPGHOME is readable; deny list = %v", denied)
+		}
+		if !denyCovered(denied, secring) {
+			t.Fatalf("GNUPGHOME secring is readable; deny list = %v", denied)
+		}
+		if !denyCovered(denied, key) {
+			t.Fatalf("GNUPGHOME private-keys-v1.d is readable; deny list = %v", denied)
+		}
+	})
+
+	t.Run("command-supplied environment", func(t *testing.T) {
+		creds := credentialDenyReadPaths(Policy{}, "", env, nil)
+		if !denyCovered(creds.Paths, alt) {
+			t.Fatalf("command-supplied GNUPGHOME is readable; deny list = %v", creds.Paths)
+		}
+		if !denyCovered(creds.Paths, key) {
+			t.Fatalf("command-supplied GNUPGHOME subtree is readable; deny list = %v", creds.Paths)
+		}
+	})
+
+	t.Run("allowRead reincludes", func(t *testing.T) {
+		options := credentialPathOptionsFromEnvironment([]string{home}, env)
+		denied := credentialDenyReadPathsIn(options, []string{alt}).Paths
+		if denyCovered(denied, alt) {
+			t.Fatalf("allowRead GNUPGHOME is still denied: %v", denied)
+		}
+		if denyCovered(denied, key) {
+			t.Fatalf("allowRead GNUPGHOME subtree is still denied: %v", denied)
+		}
+	})
+}
