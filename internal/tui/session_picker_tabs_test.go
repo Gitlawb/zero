@@ -59,6 +59,28 @@ func TestSessionAgentNameComesFromTheImportTag(t *testing.T) {
 	}
 }
 
+func TestLegacyImportedAgentIsSafeInResumeRowsAndTabs(t *testing.T) {
+	unsafeTag := "imported:\x1b[2Jforged\u202eagent"
+	agent := sessionAgentName(unsafeTag)
+	if strings.Contains(agent, "\x1b") || strings.Contains(agent, "\u202e") {
+		t.Fatalf("session agent label retained terminal controls: %q", agent)
+	}
+	picker := pickerFromParts([]pickerItem{
+		{Label: "legacy", Value: "legacy-id", Meta: agent, Tab: agent},
+		sessionRow("native", "zero"),
+	}, nil)
+	if picker == nil || !picker.hasTabs() {
+		t.Fatalf("legacy imported session did not produce a multi-source picker: %+v", picker)
+	}
+	view := (model{picker: picker}).pickerOverlay(120)
+	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\u202e") {
+		t.Fatalf("resume picker rendered unsafe legacy agent bytes: %q", view)
+	}
+	if !strings.Contains(view, "forgedagent") {
+		t.Fatalf("resume picker lost the visible agent label: %q", view)
+	}
+}
+
 func TestTheStripOnlyAppearsWhenThereIsMoreThanOneSource(t *testing.T) {
 	// A strip reading "All | zero" is chrome that tells the user nothing.
 	only := tabbedPicker(sessionRow("a", "zero"), sessionRow("b", "zero"))
