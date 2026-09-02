@@ -6048,6 +6048,21 @@ func toolResultDetail(result agent.ToolResult) string {
 // enforced profile has an empty body and a real notice, and falling back to
 // output there would restore the decorated text and draw the notice twice.
 func toolResultSessionPayload(result agent.ToolResult) map[string]any {
+	return ToolResultSessionPayload(result)
+}
+
+// ToolResultSessionPayload is THE serialization of a tool result into a session
+// event, shared by the interactive and the headless writers.
+//
+// They used to spell it separately, and the headless one persisted only the
+// decorated ModelOutput. Both write to the same default session store the TUI
+// resumes from, so a CLI-written result restored into the TUI arrived with no
+// typed notices and no undecorated body: for a long collapsed result the card
+// rendered no body and therefore no disclosure at all, even though the run
+// that produced it had shown one. One owner for the contract means one place
+// where a field can go missing, and a test against this function covers both
+// writers.
+func ToolResultSessionPayload(result agent.ToolResult) map[string]any {
 	output := result.ModelOutput()
 	payload := map[string]any{
 		"toolCallId": result.ToolCallID,
@@ -6057,6 +6072,9 @@ func toolResultSessionPayload(result agent.ToolResult) map[string]any {
 	}
 	if preview := toolResultDetail(result); preview != output {
 		payload["displayPreview"] = preview
+	}
+	if result.Truncated {
+		payload["truncated"] = true
 	}
 	if result.Redacted {
 		payload["redacted"] = true

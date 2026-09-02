@@ -28,6 +28,7 @@ import (
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/trace"
+	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -1498,23 +1499,12 @@ func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer
 // same payload separately and had already drifted: one persisted the raw field
 // while the stream writer used the accessor.
 func persistedToolResultPayload(result agent.ToolResult) map[string]any {
-	payload := map[string]any{
-		"toolCallId": result.ToolCallID,
-		"name":       result.Name,
-		"status":     string(result.Status),
-		"output":     result.ModelOutput(),
-	}
-	if len(result.Meta) > 0 {
-		payload["meta"] = result.Meta
-	}
-	if result.Truncated {
-		payload["truncated"] = true
-	}
-	if result.Redacted {
-		payload["redacted"] = true
-	}
-	if len(result.ChangedFiles) > 0 {
-		payload["changedFiles"] = result.ChangedFiles
-	}
-	return payload
+	// ONE CONTRACT WITH THE TUI. This used to build its own payload with the
+	// decorated output only, and both writers append to the same default
+	// session store the TUI resumes from. A CLI-written result restored into
+	// the TUI therefore arrived without typed enforcement notices and without
+	// the undecorated card body, so a long collapsed result rendered no body
+	// and, with it, no disclosure. The interactive writer owns the shape now,
+	// and this is the same function, not a matching copy of it.
+	return tui.ToolResultSessionPayload(result)
 }

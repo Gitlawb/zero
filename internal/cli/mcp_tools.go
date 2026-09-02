@@ -198,16 +198,36 @@ type mcpStartupDisclosing interface {
 	StartupDisclosures() []mcp.StartupDisclosure
 }
 
+// mcpStartupReporting is the push form: the runtime delivers each disclosure
+// exactly once, including a launch that completes after registration returned.
+type mcpStartupReporting interface {
+	ReportStartupDisclosures(func(mcp.StartupDisclosure))
+}
+
 // reportMCPStartupDisclosures states once what enforcement applied to the MCP
 // server processes this run launched.
+//
+// A PUSH, NOT A SAMPLE. This used to read StartupDisclosures once, here, and a
+// stdio attempt abandoned at the connect timeout could still be inside cmd.Start
+// at that moment. The process then started under the reduced write confinement,
+// the reaper closed its client, and nothing read the runtime again: the operator
+// saw the skipped-server warning and never the disclosure. Subscribing hands
+// the runtime a presentation to deliver to whenever the launch resolves, so a
+// late Start is said once rather than never. The pull form is kept for a
+// runtime that does not implement the push, which today is only test doubles.
 func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) {
-	disclosing, ok := runtime.(mcpStartupDisclosing)
-	if !ok {
-		return
-	}
-	for _, disclosure := range disclosing.StartupDisclosures() {
+	print := func(disclosure mcp.StartupDisclosure) {
 		for _, notice := range disclosure.Notices {
 			fmt.Fprintf(stderr, "notice: MCP server %s started with reduced enforcement: %s\n", disclosure.Name, notice)
+		}
+	}
+	if reporting, ok := runtime.(mcpStartupReporting); ok {
+		reporting.ReportStartupDisclosures(print)
+		return
+	}
+	if disclosing, ok := runtime.(mcpStartupDisclosing); ok {
+		for _, disclosure := range disclosing.StartupDisclosures() {
+			print(disclosure)
 		}
 	}
 }

@@ -93,6 +93,46 @@ type disclosureSource struct {
 	sink    *launchSink
 }
 
+// ReportStartupDisclosures delivers each server's launch disclosure to report
+// EXACTLY ONCE, whether the launch had already completed when this was called
+// or completes later.
+//
+// StartupDisclosures reads through the sink, which stopped a late Start from
+// being lost, but a value nobody re-reads is still a lost disclosure: both
+// production reporters sample once, right after RegisterTools returns, and an
+// attempt abandoned at the connect timeout can finish Start after that sample.
+// The reaper only closes the late client. So the operator saw the skipped-server
+// warning and never learned that a local process had run under the reduced
+// enforcement.
+//
+// Servers whose notices were known at commit are reported now, in server order.
+// Every other server subscribes its sink: if the launch already happened the
+// subscriber runs before this returns, otherwise it runs from publishLaunch on
+// the connect goroutine. Either way each server reaches report once. A server
+// that never starts never publishes, so prepare, pipe and Start failures stay
+// silent, and network servers, which launch no process, contribute nothing.
+//
+// Late deliveries arrive in completion order, which is the only order they
+// have; the immediate set keeps server order.
+func (runtime *Runtime) ReportStartupDisclosures(report func(StartupDisclosure)) {
+	if runtime == nil || report == nil {
+		return
+	}
+	for _, source := range runtime.disclosureSources {
+		if len(source.notices) > 0 {
+			report(StartupDisclosure{Name: source.name, Notices: append([]string(nil), source.notices...)})
+			continue
+		}
+		name := source.name
+		source.sink.subscribe(func(notices []string) {
+			if len(notices) == 0 {
+				return
+			}
+			report(StartupDisclosure{Name: name, Notices: notices})
+		})
+	}
+}
+
 // Skipped returns the servers that were skipped during registration (unreachable
 // or invalid), so the caller can warn the user without failing the launch.
 func (runtime *Runtime) Skipped() []SkippedServer {
