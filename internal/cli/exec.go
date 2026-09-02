@@ -350,7 +350,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// return early and the process this describes is already running by now. On
 		// stderr, so text, JSON and stream-JSON framing on stdout are untouched:
 		// this is the same channel the skipped-server and trust notices use.
-		reportMCPStartupDisclosures(stderr, mcpRuntime)
+		// Deferred AFTER closeMCPRuntime was deferred, so it runs BEFORE it: the
+		// pump stops and joins while stderr is still ours, and only then are the
+		// clients closed.
+		stopDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
+		defer stopDisclosures()
 	}
 	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)

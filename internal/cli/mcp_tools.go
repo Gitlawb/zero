@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/execution"
@@ -198,10 +199,11 @@ type mcpStartupDisclosing interface {
 	StartupDisclosures() []mcp.StartupDisclosure
 }
 
-// mcpStartupReporting is the push form: the runtime delivers each disclosure
-// exactly once, including a launch that completes after registration returned.
-type mcpStartupReporting interface {
-	ReportStartupDisclosures(func(mcp.StartupDisclosure))
+// mcpStartupStreaming is the push form: the runtime queues each disclosure as a
+// typed event, including a launch that completes after registration returned,
+// and this package drains it on the goroutine that owns stderr.
+type mcpStartupStreaming interface {
+	StartupDisclosureStream() *mcp.StartupDisclosureStream
 }
 
 // reportMCPStartupDisclosures states once what enforcement applied to the MCP
@@ -211,23 +213,59 @@ type mcpStartupReporting interface {
 // stdio attempt abandoned at the connect timeout could still be inside cmd.Start
 // at that moment. The process then started under the reduced write confinement,
 // the reaper closed its client, and nothing read the runtime again: the operator
-// saw the skipped-server warning and never the disclosure. Subscribing hands
-// the runtime a presentation to deliver to whenever the launch resolves, so a
-// late Start is said once rather than never. The pull form is kept for a
-// runtime that does not implement the push, which today is only test doubles.
-func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) {
+// saw the skipped-server warning and never the disclosure.
+//
+// THIS GOROUTINE OWNS THE WRITER. The runtime queues typed disclosures; every
+// write to stderr happens either on the caller's goroutine (the set already known
+// when this returns, in server order, so startup output keeps its order) or on
+// the single pump started here, never both at once and never after stop.
+//
+// The returned stop ends delivery and joins the pump, so no write to stderr can
+// outlive the caller's ownership of it. The caller must run it before handing the
+// terminal to anything else. A disclosure that arrives after stop is dropped: it
+// is worth printing while someone owns the writer, and worth losing rather than
+// writing into a screen that now belongs to Bubble Tea. Anything already queued
+// when stop runs is still printed, on the caller's goroutine, with the pump
+// already finished.
+//
+// The pull form is kept for a runtime that implements no stream, which today is
+// only test doubles; it has no late launches to deliver, so its stop is a no-op.
+func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) (stop func()) {
 	print := func(disclosure mcp.StartupDisclosure) {
 		for _, notice := range disclosure.Notices {
 			fmt.Fprintf(stderr, "notice: MCP server %s started with reduced enforcement: %s\n", disclosure.Name, notice)
 		}
 	}
-	if reporting, ok := runtime.(mcpStartupReporting); ok {
-		reporting.ReportStartupDisclosures(print)
-		return
-	}
-	if disclosing, ok := runtime.(mcpStartupDisclosing); ok {
-		for _, disclosure := range disclosing.StartupDisclosures() {
+	printAll := func(disclosures []mcp.StartupDisclosure) {
+		for _, disclosure := range disclosures {
 			print(disclosure)
 		}
+	}
+	streaming, ok := runtime.(mcpStartupStreaming)
+	if !ok {
+		if disclosing, ok := runtime.(mcpStartupDisclosing); ok {
+			printAll(disclosing.StartupDisclosures())
+		}
+		return func() {}
+	}
+	stream := streaming.StartupDisclosureStream()
+	if stream == nil {
+		return func() {}
+	}
+	printAll(stream.Drain())
+	pumped := make(chan struct{})
+	go func() {
+		defer close(pumped)
+		for stream.Wait() {
+			printAll(stream.Drain())
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			stream.Close()
+			<-pumped
+			printAll(stream.Drain())
+		})
 	}
 }
