@@ -2,9 +2,11 @@ package tools
 
 import (
 	"path/filepath"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Gitlawb/zero/internal/redaction"
 	udiff "github.com/aymanbagabas/go-udiff"
 )
 
@@ -12,6 +14,12 @@ import (
 // a large generated file can't flood the transcript or balloon the persisted
 // session events. Past this the tool falls back to its summary line alone.
 const maxToolPreviewBytes = 48 * 1024
+
+// A structured replacement contains two complete file sides, so its transport
+// budget is intentionally separate from the single rendered-preview budget.
+// Each side may be as large as a normal preview; aggregate producers apply the
+// two-sided result cap in file order.
+const maxToolResultFileDiffBytes = 2 * maxToolPreviewBytes
 
 // FileDiff is a human-facing before/after file change. Registry-boundary
 // redaction applies to both sides before any caller receives it.
@@ -29,16 +37,17 @@ type FileDiff struct {
 
 // boundedFileDiff declines rather than truncating: a truncated side would look
 // like an exact file replacement. Callers keep ChangedFiles as the safe
-// fallback for large, unsafe, or unchanged content. Newlines, carriage returns,
-// tabs, and ASCII spaces are normal text. Other controls, Unicode format
-// characters, and non-ASCII whitespace are rejected rather than normalized, so
-// invisible separators cannot split a secret before transcript redaction.
+// fallback for large, unsafe, or unchanged content. Each complete side gets the
+// same bound as a rendered preview; aggregate result producers apply their own
+// cap. Control bytes are rejected. Ordinary Unicode format/space characters are
+// retained unless removing them reveals a credential shape that the normal
+// redactor could not see in the original text.
 func boundedFileDiff(path, oldText, newText string, oldExists, newExists bool) (FileDiff, bool) {
 	if !filepath.IsAbs(path) || (!oldExists && !newExists) ||
 		(oldExists == newExists && oldText == newText) ||
 		!utf8.ValidString(oldText) || !utf8.ValidString(newText) ||
 		unsafeDiffText(oldText) || unsafeDiffText(newText) ||
-		len(oldText)+len(newText) > maxToolPreviewBytes {
+		len(oldText) > maxToolPreviewBytes || len(newText) > maxToolPreviewBytes {
 		return FileDiff{}, false
 	}
 	return FileDiff{Path: path, OldExists: oldExists, NewExists: newExists, OldText: oldText, NewText: newText}, true
@@ -48,16 +57,40 @@ func unsafeDiffText(text string) bool {
 	if !utf8.ValidString(text) {
 		return true
 	}
+	hasCanonicalizableSeparator := false
 	for _, r := range text {
 		switch r {
 		case '\n', '\r', '\t', ' ':
 			continue
 		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+		if unicode.IsControl(r) {
 			return true
 		}
+		if unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+			hasCanonicalizableSeparator = true
+		}
 	}
-	return false
+	if !hasCanonicalizableSeparator {
+		return false
+	}
+	return diffTextRevealsObfuscatedSecret(text)
+}
+
+func diffTextRevealsObfuscatedSecret(text string) bool {
+	if !utf8.ValidString(text) {
+		return false
+	}
+	canonical := strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t', ' ':
+			return r
+		}
+		if unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, text)
+	return canonical != text && redaction.RedactString(canonical, redaction.Options{}) != canonical
 }
 
 // boundedUnifiedDiff returns a unified diff of oldContent -> newContent labelled

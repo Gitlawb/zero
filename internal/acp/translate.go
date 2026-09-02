@@ -154,14 +154,42 @@ func appendToolResultDiffs(content []ToolCallContent, diffs []tools.FileDiff) []
 }
 
 func toolResultLocations(result agent.ToolResult) []ToolCallLocation {
-	locs := make([]ToolCallLocation, 0, len(result.ChangedFiles))
-	for _, f := range result.ChangedFiles {
-		if strings.TrimSpace(f) == "" {
+	locs := make([]ToolCallLocation, 0, len(result.FileDiffs)+len(result.ChangedFiles))
+	seen := make(map[string]bool, len(result.FileDiffs)+len(result.ChangedFiles))
+	for _, diff := range result.FileDiffs {
+		path := strings.TrimSpace(diff.Path)
+		if path == "" || seen[path] {
 			continue
 		}
+		seen[path] = true
+		locs = append(locs, ToolCallLocation{Path: path})
+	}
+	for _, f := range result.ChangedFiles {
+		f = strings.TrimSpace(f)
+		if f == "" || locationCoveredByFileDiff(f, result.FileDiffs) || seen[f] {
+			continue
+		}
+		seen[f] = true
 		locs = append(locs, ToolCallLocation{Path: f})
 	}
 	return locs
+}
+
+func locationCoveredByFileDiff(changed string, diffs []tools.FileDiff) bool {
+	changed = filepath.Clean(changed)
+	for _, diff := range diffs {
+		diffPath := filepath.Clean(diff.Path)
+		if filepath.IsAbs(changed) {
+			if diffPath == changed {
+				return true
+			}
+			continue
+		}
+		if diffPath == changed || strings.HasSuffix(diffPath, string(filepath.Separator)+changed) {
+			return true
+		}
+	}
+	return false
 }
 
 // planUpdate maps ZERO's plan items to an ACP "plan" update.

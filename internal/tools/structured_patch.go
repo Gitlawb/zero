@@ -156,8 +156,15 @@ func applyPatchOperations(applyRoot, relativeRoot string, operations []structure
 			}
 		}
 	}
-	if err := applyStructuredPatchChanges(workspace, changes, options.FileTracker); err != nil {
-		return errorResult("Error applying patch: " + err.Error())
+	applyOutcome, err := applyStructuredPatchChanges(workspace, changes, options.FileTracker)
+	if err != nil {
+		result := errorResult("Error applying patch: " + err.Error())
+		result.ChangedFiles = changedFilesFromStructuredPatch(relativeRoot, applyOutcome.committed)
+		result.ChangedFiles = appendUniqueStructuredPatchPaths(result.ChangedFiles, relativeRoot, applyOutcome.incompletePaths)
+		result.FileDiffs = fileDiffsFromStructuredPatch(relativeRoot, applyOutcome.committed)
+		result.Redacted = structuredPatchContainsObfuscatedSecret(applyOutcome.committed)
+		result.Display = Display{Summary: result.Output, Kind: "diff", Preview: structuredPatchPreview(applyOutcome.committed)}
+		return result
 	}
 
 	for _, change := range changes {
@@ -184,27 +191,38 @@ func applyPatchOperations(applyRoot, relativeRoot string, operations []structure
 	result := okResult(summary)
 	result.ChangedFiles = changedFilesFromStructuredPatch(relativeRoot, changes)
 	result.FileDiffs = fileDiffsFromStructuredPatch(relativeRoot, changes)
+	result.Redacted = structuredPatchContainsObfuscatedSecret(changes)
 	result.Display = Display{Summary: summary, Kind: "diff", Preview: structuredPatchPreview(changes)}
 	return result
+}
+
+func structuredPatchContainsObfuscatedSecret(changes []structuredPatchChange) bool {
+	for _, change := range changes {
+		if diffTextRevealsObfuscatedSecret(change.before) || diffTextRevealsObfuscatedSecret(change.after) {
+			return true
+		}
+	}
+	return false
 }
 
 func fileDiffsFromStructuredPatch(_ string, changes []structuredPatchChange) []FileDiff {
 	const maxToolResultFileDiffs = 64
 	diffs := make([]FileDiff, 0, len(changes)*2)
 	usedBytes := 0
-	appendGroup := func(group ...FileDiff) {
+	appendGroup := func(group ...FileDiff) bool {
 		if len(group) == 0 || len(diffs)+len(group) > maxToolResultFileDiffs {
-			return
+			return false
 		}
 		groupBytes := 0
 		for _, diff := range group {
-			groupBytes += len(diff.Path) + len(diff.OldText) + len(diff.NewText)
+			groupBytes += len(diff.OldText) + len(diff.NewText)
 		}
-		if usedBytes+groupBytes > maxToolPreviewBytes {
-			return
+		if usedBytes+groupBytes > maxToolResultFileDiffBytes {
+			return false
 		}
 		diffs = append(diffs, group...)
 		usedBytes += groupBytes
+		return true
 	}
 	makeDiff := func(path, before, after string, oldExists, newExists bool) (FileDiff, bool) {
 		return boundedFileDiff(path, before, after, oldExists, newExists)
@@ -237,7 +255,9 @@ func fileDiffsFromStructuredPatch(_ string, changes []structuredPatchChange) []F
 				group = append(group, diff)
 			}
 		}
-		appendGroup(group...)
+		if len(group) > 0 && !appendGroup(group...) {
+			break
+		}
 	}
 	return diffs
 }
@@ -727,38 +747,52 @@ func findStructuredPatchSequence(lines, wanted []string, start int, endOfFile bo
 	return -1, false
 }
 
-func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange, tracker *FileTracker) error {
+type structuredPatchApplyOutcome struct {
+	committed       []structuredPatchChange
+	incompletePaths []string
+}
+
+func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange, tracker *FileTracker) (structuredPatchApplyOutcome, error) {
 	// committed lists, in order, the paths whose change reached disk before a
 	// later change failed, so the caller (and the model) knows exactly which
 	// files now hold the patched content and which were never touched.
-	var committed []string
+	var outcome structuredPatchApplyOutcome
 	for _, change := range changes {
 		done, err := applyStructuredPatchChange(root, change)
-		if done {
-			committed = append(committed, structuredPatchChangePaths(change)...)
-		}
 		if err != nil {
-			forgetStructuredPatchFiles(tracker, changes)
-			if len(committed) > 0 {
-				return fmt.Errorf("%w; patch was partially applied — already committed: %s; the remaining files are unchanged; re-read the committed files before retrying", err, strings.Join(committed, ", "))
+			if done && change.to.relative != "" {
+				outcome.incompletePaths = append(outcome.incompletePaths, change.to.relative)
 			}
-			return err
+			forgetStructuredPatchFiles(tracker, changes)
+			committedPaths := changedFilesFromStructuredPatch(".", outcome.committed)
+			committedPaths = appendUniqueStructuredPatchPaths(committedPaths, ".", outcome.incompletePaths)
+			if len(committedPaths) > 0 {
+				return outcome, fmt.Errorf("%w; patch was partially applied — already committed: %s; the remaining files are unchanged; re-read the committed files before retrying", err, strings.Join(committedPaths, ", "))
+			}
+			return outcome, err
+		}
+		if done {
+			outcome.committed = append(outcome.committed, change)
 		}
 	}
-	return nil
+	return outcome, nil
 }
 
-// structuredPatchChangePaths names the workspace-relative paths a committed
-// change touched: the destination, plus the source of a move or copy.
-func structuredPatchChangePaths(change structuredPatchChange) []string {
-	if change.kind == structuredPatchDelete {
-		return []string{change.from.relative}
+func appendUniqueStructuredPatchPaths(existing []string, relativeRoot string, paths []string) []string {
+	seen := make(map[string]bool, len(existing)+len(paths))
+	for _, path := range existing {
+		seen[path] = true
 	}
-	paths := []string{change.to.relative}
-	if change.from.absolute != change.to.absolute && change.from.relative != "" {
-		paths = append([]string{change.from.relative}, paths...)
+	for _, path := range paths {
+		if relativeRoot != "" && relativeRoot != "." {
+			path = filepath.ToSlash(filepath.Join(relativeRoot, path))
+		}
+		if path != "" && !seen[path] {
+			seen[path] = true
+			existing = append(existing, path)
+		}
 	}
-	return paths
+	return existing
 }
 
 func forgetStructuredPatchFiles(tracker *FileTracker, changes []structuredPatchChange) {
@@ -969,9 +1003,19 @@ func changedFilesFromStructuredPatch(relativeRoot string, changes []structuredPa
 	seen := make(map[string]bool)
 	var paths []string
 	for _, change := range changes {
-		targets := []structuredPatchTarget{change.to}
-		if change.from.absolute != change.to.absolute {
-			targets = append([]structuredPatchTarget{change.from}, targets...)
+		var targets []structuredPatchTarget
+		switch change.kind {
+		case structuredPatchDelete:
+			targets = []structuredPatchTarget{change.from}
+		case structuredPatchUpdate:
+			targets = []structuredPatchTarget{change.to}
+			if change.from.absolute != change.to.absolute {
+				targets = append([]structuredPatchTarget{change.from}, targets...)
+			}
+		default:
+			// Adds and copies mutate only their destination; the copy source is
+			// evidence for the operation, not a changed file.
+			targets = []structuredPatchTarget{change.to}
 		}
 		for _, target := range targets {
 			path := target.relative

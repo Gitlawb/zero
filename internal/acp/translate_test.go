@@ -94,8 +94,8 @@ func TestToolCallResult(t *testing.T) {
 	if diff := ok.Content[1]; diff.Type != "diff" || diff.Path != path || diff.OldText == nil || *diff.OldText != "before\n" || diff.NewText == nil || *diff.NewText != "after\n" {
 		t.Fatalf("unexpected diff content: %+v", diff)
 	}
-	if len(ok.Locations) != 1 || ok.Locations[0].Path != "a.go" {
-		t.Fatalf("blank changed files should be dropped, got %+v", ok.Locations)
+	if len(ok.Locations) != 1 || ok.Locations[0].Path != path {
+		t.Fatalf("rich diff location should use the same absolute path, got %+v", ok.Locations)
 	}
 
 	failed := toolCallResult(agent.ToolResult{ToolCallID: "tc2", Status: tools.StatusError, Output: "boom"})
@@ -129,6 +129,23 @@ func TestToolCallDiffJSONPreservesEmptyFilesWithoutClaimingDeletion(t *testing.T
 		if index == 0 && wire["oldText"] != nil {
 			t.Fatalf("create oldText = %#v, want null", wire["oldText"])
 		}
+		if index == 1 && wire["oldText"] != "before" {
+			t.Fatalf("update oldText = %#v, want before", wire["oldText"])
+		}
+	}
+}
+
+func TestToolResultLocationsCorrelateRichDiffsAndKeepFallbacks(t *testing.T) {
+	root := t.TempDir()
+	richPath := filepath.Join(root, "rich.go")
+	locations := toolResultLocations(agent.ToolResult{
+		ChangedFiles: []string{"rich.go", "fallback.go"},
+		FileDiffs: []tools.FileDiff{{
+			Path: richPath, OldExists: true, NewExists: true, OldText: "before", NewText: "after",
+		}},
+	})
+	if len(locations) != 2 || locations[0].Path != richPath || locations[1].Path != "fallback.go" {
+		t.Fatalf("locations = %#v", locations)
 	}
 }
 

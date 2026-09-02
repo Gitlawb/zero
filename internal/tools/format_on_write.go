@@ -65,35 +65,40 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
+var runFormatOnWriteCommand = func(ctx context.Context, binaryPath string, arguments []string, directory string) error {
+	formatter := exec.CommandContext(ctx, binaryPath, arguments...)
+	formatter.Dir = directory
+	formatter.Stdin = strings.NewReader("")
+	return formatter.Run()
+}
+
+var readFormattedFile = os.ReadFile
+
 // maybeFormatWrittenFile runs the configured formatter for absolutePath (when
-// enabled and on PATH) and returns the file's content afterwards. Best-effort
-// throughout: any failure — no formatter, formatter error, timeout, unreadable
-// result — returns writtenContent so the caller's state matches the last write
-// it performed itself.
-func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) string {
+// enabled and on PATH) and returns the verified file content afterwards. A
+// formatter may mutate the file and then fail or time out, so its process error
+// never substitutes the originally requested bytes for a final read. The bool
+// is false only when a formatter ran and the resulting file could not be read;
+// callers keep ChangedFiles but omit exact rich evidence in that case.
+func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) (string, bool) {
 	if !formatOnWriteEnabled() {
-		return writtenContent
+		return writtenContent, true
 	}
 	command, ok := formatterCommands[strings.ToLower(filepath.Ext(absolutePath))]
 	if !ok {
-		return writtenContent
+		return writtenContent, true
 	}
 	binaryPath, err := exec.LookPath(command[0])
 	if err != nil {
-		return writtenContent
+		return writtenContent, true
 	}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
 	arguments := append(append([]string(nil), command[1:]...), absolutePath)
-	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
-	formatter.Dir = filepath.Dir(absolutePath)
-	formatter.Stdin = strings.NewReader("")
-	if err := formatter.Run(); err != nil {
-		return writtenContent
-	}
-	formatted, err := os.ReadFile(absolutePath)
+	_ = runFormatOnWriteCommand(formatCtx, binaryPath, arguments, filepath.Dir(absolutePath))
+	formatted, err := readFormattedFile(absolutePath)
 	if err != nil {
-		return writtenContent
+		return writtenContent, false
 	}
-	return string(formatted)
+	return string(formatted), true
 }

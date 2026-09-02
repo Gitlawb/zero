@@ -63,8 +63,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 
 	existed := false
-	if _, err := os.Stat(absolutePath); err == nil {
+	var priorInfo os.FileInfo
+	if info, err := os.Stat(absolutePath); err == nil {
 		existed = true
+		priorInfo = info
 		if !overwrite {
 			return errorResult("Error: " + relativePath + " already exists. Pass overwrite: true to replace it.")
 		}
@@ -111,19 +113,27 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
+	var expectedContent *string
+	if priorContentKnown {
+		expectedContent = &priorContent
+	}
+	if err := commitFileContents(absolutePath, priorInfo, expectedContent, content); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	content = maybeFormatWrittenFile(ctx, absolutePath, content)
+	content, finalContentKnown := maybeFormatWrittenFile(ctx, absolutePath, content)
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
-	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	if content == modelKnownContent {
+	if finalContentKnown {
+		options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	} else {
+		options.FileTracker.Forget(absolutePath)
+	}
+	if finalContentKnown && content == modelKnownContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
@@ -146,9 +156,11 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	result.ChangedFiles = []string{relativePath}
 	// Do not pretend an unreadable overwrite was a creation. The write may be
 	// valid, but ACP only receives an exact before/after pair we actually saw.
-	if priorContentKnown {
+	if priorContentKnown && finalContentKnown {
 		if diff, ok := boundedFileDiff(absolutePath, priorContent, content, existed, true); ok {
 			result.FileDiffs = []FileDiff{diff}
+		} else if diffTextRevealsObfuscatedSecret(priorContent) || diffTextRevealsObfuscatedSecret(content) {
+			result.Redacted = true
 		}
 	}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for
