@@ -1790,7 +1790,7 @@ func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing
 func TestRunAutoClassifierAllowsSandboxReviewedWorkspaceWrite(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWritePathContentThenAnswer("notes.txt", strings.Repeat("x", autoPermissionClassifierStringLimit+12), "write done")
 	var permissionEvents []PermissionEvent
 	var classifierRequests []AutoPermissionClassifierRequest
@@ -1856,7 +1856,7 @@ func TestRunAutoClassifierAllowsSandboxReviewedWorkspaceWrite(t *testing.T) {
 func TestRunAutoClassifierPromptFallsBackToPermissionRequest(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	classifierCalls := 0
 	var requests []PermissionRequest
@@ -1910,7 +1910,7 @@ func TestRunAutoClassifierPromptFallsBackToPermissionRequest(t *testing.T) {
 func TestRunAutoClassifierErrorFallsBackToPermissionRequest(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var requests []PermissionRequest
 
@@ -1947,7 +1947,7 @@ func TestRunAutoClassifierErrorFallsBackToPermissionRequest(t *testing.T) {
 func TestRunDefaultAutoClassifierInvalidJSONFallsBackToPermissionRequest(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenClassifyThenAnswer("not json", "write approved")
 	var requests []PermissionRequest
 
@@ -1981,7 +1981,7 @@ func TestRunDefaultAutoClassifierInvalidJSONFallsBackToPermissionRequest(t *test
 func TestRunDefaultAutoClassifierStrictJSONAllowsWorkspaceWrite(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenClassifyThenAnswer(`{"action":"allow","reason":"safe workspace note"}`, "write done")
 	var permissionEvents []PermissionEvent
 

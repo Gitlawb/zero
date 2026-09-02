@@ -241,6 +241,56 @@ func TestMatchCommandPrefixRejectsGrantWhenCdEscapesProject(t *testing.T) {
 		t.Fatal("expected a bare `cd` (home) to refuse the grant")
 	}
 }
+func TestMatchCommandPrefixRejectsGrantWhenWorkdirEscapesProject(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "grants.json")})
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Store: store})
+	if _, err := engine.GrantCommandPrefixForProject(sandbox.CommandPrefixInput{ToolName: "bash", Prefix: []string{"go", "test"}}); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := engine.GrantCommandPrefixForProject(sandbox.CommandPrefixInput{ToolName: "exec_command", Prefix: []string{"go", "test"}}); err != nil {
+		t.Fatalf("grant exec: %v", err)
+	}
+	// Every workdir alias for exec_command must be guarded: an outside directory
+	// supplied as workdir/cwd/dir/directory must not honor a project-scoped grant,
+	// same as the ` + "`cd` outside" guard. This is the recommended ` + "`cwd` over `cd`" + `" path.
+	for _, key := range []string{"workdir", "cwd", "dir", "directory"} {
+		args := map[string]any{"command": "go test ./...", key: outside}
+		if grant, ok, _ := matchCommandPrefix("exec_command", args, Options{Sandbox: engine}); ok {
+			t.Fatalf("expected no match for exec_command %s outside, got %#v", key, grant)
+		}
+	}
+	// bash's single alias must also be guarded.
+	if grant, ok, _ := matchCommandPrefix("bash", map[string]any{"command": "go test ./...", "cwd": outside}, Options{Sandbox: engine}); ok {
+		t.Fatalf("expected no match for bash cwd outside, got %#v", grant)
+	}
+	// Inside workdir still honors the grant (relative and absolute forms).
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if _, ok, _ := matchCommandPrefix("exec_command", map[string]any{"command": "go test ./...", "workdir": filepath.Join(root, "sub")}, Options{Sandbox: engine}); !ok {
+		t.Fatal("expected within-project workdir to still match the grant")
+	}
+	if _, ok, _ := matchCommandPrefix("exec_command", map[string]any{"command": "go test ./...", "cwd": "sub"}, Options{Sandbox: engine}); !ok {
+		t.Fatal("expected relative within-project cwd to still match the grant")
+	}
+	// workdir escape via symlink inside workspace pointing outside must also be refused.
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if grant, ok, _ := matchCommandPrefix("exec_command", map[string]any{"command": "go test ./...", "workdir": filepath.Join(root, "escape")}, Options{Sandbox: engine}); ok {
+		t.Fatalf("expected symlinked-out workdir to refuse grant, got %#v", grant)
+	}
+	// Absolute outside with ` + "`cd` outside" already refused; combined case also refused.
+	if grant, ok, _ := matchCommandPrefix("exec_command", map[string]any{"command": "cd sub && go test ./...", "workdir": outside}, Options{Sandbox: engine}); ok {
+		t.Fatalf("expected outside workdir + cd to refuse, got %#v", grant)
+	}
+}
+
 
 func TestKnownSafeCommandSegmentRejectsMsysProneOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {

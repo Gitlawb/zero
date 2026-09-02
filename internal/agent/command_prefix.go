@@ -179,10 +179,12 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 	// shellExecutionArgsForApproval). `cd` is a known-safe segment, so a composite
 	// like `cd /other && go test` would otherwise honor a grant saved for THIS
 	// project yet execute in another directory outside it. Bind the grant to the
-	// effective directory: if a `cd` moves execution outside the workspace root (or
-	// to a target we cannot prove stays inside it), refuse the match so the command
+	// effective directory: if the effective starting directory (workdir/cwd/dir/
+	// directory) or any `cd` moves execution outside the workspace root (or to a
+	// target we cannot prove stays inside it), refuse the match so the command
 	// falls back to the normal sandboxed prompt instead of an out-of-scope bypass.
-	if !commandDirStaysWithinProject(segments, options.Sandbox.WorkspaceRoot()) {
+	effectiveDir := effectiveCommandDir(args)
+	if !commandDirStaysWithinProject(segments, options.Sandbox.WorkspaceRoot(), effectiveDir) {
 		return sandbox.CommandPrefixGrant{}, false, false
 	}
 	var matched sandbox.CommandPrefixGrant
@@ -215,16 +217,45 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 	return sandbox.CommandPrefixGrant{}, false, false
 }
 
-// commandDirStaysWithinProject reports whether a composite command's `cd`
-// segments keep execution inside root. It starts at root and follows each `cd`;
-// a target that resolves outside root, or one that cannot be resolved statically
-// (no argument, `-`, `~`/home, an environment variable, a glob, or extra args),
-// is treated as leaving the project so the caller refuses the unsandboxed grant.
-// With no root there is no project to bind to, so any `cd` is rejected.
-func commandDirStaysWithinProject(segments [][]string, root string) bool {
+// effectiveCommandDir extracts the tool's effective starting directory from args.
+// exec_command accepts workdir/cwd/dir/directory (in that priority, see
+// internal/tools/exec_command.go), bash accepts cwd. We check all four aliases
+// so a grant cannot be smuggled outside the project via the recommended
+// workdir argument while the guard only watched ` + "`cd`" + `.
+func effectiveCommandDir(args map[string]any) string {
+	for _, key := range []string{"workdir", "cwd", "dir", "directory"} {
+		if raw, ok := args[key]; ok {
+			if s, ok := raw.(string); ok {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					return s
+				}
+			}
+		}
+	}
+	return "."
+}
+
+// commandDirStaysWithinProject reports whether a composite command's effective
+// directory and ` + "`cd`" + ` segments keep execution inside root. It starts at the
+// effective directory (resolved against root) and follows each ` + "`cd`" + `;
+// a starting directory or target that resolves outside root, or one that cannot
+// be resolved statically (no argument, `-`, ` + "`~`" + `/home, an environment
+// variable, a glob, or extra args), is treated as leaving the project so the
+// caller refuses the unsandboxed grant. With no root there is no project to bind
+// to, so any non-default directory or ` + "`cd`" + ` is rejected.
+func commandDirStaysWithinProject(segments [][]string, root, initialDir string) bool {
 	root = strings.TrimSpace(root)
+	initialDir = strings.TrimSpace(initialDir)
+	if initialDir == "" {
+		initialDir = "."
+	}
 	if root == "" {
-		// No project to bind to: only safe if the command never changes directory.
+		// No project to bind to: only safe if the command stays at the default
+		// directory and never changes it.
+		if initialDir != "." {
+			return false
+		}
 		return !commandChangesDirectory(segments)
 	}
 	// Resolve the root's real path once. Containment is checked against real paths
@@ -234,7 +265,31 @@ func commandDirStaysWithinProject(segments [][]string, root string) bool {
 	if err != nil {
 		return false
 	}
-	effective := realRoot
+	// Resolve the effective starting directory the same way we resolve a ` + "`cd`" + `
+	// target: relative paths join against the workspace root, absolute paths are
+	// cleaned, and unresolvable forms (home, variables, globs) fail closed.
+	var effective string
+	if initialDir == "." {
+		effective = realRoot
+	} else {
+		if initialDir == "-" || initialDir == "~" || strings.HasPrefix(initialDir, "~") {
+			return false
+		}
+		if strings.ContainsAny(initialDir, "$*?[") {
+			return false
+		}
+		var candidate string
+		if filepath.IsAbs(initialDir) {
+			candidate = filepath.Clean(initialDir)
+		} else {
+			candidate = filepath.Clean(filepath.Join(realRoot, initialDir))
+		}
+		realCandidate, err := filepath.EvalSymlinks(candidate)
+		if err != nil || !pathWithinRoot(realCandidate, realRoot) {
+			return false
+		}
+		effective = realCandidate
+	}
 	for _, tokens := range segments {
 		if len(tokens) == 0 || commandName(tokens[0]) != "cd" {
 			continue
@@ -695,6 +750,18 @@ func hasStringPrefix(values []string, prefix []string) bool {
 	}
 	for index := range prefix {
 		if values[index] != prefix[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringSlices(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
 			return false
 		}
 	}
