@@ -320,11 +320,11 @@ func TestPersistCommandPrefixGrantScopedOrSessionFallsBackToSession(t *testing.T
 	engine := sandbox.NewEngine(sandbox.EngineOptions{Store: store})
 	options := Options{Sandbox: engine}
 
-	prefix := persistCommandPrefixGrantScopedOrSession(PermissionDecisionAllowPrefixProject, "bash", []string{"yarn", "test:unit"}, "reason", options)
-	if !equalStringSlices(prefix, []string{"yarn", "test:unit"}) {
-		t.Fatalf("fallback prefix = %#v, want [yarn test:unit]", prefix)
+	prefix := persistCommandPrefixGrantScopedOrSession(PermissionDecisionAllowPrefixProject, "bash", []string{"cargo", "test:unit"}, "reason", options)
+	if !equalStringSlices(prefix, []string{"cargo", "test:unit"}) {
+		t.Fatalf("fallback prefix = %#v, want [cargo test:unit]", prefix)
 	}
-	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"yarn", "test:unit"}); !ok {
+	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"cargo", "test:unit"}); !ok {
 		t.Fatal("expected session grant recorded after project scope failed")
 	}
 	// Nothing was persisted at project/global scope.
@@ -356,12 +356,12 @@ func TestProposedCommandPrefixRejectsRequestedUnsafeLauncherPrefix(t *testing.T)
 
 func TestCommandPrefixLadderOffersBreadthChoices(t *testing.T) {
 	// test:unit has a namespace separator, so the ladder offers the intra-token
-	// wildcard alongside the exact prefix. The one-token rung ({"yarn"}) is never
-	// offered: a bare launcher grant would approve every later yarn subcommand.
-	got := commandPrefixLadder("bash", map[string]any{"command": "yarn test:unit"})
+	// wildcard alongside the exact prefix. The one-token rung ({"cargo"}) is never
+	// offered: a bare launcher grant would approve every later cargo subcommand.
+	got := commandPrefixLadder("bash", map[string]any{"command": "cargo test:unit"})
 	want := [][]string{
-		{"yarn", "test:*"},
-		{"yarn", "test:unit"},
+		{"cargo", "test:*"},
+		{"cargo", "test:unit"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("ladder = %#v, want %#v", got, want)
@@ -417,23 +417,23 @@ func TestIntraTokenWildcardPrefix(t *testing.T) {
 
 func TestGrantPrefixForDecisionHonorsOfferedChoice(t *testing.T) {
 	request := PermissionRequest{
-		CommandPrefix:        []string{"yarn", "test:unit"},
-		CommandPrefixOptions: [][]string{{"yarn", "test:*"}, {"yarn", "test:unit"}},
+		CommandPrefix:        []string{"cargo", "test:unit"},
+		CommandPrefixOptions: [][]string{{"cargo", "test:*"}, {"cargo", "test:unit"}},
 	}
 	// The intra-token wildcard breadth is honored.
-	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"yarn", "test:*"}}); !equalStringSlices(got, []string{"yarn", "test:*"}) {
+	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"cargo", "test:*"}}); !equalStringSlices(got, []string{"cargo", "test:*"}) {
 		t.Fatalf("expected wildcard breadth honored, got %#v", got)
 	}
 	// A one-token breadth is never offered, so it falls back to the default.
-	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"yarn"}}); !equalStringSlices(got, []string{"yarn", "test:unit"}) {
+	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"cargo"}}); !equalStringSlices(got, []string{"cargo", "test:unit"}) {
 		t.Fatalf("expected default prefix on unoffered one-token choice, got %#v", got)
 	}
 	// An empty choice falls back to the request default.
-	if got := grantPrefixForDecision(request, PermissionDecision{}); !equalStringSlices(got, []string{"yarn", "test:unit"}) {
+	if got := grantPrefixForDecision(request, PermissionDecision{}); !equalStringSlices(got, []string{"cargo", "test:unit"}) {
 		t.Fatalf("expected default prefix on empty choice, got %#v", got)
 	}
 	// A choice that was never offered falls back to the default (no widening).
-	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"yarn", "install"}}); !equalStringSlices(got, []string{"yarn", "test:unit"}) {
+	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"cargo", "install"}}); !equalStringSlices(got, []string{"cargo", "test:unit"}) {
 		t.Fatalf("expected default prefix on unoffered choice, got %#v", got)
 	}
 }

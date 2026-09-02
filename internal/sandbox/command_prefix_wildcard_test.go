@@ -39,8 +39,8 @@ func TestCommandPrefixProjectScope(t *testing.T) {
 }
 
 func TestValidCommandPrefixAllowsTrailingWildcardOnLastToken(t *testing.T) {
-	// yarn is not a banned launcher, so the wildcard prefix is grantable.
-	if !ValidCommandPrefix([]string{"yarn", "test:*"}) {
+	// cargo is not a banned launcher, so the wildcard prefix is grantable.
+	if !ValidCommandPrefix([]string{"cargo", "test:*"}) {
 		t.Fatal("trailing wildcard on the last token should be valid")
 	}
 }
@@ -48,10 +48,10 @@ func TestValidCommandPrefixAllowsTrailingWildcardOnLastToken(t *testing.T) {
 func TestValidCommandPrefixRejectsUnsafeWildcards(t *testing.T) {
 	cases := map[string][]string{
 		"lone launcher wildcard":  {"go*"},
-		"mid-command wildcard":    {"yarn", "test:*", "unit"},
-		"mid-token glob":          {"yarn", "te*st"},
-		"plain trailing wildcard": {"yarn", "test*"},
-		"bare wildcard":           {"yarn", "*"},
+		"mid-command wildcard":    {"cargo", "test:*", "unit"},
+		"mid-token glob":          {"cargo", "te*st"},
+		"plain trailing wildcard": {"cargo", "test*"},
+		"bare wildcard":           {"cargo", "*"},
 	}
 	for name, prefix := range cases {
 		if ValidCommandPrefix(prefix) {
@@ -62,15 +62,15 @@ func TestValidCommandPrefixRejectsUnsafeWildcards(t *testing.T) {
 
 func TestCommandPrefixSessionGrantMatchesWildcard(t *testing.T) {
 	engine := NewEngine(EngineOptions{Policy: DefaultPolicy()})
-	engine.GrantCommandPrefixForSession("bash", []string{"yarn", "test:*"})
+	engine.GrantCommandPrefixForSession("bash", []string{"cargo", "test:*"})
 
-	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"yarn", "test:unit"}); !ok {
+	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"cargo", "test:unit"}); !ok {
 		t.Fatal("wildcard grant should match test:unit")
 	}
-	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"yarn", "test:e2e", "--watch"}); !ok {
+	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"cargo", "test:e2e", "--watch"}); !ok {
 		t.Fatal("wildcard grant should match test:e2e with extra args")
 	}
-	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"yarn", "build"}); ok {
+	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"cargo", "build"}); ok {
 		t.Fatal("wildcard grant must not match a non-test: script")
 	}
 }
