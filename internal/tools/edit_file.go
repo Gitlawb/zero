@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -60,11 +61,24 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
+	target, err := resolveScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
-	contentBytes, err := os.ReadFile(absolutePath)
+	absolutePath, relativePath := target.absolute, target.display
+	root, err := os.OpenRoot(target.root)
+	if err != nil {
+		return errorResult("Error reading " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
+	// Bind both workspace containment and credential identity to the handle the
+	// content is actually read from.
+	readFile, readInfo, err := protectedRootRead(root, target.relative, absolutePath, tool.workspaceRoot)
+	if err != nil {
+		return errorResult("Error reading " + relativePath + ": " + err.Error())
+	}
+	contentBytes, err := io.ReadAll(readFile)
+	readFile.Close()
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
@@ -150,20 +164,20 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return okResult("No changes: new_string is identical to old_string.")
 	}
 	editedSpans := replacementByteSpans(content, oldString, newString, replaceAll)
-	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
+	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {
+	// The write-side handle is checked before truncation, so a target swapped
+	// after the read cannot redirect the edit to the token. In-place publication
+	// preserves the existing inode, ACLs and hard links.
+	if _, err := writeRootedFile(root, target.relative, absolutePath, tool.workspaceRoot, []byte(updated), readInfo.Mode(), false); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
-	// FileTracker re-baseline: recording pre-format content would make the very
-	// next edit look like an external modification and trip the conflict guard.
 	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
-	newInfo, _ := os.Stat(absolutePath)
+	newInfo, _ := root.Stat(target.relative)
 	if updated == modelKnownContent {
 		// OUR edit, so we know precisely which lines moved: RecordEdit carries
 		// across the reads this edit did not disturb instead of dropping them.

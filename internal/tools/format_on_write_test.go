@@ -95,6 +95,33 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 	}
 }
 
+func TestProtectedCredentialDoesNotDisableFormatOnWriteForOtherFiles(t *testing.T) {
+	requireGofmt(t)
+	dir := t.TempDir()
+	token := filepath.Join(dir, "bridge-token")
+	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", token)
+	t.Setenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED", "")
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+
+	result := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "ordinary.go", "content": "package ordinary\n\nfunc  F( ) {   }\n",
+	}, RunOptions{})
+	if result.Status != StatusOK {
+		t.Fatalf("write failed: %q", result.Output)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "ordinary.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "func F() {") {
+		t.Fatalf("formatting was suppressed by unrelated token: %q", content)
+	}
+}
+
 func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
 	content := maybeFormatWrittenFile(context.Background(), filepath.Join(t.TempDir(), "notes.xyz"), "raw   text")

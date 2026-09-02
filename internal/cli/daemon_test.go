@@ -2,7 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +43,15 @@ func TestDaemonUsage(t *testing.T) {
 	code, out, _ := runDaemonCLI(t, "--help")
 	if code != exitSuccess || !strings.Contains(out, "Usage: zero daemon") {
 		t.Fatalf("--help exit=%d out=%q", code, out)
+	}
+	for _, want := range []string{
+		"macOS shell commands require the inline token",
+		"file only when it has no hard-link aliases",
+		"shell-writable root shares its filesystem",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("--help does not state %q in the file-token shell contract: %q", want, out)
+		}
 	}
 }
 
@@ -208,4 +225,84 @@ func TestDaemonDetachedChildProcess(t *testing.T) {
 	for {
 		time.Sleep(time.Hour)
 	}
+}
+
+func TestDaemonServeRemoteCanonicalizesTokenFileBeforeStartingWorkers(t *testing.T) {
+	isolateDaemonPaths(t)
+	certFile, keyFile := writeDaemonTestCertificate(t)
+	startDir := t.TempDir()
+	t.Chdir(startDir)
+	if err := os.WriteFile("token", []byte("bridge-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", "token")
+	t.Setenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED", "")
+
+	code, _, _ := runDaemonCLI(t, "serve-remote", "--addr", "127.0.0.1:not-a-port", "--tls-cert", certFile, "--tls-key", keyFile)
+	if code != exitCrash {
+		t.Fatalf("serve-remote exit = %d, want bind failure", code)
+	}
+	configured, err := filepath.Abs(filepath.Join(startDir, "token"))
+	if err != nil {
+		t.Fatalf("Abs(token): %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(configured)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", configured, err)
+	}
+	if got := os.Getenv("ZERO_DAEMON_REMOTE_TOKEN_FILE"); got != configured {
+		t.Fatalf("ZERO_DAEMON_REMOTE_TOKEN_FILE = %q, want configured path %q", got, configured)
+	}
+	if got := os.Getenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED"); got != resolved {
+		t.Fatalf("resolved token source = %q, want %q", got, resolved)
+	}
+}
+
+func writeDaemonTestCertificate(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "zero-daemon-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	certOut, err := os.Create(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		t.Fatal(err)
+	}
+	if err := certOut.Close(); err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyOut, err := os.Create(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyOut.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
 }

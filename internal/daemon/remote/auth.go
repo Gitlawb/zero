@@ -26,12 +26,14 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 // Env vars the bridge reads for its bearer token.
 const (
-	EnvToken     = "ZERO_DAEMON_REMOTE_TOKEN"
-	EnvTokenFile = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+	EnvToken             = remotetoken.EnvToken
+	EnvTokenFile         = remotetoken.EnvTokenFile
+	EnvTokenFileResolved = remotetoken.EnvTokenFileResolved
 )
 
 // ErrUnauthorized is returned when a token does not match.
@@ -66,14 +68,15 @@ func (a *TokenAuthenticator) Authenticate(token string) error {
 	return ErrUnauthorized
 }
 
-// TokenFromEnv resolves the bridge token from EnvToken, or a file named by
-// EnvTokenFile. It never logs the token.
+// TokenFromEnv resolves the bridge token from EnvToken, or the file source
+// selected by EnvTokenFile. After daemon startup resolution it reads the pinned
+// object rather than re-following a mutable configured symlink.
 func TokenFromEnv() (string, error) {
 	if t := strings.TrimSpace(os.Getenv(EnvToken)); t != "" {
 		return t, nil
 	}
-	if file := strings.TrimSpace(os.Getenv(EnvTokenFile)); file != "" {
-		data, err := os.ReadFile(file)
+	if source, selected := remotetoken.SourceFromEnv(); selected {
+		data, err := os.ReadFile(source.ReadPath())
 		if err != nil {
 			return "", fmt.Errorf("remote: read token file: %w", err)
 		}
@@ -84,6 +87,67 @@ func TokenFromEnv() (string, error) {
 		return t, nil
 	}
 	return "", fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
+}
+
+// TokenFromFreshEnv is TokenFromEnv for a caller that has NOT run
+// CanonicalizeTokenFileEnv and must not trust an inherited
+// ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED marker.
+//
+// That marker is a daemon-worker handoff value, not an independently
+// authoritative selector: remotetoken.SourceFromEnv binds it to whatever
+// ZERO_DAEMON_REMOTE_TOKEN_FILE happens to be set to right now, without proving
+// it is THAT value's resolved identity. A one-shot client process — `zero
+// daemon link`, or a remote dial — inherits its environment from its own
+// parent, which can carry a resolved marker left over from an unrelated prior
+// `serve-remote` invocation in the same shell. If the operator then points
+// EnvTokenFile at a different file, this client reads the stale target instead:
+// it can authenticate with a revoked credential, or fail against a valid one.
+//
+// remotetoken.ResolveSource ignores the marker and always resolves fresh, which
+// is exactly the property a caller that never canonicalized needs.
+func TokenFromFreshEnv() (string, error) {
+	if t := strings.TrimSpace(os.Getenv(EnvToken)); t != "" {
+		return t, nil
+	}
+	source, selected, err := remotetoken.ResolveSource()
+	if err != nil {
+		return "", fmt.Errorf("remote: %w", err)
+	}
+	if !selected {
+		return "", fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
+	}
+	data, err := os.ReadFile(source.ReadPath())
+	if err != nil {
+		return "", fmt.Errorf("remote: read token file: %w", err)
+	}
+	t := strings.TrimSpace(string(data))
+	if t == "" {
+		return "", errors.New("remote: token file is empty")
+	}
+	return t, nil
+}
+
+// CanonicalizeTokenFileEnv records both identities of the selected token file
+// before workers start: the operator-configured absolute spelling and the
+// symlink-resolved object this daemon authenticated against. Keeping both
+// prevents worker CWD changes from retargeting a relative value without losing
+// the configured authority boundary across replacement and restart.
+//
+// It is a deliberate no-op when EnvToken supplies the token: TokenFromEnv
+// prefers the inline value, so an unused (even dangling) file pointer must not
+// change the outcome or fail the start.
+func CanonicalizeTokenFileEnv() error {
+	source, selected, err := remotetoken.ResolveSource()
+	if err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
+	if !selected {
+		return nil
+	}
+	if err := remotetoken.PersistSource(source); err != nil {
+		return fmt.Errorf("remote: persist token file source: %w", err)
+	}
+	return nil
 }
 
 // Attestation is an optional post-token hook (e.g. workload attestation). The
