@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // initGitPluginRepo creates a real local git repo holding a plugin and returns a
@@ -401,5 +403,174 @@ func TestInstallCopiesEntireTree(t *testing.T) {
 	copied := filepath.Join(filepath.Dir(result.ManifestPath), "tools", "lookup.mjs")
 	if _, err := os.Stat(copied); err != nil {
 		t.Fatalf("entry script not copied into install dir: %v", err)
+	}
+}
+
+// A process killed between installtxn.CommitDir's two renames leaves the
+// plugin's only copy in a workspace backup with nothing at the target: the
+// plugin disappears and no later run looks in the workspace. The next install
+// over the same directory already takes the same cross-process lock, so it is
+// where the interrupted one gets put back.
+func TestInstallRecoversAPluginLeftByAnInterruptedCommit(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The on-disk state a kill in that window leaves, built the way CommitDir
+	// builds it: a staged workspace naming its target, with the live tree moved
+	// into the backup beside it and the target gone.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	if err := os.WriteFile(filepath.Join(workspace, "target"), []byte("zero.demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "zero.demo"), filepath.Join(workspace, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	other := validManifest()
+	other["id"] = "zero.other"
+	src2 := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src2"), other)
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "zero.demo", manifestFileName)); err != nil {
+		t.Fatalf("the interrupted install was not put back: %v", err)
+	}
+	loaded, err := Load(LoadOptions{Roots: []Root{{Source: SourceUser, Path: dir}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{}
+	for _, p := range loaded.Plugins {
+		ids = append(ids, p.ID)
+	}
+	if len(ids) != 2 {
+		t.Errorf("Load sees %v, want both plugins", ids)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("the recovered workspace should be cleared, got %v", err)
+	}
+}
+
+// A removal has to stick. An install killed mid-commit leaves the tree in a
+// workspace backup with nothing at the target, and Remove then takes the
+// not-present branch: it drops the lockfile entry, reports success, and leaves
+// the backup behind for the next install's recovery to publish again. Since
+// Load enumerates directories rather than the lockfile, that republished tree
+// is a live plugin the user already deleted.
+func TestRemoveLeavesNothingARecoveryCanResurrect(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	if err := os.WriteFile(filepath.Join(workspace, "target"), []byte("zero.demo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "zero.demo"), filepath.Join(workspace, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(dir, "zero.demo"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	other := validManifest()
+	other["id"] = "zero.other"
+	src2 := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src2"), other)
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "zero.demo")); !os.IsNotExist(err) {
+		t.Errorf("a removed plugin was put back on disk: %v", err)
+	}
+	loaded, err := Load(LoadOptions{Roots: []Root{{Source: SourceUser, Path: dir}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range loaded.Plugins {
+		if p.ID == "zero.demo" {
+			t.Errorf("a removed plugin is loadable again")
+		}
+	}
+}
+
+// A commit killed after its publish rename but before it cleared the workspace
+// leaves the tree the install replaced in a backup beside the live plugin.
+// Removing that plugin deletes the live tree and its lockfile entry, so a
+// backup that outlived it would be published again by the next install's
+// recovery, and Load enumerates directories rather than the lockfile: the
+// removed plugin would be live again with no entry naming it.
+func TestRemoveLeavesNoSupersededBackupARecoveryCanResurrect(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The state a kill in that window leaves: the plugin live at its target,
+	// with the tree it replaced still retained in the workspace beside it.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	if err := os.WriteFile(filepath.Join(workspace, "target"), []byte("zero.demo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(workspace, "previous")
+	if err := os.MkdirAll(previous, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, "zero.demo", manifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, manifestFileName), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(dir, "zero.demo"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	other := validManifest()
+	other["id"] = "zero.other"
+	src2 := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src2"), other)
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "zero.demo")); !os.IsNotExist(err) {
+		t.Errorf("a removed plugin was put back on disk: %v", err)
+	}
+	loaded, err := Load(LoadOptions{Roots: []Root{{Source: SourceUser, Path: dir}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range loaded.Plugins {
+		if p.ID == "zero.demo" {
+			t.Errorf("a removed plugin is loadable again")
+		}
+	}
+	lock, err := ReadLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lock["zero.demo"]; ok {
+		t.Errorf("the lockfile still names a removed plugin")
 	}
 }

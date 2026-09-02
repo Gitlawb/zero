@@ -8,9 +8,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const lockFileName = ".zero-install.lock"
+
+// workspacePrefix names the per-transaction workspaces created inside an install
+// root. Dot-prefixed so it is never mistaken for an installed plugin or skill.
+const workspacePrefix = ".zero-install-txn-"
+
+// targetFileName records, inside a workspace, which install the backup beside it
+// belongs to. Without it a workspace left by a killed process holds a tree
+// nothing can attribute, and so nothing can put back.
+const targetFileName = "target"
 
 // Lock takes the per-install-root cross-process lock. It blocks until any other
 // installer or remover using dir has completed.
@@ -28,7 +38,7 @@ func StageDir(dir string) (stage string, cleanup func(), err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", func() {}, fmt.Errorf("create install dir: %w", err)
 	}
-	workspace, err := os.MkdirTemp(dir, ".zero-install-txn-")
+	workspace, err := os.MkdirTemp(dir, workspacePrefix)
 	if err != nil {
 		return "", func() {}, fmt.Errorf("create install staging dir: %w", err)
 	}
@@ -45,6 +55,12 @@ func CommitDir(target string, staged string, publish func() error) error {
 	backup := filepath.Join(workspace, "previous")
 	hadPrevious := false
 	if _, err := os.Stat(target); err == nil {
+		// Record the target before moving its tree. The two renames below cannot
+		// be made atomic, so a process killed between them leaves the only copy
+		// in the backup, and without this nothing could tell which install it is.
+		if err := os.WriteFile(filepath.Join(workspace, targetFileName), []byte(filepath.Base(target)), 0o600); err != nil {
+			return fmt.Errorf("record install target: %w", err)
+		}
 		if err := os.Rename(target, backup); err != nil {
 			return fmt.Errorf("retain previous install: %w", err)
 		}
@@ -76,7 +92,7 @@ func CommitDir(target string, staged string, publish func() error) error {
 //
 // The caller must hold the install-root lock returned by Lock.
 func RemoveDir(target string, publish func() error) error {
-	workspace, err := os.MkdirTemp(filepath.Dir(target), ".zero-install-txn-")
+	workspace, err := os.MkdirTemp(filepath.Dir(target), workspacePrefix)
 	if err != nil {
 		return fmt.Errorf("create removal staging dir: %w", err)
 	}
@@ -95,15 +111,108 @@ func RemoveDir(target string, publish func() error) error {
 	return nil
 }
 
+// Recover puts back an install that CommitDir set aside but never replaced,
+// which is what a process killed between its two renames leaves: the target
+// absent and its only copy retained in a workspace nothing else reads. The
+// target is what records how far the commit got: absent means the swap never
+// finished and the backup is put back, present means the publish rename
+// committed and the superseded backup beside it is retired. The live target is
+// never replaced or removed either way, and a workspace whose recorded target
+// Recover has no business naming is left alone rather than acted on. Best
+// effort, since the caller can still reinstall from source.
+//
+// The caller must hold the install-root lock returned by Lock, and EVERY caller
+// that takes that lock must call this first. Recovering only on the install
+// path is worse than not recovering at all: a removal would then report success
+// while the backup it never saw stayed on disk, and the next install would
+// publish it again, reinstating something the user deleted. Recovery is
+// deliberately an explicit call rather than a side effect of Lock, matching how
+// the other staged-swap transactions in this repo invoke their repair pass.
+func Recover(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), workspacePrefix) {
+			continue
+		}
+		workspace := filepath.Join(dir, entry.Name())
+		backup := filepath.Join(workspace, "previous")
+		if _, err := os.Stat(backup); err != nil {
+			continue
+		}
+		name, err := os.ReadFile(filepath.Join(workspace, targetFileName))
+		if err != nil {
+			continue
+		}
+		target, ok := recoverableTarget(dir, string(name))
+		if !ok {
+			continue
+		}
+		// An install already in place is the newer one by construction: the
+		// backup only ever holds the tree that was live before it. Leaving that
+		// backup for a later pass is what made a removal reversible by accident,
+		// since removing the live target then let the next recovery read the
+		// absent target as an interrupted swap and publish the stale tree again.
+		// Only the workspace goes; the live install is never touched. This is the
+		// one place os.RemoveAll is right over cleanupWorkspace, which refuses a
+		// workspace holding a previous precisely because it cannot tell a
+		// superseded backup from one still owed a restore.
+		if _, err := os.Lstat(target); err == nil {
+			_ = os.RemoveAll(workspace)
+			continue
+		}
+		if err := os.Rename(backup, target); err != nil {
+			continue
+		}
+		cleanupWorkspace(workspace)
+	}
+}
+
+// recoverableTarget resolves a recorded target name to a path directly inside
+// dir. A name that is not a single path element could name anything on the
+// filesystem, so it is refused rather than restored over.
+func recoverableTarget(dir string, name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
+		return "", false
+	}
+	return filepath.Join(dir, name), true
+}
+
 func rollback(target string, backup string, hadPrevious bool, cause error) error {
-	if err := os.RemoveAll(target); err != nil {
+	if !hadPrevious {
+		// A first install has no backup to protect and recorded no target, so
+		// recovery never looks here and deleting in place costs nothing.
+		if err := os.RemoveAll(target); err != nil {
+			return errors.Join(cause, fmt.Errorf("remove failed install: %w", err))
+		}
+		return cause
+	}
+	// Move the failed install aside before restoring rather than deleting it in
+	// place. A process killed partway through an in-place delete would leave a
+	// half removed tree at the target while the backup was still the only
+	// complete copy, and recovery reads a target that is there as a committed
+	// publish and retires the backup beside it. With the renames in this order
+	// every instant of the rollback has either a whole tree at the target or
+	// nothing there and the backup intact, which is exactly what recovery's two
+	// branches are able to tell apart.
+	failed := filepath.Join(filepath.Dir(backup), "failed")
+	if err := os.Rename(target, failed); err != nil {
+		// The move aside can fail too, and then the failed install stays live at
+		// the target while the backup is still the only copy of what it replaced.
+		// Recovery reads a tree at the target as a committed publish, so it would
+		// retire that backup. Dropping the marker leaves the workspace one nothing
+		// can attribute, which recovery already leaves alone, and the copy is still
+		// there to rescue by hand.
+		_ = os.Remove(filepath.Join(filepath.Dir(backup), targetFileName))
 		return errors.Join(cause, fmt.Errorf("remove failed install: %w", err))
 	}
-	if hadPrevious {
-		if err := os.Rename(backup, target); err != nil {
-			return errors.Join(cause, fmt.Errorf("restore previous install: %w", err))
-		}
+	if err := os.Rename(backup, target); err != nil {
+		return errors.Join(cause, fmt.Errorf("restore previous install: %w", err))
 	}
+	_ = os.RemoveAll(failed)
 	return cause
 }
 

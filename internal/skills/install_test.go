@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // initGitSkillRepo creates a real local git repo holding a skill and returns a
@@ -430,5 +432,102 @@ func TestSkillHashDriftUnreadableLockedPath(t *testing.T) {
 	}
 	if skillHashDrift(Skill{Path: missing}, "") {
 		t.Fatal("missing lock hash must not count as drift")
+	}
+}
+
+// skills.Install carries the same recovery call as plugins.Install, so it needs
+// the same proof. An install killed mid-commit leaves the skill's only copy in
+// a workspace backup; the next install over the same directory has to put it
+// back rather than leave it stranded where nothing reads it.
+func TestInstallRecoversASkillLeftByAnInterruptedCommit(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourceSkill(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: alpha\ndescription: first.\n---\nalpha body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The state a kill between CommitDir's two renames leaves behind.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	if err := os.WriteFile(filepath.Join(workspace, "target"), []byte("alpha"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "alpha"), filepath.Join(workspace, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	src2 := writeSourceSkill(t, filepath.Join(t.TempDir(), "src2"),
+		"---\nname: beta\ndescription: second.\n---\nbeta body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	got, ok := Get(dir, "alpha")
+	if !ok || !strings.Contains(got.Content, "alpha body") {
+		t.Fatalf("the interrupted skill install was not put back: ok=%v skill=%+v", ok, got)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("the recovered workspace should be cleared, got %v", err)
+	}
+}
+
+// skills.Remove carries the same recovery call as plugins.Remove, so it needs
+// the same proof. A commit killed after its publish rename leaves the tree the
+// install replaced in a backup beside the live skill; removing the skill must
+// not leave that backup for the next install's recovery to publish, since Get
+// reads the directory rather than the lockfile and would find the removed skill
+// loadable again.
+func TestRemoveLeavesNoSupersededBackupARecoveryCanResurrect(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourceSkill(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: alpha\ndescription: first.\n---\nalpha body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The state a kill after CommitDir's second rename leaves behind.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	if err := os.WriteFile(filepath.Join(workspace, "target"), []byte("alpha"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(workspace, "previous")
+	if err := os.MkdirAll(previous, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, skillFileName),
+		[]byte("---\nname: alpha\ndescription: superseded.\n---\nold alpha body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(dir, "alpha"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	src2 := writeSourceSkill(t, filepath.Join(t.TempDir(), "src2"),
+		"---\nname: beta\ndescription: second.\n---\nbeta body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "alpha")); !os.IsNotExist(err) {
+		t.Errorf("a removed skill was put back on disk: %v", err)
+	}
+	if _, ok := Get(dir, "alpha"); ok {
+		t.Errorf("a removed skill is loadable again")
+	}
+	lock, err := ReadLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lock["alpha"]; ok {
+		t.Errorf("the lockfile still names a removed skill")
 	}
 }

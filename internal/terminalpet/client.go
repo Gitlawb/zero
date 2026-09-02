@@ -290,6 +290,8 @@ func (c *Client) Install(ctx context.Context, entry Entry) (*Animation, error) {
 		return nil, err
 	}
 	defer unlock()
+	// Put back anything an earlier run was killed mid-commit; see installtxn.Recover.
+	installtxn.Recover(root)
 	target := filepath.Join(root, entry.Slug)
 	if err := installtxn.CommitDir(target, stage, func() error { return nil }); err != nil {
 		return nil, fmt.Errorf("install pet: %w", err)
