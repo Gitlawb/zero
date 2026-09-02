@@ -183,6 +183,7 @@ func permissionCacheFingerprint(event *agent.PermissionEvent) string {
 		event.SideEffect,
 		event.Reason,
 		event.Scope,
+		event.ClassifierReason,
 		string(event.Risk.Level),
 		strconv.FormatBool(event.GrantMatched),
 		strconv.FormatBool(event.Grant != nil),

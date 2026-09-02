@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
 )
@@ -22,6 +23,21 @@ func buildPermissionOptions(req agent.PermissionRequest) []PermissionOption {
 		if kind == "" {
 			continue // skip actions that have no clean ACP option (e.g. cancel)
 		}
+		// A command-prefix grant can be offered at several breadths (e.g. `git`,
+		// `git push`, `git push origin`). Expand each into its own ACP option so the
+		// client can pick how wide the grant is; the chosen breadth is encoded into
+		// the option id and validated on the way back. Without this, ACP clients can
+		// only ever grant the exact default prefix.
+		if isPrefixAction(action) && len(req.CommandPrefixOptions) > 1 {
+			for _, prefix := range req.CommandPrefixOptions {
+				options = append(options, PermissionOption{
+					OptionID: encodeOptionID(action, prefix),
+					Name:     name + ": " + strings.Join(prefix, " "),
+					Kind:     kind,
+				})
+			}
+			continue
+		}
 		options = append(options, PermissionOption{
 			OptionID: string(action),
 			Name:     name,
@@ -29,6 +45,52 @@ func buildPermissionOptions(req agent.PermissionRequest) []PermissionOption {
 		})
 	}
 	return options
+}
+
+// isPrefixAction reports whether an action grants a command prefix, which is the
+// only decision family that carries a breadth choice (CommandPrefixOptions).
+func isPrefixAction(action agent.PermissionDecisionAction) bool {
+	switch action {
+	case agent.PermissionDecisionAllowPrefix,
+		agent.PermissionDecisionAllowPrefixProject,
+		agent.PermissionDecisionAlwaysAllowPrefix:
+		return true
+	default:
+		return false
+	}
+}
+
+// encodeOptionID packs the ZERO action plus the chosen command-prefix breadth into
+// the ACP option id so the selection round-trips exactly. An action with no
+// breadth keeps the bare action string, so non-prefix options stay backward
+// compatible on the wire.
+func encodeOptionID(action agent.PermissionDecisionAction, prefix []string) string {
+	if len(prefix) == 0 {
+		return string(action)
+	}
+	payload, err := json.Marshal(optionIDPayload{Action: string(action), Prefix: prefix})
+	if err != nil {
+		return string(action)
+	}
+	return string(payload)
+}
+
+// decodeOptionID reverses encodeOptionID. A JSON payload yields the action and its
+// breadth; anything else is treated as a bare action string (no breadth).
+func decodeOptionID(id string) (agent.PermissionDecisionAction, []string) {
+	trimmed := strings.TrimSpace(id)
+	if strings.HasPrefix(trimmed, "{") {
+		var payload optionIDPayload
+		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil && payload.Action != "" {
+			return agent.PermissionDecisionAction(payload.Action), payload.Prefix
+		}
+	}
+	return agent.PermissionDecisionAction(id), nil
+}
+
+type optionIDPayload struct {
+	Action string   `json:"action"`
+	Prefix []string `json:"prefix"`
 }
 
 // offeredDecisions resolves what this request actually offers the client.
@@ -82,6 +144,8 @@ func optionKindFor(action agent.PermissionDecisionAction, escalates bool) (kind,
 		return PermAllowAlways, "Allow for this session"
 	case agent.PermissionDecisionAllowPrefix:
 		return PermAllowAlways, withSandboxEscalationNote("Allow this command for the session", escalates)
+	case agent.PermissionDecisionAllowPrefixProject:
+		return PermAllowAlways, "Allow this command for this project"
 	case agent.PermissionDecisionAlwaysAllow:
 		return PermAllowAlways, "Always allow"
 	case agent.PermissionDecisionAlwaysAllowPrefix:
@@ -120,10 +184,15 @@ func decisionFromOutcome(outcome RequestPermissionOutcome, offered []PermissionO
 		// Bind to what was actually offered for THIS call: a client must not be able
 		// to return a broader grant (always_allow / allow_for_session) that wasn't
 		// presented. Anything not offered fails closed to deny.
-		if actionOffered(outcome.OptionID, offered) {
-			return agent.PermissionDecision{Action: agent.PermissionDecisionAction(outcome.OptionID)}
+		if !actionOffered(outcome.OptionID, offered) {
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission option was not offered"}
 		}
-		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission option was not offered"}
+		action, prefix := decodeOptionID(outcome.OptionID)
+		decision := agent.PermissionDecision{Action: action}
+		if len(prefix) > 0 {
+			decision.CommandPrefix = append([]string(nil), prefix...)
+		}
+		return decision
 	default:
 		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "no permission outcome"}
 	}
@@ -136,6 +205,37 @@ func actionOffered(optionID string, offered []PermissionOption) bool {
 		}
 	}
 	return false
+}
+
+// prefixOffered reports whether prefix exactly matches one of the offered breadth
+// rungs, so a selected grant can only be one the request actually presented.
+func prefixOffered(prefix []string, offered [][]string) bool {
+	for _, candidate := range offered {
+		if len(candidate) != len(prefix) {
+			continue
+		}
+		match := true
+		for i := range candidate {
+			if candidate[i] != prefix[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// withSandboxEscalationNote appends the escalation disclosure to a prefix
+// option's label. Kept parallel to the TUI's wording so the same consequence is
+// not described two different ways depending on which client the user runs.
+func withSandboxEscalationNote(name string, escalates bool) string {
+	if !escalates {
+		return name
+	}
+	return name + " (runs outside the sandbox)"
 }
 
 // permissionToolCall builds the ToolCall descriptor embedded in a
@@ -167,14 +267,4 @@ func rawInputBytes(data []byte) json.RawMessage {
 		return nil
 	}
 	return json.RawMessage(data)
-}
-
-// withSandboxEscalationNote appends the escalation disclosure to a prefix
-// option's label. Kept parallel to the TUI's wording so the same consequence is
-// not described two different ways depending on which client the user runs.
-func withSandboxEscalationNote(name string, escalates bool) string {
-	if !escalates {
-		return name
-	}
-	return name + " (runs outside the sandbox)"
 }

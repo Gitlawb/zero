@@ -109,11 +109,38 @@ func (engine *Engine) GrantCommandPrefix(input CommandPrefixInput) (CommandPrefi
 	return engine.store.GrantCommandPrefix(input)
 }
 
+// GrantCommandPrefixForProject persists a prefix grant scoped to this engine's
+// configured workspace root, so it only matches inside the current project. It
+// returns an error when no workspace root is configured.
+func (engine *Engine) GrantCommandPrefixForProject(input CommandPrefixInput) (CommandPrefixGrant, error) {
+	if engine == nil || engine.store == nil {
+		return CommandPrefixGrant{}, errors.New("sandbox grant store is not configured")
+	}
+	// A project-scoped grant must be tied to a real workspace root. With no root
+	// configured, persisting an empty Project would silently widen the grant to
+	// global, so refuse instead — the caller keeps the safer session grant.
+	if strings.TrimSpace(engine.workspaceRoot) == "" {
+		return CommandPrefixGrant{}, errors.New("no workspace root for a project-scoped command prefix grant")
+	}
+	input.Project = engine.workspaceRoot
+	return engine.store.GrantCommandPrefix(input)
+}
+
+// WorkspaceRoot returns the engine's confinement root, or "" when unset. Callers
+// use it to bind a project-scoped grant to the command's effective directory, so a
+// grant saved for one project cannot authorize unsandboxed execution in another.
+func (engine *Engine) WorkspaceRoot() string {
+	if engine == nil {
+		return ""
+	}
+	return engine.workspaceRoot
+}
+
 func (engine *Engine) LookupCommandPrefix(toolName string, command []string) (CommandPrefixGrant, bool) {
 	if engine == nil || engine.store == nil || len(command) == 0 {
 		return CommandPrefixGrant{}, false
 	}
-	grant, matched, err := engine.store.LookupCommandPrefix(toolName, command)
+	grant, matched, err := engine.store.LookupCommandPrefix(toolName, command, engine.workspaceRoot)
 	if err != nil {
 		return CommandPrefixGrant{}, false
 	}
@@ -262,6 +289,18 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 		return false
 	}
 	return true
+}
+
+// ShellSandboxActive reports whether a shell command would actually be wrapped by
+// the native sandbox under the engine's effective policy. Callers use it to gate
+// autonomy that assumes confinement (e.g. auto-classifier review): when native
+// isolation is unavailable, an auto-approved shell command would run unwrapped on
+// the host, so that path must stay an explicit prompt instead.
+func (engine *Engine) ShellSandboxActive() bool {
+	if engine == nil {
+		return false
+	}
+	return engine.shellSandboxActive(engine.effectivePolicy(engine.policy))
 }
 
 // Precheck reports the sandbox blocks that would block a tool request BEFORE
@@ -429,7 +468,13 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
-	return Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
+	prompt := Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
+	// Flag a write that targets protected workspace metadata so autonomy layers
+	// keep prompting for it instead of auto-approving a .git/.zero/.agents change.
+	if request.SideEffect == SideEffectWrite && requestPathsTouchProtectedMetadata(scope, request.WorkspaceRoot, requestPaths(request)) {
+		prompt.TouchesProtectedMetadata = true
+	}
+	return prompt
 }
 
 func requestRequiresEscalatedSandbox(request Request) bool {

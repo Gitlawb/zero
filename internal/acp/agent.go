@@ -367,10 +367,16 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	defer sess.turnMu.Unlock()
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
-	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
+	case agent.PermissionModeAsk, agent.PermissionModeAuto, agent.PermissionModeWorkspaceAuto, agent.PermissionModePlan:
 		sess.setMode(mode)
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
+	case agent.PermissionModeAutoClassifier:
+		// Auto-classifier hands each low-risk decision to an LLM that may approve it
+		// with no prompt. The TUI gates enabling it behind an explicit one-time user
+		// acknowledgement; ACP has no way to represent that confirmation, so an
+		// editor client must not be able to turn it on over the wire.
+		return nil, RPCError(codeInvalidParams, "mode requires an in-app confirmation and cannot be enabled over ACP: "+p.ModeID)
 	case agent.PermissionModeUnsafe:
 		// Unsafe = run every tool with no prompt. The TUI gates this behind an
 		// explicit --skip-permissions-unsafe operator flag; an editor client must
@@ -459,16 +465,23 @@ func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
 // ---- advertising helpers ----
 
 func (a *Agent) modeState(s *acpSession) *SessionModeState {
-	// auto/ask/plan are offered over ACP; Unsafe is gated to the operator (see
-	// handleSetMode) so a client can't grant itself no-prompt host access. Plan
-	// only narrows what a client can do (read-only, no write/shell tools), so
+	// Only prompt-respecting modes are offered over ACP; Unsafe is gated to the
+	// operator (see handleSetMode) so a client can't grant itself no-prompt host
+	// access. Plan only narrows what a client can do (read-only, no write/shell tools), so
 	// unlike Unsafe there is no elevation risk in letting a client select it.
+	// Auto-classifier is intentionally NOT advertised: enabling it needs an in-app
+	// confirmation the ACP protocol cannot represent, and handleSetMode rejects it.
+	ask := agent.PermissionModeInfoFor(agent.PermissionModeAsk)
+	auto := agent.PermissionModeInfoFor(agent.PermissionModeAuto)
+	workspaceAuto := agent.PermissionModeInfoFor(agent.PermissionModeWorkspaceAuto)
+	plan := agent.PermissionModeInfoFor(agent.PermissionModePlan)
 	return &SessionModeState{
 		CurrentModeID: string(s.currentMode()),
 		AvailableModes: []SessionMode{
-			{ID: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
-			{ID: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
-			{ID: string(agent.PermissionModePlan), Name: "Plan", Description: "Read-only planning; write and shell tools are hidden."},
+			{ID: string(ask.ID), Name: ask.Label, Description: ask.Description},
+			{ID: string(auto.ID), Name: auto.Label, Description: auto.Description},
+			{ID: string(workspaceAuto.ID), Name: workspaceAuto.Label, Description: workspaceAuto.Description},
+			{ID: string(plan.ID), Name: plan.Label, Description: plan.Description},
 		},
 	}
 }

@@ -513,7 +513,10 @@ func TestResolveExecPermissionModeMember(t *testing.T) {
 		{"", agent.PermissionModeAuto},
 		{"low", agent.PermissionModeAuto},
 		{"medium", agent.PermissionModeAuto},
-		{"member", agent.PermissionModeMemberAuto}, // headless members: write + sandboxed shell
+		{"workspace", agent.PermissionModeWorkspaceAuto}, // workspace writes + sandboxed shell
+		{"workspace-auto", agent.PermissionModeWorkspaceAuto},
+		{"member", agent.PermissionModeWorkspaceAuto}, // legacy headless member alias
+		{"member-auto", agent.PermissionModeWorkspaceAuto},
 		{"high", agent.PermissionModeUnsafe},
 	}
 	for _, c := range cases {
@@ -530,16 +533,16 @@ func TestResolveExecPermissionModeMember(t *testing.T) {
 	}
 }
 
-// A member-auto headless tool list must include the in-workspace mutators that
-// plain Auto hides, so a swarm member can actually build. Match the tool ENTRY
-// line ("  write_file [") — a bare substring would false-match tool descriptions.
-func TestExecMemberAutoToolListIncludesMutators(t *testing.T) {
+// A workspace-auto tool list must include the in-workspace mutators that plain
+// Auto hides. Match the tool ENTRY line ("  write_file [") — a bare substring
+// would false-match tool descriptions.
+func TestExecWorkspaceAutoToolListIncludesMutators(t *testing.T) {
 	registry := newCoreRegistry(t.TempDir())
 	const writeEntry = "\n  write_file ["
 
-	member := formatExecToolList(registry, execOptions{}, agent.PermissionModeMemberAuto)
-	if !strings.Contains(member, writeEntry) {
-		t.Fatalf("member-auto tool list must include write_file, got %q", member)
+	workspace := formatExecToolList(registry, execOptions{}, agent.PermissionModeWorkspaceAuto)
+	if !strings.Contains(workspace, writeEntry) {
+		t.Fatalf("workspace-auto tool list must include write_file, got %q", workspace)
 	}
 	// Plain Auto must still hide it (unchanged behavior — this is the read-only gate).
 	auto := formatExecToolList(registry, execOptions{}, agent.PermissionModeAuto)

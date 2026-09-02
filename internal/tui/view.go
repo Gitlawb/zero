@@ -311,27 +311,31 @@ func providerDisplayNameIsGenericCustom(name string) bool {
 	}
 }
 
-// nextPermissionMode toggles between the two prompt-respecting modes:
-// Auto ⇄ Ask. Unsafe (which disables permission prompts entirely) is
-// deliberately NOT reachable by a casual keypress — a single shift+tab landing
-// on it would let prompt-required tools run with no decision. Unsafe stays an
-// explicit opt-in (the launch/--skip-permissions-unsafe path), not a UI toggle.
-// Unsafe is folded back to Ask so the toggle always lands somewhere safe.
-// Plan is left untouched: folding it to Ask would be a LESS strict landing
-// (Ask allows write/shell tools with a prompt; Plan hides them entirely), so
-// the read-only guarantee must only be given up through the explicit /plan
-// off exit, never a stray shift+tab.
+// nextPermissionMode cycles the prompt-respecting interactive modes from safest
+// to more autonomous: Ask -> Auto -> WorkspaceAuto -> AutoClassifier -> Ask.
+// Unsafe (which disables permission prompts entirely) is deliberately NOT
+// reachable by a casual keypress — a single shift+tab landing on it would let
+// prompt-required tools run with no decision. Unsafe stays an explicit opt-in
+// (the launch/--skip-permissions-unsafe path), not a UI toggle. Unsafe is folded
+// back to Ask so the toggle always lands somewhere safe. Plan is left untouched:
+// folding it to Ask would be a LESS strict landing (Ask allows write/shell tools
+// with a prompt; Plan hides them entirely), so the read-only guarantee must only
+// be given up through the explicit /plan off exit, never a stray shift+tab.
 func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 	switch mode {
-	case agent.PermissionModeAuto:
-		return agent.PermissionModeAsk
 	case agent.PermissionModeAsk:
 		return agent.PermissionModeAuto
+	case agent.PermissionModeAuto:
+		return agent.PermissionModeWorkspaceAuto
+	case agent.PermissionModeWorkspaceAuto:
+		return agent.PermissionModeAutoClassifier
+	case agent.PermissionModeAutoClassifier:
+		return agent.PermissionModeAsk
 	case agent.PermissionModePlan:
 		return agent.PermissionModePlan
 	default:
-		// Anything else (incl. an externally-set Unsafe) folds to Ask — the stricter
-		// landing, so toggling never makes an Unsafe session less strict.
+		// Anything else (incl. an externally-set Unsafe) folds to Ask — the strictest
+		// landing, so toggling never silently escalates autonomy.
 		return agent.PermissionModeAsk
 	}
 }
@@ -339,17 +343,21 @@ func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 func (m model) modeLabel() (string, lipgloss.Style) {
 	switch m.permissionMode {
 	case agent.PermissionModeAuto:
-		return "auto-approve", zeroTheme.modeAuto
+		return agent.PermissionModeSummary(agent.PermissionModeAuto), zeroTheme.modeAuto
+	case agent.PermissionModeWorkspaceAuto:
+		return agent.PermissionModeSummary(agent.PermissionModeWorkspaceAuto), zeroTheme.modeAuto
+	case agent.PermissionModeAutoClassifier:
+		return agent.PermissionModeSummary(agent.PermissionModeAutoClassifier), zeroTheme.modeAuto
 	case agent.PermissionModeAsk:
-		return "ask", zeroTheme.modeAsk
+		return agent.PermissionModeSummary(agent.PermissionModeAsk), zeroTheme.modeAsk
 	case agent.PermissionModeUnsafe:
-		return "unsafe", zeroTheme.modeUnsafe
+		return agent.PermissionModeSummary(agent.PermissionModeUnsafe), zeroTheme.modeUnsafe
 	case agent.PermissionModePlan:
 		return "plan", zeroTheme.modePlan
 	default:
 		mode := strings.TrimSpace(string(m.permissionMode))
 		if mode == "" {
-			return "auto-approve", zeroTheme.modeAuto
+			return agent.PermissionModeSummary(agent.PermissionModeAuto), zeroTheme.modeAuto
 		}
 		return mode, zeroTheme.muted
 	}
@@ -749,6 +757,36 @@ func fileSelectableItem(token string) selectableListItem {
 		return selectableListItem{Label: base}
 	}
 	return selectableListItem{Label: base, Description: dir}
+}
+
+// autoClassifierConfirmOverlay renders the blocking confirmation shown before
+// auto-classifier mode is enabled. Because that mode hands each permission
+// decision to an LLM, enabling it needs an explicit acknowledgement of what
+// gets auto-run rather than a single shift+tab keypress.
+func (m model) autoClassifierConfirmOverlay(width int) string {
+	if !m.autoClassifierConfirmActive {
+		return ""
+	}
+	overlayWidth := minInt(width, pickerOverlayMaxWidth)
+	if overlayWidth < pickerOverlayMinWidth {
+		overlayWidth = width
+	}
+	label := agent.PermissionModeLabel(agent.PermissionModeAutoClassifier)
+	hint := zeroTheme.accent.Render("Enter") + zeroTheme.muted.Render(" / ") + zeroTheme.accent.Render("y") +
+		zeroTheme.muted.Render("  enable") + zeroTheme.muted.Render("      ") +
+		zeroTheme.accent.Render("Esc") + zeroTheme.muted.Render(" / ") + zeroTheme.accent.Render("n") + zeroTheme.muted.Render("  cancel")
+	lines := []string{
+		"",
+		zeroTheme.ink.Bold(true).Render("Enable “" + label + "”?"),
+		"",
+		zeroTheme.muted.Render("An LLM reviews each low-risk action and runs it without"),
+		zeroTheme.muted.Render("asking. Network, destructive, escalated, and out-of-"),
+		zeroTheme.muted.Render("workspace actions still ask every time."),
+		"",
+		hint,
+		"",
+	}
+	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, "Confirm permission mode", lines, zeroTheme.amber, lipgloss.NewStyle()), width)
 }
 
 // pickerOverlay renders an open interactive selector as a centered modal: a
