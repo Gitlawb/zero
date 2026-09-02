@@ -45,7 +45,7 @@ func mustSymlink(t *testing.T, target, link string) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks not supported or permitted in this environment: %v", err)
 	}
 }
 
