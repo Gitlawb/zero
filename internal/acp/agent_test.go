@@ -53,10 +53,10 @@ func testDeps(t *testing.T) Deps {
 			return fakeProvider{text: "Hello from ZERO"}, nil
 		},
 		RunAgent: agent.Run,
-		BuildWorkspace: func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+		BuildWorkspace: func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
 			r := tools.NewRegistry()
 			r.Register(tools.NewUpdatePlanTool())
-			return r, nil, nil
+			return &Workspace{Registry: r}, nil
 		},
 		ResolveWorkspaceRoot: func(cwd string) (string, error) { return cwd, nil },
 		Store:                store,
@@ -468,8 +468,8 @@ func TestACPRunTurnWiresSandboxAndScopedRegistry(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tools.NewUpdatePlanTool())
 	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir()})
-	deps.BuildWorkspace = func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
-		return reg, engine, nil
+	deps.BuildWorkspace = func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
+		return &Workspace{Registry: reg, Sandbox: engine}, nil
 	}
 	var captured agent.Options
 	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
@@ -494,6 +494,53 @@ func TestACPRunTurnWiresSandboxAndScopedRegistry(t *testing.T) {
 	}
 	if captured.Registry != reg {
 		t.Fatal("scoped registry was not wired into agent.Options")
+	}
+}
+
+// TestACPRunTurnClosesWorkspace proves a per-turn workspace never outlives the
+// agent run. This is particularly important for MCP: its registry owns live
+// client connections and, for stdio servers, child processes.
+func TestACPRunTurnClosesWorkspaceAfterSuccessAndFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		runErr error
+	}{
+		{name: "success"},
+		{name: "agent failure", runErr: errors.New("provider interrupted")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := testDeps(t)
+			closed := 0
+			deps.BuildWorkspace = func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
+				registry := tools.NewRegistry()
+				registry.Register(tools.NewUpdatePlanTool())
+				return &Workspace{Registry: registry, Cleanup: func() error {
+					closed++
+					return nil
+				}}, nil
+			}
+			deps.RunAgent = func(context.Context, string, zeroruntime.Provider, agent.Options) (agent.Result, error) {
+				return agent.Result{FinalAnswer: "ok"}, tc.runErr
+			}
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var created NewSessionResult
+			if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+				t.Fatalf("session/new: %v", err)
+			}
+			err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("hello")}}, &PromptResult{})
+			if tc.runErr == nil && err != nil {
+				t.Fatalf("session/prompt: %v", err)
+			}
+			if tc.runErr != nil && err == nil {
+				t.Fatal("session/prompt succeeded after agent failure")
+			}
+			if closed != 1 {
+				t.Fatalf("workspace cleanup calls = %d, want 1", closed)
+			}
+		})
 	}
 }
 

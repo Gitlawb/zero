@@ -30,15 +30,36 @@ type Deps struct {
 	DiscoverModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	NewProvider    func(profile config.ProviderProfile) (zeroruntime.Provider, error)
 	RunAgent       func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error)
-	// BuildWorkspace builds the SCOPED tool registry and the sandbox engine for a
-	// validated workspace root, so ACP shell tools (bash/exec_command) are confined
-	// exactly like the exec surface — never run unconfined on the host.
-	BuildWorkspace func(workspaceRoot string, resolved config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error)
+	// BuildWorkspace creates the per-turn scoped tool workspace for a validated
+	// workspace root. Its Close method releases any resources the registry owns
+	// (notably MCP server connections) after the turn completes or is cancelled.
+	// Shell tools remain confined exactly like the exec surface — never unconfined
+	// on the host.
+	BuildWorkspace func(ctx context.Context, workspaceRoot string, resolved config.ResolvedConfig, mode agent.PermissionMode) (*Workspace, error)
 	// ResolveWorkspaceRoot validates + normalizes a client-supplied cwd (must be an
 	// existing directory; never the bare root). It is the file-tool confinement root.
 	ResolveWorkspaceRoot func(cwd string) (string, error)
 	Store                *sessions.Store
 	AgentInfo            Implementation
+}
+
+// Workspace is the per-turn execution environment passed to the agent. ACP does
+// not retain it across turns because MCP connections belong to the registry that
+// advertised their tools; keeping a stale registry after a cancelled turn would
+// leak its server process and its permission state into the next turn.
+type Workspace struct {
+	Registry *tools.Registry
+	Sandbox  *sandbox.Engine
+	Cleanup  func() error
+}
+
+// Close releases resources created with the workspace. A nil cleanup is valid
+// for core-only workspaces.
+func (w *Workspace) Close() error {
+	if w == nil || w.Cleanup == nil {
+		return nil
+	}
+	return w.Cleanup()
 }
 
 // Agent is the ACP agent server bound to one JSON-RPC connection (one editor).
@@ -241,12 +262,28 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	if err != nil {
 		return "", RPCError(codeInternalError, "provider: "+err.Error())
 	}
+	mode := sess.currentMode()
 	// Build the SCOPED registry + sandbox engine for this session's workspace so
 	// shell/file tools are confined to the workspace exactly like the exec surface.
-	registry, sandboxEngine, err := a.deps.BuildWorkspace(sess.cwd, resolved)
+	// The workspace can also own MCP connections, which must be closed after every
+	// turn even if the agent run returns an error or the client cancels it.
+	workspace, err := a.deps.BuildWorkspace(ctx, sess.cwd, resolved, mode)
 	if err != nil {
 		return "", RPCError(codeInternalError, "workspace: "+err.Error())
 	}
+	if workspace == nil || workspace.Registry == nil {
+		if workspace != nil {
+			_ = workspace.Close()
+		}
+		return "", RPCError(codeInternalError, "workspace: missing tool registry")
+	}
+	defer func() {
+		if err := workspace.Close(); err != nil {
+			log.Printf("acp: close workspace: %v", err)
+		}
+	}()
+	registry := workspace.Registry
+	sandboxEngine := workspace.Sandbox
 	note := &notifier{conn: a.conn, sessionID: sess.id}
 
 	opts := agent.Options{
@@ -256,7 +293,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		Model:          resolved.Provider.Model,
 		Registry:       registry,
 		Sandbox:        sandboxEngine,
-		PermissionMode: sess.currentMode(),
+		PermissionMode: mode,
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
 		OnText:         note.text,
