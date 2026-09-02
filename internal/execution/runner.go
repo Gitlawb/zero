@@ -24,6 +24,12 @@ type PreparedCommand struct {
 	Enforcement Enforcement
 	Report      func() (AdapterReport, error)
 	Cleanup     func()
+	// ChildLaunchOwnedByAdapter marks a plan where Command is a WRAPPER and the
+	// requested process is created inside it, so exec.Cmd.Process says nothing
+	// about whether the sandboxed child ever existed. The adapter must state the
+	// fact in its report; if it does not, the runner treats the child as not
+	// launched rather than crediting the wrapper's start.
+	ChildLaunchOwnedByAdapter bool
 }
 
 type CapturedRequest struct {
@@ -98,6 +104,24 @@ func (runner *Runner) ExecuteCaptured(ctx context.Context, input CapturedRequest
 	report, reportErr := AdapterReport{}, error(nil)
 	if prepared.Report != nil {
 		report, reportErr = prepared.Report()
+	}
+	// A WRAPPED PLAN'S LAUNCH BIT BELONGS TO THE ADAPTER. The line above observes
+	// the process THIS command started, which for a Windows restricted-token plan
+	// is the helper, not the requested executable: the helper validates the setup
+	// marker, applies ACLs, checks the network policy, builds capability SIDs and
+	// mints the restricted token after it is already running, and any of those can
+	// fail with no sandboxed child ever created. Believing the outer bit there
+	// reports that reads were denied as requested when only the unsandboxed
+	// adapter ran. An adapter that owns the inner transition overrides it; one
+	// that stays silent leaves the direct-command observation alone.
+	switch {
+	case report.ChildLaunched != nil:
+		launched = *report.ChildLaunched
+	case prepared.ChildLaunchOwnedByAdapter:
+		// The adapter owns this fact and did not state it, so the restricted child
+		// is not known to exist. Fail closed: an absent report must not be read as
+		// proof that enforcement applied.
+		launched = false
 	}
 	result := CapturedResult{
 		Stdout:    stdout.String(),

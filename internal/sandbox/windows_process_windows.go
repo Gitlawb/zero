@@ -73,6 +73,15 @@ func runWindowsCommandAsUser(token windows.Token, config WindowsSandboxCommandCo
 	}
 	defer windows.CloseHandle(process.Process)
 	defer windows.CloseHandle(process.Thread)
+	// THE TRANSITION ONLY THIS PROCESS CAN SEE. Everything above can fail with the
+	// helper already running, and the parent's exec.Cmd.Process cannot tell those
+	// failures apart from a real sandboxed launch. The restricted child exists as
+	// of this line, so this is where the fact is published. A write failure is
+	// reported rather than swallowed: the parent fails closed on a missing report,
+	// so silence must not be mistaken for a launch that did happen.
+	if err := writeWindowsExecutionReport(config.ExecutionReportPath, true); err != nil {
+		return 1, fmt.Errorf("record sandboxed child launch: %w", err)
+	}
 	if _, err := windows.WaitForSingleObject(process.Process, windows.INFINITE); err != nil {
 		return 1, fmt.Errorf("wait for sandboxed process: %w", err)
 	}

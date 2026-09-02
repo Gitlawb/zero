@@ -70,6 +70,12 @@ type CommandPlan struct {
 	// workspace. It carries structured policy facts; command output is never
 	// parsed as the control protocol.
 	executionReportPath string
+	// childLaunchReported marks a plan whose helper publishes the authoritative
+	// child-launch fact through executionReportPath. Set ONLY by adapters that
+	// actually write it: Wrapped alone is not enough, since a bwrap plan is also
+	// wrapped and reports only denials, and treating its silence as "no child"
+	// would deny every successful Linux sandbox run its disclosure.
+	childLaunchReported bool
 }
 
 // Cleanup releases any resources the plan holds. It is safe to call on a zero
@@ -135,6 +141,8 @@ func (engine *Engine) PrepareExecution(ctx context.Context, request execution.Re
 		Enforcement: EnforcementFor(plan),
 		Report:      plan.ExecutionReport,
 		Cleanup:     plan.Cleanup,
+		// Only for adapters that publish the fact; see CommandPlan.childLaunchReported.
+		ChildLaunchOwnedByAdapter: plan.childLaunchReported,
 	}, nil
 }
 

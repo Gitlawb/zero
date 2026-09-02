@@ -206,6 +206,21 @@ type Outcome struct {
 // command text cannot impersonate a policy decision.
 type AdapterReport struct {
 	Denial *Denial `json:"denial,omitempty"`
+	// ChildLaunched is the adapter's authoritative statement that the REQUESTED
+	// process started, for a plan where the command the runner starts is not that
+	// process.
+	//
+	// A wrapped plan starts a helper, and the helper creates the sandboxed child
+	// only after validating the setup marker, applying ACLs, checking the network
+	// policy, building capability SIDs and minting the restricted token. Any of
+	// those can fail with the helper already running, so the runner's own
+	// exec.Cmd.Process tells it the WRAPPER started and nothing about the child.
+	// Only the adapter sees that transition, so only the adapter may report it.
+	//
+	// nil means the adapter does not speak to this, and the runner keeps its own
+	// observation. That is correct for every direct, unwrapped command, where the
+	// process the runner starts IS the requested one.
+	ChildLaunched *bool `json:"childLaunched,omitempty"`
 }
 
 // ChildLaunched reports whether this outcome describes a process that actually
