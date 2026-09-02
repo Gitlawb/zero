@@ -168,10 +168,25 @@ func openWindowsPathComponent(parent windows.Handle, name string, directory bool
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
+	var securityDescriptor *windows.SECURITY_DESCRIPTOR
+	if !directory {
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		if err != nil {
+			return windows.InvalidHandle, fmt.Errorf("inspect current user: %w", err)
+		}
+		securityDescriptor, err = windows.SecurityDescriptorFromString(fmt.Sprintf(
+			"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;%s)",
+			user.User.Sid.String(),
+		))
+		if err != nil {
+			return windows.InvalidHandle, fmt.Errorf("build private lock permissions: %w", err)
+		}
+	}
 	attributes := windows.OBJECT_ATTRIBUTES{
-		RootDirectory: parent,
-		ObjectName:    objectName,
-		Attributes:    windows.OBJ_CASE_INSENSITIVE,
+		RootDirectory:      parent,
+		ObjectName:         objectName,
+		Attributes:         windows.OBJ_CASE_INSENSITIVE,
+		SecurityDescriptor: securityDescriptor,
 	}
 	attributes.Length = uint32(unsafe.Sizeof(attributes))
 	options := uint32(windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT)
@@ -249,24 +264,28 @@ func validateWindowsLockSecurity(handle windows.Handle, path string, directory, 
 	if dacl == nil {
 		return fmt.Errorf("credstore: unsafe permissions on %q: no discretionary access list", path)
 	}
-	dangerous := windows.ACCESS_MASK(windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE)
-	if strict {
-		dangerous |= windows.GENERIC_ALL | windows.GENERIC_WRITE
-		// FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY share the numeric values of
-		// FILE_WRITE_DATA and FILE_APPEND_DATA; FILE_DELETE_CHILD is 0x40.
-		dangerous |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.ACCESS_MASK(0x40)
-	} else if directory {
-		// On an ancestor, creating siblings is normal (notably in Windows temp
-		// directories). Deleting/replacing our traversed child is not.
-		dangerous |= windows.ACCESS_MASK(0x40)
-	}
-	if !directory {
-		dangerous |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
-	}
 	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, index, &ace); err != nil {
 			return fmt.Errorf("credstore: inspect access entry on %q: %w", path, err)
+		}
+		dangerous := windows.ACCESS_MASK(windows.WRITE_DAC | windows.WRITE_OWNER)
+		if directory {
+			// DELETE applies to this directory, not to the child component that we
+			// traversed through it. FILE_DELETE_CHILD (0x40) is the right boundary:
+			// it permits replacing that child and is unsafe even when inherited.
+			dangerous |= windows.ACCESS_MASK(0x40)
+			if strict && ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
+				// Explicit broad write grants on the credential directory remain a
+				// configuration error. Inherited grants are normal on non-system
+				// volumes; the lock file is instead created with a protected DACL.
+				dangerous |= windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
+			}
+		} else {
+			// The lock file itself always remains strict, including inherited ACEs
+			// on a pre-existing file. Newly created locks receive a protected DACL
+			// in openWindowsPathComponent, atomically with creation.
+			dangerous |= windows.DELETE | windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
 		}
 		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&dangerous == 0 {
 			continue
@@ -281,16 +300,10 @@ func validateWindowsLockSecurity(handle windows.Handle, path string, directory, 
 		if sid.Equals(user.User.Sid) || sid.Equals(system) || sid.Equals(administrators) {
 			continue
 		}
-		// A trustee that is not one of the three is not automatically an outage.
-		// Real profile and temp directories carry inherited allow-ACEs that
-		// Windows put there — capability SIDs under %TEMP%, machine-local account
-		// SIDs inherited from the profile ACL — and refusing to touch credentials
-		// over one turns hardening into "no credential can be read or written on
-		// this box". So the failure is split by what the trustee actually is:
-		// a SID naming a CLASS of principals (Everyone, a BUILTIN alias, a logon
-		// group) is the dangerous case and still fails closed, while a single
-		// unrecognised principal on an object this user owns is reported and
-		// allowed.
+		// The owner check above accepts the current user, LocalSystem, or
+		// Administrators. For a dangerous ACE, broad trustees still fail closed;
+		// unrecognised non-universal SIDs are warned and allowed because SID shape
+		// alone cannot distinguish a user from a local or domain group.
 		if broadLockTrustee(sid) {
 			return fmt.Errorf("credstore: unsafe permissions on %q grant write access to untrusted trustee %s", path, sid.String())
 		}
@@ -347,15 +360,9 @@ func broadLockTrustee(sid *windows.SID) bool {
 		//
 		// Above that range the RID does NOT prove a single account: an
 		// admin-created local group gets a RID >= 1000 too, and resolving the SID
-		// is the only way to tell. That resolution is deliberately not done, and
-		// a named group is deliberately not fatal. A real Windows 11 box in this
-		// PR's review carried an inherited write ACE for the local group
-		// "CodexSandboxUsers" on its profile and temp directories; refusing there
-		// means no credential can be read or written on that machine at all. A
-		// named group with bounded membership on a directory this user owns is
-		// what the warning is for. The universal principals above — Everyone,
-		// Authenticated Users, BUILTIN\Users — are the ones that really mean "any
-		// account on this machine", and those still fail closed.
+		// is the only way to tell. Resolution is deliberately not done because it
+		// can block on a domain controller. The universal principals above —
+		// Everyone, Authenticated Users, BUILTIN\Users — remain fail-closed.
 		fields := strings.Split(value, "-")
 		relative, err := strconv.ParseUint(fields[len(fields)-1], 10, 32)
 		return err == nil && relative < 1000

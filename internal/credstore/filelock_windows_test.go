@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -202,6 +203,86 @@ func TestFileLockRejectsWriteAccessForBuiltinGroup(t *testing.T) {
 	if err := store.Set("openai", "secret"); err == nil || !strings.Contains(err.Error(), "untrusted trustee") {
 		t.Fatalf("Set error = %v, want builtin group rejection", err)
 	}
+}
+
+// Windows commonly gives Authenticated Users inherited Modify access on the
+// root of a non-system volume. In particular, that includes DELETE on each
+// descendant directory, which permits deleting that directory itself but does
+// not permit replacing a child lock file. Exercise the real inherited ACL from
+// such a volume rather than manufacturing one in the test.
+func TestFileLockAcceptsDefaultInheritedAuthenticatedUsersACL(t *testing.T) {
+	systemVolume := os.Getenv("SystemDrive")
+	if systemVolume == "" {
+		systemVolume = filepath.VolumeName(os.Getenv("SystemRoot"))
+	}
+	authenticatedUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var dir string
+	for drive := 'C'; drive <= 'Z'; drive++ {
+		root := fmt.Sprintf("%c:\\", drive)
+		if strings.EqualFold(filepath.VolumeName(root), systemVolume) {
+			continue
+		}
+		candidate, err := os.MkdirTemp(root, "zero-credstore-acl-")
+		if err != nil {
+			continue
+		}
+		if hasInheritedDeleteACE(t, candidate, authenticatedUsers) {
+			dir = candidate
+			break
+		}
+		if err := os.RemoveAll(candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if dir == "" {
+		t.Skip("no writable non-system volume with the default inherited Authenticated Users DELETE ACE")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	store, err := New(Options{Dir: dir, Storage: "encrypted-file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openai", "secret"); err != nil {
+		t.Fatalf("Set in directory with default inherited ACL: %v", err)
+	}
+	secret, ok, err := store.Get("openai")
+	if err != nil || !ok || secret != "secret" {
+		t.Fatalf("Get = (%q, %v, %v), want the stored secret", secret, ok, err)
+	}
+}
+
+func hasInheritedDeleteACE(t *testing.T, path string, trustee *windows.SID) bool {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dacl == nil {
+		return false
+	}
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE == 0 || ace.Mask&windows.DELETE == 0 {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.Equals(trustee) {
+			return true
+		}
+	}
+	return false
 }
 
 // THE REGRESSION. Real profile and temp directories carry inherited allow-ACEs
