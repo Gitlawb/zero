@@ -242,7 +242,22 @@ func fallbackRuntimeAnchor() string {
 	if runtime.GOOS != "windows" {
 		tag = strconv.Itoa(os.Getuid())
 	}
-	return filepath.Join(os.TempDir(), "zero-runtime-"+tag)
+	// PHYSICAL PARENT, OWNED LEAF. The validator walks every component no-follow
+	// and refuses links, which is right for the anchor Zero owns and wrong for
+	// the operator's ancestors above it: macOS puts TempDir under /var, a
+	// symlink to /private/var, and a redirected %LOCALAPPDATA% is ordinary on
+	// Windows. The first version handed the validator the unresolved path and
+	// refused every fallback on every Mac. Resolving the parent first means the
+	// only new component the validator sees is the anchor itself.
+	//
+	// On a resolve error the unresolved path is used, deliberately: the
+	// validator is still the fail-closed check, and refusing there names the
+	// real component rather than hiding it behind a resolver failure.
+	base := os.TempDir()
+	if physical, err := physicalTempDir(); err == nil && physical != "" {
+		base = physical
+	}
+	return filepath.Join(base, "zero-runtime-"+tag)
 }
 
 // isFallbackRuntimeRoot reports whether root was derived by

@@ -37,9 +37,18 @@ func fallbackAnchorFixture(t *testing.T) (target string) {
 	t.Setenv("TMP", tempRoot)
 	t.Setenv("TEMP", tempRoot)
 
+	// The anchor's parent is the PHYSICAL temp dir, so compare against the
+	// resolved form of the redirect rather than its spelling: t.TempDir can
+	// come back as an 8.3 short name or in a different case from what the
+	// handle reports, and a prefix check on the raw string would fail for a
+	// correct anchor.
 	anchor := fallbackRuntimeAnchor()
-	if !strings.HasPrefix(strings.ToLower(anchor), strings.ToLower(tempRoot)) {
-		t.Fatalf("SETUP INVALID: anchor %s is not under the redirected TEMP %s", anchor, tempRoot)
+	resolvedTempRoot, err := physicalTempDir()
+	if err != nil {
+		t.Fatalf("SETUP INVALID: cannot resolve the redirected TEMP %s: %v", tempRoot, err)
+	}
+	if !pathWithinRoot(resolvedTempRoot, anchor) {
+		t.Fatalf("SETUP INVALID: anchor %s is not under the redirected TEMP %s (resolved %s)", anchor, tempRoot, resolvedTempRoot)
 	}
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", anchor, target).CombinedOutput(); err != nil {
 		t.Fatalf("mklink /J: %v\n%s", err, out)
