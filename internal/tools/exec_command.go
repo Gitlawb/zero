@@ -91,10 +91,10 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 					"cwd":                 {Type: "string", Description: "Alias for workdir. Prefer workdir.", Default: "."},
 					"yield_time_ms":       {Type: "integer", Description: "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.", Default: defaultExecYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxExecYieldTimeMS)},
 					"max_output_tokens":   {Type: "integer", Description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
-					"sandbox_permissions": {Type: "string", Enum: []string{string(SandboxPermissionsUseDefault), string(SandboxPermissionsWithAdditionalPermissions), string(SandboxPermissionsRequireEscalated)}, Description: "Per-command sandbox override. Defaults to `use_default`; use `with_additional_permissions` with `additional_permissions` for sandboxed file/network access, or `require_escalated` only when the command must run outside the sandbox, such as host/global process, socket, service, or desktop state hidden by sandbox namespaces.", Default: string(SandboxPermissionsUseDefault)},
+					"sandbox_permissions": {Type: "string", Enum: []string{string(SandboxPermissionsUseDefault), string(SandboxPermissionsWithAdditionalPermissions), string(SandboxPermissionsRequireEscalated)}, Description: sandboxPermissionsDescription, Default: string(SandboxPermissionsUseDefault)},
 					"additional_permissions": {
 						Type:        "object",
-						Description: "Sandboxed filesystem or network access for this command; only with `sandbox_permissions: \"with_additional_permissions\"`.",
+						Description: additionalPermissionsDescription,
 						Properties:  additionalPermissionsProperties(),
 					},
 					"justification": {Type: "string", Description: "User-facing approval question for `require_escalated`; omit otherwise."},
@@ -173,7 +173,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	// unsandboxed) can actually bypass the MSYS guard instead of being
 	// hard-blocked by the same check it was meant to escalate past.
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	if issue := detectShellCommandIssue(commandText, runtimeGOOS()); issue != nil && !msysGuardBypassed(issue, commandEngine) {
+	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtimeGOOS())); issue != nil && !msysGuardBypassed(issue, commandEngine) {
 		return shellIssueBlockResult(*issue)
 	}
 	if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
@@ -459,7 +459,7 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
 	if status == StatusError && input.exited && !input.interrupted {
-		if issue := detectShellOutputIssue(output, runtimeGOOS()); issue != nil {
+		if issue := detectShellOutputIssueForRuntime(output, detectShellRuntime(runtimeGOOS())); issue != nil {
 			meta["shell_issue"] = issue.Kind
 			body = appendShellIssueHint(body, *issue)
 		}

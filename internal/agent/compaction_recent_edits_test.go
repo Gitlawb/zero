@@ -20,17 +20,24 @@ func TestRecentEditsExtractsPathsAndNotes(t *testing.T) {
 			{ID: "e2", Name: "edit_file", Arguments: `{"path":"internal/bar.go","old_string":"a","new_string":"b"}`},
 		}},
 		{Role: zeroruntime.MessageRoleTool, ToolCallID: "e2", Content: "Applied edit to internal/bar.go"},
+		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{
+			{ID: "e3", Name: "apply_patch", Arguments: `{"patch":"*** Update File: internal/baz.go"}`},
+		}},
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "e3", Content: "Done!", ChangedFiles: []string{"internal/baz.go"}},
 	}
 
 	edits := recentEdits(messages)
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 edited files, got %d: %#v", len(edits), edits)
+	if len(edits) != 3 {
+		t.Fatalf("expected 3 edited files, got %d: %#v", len(edits), edits)
 	}
 	if edits[0].name != "internal/foo.go" || !strings.Contains(edits[0].body, "12 lines") {
 		t.Fatalf("first edit = %#v, want foo.go with its note", edits[0])
 	}
 	if edits[1].name != "internal/bar.go" || !strings.Contains(edits[1].body, "Applied edit") {
 		t.Fatalf("second edit = %#v, want bar.go with its note", edits[1])
+	}
+	if edits[2].name != "internal/baz.go" || edits[2].body != "Done!" {
+		t.Fatalf("third edit = %#v, want apply_patch changed file with its note", edits[2])
 	}
 }
 

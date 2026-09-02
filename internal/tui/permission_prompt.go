@@ -47,11 +47,11 @@ func permissionOptions(request agent.PermissionRequest) []permissionOption {
 		case agent.PermissionDecisionAllowForSession:
 			options = append(options, permissionOption{label: "allow for session", hotkey: "s", choice: permissionDecisionAllowForSession})
 		case agent.PermissionDecisionAllowPrefix:
-			options = appendPrefixOptions(options, request, permissionDecisionAllowPrefix, "p", "allow command prefix for session", "prefix (session)")
+			options = appendPrefixOptions(options, request, permissionDecisionAllowPrefix, "p", prefixApprovalLabel("allow command prefix for session", request), "prefix (session)")
 		case agent.PermissionDecisionAllowPrefixProject:
-			options = appendPrefixOptions(options, request, permissionDecisionAllowPrefixProject, "j", "allow command prefix for this project", "prefix (project)")
+			options = appendPrefixOptions(options, request, permissionDecisionAllowPrefixProject, "j", prefixApprovalLabel("allow command prefix for this project", request), "prefix (project)")
 		case agent.PermissionDecisionAlwaysAllowPrefix:
-			options = appendPrefixOptions(options, request, permissionDecisionAlwaysAllowPrefix, "y", "allow command prefix globally", "prefix (global)")
+			options = appendPrefixOptions(options, request, permissionDecisionAlwaysAllowPrefix, "y", prefixApprovalLabel("allow command prefix globally", request), "prefix (global)")
 		case agent.PermissionDecisionAlwaysAllow:
 			options = append(options, permissionOption{label: "allow in future", hotkey: "f", choice: permissionDecisionAlwaysAllow})
 		case agent.PermissionDecisionDeny:
@@ -78,7 +78,7 @@ func appendPrefixOptions(options []permissionOption, request agent.PermissionReq
 	}
 	for _, prefix := range ladder {
 		option := permissionOption{
-			label:         verb + ": " + strings.Join(prefix, " "),
+			label:         prefixApprovalLabel(verb+": "+strings.Join(prefix, " "), request),
 			choice:        choice,
 			commandPrefix: append([]string(nil), prefix...),
 		}
@@ -196,4 +196,22 @@ func (m model) cancelPermissionTyping() (tea.Model, tea.Cmd) {
 	m.input.SetValue(m.pendingPermission.savedDraft)
 	m.pendingPermission.savedDraft = ""
 	return m, nil
+}
+
+// prefixApprovalLabel spells out that approving a prefix also takes the command
+// out of the sandbox.
+//
+// Approving a prefix rewrites the call to require_escalated, which resolves to
+// unsandboxed execution, and the engine's escalation prompt is then satisfied by
+// the approval just given for the sandboxed form. The operator was shown only
+// "allow command prefix for session" and got something wider, which is a consent
+// gap rather than a bug in the escalation itself.
+//
+// Only appended when it is true. The backend computes that from the same guards
+// the rewrite uses, so a prompt that says this always means it.
+func prefixApprovalLabel(base string, request agent.PermissionRequest) string {
+	if !request.PrefixApprovalEscalates {
+		return base
+	}
+	return base + " (runs outside the sandbox)"
 }

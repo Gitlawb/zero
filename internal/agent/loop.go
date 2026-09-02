@@ -40,7 +40,15 @@ const (
 	toolResultControlSpecReview = "spec_review_required"
 )
 
-var errPermissionApprovalCanceled = errors.New("permission approval cancelled")
+// ErrPermissionApprovalCanceled ends a run because the caller cancelled a
+// permission prompt, rather than because anything failed.
+//
+// EXPORTED FOR THE SURFACES. A cancel is a normal ending and each surface says
+// so its own way — the TUI unwinds, and ACP has a "cancelled" stop reason for
+// exactly this. While it was unexported ACP could not distinguish it from a
+// fault and reported it as an internal error, so declining a tool looked like
+// the agent crashing.
+var ErrPermissionApprovalCanceled = errors.New("permission approval cancelled")
 
 // isImageRejectionError reports whether err is a provider 400 that rejects
 // image/multimodal content. This is checked BEFORE the compaction-retry path
@@ -133,6 +141,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterInputTokens, int64(usage.InputTokens))
 			options.Trace.Counter(trace.CounterCachedInputTokens, int64(usage.CachedInputTokens))
+			options.Trace.Counter(trace.CounterCacheWriteTokens, int64(usage.CacheWriteTokens))
 			options.Trace.Counter(trace.CounterOutputTokens, int64(usage.OutputTokens))
 		}
 	}
@@ -186,10 +195,23 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	defer runPermissions.cleanup()
 
 	promptParts := buildSystemPromptParts(options)
+	planner := newContextPlanner(contextPlannerConfig{
+		contextWindow:  options.ContextWindow,
+		promptCacheKey: options.SessionID,
+		serviceTier:    options.ServiceTier,
+		promptParts:    promptParts,
+	})
 	messages := zeroruntime.SeedMessagesWithImages(promptParts.prompt, prompt, options.Images)
 
 	guards := newGuardState()
 	task := newTaskState(prompt, options.Trace)
+	onPermission := options.OnPermission
+	options.OnPermission = func(event PermissionEvent) {
+		task.observe(taskStateEvent{kind: taskStateEventPermission, permission: event})
+		if onPermission != nil {
+			onPermission(event)
+		}
+	}
 	compactor := newCompactionState(options, task)
 	defer func() {
 		// A final transcript comparison is observational. It records drift but
@@ -274,31 +296,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the tool-definition tokens (they ride on every request) in its estimate.
 		// partitionTools depends only on registry/permissions/options/loaded, not on
 		// the messages, so computing it before compaction is safe.
-		// Build the per-turn tool list first so proactive compaction can include
-		// the tool-definition tokens (they ride on every request) in its estimate.
-		// partitionTools depends only on registry/permissions/options/loaded, not on
-		// the messages, so computing it before compaction is safe.
 		toolPartitionSpan := options.Trace.Span(trace.SpanToolPartition)
 		exposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
 		toolPartitionSpan.End()
-
-		// Fingerprint the exact system prompt built at run start plus this turn's
-		// provider-visible tool definitions in their emitted order. Reusing the
-		// retained prompt parts avoids rebuilding workspace context while ensuring
-		// the trace describes the same bytes carried by the request.
-		if options.Trace != nil {
-			fp := computePrefixFingerprint(buildPromptSubstringsFromParts(promptParts, exposed))
-			options.Trace.EmitPrefixHash(trace.PrefixHash{
-				SystemPromptHash:       fp.SystemPromptHash,
-				BaseInstructionsHash:   fp.BaseInstructionsHash,
-				ConfirmationPolicyHash: fp.ConfirmationPolicyHash,
-				ProjectContextHash:     fp.ProjectContextHash,
-				SkillsHash:             fp.SkillsHash,
-				ToolsHash:              fp.ToolsHash,
-				SchemaHash:             fp.SchemaHash,
-				CompletePrefixHash:     fp.CompletePrefixHash,
-			})
-		}
 
 		// PROACTIVE compaction: if the history is approaching the model's
 		// context window, summarize the oldest middle before building the
@@ -306,18 +306,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		compactionSpan := options.Trace.Span(trace.SpanCompaction)
 		messages = compactor.maybeCompact(ctx, provider, messages, exposed)
 		compactionSpan.End()
-		request := zeroruntime.CompletionRequest{
-			Messages:        copyMessages(messages),
-			Tools:           exposed,
-			ReasoningEffort: options.ReasoningEffort,
-			PromptCacheKey:  options.SessionID,
-		}
-
-		// Report the per-category context budget for this turn so a surface can
-		// show utilization. Opt-in: a no-op when OnContext is unset.
-		if options.OnContext != nil {
-			options.OnContext(MeasureContext(messages, request.Tools, options.ContextWindow))
-		}
+		plan := planner.Plan(messages, exposed, options.ReasoningEffort)
+		request := plan.Request
+		recordContextPlan(options, plan)
 
 		// A transient upstream disconnect on the initial connect is retried with
 		// backoff (before any content is forwarded, so no OnText is duplicated);
@@ -342,12 +333,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// on registry+loaded, not on the messages, so they stay valid after
 				// compaction. Using the bare toolDefinitions here would route through an
 				// empty-loaded partition, re-hiding every already-loaded deferred tool.
-				request = zeroruntime.CompletionRequest{
-					Messages:        copyMessages(messages),
-					Tools:           exposed,
-					ReasoningEffort: options.ReasoningEffort,
-					PromptCacheKey:  options.SessionID,
-				}
+				retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+				request = retryPlan.Request
+				recordContextPlan(options, retryPlan)
 				// Pre-content connect after a context-limit compaction: route through the
 				// reconnect helper so a transient upstream hiccup here doesn't fail the
 				// whole run and re-burn every token (AUDIT-L1).
@@ -431,12 +419,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// Reuse the SAME active-mode partition (exposed) from this turn rather
 				// than the bare toolDefinitions: exposed depends on registry+loaded (not
 				// the messages), so it stays valid after compaction.
-				retryRequest := zeroruntime.CompletionRequest{
-					Messages:        copyMessages(messages),
-					Tools:           exposed,
-					ReasoningEffort: options.ReasoningEffort,
-					PromptCacheKey:  options.SessionID,
-				}
+				retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+				retryRequest := retryPlan.Request
+				recordContextPlan(options, retryPlan)
 				retryStream, retryStreamErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 				if retryStreamErr != nil {
 					return collected, retryStreamErr
@@ -494,12 +479,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				result.Messages = copyMessages(messages)
 				return result, err
 			}
-			retryRequest := zeroruntime.CompletionRequest{
-				Messages:        copyMessages(messages),
-				Tools:           exposed,
-				ReasoningEffort: options.ReasoningEffort,
-				PromptCacheKey:  options.SessionID,
-			}
+			retryPlan := planner.Plan(messages, exposed, options.ReasoningEffort)
+			retryRequest := retryPlan.Request
+			recordContextPlan(options, retryPlan)
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
 				result.Messages = copyMessages(messages)
@@ -663,6 +645,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// between tool_results breaks strict provider replay) — same after-batch
 		// rationale as turnRequestedModel above.
 		var changedFilesThisBatch []string
+		// Images produced by tools this turn, held until every tool_result is
+		// recorded. They travel as user messages, and a user message between two
+		// tool_results breaks strict provider replay — Anthropic coalesces them
+		// into one user block list and requires the tool_result blocks first, so
+		// interleaving yields [tool_result, text, image, tool_result] and a 400.
+		// Same reason the self-correction feedback below is deferred.
+		var toolImageMessages []zeroruntime.Message
 		// Parallel read-ahead state: results for calls[precomputedStart:precomputedEnd]
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
@@ -698,7 +687,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterToolCalls, 1)
 			recordOutputBudgetTrace(options.Trace, toolResult)
-			task.observe(taskStateEvent{kind: taskStateEventToolResult, toolResult: toolResult})
+			task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: call.Arguments, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}
@@ -712,10 +701,23 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				turnRequestedModel = toolResult.RequestedModel
 			}
 			messages = append(messages, zeroruntime.Message{
-				Role:       zeroruntime.MessageRoleTool,
-				Content:    toolResult.Output,
-				ToolCallID: toolResult.ToolCallID,
+				Role:               zeroruntime.MessageRoleTool,
+				Content:            toolResult.ModelOutput(),
+				ToolCallID:         toolResult.ToolCallID,
+				ToolCallProviderID: call.ProviderCallID,
+				IsError:            toolResult.Status == tools.StatusError,
+				ChangedFiles:       append([]string(nil), toolResult.ChangedFiles...),
 			})
+			// Images ride a following USER message rather than the tool result
+			// above. Every provider drops images on a tool-role message —
+			// Anthropic's tool_result content is a string, Gemini's is a
+			// functionResponse, and OpenAI guards its image parts to the user role
+			// — so attaching them there would silently deliver nothing. A separate
+			// message also keeps the one-tool-result-per-tool-call pairing intact,
+			// which the providers validate.
+			if imageMessage, ok := toolResultImageMessage(toolResult); ok {
+				toolImageMessages = append(toolImageMessages, imageMessage)
+			}
 
 			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
 			// returns context.Canceled rather than fabricating a headless answer. Stop
@@ -726,12 +728,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if abortErr != nil {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				result.FinalAnswer = toolResult.Output
+				messages = append(messages, toolImageMessages...)
+				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
 				return result, nil
@@ -744,7 +748,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
-			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.Output)
+			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput())
 			posture.observeToolOutcome(outcome, toolResult)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
@@ -754,12 +758,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}
 			if outcome.InjectHint && failureHint == "" {
-				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.Output)
+				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.ModelOutput())
 			}
 
 			// Collect the files this successful mutating tool changed. Self-correct
@@ -772,6 +777,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				postEditDiagnostics.enqueue(ctx, toolResult.ChangedFiles)
 			}
 		}
+		// Every tool_result for this turn is now recorded, including aborted
+		// placeholders, so the images can follow without splitting them.
+		messages = append(messages, toolImageMessages...)
+		toolImageMessages = nil
 
 		// Run post-edit self-correction once over the union of files this turn
 		// changed, then append any feedback after every tool_result is recorded so
@@ -834,12 +843,27 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					_ = session.Prewarm(ctx)
 					provider = sessionProvider{session: session}
 					options.Model = turnRequestedModel
+					// Service tiers are model capabilities. A successful escalation may
+					// target a model that does not support the tier selected before the
+					// switch, so let the destination use its default.
+					options.ServiceTier = ""
+					planner.config.serviceTier = ""
 					options.Trace.Counter(trace.CounterModelSwitches, 1)
-					// KNOWN LIMITATION (deferred): the compactor's context-window budget
-					// is fixed at run start from options.ContextWindow and is NOT updated
-					// here, so a switch to a model with a different window keeps compacting
-					// against the original budget. Fixing it needs the switcher to also
-					// report the new window — out of scope for this change.
+					// Re-derive the context window for the new model so compaction and
+					// the OnContext budget report track the model actually in force —
+					// without this a switch to a smaller-window model can overflow the
+					// target, and a switch to a larger one over-compacts. An unknown
+					// model (<= 0) keeps the original window. The compactor also
+					// re-resolves its dedicated summarizer against the new model.
+					window := 0
+					if options.ContextWindowFor != nil {
+						window = options.ContextWindowFor(turnRequestedModel)
+					}
+					if window > 0 {
+						options.ContextWindow = window
+						planner.config.contextWindow = window
+					}
+					compactor.switchModel(turnRequestedModel, window)
 				}
 			}
 		}
@@ -903,7 +927,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		})
 	}
 	finalExposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
-	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, messages, finalExposed, options); strings.TrimSpace(answer) != "" {
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, planner, messages, finalExposed, options); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
 		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
@@ -927,6 +951,21 @@ func recordOutputBudgetTrace(recorder *trace.Recorder, result ToolResult) {
 	if recorder == nil || result.Meta["output_budget_category"] == "" {
 		return
 	}
+	if result.Outcome.Finalized() {
+		diagnostics := result.Outcome.Diagnostics
+		recorder.EmitOutputBudget(trace.OutputBudgetEvent{
+			Tool:                    result.Name,
+			Category:                diagnostics.Category,
+			OriginalBytes:           diagnostics.OriginalBytes,
+			RetainedBytes:           diagnostics.ModelBytes,
+			EstimatedOriginalTokens: diagnostics.EstimatedOriginalTokens,
+			EstimatedRetainedTokens: diagnostics.EstimatedModelTokens,
+			Truncated:               diagnostics.Truncated,
+			Reason:                  diagnostics.Reason,
+			SpillCreated:            result.Outcome.Artifact != nil,
+		})
+		return
+	}
 	parseInt := func(key string) int {
 		value, _ := strconv.Atoi(result.Meta[key])
 		return value
@@ -945,7 +984,32 @@ func recordOutputBudgetTrace(recorder *trace.Recorder, result ToolResult) {
 	})
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
+func recordContextPlan(options Options, plan contextPlan) {
+	recordContextPlanTrace(options.Trace, plan)
+	if options.OnContext != nil {
+		options.OnContext(plan.Breakdown)
+	}
+}
+
+func recordContextPlanTrace(recorder *trace.Recorder, plan contextPlan) {
+	if recorder == nil {
+		return
+	}
+	fingerprint := plan.PrefixFingerprint
+	recorder.EmitPrefixHash(trace.PrefixHash{
+		SystemPromptHash:       fingerprint.SystemPromptHash,
+		BaseInstructionsHash:   fingerprint.BaseInstructionsHash,
+		ConfirmationPolicyHash: fingerprint.ConfirmationPolicyHash,
+		ProjectContextHash:     fingerprint.ProjectContextHash,
+		SkillsHash:             fingerprint.SkillsHash,
+		ToolsHash:              fingerprint.ToolsHash,
+		SchemaHash:             fingerprint.SchemaHash,
+		CompletePrefixHash:     fingerprint.CompletePrefixHash,
+		InvalidationReason:     plan.Breakdown.PrefixInvalidationReason,
+	})
+}
+
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *contextPlanner, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
@@ -954,12 +1018,9 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 	// The max-turns final-answer call is a pre-content connect, often after a long
 	// autonomous/cron run — route it through the reconnect helper so a single
 	// transient hiccup doesn't drop the final summary (AUDIT-L1).
-	stream, err := streamWithReconnect(ctx, provider, zeroruntime.CompletionRequest{
-		Messages:        copyMessages(finalMessages),
-		Tools:           toolDefs,
-		ReasoningEffort: options.ReasoningEffort,
-		PromptCacheKey:  options.SessionID,
-	}, reconnectNoticeFor(options))
+	plan := planner.Plan(finalMessages, toolDefs, options.ReasoningEffort)
+	recordContextPlan(options, plan)
+	stream, err := streamWithReconnect(ctx, provider, plan.Request, reconnectNoticeFor(options))
 	if err != nil {
 		return "", messages, ""
 	}
@@ -989,6 +1050,9 @@ func historySafeToolCalls(calls []ToolCall) []ToolCall {
 	safe := make([]ToolCall, len(calls))
 	for i, call := range calls {
 		safe[i] = call
+		if call.Freeform {
+			continue
+		}
 		args := strings.TrimSpace(call.Arguments)
 		switch {
 		case args == "":
@@ -1072,8 +1136,28 @@ func decodeToolArguments(arguments string, v any) error {
 }
 
 func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	tool, toolFound := registry.Get(call.Name)
 	args := map[string]any{}
-	if call.Arguments != "" {
+	if call.Freeform {
+		if !toolFound || !tools.IsBuiltInApplyPatch(tool) {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: Unsupported freeform tool call for " + call.Name + ".",
+			}, nil
+		}
+		prepared, err := tools.PrepareFreeformApplyPatchArguments(tool, call.Arguments)
+		if err != nil {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: Invalid freeform apply_patch input: " + err.Error(),
+			}, nil
+		}
+		args = prepared
+	} else if call.Arguments != "" {
 		if err := decodeToolArguments(call.Arguments, &args); err != nil {
 			return ToolResult{
 				ToolCallID: call.ID,
@@ -1082,6 +1166,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 				Output:     "Error: Failed to parse arguments for " + call.Name + ": " + err.Error(),
 			}, nil
 		}
+	}
+	if isShellCommandTool(call.Name) {
+		normalizeNoopAdditionalPermissions(args, options.Cwd, options.Sandbox)
 	}
 	// tool_search is the gateway to the allowlisted deferred tools, so a non-empty
 	// EnabledTools allowlist that omits it must NOT reject the call — otherwise the
@@ -1098,13 +1185,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			DenialReason: DenialFiltered,
 		}, nil
 	}
-	tool, toolFound := registry.Get(call.Name)
-	if permissionMode == PermissionModeSpecDraft && toolFound && !ToolAdvertised(tool, permissionMode) {
+	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
+		modeName := string(permissionMode)
 		return ToolResult{
 			ToolCallID:   call.ID,
 			Name:         call.Name,
 			Status:       tools.StatusError,
-			Output:       `Error: Tool "` + call.Name + `" is not available in spec-draft mode.`,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + modeName + ` mode.`,
 			DenialReason: DenialFiltered,
 		}, nil
 	}
@@ -1335,7 +1422,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			}
 		case PermissionDecisionCancel:
 			emitCanceledPermission(options, call, requestEvent, decisionReason)
-			return canceledPermissionResult(call, decisionReason, requestEvent), fmt.Errorf("%w for %s", errPermissionApprovalCanceled, call.Name)
+			return canceledPermissionResult(call, decisionReason, requestEvent), fmt.Errorf("%w for %s", ErrPermissionApprovalCanceled, call.Name)
 		default:
 			emitDeniedPermission(options, call, requestEvent, decisionReason)
 			return deniedPermissionResult(call, decisionReason, requestEvent), nil
@@ -1374,7 +1461,8 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Cwd:               options.Cwd,
 		// Per-session file version tracker so write_file/edit_file refuse to clobber
 		// a file that changed on disk outside Zero since it was last read.
-		FileTracker: options.FileTracker,
+		FileTracker:                options.FileTracker,
+		DeferFileObservationCommit: true,
 		// Post-edit diagnostics are NOT forwarded to the tools: they used to run
 		// synchronously inside edit_file/write_file and block every mutating tool
 		// call on the language server (≥300ms debounce floor, 10s cap). The loop
@@ -1429,6 +1517,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			result = registry.RebudgetAfterHook(call.Name, args, result)
 		}
 	}
+	result = registry.CommitFileObservation(result, options.FileTracker)
 	// Stamp the sandbox risk classification for this EXECUTED call so run-policy
 	// observers can see the risk of an allowed mutation. Prefer the preflight
 	// decision's classification when the sandbox evaluated the call; otherwise
@@ -1451,13 +1540,15 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ToolCallID:      call.ID,
 		Name:            call.Name,
 		Status:          result.Status,
-		Output:          result.Output,
+		Output:          result.ModelOutput(),
 		Truncated:       result.Truncated,
 		Meta:            result.Meta,
+		Images:          result.Images,
 		Redacted:        result.Redacted,
 		ChangedFiles:    result.ChangedFiles,
 		ChangeSummaries: result.ChangeSummaries,
-		Display:         result.Display,
+		Display:         result.HumanDisplay(),
+		Outcome:         result.Outcome,
 		LoadedTools:     loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
@@ -1517,7 +1608,7 @@ func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry 
 	case PermissionDecisionCancel:
 		emitCanceledPermission(options, call, requestEvent, reason)
 		canceled := canceledPermissionResult(call, reason, requestEvent)
-		return result, &canceled, true, decision.Action, reason, nil, fmt.Errorf("%w for %s", errPermissionApprovalCanceled, call.Name)
+		return result, &canceled, true, decision.Action, reason, nil, fmt.Errorf("%w for %s", ErrPermissionApprovalCanceled, call.Name)
 	default:
 		emitDeniedPermission(options, call, requestEvent, reason)
 		denied := deniedPermissionResult(call, reason, requestEvent)
@@ -1565,7 +1656,7 @@ func maybeRetryWithNetworkAfterSandboxDenial(ctx context.Context, registry *tool
 	case PermissionDecisionCancel:
 		emitCanceledPermission(options, call, requestEvent, reason)
 		canceled := canceledPermissionResult(call, reason, requestEvent)
-		return result, &canceled, true, decision.Action, reason, fmt.Errorf("%w for %s", errPermissionApprovalCanceled, call.Name)
+		return result, &canceled, true, decision.Action, reason, fmt.Errorf("%w for %s", ErrPermissionApprovalCanceled, call.Name)
 	default:
 		emitDeniedPermission(options, call, requestEvent, reason)
 		denied := deniedPermissionResult(call, reason, requestEvent)
@@ -1639,9 +1730,15 @@ func sandboxRestrictedShellRetryCandidate(call ToolCall, args map[string]any, re
 
 func sandboxDeniedShellResult(result tools.Result) bool {
 	if result.ExecutionOutcome != nil {
-		// Typed denials must be handled by their exact capability path. Never
-		// turn a structured narrow denial into the legacy unrestricted retry.
-		return false
+		// Only a typed platform denial that explicitly requests unrestricted
+		// recovery may enter the legacy retry path. Narrow capability denials
+		// remain on their exact capability path.
+		denial := result.ExecutionOutcome.Denial
+		return denial != nil &&
+			denial.Source == execution.DenialSourcePlatformSandbox &&
+			denial.Capability.Kind == execution.CapabilityUnrestricted &&
+			denial.Recoverable &&
+			denial.NextAction == execution.DenialNextActionRequestApproval
 	}
 	return result.Status == tools.StatusError && result.Meta[tools.SandboxLikelyDeniedMeta] == "true"
 }
@@ -1706,20 +1803,21 @@ func sandboxRestrictionRetryReason(result tools.Result) string {
 
 func runToolForNetworkRetry(ctx context.Context, registry *tools.Registry, name string, toolCallID string, args map[string]any, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) tools.Result {
 	return registry.RunWithOptions(ctx, name, cloneArgs(args), tools.RunOptions{
-		PermissionGranted: true,
-		PermissionMode:    string(permissionMode),
-		Autonomy:          options.Autonomy,
-		Sandbox:           options.Sandbox,
-		ToolCallID:        toolCallID,
-		SessionID:         options.SessionID,
-		Model:             options.Model,
-		ReasoningEffort:   options.ReasoningEffort,
-		Depth:             options.Depth,
-		Cwd:               options.Cwd,
-		FileTracker:       options.FileTracker,
-		EnabledTools:      options.EnabledTools,
-		DisabledTools:     options.DisabledTools,
-		Progress:          progressCallback,
+		PermissionGranted:          true,
+		PermissionMode:             string(permissionMode),
+		Autonomy:                   options.Autonomy,
+		Sandbox:                    options.Sandbox,
+		ToolCallID:                 toolCallID,
+		SessionID:                  options.SessionID,
+		Model:                      options.Model,
+		ReasoningEffort:            options.ReasoningEffort,
+		Depth:                      options.Depth,
+		Cwd:                        options.Cwd,
+		FileTracker:                options.FileTracker,
+		DeferFileObservationCommit: true,
+		EnabledTools:               options.EnabledTools,
+		DisabledTools:              options.DisabledTools,
+		Progress:                   progressCallback,
 	})
 }
 
@@ -1734,20 +1832,21 @@ func unsandboxedRetryArgs(args map[string]any) map[string]any {
 
 func runToolForUnsandboxedRetry(ctx context.Context, registry *tools.Registry, name string, toolCallID string, args map[string]any, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) tools.Result {
 	return registry.RunWithOptions(ctx, name, args, tools.RunOptions{
-		PermissionGranted: true,
-		PermissionMode:    string(permissionMode),
-		Autonomy:          options.Autonomy,
-		Sandbox:           options.Sandbox,
-		ToolCallID:        toolCallID,
-		SessionID:         options.SessionID,
-		Model:             options.Model,
-		ReasoningEffort:   options.ReasoningEffort,
-		Depth:             options.Depth,
-		Cwd:               options.Cwd,
-		FileTracker:       options.FileTracker,
-		EnabledTools:      options.EnabledTools,
-		DisabledTools:     options.DisabledTools,
-		Progress:          progressCallback,
+		PermissionGranted:          true,
+		PermissionMode:             string(permissionMode),
+		Autonomy:                   options.Autonomy,
+		Sandbox:                    options.Sandbox,
+		ToolCallID:                 toolCallID,
+		SessionID:                  options.SessionID,
+		Model:                      options.Model,
+		ReasoningEffort:            options.ReasoningEffort,
+		Depth:                      options.Depth,
+		Cwd:                        options.Cwd,
+		FileTracker:                options.FileTracker,
+		DeferFileObservationCommit: true,
+		EnabledTools:               options.EnabledTools,
+		DisabledTools:              options.DisabledTools,
+		Progress:                   progressCallback,
 	})
 }
 
@@ -1786,9 +1885,31 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 }
 
+// hooksSuppressed reports whether advisory (non-veto) hooks must not run for
+// this run's permission mode. Plan mode promises a read-only turn, but
+// sessionStart/sessionEnd/afterTool hooks execute configured host commands
+// outside the advertised-tool and sandbox gates, so dispatching them would let
+// merely starting a plan session or finishing a read mutate the workspace.
+//
+// beforeTool is intentionally NOT suppressed: a non-zero exit is a deny gate,
+// and skipping it fails open (operators who block secret-file reads via
+// beforeTool would lose that protection under /plan on). See dispatchBeforeTool.
+//
+// Spec-draft keeps the existing trust-gated hook model: project hooks still
+// fire when the workspace (or its worktree trust root) is trusted. That is
+// intentional; trust inheritance for --use-spec --worktree is covered by
+// TestExecSpecWorktreeInheritsTrustEndToEnd.
+func hooksSuppressed(options Options) bool {
+	return options.PermissionMode == PermissionModePlan
+}
+
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
 // that exits non-zero vetoes the call: the returned bool is true and the tool
 // must not run. A nil dispatcher (no hooks wired) is a no-op.
+//
+// Unlike advisory hooks, beforeTool still runs under plan mode. Suppressing it
+// would fail open: a project policy that blocks reads of secrets via
+// beforeTool would silently stop applying the moment permission mode is plan.
 func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
 	if options.Hooks == nil {
 		return hooks.DispatchOutcome{}, false
@@ -1813,7 +1934,7 @@ func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, arg
 // returns any advisory output (e.g. a formatter or vet result) to surface back
 // to the model. afterTool hooks never block. A nil dispatcher is a no-op.
 func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) string {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return ""
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1837,7 +1958,7 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 // model turn. Lifecycle hooks are advisory: dispatcher failures are audited but
 // never block the run.
 func dispatchSessionStart(ctx context.Context, options Options) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1858,7 +1979,7 @@ func dispatchSessionStart(ctx context.Context, options Options) {
 // dispatchSessionEnd runs configured sessionEnd hooks once when the agent run
 // exits, including early error returns. Lifecycle hooks are advisory.
 func dispatchSessionEnd(ctx context.Context, options Options, result Result, runErr error) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	payload := map[string]any{
@@ -2045,13 +2166,14 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			ToolCallID:      call.ID,
 			Name:            call.Name,
 			Status:          result.Status,
-			Output:          result.Output,
+			Output:          result.ModelOutput(),
 			Truncated:       result.Truncated,
 			Meta:            result.Meta,
 			Redacted:        result.Redacted,
 			ChangedFiles:    result.ChangedFiles,
 			ChangeSummaries: result.ChangeSummaries,
-			Display:         result.Display,
+			Display:         result.HumanDisplay(),
+			Outcome:         result.Outcome,
 		}
 	}
 	return ToolResult{
@@ -2251,6 +2373,20 @@ type requestPermissionsArgs struct {
 }
 
 func executeRequestPermissions(ctx context.Context, call ToolCall, args map[string]any, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	// request_permissions is dispatched by name above, before the registry-based
+	// ToolAdvertised gate runs, so a read-only mode's registry omitting this tool
+	// (rather than registering it as denied) must not fall through to a real
+	// grant. Deny it here unconditionally for spec-draft/plan, independent of
+	// whether the caller's registry happens to contain the tool.
+	if permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan {
+		return ToolResult{
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusError,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + string(permissionMode) + ` mode.`,
+			DenialReason: DenialFiltered,
+		}, nil
+	}
 	parsed, err := parseRequestPermissionsArgs(args)
 	if err != nil {
 		return ToolResult{
@@ -2838,7 +2974,34 @@ func permissionRequestFromEvent(event PermissionEvent, args map[string]any, opti
 		AvailableDecisions:   availablePermissionDecisions(event, args, options),
 		CommandPrefixOptions: commandPrefixLadder(event.ToolName, args),
 		ClassifierReason:     event.ClassifierReason,
+		// Computed from the SAME conditions shellExecutionArgsForApproval uses,
+		// so the prompt cannot claim an escalation that will not happen or stay
+		// silent about one that will. Keeping the two in step matters more than
+		// the wording: a label that overstates gets ignored, and one that
+		// understates is the bug being fixed.
+		PrefixApprovalEscalates: shellPrefixApprovalEscalates(event.ToolName, args, options),
 	}
+}
+
+// shellPrefixApprovalEscalates reports whether approving a command prefix would
+// also take this command out of the sandbox.
+//
+// Deliberately mirrors shellExecutionArgsForApproval's guards rather than
+// re-deriving them: same tool test, same sandbox availability test, and the same
+// two opt-outs for a call that already asked for additional permissions or
+// escalation. Those already carry their own disclosure, so labelling them again
+// would be noise.
+func shellPrefixApprovalEscalates(toolName string, args map[string]any, options Options) bool {
+	if !isShellCommandTool(toolName) {
+		return false
+	}
+	if options.Sandbox == nil || !options.Sandbox.UnsandboxedExecutionAllowed() {
+		return false
+	}
+	if shellCommandAdditionalPermissionsRequested(args) || shellCommandRequiresEscalated(args) {
+		return false
+	}
+	return true
 }
 
 func availablePermissionDecisions(event PermissionEvent, args map[string]any, options Options) []PermissionDecisionAction {
@@ -2902,21 +3065,89 @@ func shellCommandAdditionalPermissionsRequested(args map[string]any) bool {
 	return strings.TrimSpace(value) == string(tools.SandboxPermissionsWithAdditionalPermissions)
 }
 
+// normalizeNoopAdditionalPermissions treats a provider-expanded empty or
+// already-covered additional_permissions object as if it had been omitted.
+// Some strict-schema providers materialize every optional property and may add
+// a workspace read that the default sandbox already grants; rejecting either
+// no-op makes the model retry an otherwise valid command. Requests that broaden
+// access and malformed payloads are left untouched so validation stays closed.
+func normalizeNoopAdditionalPermissions(args map[string]any, basePath string, engine *sandbox.Engine) {
+	raw, exists := args["additional_permissions"]
+	if !exists {
+		return
+	}
+	// An explicit null is the field omitted, not a request: drop the key so the
+	// rest of the pipeline sees the same args a model that omitted it would send.
+	// sandbox_permissions is deliberately left alone — a flagged null must reach
+	// the same "no additional_permissions object was provided" error as a flagged
+	// absent field rather than being silently downgraded to a different outcome.
+	if raw == nil {
+		delete(args, "additional_permissions")
+		return
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	var profile sandbox.RequestPermissionProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return
+	}
+	normalized, err := sandbox.NormalizeRequestPermissionProfile(profile, basePath)
+	if err != nil {
+		return
+	}
+	noop := normalized.Empty()
+	if !noop && engine != nil {
+		if grantProfile, grantErr := sandbox.RequestPermissionGrantProfile(normalized); grantErr == nil {
+			noop = engine.CoversRequestPermissions(grantProfile)
+		}
+	}
+	if !noop {
+		return
+	}
+	delete(args, "additional_permissions")
+	if rawMode, ok := args["sandbox_permissions"].(string); ok &&
+		strings.TrimSpace(rawMode) == string(tools.SandboxPermissionsWithAdditionalPermissions) {
+		args["sandbox_permissions"] = string(tools.SandboxPermissionsUseDefault)
+	}
+}
+
+// omitAdditionalPermissionsHint is the one instruction that ends the retry loop
+// in #845/#847. Every additional_permissions rejection must carry it: the model
+// reaches these errors by attaching a permission object to a command that needs
+// none, so "omit it and retry" is the answer in practice, and an error that
+// only explains how to build a VALID permission object sends the model round
+// the loop again with a different invalid shape.
+const omitAdditionalPermissionsHint = "If this command does not need extra sandbox access — ordinary " +
+	"read-only commands such as `git branch --show-current` do not — omit both sandbox_permissions and " +
+	"additional_permissions entirely and retry; that is the fix in almost every case."
+
 func inlineAdditionalPermissionsProfile(args map[string]any, basePath string) (sandbox.RequestPermissionProfile, bool, error) {
 	if !shellCommandAdditionalPermissionsRequested(args) {
-		if _, exists := args["additional_permissions"]; exists {
-			return sandbox.RequestPermissionProfile{}, false, fmt.Errorf("additional_permissions requires sandbox_permissions set to %q", tools.SandboxPermissionsWithAdditionalPermissions)
+		// An explicit null grants nothing and carries no flag, so it is
+		// indistinguishable from an omitted field; rejecting it would be a pure
+		// false positive against providers that materialize every optional
+		// property.
+		if raw, exists := args["additional_permissions"]; exists && raw != nil {
+			return sandbox.RequestPermissionProfile{}, false, fmt.Errorf(
+				"additional_permissions was provided without sandbox_permissions set to %q, so it cannot be applied. %s "+
+					"Only if the command genuinely needs file or network access the sandbox denies, resend with "+
+					`sandbox_permissions: %q AND a non-empty additional_permissions, for example {"network": {"enabled": true}}`,
+				tools.SandboxPermissionsWithAdditionalPermissions,
+				omitAdditionalPermissionsHint,
+				tools.SandboxPermissionsWithAdditionalPermissions)
 		}
 		return sandbox.RequestPermissionProfile{}, false, nil
 	}
 	raw, ok := args["additional_permissions"]
 	if !ok || raw == nil {
 		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf(
-			"sandbox_permissions was set to %q but no additional_permissions object was provided. "+
-				`Include one, for example additional_permissions: {"network": {"enabled": true}} or `+
-				`{"file_system": {"write": ["/path"]}}. If this command does not need elevated permissions, `+
-				"omit sandbox_permissions entirely and retry",
-			tools.SandboxPermissionsWithAdditionalPermissions)
+			"sandbox_permissions was set to %q but no additional_permissions object was provided. %s "+
+				`Otherwise include one, for example additional_permissions: {"network": {"enabled": true}} or `+
+				`{"file_system": {"write": ["/path"]}}`,
+			tools.SandboxPermissionsWithAdditionalPermissions,
+			omitAdditionalPermissionsHint)
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -2932,8 +3163,10 @@ func inlineAdditionalPermissionsProfile(args map[string]any, basePath string) (s
 	}
 	if normalized.Empty() {
 		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf(
-			"additional_permissions must include at least one of network or file_system, for example " +
-				`{"network": {"enabled": true}} or {"file_system": {"write": ["/path"]}}`)
+			"additional_permissions granted nothing, so it cannot be applied. %s "+
+				`Otherwise include a real permission, for example {"network": {"enabled": true}} or `+
+				`{"file_system": {"write": ["/path"]}}`,
+			omitAdditionalPermissionsHint)
 	}
 	grantProfile, err := sandbox.RequestPermissionGrantProfile(normalized)
 	if err != nil {
@@ -3075,19 +3308,6 @@ func permissionActionFromSandbox(action sandbox.Action) PermissionAction {
 	}
 }
 
-// partitionTools builds the per-turn advertised tool list and optional
-// tool_search discovery text. INACTIVE (DeferThreshold <= 0 or the eligible count is
-// below it): every visible tool is exposed with its full schema EXCEPT tool_search
-// (dropped so it is never advertised when it cannot help), and the discovery text is
-// empty — byte-identical to the pre-deferral output. ACTIVE: a deferred-eligible
-// tool is exposed only when loaded[name]; otherwise it is hidden and searchable
-// through tool_search. Non-deferred tools (including tool_search) are always
-// exposed. The exposed slice is alpha-sorted by name, matching the legacy order
-// so the inactive path is stable.
-func partitionTools(registry *tools.Registry, permissionMode PermissionMode, options Options, loaded map[string]bool) ([]zeroruntime.ToolDefinition, string) {
-	return partitionToolsCached(registry, permissionMode, options, loaded, nil)
-}
-
 // partitionToolsCached is partitionTools with an optional per-tool definition
 // cache. The partitioning itself (visibility, deferral, ordering) is recomputed
 // every call — it must be, because a tool's deferred state can flip mid-run (e.g.
@@ -3118,13 +3338,15 @@ func partitionToolsCached(registry *tools.Registry, permissionMode PermissionMod
 	// Deferral may activate only when tool_search is actually runnable; otherwise
 	// the loop would hide deferred tools behind a loader the dispatch gate rejects
 	// — an inescapable dead-end. "Runnable" mirrors executeToolCall's gate:
-	// registered, not in DisabledTools, and advertised in the current permission
-	// mode (e.g. not spec-draft, where tool_search is not advertised). The
+	// registered, model-visible, not in DisabledTools, and advertised in the
+	// current permission mode (e.g. not spec-draft, where tool_search is not
+	// advertised). The
 	// EnabledTools allowlist is intentionally NOT checked here — tool_search is
 	// exempt from the allowlist at dispatch, so an allowlist that omits it must
 	// not disable deferral.
 	loader, loaderFound := registry.Get(tools.ToolSearchToolName)
 	loaderUsable := loaderFound &&
+		tools.ModelVisible(loader) &&
 		!containsToolName(options.DisabledTools, tools.ToolSearchToolName) &&
 		ToolAdvertised(loader, permissionMode)
 
@@ -3158,22 +3380,20 @@ func partitionToolsCached(registry *tools.Registry, permissionMode PermissionMod
 	//   2. tool_search — always present, right after the stable block;
 	//   3. loaded deferred tools, alpha-sorted — APPENDED, so an unloaded->loaded
 	//      transition grows the tail instead of inserting into the eager block.
-	// (tool_search's discovery text still shrinks as tools load, so keeping it and
-	// the loaded tail AFTER the eager block preserves the eager tools' cache across a
-	// load; fully stabilizing the loader's own description is a scoped follow-up.)
+	// tool_search's compact catalog also stays byte-stable as tools load, so only
+	// the appended full-schema tail changes.
 	eager := make([]zeroruntime.ToolDefinition, 0, len(visible))
 	loadedTail := make([]zeroruntime.ToolDefinition, 0)
-	var hiddenTools []tools.Tool
+	var deferredCatalog []tools.Tool
 	for _, tool := range visible {
 		name := tool.Name()
 		if name == tools.ToolSearchToolName {
 			continue // added explicitly between the eager block and the loaded tail
 		}
 		if tools.IsDeferred(tool) {
+			deferredCatalog = append(deferredCatalog, tool)
 			if loaded[name] {
 				loadedTail = append(loadedTail, cachedRuntimeToolDefinition(defCache, tool))
-			} else {
-				hiddenTools = append(hiddenTools, tool)
 			}
 			continue
 		}
@@ -3186,15 +3406,16 @@ func partitionToolsCached(registry *tools.Registry, permissionMode PermissionMod
 		return loadedTail[left].Name < loadedTail[right].Name
 	})
 
-	discovery := ""
-	if len(hiddenTools) > 0 {
-		discovery = tools.BuildToolSearchDescription(hiddenTools)
-	}
+	// Keep the catalog byte-stable as tools load. tool_search already redirects
+	// requests for an exposed tool back to the current tool list, so retaining
+	// loaded names costs only compact catalog lines and avoids invalidating the
+	// provider cache at the loader definition on every load.
+	discovery := tools.BuildToolSearchDescription(deferredCatalog)
 
 	// tool_search is guaranteed runnable on the active path, so it is ALWAYS exposed
 	// — even when a non-empty EnabledTools allowlist omits it (the operator
 	// allowlisted the deferred tools, not the loader). It sits right after the stable
-	// eager block and carries the discovery list for still-hidden tools.
+	// eager block and carries the stable deferred-tool catalog.
 	description := loader.Description()
 	if discovery != "" {
 		description = discovery
@@ -3232,15 +3453,21 @@ func cachedRuntimeToolDefinition(defCache map[string]zeroruntime.ToolDefinition,
 // runtimeToolDefinition renders a tool's advertised definition (name, description,
 // JSON-schema parameters) as sent to the provider.
 func runtimeToolDefinition(tool tools.Tool) zeroruntime.ToolDefinition {
-	return zeroruntime.ToolDefinition{
+	definition := zeroruntime.ToolDefinition{
 		Name:        tool.Name(),
 		Description: tool.Description(),
 		Parameters:  schemaToRuntimeMap(tool.Parameters()),
 	}
+	if tools.IsBuiltInApplyPatch(tool) {
+		definition.Type = zeroruntime.ToolDefinitionFreeform
+	}
+	return definition
 }
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {
-	return ToolAllowedByFilters(tool.Name(), enabledTools, disabledTools) && ToolAdvertised(tool, permissionMode)
+	return tools.ModelVisible(tool) &&
+		ToolAllowedByFilters(tool.Name(), enabledTools, disabledTools) &&
+		ToolAdvertised(tool, permissionMode)
 }
 
 func ToolAllowedByFilters(name string, enabledTools []string, disabledTools []string) bool {
@@ -3321,11 +3548,17 @@ func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
 }
 
 func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
+	// Denied tools are never advertised in any mode. Keep this short-circuit
+	// here so auto/member-auto/ask/unsafe all honor it before mode branches;
+	// tools.ToolAdvertisedForPermissionMode repeats it for the tool_search path
+	// which never enters this function.
 	if tool.Safety().Permission == tools.PermissionDeny {
 		return false
 	}
-	if permissionMode == PermissionModeSpecDraft {
-		return toolAdvertisedInSpecDraft(tool)
+	// plan/spec-draft policy lives in tools so tool_search and the dispatch
+	// gate cannot drift. PermissionDeny was already checked above.
+	if permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan {
+		return tools.ToolAdvertisedForPermissionMode(tool, string(permissionMode))
 	}
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
@@ -3346,17 +3579,6 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 		return false
 	}
 	return true
-}
-
-func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
-	switch tool.Name() {
-	case "ask_user", "submit_spec":
-		return true
-	case "update_plan":
-		return false
-	}
-	safety := tool.Safety()
-	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
 }
 
 func stopReasonFromToolResult(result ToolResult) StopReason {
@@ -3394,9 +3616,11 @@ func loadedToolsFromResult(meta map[string]string) []string {
 func appendAbortedToolResults(messages []Message, remaining []ToolCall) []Message {
 	for _, call := range remaining {
 		messages = append(messages, zeroruntime.Message{
-			Role:       zeroruntime.MessageRoleTool,
-			Content:    abortedToolResultNotice,
-			ToolCallID: call.ID,
+			Role:               zeroruntime.MessageRoleTool,
+			Content:            abortedToolResultNotice,
+			ToolCallID:         call.ID,
+			ToolCallProviderID: call.ProviderCallID,
+			IsError:            true,
 		})
 	}
 	return messages
@@ -3427,9 +3651,46 @@ func copyMessages(messages []Message) []Message {
 		if message.Reasoning != nil {
 			copied[index].Reasoning = append([]zeroruntime.ReasoningBlock{}, message.Reasoning...)
 		}
+		if message.ChangedFiles != nil {
+			copied[index].ChangedFiles = append([]string(nil), message.ChangedFiles...)
+		}
 		// Deep-copy image attachments (slice AND each Data byte slice) so the
 		// raw image bytes are never aliased across history/request/result copies.
 		copied[index].Images = zeroruntime.CloneImageBlocks(message.Images)
 	}
 	return copied
+}
+
+// toolResultImageMessage builds the user message that carries a tool's images
+// to the model, or reports false when the tool produced none.
+//
+// The text names the tool so the model can tell which call an image came from
+// when several ran in one turn — the images arrive detached from their tool
+// result, so nothing else associates them.
+func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
+	images := make([]zeroruntime.ImageBlock, 0, len(result.Images))
+	for _, image := range result.Images {
+		if len(image.Data) == 0 {
+			continue
+		}
+		mediaType := zeroruntime.NormalizeImageMediaType(image.MediaType)
+		if mediaType == "" {
+			// Outside the provider allow-list. Dropping it beats sending bytes a
+			// provider will reject and failing the whole turn.
+			continue
+		}
+		images = append(images, zeroruntime.ImageBlock{MediaType: mediaType, Data: image.Data})
+	}
+	if len(images) == 0 {
+		return zeroruntime.Message{}, false
+	}
+	label := result.Name
+	if label == "" {
+		label = "tool"
+	}
+	return zeroruntime.Message{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "Image output from " + label + ":",
+		Images:  images,
+	}, true
 }

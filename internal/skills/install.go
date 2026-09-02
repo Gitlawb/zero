@@ -76,9 +76,10 @@ type LockEntry struct {
 // SkillInfo bundles a discovered skill with its recorded source and hash, for
 // `skill info`.
 type SkillInfo struct {
-	Skill  Skill  `json:"skill"`
-	Source string `json:"source,omitempty"`
-	Hash   string `json:"hash,omitempty"`
+	Skill     Skill  `json:"skill"`
+	Source    string `json:"source,omitempty"`
+	Hash      string `json:"hash,omitempty"`
+	HashDrift bool   `json:"hashDrift"`
 }
 
 // Install fetches the skill at options.Source and copies its SKILL.md into
@@ -232,23 +233,6 @@ func Remove(dir string, name string) error {
 	return nil
 }
 
-// Info returns the named skill plus its recorded source and hash, or ok=false if
-// it is not discoverable in dir.
-func Info(dir string, name string) (SkillInfo, bool) {
-	skill, ok := Get(dir, name)
-	if !ok {
-		return SkillInfo{}, false
-	}
-	info := SkillInfo{Skill: skill}
-	if lock, err := ReadLock(dir); err == nil {
-		if entry, found := lock[skill.Name]; found {
-			info.Source = entry.Source
-			info.Hash = entry.Hash
-		}
-	}
-	return info, true
-}
-
 // InfoFromRoots resolves the named skill across discovery roots (earlier roots
 // win). Lock source/hash are attached only when the winning skill lives under
 // primaryDir and that dir's lockfile has an entry — agents-only skills return
@@ -292,6 +276,7 @@ func InfoFromRoots(primaryDir string, roots []string, name string) (SkillInfo, b
 			info.Hash = entry.Hash
 		}
 	}
+	info.HashDrift = skillHashDrift(skill, info.Hash)
 	return info, true
 }
 
@@ -497,4 +482,20 @@ func validSkillName(name string) bool {
 func hashContent(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// skillHashDrift reports whether the on-disk SKILL.md no longer matches the
+// lockfile hash recorded at install time. Missing lock hashes never count as
+// drift (agents-only / unlocked skills). A locked skill whose SKILL.md cannot
+// be read is treated as drifted — not as a clean match.
+func skillHashDrift(skill Skill, lockHash string) bool {
+	lockHash = strings.TrimSpace(lockHash)
+	if lockHash == "" {
+		return false
+	}
+	data, err := os.ReadFile(skill.Path)
+	if err != nil {
+		return true
+	}
+	return hashContent(data) != lockHash
 }

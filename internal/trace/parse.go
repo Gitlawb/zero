@@ -116,6 +116,7 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 				ToolsHash:              stringField(obj, "tools"),
 				SchemaHash:             stringField(obj, "schema"),
 				CompletePrefixHash:     stringField(obj, "complete_prefix"),
+				InvalidationReason:     stringField(obj, "invalidation_reason"),
 			})
 		case "output_budget":
 			if !sawTraceHeader {

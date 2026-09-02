@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -14,6 +16,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -24,13 +27,16 @@ import (
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Gitlawb/zero/internal/terminalpet"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/usercommands"
@@ -40,6 +46,10 @@ import (
 const tuiToolOutputLimit = 240
 const defaultResponseStyle = "concise"
 const chatWheelScrollLines = 5
+
+// activeAnimationFrameInterval keeps active-only status motion smooth without
+// running a timer when Zero is idle. It also drives the shared liveness spinner.
+const activeAnimationFrameInterval = time.Second / 30
 const ctrlCExitConfirmDuration = 3 * time.Second
 const ctrlCExitConfirmText = "Press Ctrl+C again to exit"
 
@@ -76,16 +86,22 @@ type model struct {
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
+	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	registry                    *tools.Registry
+	awaitToolReadiness          func(context.Context)
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
 	// fall back to a per-run manager. Torn down in quit().
 	lspManager           *lsp.Manager
 	sessionStore         *sessions.Store
+	peerService          *peermsg.Service
+	peerInbox            []peermsg.InboundMessage
+	peerApprovalQueue    []peermsg.InboundMessage
+	peerPendingApproval  *peermsg.InboundMessage
 	sandboxStore         *sandbox.GrantStore
 	mcpConfig            config.MCPConfig
 	mcpPermissionStore   *internalmcp.PermissionStore
@@ -102,6 +118,7 @@ type model struct {
 	doctorInFlight       bool
 	doctorFrame          int
 	activeSession        sessions.Metadata
+	pendingSessionTitle  string
 	sessionEvents        []sessions.Event
 	btw                  btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
@@ -112,14 +129,8 @@ type model struct {
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
 	// Lazily initialized.
-	titledSessions map[string]bool
-	// retitle* drive the sequential /retitle backfill: queued session ids still
-	// awaiting a title, whether a backfill is running, and its progress counters.
-	retitleQueue                []string
-	retitleActive               bool
-	retitleTotal                int
-	retitleDone                 int
-	retitleOK                   int
+	titledSessions              map[string]bool
+	renamePrompt                *sessionRenamePrompt
 	usageTracker                *usage.Tracker
 	sessionCompactor            SessionCompactor
 	prService                   *PrService
@@ -138,8 +149,13 @@ type model struct {
 	// about a mode, not a session, so one acknowledgement covers the process —
 	// including cycles after a /resume). Resets when zero is closed.
 	autoClassifierAcknowledged bool
-	selfCorrectTests           bool
-	reasoningEffort            modelregistry.ReasoningEffort
+	// permissionModeBeforePlan holds whatever mode was active when /plan on
+	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
+	// the execProfile displaced/applied pattern below).
+	permissionModeBeforePlan agent.PermissionMode
+	selfCorrectTests         bool
+	reasoningEffort          modelregistry.ReasoningEffort
+	serviceTier              string
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -157,9 +173,52 @@ type model struct {
 	execProfileEffortTouched      bool
 	execProfileSelfCorrectTouched bool
 	responseStyle                 string
+	petClient                     *terminalpet.Client
+	petRenderer                   *terminalpet.ImageRenderer
+	attachmentRenderers           []*terminalpet.ImageRenderer
+	petEntries                    map[string]terminalpet.Entry
+	petID                         string
+	petName                       string
+	petAnimation                  *terminalpet.Animation
+	petPreview                    *terminalpet.Animation
+	petPreviewSlug                string
+	petPreviewError               string
+	petPreviewLoading             bool
+	petPreviewSeq                 uint64
+	petPreviewCancel              context.CancelFunc
+	petRequestedSlug              string
+	petPhase                      int
+	petTickSeq                    uint64
+	petPlaybackState              terminalpet.State
+	petClickAnimationIndex        int
+	petOutcome                    terminalpet.State
+	petOutcomeAt                  time.Time
+	petLayoutRendering            bool
+	petPositionSet                bool
+	petPositionX                  int
+	petPositionY                  int
+	petDragActive                 bool
+	petDragMoved                  bool
+	petDragStartedDocked          bool
+	petDragOffsetX                int
+	petDragOffsetY                int
+	petDragTargetX                int
+	petDragTargetY                int
+	petDragTargetOffsetX          int
+	petDragTargetOffsetY          int
+	petPositionOffsetX            int
+	petPositionOffsetY            int
+	petCellPixelWidth             int
+	petCellPixelHeight            int
+	petPixelDrag                  bool
+	petPixelAnchorSet             bool
+	petDragOffsetPixelX           int
+	petDragOffsetPixelY           int
+	petDragState                  terminalpet.State
+	petLastClickAt                time.Time
 	keyBindings                   keyBindings
-	themeMode                     themeMode // palette preference: auto (default), dark, light
-	hasDarkBg                     bool      // last terminal background-detection result (auto mode)
+	themeMode                     themeMode // palette preference: system (default) or named palette
+	hasDarkBg                     bool      // last terminal background-detection result, if one is delivered
 	userAgent                     string
 	compactRequests               int
 	compactInFlight               bool
@@ -184,17 +243,20 @@ type model struct {
 	leaderHelpOverlay bool
 	// leaderPending is true after Ctrl+X until a second key, Esc, or timeout
 	// resolves the chord (see leader.go). leaderSeq invalidates a stale tick.
-	leaderPending         bool
-	leaderSeq             int
-	transcriptBodyHeights *transcriptBodyHeightCache
-	input                 textinput.Model
-	composer              composerState
-	composerActive        bool
-	composerCursorVisible bool
-	composerPastePreviews []composerPastePreview
-	composerSelection     composerSelectionState
-	dictation             dictationController
-	sttKeyPrompt          *sttKeyPromptState
+	leaderPending          bool
+	leaderSeq              int
+	transcriptBodyHeights  *transcriptBodyHeightCache
+	input                  textinput.Model
+	composer               composerState
+	composerActive         bool
+	composerCursorVisible  bool
+	composerBlinkSeq       int
+	composerBlinkIdleTicks int
+	composerBlinkTicking   bool
+	composerPastePreviews  []composerPastePreview
+	composerSelection      composerSelectionState
+	dictation              dictationController
+	sttKeyPrompt           *sttKeyPromptState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -209,14 +271,13 @@ type model struct {
 	altScreen       bool
 	setup           setupState
 	setupSave       func(SetupSelection) (SetupResult, error)
-	// spinner animates the running-tool glyph in card heads. Its tick is started
-	// with each run and stops itself once pending clears (the TickMsg is simply
-	// not forwarded), so an idle UI schedules no timers.
+	// spinner animates the turn-level activity glyph. Its tick is started with
+	// each run and stops itself once pending clears (the TickMsg is simply not
+	// forwarded), so an idle UI schedules no timers.
 	spinner spinner.Model
-	// spinnerPhase advances once per spinner tick while a run is in flight and is
-	// the shared animation clock for the cosine ripple on the working status line
-	// (ripple.go). Reusing the spinner's existing tick keeps a single ~80ms timer
-	// driving both the braille glyph and the colour wave — no second ticker.
+	// spinnerPhase advances once per spinner tick while a run is in flight. It
+	// drives only bounded secondary motion such as the streaming caret and agent
+	// lifecycle fades; it never creates a second live spinner.
 	spinnerPhase int
 	// spinnerTicking tracks whether the spinner's self-scheduling tick loop is
 	// currently alive, so a kick (ensureSpinnerTick) never double-issues the tick
@@ -228,6 +289,9 @@ type model struct {
 	// renders the live elapsed time from it so a long or stalled turn never looks
 	// like a frozen terminal (for ANY provider, not just slow ones). Zero = idle.
 	turnStartedAt time.Time
+	// turnTimer is shared with the agent command so both the live status and the
+	// settled "worked for" duration exclude time blocked on a user permission.
+	turnTimer *activeTurnTimer
 	// lastCharTime tracks when the last non-Enter key was received, for paste detection.
 	lastCharTime time.Time
 	// lastKeyTime tracks every keypress timestamp for burst calculation.
@@ -252,10 +316,13 @@ type model struct {
 	loopCounter     int
 	loopTicking     bool
 	loopLeavePrompt commandKind
-	exiting         bool
-	runCancel       context.CancelFunc
-	runID           int
-	activeRunID     int
+	// goalContinuationsSuspended keeps a hidden parent from launching autonomous
+	// work while the user is in an isolated BTW conversation.
+	goalContinuationsSuspended bool
+	exiting                    bool
+	runCancel                  context.CancelFunc
+	runID                      int
+	activeRunID                int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -282,17 +349,13 @@ type model struct {
 	pendingSpecReview *pendingSpecReviewPrompt
 	width             int
 	height            int
-	// hidePinnedPlan suppresses the pinned plan panel above the composer. Set on
-	// the chat-column model copy in the two-column layout, where the plan is
-	// surfaced in the context sidebar instead so it isn't shown twice.
-	hidePinnedPlan bool
-	// sidebarHidden is the user's Ctrl+B preference to collapse the right context
-	// sidebar; when set, the chat reflows to full width. Distinct from the
-	// availability conditions in sidebarAvailable (geometry / mode / overlays).
-	sidebarHidden bool
-	// selectedFile is the touched file selected by clicking its FILES sidebar
-	// row: its edit cards tint in the chat (rowTouchesSelectedFile) and a second
-	// click opens the drill-in file view. "" when nothing is selected; Esc clears.
+	// runDetailsOpen keeps the optional run summary focused without permanently
+	// shrinking the conversation surface.
+	runDetailsOpen bool
+	sidebarHidden  bool
+	// selectedFile is the touched file selected from a file summary: its edit
+	// cards tint in the chat (rowTouchesSelectedFile) and a second click opens
+	// the drill-in file view. "" when nothing is selected; Esc clears.
 	selectedFile string
 	// fileView is the drill-in view for a touched file (file_view.go): while
 	// active the chat column's body shows the file's diff/content instead of the
@@ -384,7 +447,20 @@ type model struct {
 	lastStreamActivity time.Time
 	fadeActive         bool
 	fadeDisabled       bool // streaming fade off (ZERO_NO_FADE / SSH / tmux / low-color / reduced motion)
-	reducedMotion      bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
+	// streamClearDisabled turns off the full-redraw-on-streamed-newline
+	// workaround for terminals that render scroll regions correctly
+	// (ZERO_NO_STREAM_CLEAR=1). lastStreamClear rate-limits the redraws the
+	// workaround schedules so heavy streaming output (code, logs, diffs)
+	// coalesces to a bounded number of repaints per second instead of one
+	// per newline. pendingStreamClear tracks a newline that arrived while
+	// throttled: the redraw it would have triggered is deferred (flushed by
+	// a scheduled streamClearFlushMsg, or at stream end) instead of dropped
+	// outright, so a throttled newline that happens to be the last one of
+	// the turn still gets its caret repaired.
+	streamClearDisabled bool
+	lastStreamClear     time.Time
+	pendingStreamClear  bool
+	reducedMotion       bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
 	// In-progress tool call whose arguments are streaming (a file being written),
 	// shown live by streamingToolCallView so a long write/edit isn't a frozen
 	// spinner. Cleared when the call completes (next text/turn) — see updateModel.
@@ -422,11 +498,17 @@ type model struct {
 	// mouse cursor with no button pressed, so it renders in a distinct style —
 	// the visual cue that it's clickable. Requires AllMotion mouse reporting
 	// (see wantsMouseCapture) since idle cursor movement carries no button.
-	hover             hoverTarget
-	copyStatus        string
-	copyStatusSeq     int
-	exitConfirmActive bool
-	exitConfirmSeq    int
+	hover         hoverTarget
+	copyStatus    string
+	copyStatusSeq int
+	// transientNotice is a single, replaceable confirmation shown above the
+	// composer. Unlike copyStatus it is shared by lightweight slash commands
+	// and is never persisted into the transcript.
+	transientNotice         transientNotice
+	transientNoticeSeq      int
+	transientNoticeTimerSeq int
+	exitConfirmActive       bool
+	exitConfirmSeq          int
 	// cancelConfirmActive/cancelConfirmSeq mirror exitConfirmActive/exitConfirmSeq
 	// (same seq-gated tea.Tick pattern) but guard a DIFFERENT action: Esc
 	// cancelling a running turn. The two are deliberately separate state (not a
@@ -465,8 +547,15 @@ type model struct {
 	// pins), this is maintained by recordRecentModel on every successful
 	// switch and persisted via config.SetRecentModels.
 	recentModels                 []config.RecentModelEntry
-	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
-	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
+	recapsEnabled                bool // idle orientation note (config: recaps on|off)
+	recapSeq                     int
+	recapRunning                 bool
+	recapCancel                  context.CancelFunc
+	recapTimerCancel             context.CancelFunc
+	recapIdleArmed               bool
+	recapIdleRunID               int
+	idleRecap                    string
+	compactionModel              string // preferences.compactionModel (see providers.CompactionModelID)
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
@@ -487,6 +576,10 @@ type model struct {
 	// no attachments = today's text-only behavior exactly.
 	pendingImages      []zeroruntime.ImageBlock
 	pendingImageLabels []string
+	// pendingImageThumbnails are decoded previews for a bounded gallery of staged
+	// images. They are only rendered by terminals with an inline-image protocol;
+	// every other terminal continues to use the compact text attachment row.
+	pendingImageThumbnails []*terminalpet.Animation
 
 	// pendingDocuments holds PDF text layers staged by /image for the next user
 	// turn; the text is prepended to the prompt as a preamble at submit time and
@@ -502,6 +595,28 @@ type model struct {
 type agentTextMsg struct {
 	runID int
 	delta string
+}
+
+// streamClearThrottle is the minimum gap between full-screen stream-clear
+// redraws. Newlines that arrive inside this window mark a deferred clear
+// (pendingStreamClear) instead of firing immediately, so heavy streaming
+// output coalesces to ~10 repaints/second while still guaranteeing a
+// eventual caret repair.
+const streamClearThrottle = 100 * time.Millisecond
+
+// streamClearFlushMsg fires once, roughly when the stream-clear throttle
+// window (see lastStreamClear) has elapsed, to flush a ClearScreen that a
+// throttled newline deferred rather than fired directly. It's a no-op if
+// nothing is pending by the time it lands (the common case, since most
+// throttled newlines are followed by another one that flushes them first).
+type streamClearFlushMsg struct{}
+
+// scheduleStreamClearFlush returns a one-shot command that delivers a
+// streamClearFlushMsg after d. Used to guarantee a deferred stream-clear
+// redraw is eventually flushed even if no later newline or stream-end event
+// does it first (see the streamClearFlushMsg case in Update).
+func scheduleStreamClearFlush(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return streamClearFlushMsg{} })
 }
 
 type exitConfirmExpiredMsg struct {
@@ -557,6 +672,7 @@ type agentResponseMsg struct {
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
+	goalAware     bool
 	// Turn metadata for settled rows that do not otherwise carry it.
 	turnTools   int
 	turnElapsed time.Duration
@@ -564,6 +680,26 @@ type agentResponseMsg struct {
 	// tool-only or errored turn). Set only on the success path.
 	ttft time.Duration
 }
+
+type peerMessageMsg struct {
+	message peermsg.InboundMessage
+	admit   chan<- bool
+}
+
+type peerStatusMsg struct{ event peermsg.StatusEvent }
+
+type peerHeldReleasedMsg struct{ message peermsg.InboundMessage }
+
+type peerDecisionMsg struct {
+	message peermsg.InboundMessage
+	allow   bool
+}
+
+type peerRuntimeErrorMsg struct{ err error }
+
+type peerReceiptErrorMsg struct{ err error }
+
+type peerApprovalExpiredMsg struct{ messageID string }
 
 type agentRowMsg struct {
 	runID int
@@ -741,10 +877,11 @@ type pendingSpecReviewPrompt struct {
 }
 
 type tuiAgentRunOptions struct {
-	registry       *tools.Registry
-	permissionMode agent.PermissionMode
-	systemPrompt   string
-	specDraft      bool
+	registry              *tools.Registry
+	permissionMode        agent.PermissionMode
+	systemPrompt          string
+	transientSystemPrompt string
+	specDraft             bool
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -806,8 +943,16 @@ func newModel(ctx context.Context, options Options) model {
 	// terminal bracketed paste (Paste: true) is the single paste path.
 	input.KeyMap.Paste.SetEnabled(false)
 	input.Focus()
+	// The main composer paints its own cursor through composerCursorVisible.
+	// Keep the embedded textinput cursor static so the shared textinput.Blink
+	// message cannot start a second, invisible 530ms tick chain. Setup inputs
+	// still use the normal Bubbles cursor and continue blinking independently.
+	inputStyles := input.Styles()
+	inputStyles.Cursor.Blink = false
+	input.SetStyles(inputStyles)
 
 	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	runSpinner.Spinner.FPS = activeAnimationFrameInterval
 
 	notifier := notify.New(os.Stderr, notify.Config{
 		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
@@ -829,6 +974,8 @@ func newModel(ctx context.Context, options Options) model {
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
+		composerBlinkSeq:            1,
+		composerBlinkTicking:        true,
 		terminalFocused:             true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
@@ -841,14 +988,18 @@ func newModel(ctx context.Context, options Options) model {
 		providerProfile:             options.ProviderProfile,
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
 		recentModels:                normalizeRecentModelEntries(options.RecentModels),
+		compactionModel:             options.CompactionModel,
 		recapsEnabled:               options.RecapsEnabled,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
+		newTurnSessionProvider:      options.NewTurnSessionProvider,
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
 		registry:                    registry,
+		awaitToolReadiness:          options.AwaitToolReadiness,
 		sessionStore:                sessionStore,
+		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
 		mcpPermissionStore:          options.MCPPermissionStore,
@@ -861,6 +1012,8 @@ func newModel(ctx context.Context, options Options) model {
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
+		petEntries:                  map[string]terminalpet.Entry{},
+		petID:                       strings.TrimSpace(options.SavedPet),
 		keyBindings:                 resolvedKeyBindings,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
@@ -884,9 +1037,26 @@ func newModel(ctx context.Context, options Options) model {
 		setupSave:                   options.Setup.Save,
 		dictation:                   newDictationController(options),
 	}
-	// Apply an explicit theme immediately; auto stays on the dark default until
-	// Init's terminal background probe resolves it (see Init / BackgroundColorMsg).
-	if m.themeMode != themeAuto {
+	petRoot := userConfigDir
+	if strings.TrimSpace(options.UserConfigPath) != "" {
+		petRoot = filepath.Dir(options.UserConfigPath)
+	}
+	if strings.TrimSpace(petRoot) != "" {
+		m.petClient = terminalpet.NewClient(petRoot)
+		if m.petID != "" && m.petID != terminalpet.DisabledID {
+			if animation, loadErr := m.petClient.LoadInstalled(m.petID); loadErr == nil {
+				m.petAnimation = animation
+				m.petName = m.petID
+				if entry, entryErr := m.petClient.InstalledEntry(m.petID); entryErr == nil {
+					m.petName = entry.Label()
+				}
+			}
+		}
+	}
+	// Apply an explicit palette immediately. System is applied by Run immediately
+	// before Bubble Tea starts, which keeps package-level helper rendering
+	// deterministic while models are being constructed in tests.
+	if m.themeMode != themeSystem {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
@@ -895,6 +1065,12 @@ func newModel(ctx context.Context, options Options) model {
 	// Streaming text always renders statically at base ink (the disabled path in
 	// styleStreamingLine), so no accent glow and no per-line fade ticks.
 	m.fadeDisabled = true
+	// Terminals that handle scroll regions correctly can opt back into the
+	// fast incremental path; the redraw workaround (see the ClearScreen
+	// scheduling in updateModel) is otherwise on, rate-limited.
+	if v := strings.TrimSpace(os.Getenv("ZERO_NO_STREAM_CLEAR")); v != "" && v != "0" && !strings.EqualFold(v, "false") {
+		m.streamClearDisabled = true
+	}
 	// One session-long LSP manager (cheap to build — servers start lazily on the
 	// first Check), reused across prompts so gopls stays warm between turns.
 	if cwd != "" {
@@ -942,6 +1118,11 @@ const (
 // composerCursorBlinkInterval is the on/off period of the composer text cursor.
 const composerCursorBlinkInterval = 530 * time.Millisecond
 
+// composerBlinkIdleTicksBeforeSettle bounds the software cursor animation.
+// Once the terminal is focused but otherwise idle, the cursor finishes a short
+// blink sequence and settles visible instead of waking the TUI forever.
+const composerBlinkIdleTicksBeforeSettle = 4
+
 // composerTypingIdleThreshold is how long a typing pause must last before the
 // cursor resumes blinking; comfortably above normal inter-keystroke gaps
 // (~150-300ms) so it won't flicker mid-sentence.
@@ -950,16 +1131,38 @@ const composerTypingIdleThreshold = 500 * time.Millisecond
 // composerBlinkMsg toggles the composer cursor's visibility each tick. The custom
 // composer render draws its own cursor (not textinput's), so it drives its own
 // blink rather than relying on textinput.Blink.
-type composerBlinkMsg struct{}
+type composerBlinkMsg struct{ seq int }
 
-func composerBlinkCmd() tea.Cmd {
+func composerBlinkCmd(seq int) tea.Cmd {
 	return tea.Tick(composerCursorBlinkInterval, func(time.Time) tea.Msg {
-		return composerBlinkMsg{}
+		return composerBlinkMsg{seq: seq}
 	})
 }
 
+func (m model) armComposerBlink() (model, tea.Cmd) {
+	m.composerCursorVisible = true
+	m.composerBlinkIdleTicks = 0
+	if m.composerBlinkTicking {
+		return m, nil
+	}
+	m.composerBlinkTicking = true
+	m.composerBlinkSeq++
+	return m, composerBlinkCmd(m.composerBlinkSeq)
+}
+
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd()}
+	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd(m.composerBlinkSeq)}
+	if m.petAnimation != nil && !m.reducedMotion {
+		cmds = append(cmds, petTickCmd(m.petTickSeq, m.petFrameDelay()))
+	}
+	// Every image protocol wants this, not just the ones that support pixel
+	// dragging. Sixel needs it most: it erases itself by writing over cells, so
+	// without the pixels-per-cell figure it cannot know how many cells it
+	// covered, and falls back to constants describing the reserved area rather
+	// than the image.
+	if m.petCellMetricsWanted() {
+		cmds = append(cmds, tea.Raw(ansi.WindowOp(16)))
+	}
 	// Bubble Tea documents an initial WindowSizeMsg as delivered automatically
 	// on program start, so m.height/m.width are normally set before the first
 	// render. But that's the terminal proactively pushing a size — if it's
@@ -969,19 +1172,17 @@ func (m model) Init() tea.Cmd {
 	// unpadded, non-fullscreen render path for the rest of the session, and
 	// the alt-screen viewport never gets filled below the actual content.
 	// Explicitly requesting it here means Zero doesn't depend solely on the
-	// terminal's unprompted push — mirrors the RequestBackgroundColor request
-	// below for the same reason.
+	// terminal's unprompted push.
 	cmds = append(cmds, tea.RequestWindowSize)
+	// Read the terminal background only to keep a selected palette legible. This
+	// query never changes the terminal canvas; View deliberately leaves both
+	// terminal-wide color fields unset.
+	cmds = append(cmds, tea.RequestBackgroundColor)
 	// Baseline git snapshot for the FILES sidebar sweep: whatever is already
 	// dirty when the TUI opens is pre-existing state, not this session's work
 	// (files_git_sweep.go). Async; a non-git workspace just disables the sweep.
 	if strings.TrimSpace(m.cwd) != "" {
 		cmds = append(cmds, gitSweepCmd(m.ctx, m.cwd, true))
-	}
-	// In auto mode, ask the terminal for its background color; the reply arrives
-	// as tea.BackgroundColorMsg and selects light vs dark (see updateModel).
-	if m.themeMode == themeAuto {
-		cmds = append(cmds, tea.RequestBackgroundColor)
 	}
 	// Warm model discovery for the active provider in the background so the
 	// context-usage gauge (used / total tokens + % fill) knows the active model's
@@ -1032,7 +1233,7 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
-		m.sttKeyPrompt == nil && !m.autoClassifierConfirmActive
+		m.sttKeyPrompt == nil && m.renamePrompt == nil && !m.autoClassifierConfirmActive
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1120,6 +1321,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.printInFlight = false
 		return m.drainFlushQueue()
 	}
+	var recapActivityCmd tea.Cmd
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseMsg:
+		m, recapActivityCmd = m.resetIdleRecapAfterActivity()
+	}
 	next, cmd := m.updateModel(msg)
 	nm, ok := next.(model)
 	if !ok {
@@ -1128,7 +1334,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
-	return nm, batchCommands(cmd, mouseCmd, flushCmd)
+	var composerCmd tea.Cmd
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.FocusMsg:
+		if nm.terminalFocused {
+			nm, composerCmd = nm.armComposerBlink()
+		}
+	}
+	nm, noticeCmd := nm.ensureTransientNoticeTimer()
+	return nm, batchCommands(cmd, mouseCmd, flushCmd, recapActivityCmd, composerCmd, noticeCmd)
 }
 
 func batchCommands(cmds ...tea.Cmd) tea.Cmd {
@@ -1156,23 +1370,68 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	switch msg := msg.(type) {
+	case uv.CellSizeEvent:
+		if msg.Width > 0 && msg.Height > 0 {
+			m.petCellPixelWidth = msg.Width
+			m.petCellPixelHeight = msg.Height
+		}
+		return m, nil
+	case peerMessageMsg:
+		admitted := m.canAcceptPeerMessage(msg.message)
+		if msg.admit != nil {
+			msg.admit <- admitted
+		}
+		if !admitted {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "Dropped peer message because the inbound queue is full."})
+			return m, nil
+		}
+		return m.handlePeerMessage(msg.message)
+	case peerStatusMsg:
+		return m.handlePeerStatus(msg.event), nil
+	case peerHeldReleasedMsg:
+		return m.handleReleasedPeerMessage(msg.message)
+	case peerDecisionMsg:
+		return m.handlePeerDecision(msg.message, msg.allow)
+	case peerApprovalExpiredMsg:
+		return m.handlePeerApprovalExpired(msg.messageID)
+	case peerReceiptErrorMsg:
+		if msg.err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "peer receipt: " + msg.err.Error()})
+		}
+		return m, nil
+	case peerRuntimeErrorMsg:
+		if msg.err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "peer messaging unavailable: " + msg.err.Error()})
+		}
+		return m, nil
 	case composerBlinkMsg:
+		if !m.composerBlinkTicking || msg.seq != m.composerBlinkSeq {
+			return m, nil
+		}
 		switch {
 		case !m.terminalFocused:
-			m.composerCursorVisible = false // hidden while unfocused
+			m.composerCursorVisible = false
+			m.composerBlinkTicking = false
+			return m, nil
 		case m.now().Sub(m.lastCharTime) < composerTypingIdleThreshold:
-			m.composerCursorVisible = true // solid while actively typing
+			m.composerCursorVisible = true
+			m.composerBlinkIdleTicks = 0
 		default:
-			m.composerCursorVisible = !m.composerCursorVisible // idle + focused: blink as before
+			m.composerBlinkIdleTicks++
+			if m.composerBlinkIdleTicks >= composerBlinkIdleTicksBeforeSettle {
+				m.composerCursorVisible = true
+				m.composerBlinkTicking = false
+				return m, nil
+			}
+			m.composerCursorVisible = !m.composerCursorVisible
 		}
-		return m, composerBlinkCmd()
+		return m, composerBlinkCmd(m.composerBlinkSeq)
 	case tea.BackgroundColorMsg:
-		// Terminal background-color reply (from Init's RequestBackgroundColor). In
-		// auto mode it selects light vs dark; applyTheme repaints (clears the render
-		// cache). An explicit dark/light theme ignores it but still records the bg.
+		// A background reading changes only the contrast direction used for named
+		// palettes. It never repaints the terminal canvas.
 		m.hasDarkBg = msg.IsDark()
-		if m.themeMode == themeAuto {
-			applyTheme(themeAuto, m.hasDarkBg)
+		if m.themeMode != themeSystem {
+			applyTheme(m.themeMode, m.hasDarkBg)
 		}
 		return m, nil
 	case tea.MouseMsg:
@@ -1196,6 +1455,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transcriptCopyStatusExpiredMsg:
 		if msg.seq == m.copyStatusSeq {
 			m.copyStatus = ""
+		}
+		return m, nil
+	case transientNoticeExpiredMsg:
+		if msg.seq == m.transientNoticeSeq {
+			m.transientNotice = transientNotice{}
 		}
 		return m, nil
 	case exitConfirmExpiredMsg:
@@ -1283,13 +1547,26 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyboardEnhancementsMsg:
 		return m.handleKeyboardEnhancements(msg), nil
 	case tea.KeyReleaseMsg:
-		// Voice mode's hold-to-record ends on Space release; every other release
-		// event is ignored (dispatch elsewhere is press-based).
-		if m.dictation.voiceModeEnabled && keyIs(msg, tea.KeySpace) {
-			return m.handleVoiceSpaceRelease()
+		// Voice mode's hold-to-record ends on Ctrl+Space release; every other
+		// release event is ignored (dispatch elsewhere is press-based).
+		if m.dictation.voiceModeEnabled && voiceCaptureReleaseKey(msg) {
+			return m.handleVoiceCaptureRelease()
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.petDragActive {
+			pixelDrag := m.petPixelDrag
+			if !keyIs(msg, tea.KeyEsc) && !keyCtrl(msg, 'c') {
+				return m, nil
+			}
+			m.cancelPetDrag()
+			m.lastKeyTime = time.Time{}
+			m.burstCount = 0
+			if pixelDrag {
+				return m, petPixelMouseDisableCmd()
+			}
+			return m, nil
+		}
 		// Paste-detection timing trackers. MUST run before any early return
 		// so burst counting stays accurate regardless of which branch fires.
 		now := m.now()
@@ -1314,6 +1591,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// input) until Enter saves or Esc cancels.
 		if m.sttKeyPrompt != nil {
 			return m.handleSTTKeyPromptKey(msg)
+		}
+		if m.renamePrompt != nil {
+			return m.handleSessionRenameKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
 		m.composerSelection = composerSelectionState{}
@@ -1375,6 +1655,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch {
+		case m.runDetailsOpen:
+			if keyIs(msg, tea.KeyEsc) || m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) {
+				m.runDetailsOpen = false
+			}
+			return m, nil
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
@@ -1398,12 +1683,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
 				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
-			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
-		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && keyIs(msg, tea.KeySpace) && !keyHasMod(msg, tea.ModCtrl) && !keyAlt(msg) && m.noBlockingModal():
-			// Voice mode (/voice) repurposes Space into the record gesture — the only
-			// dictation trigger — so it must not also type a space. Turn voice mode
-			// off (/voice) to type normally.
-			return m.handleVoiceSpacePress(msg)
+			return m.showTransientNoticeInline("Mouse interaction re-enabled.", transientNoticeSuccess), nil
+		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && voiceCaptureKey(msg) && m.noBlockingModal():
+			// Voice mode reserves Ctrl+Space for recording; ordinary Space continues
+			// through the composer path below.
+			return m.handleVoiceCapturePress(msg)
 		case keyIs(msg, tea.KeyEsc):
 			// Esc is heavily overloaded below (subchat exit, MCP cancel, ask-user,
 			// permission deny, wizard/picker/suggestions dismiss, ...) before ever
@@ -1475,6 +1759,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil && m.pendingPermission.request.ToolName == tools.RequestPermissionsToolName {
 				return m.resolvePermission(permissionDecisionDeny)
 			}
+			if m.pendingPermission != nil && m.pendingPermission.request.ToolName == peerPermissionToolName {
+				return m.resolvePermission(permissionDecisionDeny)
+			}
 			if m.providerWizard != nil {
 				// Delegate so multi-level surfaces (provider manager list → edit →
 				// field, manage-key step) can walk BACK one level; the wizard's own
@@ -1495,10 +1782,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.picker.kind == pickerModel {
 					m.clearModelPickerLoadState()
 				}
-				if m.picker.kind == pickerTheme {
-					// A live theme preview was applied while navigating; restore the
-					// committed palette since Esc dismisses without choosing.
-					m.restoreCommittedTheme()
+				if m.picker.kind == pickerPet {
+					m.cancelPetPreview()
 				}
 				m.picker = nil
 				return m, nil
@@ -1645,6 +1930,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.permissionMode = next
+				m = m.syncPeerIdentity()
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
@@ -1660,32 +1946,34 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
-		case m.keyMatch(m.keyBindings.togglePlan, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'p') }):
-			// Ctrl+P toggles the plan panel expansion (collapse/expand step list).
-			// Modal selection is handled before this switch so menus win over toggle.
-			if m.noBlockingModal() && !m.plan.isEmpty() {
-				m.plan.expanded = !m.plan.expanded
+		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && canFireComposerGatedToggle(m.keyBindings.toggleSidebar, defaultToggleSidebarChord, m.composerValue() == ""):
+			// Ctrl+B opens a compact, on-demand run summary. The composer-empty rule
+			// preserves readline's Ctrl+B move-to-beginning behavior; a remapped
+			// binding continues to work while composing.
+			if !m.transcriptDetailed && m.noBlockingModal() && m.runDetailsAllowed() {
+				m.runDetailsOpen = !m.runDetailsOpen
 				return m, nil
 			}
-		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && canFireComposerGatedToggle(m.keyBindings.toggleSidebar, defaultToggleSidebarChord, m.composerValue() == ""):
-			// Ctrl+B collapses / restores the right context sidebar. The composer-empty
-			// requirement only applies when the binding resolves to the conflicting
-			// default Ctrl+B chord (unset, or explicitly configured to the same
-			// chord), which readline navigation (move-to-beginning-of-line) also
-			// claims while typing; a binding that resolves to a genuinely different
-			// chord still fires mid-type. Only acts when
-			// the sidebar would otherwise be on screen (managed mode, wide enough,
-			// real conversation) so it's a no-op — not a confusing notice — on the
-			// home screen or a narrow terminal. Hiding reflows the chat to full
-			// width, so mirror the width-change bookkeeping (re-wrap the streaming
-			// fade, resize the composer) the WindowSizeMsg path does.
-			if !m.transcriptDetailed && m.noBlockingModal() && m.sidebarToggleAllowed() {
-				// Just show/hide — no transcript notice. The reflow IS the feedback,
-				// and emitting a line every toggle piled up noise in the chat.
-				m.sidebarHidden = !m.sidebarHidden
-				m.lineAges = nil
-				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
-				return m, nil
+		case keyCtrl(msg, 'v'), keySuper(msg, 'v'):
+			// Ctrl+V probes the clipboard for an IMAGE only. Text pasting stays
+			// exclusively on the terminal's bracketed-paste path (Bubble's own
+			// Ctrl+V binding is disabled in newModel for exactly that reason), so
+			// this cannot double-insert text. It is needed because a clipboard
+			// holding a screenshot produces no bracketed paste at all: the terminal
+			// has no text to send, so routePaste never runs and its empty-content
+			// image probe never fires. Right-click paste reached that probe only
+			// because it always delivers a clipboardReadMsg, empty or not.
+			// readClipboardImageCmd yields no message when the clipboard holds no
+			// image, so Ctrl+V with text on the clipboard stays a no-op here and is
+			// handled by the bracketed paste exactly as before.
+			//
+			// Cmd+V is matched too, since macOS reports Command as ModSuper rather
+			// than ModCtrl. That only helps on terminals that deliver the key to the
+			// application: one that handles Cmd+V itself pastes the clipboard TEXT
+			// and sends no key event, so an image-only clipboard still produces
+			// nothing for this to react to.
+			if m.noBlockingModal() {
+				return m, readClipboardImageCmd()
 			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
@@ -1719,9 +2007,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.picker.deleteQueryRune()
-				// Editing the filter changes which row is highlighted; keep the
-				// theme preview in sync with it (no-op for other pickers).
-				m.previewSelectedTheme()
+				if m.picker.kind == pickerPet {
+					return m.schedulePetPreview()
+				}
 				return m, nil
 			}
 			// On an empty composer, Backspace removes the last attachment chip
@@ -1952,9 +2240,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if keyPrintable(msg) {
 				m.picker.appendQuery(keyRunes(msg))
-				// Filtering changes the highlighted row; keep the theme preview in
-				// sync with it (no-op for other pickers).
-				m.previewSelectedTheme()
+				if m.picker.kind == pickerPet {
+					return m.schedulePetPreview()
+				}
 			}
 			return m, nil
 		}
@@ -1983,12 +2271,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.BlurMsg:
+		var petMouseCmd tea.Cmd
+		if m.petDragActive {
+			pixelDrag := m.petPixelDrag
+			m.cancelPetDrag()
+			m.lastKeyTime = time.Time{}
+			m.burstCount = 0
+			if pixelDrag {
+				petMouseCmd = petPixelMouseDisableCmd()
+			}
+		}
 		m.terminalFocused = false
 		m.composerCursorVisible = false
+		m.composerBlinkTicking = false
+		m.composerBlinkSeq++
 		if m.notifier != nil {
 			m.notifier.SetFocused(false)
 		}
-		return m, nil
+		return m, petMouseCmd
 	case toolCallStreamStartMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -2024,6 +2324,37 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// re-stamps the in-progress last entry so the line that's still
 		// being filled stays visibly fresh.
 		m.recordStreamingDelta(msg.delta)
+		var cmds []tea.Cmd
+		// The streaming caret (appendStreamingCursor) is appended to whatever
+		// visual line is currently last. Some terminal/renderer combinations
+		// (observed over multipass + Windows Terminal) fail to clear the
+		// caret's old cell when a newline moves it to a new line, leaving
+		// ghost carets behind. A newline is exactly the moment that risk
+		// exists, so force one full-screen redraw right then rather than
+		// leaving it to the incremental diff. Rate-limited: heavy streaming
+		// output (code, logs, diffs) would otherwise turn every coalesced
+		// newline into a full-screen repaint, a real throughput/latency cost
+		// on SSH and slow links. ~10 redraws/second is enough to keep the
+		// caret clean without dominating the write path; terminals that
+		// render scroll regions correctly can opt out entirely with
+		// ZERO_NO_STREAM_CLEAR=1. A newline that arrives inside the throttle
+		// window still owes a repair — it's marked pending and a one-shot
+		// timer is scheduled to flush it (see streamClearFlushMsg), instead
+		// of being dropped outright. That covers a throttled newline that
+		// turns out to be the turn's last one (agentResponseMsg also flushes
+		// any still-pending clear at stream end, belt-and-suspenders) as
+		// well as one buried in the middle of a long, still-streaming turn.
+		if strings.Contains(msg.delta, "\n") && !m.streamClearDisabled {
+			now := m.now()
+			if elapsed := now.Sub(m.lastStreamClear); elapsed >= streamClearThrottle {
+				m.lastStreamClear = now
+				m.pendingStreamClear = false
+				cmds = append(cmds, tea.ClearScreen)
+			} else if !m.pendingStreamClear {
+				m.pendingStreamClear = true
+				cmds = append(cmds, scheduleStreamClearFlush(streamClearThrottle-elapsed))
+			}
+		}
 		// The fade's tick is self-perpetuating (the streamingFadeTickMsg
 		// case schedules the next one). Schedule the FIRST tick only on
 		// the inactive→active transition; subsequent deltas just refresh
@@ -2035,10 +2366,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			startTick := !m.fadeActive
 			m.fadeActive = true
 			if startTick {
-				return m, streamingFadeTick()
+				cmds = append(cmds, streamingFadeTick())
 			}
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 	case agentReasoningMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -2057,10 +2388,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in flight or the sidebar holds agents — exactly when this can change).
 		m.stampSwarmDone()
 		// Not forwarding the tick while idle stops the spinner's self-scheduling,
-		// so no timer fires between runs. The one exception is an active sidebar
-		// holding agents: their cool ripple animation needs the phase to keep
-		// advancing even when no run is pending, so the tick loop stays alive while
-		// sidebarHasAgents() holds (and stops the moment the agents/sidebar clear).
+		// so no timer fires between runs. The one exception is active agent state:
+		// its short lifecycle fade needs the phase to keep advancing until the
+		// agents clear.
 		if !m.pending && !m.compactInFlight && !m.doctorInFlight {
 			// The tick also keeps advancing while the aimlapi.com onboarding sub-flow is
 			// busy (its progress screen is spinner-only), even though no agent run is in
@@ -2084,8 +2414,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerTicking = true
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		// Advance the shared ripple phase in lock-step with the spinner glyph;
-		// frozen under reduced motion so the colour wave stops with the glyph.
+		// Advance bounded secondary motion in lock-step with the activity glyph;
+		// freeze it under reduced motion.
 		if !m.reducedMotion {
 			m.spinnerPhase++
 		}
@@ -2112,9 +2442,28 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, streamingFadeTick()
+	case streamClearFlushMsg:
+		// Flush a newline-triggered redraw that the stream-clear throttle
+		// deferred (see agentTextMsg) once its window has elapsed. This runs
+		// independent of the streaming fade (which is unconditionally off —
+		// fadeDisabled is hardcoded true in newModel — so its tick can't be
+		// relied on to drive this), and independent of stream end: a turn
+		// that keeps streaming for a while after the throttled newline would
+		// otherwise leave the ghost caret up for the rest of the turn.
+		now := m.now()
+		if m.pendingStreamClear && now.Sub(m.lastStreamClear) >= streamClearThrottle {
+			m.lastStreamClear = now
+			m.pendingStreamClear = false
+			return m, tea.ClearScreen
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
+		m.resizeFreePetPosition(m.width, m.height, msg.Width, msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
+		if msg.Width < runDetailsMinWidth {
+			m.runDetailsOpen = false
+		}
 		// A resize re-wraps content at a new width, shifting every row's bodyY;
 		// a stale transcript-hover target could coincidentally land on an
 		// unrelated clickable row (same reasoning as clearHover's other callers).
@@ -2134,9 +2483,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.headerPrinted = true
 			m.flushQueue = append(m.flushQueue, m.titleBar(chatWidth(msg.Width)))
 		}
-		// A resumed/idle session may already hold sidebar agents now that geometry
-		// (and thus sidebarActive) is known; kick the ripple tick loop if so. No-op
-		// when the loop is already running or there is nothing to animate.
+		// A resumed/idle session may already hold agents; keep their short lifecycle
+		// fade alive. No-op when the loop is already running or nothing animates.
 		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
@@ -2165,7 +2513,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		promptRow := permissionTranscriptRow(permissionEventFromRequest(msg.request))
+		promptEvent := permissionEventFromRequest(msg.request)
+		promptRow := permissionTranscriptRow(promptEvent)
+		// The focused modal owns the actionable reason while the decision is
+		// pending. Keep only structured block context in the transcript row so
+		// the same explanation is not shown immediately above the card.
+		if promptEvent.Block == nil {
+			promptRow.detail = ""
+		} else {
+			promptRow.detail = permissionBlockDetail(promptEvent)
+		}
 		promptRow.runID = msg.runID
 		m.transcript = appendTranscriptRow(m.transcript, promptRow)
 		m.pendingPermission = &pendingPermissionPrompt{
@@ -2262,8 +2619,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
+		if msg.err != nil {
+			m.petOutcome = terminalpet.Failed
+		} else {
+			m.petOutcome = terminalpet.Review
+		}
+		m.petOutcomeAt = m.now()
 		m.pending = false
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
+		// A newline-triggered redraw deferred by the stream-clear throttle
+		// (see agentTextMsg) may never get a later newline or fade tick to
+		// flush it if this was the turn's last delta — flush it here so the
+		// ghost caret isn't left behind at stream end.
+		var pendingClearCmd tea.Cmd
+		if m.pendingStreamClear {
+			m.pendingStreamClear = false
+			pendingClearCmd = tea.ClearScreen
+		}
 		// Fully reset the fade state at stream end. The next render
 		// emits the final row in solid ink (no settling animation), and
 		// the pending streamingFadeTickMsg that lands after this point
@@ -2350,6 +2722,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingText = nil
 		m.streamingReasoning = ""
 		m.streamingReasoningExpanded = false
+		if msg.goalAware {
+			m = m.reconcileGoalAfterRun(msg.usageEvents, msg.err)
+		}
 		// Roll the completed run's wall-time into the session's rolling average so
 		// /context can surface typical turn latency, not just token counts.
 		if msg.turnElapsed > 0 {
@@ -2372,15 +2747,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var titleCmd, recapCmd tea.Cmd
 		if msg.err == nil {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
-			// Post-turn recap (gated on the recaps preference): one short sentence
-			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
+			// Arm an idle recap only after a successful answer. The timer performs
+			// no provider work unless the session stays untouched long enough.
 			var finalAnswer string
 			for _, row := range msg.rows {
 				if row.kind == rowAssistant && row.final {
 					finalAnswer = row.text
 				}
 			}
-			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
+			m, recapCmd = m.maybeScheduleIdleRecap(msg.runID, finalAnswer)
 		}
 		// End-of-turn git sweep: catch file mutations the tool stream couldn't
 		// report (bash scaffolding, subagent edits) so the FILES sidebar is
@@ -2404,10 +2779,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// other loops remain.
 			m, loopTickCmd = m.ensureLoopTick()
 		}
+		hadQueuedMessage := strings.TrimSpace(m.queuedMessage) != ""
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
+		var peerCmd tea.Cmd
+		if queuedCmd == nil {
+			next, peerCmd = next.launchQueuedPeerIfReady()
+		}
+		var peerApprovalCmd tea.Cmd
+		if queuedCmd == nil && peerCmd == nil {
+			next, peerApprovalCmd = next.openNextPeerApproval()
+		}
+		var goalCmd tea.Cmd
+		if msg.goalAware && !hadQueuedMessage && peerCmd == nil && next.pendingPermission == nil && msg.specReview == nil {
+			next, goalCmd = next.launchGoalContinuationIfReady()
+		}
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, peerCmd, peerApprovalCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
+	case recapIdleMsg:
+		return m.handleRecapIdle(msg)
 	case recapGeneratedMsg:
 		return m.handleRecapGenerated(msg)
 	case compactResultMsg:
@@ -2623,6 +3013,34 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applySetupOAuthDeviceCode(msg)
 	case modelPickerModelsDiscoveredMsg:
 		return m.applyModelPickerModelsDiscovered(msg), nil
+	case petCatalogLoadedMsg:
+		return m.applyPetCatalog(msg)
+	case petPreviewDebounceMsg:
+		return m.startPetPreview(msg)
+	case petPreviewLoadedMsg:
+		m = m.applyPetPreview(msg)
+		if m.petPreview != nil && m.petAnimation == nil && !m.reducedMotion {
+			m.petTickSeq++
+			return m, petTickCmd(m.petTickSeq, m.petFrameDelay())
+		}
+		return m, nil
+	case petInstalledMsg:
+		return m.applyPetInstall(msg)
+	case petTickMsg:
+		if msg.seq != m.petTickSeq {
+			return m, nil
+		}
+		if (m.petAnimation == nil && (m.picker == nil || m.petPreview == nil)) || m.reducedMotion {
+			return m, nil
+		}
+		_, state := m.petPlayback()
+		if state != m.petPlaybackState {
+			m.petPlaybackState = state
+			m.petPhase = 0
+		} else {
+			m.petPhase++
+		}
+		return m, petTickCmd(m.petTickSeq, m.petFrameDelay())
 	case ollamaContextWindowDiscoveredMsg:
 		if msg.err == nil && msg.contextWindow > 0 {
 			if m.ollamaContextWindowByModel == nil {
@@ -2652,20 +3070,17 @@ func (m model) View() tea.View {
 	} else {
 		content = m.detailedTranscriptView()
 	}
+	if m.petRenderer != nil {
+		m.petRenderer.Set(m.petImageDraw(content))
+	}
+	for index, renderer := range m.attachmentRenderers {
+		renderer.Set(m.attachmentImageDraw(index))
+	}
 
 	view := tea.NewView(content)
 	view.AltScreen = m.altScreen
-	// Paint the whole frame with the active theme's surface. Zero never paints the
-	// terminal's own canvas, so without this a theme's text falls on the terminal
-	// background — fine when they share polarity, but a light theme's dark text on a
-	// dark terminal (or vice versa) is invisible, and a color theme never shows its
-	// real surface. Painting the panel makes every theme self-contained and legible
-	// on any terminal, and fills the transparent popup interiors (e.g. the /theme
-	// picker) too. Alt-screen only, so inline output never leaves a painted
-	// background behind in the user's scrollback after exit.
-	if m.altScreen {
-		view.BackgroundColor = zeroTheme.bgPanel
-	}
+	// Keep the terminal's canvas intact. Named themes may color local cards, but
+	// Zero never replaces the user's background, opacity, wallpaper, or profile.
 	// Always requested, independent of the notifier: the composer cursor's
 	// focus/blink behavior (composerBlinkMsg above) needs tea.FocusMsg/BlurMsg
 	// regardless of notification config. A standard, widely supported DEC
@@ -2676,23 +3091,14 @@ func (m model) View() tea.View {
 	// only when the value changes, so gating this costs nothing (§10).
 	view.KeyboardEnhancements.ReportEventTypes = m.dictation.voiceModeEnabled
 	if m.wantsMouseCapture() {
-		if isRunningUnderPRoot() {
-			// Under PRoot the AllMotion (1003) sequence doesn't work
-			// reliably, breaking touch-gesture scrolling. Fall back to
-			// CellMotion which still delivers wheel events, clicks, and
-			// drag — the only thing lost is hover-highlighting.
-			view.MouseMode = tea.MouseModeCellMotion
-		} else {
-			// AllMotion (not CellMotion) is required for hover highlighting:
-			// it reports cursor movement even with no button pressed.
-			// CellMotion only reports motion while a button is held (drag) —
-			// see bubbletea's MouseMode docs. AllMotion has marginally worse
-			// terminal compatibility but is well supported by the terminals
-			// this app targets; the existing 15ms mouse-event throttle
-			// (mouseEventThrottleInterval) already bounds the redraw rate
-			// from the extra motion events.
-			view.MouseMode = tea.MouseModeAllMotion
-		}
+		// AllMotion (1003) is what hover highlighting needs: it reports cursor
+		// movement with no button pressed, where CellMotion (1002) reports motion
+		// only while a button is held. mouseModeFor decides which is safe here,
+		// and documents why one is not simply better than the other: a terminal
+		// that does not implement 1003 sends nothing at all rather than degrading.
+		// The 15ms throttle (mouseEventThrottleInterval) already bounds the redraw
+		// rate from AllMotion's extra motion events.
+		view.MouseMode = mouseModeFor(runtime.GOOS, os.Getenv, isRunningUnderPRoot())
 	}
 	return view
 }
@@ -2713,13 +3119,8 @@ func (m model) transcriptEmpty() bool {
 // the managed conversation view. Streaming/modal blocks and composer chrome are
 // always rendered here.
 func (m model) transcriptView() string {
-	// Two-column layout: in alt-screen managed mode on a wide-enough terminal,
-	// the chat renders into a left column and a context sidebar (FILES / PLAN /
-	// tokens) into a right column. The chat is rendered by the existing scroll
-	// engine at the reduced column width via a model copy, then joined with the
-	// sidebar row-by-row. The subchat drill-in keeps its own single-column view.
-	if m.sidebarActive() && !m.subchat.active {
-		return m.twoColumnTranscriptView()
+	if m.petLayoutActive() {
+		return m.floatingPetTranscriptView()
 	}
 
 	width := chatWidth(m.width)
@@ -2748,6 +3149,7 @@ func (m model) transcriptView() string {
 	}
 
 	suggestionOverlay := m.suggestionOverlay(width)
+	runDetailsOverlay := m.runDetailsOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
 	mcpOverlay := m.mcpManagerOverlay(width)
@@ -2764,6 +3166,8 @@ func (m model) transcriptView() string {
 		viewportOverlay = helpOverlayContent
 	case leaderHelpOverlayContent != "":
 		viewportOverlay = leaderHelpOverlayContent
+	case runDetailsOverlay != "":
+		viewportOverlay = runDetailsOverlay
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
 	case mcpAddOverlay != "":
@@ -2804,36 +3208,6 @@ func (m model) transcriptView() string {
 	return body + footer
 }
 
-// twoColumnTranscriptView renders the alt-screen chat into a left column and
-// the context sidebar (FILES / PLAN / tokens) into a right column. The chat is
-// produced by the existing scroll engine at the reduced chat-column width (via
-// chatColumnWidth, which every frame/geometry caller already routes through),
-// yielding exactly m.height lines at the column width; the sidebar block is
-// built to the same height and joined row-by-row. Overlays/wizards never reach
-// here — sidebarActive() returns false while any is up, falling back to the
-// single-column path. Caller guarantees sidebarActive() && !subchat.active.
-func (m model) twoColumnTranscriptView() string {
-	chatW := m.chatColumnWidth()
-	sidebarW := sidebarWidth(m.width)
-
-	width := chatW
-
-	suggestionOverlay := m.suggestionOverlay(width)
-	bodyItems := m.transcriptBodyItems(width, "", false)
-	footer := m.footerView(width)
-	overlayForViewport := suggestionOverlay
-	if m.transcriptEmpty() && !m.pending {
-		overlayForViewport = ""
-	}
-
-	header := m.pinnedTitleBar(width)
-	chatBlock := viewLines(m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport))
-
-	sidebar := m.renderContextSidebar(sidebarW, len(chatBlock))
-	rows := joinColumns(chatBlock, sidebar, chatW, sidebarW)
-	return strings.Join(rows, "\n")
-}
-
 func (m model) titleBarInTranscriptBody() bool {
 	return !m.altScreen && !m.headerPrinted
 }
@@ -2853,13 +3227,19 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	if m.renamePrompt != nil {
+		footer.WriteString(m.sessionRenamePromptView(width))
+		footer.WriteString("\n")
+		footer.WriteString(m.footerStatusLine(width))
+		return footer.String()
+	}
 	// While an ask-user questionnaire is active it REPLACES the composer box (the
 	// text box becomes the questionnaire): render the tabbed prompt + status line and
 	// skip the plan panel / idle hints / composer for a focused modal.
 	if m.pendingAskUser != nil {
 		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width))
 		footer.WriteString("\n")
-		footer.WriteString(m.statusLine(width))
+		footer.WriteString(m.footerStatusLine(width))
 		return footer.String()
 	}
 	// A focused permission prompt owns the keyboard: its options (and the feedback
@@ -2869,7 +3249,7 @@ func (m model) footerView(width int) string {
 	// input from echoing in two places once "tell Zero what to do differently"
 	// opens the on-card feedback field.
 	if m.pendingPermission != nil {
-		footer.WriteString(m.statusLine(width))
+		footer.WriteString(m.footerStatusLine(width))
 		return footer.String()
 	}
 	// The auto-classifier confirmation renders here in the live-tail region (like
@@ -2884,25 +3264,16 @@ func (m model) footerView(width int) string {
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
 	}
-	// Pinned plan panel: sits directly above the composer so it stays visible
-	// while the transcript scrolls underneath (a streaming turn no longer pushes
-	// the plan off-screen). Budgeted to at most a third of the screen height; a
-	// taller plan collapses to a one-line summary so the composer always stays
-	// on screen. Skipped in the subchat drill-in: m.plan belongs to the PARENT
-	// run, not the subagent/swarm child session being viewed there, so pinning it
-	// above that composer would show unrelated state.
-	if !m.subchat.active {
-		if plan := m.renderPinnedPlanPanel(width, m.pinnedPlanMaxHeight()); plan != "" {
-			footer.WriteString(plan)
-			footer.WriteString("\n")
-		}
-	}
 	// The row above the composer: transient copy feedback takes priority; otherwise
 	// a faint idle affordance — discoverable key hints on the left, a jump-to-bottom
 	// cue on the right when scrolled up. Always one line (blank when nothing shows),
 	// so the footer height is unchanged.
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+	} else if notice := m.transientNoticeLine(width); notice != "" {
+		footer.WriteString(notice)
+	} else if recap := strings.TrimSpace(m.idleRecap); recap != "" {
+		footer.WriteString(fitStyledLine("  "+zeroTheme.faint.Render("※ "+recap), width))
 	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
 		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
 	}
@@ -2915,12 +3286,8 @@ func (m model) footerView(width int) string {
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))
-	if hint := m.composerDescriptionHint(width); hint != "" {
-		footer.WriteString("\n")
-		footer.WriteString(hint)
-	}
 	footer.WriteString("\n")
-	footer.WriteString(m.statusLine(width))
+	footer.WriteString(m.footerStatusLine(width))
 	return footer.String()
 }
 
@@ -2953,9 +3320,18 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar", sidebarKey)
+		parts := []string{"? shortcuts", "Ctrl+X cmds"}
+		if m.runDetailsAvailable() {
+			parts = append(parts, sidebarKey+" details")
+		}
+		hint = strings.Join(parts, " · ")
 	default:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		parts := []string{"? shortcuts", "Ctrl+X cmds"}
+		if m.runDetailsAvailable() {
+			parts = append(parts, sidebarKey+" details")
+		}
+		parts = append(parts, detailKey+" detail", mouseKey+" copy", "Shift+Tab mode")
+		hint = strings.Join(parts, " · ")
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -2968,21 +3344,6 @@ func (m model) jumpToBottomHint() string {
 		return ""
 	}
 	return zeroTheme.faint.Render(fmt.Sprintf("↓ %d more · PgDn", m.chatScrollOffset))
-}
-
-// pinnedPlanMaxHeight is the line budget for the pinned plan panel: at most a
-// third of the screen, so even a long plan can't crowd out the transcript or
-// the composer. Beyond this the panel collapses to its one-line summary. Falls
-// back to a generous cap when the height isn't known yet (unmeasured/headless).
-func (m model) pinnedPlanMaxHeight() int {
-	if m.height <= 0 {
-		return 12
-	}
-	budget := m.height / 3
-	if budget < 3 {
-		budget = 3
-	}
-	return budget
 }
 
 type tuiRect struct {
@@ -3096,18 +3457,6 @@ func (f transcriptFrameLayout) footerLineRect(line int) tuiRect {
 	}
 }
 
-func (m model) scrollableTranscriptView(header string, body string, footer string, width int, overlay string) string {
-	return m.scrollableTranscriptLayoutView(header, transcriptBodyLayout{lines: viewLines(body)}, footer, width, overlay)
-}
-
-func (m model) scrollableTranscriptLayoutView(header string, body transcriptBodyLayout, footer string, width int, overlay string) string {
-	frame := m.scrollableTranscriptFrame(header, footer)
-	window := transcriptViewportForLayout(body, frame, m.chatScrollOffset).window()
-
-	bodyWindow := body.visibleLines(window)
-	return m.renderScrollableTranscriptWindow(frame, bodyWindow, window, width, overlay)
-}
-
 func (m model) scrollableTranscriptItemsView(header string, items []transcriptBodyItem, footer string, width int, overlay string) string {
 	frame := m.scrollableTranscriptFrame(header, footer)
 	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
@@ -3162,15 +3511,62 @@ func overlayViewportLines(lines []string, overlay string, width int) []string {
 	return lines
 }
 
-// scrimViewportLine dims one backdrop line: it strips the line's own colors and
-// re-renders the text faint, so the dimmed transcript recedes behind the overlay.
+// scrimViewportLine dims one backdrop line while keeping semantic styling intact.
+// A transcript can contain syntax colors, diff backgrounds, warnings, and errors;
+// reducing all of them to faint grey makes an overlay harder to understand instead
+// of merely less prominent. Plain text uses the regular faint style. ANSI-styled
+// text keeps its colors and is made faint between resets, which lets the overlay
+// take focus while red, green, and syntax roles remain legible.
 // Blank lines are left untouched.
 func scrimViewportLine(line string, width int) string {
-	plain := ansi.Strip(line)
-	if strings.TrimSpace(plain) == "" {
+	if strings.TrimSpace(ansi.Strip(line)) == "" {
 		return line
 	}
-	return zeroTheme.faint.Render(plain)
+	if !hasExternalANSIStyle(line) {
+		return zeroTheme.faint.Render(line)
+	}
+
+	const faintSGR = "\x1b[2m"
+	const resetSGR = "\x1b[0m"
+	var out strings.Builder
+	out.Grow(len(line) + 16)
+	out.WriteString(faintSGR)
+	for index := 0; index < len(line); {
+		if line[index] == '\x1b' {
+			if end := ansiSequenceEnd(line, index); end > index {
+				sequence := line[index:end]
+				out.WriteString(sequence)
+				if sgrClearsFaint(sequence) {
+					out.WriteString(faintSGR)
+				}
+				index = end
+				continue
+			}
+		}
+		out.WriteByte(line[index])
+		index++
+	}
+	out.WriteString(resetSGR)
+	return out.String()
+}
+
+// sgrClearsFaint reports whether an SGR sequence resets intensity. Lipgloss
+// commonly emits ESC[0m around styled spans, but 22 also clears faint/bold, so
+// both need the faint scrim reapplied for the next unstyled segment.
+func sgrClearsFaint(sequence string) bool {
+	if !strings.HasPrefix(sequence, "\x1b[") || !strings.HasSuffix(sequence, "m") {
+		return false
+	}
+	params := strings.TrimSuffix(strings.TrimPrefix(sequence, "\x1b["), "m")
+	if params == "" {
+		return true
+	}
+	for _, param := range strings.Split(params, ";") {
+		if param == "0" || param == "22" {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeOverlayBlock(lines []string, width int) (int, []string, int) {
@@ -3256,11 +3652,6 @@ func (m model) scrollChat(delta int) model {
 		m.chatBodyLines = 0
 	}
 	return m
-}
-
-func (m model) chatMaxScrollOffset() int {
-	_, maxOffset := m.chatScrollMetrics()
-	return maxOffset
 }
 
 func (m model) chatScrollMetrics() (int, int) {
@@ -3382,16 +3773,16 @@ func (m model) interimBlock(width int) string {
 	if writing := m.streamingToolCallView(width); writing != "" {
 		blocks = append(blocks, writing)
 	}
-	// Always show the live working line (spinner + verb + elapsed) BELOW the
+	// Always show the live working line (motion cue + verb + elapsed) BELOW the
 	// streamed text so an upstream stall keeps animating, never a frozen screen.
 	blocks = append(blocks, m.workingStatusLine())
 	return strings.Join(blocks, "\n")
 }
 
 // workingStatusLine renders the live "working" indicator shown on every pending
-// render: an animated spinner, the rotating working verb, and the elapsed time.
+// render: a subtle liveness pulse, the current phase, and the elapsed time.
 // It is shown even once partial text has streamed so an upstream stall never
-// looks like a frozen terminal — the spinner tick (~80ms, time-based) drives the
+// looks like a frozen terminal — the spinner tick (~33ms, time-based) drives the
 // re-render, so the elapsed clock keeps advancing for ANY provider/model even
 // when no stream data arrives.
 // spinnerGlyph is the liveness glyph every renderer should use instead of
@@ -3405,38 +3796,83 @@ func (m model) spinnerGlyph() string {
 	return m.spinner.View()
 }
 
-// workingActivity labels what the agent is doing right now for the working
-// status line: "writing" while the final answer streams, otherwise "thinking"
-// (reasoning, waiting on the model, or a tool in flight). Cheap and robust — no
-// transcript scan — so it can't misreport on a long, output-less step.
+// workingActivity labels the current live phase for the working status line.
+// User-blocked states take precedence, then a streamed or outstanding tool call,
+// then assistant text/reasoning. This makes a quiet but healthy run legible
+// without guessing from elapsed time alone.
 func (m model) workingActivity() string {
+	if m.pendingPermission != nil {
+		return "waiting for approval"
+	}
+	if m.pendingAskUser != nil {
+		return "waiting for your answer"
+	}
+	if m.streamCallName != "" {
+		return strings.ToLower(toolCardActionLabel(m.streamCallName, "", true))
+	}
+	if row, ok := m.activeToolCall(); ok {
+		return strings.ToLower(toolCardActionLabel(toolRowName(row), row.detail, true))
+	}
 	if strings.TrimSpace(m.streamingTextString()) != "" {
 		return "writing"
 	}
 	return "thinking"
 }
 
-// toolCardSuppressedInTranscript reports tools whose transcript card is redundant
-// because a dedicated UI surface already shows their state: Task (its specialist
-// card) and update_plan (the pinned plan panel + PLAN sidebar). Their session
-// events are still recorded; only the visible card is skipped.
-func toolCardSuppressedInTranscript(name string) bool {
-	return name == "Task" || name == "update_plan"
+// activeToolCallScanLimit bounds per-frame work while the spinner is active.
+// A current tool call belongs near the transcript tail; if it falls outside this
+// window we use the conservative "thinking" label rather than scan history on
+// every animation frame.
+const activeToolCallScanLimit = 200
+
+// activeToolCall returns the newest unresolved tool call from the active run.
+// Results are encountered before their calls while scanning backwards, so a
+// small resolved set prevents an earlier completed call from being reported as
+// live. Tool IDs are required: unkeyed historical rows cannot be paired safely.
+func (m model) activeToolCall() (transcriptRow, bool) {
+	if !m.pending || m.activeRunID == 0 {
+		return transcriptRow{}, false
+	}
+	var resolved map[string]struct{}
+	for i, scanned := len(m.transcript)-1, 0; i >= 0 && scanned < activeToolCallScanLimit; i, scanned = i-1, scanned+1 {
+		row := m.transcript[i]
+		if row.runID != m.activeRunID || row.id == "" {
+			continue
+		}
+		key := rcKey(row.runID, row.id)
+		switch row.kind {
+		case rowToolResult:
+			if resolved == nil {
+				resolved = make(map[string]struct{})
+			}
+			resolved[key] = struct{}{}
+		case rowToolCall:
+			if _, complete := resolved[key]; !complete {
+				return row, true
+			}
+		}
+	}
+	return transcriptRow{}, false
+}
+
+func toolResultCardSuppressedInTranscript(name string, status tools.Status) bool {
+	return isHiddenPlumbingTool(name) && status != tools.StatusError
 }
 
 func (m model) workingStatusLine() string {
-	// Cosine ripple FX: "Working" breathes through a cold-to-warm theme ramp, the
-	// wave moving one character per spinner tick (shared m.spinnerPhase clock). A
-	// 6-char wavelength fits the 7-letter word so a full oscillation is visible.
-	// Under reduced motion the phase is frozen, so this renders a static gradient.
-	working := rippleText("Working", ripplePalette(), m.spinnerPhase, 6)
-	line := zeroTheme.accent.Render(m.spinnerGlyph()) + " " + working
+	// Keep one quiet liveness signal at the start of the line. Tool and plan
+	// labels stay still, so the display reads as active without competing motion
+	// scattered through the transcript.
+	line := m.workingStatusLabel()
+	if indicator := m.workingStatusIndicator(); indicator != "" {
+		line = indicator + line
+	}
 	// Phase label so a long, output-less step reads as live progress rather than a
 	// frozen screen: "writing" while the answer streams, "thinking" otherwise
 	// (reasoning, waiting on the model, or running a tool).
 	line += zeroTheme.faint.Render("  ·  " + m.workingActivity())
 	if !m.turnStartedAt.IsZero() {
-		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
+		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.activeTurnElapsed(m.turnStartedAt)))
 	}
 	// Live token estimate so the working line visibly climbs as the model reasons
 	// and writes, instead of a static figure. Shown from the start of the turn (at
@@ -3446,43 +3882,11 @@ func (m model) workingStatusLine() string {
 	// If the model has gone quiet (no streamed text, reasoning, OR tool-call output
 	// for a while — common when a provider buffers a large tool call instead of
 	// streaming it), say so plainly with an advancing timer, so a long silent
-	// generation never reads as a frozen screen. Only on the working line when the
-	// context sidebar isn't showing it — the sidebar's ACTIVITY pulse carries it
-	// whenever the sidebar is up, so it never appears in both places at once.
-	if !m.sidebarActive() {
-		if hint := m.quietGenerationHint(); hint != "" {
-			line += zeroTheme.amber.Render("  ·  " + hint)
-		}
-	}
-	// A second line carries live plan progress (how far along + the current step)
-	// so a long working stretch shows the task advancing without consulting the
-	// sidebar. Replaces the old per-call update_plan transcript cards. Empty when
-	// there is no active plan.
-	if planLine := m.workingPlanLine(); planLine != "" {
-		line += "\n" + planLine
+	// generation never reads as a frozen screen.
+	if hint := m.quietGenerationHint(); hint != "" {
+		line += zeroTheme.amber.Render("  ·  " + hint)
 	}
 	return line
-}
-
-// workingPlanLine is the optional second line under the working indicator: the
-// plan's done/total and the step currently in progress. Empty when there is no
-// plan or the plan is already complete.
-func (m model) workingPlanLine() string {
-	if m.plan.isEmpty() || m.plan.isComplete() {
-		return ""
-	}
-	total := len(m.plan.steps)
-	done := 0
-	for _, step := range m.plan.steps {
-		if step.status == "completed" || step.status == "failed" {
-			done++
-		}
-	}
-	text := fmt.Sprintf("· plan %d/%d", done, total)
-	if current := truncateStep(currentStepContent(m.plan.steps), 48); current != "" {
-		text += " · " + current
-	}
-	return "  " + zeroTheme.faint.Render(text)
 }
 
 // workingTokenIndicator renders a live "↑ <n> tok" estimate of the tokens
@@ -3521,7 +3925,7 @@ const quietWorkingHint = 8 * time.Second
 // the ticking number was the only signal, and it looks identical whether real
 // (if slow) content is coming or nothing ever will.
 func (m model) quietGenerationHint() string {
-	if m.activeRunID == 0 {
+	if m.activeRunID == 0 || m.pendingPermission != nil {
 		return ""
 	}
 	last := m.lastStreamActivity
@@ -3952,57 +4356,43 @@ func (m model) composerBox(width int) string {
 	if width < 8 {
 		return fitStyledLine(m.composerLine(width), width)
 	}
-	innerWidth := maxInt(1, width-4)
+	reserved := m.petComposerReservedColumns(width)
+	boxWidth := width - reserved
+	innerWidth := maxInt(1, boxWidth-4)
 	content := m.composerLine(innerWidth)
 	lines := strings.Split(content, "\n")
+	rightPad := strings.Repeat(" ", reserved)
 
 	rendered := make([]string, 0, len(lines)+3)
-	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", width-2)+"╮"))
-	// Attachment chips ([Image #1] …) render INSIDE the box, above the input line,
-	// instead of as a separate row above the box.
-	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
+	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", boxWidth-2)+"╮")+rightPad)
+	// On graphics-capable terminals the first image receives a real thumbnail in
+	// this compact strip. Text-only terminals retain the numbered chip row below.
+	if m.attachmentThumbnailVisible(width) {
+		for _, line := range m.attachmentThumbnailLines(innerWidth) {
+			fitted := fitStyledLine(line, innerWidth)
+			pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+			rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+		}
+		// A thumbnail gallery makes the first few attachments visible. Keep a compact
+		// numbered row whenever there is more than one item (or a document), so the
+		// rest of a longer batch is never silently hidden.
+		if chips := m.attachmentThumbnailSupplementalChips(); chips != "" {
+			fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
+			pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+			rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+		}
+	} else if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
 		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
 	}
 	for _, line := range lines {
 		fitted := fitStyledLine(line, innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
 	}
 	rendered = append(rendered, m.composerDividerLine(width))
 	return strings.Join(rendered, "\n")
-}
-
-// composerDescriptionHint returns the description line that sits below the
-// composer box, claude-code style, when the input is a single unambiguous
-// slash command. Returns "" when the user is mid-prompt, the palette is closed,
-// or more than one command matches. Slash commands only; the @file palette
-// already shows its rows. The inline argument hint ([low|medium|...]) is
-// unchanged and continues to render inside the composer box.
-func (m model) composerDescriptionHint(width int) string {
-	if width < 8 {
-		return ""
-	}
-	if m.suggestionsAreFiles {
-		return ""
-	}
-	if !m.commandPaletteOpen || len(m.suggestions) != 1 {
-		return ""
-	}
-	if m.suggestionIdx != 0 {
-		return ""
-	}
-	value := strings.TrimSpace(m.input.Value())
-	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, " \t\n") {
-		return ""
-	}
-	suggestion := m.suggestions[0]
-	desc := strings.TrimSpace(suggestion.Desc)
-	if desc == "" {
-		return ""
-	}
-	return fitStyledLine(zeroTheme.muted.Render(desc), width)
 }
 
 // startsTurn reports whether a row begins a new conversational turn and therefore
@@ -4081,7 +4471,16 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		})
 	}
 	m.pendingPermission = nil
-	return m, nil
+	// Time spent at the prompt is user wait, not provider silence. Restart the
+	// quiet-generation clock so resuming a long-blocked run does not immediately
+	// claim the model has been inactive for the entire approval interval.
+	m.lastStreamActivity = m.now()
+	if pending.request.ToolName == peerPermissionToolName {
+		// Receipt delivery completes asynchronously. That completion advances
+		// the peer queue after this prompt is fully settled.
+		return m, nil
+	}
+	return m.openNextPeerApproval()
 }
 
 // resolvePermissionOption resolves the prompt with a chosen option, carrying the
@@ -4162,16 +4561,12 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	}
 	item, ok := picker.current()
 	if !ok {
-		if picker.kind == pickerTheme {
-			// No selectable row (e.g. the filter matched nothing): undo any live
-			// preview so the palette matches the committed m.themeMode.
-			m.restoreCommittedTheme()
-		}
 		return m, nil
 	}
 	var cmd tea.Cmd
 	switch picker.kind {
 	case pickerModel:
+		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
 		owner := strings.TrimSpace(item.OwnerProvider)
 		_, ownerIsSavedProvider := m.savedProviderByName(owner)
@@ -4184,10 +4579,17 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			// the active provider instead of attempting an unresolvable provider switch.
 			m, text = m.handleModelCommand(item.Value)
 		}
+		if m.providerName != previousProvider || m.modelName != previousModel {
+			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), cmd
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerEffort:
+		previous := m.reasoningEffort
 		text := ""
 		m, text = m.handleEffortCommand(item.Value)
+		if m.reasoningEffort != previous {
+			return m.showTransientNoticeInline(m.effortAppliedNotice(), transientNoticeSuccess), cmd
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerSession:
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
@@ -4215,18 +4617,17 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		}
 	case pickerSTTDownload:
 		return m.handleSTTDownloadSelection(item.Value)
+	case pickerPet:
+		return m.installPet(item.Value)
 	case pickerTheme:
-		// The hovered palette is already live from the preview; handleThemeCommand
-		// records the choice (m.themeMode) and re-applies it, and reports the switch.
+		// Selection is applied only after Enter. Moving through the picker renders a
+		// local preview and never changes the active palette.
 		text := ""
 		m, text = m.handleThemeCommand(item.Value)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		if m.themeMode == themeAuto {
-			// Re-probe the terminal background so a committed `auto` re-detects
-			// light/dark instead of reusing the preview's reading — mirrors the
-			// text /theme dispatch (M17).
-			return m, tea.RequestBackgroundColor
+		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
+			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, cmd
 }
@@ -4320,6 +4721,13 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	}
+	if m.permissionMode == agent.PermissionModePlan && planModeCommandUnavailable(command) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: command.name + " is unavailable in plan mode — it mutates the workspace or spawns a process outside the read-only gate. Exit with /plan off first.",
+		})
+		return m, nil
+	}
 	switch command.kind {
 	case commandEmpty:
 		return m, nil
@@ -4362,6 +4770,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.handleBTWCommand(command.text)
 	case commandLoop:
 		return m.handleLoopCommand(command.text)
+	case commandGoal:
+		return m.handleGoalCommand(command.text)
+	case commandPets:
+		return m.handlePetsCommand(command.text)
 	case commandExit:
 		// Closing the session stops its foreground loops mid-task; warn once so a
 		// token-spending loop isn't ended by reflex.
@@ -4401,6 +4813,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
 	case commandPS:
+		if len(m.backgroundTerminalSessions()) == 0 {
+			return m.showTransientNoticeInline("No background terminals running.", transientNoticeInfo), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.backgroundTerminalsText()})
 		return m, nil
 	case commandStop:
@@ -4437,8 +4852,12 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 		}
+		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
 		m, text = m.handleModelCommand(command.text)
+		if m.providerName != previousProvider || m.modelName != previousModel {
+			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandSTTModel:
@@ -4465,7 +4884,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
+		text := ""
+		m, text = m.handlePlanCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
@@ -4501,21 +4922,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		return m, nil
-	case commandRetitle:
-		if m.pending {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{
-				kind: actionAppendError,
-				text: "Cannot retitle sessions while a run is active.",
-			})
-			return m, nil
+	case commandRename:
+		if title := strings.TrimSpace(command.text); title != "" {
+			return m.renameActiveSession(title), nil
 		}
-		text := ""
-		var retitleCmd tea.Cmd
-		m, retitleCmd, text = m.startSessionRetitle()
-		if text != "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		}
-		return m, retitleCmd
+		return m.openSessionRenamePrompt(), nil
 	case commandSpec:
 		return m.handleSpecCommand(command.text)
 	case commandInit:
@@ -4544,18 +4955,39 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		previous := m.reasoningEffort
 		text := ""
 		m, text = m.handleEffortCommand(command.text)
+		if m.reasoningEffort != previous {
+			return m.showTransientNoticeInline(m.effortAppliedNotice(), transientNoticeSuccess), nil
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
+	case commandFast:
+		previous := m.activeServiceTier()
+		text := ""
+		m, text = m.handleFastCommand(command.text)
+		if m.activeServiceTier() != previous {
+			return m.showTransientNoticeInline(m.fastAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandStyle:
+		previous := m.responseStyle
 		text := ""
 		m, text = m.handleStyleCommand(command.text)
+		if m.responseStyle != previous {
+			return m.showTransientNoticeInline("Style: "+m.responseStyle, transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandSelfCorrect:
+		previous := m.selfCorrectTests
 		text := ""
 		m, text = m.handleSelfCorrectCommand(command.text)
+		if m.selfCorrectTests != previous {
+			return m.showTransientNoticeInline(m.selfCorrectAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTurns:
@@ -4566,8 +4998,12 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Turns\nFinish or stop the current run before changing the tool-turn budget."})
 			return m, nil
 		}
+		previous := m.agentOptions.MaxTurns
 		text := ""
 		m, text = m.handleTurnsCommand(command.text)
+		if m.agentOptions.MaxTurns != previous {
+			return m.showTransientNoticeInline(m.turnsAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandProfile:
@@ -4578,27 +5014,27 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Profile\nFinish or stop the current run before switching the execution profile."})
 			return m, nil
 		}
+		previous := m.execProfileName
 		text := ""
 		m, text = m.handleProfileCommand(command.text)
+		if m.execProfileName != previous {
+			return m.showTransientNoticeInline(m.profileAppliedNotice(), transientNoticeSuccess), nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme:
-		// Bare `/theme` opens the popup picker (live preview on move, apply on
-		// Enter), matching /model and /effort. An explicit `/theme auto|dark|light`
-		// (or `/theme list`) still runs the text handler directly.
+		// Bare `/theme` opens a picker with a contained candidate preview. An
+		// explicit `/theme <name>` (or `/theme list`) still runs the text handler.
 		if strings.TrimSpace(command.text) == "" {
 			m.picker = m.newThemePicker()
 			return m, nil
 		}
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		if m.themeMode == themeAuto {
-			// Re-probe the terminal background so /theme auto re-detects light/dark
-			// instead of reusing a stale reading from startup; the BackgroundColorMsg
-			// handler re-applies the auto palette with the fresh result (M17).
-			return m, tea.RequestBackgroundColor
+		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
+			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)
@@ -4672,6 +5108,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.pendingImages = m.lastImages
 		m.pendingImageLabels = m.lastImageLabels
 		m.pendingDocuments = m.lastDocuments
+		m.refreshPendingImageThumbnail()
 		return m.launchPrompt(m.lastPrompt)
 	case commandEdit:
 		if strings.TrimSpace(m.lastPrompt) == "" {
@@ -4686,6 +5123,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.pendingImages = m.lastImages
 		m.pendingImageLabels = m.lastImageLabels
 		m.pendingDocuments = m.lastDocuments
+		m.refreshPendingImageThumbnail()
 		m.input.SetValue(m.lastPrompt)
 		return m, nil
 	case commandCopy:
@@ -4729,16 +5167,35 @@ func (m model) executeSlash(input string) (tea.Model, tea.Cmd) {
 // composer. Queued prompts use this path too, so session and image behavior
 // stays identical to immediate submissions.
 func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
+	return m.launchPromptInternal(prompt, nil)
+}
+
+func (m model) launchPromptInternal(prompt string, peer *peermsg.InboundMessage) (model, tea.Cmd) {
 	// Remember the verbatim prompt (before specialist/document expansion) so /retry
 	// and /edit can act on exactly what the user submitted. Snapshot the staged
 	// attachments too: launchPrompt clears the pending queues below, so /retry
 	// re-stages these to resend an identical vision/PDF-backed request rather than
 	// a degraded text-only one.
-	m.lastPrompt = prompt
-	m.lastImages = m.pendingImages
-	m.lastImageLabels = m.pendingImageLabels
-	m.lastDocuments = m.pendingDocuments
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
+	var attachments transcriptAttachmentSummary
+	if peer == nil {
+		m.lastPrompt = prompt
+		m.lastImages = m.pendingImages
+		m.lastImageLabels = m.pendingImageLabels
+		m.lastDocuments = m.pendingDocuments
+		attachments = transcriptAttachmentSummary{
+			images:    len(m.pendingImages),
+			documents: len(m.pendingDocuments),
+		}
+		// A switched model may no longer accept a staged image. The matching
+		// system notice below explains the drop; the sent user row must not claim
+		// the image was included.
+		if attachments.images > 0 && !m.modelSupportsVisionTUI() {
+			attachments.images = 0
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt, attachments: attachments})
+	} else {
+		m.transcript = appendTranscriptRow(m.transcript, peerTranscriptRow(peerDisplayName(peer.From), peer.Body))
+	}
 	if m.provider == nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendAssistant,
@@ -4749,14 +5206,18 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// A leading "@specialist <task>" is expanded into an explicit Task-delegation
 	// directive for the agent only; the transcript above keeps the user's verbatim
 	// "@mention". Non-mentions and mid-message "@file" references are unchanged.
-	if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
-		prompt = expanded
+	if peer == nil {
+		if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
+			prompt = expanded
+		}
 	}
 	// Prepend any staged PDF document text as a model-facing preamble. The
 	// visible transcript above keeps the user's clean prompt; the agent (and the
 	// recorded session, for resume fidelity) sees the document text first.
-	if preamble := m.consumePendingDocuments(); preamble != "" {
-		prompt = preamble + prompt
+	if peer == nil {
+		if preamble := m.consumePendingDocuments(); preamble != "" {
+			prompt = preamble + prompt
+		}
 	}
 	var err error
 	m, err = m.ensureActiveSession(prompt)
@@ -4766,11 +5227,34 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			text: "session create error: " + err.Error(),
 		})
 	} else {
+		if m.activeLoopID == "" && sessions.IsResumableKind(m.activeSession.SessionKind) &&
+			m.activeSession.Goal != nil && m.activeSession.Goal.Status == sessions.GoalStatusActive {
+			if updated, resetErr := m.sessionStore.ResetGoalContinuations(m.activeSession.SessionID); resetErr != nil {
+				m = m.appendGoalError("reset automatic continuation count: " + resetErr.Error())
+			} else {
+				m.activeSession = updated
+			}
+		}
 		agentPrompt := m.sessionPrompt(prompt)
-		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+		messagePayload := map[string]any{
 			"role":    "user",
 			"content": prompt,
-		})
+		}
+		if peer == nil {
+			if !attachments.empty() {
+				messagePayload["attachments"] = map[string]int{
+					"images":    attachments.images,
+					"documents": attachments.documents,
+				}
+			}
+		}
+		if peer != nil {
+			messagePayload["origin"] = "cross_session"
+			messagePayload["from"] = peerDisplayName(peer.From)
+			messagePayload["messageId"] = peer.ID
+			messagePayload["displayContent"] = peer.Body
+		}
+		m, err = m.appendSessionEvent(sessions.EventMessage, messagePayload)
 		if err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -4786,6 +5270,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// exec's drop+warn wording) rather than sending them to a model that
 	// rejects them. Pending state is cleared either way below.
 	turnImages := m.pendingImages
+	if peer != nil {
+		turnImages = nil
+	}
 	if len(turnImages) > 0 && !m.modelSupportsVisionTUI() {
 		name := m.modelName
 		if name == "" {
@@ -4797,11 +5284,25 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		})
 		turnImages = nil
 	}
-	m.pendingImages = nil
-	m.pendingImageLabels = nil
+	if peer == nil {
+		m.pendingImages = nil
+		m.pendingImageLabels = nil
+		m.pendingImageThumbnails = nil
+	}
 	runCtx, cancel := context.WithCancel(m.ctx)
+	if peer != nil {
+		runCtx = peermsg.WithInboundMessage(runCtx, *peer)
+	}
 	m = m.beginRun(cancel)
-	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+	var agentCmd tea.Cmd
+	if peer != nil {
+		agentCmd = m.runAgentWithOptions(m.activeRunID, runCtx, prompt, turnImages, tuiAgentRunOptions{
+			transientSystemPrompt: peerTurnSystemPrompt,
+		})
+	} else {
+		agentCmd = m.runAgent(m.activeRunID, runCtx, prompt, turnImages)
+	}
+	return m, tea.Batch(agentCmd, m.spinner.Tick)
 }
 
 // beginRun stamps the shared run-start state for a new agent turn: a fresh run
@@ -4811,6 +5312,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 // (normal prompt + spec draft/impl) keeps these in sync — a missing
 // turnStartedAt previously dropped the elapsed timer on spec-mode runs.
 func (m model) beginRun(cancel context.CancelFunc) model {
+	m = m.cancelIdleRecap()
 	if m.prepareRunCompletionWarning != nil {
 		m.prepareRunCompletionWarning()
 	}
@@ -4827,22 +5329,20 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.stepExplanation = nil
 	m.planDetailOpen = false
 	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
-	// A new run clears the sidebar's content (plan/agents), so the user's Ctrl+B
-	// hide was for the OLD context — reset it so the new run's sidebar isn't
-	// suppressed by a stale preference.
-	m.sidebarHidden = false
+	m.runDetailsOpen = false
 	m.turnStartedAt = m.now()
+	m.turnTimer = newActiveTurnTimer(m.turnStartedAt)
+	m.lastStreamActivity = m.turnStartedAt
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
 	return m
 }
 
 // ensureSpinnerTick returns the spinner.Tick cmd to (re)start the self-scheduling
-// tick loop when an active sidebar holds agents to animate but the loop is not
-// already running (e.g. a resumed session whose swarm members exist before any
-// run started this process). It returns nil — issuing no second timer — when the
-// loop is already alive, when reduced motion is set, or when there is nothing to
-// animate, so an idle plain session schedules no timer.
+// tick loop when active agent state needs its short lifecycle fade but the loop
+// is not already running (e.g. a resumed session with live agents before any
+// run starts). It returns nil — issuing no second timer — when the loop is
+// already alive, reduced motion is set, or nothing needs animation.
 func (m *model) ensureSpinnerTick() tea.Cmd {
 	if m.spinnerTicking || m.reducedMotion {
 		return nil
@@ -4908,6 +5408,8 @@ func (m *model) rememberInput(value string) {
 }
 
 func (m *model) cancelRun() {
+	goalWasActive := m.pending && m.activeSession.Goal != nil &&
+		m.activeSession.Goal.Status == sessions.GoalStatusActive
 	if m.runCancel != nil {
 		m.runCancel()
 	}
@@ -4958,6 +5460,18 @@ func (m *model) cancelRun() {
 			*m = next
 		}
 	}
+	if goalWasActive && m.sessionStore != nil && m.activeSession.SessionID != "" {
+		updated, event, err := m.sessionStore.PauseGoalIfActive(m.activeSession.SessionID, "run cancelled by user")
+		if err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "Goal: pause after cancellation: " + err.Error()})
+		} else {
+			m.activeSession = updated
+			if event != nil {
+				m.sessionEvents = append(m.sessionEvents, *event)
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: "Goal paused. Use /goal resume to continue."})
+			}
+		}
+	}
 	m.pending = false
 	m.runCancel = nil
 	m.activeRunID = 0
@@ -4997,19 +5511,48 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		started := m.now()
-		// firstTokenAt is stamped when the first token (reasoning or text) streams,
-		// so the turn can report time-to-first-token alongside total wall time.
-		var firstTokenAt time.Time
+		if m.turnTimer != nil {
+			m.turnTimer.start(started)
+		}
+		// firstTokenElapsed is stamped from the pause-aware turn timer when the
+		// first reasoning or text token streams, so TTFT and total elapsed use
+		// the same clock.
+		var firstTokenElapsed time.Duration
+		firstTokenSeen := false
+		stampFirstToken := func(at time.Time) {
+			if firstTokenSeen {
+				return
+			}
+			firstTokenSeen = true
+			firstTokenElapsed = m.activeTurnElapsedAt(started, at)
+		}
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
 		var specReview *pendingSpecReviewPrompt
+		if m.awaitToolReadiness != nil {
+			m.awaitToolReadiness(runCtx)
+		}
 		options := m.agentOptions
-		options.Registry = m.registry
+		options.Registry = cloneToolRegistry(m.registry)
+		goalAwareRun := !runOptions.specDraft && m.activeLoopID == "" &&
+			sessions.IsResumableKind(m.activeSession.SessionKind)
+		if goalAwareRun {
+			options.Registry = m.goalRegistry()
+		}
 		if runOptions.registry != nil {
-			options.Registry = runOptions.registry
+			options.Registry = cloneToolRegistry(runOptions.registry)
+			if goalAwareRun && m.activeSession.SessionID != "" {
+				for _, tool := range tools.NewGoalTools(m.sessionStore, m.activeSession.SessionID) {
+					options.Registry.Register(tool)
+				}
+			}
+		}
+		peerAwareRun := runOptions.transientSystemPrompt != "" || m.sessionContainsPeerMessages()
+		if peerAwareRun && m.peerService != nil {
+			options.Registry.Register(tools.NewPeerReplyTool(m.peerService))
 		}
 		options.PermissionMode = m.permissionMode
 		if runOptions.permissionMode != "" {
@@ -5018,13 +5561,25 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
 		}
+		if runOptions.transientSystemPrompt != "" {
+			options.TransientSystemPrompt = runOptions.transientSystemPrompt
+		} else if peerAwareRun {
+			options.TransientSystemPrompt = peerTurnSystemPrompt
+		}
+		if goalAwareRun {
+			options.SystemPrompt = m.goalSystemPrompt(options.SystemPrompt)
+		}
 		options.SessionID = m.activeSession.SessionID
 		options.ProviderName = m.providerName
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
+		options.ServiceTier = m.activeServiceTier()
 		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd
 		options.Images = images
+		if m.newTurnSessionProvider != nil && m.provider != nil {
+			options.TurnSessionProvider = m.newTurnSessionProvider(m.providerProfile, m.provider)
+		}
 		if m.captureRunImages != nil {
 			m.captureRunImages(images)
 		}
@@ -5033,6 +5588,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// compaction (proactive + reactive) is enabled for every model, not just
 		// catalogued ones.
 		options.ContextWindow = modelregistry.AgentContextWindow(m.modelContextWindow(m.modelName))
+		// Route compaction summarization to a cheap model when one applies
+		// (env > config > curated default). The factory is lazy, re-evaluated
+		// against the model in force when the compactor asks (so an escalation
+		// away from the cheap model gains a summarizer), and the agent falls
+		// back to the main provider on any summarizer failure. Resolved against
+		// the ACTIVE profile so it tracks mid-session model switches.
+		options.Summarizer = providers.CompactionSummarizerFactory(m.providerProfile, m.compactionModel, m.newProvider)
+		// Let compaction re-derive its threshold after a mid-run escalate_model
+		// switch instead of keeping the original model's window.
+		options.ContextWindowFor = func(modelID string) int {
+			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
+		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,
@@ -5102,11 +5669,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
-			if firstTokenAt.IsZero() {
-				firstTokenAt = m.now()
-			}
+			now := m.now()
+			stampFirstToken(now)
 			if strings.TrimSpace(reasoningText) != "" {
-				flushReasoning(m.now())
+				flushReasoning(now)
 			}
 			m.sendAgentText(runID, delta)
 			if onText != nil {
@@ -5123,6 +5689,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
+			if m.turnTimer != nil {
+				m.turnTimer.pause(m.now())
+				defer func() {
+					m.turnTimer.resume(m.now())
+				}()
+			}
 			if onPermissionRequest != nil {
 				return onPermissionRequest(ctx, request)
 			}
@@ -5200,8 +5772,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			now := m.now()
-			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
-				firstTokenAt = now
+			if strings.TrimSpace(delta) != "" {
+				stampFirstToken(now)
 			}
 			if strings.TrimSpace(reasoningText) == "" && strings.TrimSpace(delta) != "" {
 				reasoningStarted = now
@@ -5230,10 +5802,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				arg:    argHintSecondary(call.Arguments),
 				runID:  runID,
 			}
-			// A Task delegation is shown by the specialist card below, and update_plan
-			// is shown by the pinned plan panel + PLAN sidebar, so skip both redundant
-			// transcript cards — the dedicated UI supersedes them.
-			if !toolCardSuppressedInTranscript(call.Name) {
+			// Specialist delegation and an in-flight plan update have dedicated UI, so
+			// omit their redundant call cards from the transcript. The completed plan
+			// result remains as a durable checklist in the conversation history.
+			if !toolCallCardSuppressedInTranscript(call.Name) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
@@ -5312,17 +5884,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				tool:            result.Name,
 				status:          result.Status,
 				detail:          toolResultDetail(result),
+				meta:            result.Meta,
 				runID:           runID,
 				changedFiles:    result.ChangedFiles,
 				changeSummaries: result.ChangeSummaries,
 			}
-			// A Task result is shown by the specialist card, and update_plan by the
-			// plan panel/sidebar, so skip both redundant transcript rows.
-			if !toolCardSuppressedInTranscript(result.Name) {
+			// A successful Task/TaskOutput result is represented by a specialist card.
+			// update_plan stays in the transcript as a rendered checklist; failures
+			// always remain visible because a dedicated surface cannot explain them.
+			if !toolResultCardSuppressedInTranscript(result.Name, result.Status) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
-			// Sync the sticky plan panel when update_plan runs.
+			// Keep the latest plan state in sync for run details and step drill-in.
 			if result.Name == "update_plan" && m.registry != nil {
 				if planTool, ok := m.registry.Get("update_plan"); ok {
 					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
@@ -5332,27 +5906,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					}
 				}
 			}
-			toolPayload := map[string]any{
-				"toolCallId": result.ToolCallID,
-				"name":       result.Name,
-				"status":     string(result.Status),
-				"output":     result.Output,
-			}
-			if result.Redacted {
-				toolPayload["redacted"] = true
-			}
-			if len(result.Meta) > 0 {
-				toolPayload["meta"] = result.Meta
-			}
-			if len(result.ChangedFiles) > 0 {
-				toolPayload["changedFiles"] = result.ChangedFiles
-			}
-			if len(result.ChangeSummaries) > 0 {
-				toolPayload["changeSummaries"] = result.ChangeSummaries
-			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventToolResult,
-				Payload: toolPayload,
+				Payload: toolResultSessionPayload(result),
 			})
 			// Complete specialist tracking when the Task tool returns.
 			if result.Name == "Task" {
@@ -5426,7 +5982,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -5436,17 +5992,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 			}
 			flushReasoning(m.now())
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		flushReasoning(m.now())
-		elapsed := m.now().Sub(started)
-		ttft := time.Duration(0)
-		if !firstTokenAt.IsZero() {
-			ttft = firstTokenAt.Sub(started)
-		}
+		elapsed := m.activeTurnElapsed(started)
 		rows = append(rows, transcriptRow{
 			kind:        rowAssistant,
 			text:        result.FinalAnswer,
@@ -5464,7 +6016,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
 	}
 }
 
@@ -5570,10 +6122,41 @@ func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage
 // (a code/diff preview) when present on a successful result, else the Output that
 // the model also saw. Error results keep their Output so the failure shows.
 func toolResultDetail(result agent.ToolResult) string {
-	if result.Status != tools.StatusError && strings.TrimSpace(result.Display.Preview) != "" {
-		return result.Display.Preview
+	display := result.HumanDisplay()
+	if strings.TrimSpace(display.Preview) != "" && (result.Status != tools.StatusError || result.Outcome.Finalized()) {
+		return display.Preview
 	}
-	return result.Output
+	return result.ModelOutput()
+}
+
+// toolResultSessionPayload preserves both views of a tool result: output remains
+// the provider-facing text used for session context, while displayPreview keeps
+// the richer card body that was visible during the live run. The preview is only
+// stored when it differs, so ordinary tool results retain their compact event.
+func toolResultSessionPayload(result agent.ToolResult) map[string]any {
+	output := result.ModelOutput()
+	payload := map[string]any{
+		"toolCallId": result.ToolCallID,
+		"name":       result.Name,
+		"status":     string(result.Status),
+		"output":     output,
+	}
+	if preview := toolResultDetail(result); strings.TrimSpace(preview) != "" && preview != output {
+		payload["displayPreview"] = preview
+	}
+	if result.Redacted {
+		payload["redacted"] = true
+	}
+	if len(result.Meta) > 0 {
+		payload["meta"] = result.Meta
+	}
+	if len(result.ChangedFiles) > 0 {
+		payload["changedFiles"] = result.ChangedFiles
+	}
+	if len(result.ChangeSummaries) > 0 {
+		payload["changeSummaries"] = result.ChangeSummaries
+	}
+	return payload
 }
 
 func toolResultRowText(result agent.ToolResult) string {
@@ -5581,5 +6164,5 @@ func toolResultRowText(result agent.ToolResult) string {
 	if status == "" {
 		status = tools.StatusOK
 	}
-	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.Output, tuiToolOutputLimit))
+	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.ModelOutput(), tuiToolOutputLimit))
 }

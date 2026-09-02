@@ -54,28 +54,29 @@ func TestBuildPermissionOptionsDefault(t *testing.T) {
 }
 
 func TestDecisionFromOutcome(t *testing.T) {
-	req := agent.PermissionRequest{
+	offered := buildPermissionOptions(agent.PermissionRequest{
+		ToolName: "bash",
 		AvailableDecisions: []agent.PermissionDecisionAction{
 			agent.PermissionDecisionAllow,
 			agent.PermissionDecisionAlwaysAllow,
 			agent.PermissionDecisionDeny,
 		},
-	}
-	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeCancelled}, req); d.Action != agent.PermissionDecisionCancel {
+	})
+	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeCancelled}, offered); d.Action != agent.PermissionDecisionCancel {
 		t.Errorf("cancelled -> %q, want cancel", d.Action)
 	}
-	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: "allow"}, req); d.Action != agent.PermissionDecisionAllow {
+	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: "allow"}, offered); d.Action != agent.PermissionDecisionAllow {
 		t.Errorf("selected allow -> %q", d.Action)
 	}
-	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: "always_allow"}, req); d.Action != agent.PermissionDecisionAlwaysAllow {
+	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: "always_allow"}, offered); d.Action != agent.PermissionDecisionAlwaysAllow {
 		t.Errorf("selected always_allow -> %q", d.Action)
 	}
 	// Unknown option fails closed to deny.
-	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: "bogus"}, req); d.Action != agent.PermissionDecisionDeny {
+	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: "bogus"}, offered); d.Action != agent.PermissionDecisionDeny {
 		t.Errorf("unknown option -> %q, want deny", d.Action)
 	}
 	// Missing/empty outcome fails closed to deny.
-	if d := decisionFromOutcome(RequestPermissionOutcome{}, req); d.Action != agent.PermissionDecisionDeny {
+	if d := decisionFromOutcome(RequestPermissionOutcome{}, offered); d.Action != agent.PermissionDecisionDeny {
 		t.Errorf("empty outcome -> %q, want deny", d.Action)
 	}
 }
@@ -138,11 +139,12 @@ func TestDecisionFromOutcomePrefixBreadthRoundTrip(t *testing.T) {
 			agent.PermissionDecisionDeny,
 		},
 	}
+	offered := buildPermissionOptions(req)
 
 	// Selecting the broader `git push` breadth for the project scope must carry
 	// both the action and the chosen prefix back to ZERO.
 	id := encodeOptionID(agent.PermissionDecisionAllowPrefixProject, []string{"git", "push"})
-	d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: id}, req)
+	d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: id}, offered)
 	if d.Action != agent.PermissionDecisionAllowPrefixProject {
 		t.Fatalf("action = %q, want allow_prefix_for_project", d.Action)
 	}
@@ -152,7 +154,7 @@ func TestDecisionFromOutcomePrefixBreadthRoundTrip(t *testing.T) {
 
 	// A prefix that was never offered fails closed to deny (no silent widening).
 	tampered := encodeOptionID(agent.PermissionDecisionAllowPrefixProject, []string{"git"})
-	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: tampered}, req); d.Action != agent.PermissionDecisionDeny {
+	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: tampered}, offered); d.Action != agent.PermissionDecisionDeny {
 		t.Fatalf("non-offered prefix -> %q, want deny", d.Action)
 	}
 }

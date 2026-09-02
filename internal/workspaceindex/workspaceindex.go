@@ -316,16 +316,6 @@ func normalizeSeparators(rel string) string {
 	return strings.ReplaceAll(filepath.ToSlash(rel), "\\", "/")
 }
 
-func MaxFileDepth(files []File) int {
-	maxDepth := 0
-	for _, file := range files {
-		if file.Depth > maxDepth {
-			maxDepth = file.Depth
-		}
-	}
-	return maxDepth
-}
-
 func SortFiles(files []File) {
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].Path < files[j].Path

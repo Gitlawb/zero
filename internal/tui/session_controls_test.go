@@ -46,17 +46,17 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	}
 
 	next.input.SetValue("/effort high")
-	updated, cmd = next.Update(testKey(tea.KeyEnter))
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /effort high to be handled without starting an agent run")
 	}
 	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
 		t.Fatalf("expected effort high, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "active effort: high") {
-		t.Fatalf("expected effort switch transcript, got %#v", next.transcript)
+	if next.transientNotice.text != "Reasoning effort: high" {
+		t.Fatalf("effort switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -153,17 +153,17 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	}
 
 	next.input.SetValue("/style explanatory")
-	updated, cmd = next.Update(testKey(tea.KeyEnter))
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /style explanatory to be handled without starting an agent run")
 	}
 	if next.responseStyle != "explanatory" {
 		t.Fatalf("expected explanatory style, got %q", next.responseStyle)
 	}
-	if !transcriptContains(next.transcript, "active style: explanatory") {
-		t.Fatalf("expected style switch transcript, got %#v", next.transcript)
+	if next.transientNotice.text != "Style: explanatory" {
+		t.Fatalf("style switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -481,6 +481,15 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, input := range []sessions.AppendEventInput{
+		{Type: sessions.EventToolCall, Payload: map[string]any{"id": "ask", "name": "ask_user", "arguments": `{"questions":[{"question":"Which database should remain?"}]}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"toolCallId": "ask", "name": "ask_user", "status": "ok", "output": "Postgres only"}},
+	} {
+		m, err = m.appendSessionEvent(input.Type, input.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, content := range []string{
 		"old decision A",
 		"old decision B",
@@ -521,6 +530,15 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one provider summarization request, got %d", len(provider.requests))
 	}
+	request := provider.requests[0]
+	if len(request.Messages) != 2 || request.Messages[0].Content != agent.CompactionSummaryInstructions {
+		t.Fatalf("manual compaction did not use the shared agent compaction prompt: %#v", request.Messages)
+	}
+	for _, want := range []string{"Which database should remain?", "Postgres only"} {
+		if !strings.Contains(request.Messages[1].Content, want) {
+			t.Fatalf("manual compaction projection lost %q: %q", want, request.Messages[1].Content)
+		}
+	}
 	if next.lastCompactResult == nil || next.lastCompactResult.Summary != "Provider summary keeps the actual old decisions." {
 		t.Fatalf("expected provider summary result, got %#v", next.lastCompactResult)
 	}
@@ -530,6 +548,56 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	}
 	if strings.Contains(prompt, "old decision A") {
 		t.Fatalf("next prompt should not include raw compacted event:\n%s", prompt)
+	}
+}
+
+func TestManualCompactionPersistsStructuralTruncationMetadata(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "Bounded summary."},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1", Provider: provider, SessionStore: store})
+	var err error
+	m, err = m.ensureActiveSession("compact a large session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range 20 {
+		content := strings.Repeat("contextword ", 256) + string(rune('a'+index))
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: content})
+	}
+
+	next, result, err := m.compactActiveSession()
+	if err != nil || !result.Compacted {
+		t.Fatalf("compactActiveSession() = (%#v, %v)", result, err)
+	}
+	raw, err := store.ReadEvents(next.activeSession.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := raw[len(raw)-1]
+	if latest.Type != sessions.EventCompaction {
+		t.Fatalf("latest event = %s, want compaction", latest.Type)
+	}
+	payload := sessionPayload(latest)
+	if !payloadBool(payload, "truncated") {
+		t.Fatalf("compaction did not persist structural truncation: %#v", payload)
+	}
+	request := provider.requests[0]
+	wantPromptChars := len(agent.CompactionSummaryInstructions)
+	for _, message := range request.Messages[1:] {
+		wantPromptChars += len(message.Content)
+		for _, call := range message.ToolCalls {
+			wantPromptChars += len(call.Name) + len(call.Arguments)
+		}
+	}
+	if promptChars, ok := payload["promptChars"].(float64); !ok || int(promptChars) != wantPromptChars {
+		t.Fatalf("promptChars = %#v, want %d", payload["promptChars"], wantPromptChars)
 	}
 }
 
@@ -771,31 +839,17 @@ func TestUnpricedUsageStatusUsesLatestEventNotCumulative(t *testing.T) {
 	}
 }
 
-func TestStatusLineDropsTokenFigureWhenSidebarShowsIt(t *testing.T) {
+func TestStatusLineShowsTokenFigureWithoutPersistentRail(t *testing.T) {
 	m := sidebarTestModel()
 	m, _ = m.recordUsageEvent("test-model", zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})
-	if !m.sidebarActive() {
-		t.Fatal("expected the sidebar to be active for this model")
-	}
-
-	// The sidebar owns the token readout at its floor.
+	// Run details retains the full token count on demand.
 	if got := m.sidebarTokenText(); !strings.Contains(got, "120 tokens") {
 		t.Fatalf("sidebar token text = %q, want it to carry the 120-token figure", got)
 	}
-	// With the sidebar open, the status line must not repeat the token figure.
+	// The status line is the always-visible token readout.
 	status := plainRender(t, m.statusLine(m.width))
-	if strings.Contains(status, "tok") {
-		t.Fatalf("status line = %q, should not duplicate the token figure while the sidebar shows it", status)
-	}
-
-	// Sidebar hidden → the status line is the only home for the figure again.
-	m.sidebarHidden = true
-	if m.sidebarActive() {
-		t.Fatal("sidebar should be inactive once hidden")
-	}
-	hidden := plainRender(t, m.statusLine(m.width))
-	if !strings.Contains(hidden, "120 tok") {
-		t.Fatalf("status line with sidebar hidden = %q, want the token figure back", hidden)
+	if !strings.Contains(status, "120 tok") {
+		t.Fatalf("status line = %q, want the token figure", status)
 	}
 }
 
@@ -861,17 +915,17 @@ func TestModelSwitchClearsUnsupportedEffortPreference(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.reasoningEffort != "" {
 		t.Fatalf("expected unsupported effort preference to reset, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "effort auto (reset)") {
-		t.Fatalf("expected model switch transcript to mention effort reset, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "effort auto") {
+		t.Fatalf("expected model switch notice to mention effort reset, got %q", next.transientNotice.text)
 	}
 }
 

@@ -29,6 +29,11 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
+			provider: "fireworks",
+			want:     []string{"accounts/fireworks/models/kimi-k2p7-code", "accounts/fireworks/models/deepseek-v4-flash"},
+			notWant:  []string{"gpt-4.1", "llama-3.3-70b-versatile"},
+		},
+		{
 			provider: "chatgpt",
 			want:     []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"},
 			notWant:  []string{"gpt-5", "gpt-4.1", "openai/gpt-4.1"},
@@ -114,6 +119,25 @@ func TestModelsDoNotAliasMutableCatalogState(t *testing.T) {
 	second := Models(descriptor)
 	if second[0].ID == "mutated" || second[0].InputModalities[0] == "mutated" {
 		t.Fatal("Models returned aliased mutable catalog state")
+	}
+}
+
+func TestDedupeModelsDoesNotAliasCapabilitySlices(t *testing.T) {
+	models := []Model{{
+		ID:               "reasoner",
+		ReasoningEfforts: []string{"low", "high"},
+		ServiceTiers:     []string{"priority"},
+	}}
+	first := dedupeModels("reasoner", models)
+	first[0].ReasoningEfforts[0] = "mutated"
+	first[0].ServiceTiers[0] = "mutated"
+
+	second := dedupeModels("reasoner", models)
+	if got, want := second[0].ReasoningEfforts[0], "low"; got != want {
+		t.Fatalf("reasoning efforts alias source state: got %q, want %q", got, want)
+	}
+	if got, want := second[0].ServiceTiers[0], "priority"; got != want {
+		t.Fatalf("service tiers alias source state: got %q, want %q", got, want)
 	}
 }
 

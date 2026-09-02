@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,25 @@ func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
 	}
 	if decision.GrantMatched {
 		t.Fatalf("network prompt must not report the bash allow grant as matched: %#v", decision)
+	}
+}
+
+func TestEngineClassifiesPowerShellCurlCommandAsNetwork(t *testing.T) {
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: t.TempDir(),
+		Policy:        DefaultPolicy(),
+	})
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "bash",
+		SideEffect:     SideEffectShell,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Args: map[string]any{
+			"command": `$env:PATH = '.;' + $env:PATH; curl.cmd https://example.com`,
+		},
+	})
+	if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked || !HasRiskCategory(decision.Risk, "network") {
+		t.Fatalf("PowerShell curl command decision = %#v, want network prompt", decision)
 	}
 }
 
@@ -222,6 +242,7 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 		{name: "write_file", args: map[string]any{"path": "notes.txt"}},
 		{name: "edit_file", args: map[string]any{"path": "notes.txt"}},
 		{name: "apply_patch", args: map[string]any{"patch": "diff --git a/notes.txt b/notes.txt\n"}},
+		{name: "apply_patch", args: map[string]any{"patch": "*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch\n"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decision := engine.Evaluate(context.Background(), Request{
@@ -292,6 +313,27 @@ func TestEngineDeniesApplyPatchEscapesFromPatchBody(t *testing.T) {
 
 	if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockOutsideWorkspace {
 		t.Fatalf("escaping apply_patch decision = %#v, want outside-workspace deny", decision)
+	}
+}
+
+func TestEngineDeniesStructuredApplyPatchEscapesFromPatchBody(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	for _, patch := range []string{
+		"*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch\n",
+		"*** Begin Patch\n*** Add File: ..\\escape.txt\n+x\n*** End Patch\n",
+	} {
+		decision := engine.Evaluate(context.Background(), Request{
+			ToolName:       "apply_patch",
+			SideEffect:     SideEffectWrite,
+			Permission:     PermissionPrompt,
+			PermissionMode: PermissionModeAsk,
+			Args:           map[string]any{"patch": patch},
+		})
+		if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockOutsideWorkspace {
+			t.Fatalf("escaping structured apply_patch decision = %#v, want outside-workspace deny", decision)
+		}
 	}
 }
 
@@ -482,6 +524,28 @@ func TestEngineDeniesOutOfWorkspacePaths(t *testing.T) {
 	}
 	if !strings.Contains(decision.Reason, "outside the workspace") {
 		t.Fatalf("expected outside-workspace reason, got %q", decision.Reason)
+	}
+}
+
+func TestEnginePromptsForOutOfWorkspaceReadWithReadSpecificReason(t *testing.T) {
+	root := t.TempDir()
+	outside := outsideDefaultTempPath(root, "external")
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:      "list_directory",
+		SideEffect:    SideEffectRead,
+		Permission:    PermissionAllow,
+		WorkspaceRoot: root,
+		Args:          map[string]any{"path": outside},
+	})
+
+	want := fmt.Sprintf("Reading %s requires access outside the workspace.", outside)
+	if decision.Action != ActionPrompt || decision.Block == nil || !decision.Block.Recoverable {
+		t.Fatalf("outside read decision = %#v, want recoverable prompt", decision)
+	}
+	if decision.Reason != want || decision.Block.Reason != want {
+		t.Fatalf("outside read reasons = decision %q, block %q; want %q", decision.Reason, decision.Block.Reason, want)
 	}
 }
 

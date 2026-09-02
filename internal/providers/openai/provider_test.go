@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -105,6 +106,72 @@ func TestStreamCompletionPostsChatCompletionRequest(t *testing.T) {
 	if tool["type"] != "function" {
 		t.Fatalf("unexpected tool wrapper: %#v", tool)
 	}
+	functionDefinition := tool["function"].(map[string]any)
+	parameters := functionDefinition["parameters"].(map[string]any)
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok || len(properties) != 0 {
+		t.Fatalf("parameters.properties = %#v, want empty object", parameters["properties"])
+	}
+}
+
+// TestStreamCompletionSerializesTypedNilPropertiesAsEmptyObject locks in the
+// normalizeToolParameters fix: a tool whose parameters carry a typed-nil
+// properties map must serialize "properties":{} on the wire, never
+// "properties":null, because strict OpenAI-compatible servers (LM Studio)
+// reject the null form.
+func TestStreamCompletionSerializesTypedNilPropertiesAsEmptyObject(t *testing.T) {
+	var gotBody map[string]any
+	var gotRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		gotRaw = raw
+		if err := json.Unmarshal(raw, &gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"choices":[]}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:  "sk-secret",
+		BaseURL: server.URL + "/",
+		Model:   "gpt-test",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		Tools: []zeroruntime.ToolDefinition{{
+			Name:        "no_args",
+			Description: "Takes no arguments",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any(nil)},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if !strings.Contains(string(gotRaw), `"properties":{}`) {
+		t.Fatalf("request body must serialize properties as an empty object, got: %s", gotRaw)
+	}
+	if strings.Contains(string(gotRaw), `"properties":null`) {
+		t.Fatalf("request body must not serialize properties as null, got: %s", gotRaw)
+	}
+	tools := gotBody["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	functionDefinition := tool["function"].(map[string]any)
+	parameters := functionDefinition["parameters"].(map[string]any)
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok || len(properties) != 0 {
+		t.Fatalf("parameters.properties = %#v, want empty object", parameters["properties"])
+	}
 }
 
 func TestNewRequiresModelButNotAPIKey(t *testing.T) {
@@ -193,14 +260,14 @@ func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"hello "}}]}`)
-		writeSSE(w, `{"choices":[{"delta":{"content":"zero"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"zero"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}`)
 		writeSSE(w, `[DONE]`)
 	})
 
 	events := collectProviderEvents(t, provider)
 	assertEvent(t, events[0], zeroruntime.StreamEventText, "hello ")
 	assertEvent(t, events[1], zeroruntime.StreamEventText, "zero")
-	if events[2].Type != zeroruntime.StreamEventUsage || events[2].Usage.PromptTokens != 12 || events[2].Usage.CompletionTokens != 5 || events[2].Usage.CachedInputTokens != 3 {
+	if events[2].Type != zeroruntime.StreamEventUsage || events[2].Usage.PromptTokens != 12 || events[2].Usage.CompletionTokens != 5 || events[2].Usage.CachedInputTokens != 3 || events[2].Usage.CacheWriteTokens != 2 {
 		t.Fatalf("unexpected usage event: %#v", events[2])
 	}
 	if events[3].Type != zeroruntime.StreamEventDone {
@@ -860,6 +927,51 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionNormalizesServiceTier(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "priority", input: "priority", want: "priority"},
+		{name: "flex with surrounding whitespace", input: " FlEx ", want: "flex"},
+		{name: "unsupported omitted", input: "standard", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeSSE(w, `[DONE]`)
+			}))
+			defer server.Close()
+
+			provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:    []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				ServiceTier: test.input,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion: %v", err)
+			}
+			drain(stream)
+			if test.want == "" {
+				if _, ok := gotBody["service_tier"]; ok {
+					t.Fatalf("service_tier = %#v, want omitted", gotBody["service_tier"])
+				}
+				return
+			}
+			if got := gotBody["service_tier"]; got != test.want {
+				t.Fatalf("service_tier = %#v, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestStreamCompletionOmitsReasoningEffortWhenUnsetOrInvalid(t *testing.T) {
 	for _, effort := range []string{"", "none", "bogus"} {
 		var gotBody map[string]any
@@ -945,9 +1057,9 @@ func TestStreamCompletionSurfacesLengthFinishReason(t *testing.T) {
 		t.Fatalf("done FinishReason = %q, want %q", doneReason, zeroruntime.FinishReasonLength)
 	}
 
-	// And it round-trips through the runtime collector as Truncated.
+	// And it round-trips through the runtime collector's FinishReason.
 	collected := zeroruntime.CollectStream(context.Background(), replay(events))
-	if !collected.Truncated() || collected.FinishReason != zeroruntime.FinishReasonLength {
+	if collected.FinishReason != zeroruntime.FinishReasonLength {
 		t.Fatalf("collected = %+v, want truncated length", collected)
 	}
 }
@@ -1432,5 +1544,68 @@ func TestOpenAIRequestPreservesCacheablePrefixAcrossTurns(t *testing.T) {
 	}
 	if first["prompt_cache_key"] != second["prompt_cache_key"] || first["prompt_cache_key"] != "session-stable-prefix" {
 		t.Fatalf("wire prompt cache key must remain stable: first=%#v second=%#v", first["prompt_cache_key"], second["prompt_cache_key"])
+	}
+}
+
+// TestStreamCompletionSerializesNonMapPropertiesAsEmptyObject locks in the
+// normalizeToolParameters type-assert branch: when a tool's parameters carry a
+// `properties` field whose value is a non-map (e.g., an empty slice), it must
+// be normalized to "properties":{} on the wire, never "properties":[] or
+// "properties":null.
+func TestStreamCompletionSerializesNonMapPropertiesAsEmptyObject(t *testing.T) {
+	var gotBody map[string]any
+	var gotRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		gotRaw = raw
+		if err := json.Unmarshal(raw, &gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"choices":[]}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:  "sk-secret",
+		BaseURL: server.URL + "/",
+		Model:   "gpt-test",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		Tools: []zeroruntime.ToolDefinition{{
+			Name:        "no_args",
+			Description: "Takes no arguments",
+			Parameters:  map[string]any{"type": "object", "properties": []any{}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if !strings.Contains(string(gotRaw), `"properties":{}`) {
+		t.Fatalf("request body must serialize properties as an empty object, got: %s", gotRaw)
+	}
+	if strings.Contains(string(gotRaw), `"properties":null`) {
+		t.Fatalf("request body must not serialize properties as null, got: %s", gotRaw)
+	}
+	if strings.Contains(string(gotRaw), `"properties":[]`) {
+		t.Fatalf("request body must not serialize properties as an empty array, got: %s", gotRaw)
+	}
+	tools := gotBody["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	functionDefinition := tool["function"].(map[string]any)
+	parameters := functionDefinition["parameters"].(map[string]any)
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok || len(properties) != 0 {
+		t.Fatalf("parameters.properties = %#v, want empty object", parameters["properties"])
 	}
 }

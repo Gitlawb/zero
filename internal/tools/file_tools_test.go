@@ -15,7 +15,7 @@ func TestReadFileToolReadsLineRanges(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":       "notes.txt",
 		"start_line": 2,
 		"max_lines":  2,
@@ -26,8 +26,8 @@ func TestReadFileToolReadsLineRanges(t *testing.T) {
 	}
 	for _, want := range []string{
 		"File: notes.txt (lines 2-3 of 4)",
-		"2 | beta",
-		"3 | gamma",
+		"2→beta",
+		"3→gamma",
 	} {
 		if !strings.Contains(result.Output, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, result.Output)
@@ -38,11 +38,113 @@ func TestReadFileToolReadsLineRanges(t *testing.T) {
 	}
 }
 
+func TestReadFileToolReadsCanonicalLineRange(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path":   "notes.txt",
+		"offset": 2,
+		"limit":  2,
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if result.Truncated {
+		t.Fatalf("canonical limit defines the requested range and must not mark it truncated: %#v", result.Meta)
+	}
+	if !strings.Contains(result.Output, "2→beta") || !strings.Contains(result.Output, "3→gamma") {
+		t.Fatalf("canonical range returned the wrong lines: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "alpha") || strings.Contains(result.Output, "delta") {
+		t.Fatalf("canonical range leaked outside requested slice: %q", result.Output)
+	}
+}
+
+func TestReadFileToolCanonicalOffsetPastEnd(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "notes.txt", "offset": 10,
+	})
+
+	if result.Status != StatusOK || !strings.Contains(result.Output, "offset 10 is past the end") {
+		t.Fatalf("expected canonical out-of-range message, got status=%s output=%q", result.Status, result.Output)
+	}
+	if strings.Contains(result.Output, "start_line") {
+		t.Fatalf("out-of-range message exposed legacy argument: %q", result.Output)
+	}
+}
+
+func TestReadFileToolMixedLegacyRangesPreferLines(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path":        "notes.txt",
+		"start_line":  2,
+		"end_line":    3,
+		"max_lines":   2,
+		"byte_offset": 0,
+		"byte_limit":  readFileByteChunkMax,
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("mixed legacy range should recover, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "2→beta") || !strings.Contains(result.Output, "3→gamma") {
+		t.Fatalf("mixed legacy range did not prefer lines: %q", result.Output)
+	}
+}
+
+func TestReadFileToolCombinesLegacyStartWithCanonicalLimit(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "notes.txt", "start_line": 2, "limit": 2,
+	})
+
+	if result.Status != StatusOK || result.Truncated {
+		t.Fatalf("mixed compatible range should be exact, got status=%s truncated=%v: %s", result.Status, result.Truncated, result.Output)
+	}
+	if !strings.Contains(result.Output, "2→beta") || !strings.Contains(result.Output, "3→gamma") {
+		t.Fatalf("mixed compatible range returned the wrong lines: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "alpha") || strings.Contains(result.Output, "delta") {
+		t.Fatalf("mixed compatible range leaked outside requested slice: %q", result.Output)
+	}
+}
+
+func TestFileToolSchemasExposeOnlyCanonicalArguments(t *testing.T) {
+	readProperties := NewScopedReadFileTool(t.TempDir(), nil).Parameters().Properties
+	for _, want := range []string{"path", "offset", "limit", "byte_offset", "byte_limit"} {
+		if _, ok := readProperties[want]; !ok {
+			t.Fatalf("read_file schema missing %q", want)
+		}
+	}
+	for _, legacy := range []string{"start_line", "end_line", "max_lines"} {
+		if _, ok := readProperties[legacy]; ok {
+			t.Fatalf("read_file schema must not expose legacy argument %q", legacy)
+		}
+	}
+
+	grepProperties := NewScopedGrepTool(t.TempDir(), nil).Parameters().Properties
+	if _, ok := grepProperties["case_insensitive"]; !ok {
+		t.Fatal("grep schema missing case_insensitive")
+	}
+	if _, ok := grepProperties["-i"]; ok {
+		t.Fatal("grep schema must not expose the -i alias")
+	}
+}
+
 func TestReadFileToolMarksTruncation(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "a\nb\nc\nd\ne")
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":      "notes.txt",
 		"max_lines": 2,
 	})
@@ -52,7 +154,7 @@ func TestReadFileToolMarksTruncation(t *testing.T) {
 	}
 	// The cut must be visible in the rendered output, not just the Truncated flag,
 	// and must tell the model where to continue.
-	if !strings.Contains(result.Output, "[truncated:") || !strings.Contains(result.Output, "start_line=3") {
+	if !strings.Contains(result.Output, "[truncated:") || !strings.Contains(result.Output, "offset=3") {
 		t.Fatalf("expected truncation marker pointing to the next line, got %q", result.Output)
 	}
 }
@@ -61,14 +163,14 @@ func TestReadFileToolAppliesByteBudget(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "large.txt"), strings.Repeat("0123456789abcdef\n", 9000))
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "large.txt",
 	})
 
 	if result.Status != StatusOK || !result.Truncated {
 		t.Fatalf("expected ok+truncated, got status=%s truncated=%v", result.Status, result.Truncated)
 	}
-	if !strings.Contains(result.Output, "output exceeded") || !strings.Contains(result.Output, "start_line") {
+	if !strings.Contains(result.Output, "output exceeded") || !strings.Contains(result.Output, "offset/limit") {
 		t.Fatalf("expected byte-budget continuation hint, got %q", result.Output[len(result.Output)-200:])
 	}
 	if result.Meta["raw_bytes"] == "" || result.Meta["emitted_bytes"] == "" {
@@ -89,7 +191,7 @@ func TestReadFileToolTracksWholeFileHashWhenReadingSmallRange(t *testing.T) {
 	writeTestFile(t, path, content)
 
 	tracker := NewFileTracker()
-	tool := NewReadFileTool(root).(optionsAwareTool)
+	tool := NewScopedReadFileTool(root, nil).(optionsAwareTool)
 	result := tool.RunWithOptions(context.Background(), map[string]any{
 		"path":       "large.txt",
 		"start_line": 1000,
@@ -120,7 +222,7 @@ func TestReadFileToolRejectsOutsideWorkspace(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "secret.txt")
 	writeTestFile(t, outside, "secret")
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": outside,
 	})
 
@@ -138,7 +240,7 @@ func TestListDirectoryToolListsRecursivelyAndIgnoresJunk(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "node_modules", "leftpad", "index.js"), "module.exports = 1")
 	writeTestFile(t, filepath.Join(root, "README.md"), "# Zero")
 
-	result := NewListDirectoryTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedListDirectoryTool(root, nil).Run(context.Background(), map[string]any{
 		"path":      ".",
 		"recursive": true,
 		"max_depth": 2,
@@ -164,7 +266,7 @@ func TestGlobToolFindsMatchesWithLimit(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "nested", "b.go"), "package nested")
 	writeTestFile(t, filepath.Join(root, "nested", "c.txt"), "text")
 
-	result := NewGlobTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "**/*.go",
 		"limit":   1,
 	})
@@ -190,7 +292,7 @@ func TestGlobToolCanIncludeDirectoryMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := NewGlobTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":      "src",
 		"include_dirs": true,
 	})
@@ -208,7 +310,7 @@ func TestGrepToolSearchesContent(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "cmd", "main.go"), "package main\nfunc main() {}\n")
 	writeTestFile(t, filepath.Join(root, "README.md"), "main docs\n")
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":    "func main",
 		"path":       ".",
 		"glob":       "**/*.go",
@@ -230,7 +332,7 @@ func TestGrepToolMakesHeadLimitTruncationVisible(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "needle 1\nneedle 2\nneedle 3\n")
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":    "needle",
 		"path":       ".",
 		"head_limit": 2,
@@ -260,7 +362,7 @@ func TestGrepToolStopsAfterHeadLimitInContentMode(t *testing.T) {
 	}
 	writeTestFile(t, filepath.Join(root, "notes.txt"), builder.String())
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":    "needle",
 		"path":       ".",
 		"head_limit": 3,
@@ -320,7 +422,7 @@ func TestGrepGlobMatchesRelativeToSearchDir(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "subdir", "a.go"), "package sub\nfunc target() {}\n")
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "func target",
 		"path":    "subdir",
 		"glob":    "*.go",
@@ -339,7 +441,7 @@ func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "a.txt"), "needle\nneedle\n")
 	writeTestFile(t, filepath.Join(root, "b.txt"), "needle\n")
 
-	files := NewGrepTool(root).Run(context.Background(), map[string]any{
+	files := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "files_with_matches",
 	})
@@ -350,7 +452,7 @@ func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 		t.Fatalf("expected both files, got %q", files.Output)
 	}
 
-	count := NewGrepTool(root).Run(context.Background(), map[string]any{
+	count := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "count",
 	})
@@ -366,7 +468,7 @@ func TestGrepCountModeCountsMultipleHitsPerLine(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "needle needle\nneedle\n")
 
-	count := NewGrepTool(root).Run(context.Background(), map[string]any{
+	count := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "count",
 	})
@@ -393,7 +495,7 @@ func TestGrepDoesNotFollowSymlinkOutsideWorkspace(t *testing.T) {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 
-	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "content",
 	})
@@ -421,7 +523,7 @@ func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 
-	res := NewGrepTool(linkRoot).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(linkRoot, nil).Run(context.Background(), map[string]any{
 		"pattern":     "func main",
 		"output_mode": "content",
 	})
@@ -436,7 +538,7 @@ func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
 	}
 
 	// files_with_matches mode must likewise be clean-relative.
-	res = NewGrepTool(linkRoot).Run(context.Background(), map[string]any{
+	res = NewScopedGrepTool(linkRoot, nil).Run(context.Background(), map[string]any{
 		"pattern":     "func main",
 		"output_mode": "files_with_matches",
 	})
@@ -618,7 +720,7 @@ func TestUnscopedWriteRefusesInRootSymlinkTraversal(t *testing.T) {
 	if err := os.Symlink(filepath.Join(workspace, "subdir"), link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(workspace, nil).Run(context.Background(), map[string]any{
 		"path":    filepath.Join(link, "x.txt"),
 		"content": "nope",
 	})
@@ -667,7 +769,7 @@ func TestScopedWriteThroughSymlinkIntoGrantedRoot(t *testing.T) {
 func TestUnscopedToolsStillRejectOutsideWrites(t *testing.T) {
 	workspace := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "escape.txt")
-	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(workspace, nil).Run(context.Background(), map[string]any{
 		"path":    outside,
 		"content": "nope",
 	})
@@ -705,7 +807,7 @@ func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
 	mustWrite("vendor/pkg/lib.go", "needle here")
 	mustWrite(".worktrees/branch/main.go", "needle here")
 
-	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "files_with_matches",
 	})
@@ -779,7 +881,7 @@ func TestGrepSkipsBinaryLikeFiles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "image.png"), "needle hidden")
 	writeTestFile(t, filepath.Join(root, "archive.zip"), "needle hidden")
 
-	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "files_with_matches",
 	})
@@ -793,7 +895,7 @@ func TestGrepSkipsBinaryLikeFiles(t *testing.T) {
 		t.Fatalf("expected only keep.txt, got:\n%s", res.Output)
 	}
 
-	direct := NewGrepTool(root).Run(context.Background(), map[string]any{
+	direct := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "needle",
 		"path":    "image.png",
 	})
@@ -813,7 +915,7 @@ func TestGlobSkipsWorkspaceExcludedDirectoriesAndBinaryFiles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, ".worktrees", "branch", "main.go"), "package main")
 	writeTestFile(t, filepath.Join(root, "image.png"), "binary")
 
-	res := NewGlobTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "**/*",
 		"limit":   20,
 	})
@@ -853,7 +955,7 @@ func TestReadFileToolRecoversBackwardsRange(t *testing.T) {
 	for _, want := range []string{
 		"end_line 2 was before start_line 3", // the note
 		"only line 3 was read",
-		"3 | gamma",
+		"3→gamma",
 	} {
 		if !strings.Contains(result.Output, want) {
 			t.Fatalf("expected %q in output, got %q", want, result.Output)
@@ -882,7 +984,7 @@ func TestReadFileToolValidRangeUnchangedByRecovery(t *testing.T) {
 	// Byte-for-byte: header, blank separator, the exact selected lines, and no
 	// recovery note or trailing content. An altered header/separator or a stray
 	// out-of-range line would fail this where a substring check would not.
-	const want = "File: notes.txt (lines 2-4 of 5)\n\n2 | beta\n3 | gamma\n4 | delta"
+	const want = "File: notes.txt (lines 2-4 of 5)\n\n2→beta\n3→gamma\n4→delta"
 	if result.Output != want {
 		t.Fatalf("valid-range output changed by the recovery path:\n got: %q\nwant: %q", result.Output, want)
 	}

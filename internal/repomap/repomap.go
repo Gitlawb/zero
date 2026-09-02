@@ -2,7 +2,6 @@
 package repomap
 
 import (
-	"io/fs"
 	"sort"
 	"strings"
 
@@ -80,10 +79,6 @@ func Scan(root string, options Options) (Snapshot, error) {
 	snapshot.ImportantFiles = importantFilePaths(files)
 	snapshot.Tree = buildTree(files)
 	return snapshot, err
-}
-
-func handleWalkError(cleanRoot string, current string, entry fs.DirEntry, walkErr error, truncated *bool) (bool, error) {
-	return workspaceindex.HandleWalkError(cleanRoot, current, entry, walkErr, truncated)
 }
 
 func fileDepth(rel string) int {

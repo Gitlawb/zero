@@ -25,7 +25,9 @@ type TokenResolver func(ctx context.Context, forceRefresh bool) (header string, 
 //
 // base carries the API-key auth config (key + default header/scheme). setExtra
 // (optional) sets the provider's non-auth headers on every attempt. Transient
-// retries (429/503/529) are handled by the inner SendWithRetry.
+// retries are handled by the inner SendWithRetry: 429/503/529 on their own
+// budget, and provably pre-send transport failures (refused or timed-out
+// connect, DNS, TLS handshake) on a separate, shorter one.
 func SendWithAuthRetry(
 	ctx context.Context,
 	client *http.Client,

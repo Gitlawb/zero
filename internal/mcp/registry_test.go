@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +67,62 @@ func TestRegisterToolsAddsPromptGatedMCPTools(t *testing.T) {
 	}
 	if client.closed != 1 {
 		t.Fatalf("client.closed after runtime close = %d, want 1", client.closed)
+	}
+}
+
+func TestRegisterToolsPublishesServerToolsInOneGeneration(t *testing.T) {
+	registry := tools.NewRegistry()
+	before := registry.Snapshot().Generation
+	client := &fakeToolClient{listed: []RemoteTool{
+		{Name: "lookup", Description: "Lookup documentation"},
+		{Name: "search", Description: "Search documentation"},
+	}}
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{ClientFactory: func(context.Context, Server) (ToolClient, error) {
+		return client, nil
+	}})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+
+	after := registry.Snapshot()
+	if after.Generation != before+1 {
+		t.Fatalf("registry generation = %d, want %d", after.Generation, before+1)
+	}
+	for _, name := range []string{"mcp_docs_lookup", "mcp_docs_search"} {
+		if _, ok := registry.Get(name); !ok {
+			t.Fatalf("expected %s to be published in the batch", name)
+		}
+	}
+}
+
+func TestRegisterToolsPublishesNoneWhenServerToolValidationFails(t *testing.T) {
+	registry := tools.NewRegistry()
+	before := registry.Snapshot().Generation
+	client := &fakeToolClient{listed: []RemoteTool{
+		{Name: "lookup", Description: "Lookup documentation"},
+		{Name: "", Description: "Invalid nameless tool"},
+	}}
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{ClientFactory: func(context.Context, Server) (ToolClient, error) {
+		return client, nil
+	}})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+
+	if got := registry.Snapshot().Generation; got != before {
+		t.Fatalf("registry generation = %d, want unchanged %d", got, before)
+	}
+	if _, ok := registry.Get("mcp_docs_lookup"); ok {
+		t.Fatal("valid prefix of rejected server batch was published")
+	}
+	if skipped := runtime.Skipped(); len(skipped) != 1 || skipped[0].Name != "docs" || skipped[0].Err == nil {
+		t.Fatalf("Skipped() = %#v, want one validation failure for docs", skipped)
 	}
 }
 
@@ -154,16 +209,16 @@ func TestRegisterToolsSkipsUnreachableServerAndKeepsOthers(t *testing.T) {
 }
 
 func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
-	// firecrawl is seeded by config.DefaultMCPServers with no credentials; when a
-	// user never configures it, a connect failure (e.g. the real HTTP 401 from
-	// issue #552) must be recorded as UnconfiguredDefault so callers can avoid
+	// Exa is seeded by config.DefaultMCPServers with no credentials; when a
+	// user never configures it, a connect failure must be recorded as
+	// UnconfiguredDefault so callers can avoid
 	// warning about a server the user never asked for. "custom" is configured by
 	// the user and must NOT be flagged even though it also fails to connect.
 	registry := tools.NewRegistry()
 
 	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-		"firecrawl": config.DefaultMCPServers()["firecrawl"],
-		"custom":    {Type: "stdio", Command: "custom-mcp"},
+		"exa":    config.DefaultMCPServers()["exa"],
+		"custom": {Type: "stdio", Command: "custom-mcp"},
 	}}, RegisterOptions{
 		ClientFactory: func(_ context.Context, server Server) (ToolClient, error) {
 			return nil, errors.New(server.Name + " connect failed")
@@ -178,12 +233,12 @@ func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
 	for _, skipped := range runtime.Skipped() {
 		byName[skipped.Name] = skipped
 	}
-	firecrawl, ok := byName["firecrawl"]
+	exa, ok := byName["exa"]
 	if !ok {
-		t.Fatalf("Skipped() = %#v, want an entry for firecrawl", runtime.Skipped())
+		t.Fatalf("Skipped() = %#v, want an entry for exa", runtime.Skipped())
 	}
-	if !firecrawl.UnconfiguredDefault {
-		t.Fatalf("Skipped()[firecrawl] = %#v, want UnconfiguredDefault", firecrawl)
+	if !exa.UnconfiguredDefault {
+		t.Fatalf("Skipped()[exa] = %#v, want UnconfiguredDefault", exa)
 	}
 	custom, ok := byName["custom"]
 	if !ok {
@@ -289,7 +344,7 @@ func TestRegistryToolIsDeferredEligible(t *testing.T) {
 
 // TestRegistryToolReportsMCPServerName verifies the registryTool reports its true
 // configured server name (not the sanitized tool-name token) so the deferred-tools
-// reminder labels a multi-token server correctly via tools.DeferredLine.
+// discovery label names a multi-token server correctly via tools.DeferredSource.
 func TestRegistryToolReportsMCPServerName(t *testing.T) {
 	client := &fakeToolClient{}
 	// A server name that sanitizes to a token containing an underscore ("git_hub"):
@@ -305,14 +360,9 @@ func TestRegistryToolReportsMCPServerName(t *testing.T) {
 		t.Fatalf("MCPServerName() = %q, want %q", tool.MCPServerName(), "git hub")
 	}
 
-	// DeferredLine must prefer the reported server name over the name-derived token.
-	line := tools.DeferredLine(tool)
-	if !strings.Contains(line, "server: git hub") {
-		t.Fatalf("DeferredLine = %q, want it to label server as %q via MCPServerName()", line, "git hub")
-	}
-	// The truncated token-only label ("git") must NOT be the server segment.
-	if strings.Contains(line, "server: git |") {
-		t.Fatalf("DeferredLine = %q, mislabeled multi-token server with the truncated token", line)
+	// DeferredSource must prefer the reported server name over the name-derived token.
+	if source := tools.DeferredSource(tool); source != "git hub" {
+		t.Fatalf("DeferredSource = %q, want %q via MCPServerName()", source, "git hub")
 	}
 }
 

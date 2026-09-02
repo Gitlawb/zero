@@ -226,7 +226,7 @@ func (m model) handleSTTModelSelection(value string) (model, string) {
 			// instead); this is the manual-setup path (e.g. Termux).
 			hint += " Set stt.localModelPath to a model directory (see docs/dictation.md)."
 		} else {
-			hint += " Run /voice, then hold Space to dictate."
+			hint += " Run /voice; " + voiceCaptureUsage + "."
 		}
 		return m, hint
 	}
@@ -248,13 +248,6 @@ func (m model) handleSTTModelSelection(value string) (model, string) {
 	}
 	hasKey := m.dictation.keyAvailable != nil && m.dictation.keyAvailable(provider)
 	return m.openSTTKeyPrompt(provider, value, hasKey), ""
-}
-
-// newSTTDownloadPicker builds the model-download chooser, seeded with the
-// curated shortlist. The full model list from the release is fetched
-// asynchronously and merged in (see fetchSTTModelsCmd / handleSTTModelsFetched).
-func (m model) newSTTDownloadPicker() *commandPicker {
-	return newSTTDownloadPickerFrom(dictation.ModelVariants(), true, m.dictation.downloadRoot, m.engineDownloaded(), m.dictation.cfg.LocalModelPath)
 }
 
 // engineDownloaded reports whether the shared engine is already on disk.
@@ -380,7 +373,7 @@ func (m model) applyInstalledModel(v dictation.ModelVariant) (model, tea.Cmd) {
 	if aerr != nil {
 		return m.appendSystemNotice("Couldn't save the config: " + aerr.Error()), nil
 	}
-	return m.appendSystemNotice(v.Label + " is already downloaded — dictation ready. Run /voice, then hold Space to dictate."), nil
+	return m.showTransientNoticeInline(v.Label+" is ready. Run /voice to start dictating.", transientNoticeSuccess), nil
 }
 
 // sttDownloadVariants returns the variants currently offered — the full fetched

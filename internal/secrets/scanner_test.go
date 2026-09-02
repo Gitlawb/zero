@@ -50,11 +50,11 @@ func TestRedactNestedSecretStillRemovesWholeBlock(t *testing.T) {
 	// AWS key shape, which sorts before private_key_block). Redaction must remove
 	// the WHOLE block: if the inner match were replaced first it would corrupt the
 	// block's exact string and leave the BEGIN/END header in the output.
-	key := "-----BEGIN PRIVATE KEY-----\nAKIAABCDEFGHIJKLMNOP\nMIIEowIBAAKCAQEAbody\n-----END PRIVATE KEY-----"
+	key := "-----BEGIN PRIVATE KEY-----\nAKIAIOSFODNN7EXAMPLE\nMIIEowIBAAKCAQEAbody\n-----END PRIVATE KEY-----"
 	text := "leaked:\n" + key + "\ndone"
 
 	redacted, _ := Redact(text)
-	for _, leaked := range []string{"PRIVATE KEY", "AKIAABCDEFGHIJKLMNOP", "MIIEowIBAAKCAQEAbody"} {
+	for _, leaked := range []string{"PRIVATE KEY", "AKIAIOSFODNN7EXAMPLE", "MIIEowIBAAKCAQEAbody"} {
 		if strings.Contains(redacted, leaked) {
 			t.Fatalf("redaction leaked %q from a nested-secret block: %q", leaked, redacted)
 		}
@@ -102,11 +102,12 @@ func TestRedactNoMatchReturnsInputUnchanged(t *testing.T) {
 }
 
 func TestScanDetectsModernPrefixedOpenAIKeys(t *testing.T) {
-	// Modern keys carry sk-proj-/sk-svcacct- prefixes and use - and _ in the body;
-	// the legacy sk-<alnum> pattern would have missed them.
+	// Modern keys carry sk-proj-/sk-svcacct-/sk-admin- prefixes and use - and _ in
+	// the body; the legacy sk-<alnum> pattern would have missed them.
 	for _, key := range []string{
 		"sk-proj-abcDEF123_ghiJKL456-mnoPQR789stu",
 		"sk-svcacct-abcDEF123_ghiJKL456-mnoPQR789",
+		"sk-admin-abcDEF123_ghiJKL456-mnoPQR789stu",
 	} {
 		redacted, findings := Redact("token=" + key)
 		if len(findings) != 1 || findings[0].Type != "openai_key" {
@@ -117,6 +118,187 @@ func TestScanDetectsModernPrefixedOpenAIKeys(t *testing.T) {
 		}
 		if !strings.Contains(redacted, "[REDACTED:openai_key]") {
 			t.Fatalf("missing typed placeholder for %q: %q", key, redacted)
+		}
+	}
+}
+
+func TestScanDetectsHyphenatedOpenAICompatibleKeys(t *testing.T) {
+	// Vendor-prefixed keys (OpenRouter sk-or-v1-, Fireworks sk-fw-, live keys)
+	// use hyphens beyond the enumerated prefixes. The broad sk-[A-Za-z0-9_-]
+	// pattern plus the digit filter must catch them without listing every vendor.
+	for _, key := range []string{
+		"sk-or-v1-1234567890abcdef1234567890abcdef1234567890abcdef1234",
+		// Vendor prefixes not in any allow-list; digit filter still accepts them.
+		"sk-fw-1SENTINEL_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"sk-live-1SENTINELaaaaaaaaaa_bbbbbbbbbb-cccc",
+		"sk-test-secret1234567890",
+	} {
+		redacted, findings := Redact("token=" + key)
+		if len(findings) != 1 || findings[0].Type != "openai_key" {
+			t.Fatalf("expected one openai_key finding for %q, got %#v", key, findings)
+		}
+		if strings.Contains(redacted, key) {
+			t.Fatalf("key leaked after redaction: %q", redacted)
+		}
+		if !strings.Contains(redacted, "[REDACTED:openai_key]") {
+			t.Fatalf("missing typed placeholder for %q: %q", key, redacted)
+		}
+	}
+}
+
+func TestScanDetectsLooseJWTForms(t *testing.T) {
+	// Compact JWS (three segments, including non-JSON payloads) and full
+	// compact JWE (five segments: header, encrypted key, IV, ciphertext, tag).
+	cases := []string{
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SENTINELsignature123",
+		"eyJhbGciOiJIUzI1NiJ9.U0VOVElORUxwYXlsb2Fk.SENTINELsignature123",
+		"eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.SENTINELencryptedkey.SENTINELiv.SENTINELciphertext.SENTINELtag12345",
+	}
+	for _, token := range cases {
+		redacted, findings := Redact("auth=" + token)
+		if len(findings) == 0 {
+			t.Fatalf("expected jwt finding for %q, got none", token)
+		}
+		if findings[0].Type != "jwt" {
+			t.Fatalf("expected jwt type for %q, got %#v", token, findings)
+		}
+		// Every segment must be gone: partial matches used to leave JWE
+		// ciphertext and authentication tags in the output.
+		if redacted != "auth=[REDACTED:jwt]" {
+			t.Fatalf("jwt incompletely redacted for %q: got %q", token, redacted)
+		}
+	}
+}
+
+func TestScanDetectsAnthropicKeys(t *testing.T) {
+	for _, key := range []string{
+		"sk-ant-api03-1234567890abcdefghijklmnopqrstuvwxyz-12345",
+		"sk-ant-1234567890abcdefghijklmnopqrstuvwxyz-12345",
+	} {
+		redacted, findings := Redact("token=" + key)
+		if len(findings) != 1 || findings[0].Type != "anthropic_key" {
+			t.Fatalf("expected one anthropic_key finding for %q, got %#v", key, findings)
+		}
+		if strings.Contains(redacted, key) {
+			t.Fatalf("key leaked after redaction: %q", redacted)
+		}
+		if !strings.Contains(redacted, "[REDACTED:anthropic_key]") {
+			t.Fatalf("missing typed placeholder for %q: %q", key, redacted)
+		}
+	}
+}
+
+func TestScanRedactsLongerKeysWithoutTailLeak(t *testing.T) {
+	cases := []struct {
+		wantType string
+		secret   string
+	}{
+		{"github_token", "ghp_1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdef"}, // 50 chars instead of 40
+		{"google_api_key", "AIzaSyA1234567890abcdefghijklmnopqrstuv12345678"},        // 50 chars instead of 39
+	}
+	for _, tc := range cases {
+		text := "longer key is " + tc.secret + " in text"
+		redacted, findings := Redact(text)
+		if len(findings) != 1 || findings[0].Type != tc.wantType {
+			t.Errorf("expected one %s finding, got %#v", tc.wantType, findings)
+			continue
+		}
+		wantRedacted := "longer key is [REDACTED:" + tc.wantType + "] in text"
+		if redacted != wantRedacted {
+			t.Errorf("redacted = %q, want %q", redacted, wantRedacted)
+		}
+	}
+}
+
+// Patterns whose body class allows "-" (slack_token, google_api_key, the
+// modern openai_key branch, jwt) must redact a secret that ends in "-" right
+// before a delimiter: a trailing \b anchor would have no word/non-word
+// transition to match there, forcing the engine to drop that last character
+// from the match and leaking it.
+func TestScanRedactsTrailingHyphenWithoutTailLeak(t *testing.T) {
+	cases := []struct {
+		wantType string
+		secret   string
+	}{
+		{"slack_token", "xoxb-1234567890-abcdefghi-"},
+		{"google_api_key", "AIzaSyA1234567890abcdefghijklmnopqrstu-"},
+		{"openai_key", "sk-proj-abcDEF123_ghiJKL456-mnoPQR789st-"},
+		{"jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fw-"},
+	}
+	for _, tc := range cases {
+		text := "secret is " + tc.secret + " end"
+		redacted, findings := Redact(text)
+		if len(findings) != 1 || findings[0].Type != tc.wantType {
+			t.Errorf("%s: expected one finding for %q, got %#v", tc.wantType, tc.secret, findings)
+			continue
+		}
+		if strings.Contains(redacted, "-  end") || strings.Contains(redacted, "-] end") {
+			t.Errorf("%s: trailing hyphen leaked: %q", tc.wantType, redacted)
+		}
+		wantRedacted := "secret is [REDACTED:" + tc.wantType + "] end"
+		if redacted != wantRedacted {
+			t.Errorf("%s: redacted = %q, want %q", tc.wantType, redacted, wantRedacted)
+		}
+	}
+}
+
+// A credential with more word characters appended right after its body (a
+// copy-paste artifact, an env-var-style suffix) must still have its real
+// secret material redacted, even though the appended run itself is outside
+// the body class and so is left un-redacted. A trailing \b anchor would find
+// no word/non-word transition there and, for a fixed or unbounded-greedy
+// quantifier, fail the whole match instead of backtracking, leaking the
+// credential entirely.
+func TestScanRedactsCredentialWithAppendedSuffix(t *testing.T) {
+	cases := []struct {
+		wantType string
+		secret   string
+		suffix   string
+	}{
+		{"aws_access_key_id", "AKIAIOSFODNN7EXAMPLE", "EXTRA"},
+		{"github_token", "ghp_1234567890abcdefghijklmnopqrstuvwxyz", "_suffix"},
+	}
+	for _, tc := range cases {
+		text := "token=" + tc.secret + tc.suffix + " end"
+		redacted, findings := Redact(text)
+		if len(findings) != 1 || findings[0].Type != tc.wantType {
+			t.Fatalf("%s: expected one finding for %q, got %#v", tc.wantType, tc.secret+tc.suffix, findings)
+		}
+		if findings[0].Match != tc.secret {
+			t.Fatalf("%s: matched %q, want the credential prefix %q", tc.wantType, findings[0].Match, tc.secret)
+		}
+		if strings.Contains(redacted, tc.secret) {
+			t.Fatalf("%s: credential leaked after redaction: %q", tc.wantType, redacted)
+		}
+		wantRedacted := "token=[REDACTED:" + tc.wantType + "]" + tc.suffix + " end"
+		if redacted != wantRedacted {
+			t.Fatalf("%s: redacted = %q, want %q", tc.wantType, redacted, wantRedacted)
+		}
+	}
+}
+
+func TestScanIgnoresKebabCaseStartingWithSk(t *testing.T) {
+	phrase := "sk-learn-machine-learning-model"
+	findings := Scan("testing " + phrase + " in text")
+	if len(findings) != 0 {
+		t.Errorf("expected no match for non-secret kebab-case phrase %q, got: %#v", phrase, findings)
+	}
+}
+
+func TestScanDetectsAlphabetOnlyKnownOpenAIPrefixes(t *testing.T) {
+	// Known OpenAI-issued prefixes redact even when the body has no digit.
+	// Unknown sk- forms still require a digit (see TestScanIgnoresKebabCase…).
+	for _, key := range []string{
+		"sk-proj-abcdefghijklmnopqrstuvwxyz",
+		"sk-svcacct-abcdefghijklmnopqrstuvwx",
+		"sk-admin-abcdefghijklmnopqrstuvwxyz",
+	} {
+		redacted, findings := Redact("token=" + key)
+		if len(findings) != 1 || findings[0].Type != "openai_key" {
+			t.Fatalf("expected one openai_key for alphabet-only %q, got %#v", key, findings)
+		}
+		if strings.Contains(redacted, key) {
+			t.Fatalf("alphabet-only known OpenAI form leaked: %q", redacted)
 		}
 	}
 }

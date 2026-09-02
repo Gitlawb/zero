@@ -105,7 +105,7 @@ Review.`)
 	_, err = ParseMarkdown(`---
 name: reviewer
 description: Reviews code
-reasoningEffort: ULTRA
+reasoningEffort: IMPOSSIBLE
 ---
 Review.`)
 	if err == nil || !strings.Contains(err.Error(), "unknown reasoning effort") {
@@ -379,9 +379,9 @@ Prompt.`)
 
 func TestKnownToolNamesMatchCoreRegistry(t *testing.T) {
 	// web_search is only registered when a search backend is configured; set one so
-	// CoreTools() exposes the full set this list is meant to mirror.
+	// CoreToolsScoped(, nil) exposes the full set this list is meant to mirror.
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
-	core := tools.CoreTools(t.TempDir())
+	core := tools.CoreToolsScoped(t.TempDir(), nil)
 	got := make([]string, 0, len(knownToolNames))
 	for name := range knownToolNames {
 		got = append(got, name)

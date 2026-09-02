@@ -13,6 +13,8 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -21,7 +23,6 @@ import (
 var responseStyles = []string{"balanced", "concise", "explanatory", "review"}
 
 const tuiCompactionPreserveLast = 8
-const tuiCompactionMaxPromptChars = 8000
 const compactStatusRowID = "compact/status"
 
 var compactFrames = []string{"⠂", "⠒", "⠲", "⠴"}
@@ -83,6 +84,96 @@ func (m model) handleEffortCommand(args string) (model, string) {
 	m.reasoningEffort = requested
 	m = m.markProfileEffortTouched()
 	return m, m.effortStatusCard(string(requested), "Reasoning effort preference is stored for this TUI session.")
+}
+
+func (m model) handleFastCommand(args string) (model, string) {
+	if strings.TrimSpace(args) != "" {
+		return m, m.fastStatusText("Use /fast to toggle fast mode for supported ChatGPT subscription models.")
+	}
+	if m.pending {
+		return m, m.fastStatusText("Finish or stop the current run before changing fast mode.")
+	}
+	if !m.fastModeSupported() {
+		m.serviceTier = ""
+		return m, m.fastStatusText("Fast mode is available only for ChatGPT subscription models that advertise it.")
+	}
+	if m.activeServiceTier() == "priority" {
+		m.serviceTier = ""
+	} else {
+		m.serviceTier = "priority"
+	}
+	return m, m.fastStatusText("Fast mode applies to the next request for this ChatGPT subscription model.")
+}
+
+func (m model) fastStatusText(detail string) string {
+	state := "off"
+	if m.activeServiceTier() == "priority" {
+		state = "on"
+	}
+	fields := []commandField{
+		{Key: "fast mode", Value: state},
+		{Key: "model", Value: displayValue(m.modelName, "none")},
+	}
+	if detail == "" {
+		detail = "Use /fast to toggle fast mode for supported ChatGPT subscription models."
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:   "Fast",
+		Summary: []string{"fast mode: " + state},
+		Sections: []commandCardSection{{
+			Title:  "State",
+			Fields: fields,
+			Lines:  []string{detail},
+		}},
+	})
+}
+
+func (m model) activeServiceTier() string {
+	if m.serviceTier == "priority" && m.fastModeSupported() {
+		return "priority"
+	}
+	return ""
+}
+
+func (m model) fastModeSupported() bool {
+	// Priority is a ChatGPT subscription capability. Never forward it for
+	// metered provider profiles, even if a third-party catalog advertises it.
+	if providercatalog.NormalizeID(m.providerProfile.CatalogID) != "chatgpt" {
+		return false
+	}
+	for _, model := range m.discoveredModelsForActiveProvider() {
+		if !strings.EqualFold(strings.TrimSpace(model.ID), strings.TrimSpace(m.modelName)) {
+			continue
+		}
+		for _, tier := range model.ServiceTiers {
+			if normalizeTUIServiceTier(tier) == "priority" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func (m model) discoveredModelsForActiveProvider() []providermodeldiscovery.Model {
+	for _, key := range []string{m.providerProfile.CatalogID, m.providerProfile.Name, m.providerName} {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if models := m.modelPickerLiveByProvider[key]; len(models) > 0 {
+			return models
+		}
+	}
+	return nil
+}
+
+func normalizeTUIServiceTier(tier string) string {
+	tier = strings.ToLower(strings.TrimSpace(tier))
+	if tier == "fast" {
+		return "priority"
+	}
+	return tier
 }
 
 // effortStatusCard renders the small inline confirmation card shown after a
@@ -237,11 +328,38 @@ func (m model) availableReasoningEfforts() []modelregistry.ReasoningEffort {
 	if strings.TrimSpace(m.modelName) == "" {
 		return nil
 	}
+	if efforts, found := m.discoveredReasoningEfforts(); found {
+		return efforts
+	}
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		return nil
 	}
 	return registry.ReasoningEfforts(m.modelName)
+}
+
+func (m model) discoveredReasoningEfforts() ([]modelregistry.ReasoningEffort, bool) {
+	return reasoningEffortsFromModels(m.discoveredModelsForActiveProvider(), m.modelName)
+}
+
+func reasoningEffortsFromModels(models []providermodeldiscovery.Model, modelName string) ([]modelregistry.ReasoningEffort, bool) {
+	for _, discovered := range models {
+		if !strings.EqualFold(strings.TrimSpace(discovered.ID), strings.TrimSpace(modelName)) {
+			continue
+		}
+		seen := map[modelregistry.ReasoningEffort]bool{}
+		efforts := make([]modelregistry.ReasoningEffort, 0, len(discovered.ReasoningEfforts))
+		for _, raw := range discovered.ReasoningEfforts {
+			effort := modelregistry.ReasoningEffort(strings.ToLower(strings.TrimSpace(raw)))
+			if effort == modelregistry.ReasoningEffortNone || !modelregistry.ValidReasoningEffort(effort) || seen[effort] {
+				continue
+			}
+			seen[effort] = true
+			efforts = append(efforts, effort)
+		}
+		return efforts, true
+	}
+	return nil, false
 }
 
 func (m model) effortDisplay() string {
@@ -842,8 +960,8 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 	beforeEvents := append([]sessions.Event{}, m.sessionEvents...)
 	beforeTokens := estimateTranscriptTokens(m.transcript)
 	plan, err := m.sessionStore.PlanCompaction(m.activeSession.SessionID, sessions.CompactionOptions{
-		PreserveLast:   tuiCompactionPreserveLast,
-		MaxPromptChars: tuiCompactionMaxPromptChars,
+		PreserveLast: tuiCompactionPreserveLast,
+		SkipPrompt:   true,
 	})
 	if err != nil {
 		return m, CompactResult{}, err
@@ -857,13 +975,26 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 		}, nil
 	}
 
-	summary, err := m.summarizeCompactionPlan(plan)
+	rawEvents, err := m.sessionStore.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		return m, CompactResult{}, fmt.Errorf("read session events for compaction: %w", err)
+	}
+	compactableEvents, err := sessionEventsForRefs(rawEvents, plan.CompactableEvents)
 	if err != nil {
 		return m, CompactResult{}, err
 	}
+	summaryResult, err := m.summarizeCompactionPlan(plan, sessions.CompactionMessages(compactableEvents))
+	if err != nil {
+		return m, CompactResult{}, err
+	}
+	// PromptChars counts the text content sent to the provider: the shared
+	// system instruction plus projected message/tool payloads. Provider protocol
+	// framing is intentionally excluded.
+	plan.PromptChars = len(agent.CompactionSummaryInstructions) + summaryResult.ProjectedChars
+	plan.Truncated = summaryResult.Truncated
 	if _, err := m.sessionStore.RecordCompaction(m.activeSession.SessionID, sessions.RecordCompactionInput{
 		Plan:    plan,
-		Summary: summary,
+		Summary: summaryResult.SummaryText,
 	}); err != nil {
 		return m, CompactResult{}, err
 	}
@@ -885,32 +1016,47 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 		Compacted:    len(events) < len(beforeEvents)+1,
 		BeforeTokens: beforeTokens,
 		AfterTokens:  estimateTranscriptTokens(m.transcript),
-		Summary:      summary,
+		Summary:      summaryResult.SummaryText,
 	}, nil
 }
 
-func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan) (string, error) {
-	if m.provider == nil {
-		return deterministicCompactionSummary(plan), nil
+func sessionEventsForRefs(events []sessions.Event, refs []sessions.EventRef) ([]sessions.Event, error) {
+	byID := make(map[string]sessions.Event, len(events))
+	for _, event := range events {
+		byID[event.ID] = event
 	}
-	stream, err := m.provider.StreamCompletion(m.ctx, zeroruntime.CompletionRequest{
-		Messages: []zeroruntime.Message{
-			{Role: zeroruntime.MessageRoleSystem, Content: "Summarize compacted Zero session events for future coding context. Preserve user goals, decisions, files, tool outcomes, blockers, and exact next steps. Omit secrets and do not invent details."},
-			{Role: zeroruntime.MessageRoleUser, Content: plan.SummaryPrompt},
-		},
+	selected := make([]sessions.Event, 0, len(refs))
+	for _, ref := range refs {
+		event, ok := byID[ref.ID]
+		if !ok || event.Sequence != ref.Sequence || event.Type != ref.Type {
+			return nil, fmt.Errorf("session changed while compaction was being planned; retry /compact")
+		}
+		selected = append(selected, event)
+	}
+	return selected, nil
+}
+
+func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan, messages []zeroruntime.Message) (agent.CompactionSummaryResult, error) {
+	return agent.SummarizeCompactionMessages(messages, func(projected []zeroruntime.Message) (string, error) {
+		if m.provider == nil {
+			return deterministicCompactionSummary(plan), nil
+		}
+		stream, streamErr := m.provider.StreamCompletion(m.ctx, zeroruntime.CompletionRequest{
+			Messages: append([]zeroruntime.Message{{Role: zeroruntime.MessageRoleSystem, Content: agent.CompactionSummaryInstructions}}, projected...),
+		})
+		if streamErr != nil {
+			return "", fmt.Errorf("summarize compacted session: %w", streamErr)
+		}
+		collected := zeroruntime.CollectStream(m.ctx, stream)
+		if collected.Error != "" {
+			return "", fmt.Errorf("summarize compacted session: %s", collected.Error)
+		}
+		result := strings.TrimSpace(collected.Text)
+		if result == "" {
+			return "", fmt.Errorf("summarize compacted session: empty summary")
+		}
+		return result, nil
 	})
-	if err != nil {
-		return "", fmt.Errorf("summarize compacted session: %w", err)
-	}
-	collected := zeroruntime.CollectStream(m.ctx, stream)
-	if collected.Error != "" {
-		return "", fmt.Errorf("summarize compacted session: %s", collected.Error)
-	}
-	summary := strings.TrimSpace(collected.Text)
-	if summary == "" {
-		return "", fmt.Errorf("summarize compacted session: empty summary")
-	}
-	return summary, nil
 }
 
 func deterministicCompactionSummary(plan sessions.CompactionPlan) string {

@@ -2,12 +2,11 @@ package tui
 
 import (
 	"context"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // bashEscapeTimeout bounds a "!cmd" shell escape so a hung command can't freeze
@@ -30,8 +29,7 @@ func runBashEscape(cwd, command string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), bashEscapeTimeout)
 		defer cancel()
 
-		name, shellArgs := escapeShell(command)
-		cmd := exec.CommandContext(ctx, name, shellArgs...)
+		cmd := tools.NewHostShellCommandContext(ctx, command)
 		if strings.TrimSpace(cwd) != "" {
 			cmd.Dir = cwd
 		}
@@ -51,15 +49,11 @@ func runBashEscape(cwd, command string) tea.Cmd {
 	}
 }
 
-// escapeShell returns the platform shell and arguments for a "!cmd" escape,
-// matching the agent bash tool: cmd.exe on Windows, /bin/sh elsewhere. Hardcoding
-// "bash" broke the escape on stock Windows (no bash on PATH) and anywhere bash is
-// not installed at a predictable path.
+// escapeShell returns the platform shell and arguments for tests and display.
+// Execution itself uses tools.NewHostShellCommandContext so the cmd.exe
+// fallback receives its required raw Windows command line.
 func escapeShell(command string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return "cmd.exe", []string{"/d", "/s", "/c", command}
-	}
-	return "/bin/sh", []string{"-c", command}
+	return tools.HostShellCommand(command)
 }
 
 func appendNote(text, note string) string {

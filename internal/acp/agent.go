@@ -90,9 +90,6 @@ func NewAgent(conn *Conn, deps Deps) *Agent {
 	return a
 }
 
-// Serve runs the connection read loop until the stream closes or ctx is done.
-func (a *Agent) Serve(ctx context.Context) error { return a.conn.Serve(ctx) }
-
 // ---- initialize ----
 
 func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any, error) {
@@ -299,6 +296,16 @@ func stopReasonFor(result agent.Result, err error) (string, error) {
 		if errors.Is(err, context.Canceled) {
 			return StopCancelled, nil
 		}
+		// A CLIENT THAT CANCELLED A PERMISSION PROMPT DID NOT FAIL. Only
+		// context.Canceled was matched here, so dismissing a permission dialog —
+		// a deliberate action, and for apply_patch the only refusal a client is
+		// offered — came back as JSON-RPC -32603 carrying the internal sentinel
+		// text. Editors and the desktop app both render that as a crashed turn,
+		// so declining a tool looked like ZERO falling over. It is a
+		// cancellation, and StopCancelled is what ACP has for saying so.
+		if errors.Is(err, agent.ErrPermissionApprovalCanceled) {
+			return StopCancelled, nil
+		}
 		return "", err
 	}
 	if result.FinishReason == "length" {
@@ -314,10 +321,14 @@ func stopReasonFor(result agent.Result, err error) (string, error) {
 // session/request_permission request and maps the outcome back. Failure to reach
 // the client fails closed to deny.
 func (a *Agent) requestPermission(ctx context.Context, sessionID string, req agent.PermissionRequest) (agent.PermissionDecision, error) {
+	// Built ONCE and used for both halves. Sending one list and validating the
+	// reply against another is the defect this whole path had; see
+	// decisionFromOutcome.
+	options := buildPermissionOptions(req)
 	params := RequestPermissionParams{
 		SessionID: sessionID,
 		ToolCall:  permissionToolCall(req),
-		Options:   buildPermissionOptions(req),
+		Options:   options,
 	}
 	var result RequestPermissionResult
 	if err := a.conn.Call(ctx, MethodSessionRequestPerm, params, &result); err != nil {
@@ -326,7 +337,7 @@ func (a *Agent) requestPermission(ctx context.Context, sessionID string, req age
 		}
 		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission request failed: " + err.Error()}, nil
 	}
-	return decisionFromOutcome(result.Outcome, req), nil
+	return decisionFromOutcome(result.Outcome, options), nil
 }
 
 func (a *Agent) emitPlan(registry *tools.Registry, note *notifier) {
@@ -352,9 +363,11 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
 	}
+	sess.turnMu.Lock()
+	defer sess.turnMu.Unlock()
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
-	case agent.PermissionModeAsk, agent.PermissionModeAuto, agent.PermissionModeWorkspaceAuto:
+	case agent.PermissionModeAsk, agent.PermissionModeAuto, agent.PermissionModeWorkspaceAuto, agent.PermissionModePlan:
 		sess.setMode(mode)
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
@@ -390,9 +403,13 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 			return nil, err
 		}
 	case configIDMode:
+		// Same turnMu as handleSetMode so the two advertised mode doors (session
+		// set_mode and set_config_option) serialize mode flips consistently.
+		sess.turnMu.Lock()
+		defer sess.turnMu.Unlock()
 		mode := agent.PermissionMode(p.Value)
 		switch mode {
-		case agent.PermissionModeAuto, agent.PermissionModeAsk:
+		case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
 			sess.setMode(mode)
 			(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		case agent.PermissionModeUnsafe:
@@ -450,18 +467,21 @@ func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
 func (a *Agent) modeState(s *acpSession) *SessionModeState {
 	// Only prompt-respecting modes are offered over ACP; Unsafe is gated to the
 	// operator (see handleSetMode) so a client can't grant itself no-prompt host
-	// access.
+	// access. Plan only narrows what a client can do (read-only, no write/shell tools), so
+	// unlike Unsafe there is no elevation risk in letting a client select it.
+	// Auto-classifier is intentionally NOT advertised: enabling it needs an in-app
+	// confirmation the ACP protocol cannot represent, and handleSetMode rejects it.
 	ask := agent.PermissionModeInfoFor(agent.PermissionModeAsk)
 	auto := agent.PermissionModeInfoFor(agent.PermissionModeAuto)
 	workspaceAuto := agent.PermissionModeInfoFor(agent.PermissionModeWorkspaceAuto)
-	// Auto-classifier is intentionally NOT advertised: enabling it needs an in-app
-	// confirmation the ACP protocol cannot represent, and handleSetMode rejects it.
+	plan := agent.PermissionModeInfoFor(agent.PermissionModePlan)
 	return &SessionModeState{
 		CurrentModeID: string(s.currentMode()),
 		AvailableModes: []SessionMode{
 			{ID: string(ask.ID), Name: ask.Label, Description: ask.Description},
 			{ID: string(auto.ID), Name: auto.Label, Description: auto.Description},
 			{ID: string(workspaceAuto.ID), Name: workspaceAuto.Label, Description: workspaceAuto.Description},
+			{ID: string(plan.ID), Name: plan.Label, Description: plan.Description},
 		},
 	}
 }
@@ -532,6 +552,7 @@ func (a *Agent) configOptions(s *acpSession) []SessionConfigOption {
 		Options: []SessionConfigOptionValue{
 			{Value: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
 			{Value: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
+			{Value: string(agent.PermissionModePlan), Name: "Plan", Description: "Read-only planning; write and shell tools are hidden."},
 		},
 	}}
 }

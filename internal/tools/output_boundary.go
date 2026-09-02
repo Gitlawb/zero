@@ -57,6 +57,9 @@ func applySelfManagedOutputBudget(tool Tool, toolName string, args map[string]an
 
 	category := resolveOutputCategory(tool, toolName, args)
 	budgeted := budgetSemanticOutput(result.Output, category, budget)
+	if result.Truncated && budgeted.spillPath == "" {
+		budgeted.spillPath = result.Meta["spill_path"]
+	}
 	if result.Truncated && !budgeted.truncated {
 		budgeted.truncated = true
 		budgeted.reason = result.Meta["truncation_reason"]
@@ -64,7 +67,7 @@ func applySelfManagedOutputBudget(tool Tool, toolName string, args map[string]an
 			budgeted.reason = "upstream_tool_budget"
 		}
 	}
-	if budgeted.truncated {
+	if budgeted.truncated && budgeted.spillPath == "" {
 		budgeted = attachExistingSpill(toolName, result.Output, budget, budgeted)
 	}
 	result.Output = budgeted.text
@@ -96,15 +99,18 @@ func selfManagedOutputBudget(toolName string, args map[string]any) outputBudget 
 // newly combined result so hooks cannot bypass the established safety ceiling.
 func (registry *Registry) RebudgetAfterHook(toolName string, args map[string]any, result Result) Result {
 	result = scrubResultSecrets(result)
+	boundaryOutput := result.Output
 	tool, _ := registry.Get(toolName)
 	if _, ok := tool.(selfBudgeting); ok {
 		// Match the primary registry boundary: self-managed tools keep their
 		// call-specific capture/output budget instead of being tightened or
 		// loosened to the generic registry ceiling after hook feedback.
-		return applySelfManagedOutputBudget(tool, toolName, args, result)
+		result = applySelfManagedOutputBudget(tool, toolName, args, result)
+		return finalizeToolOutcome(result, boundaryOutput)
 	}
 	result = applyRegistryOutputBudget(tool, toolName, args, result)
-	return enforceOutputCeiling(toolName, result)
+	result = enforceOutputCeiling(toolName, result)
+	return finalizeToolOutcome(result, boundaryOutput)
 }
 
 func registryOutputBudget(toolName string) outputBudget {

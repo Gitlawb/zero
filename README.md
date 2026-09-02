@@ -6,8 +6,9 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26.5+" src="https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.6+" src="https://img.shields.io/badge/Go-1.26.6+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+  <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
   <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
@@ -75,7 +76,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### From source
 
-Source builds require Go 1.26.5+.
+Source builds require Go 1.26.6+.
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -131,6 +132,7 @@ export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
 export AIMLAPI_API_KEY=...
 export LONGCAT_API_KEY=...
+export FIREWORKS_API_KEY=...
 export MINIMAX_API_KEY=...
 export MINIMAXI_API_KEY=...
 ```
@@ -145,6 +147,12 @@ To configure Meituan LongCat (LongCat-2.0) directly, run:
 
 ```bash
 zero providers setup longcat --set-active
+```
+
+To configure Fireworks AI directly, run:
+
+```bash
+zero providers setup fireworks --set-active
 ```
 
 MiniMax presets use the Anthropic-compatible endpoints for the global and China
@@ -205,6 +213,7 @@ Common slash commands:
 | `/spec`, `/plan` | draft and review a plan before building |
 | `/image` | attach an image for vision-capable models |
 | `/resume`, `/rewind` | continue or roll back local sessions |
+| `/new` | start a fresh session in place (previous session stays on disk) |
 | `/btw [question]` | ask in an isolated fork without adding the side conversation to the main session |
 | `/loop` | repeat a prompt or custom `/command` on an interval (`/loop 5m /babysit-prs`) or self-paced |
 | `/compact`, `/context` | manage context usage |
@@ -301,7 +310,8 @@ zero verify           detect and run local verification checks
 zero changes          inspect and commit local git changes
 zero usage            token usage and estimated cost
 zero cron             scheduled agent jobs
-zero update           check for newer releases
+zero update --check   check for newer releases
+zero upgrade          download, verify, and install the latest release
 ```
 
 ## Extending Zero
@@ -361,28 +371,26 @@ go run ./cmd/zero-perf-bench
 
 Experimental: `ZERO_OPENAI_TURN_SESSION=1` enables the optimized OpenAI turn
 session (background connection prewarm + request-prefix telemetry) for headless
-`zero exec` runs against official OpenAI profiles. Off by default; `0`/`false`
-disable. A/B-benchmark it by running the same `zero-perf-bench` suite with the
-variable unset and set.
+`zero exec` runs against official OpenAI profiles. Off by default; `0`, `false`,
+or `off` disable it. A/B-benchmark it by running the same `zero-perf-bench` suite
+with the variable unset and set.
+
+Native ChatGPT Responses sessions are enabled by default. Set
+`ZERO_CHATGPT_TURN_SESSION=0`, `false`, or `off` to restore stateless HTTP/SSE
+transport.
 
 ### Code Quality and Security Checks
 
-Before committing any changes, ensure all Go code quality and security checks pass. Pinned `go run` commands matching CI constraints can be used directly without prior installation:
+Before committing any changes, ensure all Go code quality and security checks pass. The `make` targets below pin each tool to this module's Go version, so they load correctly even when your default `go` toolchain is older — running the plain `go run ...@version` form yourself can select the tool module's own (older) toolchain and fail to load this module instead.
 
-1. **Formatting**: Run `go fmt ./...` (or `make fmt`).
-2. **Vetting**: Run `go vet ./...` (or `make vet`).
-3. **Linting**: Run `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...`.
-4. **Vulnerability Scan**: Run `go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...`.
+1. **Formatting**: Run `make fmt` (or `go fmt ./...`).
+2. **Vetting**: Run `make vet` (or `go vet ./...`).
+3. **Linting**: Run `make lint-static`.
+4. **Vulnerability Scan**: Run `make vulncheck`.
 
-If you prefer to install these tools globally on your path, you can run:
-
-```bash
-# Install golangci-lint
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-
-# Install govulncheck
-go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-```
+Use the repository-managed targets rather than globally installed binaries:
+the targets apply the module's required Go toolchain as well as the reviewed,
+pinned tool versions.
 
 The installed binaries land in `$GOBIN` when it is set, otherwise in
 `$GOPATH/bin` (default `~/go/bin`). That directory must be on your `PATH` to
@@ -413,6 +421,8 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 - [Agent evals](docs/AGENT_EVALS.md)
 
 ## Community
+
+Real-time chat happens on the [Discord server](https://discord.gg/CaQDS6wdFn).
 
 Questions, setup help, ideas, and sharing all live in
 [GitHub Discussions](https://github.com/Gitlawb/zero/discussions):

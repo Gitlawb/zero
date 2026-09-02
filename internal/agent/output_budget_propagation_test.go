@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +20,16 @@ type propagationOutputTool struct {
 
 func TestOutputBudgetHookHelperProcess(t *testing.T) {
 	for index, arg := range os.Args {
+		if arg == "--zero-output-budget-hook-repeat" && index+1 < len(os.Args) {
+			repeats, err := strconv.Atoi(os.Args[index+1])
+			if err != nil {
+				os.Exit(2)
+			}
+			if _, err := os.Stdout.WriteString(strings.Repeat("hook feedback ", repeats)); err != nil {
+				os.Exit(2)
+			}
+			os.Exit(0)
+		}
 		if arg != "--zero-output-budget-hook" || index+1 >= len(os.Args) {
 			continue
 		}
@@ -30,23 +41,100 @@ func TestOutputBudgetHookHelperProcess(t *testing.T) {
 }
 
 func largeOutputBudgetHookDispatcher() *hooks.Dispatcher {
-	feedback := strings.Repeat("hook feedback ", 200)
+	return outputBudgetHookDispatcherFor("propagation_output", 200)
+}
+
+func outputBudgetHookDispatcherFor(toolName string, repeats int) *hooks.Dispatcher {
+	feedback := strings.Repeat("hook feedback ", repeats)
+	hookArgs := []string{
+		"-test.run=TestOutputBudgetHookHelperProcess",
+		"--",
+		"--zero-output-budget-hook",
+		feedback,
+	}
+	if repeats > 1_000 {
+		hookArgs = []string{
+			"-test.run=TestOutputBudgetHookHelperProcess",
+			"--",
+			"--zero-output-budget-hook-repeat",
+			strconv.Itoa(repeats),
+		}
+	}
 	return hooks.NewDispatcher(hooks.DispatcherOptions{Config: hooks.Config{
 		Enabled: true,
 		Hooks: []hooks.Definition{{
 			ID:      "large-feedback",
 			Event:   hooks.EventAfterTool,
-			Matcher: "propagation_output",
+			Matcher: toolName,
 			Command: os.Args[0],
-			Args: []string{
-				"-test.run=TestOutputBudgetHookHelperProcess",
-				"--",
-				"--zero-output-budget-hook",
-				feedback,
-			},
+			Args:    hookArgs,
 			Enabled: true,
 		}},
 	}})
+}
+
+func TestExecuteToolCallCommitsReadObservationAfterFinalBoundary(t *testing.T) {
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("known content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(root, "small.txt")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	tracker := tools.NewFileTracker()
+
+	result, abortErr := executeToolCall(context.Background(), registry, ToolCall{
+		ID: "read-small", Name: "read_file", Arguments: `{"path":"small.txt"}`,
+	}, PermissionModeAuto, Options{Cwd: root, FileTracker: tracker})
+	if abortErr != nil || result.Status != tools.StatusOK {
+		t.Fatalf("executeToolCall: result=%#v err=%v", result, abortErr)
+	}
+	if !tracker.SeenWhole(resolvedPath) {
+		t.Fatal("unmodified final read output was not committed as observed")
+	}
+}
+
+func TestExecuteToolCallDoesNotCommitReadObservationBeforeHookBudget(t *testing.T) {
+	t.Setenv("ZERO_TOOL_OUTPUT_CEILING_TOKENS", "80")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("known content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(root, "small.txt")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	tracker := tools.NewFileTracker()
+
+	result, abortErr := executeToolCall(context.Background(), registry, ToolCall{
+		ID: "read-hook", Name: "read_file", Arguments: `{"path":"small.txt"}`,
+	}, PermissionModeAuto, Options{
+		Cwd: root, FileTracker: tracker, Hooks: outputBudgetHookDispatcherFor("read_file", 20_000),
+	})
+	if abortErr != nil {
+		t.Fatalf("executeToolCall: %v", abortErr)
+	}
+	if !result.Truncated {
+		t.Fatalf("precondition: hook feedback was not truncated: %#v", result)
+	}
+	if tracker.SeenWhole(resolvedPath) {
+		t.Fatal("read observation committed before hook output was budgeted")
+	}
 }
 
 func (tool propagationOutputTool) Name() string        { return "propagation_output" }

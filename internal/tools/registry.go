@@ -2,7 +2,10 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strings"
+	"sync"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -10,7 +13,17 @@ import (
 )
 
 type Registry struct {
-	tools map[string]Tool
+	mu         sync.RWMutex
+	tools      map[string]Tool
+	generation uint64
+}
+
+// RegistrySnapshot is one immutable registry generation. Tools is a detached,
+// name-sorted slice: later registrations cannot change the snapshot observed by
+// an in-flight agent turn.
+type RegistrySnapshot struct {
+	Tools      []Tool
+	Generation uint64
 }
 
 type RunOptions struct {
@@ -29,6 +42,10 @@ type RunOptions struct {
 	// disk outside Zero since it was last read. nil disables the feature entirely
 	// (the read/write tools behave exactly as before).
 	FileTracker *FileTracker
+	// DeferFileObservationCommit lets a caller with an additional output layer
+	// commit exact-read credit after that final layer has run.
+	DeferFileObservationCommit bool
+	deferFileObservation       bool
 	// EnabledTools / DisabledTools carry the run's operator tool filters so a
 	// filter-aware tool (tool_search) never discloses or loads an operator-hidden
 	// tool. They use the same allow/deny semantics as the agent's filter gate:
@@ -101,23 +118,69 @@ func IsDeferralEligible(t Tool) bool {
 }
 
 func (registry *Registry) Register(tool Tool) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
 	registry.tools[tool.Name()] = tool
+	registry.generation++
+}
+
+// RegisterBatch publishes a group of tools as one registry generation. Readers
+// observe either the complete prior generation or the complete new one.
+func (registry *Registry) RegisterBatch(batch []Tool) {
+	if len(batch) == 0 {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	for _, tool := range batch {
+		registry.tools[tool.Name()] = tool
+	}
+	registry.generation++
 }
 
 func (registry *Registry) Get(name string) (Tool, bool) {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
 	tool, ok := registry.tools[name]
 	return tool, ok
 }
 
 func (registry *Registry) All() []Tool {
+	return registry.Snapshot().Tools
+}
+
+// Snapshot returns a stable, sorted view of the registry at one generation.
+func (registry *Registry) Snapshot() RegistrySnapshot {
+	registry.mu.RLock()
 	tools := make([]Tool, 0, len(registry.tools))
 	for _, tool := range registry.tools {
 		tools = append(tools, tool)
 	}
+	generation := registry.generation
+	registry.mu.RUnlock()
 	sort.Slice(tools, func(left, right int) bool {
 		return tools[left].Name() < tools[right].Name()
 	})
-	return tools
+	return RegistrySnapshot{Tools: tools, Generation: generation}
+}
+
+// Clone returns an independent registry containing exactly one source snapshot.
+func (registry *Registry) Clone() *Registry {
+	clone := NewRegistry()
+	if registry == nil {
+		return clone
+	}
+	snapshot := registry.Snapshot()
+	clonedTools := make([]Tool, 0, len(snapshot.Tools))
+	for _, tool := range snapshot.Tools {
+		if cloner, ok := tool.(interface{ cloneForRegistry(*Registry) Tool }); ok {
+			tool = cloner.cloneForRegistry(clone)
+		}
+		clonedTools = append(clonedTools, tool)
+	}
+	clone.RegisterBatch(clonedTools)
+	clone.generation = snapshot.Generation
+	return clone
 }
 
 func (registry *Registry) Run(ctx context.Context, name string, args map[string]any) Result {
@@ -130,16 +193,24 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	// args/paths) are redacted at the boundary just like tool output. The output
 	// ceiling runs after the scrub so the transcript and the spill file agree on
 	// what was hidden.
+	commitFileObservation := !options.DeferFileObservationCommit
+	options.deferFileObservation = true
 	selfManagedOutput := false
 	var tool Tool
 	var ok bool
 	defer func() {
 		result = scrubResultSecrets(result)
+		boundaryOutput := result.Output
+		result = reduceCommandOutput(name, args, result)
 		if selfManagedOutput {
 			result = applySelfManagedOutputBudget(tool, name, args, result)
 		} else {
 			result = applyRegistryOutputBudget(tool, name, args, result)
 			result = enforceOutputCeiling(name, result)
+		}
+		result = finalizeToolOutcome(result, boundaryOutput)
+		if commitFileObservation {
+			result = registry.CommitFileObservation(result, options.FileTracker)
 		}
 	}()
 
@@ -220,6 +291,32 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	return res
 }
 
+// CommitFileObservation grants exact-read credit only when the tool's complete
+// output remains intact at the final boundary that will be sent to the model.
+func (registry *Registry) CommitFileObservation(result Result, tracker *FileTracker) Result {
+	observation := result.pendingFileObservation
+	result.pendingFileObservation = nil
+	if observation == nil || tracker == nil || result.Status != StatusOK || result.Truncated ||
+		!strings.HasPrefix(result.Output, observation.output) {
+		return result
+	}
+	if observation.byteMode {
+		tracker.RecordSeenBytes(observation.path, observation.start, observation.end, observation.total)
+	} else {
+		tracker.RecordSeenRange(observation.path, observation.start, observation.end, observation.total)
+	}
+	if result.Meta == nil {
+		result.Meta = map[string]string{}
+	}
+	result.Meta["file_version"] = observation.hash
+	if observation.byteMode {
+		result.Meta["seen_bytes"] = fmt.Sprintf("%d-%d", observation.start, observation.end)
+	} else {
+		result.Meta["seen_lines"] = fmt.Sprintf("%d-%d", observation.start, observation.end)
+	}
+	return result
+}
+
 func effectiveToolPermission(tool Tool, args map[string]any) Permission {
 	if permissioner, ok := tool.(ArgsPermissioner); ok {
 		return permissioner.PermissionForArgs(args)
@@ -257,13 +354,13 @@ func scrubResultSecrets(res Result) Result {
 	return res
 }
 
-func CoreReadOnlyTools(workspaceRoot string) []Tool {
-	return CoreReadOnlyToolsScoped(workspaceRoot, nil)
-}
 func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
-		NewScopedReadFileTool(workspaceRoot, scope),
 		NewScopedReadMinifiedFileTool(workspaceRoot, scope),
+		NewScopedReadFileTool(workspaceRoot, scope),
+		// view_image is read-only and shares read_file's path scoping, so it
+		// belongs with the other readers rather than behind a gate.
+		NewScopedViewImageTool(workspaceRoot, scope),
 		NewScopedListDirectoryTool(workspaceRoot, scope),
 		NewScopedGlobTool(workspaceRoot, scope),
 		NewScopedGrepTool(workspaceRoot, scope),
@@ -280,7 +377,6 @@ func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	}
 }
 
-func CoreWriteTools(workspaceRoot string) []Tool { return CoreWriteToolsScoped(workspaceRoot, nil) }
 func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedWriteFileTool(workspaceRoot, scope),
@@ -290,7 +386,6 @@ func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	}
 }
 
-func CoreShellTools(workspaceRoot string) []Tool { return CoreShellToolsScoped(workspaceRoot, nil) }
 func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	execManager := newExecSessionManager()
 	return []Tool{
@@ -312,7 +407,6 @@ func CoreNetworkTools() []Tool {
 	return tools
 }
 
-func CoreTools(workspaceRoot string) []Tool { return CoreToolsScoped(workspaceRoot, nil) }
 func CoreToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	tools := append([]Tool{}, CoreReadOnlyToolsScoped(workspaceRoot, scope)...)
 	tools = append(tools, CoreWriteToolsScoped(workspaceRoot, scope)...)

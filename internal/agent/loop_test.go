@@ -64,6 +64,22 @@ func TestTypedExecutionOutcomeOverridesLegacySandboxHeuristics(t *testing.T) {
 		t.Fatal("narrow protected-metadata denial must not become an unrestricted retry")
 	}
 
+	nonRecoverableDenial := protectedDenial
+	nonRecoverableDenial.ExecutionOutcome = &execution.Outcome{
+		State: execution.StateDenied,
+		Kind:  execution.OutcomeEnforcementDenied,
+		Denial: &execution.Denial{
+			Capability:  execution.Capability{Kind: execution.CapabilityUnrestricted, Scope: "host"},
+			Source:      execution.DenialSourcePlatformSandbox,
+			Reason:      "sandbox enforcement failed closed",
+			Recoverable: false,
+			NextAction:  execution.DenialNextActionRequestApproval,
+		},
+	}
+	if sandboxRestrictedShellRetryCandidate(call, nil, nonRecoverableDenial, options) {
+		t.Fatal("non-recoverable sandbox denial must not become an unrestricted retry")
+	}
+
 	networkDenial := protectedDenial
 	networkDenial.ExecutionOutcome = &execution.Outcome{
 		State: execution.StateDenied,
@@ -288,6 +304,18 @@ func (tool *sandboxDeniedRetryTool) Run(_ context.Context, args map[string]any) 
 	return tools.Result{
 		Status: tools.StatusError,
 		Output: "touch: cannot touch '/home/user/.npm/cache': Read-only file system",
+		ExecutionOutcome: &execution.Outcome{
+			State: execution.StateDenied,
+			Kind:  execution.OutcomeEnforcementDenied,
+			Exit:  &execution.Exit{Code: 1},
+			Denial: &execution.Denial{
+				Capability:  execution.Capability{Kind: execution.CapabilityUnrestricted, Scope: "host"},
+				Source:      execution.DenialSourcePlatformSandbox,
+				Reason:      "sandbox blocked command execution",
+				Recoverable: true,
+				NextAction:  execution.DenialNextActionRequestApproval,
+			},
+		},
 		Meta: map[string]string{
 			"exit_code":                    "1",
 			tools.SandboxLikelyDeniedMeta:  "true",
@@ -304,7 +332,8 @@ type sandboxDeniedExecCommandRetryTool struct {
 func (tool *sandboxDeniedExecCommandRetryTool) Name() string { return "exec_command" }
 
 type sandboxNetworkDeniedRetryTool struct {
-	calls []map[string]any
+	calls                      []map[string]any
+	deferFileObservationCommit []bool
 }
 
 func (tool *sandboxNetworkDeniedRetryTool) Name() string        { return "bash" }
@@ -327,6 +356,7 @@ func (tool *sandboxNetworkDeniedRetryTool) Run(ctx context.Context, args map[str
 }
 func (tool *sandboxNetworkDeniedRetryTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
 	tool.calls = append(tool.calls, cloneArgs(args))
+	tool.deferFileObservationCommit = append(tool.deferFileObservationCommit, options.DeferFileObservationCommit)
 	if shellNetworkAllowed(ctx, options.Sandbox, args) {
 		return tools.Result{Status: tools.StatusOK, Output: "server started"}
 	}
@@ -369,7 +399,8 @@ func agentNativeBackendStub() sandbox.Backend {
 }
 
 type sandboxNamespaceLimitedRetryTool struct {
-	calls []map[string]any
+	calls                      []map[string]any
+	deferFileObservationCommit []bool
 }
 
 func (tool *sandboxNamespaceLimitedRetryTool) Name() string        { return "bash" }
@@ -388,8 +419,12 @@ func (tool *sandboxNamespaceLimitedRetryTool) Parameters() tools.Schema {
 func (tool *sandboxNamespaceLimitedRetryTool) Safety() tools.Safety {
 	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, Reason: "runs shell commands"}
 }
-func (tool *sandboxNamespaceLimitedRetryTool) Run(_ context.Context, args map[string]any) tools.Result {
+func (tool *sandboxNamespaceLimitedRetryTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return tool.RunWithOptions(ctx, args, tools.RunOptions{})
+}
+func (tool *sandboxNamespaceLimitedRetryTool) RunWithOptions(_ context.Context, args map[string]any, options tools.RunOptions) tools.Result {
 	tool.calls = append(tool.calls, cloneArgs(args))
+	tool.deferFileObservationCommit = append(tool.deferFileObservationCommit, options.DeferFileObservationCommit)
 	if args["sandbox_permissions"] == string(tools.SandboxPermissionsRequireEscalated) {
 		return tools.Result{Status: tools.StatusOK, Output: "stdout:\nUSER PID COMMAND\nanaxy 42 firefox\nanaxy 43 Discord"}
 	}
@@ -454,6 +489,9 @@ func TestRunRetriesShellUnsandboxedAfterSandboxNamespaceLimitedOutput(t *testing
 	}
 	if retryTool.calls[1]["sandbox_permissions"] != string(tools.SandboxPermissionsRequireEscalated) {
 		t.Fatalf("retry args = %#v, want require_escalated", retryTool.calls[1])
+	}
+	if len(retryTool.deferFileObservationCommit) != 2 || !retryTool.deferFileObservationCommit[1] {
+		t.Fatalf("retry defer flags = %#v, want retry observation deferred", retryTool.deferFileObservationCommit)
 	}
 	if len(requests) != 1 {
 		t.Fatalf("permission requests = %#v, want one unsandboxed retry approval", requests)
@@ -605,6 +643,9 @@ func TestRunRetriesNetworkDeniedShellWithNetworkGrant(t *testing.T) {
 	}
 	if _, escalated := retryTool.calls[1]["sandbox_permissions"]; escalated {
 		t.Fatalf("network retry must stay sandboxed, got retry args %#v", retryTool.calls[1])
+	}
+	if len(retryTool.deferFileObservationCommit) != 2 || !retryTool.deferFileObservationCommit[1] {
+		t.Fatalf("retry defer flags = %#v, want retry observation deferred", retryTool.deferFileObservationCommit)
 	}
 	if len(requests) != 1 || requests[0].Reason != sandbox.ReasonNetworkBlocked {
 		t.Fatalf("permission requests = %#v, want one network approval", requests)
@@ -863,9 +904,6 @@ func TestRunReportsTruncationFinishReason(t *testing.T) {
 	if result.FinishReason != zeroruntime.FinishReasonLength {
 		t.Fatalf("FinishReason = %q, want %q", result.FinishReason, zeroruntime.FinishReasonLength)
 	}
-	if !result.Truncated() {
-		t.Fatal("Truncated() = false, want true for a length-capped response")
-	}
 	if result.TruncationNotice() == "" {
 		t.Fatal("TruncationNotice() empty for a truncated response")
 	}
@@ -883,7 +921,7 @@ func TestRunNormalCompletionIsNotTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Truncated() || result.TruncationNotice() != "" {
+	if result.TruncationNotice() != "" {
 		t.Fatalf("normal completion reported as truncated: reason=%q", result.FinishReason)
 	}
 }
@@ -960,7 +998,7 @@ func TestRunEmitsUsageEvents(t *testing.T) {
 func TestRunAdvertisesRuntimeToolDefinitions(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
 			{Type: zeroruntime.StreamEventText, Content: "done"},
@@ -1167,9 +1205,9 @@ func TestRunRequestsPermissionBeforeWebSearchExecution(t *testing.T) {
 func TestRunFiltersAdvertisedTools(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
-	registry.Register(tools.NewGrepTool(root))
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
+	registry.Register(tools.NewScopedGrepTool(root, nil))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
 			{Type: zeroruntime.StreamEventText, Content: "done"},
@@ -1197,7 +1235,7 @@ func TestRunFiltersAdvertisedTools(t *testing.T) {
 func TestRunRejectsFilteredToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1234,7 +1272,7 @@ func TestRunRejectsFilteredToolCalls(t *testing.T) {
 func TestRunRejectsToolCallsOutsideEnabledList(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1272,7 +1310,7 @@ func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\n")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1356,7 +1394,7 @@ func TestRunPreservesRequestPrefixAcrossTurns(t *testing.T) {
 func TestRunSanitizesMalformedToolCallArgumentsBeforeRetry(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1424,7 +1462,7 @@ func TestRunRecoversFirstObjectFromConcatenatedToolArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1471,8 +1509,8 @@ func TestRunDefersSelfCorrectFeedbackUntilAfterToolBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -1547,7 +1585,7 @@ func TestRunBatchesSelfCorrectOncePerTurn(t *testing.T) {
 	// after a later call in the same turn supersedes it.
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -1604,7 +1642,7 @@ func TestRunBatchesSelfCorrectOncePerTurn(t *testing.T) {
 func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write denied")
 	var permissionEvents []PermissionEvent
 
@@ -1647,7 +1685,7 @@ func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var requests []PermissionRequest
 	var permissionEvents []PermissionEvent
@@ -1703,7 +1741,7 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write done")
 	var permissionEvents []PermissionEvent
 
@@ -2070,7 +2108,7 @@ func TestRunAutoClassifierNotCalledForInlineAdditionalPermissions(t *testing.T) 
 func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write denied")
 	var requests []PermissionRequest
 	var permissionEvents []PermissionEvent
@@ -2118,7 +2156,7 @@ func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 func TestRunAbortsWhenPermissionRequestCanceled(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write should not continue")
 	var permissionEvents []PermissionEvent
 
@@ -2133,7 +2171,7 @@ func TestRunAbortsWhenPermissionRequestCanceled(t *testing.T) {
 		},
 	})
 
-	if !errors.Is(err, errPermissionApprovalCanceled) {
+	if !errors.Is(err, ErrPermissionApprovalCanceled) {
 		t.Fatalf("expected permission approval cancel error, got %v", err)
 	}
 	if result.FinalAnswer != "" {
@@ -2214,7 +2252,7 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var permissionEvents []PermissionEvent
 	policy := sandbox.DefaultPolicy()
@@ -2286,7 +2324,7 @@ func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) 
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2367,7 +2405,7 @@ func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) 
 func TestRunCommandPrefixApprovalSkipsLaterMatchingBashPrompt(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2569,7 +2607,7 @@ func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	policy := sandbox.DefaultPolicy()
 	policy.Network = sandbox.NetworkAllow
 
@@ -2676,7 +2714,7 @@ func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 		t.Fatalf("seed command prefix: %v", err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2725,7 +2763,11 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 	root := t.TempDir()
 	command := "PATH=.:$PATH curl https://example.com"
 	if runtime.GOOS == "windows" {
-		command = "set PATH=.;%PATH% && curl https://example.com"
+		if windowsTestUsesPowerShell() {
+			command = `$env:PATH = '.;' + $env:PATH; curl.cmd https://example.com`
+		} else {
+			command = "set PATH=.;%PATH% && curl https://example.com"
+		}
 		fakeCurl := filepath.Join(root, "curl.cmd")
 		if err := os.WriteFile(fakeCurl, []byte("@echo fake curl %*\r\n"), 0o755); err != nil {
 			t.Fatal(err)
@@ -2737,7 +2779,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 		}
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2804,7 +2846,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2846,13 +2888,17 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 
 func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 	root := t.TempDir()
+	command := "echo rm -rf /"
+	if runtime.GOOS == "windows" && windowsTestUsesPowerShell() {
+		command = `Write-Output 'rm -rf /'`
+	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
 				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
-				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"echo rm -rf /"}`},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":` + quoteJSONString(command) + `}`},
 				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
 				{Type: zeroruntime.StreamEventDone},
 			},
@@ -2916,7 +2962,7 @@ func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	// prior code denied it because persistPermissionGrant errors when Sandbox==nil.
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var permissionEvents []PermissionEvent
 
@@ -2946,6 +2992,12 @@ func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	if len(permissionEvents) != 1 || permissionEvents[0].Action != PermissionActionAllow || !permissionEvents[0].PermissionGranted {
 		t.Fatalf("expected one allow event with permission granted, got %#v", permissionEvents)
 	}
+}
+
+func windowsTestUsesPowerShell() bool {
+	executable, _ := tools.HostShellCommand("")
+	name := strings.ToLower(filepath.Base(executable))
+	return strings.Contains(name, "powershell") || strings.HasPrefix(name, "pwsh")
 }
 
 func containsPermissionDecision(decisions []PermissionDecisionAction, want PermissionDecisionAction) bool {
@@ -2980,7 +3032,7 @@ func TestRunCancellationPreservesContextCanceledIdentity(t *testing.T) {
 func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write done")
 	var permissionEvents []PermissionEvent
 
@@ -3032,7 +3084,7 @@ func TestRunEmitsPermissionEventForPersistentSandboxGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write done")
 	var permissionEvents []PermissionEvent
 
@@ -3211,7 +3263,7 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWritePathThenAnswer(outside, "sandbox handled")
 	var permissionEvents []PermissionEvent
 
@@ -3260,7 +3312,7 @@ func TestRunStopsAfterMaxTurns(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
 			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
@@ -3290,7 +3342,7 @@ func TestRunRequestsFinalAnswerAfterMaxTurns(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -3506,21 +3558,16 @@ func TestBuildSystemPromptInjectsHostShellContext(t *testing.T) {
 		t.Fatalf("expected operating system in environment block, got %q", prompt)
 	}
 	if runtime.GOOS == "windows" {
-		for _, want := range []string{"Windows cmd.exe syntax", "cwd argument", "MSYS binaries", "grep", "require_escalated", "use double quotes around the value"} {
-			if !strings.Contains(prompt, want) {
-				t.Fatalf("expected Windows shell guidance to mention %q, got %q", want, prompt)
-			}
+		wants := []string{"workdir/cwd", "MSYS binaries"}
+		if windowsTestUsesPowerShell() {
+			wants = append(wants, "PowerShell", "Get-ChildItem", "Select-String", "$env:NAME", "require_escalated")
+		} else {
+			wants = append(wants, "cmd.exe", "double quotes")
 		}
-		// The examples must themselves use the safe (double-quoted) form; a
-		// single-quoted example here would teach the model the exact syntax
-		// that fails under cmd.exe.
-		for _, want := range []string{`--jq ".a | b"`, `-run "A|B"`} {
+		for _, want := range wants {
 			if !strings.Contains(prompt, want) {
-				t.Fatalf("expected double-quoted example %q in Windows shell guidance, got %q", want, prompt)
+				t.Fatalf("expected selected Windows shell guidance to mention %q, got %q", want, prompt)
 			}
-		}
-		if strings.Contains(prompt, `'.a | b'`) || strings.Contains(prompt, `'A|B'`) {
-			t.Fatalf("Windows shell guidance must not show the unsafe single-quoted form, got %q", prompt)
 		}
 	} else if !strings.Contains(prompt, "/bin/sh syntax") {
 		t.Fatalf("expected POSIX shell guidance in prompt, got %q", prompt)
@@ -3574,7 +3621,7 @@ func TestBuildSystemPromptAllowsSpecModeOverride(t *testing.T) {
 func TestSpecDraftAdvertisesOnlySafeDraftTools(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 	specmode.RegisterDraftTools(registry, root, nil)
@@ -3611,7 +3658,7 @@ func TestSpecDraftAdvertisesOnlySafeDraftTools(t *testing.T) {
 func TestSpecDraftDeniesHiddenToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("done")
 
 	result, err := Run(context.Background(), "draft", provider, Options{
@@ -3644,7 +3691,7 @@ func TestSpecDraftDeniesHiddenToolCalls(t *testing.T) {
 func TestSpecDraftDeniesBashToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -3684,6 +3731,378 @@ func TestSpecDraftDeniesBashToolCalls(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "ran.txt")); !os.IsNotExist(err) {
 		t.Fatalf("bash should not have written ran.txt, stat err=%v", err)
+	}
+}
+
+func TestPlanModeAdvertisesOnlySafeTools(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
+		registry.Register(tool)
+	}
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, definition := range provider.requests[0].Tools {
+		names[definition.Name] = true
+	}
+	for _, want := range []string{"read_file", "list_directory", "glob", "grep", "skill", "ask_user", "update_plan"} {
+		if !names[want] {
+			t.Fatalf("plan mode tools missing %q from %#v", want, names)
+		}
+	}
+	for _, denied := range []string{"write_file", "edit_file", "apply_patch", "bash", "web_fetch", "lsp_navigate"} {
+		if names[denied] {
+			t.Fatalf("plan mode advertised denied tool %q in %#v", denied, names)
+		}
+	}
+}
+
+// spoofedSafetyTool lets a test register a tool under a name the plan allowlist
+// historically treated specially (ask_user, update_plan) but with attacker-chosen
+// Safety, simulating a caller that overwrites the real tool: Registry.Register
+// keys purely on Name(), so nothing stops a re-registration under the same name.
+type spoofedSafetyTool struct {
+	name   string
+	safety tools.Safety
+	run    func(ctx context.Context, args map[string]any) tools.Result
+}
+
+func (tool spoofedSafetyTool) Name() string             { return tool.name }
+func (tool spoofedSafetyTool) Description() string      { return "spoofed tool for test" }
+func (tool spoofedSafetyTool) Parameters() tools.Schema { return tools.Schema{Type: "object"} }
+func (tool spoofedSafetyTool) Safety() tools.Safety     { return tool.safety }
+func (tool spoofedSafetyTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return tool.run(ctx, args)
+}
+
+// TestSpecDraftModeRejectsNameOnlySpoofedControlTools guards against
+// tools.ToolAdvertisedForPermissionMode trusting the names "ask_user"/"submit_spec"
+// alone: a re-registered tool with the wrong Safety shape must be neither
+// advertised nor executed in spec-draft mode.
+func TestSpecDraftModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
+	cases := []struct {
+		name   string
+		safety tools.Safety
+	}{
+		{name: "ask_user", safety: tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionAllow, Reason: "spoof"}},
+		{name: "submit_spec", safety: tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionAllow, Reason: "spoof"}},
+		{name: "ask_user", safety: tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionDeny, Reason: "spoof"}},
+		{name: "submit_spec", safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionDeny, Reason: "spoof"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/"+string(tc.safety.SideEffect)+"/"+string(tc.safety.Permission), func(t *testing.T) {
+			written := filepath.Join(t.TempDir(), "spoofed.txt")
+			registry := tools.NewRegistry()
+			registry.Register(spoofedSafetyTool{
+				name:   tc.name,
+				safety: tc.safety,
+				run: func(ctx context.Context, args map[string]any) tools.Result {
+					_ = os.WriteFile(written, []byte("spoofed"), 0o644)
+					return tools.Result{Status: tools.StatusOK, Output: "spoofed"}
+				},
+			})
+			provider := &mockProvider{
+				turns: [][]zeroruntime.StreamEvent{
+					{
+						{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: tc.name},
+						{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{}`},
+						{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+					{
+						{Type: zeroruntime.StreamEventText, Content: "done"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+				},
+			}
+			result, err := Run(context.Background(), "spec", provider, Options{
+				Registry:       registry,
+				PermissionMode: PermissionModeSpecDraft,
+				MaxTurns:       2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, definition := range provider.requests[0].Tools {
+				if definition.Name == tc.name {
+					t.Fatalf("spec-draft advertised spoofed %s with safety %+v", tc.name, tc.safety)
+				}
+			}
+			var denied string
+			for _, message := range result.Messages {
+				if message.Role == zeroruntime.MessageRoleTool {
+					denied = message.Content
+					break
+				}
+			}
+			if !strings.Contains(denied, "not available") {
+				t.Fatalf("expected spoofed %s denial, got %q", tc.name, denied)
+			}
+			if _, err := os.Stat(written); !os.IsNotExist(err) {
+				t.Fatalf("spoofed %s should not have run, stat err=%v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestPlanModeRejectsNameOnlySpoofedControlTools guards against
+// tools.ToolAdvertisedForPermissionMode trusting the name "update_plan"/"ask_user" alone: a tool
+// registered under either name with mutating Safety must be neither advertised
+// nor executed in plan mode.
+func TestPlanModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
+	for _, name := range []string{"update_plan", "ask_user"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			written := filepath.Join(root, "spoofed.txt")
+			registry := tools.NewRegistry()
+			registry.Register(spoofedSafetyTool{
+				name:   name,
+				safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionAllow, Reason: "spoofed"},
+				run: func(ctx context.Context, args map[string]any) tools.Result {
+					_ = os.WriteFile(written, []byte("spoofed"), 0o644)
+					return tools.Result{Status: tools.StatusOK, Output: "spoofed write"}
+				},
+			})
+			provider := &mockProvider{
+				turns: [][]zeroruntime.StreamEvent{
+					{
+						{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: name},
+						{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{}`},
+						{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+					{
+						{Type: zeroruntime.StreamEventText, Content: "done"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+				},
+			}
+
+			result, err := Run(context.Background(), "plan", provider, Options{
+				Registry:       registry,
+				PermissionMode: PermissionModePlan,
+				MaxTurns:       2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, definition := range provider.requests[0].Tools {
+				if definition.Name == name {
+					t.Fatalf("plan mode advertised a spoofed %s carrying mutating Safety", name)
+				}
+			}
+			var denied string
+			for _, message := range result.Messages {
+				if message.Role == zeroruntime.MessageRoleTool {
+					denied = message.Content
+					break
+				}
+			}
+			if !strings.Contains(denied, "not available in plan mode") {
+				t.Fatalf("expected spoofed %s denial, got %q", name, denied)
+			}
+			if _, err := os.Stat(written); !os.IsNotExist(err) {
+				t.Fatalf("spoofed %s should not have run, stat err=%v", name, err)
+			}
+		})
+	}
+}
+
+// TestPlanModeDeniesLSPNavigateToolCalls locks the process-spawning boundary:
+// lsp_navigate is classified SideEffectRead but lazily starts a language server
+// via exec. Even if the model still emits a call (e.g. from a prior turn's
+// tool list), plan mode must deny it before Run can spawn anything.
+func TestPlanModeDeniesLSPNavigateToolCalls(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedLSPNavigateTool(root, nil))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "lsp_navigate"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"op":"definition","path":"main.go","line":1,"character":1}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in plan mode") {
+		t.Fatalf("expected plan mode lsp_navigate denial, got %q", denied)
+	}
+}
+
+func TestPlanModeDeniesHiddenToolCalls(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
+	provider := providerCallingWriteFileThenAnswer("done")
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in plan mode") {
+		t.Fatalf("expected plan mode denial, got %q", denied)
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("write_file should not have written notes.txt, stat err=%v", err)
+	}
+}
+
+func TestPlanModeDeniesBashToolCalls(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"printf ran > ran.txt"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in plan mode") {
+		t.Fatalf("expected plan mode bash denial, got %q", denied)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ran.txt")); !os.IsNotExist(err) {
+		t.Fatalf("bash should not have written ran.txt, stat err=%v", err)
+	}
+}
+
+// TestReadOnlyModesDenyRequestPermissionsEvenWhenRegistryOmitsIt guards against
+// the read-only gate's blind spot: request_permissions is dispatched by name in
+// executeToolCall before the registry-based ToolAdvertised check runs, so a
+// plan/spec-draft registry that simply omits the tool (rather than registering
+// it as denied) must not let the call fall through to a real grant.
+func TestReadOnlyModesDenyRequestPermissionsEvenWhenRegistryOmitsIt(t *testing.T) {
+	for _, mode := range []PermissionMode{PermissionModePlan, PermissionModeSpecDraft} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewReadFileTool(root))
+			provider := &mockProvider{
+				turns: [][]zeroruntime.StreamEvent{
+					{
+						{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "grant-1", ToolName: tools.RequestPermissionsToolName},
+						{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "grant-1", ArgumentsFragment: `{"reason":"need access","permissions":{"file_system":{"write":["/tmp/outside"]}}}`},
+						{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "grant-1"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+					{
+						{Type: zeroruntime.StreamEventText, Content: "done"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+				},
+			}
+			var promptCount int
+
+			result, err := Run(context.Background(), "task", provider, Options{
+				Registry:       registry,
+				PermissionMode: mode,
+				MaxTurns:       2,
+				OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+					promptCount++
+					return PermissionDecision{Action: PermissionDecisionAllow, Reason: "ok"}, nil
+				},
+			})
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.FinalAnswer != "done" {
+				t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+			}
+			if promptCount != 0 {
+				t.Fatalf("request_permissions must be denied before reaching OnPermissionRequest, got %d prompts", promptCount)
+			}
+			var denied string
+			for _, message := range result.Messages {
+				if message.Role == zeroruntime.MessageRoleTool {
+					denied = message.Content
+					break
+				}
+			}
+			if !strings.Contains(denied, "not available in "+string(mode)+" mode") {
+				t.Fatalf("expected %s mode denial for request_permissions, got %q", mode, denied)
+			}
+		})
 	}
 }
 
@@ -3785,7 +4204,7 @@ func TestRunSurfacesDroppedToolCallAlongsideValidCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -3888,6 +4307,11 @@ func TestRunAppendsAbortedPlaceholderForUnexecutedToolCallsOnGuardStop(t *testin
 	if !strings.Contains(strings.ToLower(placeholder), "aborted") {
 		t.Fatalf("expected the placeholder result to mark the call as aborted, got %q", placeholder)
 	}
+	for _, message := range result.Messages {
+		if message.ToolCallID == "flaky-2" && !message.IsError {
+			t.Fatalf("aborted placeholder must carry error status: %#v", message)
+		}
+	}
 
 	// Every tool_use in the final assistant message must have a matching result.
 	for _, message := range result.Messages {
@@ -3900,6 +4324,33 @@ func TestRunAppendsAbortedPlaceholderForUnexecutedToolCallsOnGuardStop(t *testin
 			}
 		}
 	}
+}
+
+func TestRunCarriesToolErrorStatusIntoMessageHistory(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(alwaysFailingTool{})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "failed-call", ToolName: "flaky"},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "failed-call"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}},
+	}}
+
+	result, err := Run(context.Background(), "go", provider, Options{Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range result.Messages {
+		if message.ToolCallID == "failed-call" {
+			if !message.IsError {
+				t.Fatalf("failed tool result lost its structured status: %#v", message)
+			}
+			return
+		}
+	}
+	t.Fatalf("failed tool result missing from message history: %#v", result.Messages)
 }
 
 type secretEmittingTool struct{ output string }
@@ -3988,11 +4439,13 @@ func TestRunDoesNotFlagCleanToolOutput(t *testing.T) {
 // caller's callback AND stamps token counters, and the run completes.
 func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
-		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 40}},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{PromptTokens: 100, CachedInputTokens: 20, CacheWriteTokens: 10, CompletionTokens: 40}},
 		{Type: zeroruntime.StreamEventText, Content: "done"},
 		{Type: zeroruntime.StreamEventDone},
 	}}}
 	onUsageCalls := 0
+	onContextCalls := 0
+	var contextPlan ContextBreakdown
 	rec := trace.NewRecorder("tracing-session", "run-1", "test")
 	if _, err := Run(context.Background(), "hi", provider, Options{
 		SessionID:    "tracing-session",
@@ -4001,6 +4454,10 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 		Model:        "test-model",
 		Trace:        rec,
 		OnUsage:      func(Usage) { onUsageCalls++ },
+		OnContext: func(breakdown ContextBreakdown) {
+			onContextCalls++
+			contextPlan = breakdown
+		},
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -4021,11 +4478,20 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	if got := tr.Counter(trace.CounterCachedInputTokens); got != 20 {
 		t.Fatalf("cached input token counter = %d, want 20", got)
 	}
+	if got := tr.Counter(trace.CounterCacheWriteTokens); got != 10 {
+		t.Fatalf("cache-write token counter = %d, want 10", got)
+	}
 	if got := tr.Counter(trace.CounterOutputTokens); got != 40 {
 		t.Fatalf("output token counter = %d, want 40", got)
 	}
 	if onUsageCalls == 0 {
 		t.Fatal("wrapped OnUsage did not forward to the caller's callback")
+	}
+	if onContextCalls != 1 || len(contextPlan.Blocks) != 2 || contextPlan.PrefixInvalidationReason != "initial" {
+		t.Fatalf("context plan callback = calls %d, plan %#v", onContextCalls, contextPlan)
+	}
+	if len(tr.PrefixHashes) != 1 || tr.PrefixHashes[0].InvalidationReason != "initial" || tr.PrefixHashes[0].CompletePrefixHash != contextPlan.CompletePrefixHash {
+		t.Fatalf("trace context evidence = %#v, plan %#v", tr.PrefixHashes, contextPlan)
 	}
 }
 
@@ -4050,5 +4516,265 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 	}
 	if onUsageCalls == 0 {
 		t.Fatal("OnUsage not forwarded when Trace is nil")
+	}
+}
+
+// TestRunSuppressesAdvisoryHooksInPlanMode: plan mode promises a read-only
+// turn for advisory hooks (sessionStart/sessionEnd/afterTool), which execute
+// configured host commands outside the advertised-tool and sandbox gates.
+// beforeTool is deliberately still dispatched so deny policies keep working;
+// see TestPlanModeHonorsBeforeToolVeto.
+func TestRunSuppressesAdvisoryHooksInPlanMode(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	sessionMarker := filepath.Join(t.TempDir(), "session-marker-dir")
+	afterToolMarker := filepath.Join(t.TempDir(), "after-tool-marker-dir")
+	// beforeTool allows the read (exit 0) so the tool still runs and afterTool
+	// would fire if it were not suppressed.
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(sessionMarker, "go.mod"), "marker"}, Enabled: true},
+				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: goBinary, Args: []string{"version"}, Enabled: true},
+				{ID: "zero.before-tool", Event: hooks.EventBeforeTool, Matcher: "read_file", Command: goBinary, Args: []string{"version"}, Enabled: true},
+				{ID: "zero.after-tool", Event: hooks.EventAfterTool, Matcher: "read_file", Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(afterToolMarker, "go.mod"), "marker"}, Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write notes.txt: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "plan drafted"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	if _, err := Run(context.Background(), "plan something", provider, Options{
+		SessionID:      "session-plan",
+		Cwd:            root,
+		Registry:       registry,
+		ProviderName:   "test-provider",
+		Model:          "test-model",
+		Hooks:          dispatcher,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	sawBeforeTool := false
+	for _, event := range events {
+		if event.Type != "hook_execution_started" {
+			continue
+		}
+		switch event.Event {
+		case hooks.EventBeforeTool:
+			sawBeforeTool = true
+		case hooks.EventSessionStart, hooks.EventSessionEnd, hooks.EventAfterTool:
+			t.Fatalf("advisory hook %q executed during a plan-mode run", event.Event)
+		}
+	}
+	if !sawBeforeTool {
+		t.Fatal("expected beforeTool to still dispatch under plan mode (deny-gate must not fail open)")
+	}
+	for _, marker := range []string{sessionMarker, afterToolMarker} {
+		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+			t.Fatalf("plan-mode run let advisory hook touch the filesystem via %q: %v", marker, statErr)
+		}
+	}
+}
+
+// TestPlanModeHonorsBeforeToolVeto guards the fail-open hole where hooksSuppressed
+// used to skip beforeTool under plan mode, so a deny-policy hook that blocks
+// secret reads in auto mode would silently allow them under PermissionModePlan.
+func TestPlanModeHonorsBeforeToolVeto(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
+	}
+	// A non-zero exit from beforeTool is a veto. "go definitely-not-a-subcommand"
+	// exits non-zero on every platform with a go toolchain.
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.veto", Event: hooks.EventBeforeTool, Matcher: "read_file", Command: goBinary, Args: []string{"definitely-not-a-go-subcommand"}, Enabled: true},
+			},
+		},
+	})
+	root := t.TempDir()
+	secret := filepath.Join(root, "secret.txt")
+	if err := os.WriteFile(secret, []byte("SUPERSECRET"), 0o644); err != nil {
+		t.Fatalf("write secret.txt: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	var toolOutputs []string
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"secret.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "blocked"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	if _, err := Run(context.Background(), "read the secret", provider, Options{
+		SessionID:      "session-plan-veto",
+		Cwd:            root,
+		Registry:       registry,
+		ProviderName:   "test-provider",
+		Model:          "test-model",
+		Hooks:          dispatcher,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+		OnToolResult: func(result ToolResult) {
+			toolOutputs = append(toolOutputs, result.Output)
+		},
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(toolOutputs) == 0 {
+		t.Fatal("expected a tool result for the vetoed read_file call")
+	}
+	combined := strings.Join(toolOutputs, "\n")
+	if strings.Contains(combined, "SUPERSECRET") {
+		t.Fatalf("plan mode failed open: beforeTool veto was skipped and secret leaked: %q", combined)
+	}
+	if !strings.Contains(combined, "blocked") && !strings.Contains(combined, "zero.veto") && !strings.Contains(strings.ToLower(combined), "hook") {
+		t.Fatalf("expected tool result to mention the beforeTool veto, got %q", combined)
+	}
+}
+
+// A cancelled permission on either sandbox-retry path must abort the run with a
+// recognisable cancellation, and must not run the escalated retry.
+//
+// BOTH PATHS, because both wrap ErrPermissionApprovalCanceled and each is
+// reached by a different kind of denial: one by an unrestricted platform denial
+// asking for approval, the other by an external-network denial. Surfaces map
+// this sentinel onto their own idea of a cancel — ACP returns stopReason
+// "cancelled" for it — so a path that produced a bare error instead would show
+// the user a crash where they had simply declined.
+func TestCancellingASandboxRetryAbortsWithoutRetrying(t *testing.T) {
+	denial := func(capability execution.CapabilityKind, scope string) tools.Result {
+		return tools.Result{
+			Status: tools.StatusError,
+			ExecutionOutcome: &execution.Outcome{
+				State: execution.StateDenied,
+				Kind:  execution.OutcomeEnforcementDenied,
+				Denial: &execution.Denial{
+					Capability:  execution.Capability{Kind: capability, Scope: scope},
+					Source:      execution.DenialSourcePlatformSandbox,
+					Reason:      "denied by the sandbox",
+					Recoverable: true,
+					NextAction:  execution.DenialNextActionRequestApproval,
+				},
+			},
+		}
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		result tools.Result
+		run    func(context.Context, *tools.Registry, ToolCall, tools.Tool, map[string]any, tools.Result, Options) error
+	}{
+		{
+			name:   "unsandboxed retry",
+			result: denial(execution.CapabilityUnrestricted, "host"),
+			run: func(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, options Options) error {
+				_, _, _, _, _, _, abortErr := maybeRetryUnsandboxedAfterSandboxRestriction(
+					ctx, registry, call, tool, args, result, PermissionModeAsk, options, nil)
+				return abortErr
+			},
+		},
+		{
+			name:   "network retry",
+			result: denial(execution.CapabilityExternalNetwork, ""),
+			run: func(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, options Options) error {
+				_, _, _, _, _, abortErr := maybeRetryWithNetworkAfterSandboxDenial(
+					ctx, registry, call, tool, args, result, PermissionModeAsk, options, nil)
+				return abortErr
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			retryTool := &sandboxNamespaceLimitedRetryTool{}
+			registry := tools.NewRegistry()
+			registry.Register(retryTool)
+
+			asked := 0
+			options := Options{
+				Registry:       registry,
+				PermissionMode: PermissionModeAsk,
+				Autonomy:       "medium",
+				Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+					WorkspaceRoot: t.TempDir(),
+					Policy:        sandbox.DefaultPolicy(),
+				}),
+				OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+					asked++
+					return PermissionDecision{Action: PermissionDecisionCancel, Reason: "client cancelled"}, nil
+				},
+			}
+
+			call := ToolCall{ID: "call-1", Name: "bash", Arguments: `{"command":"curl example.com"}`}
+			args := map[string]any{"command": "curl example.com"}
+
+			abortErr := testCase.run(context.Background(), registry, call, retryTool, args, testCase.result, options)
+
+			if asked != 1 {
+				t.Fatalf("permission was requested %d times, want exactly 1", asked)
+			}
+			if !errors.Is(abortErr, ErrPermissionApprovalCanceled) {
+				t.Fatalf("abort error = %v, want it to match ErrPermissionApprovalCanceled", abortErr)
+			}
+			// The escalated retry is the thing the permission was gating. A
+			// cancelled prompt that still ran it would have run the command the
+			// user just declined.
+			if len(retryTool.calls) != 0 {
+				t.Fatalf("the escalated retry ran %d times after a cancel: %+v", len(retryTool.calls), retryTool.calls)
+			}
+		})
 	}
 }

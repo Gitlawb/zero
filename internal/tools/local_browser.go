@@ -45,6 +45,7 @@ func newBrowserInstallTool(options localcontrol.BrowserOptions) Tool {
 	return browserInstallTool{
 		baseTool: baseTool{
 			name:        "browser_install",
+			deferred:    true,
 			description: "Install the local browser runtime used by browser automation.",
 			parameters: Schema{
 				Type: "object",
@@ -86,6 +87,7 @@ func newBrowserLaunchToolWithLauncher(options localcontrol.BrowserOptions, launc
 	return browserLaunchTool{
 		baseTool: baseTool{
 			name:        "browser_launch",
+			deferred:    true,
 			description: "Launch a supported local Chromium/Electron app with Chrome DevTools enabled and attach browser automation to it. Use this for installed Electron apps such as Discord instead of launching GUI apps through shell commands.",
 			parameters: Schema{
 				Type: "object",
@@ -165,6 +167,7 @@ func newBrowserConnectTool(options localcontrol.BrowserOptions) Tool {
 	return browserConnectTool{
 		baseTool: baseTool{
 			name:        "browser_connect",
+			deferred:    true,
 			description: "Attach local browser automation to an existing Chrome/Electron DevTools endpoint. For Electron apps, first launch the app with --remote-debugging-port=<port>, then connect to that port instead of using desktop control.",
 			parameters: Schema{
 				Type: "object",
@@ -205,6 +208,7 @@ func newBrowserOpenTool(options localcontrol.BrowserOptions) Tool {
 	return browserOpenTool{
 		baseTool: baseTool{
 			name:        "browser_open",
+			deferred:    true,
 			description: "Open a URL in the local browser automation session.",
 			parameters: Schema{
 				Type: "object",
@@ -245,6 +249,7 @@ func newBrowserSnapshotTool(options localcontrol.BrowserOptions) Tool {
 	return browserSnapshotTool{
 		baseTool: baseTool{
 			name:        "browser_snapshot",
+			deferred:    true,
 			description: "Return an accessibility snapshot from the current local browser automation session.",
 			parameters: Schema{
 				Type: "object",
@@ -288,6 +293,7 @@ func newBrowserClickTool(options localcontrol.BrowserOptions) Tool {
 	return browserClickTool{
 		baseTool: baseTool{
 			name:        "browser_click",
+			deferred:    true,
 			description: "Click a ref from browser_snapshot in the current local browser automation session.",
 			parameters: Schema{
 				Type: "object",
@@ -328,6 +334,7 @@ func newBrowserTypeTool(options localcontrol.BrowserOptions) Tool {
 	return browserTypeTool{
 		baseTool: baseTool{
 			name:        "browser_type",
+			deferred:    true,
 			description: "Type text into a ref from browser_snapshot in the current local browser automation session.",
 			parameters: Schema{
 				Type: "object",
@@ -369,6 +376,7 @@ func newBrowserPressTool(options localcontrol.BrowserOptions) Tool {
 	return browserPressTool{
 		baseTool: baseTool{
 			name:        "browser_press",
+			deferred:    true,
 			description: "Press a keyboard key in the current local browser automation session.",
 			parameters: Schema{
 				Type: "object",
@@ -454,6 +462,7 @@ func newBrowserActionTool(options localcontrol.BrowserOptions) Tool {
 	return browserActionTool{
 		baseTool: baseTool{
 			name:        "browser_action",
+			deferred:    true,
 			description: "Run an allowed action against the current local browser automation session.",
 			parameters: Schema{
 				Type: "object",

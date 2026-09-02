@@ -100,5 +100,6 @@
       "shell commands are not wrapped by a native platform sandbox"
     ]
   },
-  "grantsPath": "$GRANTS"
+  "grantsPath": "$GRANTS",
+  "permissionProfileNote": "permissionProfile is derived from this process's environment and working directory; a command run with its own environment can add further credential deny-read entries."
 }

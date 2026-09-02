@@ -23,6 +23,24 @@ type ContextBreakdown struct {
 	TotalTokens   int     // SystemTokens + ToolTokens + MessageTokens
 	ContextWindow int     // model context window; 0 when unknown
 	UsedFraction  float64 // TotalTokens / ContextWindow; 0 when window unknown
+	// Blocks explain why each model-visible category is present without exposing
+	// its content. The planner currently preserves all three categories.
+	Blocks []ContextBlock
+	// CompletePrefixHash identifies the provider-visible system+tool prefix.
+	CompletePrefixHash string
+	// PrefixInvalidationReason is "initial", "unchanged", or a stable comma-
+	// separated list of changed prefix categories.
+	PrefixInvalidationReason string
+}
+
+// ContextBlock is content-free evidence for one model-visible context category.
+type ContextBlock struct {
+	Kind        string
+	Tokens      int
+	CacheClass  string
+	Authority   string
+	Recoverable bool
+	Reason      string
 }
 
 // MeasureContext estimates the per-category token footprint of a request: the
@@ -41,6 +59,24 @@ func MeasureContext(messages []zeroruntime.Message, tools []zeroruntime.ToolDefi
 		ContextWindow: contextWindow,
 	}
 	breakdown.TotalTokens = breakdown.SystemTokens + breakdown.ToolTokens + breakdown.MessageTokens
+	if breakdown.SystemTokens > 0 {
+		breakdown.Blocks = append(breakdown.Blocks, ContextBlock{
+			Kind: "system", Tokens: breakdown.SystemTokens, CacheClass: "stable_prefix",
+			Authority: "required", Reason: "instructions, workspace policy, and safety policy",
+		})
+	}
+	if breakdown.ToolTokens > 0 {
+		breakdown.Blocks = append(breakdown.Blocks, ContextBlock{
+			Kind: "tools", Tokens: breakdown.ToolTokens, CacheClass: "stable_prefix",
+			Authority: "capability", Reason: "currently permitted and selected tool definitions",
+		})
+	}
+	if breakdown.MessageTokens > 0 {
+		breakdown.Blocks = append(breakdown.Blocks, ContextBlock{
+			Kind: "conversation", Tokens: breakdown.MessageTokens, CacheClass: "dynamic_tail",
+			Authority: "transcript", Reason: "valid provider replay history and current task context",
+		})
+	}
 	if contextWindow > 0 {
 		breakdown.UsedFraction = float64(breakdown.TotalTokens) / float64(contextWindow)
 	}

@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-var ErrWindowsNetworkEnforcementUnavailable = errors.New("Windows sandbox network enforcement is not available")
+var ErrWindowsNetworkEnforcementUnavailable = errors.New("Windows sandbox network enforcement is not available") //nolint:staticcheck // Preserve the exported sentinel's established text.
 
 const (
 	windowsWFPProviderKey = "2e31d31c-3948-4753-9117-e5d1a6496f41"

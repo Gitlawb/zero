@@ -18,7 +18,7 @@ import (
 )
 
 func TestIndependentExecCommandConstructorsShareDefaultManager(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	execTool := NewScopedExecCommandTool(root, nil, nil)
 	writeTool := NewWriteStdinTool(nil)
 
@@ -76,17 +76,21 @@ func TestExecCommandToolDescribesHostShellSyntax(t *testing.T) {
 	description := strings.ToLower(strings.Join(descriptionParts, " "))
 
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
-			t.Fatalf("expected Windows cmd.exe and cwd guidance in exec_command description, got %q", description)
-		}
-		if !strings.Contains(description, "double quotes") || !strings.Contains(description, `--jq ".a | b"`) {
-			t.Fatalf("expected the double-quote metacharacter rule in exec_command description, got %q", description)
+		shell := detectShellRuntime(runtime.GOOS)
+		if shell.Kind == shellKindPowerShell {
+			for _, want := range []string{"powershell", "cwd", "get-childitem", "select-string", "$env:name"} {
+				if !strings.Contains(description, want) {
+					t.Fatalf("expected Windows PowerShell guidance %q in exec_command description, got %q", want, description)
+				}
+			}
+		} else if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
+			t.Fatalf("expected Windows cmd.exe fallback guidance in exec_command description, got %q", description)
 		}
 	}
 }
 
 func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
@@ -134,7 +138,7 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 }
 
 func TestExecCommandRequireEscalatedBypassesNativeSandboxAfterApproval(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	registry := NewRegistry()
 	registry.Register(NewScopedExecCommandTool(root, nil, manager))
@@ -183,7 +187,7 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 	if runtime.GOOS != "windows" {
 		t.Skip("windows-only MSYS sandbox guard")
 	}
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	registry := NewRegistry()
 	registry.Register(NewScopedExecCommandTool(root, nil, manager))
@@ -192,9 +196,15 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 		Policy:        sandbox.DefaultPolicy(),
 		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 	})
+	msysCommand := "cat somefile.txt"
+	if detectShellRuntime(runtime.GOOS).Kind == shellKindPowerShell {
+		// cat is a native Get-Content alias in PowerShell, so use an executable
+		// name that still exercises the MSYS guard.
+		msysCommand = "grep pattern somefile.txt"
+	}
 
 	result := registry.RunWithOptions(context.Background(), ExecCommandToolName, map[string]any{
-		"cmd":                 "cat somefile.txt",
+		"cmd":                 msysCommand,
 		"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
 	}, RunOptions{
 		PermissionGranted: true,
@@ -204,8 +214,8 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 
 	// Assert on the preflight block sentinel (exit_code "-1", set only by
 	// shellIssueBlockResult) rather than shell_issue: once the guard is
-	// bypassed, "cat somefile.txt" actually runs, and its real,
-	// PATH-dependent output could otherwise trip the unrelated
+	// bypassed, the command actually runs, and its real, PATH-dependent output
+	// could otherwise trip the unrelated
 	// post-execution detectShellOutputIssue heuristic and make this
 	// assertion flaky for reasons unrelated to the guard under test.
 	if result.Meta["exit_code"] == "-1" {
@@ -214,7 +224,7 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 }
 
 func TestExecCommandReturnsExitCodeWhenCommandCompletesDuringInitialYield(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 
@@ -253,7 +263,7 @@ func TestExecCommandReportsWorkspaceChanges(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX shell syntax")
 	}
-	root := t.TempDir()
+	root := execTestRoot(t)
 	result := NewScopedExecCommandTool(root, nil, newExecSessionManager()).Run(context.Background(), map[string]any{
 		"cmd":           "mkdir -p src node_modules/pkg && printf 'export {}' > src/main.ts && printf generated > node_modules/pkg/index.js",
 		"yield_time_ms": 30000,
@@ -284,8 +294,9 @@ func TestExecCommandApplicationFailureHasTypedOutcome(t *testing.T) {
 	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
 		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
 	}
-	if result.ExecutionOutcome.Exit == nil || result.ExecutionOutcome.Exit.Code != 7 {
-		t.Fatalf("execution exit = %#v, want code 7", result.ExecutionOutcome.Exit)
+	wantExitCode := helperFailureExitCode()
+	if result.ExecutionOutcome.Exit == nil || result.ExecutionOutcome.Exit.Code != wantExitCode {
+		t.Fatalf("execution exit = %#v, want code %d", result.ExecutionOutcome.Exit, wantExitCode)
 	}
 }
 
@@ -316,6 +327,26 @@ func TestExecCommandUsesStructuredAdapterDenial(t *testing.T) {
 	}
 }
 
+func TestExecCommandDoesNotInferNativeSandboxDenialFromOutput(t *testing.T) {
+	result := execToolResult(execToolResultInput{
+		commandText: "touch \"$HOME/probe\"",
+		output:      "touch: cannot touch '/home/user/probe': Read-only file system",
+		exited:      true,
+		exitCode:    1,
+		enforcement: execution.Enforcement{Backend: string(sandbox.BackendLinuxBwrap), Level: string(sandbox.EnforcementNative)},
+	})
+
+	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
+		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
+	}
+	if result.ExecutionOutcome.Denial != nil {
+		t.Fatalf("command output created a typed denial: %#v", result.ExecutionOutcome.Denial)
+	}
+	if result.Meta[SandboxLikelyDeniedMeta] == "true" {
+		t.Fatalf("command output created sandbox-denial metadata: %#v", result.Meta)
+	}
+}
+
 func executionRequestHasCapability(request execution.Request, kind execution.CapabilityKind, scope string) bool {
 	for _, capability := range request.Capabilities {
 		if capability.Kind == kind && (scope == "" || capability.Scope == scope) {
@@ -326,7 +357,7 @@ func executionRequestHasCapability(request execution.Request, kind execution.Cap
 }
 
 func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
@@ -380,7 +411,7 @@ func parseListeningAddress(output string) string {
 }
 
 func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := execution.NewProcessManager(execution.ProcessManagerOptions{CompletedRetention: 10 * time.Millisecond})
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 
@@ -506,7 +537,7 @@ func TestWriteStdinInterruptTerminatesSession(t *testing.T) {
 }
 
 func TestWriteStdinRejectsInputForNonTTYSession(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
@@ -537,9 +568,43 @@ func TestWriteStdinRejectsInputForNonTTYSession(t *testing.T) {
 	manager.Stop(sessionID)
 }
 
+// execTestRoot is t.TempDir with a cleanup that tolerates Windows still holding
+// the directory.
+//
+// A terminated process does not release its handles the instant the session
+// reports it exited, and Windows refuses to remove a directory with an open
+// handle where POSIX does not. t.TempDir's own cleanup removes once and fails
+// the test on a sharing violation, which turns ordinary teardown timing into a
+// test failure with nothing actually wrong underneath it.
+func execTestRoot(t *testing.T) string {
+	t.Helper()
+
+	root, err := os.MkdirTemp("", "zero-exec-test-")
+	if err != nil {
+		t.Fatalf("create test root: %v", err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if err := os.RemoveAll(root); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				// Deliberately not a failure. The directory is under the OS temp
+				// root and the process holding it has already been terminated, so
+				// the worst case is a stale directory, not a broken test.
+				t.Logf("test root %s still held after the cleanup deadline; leaving it", root)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+	return root
+}
+
 func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 	for _, chars := range []string{`\u0003`, "exit\n"} {
-		root := t.TempDir()
+		root := execTestRoot(t)
 		manager := newExecSessionManager()
 		execTool := NewScopedExecCommandTool(root, nil, manager)
 		writeTool := NewWriteStdinTool(manager)
@@ -556,22 +621,63 @@ func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 			t.Fatalf("session_id is not numeric: %v", err)
 		}
 
-		result := writeTool.Run(context.Background(), map[string]any{
-			"session_id":    sessionID,
-			"chars":         chars,
-			"yield_time_ms": 1000,
-		})
-		if result.Status != StatusOK {
-			t.Fatalf("stop input %q status = %s: %s", chars, result.Status, result.Output)
-		}
-		if result.Meta["session_id"] != "" {
-			t.Fatalf("stop input %q should not leave session running, meta=%#v output=%q", chars, result.Meta, result.Output)
+		// Re-send the stop until the session reports it has exited, rather than
+		// waiting a fixed slice and asserting on whatever is true by then.
+		//
+		// A single 1s yield used to be enough because the session ran under
+		// cmd.exe. Under PowerShell the tree is slower to stand up and tear down,
+		// and the FIRST stop in a fresh process pays the interpreter's cold start,
+		// so it routinely returns with termination already under way but not
+		// finished. The old assertion read that as "the stop did not work" and
+		// failed, intermittently, on whichever of the two inputs happened to run
+		// first. CI never saw it because the runners have PowerShell 7 while a
+		// stock Windows box only has 5.1.
+		//
+		// Repeating the same input rather than polling with empty chars is
+		// deliberate: Terminate is a no-op against an already-dead tree, so it is
+		// safe to repeat, and it keeps the interrupt flag that an empty-chars poll
+		// would drop, which is what the interrupted assertion below needs.
+		var result Result
+		// Every poll's output is kept, not just the last one. Each Continue
+		// returns only what the session produced since the previous collection,
+		// so a marker printed just before the poll that observes the exit lands
+		// in the earlier result and would be invisible to a check against the
+		// final one alone.
+		var collected strings.Builder
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			result = writeTool.Run(context.Background(), map[string]any{
+				"session_id":    sessionID,
+				"chars":         chars,
+				"yield_time_ms": 500,
+			})
+			collected.WriteString(result.Output)
+			if result.Status != StatusOK {
+				t.Fatalf("stop input %q status = %s: %s", chars, result.Status, result.Output)
+			}
+			if result.Meta["session_id"] == "" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("stop input %q left the session running past the deadline, meta=%#v output=%q", chars, result.Meta, result.Output)
+			}
 		}
 		if result.Meta["exit_code"] == "" {
 			t.Fatalf("stop input %q should report exit_code, meta=%#v output=%q", chars, result.Meta, result.Output)
 		}
 		if result.Meta["interrupted"] != "true" {
 			t.Fatalf("stop input %q should report interrupted metadata, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+		// The session has to have been killed rather than allowed to finish.
+		// Without this the retry loop makes the test unfalsifiable: the helper
+		// sleeps 5s, well inside the deadline, so a terminate that did nothing at
+		// all would let the sleep end on its own and every assertion above would
+		// still hold. The interrupted flag does not close the hole either, since
+		// it echoes the request rather than the outcome. The helper prints this
+		// line only on the way out of a completed sleep, so its absence is what
+		// separates the two, and it says nothing about how long the loop took.
+		if strings.Contains(collected.String(), "long sleep finished") {
+			t.Fatalf("stop input %q let the session run to completion instead of terminating it, output=%q", chars, collected.String())
 		}
 	}
 }
@@ -612,7 +718,7 @@ func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("pty transport is currently implemented for linux")
 	}
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
@@ -650,7 +756,7 @@ func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
 }
 
 func TestExecSessionSnapshotsAndStopAll(t *testing.T) {
-	root := t.TempDir()
+	root := execTestRoot(t)
 	manager := newExecSessionManager()
 	execTool := NewScopedExecCommandTool(root, nil, manager).(execCommandTool)
 

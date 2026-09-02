@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,12 +25,47 @@ func TestRunExecOptimizedSessionUnderGate(t *testing.T) {
 	cwd := t.TempDir()
 
 	var heads, posts atomic.Int64
+	// Closed when the prewarm probe lands, so the turn can be held open until it
+	// does. See the POST handler for why that ordering has to be forced.
+	headSeen := make(chan struct{})
+	var headOnce sync.Once
+	var prewarmWaitTimedOut atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodHead:
 			heads.Add(1)
+			headOnce.Do(func() { close(headSeen) })
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			// Hold the turn open until the prewarm probe arrives. The probe is
+			// issued on the run's context, and runExec cancels that context the
+			// moment it returns, because the stop function signalContext hands
+			// back is a CancelFunc. A probe that has not reached the wire by the
+			// end of the run therefore never reaches it at all. That is why the
+			// poll this replaced could not work at any deadline: once the run is
+			// over the probe is cancelled, not merely slow.
+			//
+			// This widens the window, it does not close it. Once the goroutine is
+			// scheduled it still has only prewarmTimeout to dial loopback and
+			// write the request, and that timeout is armed inside the goroutine
+			// itself, so holding the turn here cannot extend it. If this test
+			// ever fails again, prewarmTimeout is where to look, not this hold.
+			//
+			// No self-deadlock: the pinned transport leaves MaxConnsPerHost at 0,
+			// so the HEAD dials its own connection instead of queueing behind
+			// this held POST. Do not set a per-host connection limit there.
+			//
+			// Bounded, so a probe that genuinely never fires fails the assertion
+			// below with a useful message instead of hanging the test.
+			select {
+			case <-headSeen:
+			case <-time.After(10 * time.Second):
+				// Record it. A probe that shows up after this gave up would still
+				// leave heads at 1, so the count alone proves the probe was
+				// eventually received, not that it was ordered before the turn,
+				// which is the whole claim of this test.
+				prewarmWaitTimedOut.Store(true)
+			}
 			posts.Add(1)
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"))
@@ -75,14 +111,13 @@ func TestRunExecOptimizedSessionUnderGate(t *testing.T) {
 	if got := posts.Load(); got < 1 {
 		t.Fatalf("server saw %d chat-completions POSTs, want >= 1", got)
 	}
-	// The prewarm probe is asynchronous; it fires well before the model turn
-	// finishes, but poll rather than assuming scheduling order. The deadline
-	// exceeds the production prewarmTimeout (3s) so a slow probe cannot flake
-	// this assertion.
-	deadline := time.Now().Add(5 * time.Second)
-	for heads.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	// Checked before the count, because the count cannot tell the two apart: a
+	// probe that arrived only after the guard expired still leaves heads at 1.
+	if prewarmWaitTimedOut.Load() {
+		t.Fatal("the turn was not held until the prewarm probe arrived; the probe did not precede it")
 	}
+	// No polling: the turn above could not complete until the probe landed, so
+	// the count is settled by this point.
 	if got := heads.Load(); got != 1 {
 		t.Fatalf("server saw %d prewarm HEAD probes, want exactly 1", got)
 	}

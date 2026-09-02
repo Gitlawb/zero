@@ -39,3 +39,21 @@ func ConfigureChildProcessGroup(cmd *exec.Cmd) {
 func terminateProcess(pid int) error {
 	return execution.TerminateProcessTree(pid, terminationGracePeriod, terminationPollInterval)
 }
+
+// terminateOwnedProcess terminates cmd's process group directly when its launch
+// configuration proves it was made a group leader. This avoids fragile Getpgid
+// rediscovery after an owned leader exits. Ordinary commands fall back to the
+// safe PID/tree path rather than assuming their PID is also a process-group ID.
+//
+// The Setpgid && Pgid == 0 guard only recognizes ConfigureChildProcessGroup's
+// own convention. A command made its own session leader via Setsid (as opposed
+// to Setpgid) is also its own process-group leader in practice, but takes the
+// slower rediscovery path here since Setsid isn't checked. Harmless today
+// because TerminateCommand has exactly one caller in this codebase; worth
+// covering explicitly if Setsid-configured commands start using this path too.
+func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		return false, execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
+	}
+	return false, terminateProcess(cmd.Process.Pid)
+}

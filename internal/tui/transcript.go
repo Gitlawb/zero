@@ -38,7 +38,8 @@ type transcriptRow struct {
 	detail     string       // raw multi-line output (e.g. a diff to render as a card)
 	hint       string       // one-line actionable hint, rendered faintly below error rows
 	arg        string       // secondary argument hint (pattern/command), for tool call rows
-	runID      int          // owning run, for tool call rows (0 = rehydrated/unknown)
+	meta       map[string]string
+	runID      int // owning run, for tool call rows (0 = rehydrated/unknown)
 	permission *agent.PermissionEvent
 	askUser    *agent.AskUserRequest
 	expanded   bool // collapsible transcript rows, e.g. provider thoughts
@@ -61,6 +62,24 @@ type transcriptRow struct {
 	final       bool
 	turnTools   int
 	turnElapsed time.Duration
+
+	// attachments records what accompanied a user turn without retaining the
+	// original bytes in transcript memory or the session log.
+	attachments transcriptAttachmentSummary
+}
+
+type transcriptAttachmentSummary struct {
+	images    int
+	documents int
+}
+
+const (
+	persistedAttachmentCountLimit = 64
+	attachmentSummaryVisibleItems = 4
+)
+
+func (summary transcriptAttachmentSummary) empty() bool {
+	return summary.images <= 0 && summary.documents <= 0
 }
 
 type transcriptActionKind int
@@ -74,8 +93,9 @@ const (
 )
 
 type transcriptAction struct {
-	kind transcriptActionKind
-	text string
+	kind        transcriptActionKind
+	text        string
+	attachments transcriptAttachmentSummary
 }
 
 func initialTranscript() []transcriptRow {
@@ -90,7 +110,7 @@ func reduceTranscript(rows []transcriptRow, action transcriptAction) []transcrip
 	case actionClear:
 		return initialTranscript()
 	case actionAppendUser:
-		return appendRow(rows, rowUser, action.text)
+		return appendTranscriptRow(rows, transcriptRow{kind: rowUser, text: action.text, attachments: action.attachments})
 	case actionAppendAssistant:
 		return appendRow(rows, rowAssistant, action.text)
 	case actionAppendSystem:
@@ -398,8 +418,10 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	if event.GrantMatched {
 		parts = append(parts, "approved by saved permission")
 	}
-	if event.Reason != "" {
-		parts = append(parts, permissionDisplayReason(event.Reason))
+	if event.Action == agent.PermissionActionPrompt {
+		if reason := permissionDisplayReason(event.Reason); reason != "" {
+			parts = append(parts, reason)
+		}
 	}
 	if note := strings.TrimSpace(event.ClassifierReason); note != "" {
 		parts = append(parts, "classifier: "+note)
@@ -445,7 +467,9 @@ func permissionBlockDetail(event agent.PermissionEvent) string {
 	if path := strings.TrimSpace(event.Block.Path); path != "" {
 		parts = append(parts, "path: "+path)
 	}
-	if reason := permissionDisplayReason(event.Block.Reason); reason != "" {
+	reason := permissionDisplayReason(event.Block.Reason)
+	eventReason := permissionDisplayReason(event.Reason)
+	if reason != "" && reason != eventReason {
 		parts = append(parts, reason)
 	}
 	return strings.Join(parts, "  ")

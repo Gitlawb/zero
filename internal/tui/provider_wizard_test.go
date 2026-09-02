@@ -174,6 +174,10 @@ func TestProviderWizardModelsAreProviderScoped(t *testing.T) {
 }
 
 func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
+	// Pin the credential state so the footer assertion does not depend on the
+	// ambient environment.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
@@ -683,7 +687,7 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
-	next = updated.(model)
+	_ = updated.(model)
 
 	if captured.APIKey != secret {
 		t.Fatalf("captured APIKey = %q, want pasted secret", captured.APIKey)

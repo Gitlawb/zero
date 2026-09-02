@@ -194,7 +194,7 @@ func TestSpecReviewRejectLaunchesQueuedPrompt(t *testing.T) {
 
 func newSpecModeTestModel(root string, provider zeroruntime.Provider, store *sessions.Store) model {
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 	return newModel(context.Background(), Options{

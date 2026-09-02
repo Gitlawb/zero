@@ -244,19 +244,19 @@ func parseUsageArgs(args []string) (usageOptions, bool, error) {
 func FormatReport(report usage.Report, insertions int, deletions int) string {
 	var builder strings.Builder
 	builder.WriteString("Usage report (cost is a reconstructed estimate)\n\n")
-	builder.WriteString(fmt.Sprintf("%-12s %10s %14s %14s\n", "date", "requests", "tokens", "est. cost"))
+	fmt.Fprintf(&builder, "%-12s %10s %14s %14s\n", "date", "requests", "tokens", "est. cost")
 	for _, bucket := range report.Buckets {
-		builder.WriteString(fmt.Sprintf("%-12s %10d %14s %14s\n",
-			bucket.Date, bucket.Requests, groupThousands(bucket.TotalTokens), formatUSD(bucket.TotalCost)))
+		fmt.Fprintf(&builder, "%-12s %10d %14s %14s\n",
+			bucket.Date, bucket.Requests, groupThousands(bucket.TotalTokens), formatUSD(bucket.TotalCost))
 	}
-	builder.WriteString(fmt.Sprintf("\n%-12s %10d %14s %14s\n",
-		"total", report.Total.Requests, groupThousands(report.Total.TotalTokens), formatUSD(report.Total.TotalCost)))
+	fmt.Fprintf(&builder, "\n%-12s %10d %14s %14s\n",
+		"total", report.Total.Requests, groupThousands(report.Total.TotalTokens), formatUSD(report.Total.TotalCost))
 
-	builder.WriteString(fmt.Sprintf("\nnet LOC (estimate): +%d / -%d = %d\n",
-		insertions, deletions, report.NetLOC))
+	fmt.Fprintf(&builder, "\nnet LOC (estimate): +%d / -%d = %d\n",
+		insertions, deletions, report.NetLOC)
 	if report.NetLOCPositive {
-		builder.WriteString(fmt.Sprintf("tokens per net LOC: %.1f\n", report.TokensPerNetLOC))
-		builder.WriteString(fmt.Sprintf("est. cost per net LOC: %s\n", formatUSD(report.CostPerNetLOC)))
+		fmt.Fprintf(&builder, "tokens per net LOC: %.1f\n", report.TokensPerNetLOC)
+		fmt.Fprintf(&builder, "est. cost per net LOC: %s\n", formatUSD(report.CostPerNetLOC))
 	} else {
 		builder.WriteString("tokens per net LOC: n/a (net LOC <= 0)\n")
 		builder.WriteString("est. cost per net LOC: n/a (net LOC <= 0)\n")

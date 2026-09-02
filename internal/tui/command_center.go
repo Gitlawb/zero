@@ -15,6 +15,7 @@ import (
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -456,6 +457,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(nextProfile.Name)
 	m.modelName = target.modelID
+	m.serviceTier = ""
 	// Record the outgoing pair too, not just the destination: otherwise the
 	// model a session started on (never itself the target of a recordRecentModel
 	// call) would silently drop out of "Recent" the moment you switch away from
@@ -548,7 +550,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	// and a stored OAuth login (e.g. ChatGPT) is a credential too — the profile stays
 	// keyless on purpose so newProvider attaches the bearer resolver + login key.
 	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" &&
-		!(hasDescriptor && descriptor.Local) && !oauthLoginAvailable(target) {
+		(!hasDescriptor || !descriptor.Local) && !oauthLoginAvailable(target) {
 		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`.", false, nil
 	}
 	next, err := m.newProvider(target)
@@ -559,6 +561,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	m.providerProfile = target
 	m.providerName = target.Name
 	m.modelName = target.Model
+	m.serviceTier = ""
 	// An active profile's effort fill is per-model: re-derive it for the
 	// destination, exactly like handleModelCommand does. No generic
 	// unsupported-drop here: cross-provider targets are often custom models
@@ -729,14 +732,16 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 		}, true
 	}
 	if provider, ok := m.activeProviderDescriptor(); ok {
-		for _, model := range m.modelPickerLiveByProvider[provider.ID] {
-			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
-				return modelSwitchTarget{modelID: model.ID}, true
+		for _, candidate := range providerModelSwitchCandidates(provider.ID, args) {
+			for _, model := range m.modelPickerLiveByProvider[provider.ID] {
+				if strings.EqualFold(model.ID, candidate) {
+					return modelSwitchTarget{modelID: model.ID}, true
+				}
 			}
-		}
-		for _, model := range providermodelcatalog.Models(provider) {
-			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
-				return modelSwitchTarget{modelID: model.ID}, true
+			for _, model := range providermodelcatalog.Models(provider) {
+				if strings.EqualFold(model.ID, candidate) {
+					return modelSwitchTarget{modelID: model.ID}, true
+				}
 			}
 		}
 		if genericProviderCatalogID(provider.ID) && strings.TrimSpace(args) != "" {
@@ -744,6 +749,24 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 		}
 	}
 	return modelSwitchTarget{}, false
+}
+
+// providerModelSwitchCandidates preserves provider-owned model IDs while
+// accepting the models.dev OpenAI namespace for ChatGPT subscription models.
+// The ChatGPT backend itself publishes bare model IDs (for example,
+// "gpt-5.6-sol"); gateway providers may legitimately require "openai/..."
+// as part of their model ID, so the alias is deliberately provider-specific.
+func providerModelSwitchCandidates(providerID string, input string) []string {
+	requested := strings.TrimSpace(input)
+	candidates := []string{requested}
+	const openAIPrefix = "openai/"
+	if providercatalog.NormalizeID(providerID) != "chatgpt" || len(requested) <= len(openAIPrefix) || !strings.EqualFold(requested[:len(openAIPrefix)], openAIPrefix) {
+		return candidates
+	}
+	if bare := strings.TrimSpace(requested[len(openAIPrefix):]); bare != "" {
+		candidates = append(candidates, bare)
+	}
+	return candidates
 }
 
 func (m model) requestCompactionBeforeModelSwitch(request modelSwitchCompactionRequest, title string) (model, string, bool) {

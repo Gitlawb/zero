@@ -62,7 +62,7 @@ func TestDetectLocalRuntimesReportsReachableRuntime(t *testing.T) {
 	if !detected[0].Reachable {
 		t.Fatalf("runtime should be reachable: %#v", detected[0])
 	}
-	if detected[0].Models == nil || len(detected[0].Models) == 0 || detected[0].Models[0] != "llama3.1" {
+	if len(detected[0].Models) == 0 || detected[0].Models[0] != "llama3.1" {
 		t.Fatalf("expected discovered model list, got %#v", detected[0].Models)
 	}
 }

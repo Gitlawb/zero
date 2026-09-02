@@ -25,10 +25,6 @@ func newTranscriptViewport(totalLines int, height int, offset int) transcriptVie
 	}
 }
 
-func transcriptViewportForBody(body string, frame transcriptFrameLayout, offset int) transcriptViewport {
-	return newTranscriptViewport(len(viewLines(body)), frame.bodyRect.height, offset)
-}
-
 func transcriptViewportForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, offset int) transcriptViewport {
 	return newTranscriptViewport(layout.totalLines(), frame.bodyRect.height, offset)
 }

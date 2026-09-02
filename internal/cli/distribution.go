@@ -139,6 +139,7 @@ func runSkillInfo(args []string, dir string, stdout io.Writer, stderr io.Writer)
 	}
 	if info.Hash != "" {
 		lines = append(lines, "  hash: "+info.Hash)
+		lines = append(lines, fmt.Sprintf("  hash drift: %t", info.HashDrift))
 	}
 	lines = append(lines, "  path: "+info.Skill.Path)
 	if _, err := fmt.Fprintln(stdout, redaction.RedactString(strings.Join(lines, "\n"), redaction.Options{})); err != nil {

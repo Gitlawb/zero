@@ -14,7 +14,7 @@ func TestLSPNavigateConfinesPathToWorkspace(t *testing.T) {
 	// rejected before any read or LSP open, so it can't exfiltrate files off disk
 	// (reachable via indirect prompt injection).
 	root := t.TempDir()
-	tool := NewLSPNavigateTool(root) // workspace-only scope (nil)
+	tool := NewScopedLSPNavigateTool(root, nil) // workspace-only scope (nil)
 	escapes := []string{
 		"/etc/passwd",
 		"../../../../etc/passwd",
@@ -41,7 +41,7 @@ func TestLSPNavigateConfinesPathToWorkspace(t *testing.T) {
 }
 
 func TestLSPNavigateRejectsBadArgs(t *testing.T) {
-	tool := NewLSPNavigateTool(t.TempDir())
+	tool := NewScopedLSPNavigateTool(t.TempDir(), nil)
 	cases := []map[string]any{
 		{},                   // missing op + path
 		{"op": "definition"}, // missing path
@@ -64,7 +64,7 @@ func TestLSPNavigateUnsupportedFileDegrades(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tool := NewLSPNavigateTool(root)
+	tool := NewScopedLSPNavigateTool(root, nil)
 	got := tool.Run(context.Background(), map[string]any{
 		"op": "definition", "path": "notes.unknownext", "line": 1, "character": 1,
 	})
@@ -77,7 +77,7 @@ func TestLSPNavigateUnsupportedFileDegrades(t *testing.T) {
 }
 
 func TestLSPNavigateIsReadOnly(t *testing.T) {
-	tool := NewLSPNavigateTool(t.TempDir())
+	tool := NewScopedLSPNavigateTool(t.TempDir(), nil)
 	if s := tool.Safety(); s.SideEffect != SideEffectRead || s.Permission != PermissionAllow {
 		t.Fatalf("lsp_navigate should be read-only/allow, got %+v", s)
 	}

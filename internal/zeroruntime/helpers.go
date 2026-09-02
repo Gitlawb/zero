@@ -26,13 +26,6 @@ type CollectedStream struct {
 	HasReasoning bool
 }
 
-// Truncated reports whether the response ended for a non-normal reason (the
-// output was cut at the token cap or withheld by a content filter), so callers
-// can warn instead of treating a clipped answer as complete.
-func (collected CollectedStream) Truncated() bool {
-	return collected.FinishReason != ""
-}
-
 // CollectOptions provides callbacks for consumers that need live stream updates.
 type CollectOptions struct {
 	OnText      func(string)
@@ -142,7 +135,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 					options.OnReasoning(event.Content)
 				}
 			case StreamEventToolCallStart:
-				collector.start(event.ToolCallID, event.ToolName, event.ToolCallSignature)
+				collector.start(event.ToolCallID, event.ToolCallProviderID, event.ToolName, event.ToolCallSignature, event.ToolCallFreeform)
 				if options.OnToolCallStart != nil {
 					options.OnToolCallStart(event.ToolCallID, event.ToolName)
 				}
@@ -232,7 +225,7 @@ func newToolCallCollector() *toolCallCollector {
 // start begins a tool call. A non-empty ID reuses any open call with that ID
 // (some backends re-emit the same start); an empty ID always begins a fresh
 // synthetic call so concurrent empty-id calls stay distinct.
-func (collector *toolCallCollector) start(id string, name string, signature string) {
+func (collector *toolCallCollector) start(id string, providerCallID string, name string, signature string, freeform bool) {
 	key := id
 	if id == "" {
 		// Adopt an empty-id call that a delta opened before this start, so its
@@ -247,6 +240,9 @@ func (collector *toolCallCollector) start(id string, name string, signature stri
 		}
 	}
 	call := collector.ensure(key, id)
+	if providerCallID != "" && call.ProviderCallID == "" {
+		call.ProviderCallID = providerCallID
+	}
 	// Only set the name when non-empty and still unset, so a duplicate or
 	// nameless follow-up start cannot clobber an already-resolved name.
 	if name != "" && call.Name == "" {
@@ -257,6 +253,7 @@ func (collector *toolCallCollector) start(id string, name string, signature stri
 	if signature != "" && call.Signature == "" {
 		call.Signature = signature
 	}
+	call.Freeform = call.Freeform || freeform
 }
 
 func (collector *toolCallCollector) delta(id string, fragment string) {

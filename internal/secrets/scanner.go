@@ -30,19 +30,34 @@ type pattern struct {
 // mid-word — e.g. "sk-" inside "task-management-and-coordination" must NOT match
 // as an openai_key. Real secrets are preceded by a delimiter (space, quote, =, :,
 // start-of-string), all of which satisfy \b.
+//
+// A trailing \b is omitted on every pattern: \b only matches at a word/non-word
+// transition, so a secret immediately followed by more word characters that
+// fall outside its body class (an appended suffix like "...EXAMPLEEXTRA" or
+// "..._suffix") has no such transition there, and a fixed or greedy quantifier
+// cannot backtrack its way to one — the whole match fails and the credential
+// leaks un-redacted. The body character class is itself the real stopping
+// boundary once the input runs out of allowed characters, so the anchor is
+// unnecessary; the leading \b already keeps these from firing mid-word.
 var patterns = []pattern{
 	{"aws_access_key_id", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}`)},
-	{"github_token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36}`)},
+	{"github_token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`)},
 	{"github_pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`)},
 	{"slack_token", regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`)},
-	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35}`)},
-	// Body allows - and _ so modern prefixed keys (sk-proj-…, sk-svcacct-…) match,
-	// not just the legacy sk-<alnum> shape.
+	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`)},
+	{"anthropic_key", regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`)},
+	// Broad body (allows - and _) so sk-proj-…, sk-or-v1-…, sk-fw-…, and
+	// legacy sk-<alnum> all match. Scan drops digit-free matches only when
+	// the body contains an interior hyphen, which preserves kebab-case false
+	// positives without excluding digit-free legacy credentials.
 	{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)},
 	// Match the ENTIRE PEM/OpenSSH block (header THROUGH the END marker, body
 	// included) so redaction removes the key material, not just the header.
 	{"private_key_block", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----`)},
-	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
+	// Compact JWS (three segments) or compact JWE (five segments). The optional
+	// fourth and fifth segments capture JWE ciphertext and authentication tag so
+	// they are not left behind after redacting the first three.
+	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})?`)},
 }
 
 // Scan returns the distinct secrets found in text (deduplicated by match,
@@ -54,6 +69,13 @@ func Scan(text string) []Finding {
 	seen := map[string]Finding{}
 	for _, p := range patterns {
 		for _, m := range p.re.FindAllString(text, -1) {
+			// Drop pure kebab FPs (sk-learn-…) unless the match is a known
+			// OpenAI-issued prefix form (sk-proj-/sk-svcacct-/sk-admin-), which
+			// we always treat as credentials even when the body has no digit.
+			if p.typ == "openai_key" && !knownOpenAIKeyPrefix(m) && !containsDigit(m) &&
+				strings.Contains(strings.TrimPrefix(m, "sk-"), "-") {
+				continue
+			}
 			if _, ok := seen[m]; !ok {
 				seen[m] = Finding{Type: p.typ, Match: m}
 			}
@@ -73,6 +95,27 @@ func Scan(text string) []Finding {
 		return out[i].Match < out[j].Match
 	})
 	return out
+}
+
+// containsDigit reports whether s has at least one ASCII digit. Together with
+// an interior-hyphen check, it distinguishes kebab-case false positives from
+// digit-free legacy sk- credentials.
+func containsDigit(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// knownOpenAIKeyPrefix reports whether match is a known OpenAI-issued sk-
+// form. Those prefixes are redacted even when the body has no digit; unknown
+// sk- vendor forms still need a digit so kebab phrases stay un-redacted.
+func knownOpenAIKeyPrefix(match string) bool {
+	return strings.HasPrefix(match, "sk-proj-") ||
+		strings.HasPrefix(match, "sk-svcacct-") ||
+		strings.HasPrefix(match, "sk-admin-")
 }
 
 // Redact replaces every detected secret in text with a typed placeholder and

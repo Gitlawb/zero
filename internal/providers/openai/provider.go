@@ -357,6 +357,7 @@ func (provider *Provider) emitChunk(
 				PromptTokens:      chunk.Usage.PromptTokens,
 				CompletionTokens:  chunk.Usage.CompletionTokens,
 				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+				CacheWriteTokens:  chunk.Usage.PromptTokensDetails.CacheWriteTokens,
 				ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
 			},
 		})
@@ -467,6 +468,9 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
 		mapped.ReasoningEffort = effort
 	}
+	if tier := openAIServiceTier(request.ServiceTier); tier != "" {
+		mapped.ServiceTier = tier
+	}
 	// prompt_cache_key is a documented OpenAI parameter for server-side prefix
 	// cache routing. Official OpenAI accepts it; many openai-compatible
 	// gateways (NVIDIA NIM, strict local proxies) reject unknown fields with a
@@ -483,12 +487,27 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 				Function: toolFunction{
 					Name:        tool.Name,
 					Description: tool.Description,
-					Parameters:  tool.Parameters,
+					Parameters:  normalizeToolParameters(tool.Parameters),
 				},
 			})
 		}
 	}
 	return mapped
+}
+
+// normalizeToolParameters keeps schemas accepted by strict OpenAI-compatible
+// servers such as LM Studio. No-argument tools still need an object-valued
+// parameters.properties field instead of an omitted field.
+func normalizeToolParameters(parameters map[string]any) map[string]any {
+	normalized := make(map[string]any, len(parameters)+1)
+	for key, value := range parameters {
+		normalized[key] = value
+	}
+	properties, ok := normalized["properties"].(map[string]any)
+	if !ok || properties == nil {
+		normalized["properties"] = map[string]any{}
+	}
+	return normalized
 }
 
 // promptCacheKeyDisabled reports whether the ZERO_DISABLE_PROMPT_CACHE_KEY
@@ -505,7 +524,16 @@ func promptCacheKeyDisabled() bool {
 // is dropped rather than risking a 400 on an unrecognized enum.
 func openAIReasoningEffort(requested string) string {
 	switch strings.ToLower(strings.TrimSpace(requested)) {
-	case "minimal", "low", "medium", "high":
+	case "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+		return strings.ToLower(strings.TrimSpace(requested))
+	default:
+		return ""
+	}
+}
+
+func openAIServiceTier(requested string) string {
+	switch strings.ToLower(strings.TrimSpace(requested)) {
+	case "priority", "flex":
 		return strings.ToLower(strings.TrimSpace(requested))
 	default:
 		return ""
