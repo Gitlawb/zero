@@ -474,6 +474,21 @@ func TestScrubResultSecretsDropsControlSplitFileDiff(t *testing.T) {
 	}
 }
 
+func TestScrubResultSecretsDoesNotMutateCallerFileDiffSlice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x")
+	original := []FileDiff{
+		{Path: path, OldExists: true, NewExists: true, OldText: "token=sk-proj-abc\x00def", NewText: "unsafe"},
+		{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: "after"},
+	}
+	result := scrubResultSecrets(Result{FileDiffs: original})
+	if len(result.FileDiffs) != 1 || result.FileDiffs[0].OldText != "before" {
+		t.Fatalf("filtered FileDiffs = %#v", result.FileDiffs)
+	}
+	if original[0].NewText != "unsafe" || original[1].OldText != "before" {
+		t.Fatalf("caller slice was mutated: %#v", original)
+	}
+}
+
 func TestRunWithOptionsScrubsSecretsOnDenialPaths(t *testing.T) {
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	reg := NewRegistry()

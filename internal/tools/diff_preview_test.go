@@ -27,7 +27,7 @@ func TestBoundedFileDiffRefusesPartialOrBinaryContent(t *testing.T) {
 		{"byte order mark", "token=sk-proj-abc\ufeffdef", "text"},
 		{"soft hyphen", "token=sk-proj-abc\u00addef", "text"},
 		{"non breaking space", "token=sk-proj-abc\u00a0def", "text"},
-		{"too large", strings.Repeat("a", maxToolPreviewBytes), "b"},
+		{"too large", strings.Repeat("a", maxToolPreviewBytes+1), "b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if diff, ok := boundedFileDiff(path, tc.old, tc.new, true, true); ok || diff != (FileDiff{}) {
@@ -97,13 +97,64 @@ func TestStructuredPatchFileDiffsPreserveEmptyOperationsAndResultBudget(t *testi
 		}
 	}
 
-	large := strings.Repeat("x", 20*1024)
+	large := strings.Repeat("x", 40*1024)
 	budgeted := fileDiffsFromStructuredPatch(".", []structuredPatchChange{
 		{kind: structuredPatchAdd, to: structuredPatchTarget{absolute: filepath.Join(root, "one")}, after: large},
-		{kind: structuredPatchAdd, to: structuredPatchTarget{absolute: filepath.Join(root, "two")}, after: large},
+		{kind: structuredPatchAdd, to: structuredPatchTarget{absolute: filepath.Join(root, "two")}, after: "tiny"},
 		{kind: structuredPatchAdd, to: structuredPatchTarget{absolute: filepath.Join(root, "three")}, after: large},
+		{kind: structuredPatchAdd, to: structuredPatchTarget{absolute: filepath.Join(root, "four")}, after: large},
 	})
-	if len(budgeted) != 2 {
-		t.Fatalf("aggregate file-diff budget = %d diffs, want 2", len(budgeted))
+	if len(budgeted) != 3 || filepath.Base(budgeted[0].Path) != "one" || filepath.Base(budgeted[1].Path) != "two" || filepath.Base(budgeted[2].Path) != "three" {
+		t.Fatalf("ordered aggregate file-diff budget = %#v", budgeted)
+	}
+}
+
+func TestBoundedDiffPreservesOrdinaryUnicodeButRejectsObfuscatedSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unicode.txt")
+	for name, content := range map[string]string{
+		"family emoji":      "family: 👨‍👩‍👧‍👦\n",
+		"nonbreaking space": "ordinary\u00a0prose\n",
+		"byte order mark":   "\ufeffdocument\n",
+		"soft hyphen":       "co\u00adoperate\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := boundedFileDiff(path, "before\n", content, true, true); !ok {
+				t.Fatalf("ordinary Unicode content was rejected: %q", content)
+			}
+			if preview := boundedUnifiedDiff("unicode.txt", "before\n", content); preview == "" {
+				t.Fatal("ordinary Unicode preview was omitted")
+			}
+		})
+	}
+
+	secret := "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG"
+	for name, separator := range map[string]string{
+		"zero width space":  "\u200b",
+		"zero width joiner": "\u200d",
+		"byte order mark":   "\ufeff",
+		"soft hyphen":       "\u00ad",
+		"nonbreaking space": "\u00a0",
+	} {
+		t.Run("split "+name, func(t *testing.T) {
+			obfuscated := secret[:20] + separator + secret[20:]
+			if _, ok := boundedFileDiff(path, "before\n", obfuscated, true, true); ok {
+				t.Fatalf("obfuscated credential produced a rich diff: %q", obfuscated)
+			}
+			if preview := boundedUnifiedDiff("secret.txt", "before\n", obfuscated); preview != "" {
+				t.Fatalf("obfuscated credential produced preview: %q", preview)
+			}
+		})
+	}
+}
+
+func TestWriteFileMarksSuppressedObfuscatedSecretAsRedacted(t *testing.T) {
+	root := t.TempDir()
+	secret := "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG"
+	obfuscated := secret[:20] + "\u200b" + secret[20:]
+	result := NewScopedWriteFileTool(root, nil).Run(t.Context(), map[string]any{
+		"path": "secret.txt", "content": obfuscated,
+	})
+	if result.Status != StatusOK || len(result.ChangedFiles) != 1 || len(result.FileDiffs) != 0 || !result.Redacted {
+		t.Fatalf("obfuscated-secret result = status=%s changed=%#v diffs=%#v redacted=%t", result.Status, result.ChangedFiles, result.FileDiffs, result.Redacted)
 	}
 }

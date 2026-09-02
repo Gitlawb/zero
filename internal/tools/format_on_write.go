@@ -44,7 +44,8 @@ var formatOnWriteTimeout = 10 * time.Second
 // and finds out from a CI format check it cannot see, which is the thing this
 // feature exists to prevent.
 type formatOnWriteResult struct {
-	Content string
+	Content      string
+	ContentKnown bool
 	// Formatter is the binary that was run, named in the notice so the user can
 	// tell a slow gofmt from a slow prettier.
 	Formatter string
@@ -117,14 +118,22 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
+var runFormatOnWriteCommand = func(ctx context.Context, binaryPath string, arguments []string, directory string) error {
+	formatter := exec.CommandContext(ctx, binaryPath, arguments...)
+	formatter.Dir = directory
+	formatter.Stdin = strings.NewReader("")
+	return formatter.Run()
+}
+
+var readFormattedFile = os.ReadFile
+
 // maybeFormatWrittenFile runs the configured formatter for absolutePath (when
-// enabled and on PATH) and returns the file's content afterwards. Best-effort
-// throughout: any failure — no formatter, formatter error, timeout, unreadable
-// result — returns writtenContent so the caller's state matches the last write
-// it performed itself. Only the timeout is reported back, for the reason on
-// formatOnWriteResult.
+// enabled and on PATH) and returns the verified file content afterwards.
+// Formatter failures restore writtenContent; if either that restoration or a
+// successful formatter's final read fails, ContentKnown is false so callers do
+// not publish exact diff evidence for bytes they could not verify.
 func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) formatOnWriteResult {
-	unformatted := formatOnWriteResult{Content: writtenContent}
+	unformatted := formatOnWriteResult{Content: writtenContent, ContentKnown: true}
 	if !formatOnWriteEnabled() {
 		return unformatted
 	}
@@ -139,10 +148,7 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
 	arguments := append(append([]string(nil), command[1:]...), absolutePath)
-	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
-	formatter.Dir = filepath.Dir(absolutePath)
-	formatter.Stdin = strings.NewReader("")
-	if err := formatter.Run(); err != nil {
+	if err := runFormatOnWriteCommand(formatCtx, binaryPath, arguments, filepath.Dir(absolutePath)); err != nil {
 		unformatted.Formatter = command[0]
 		// THE FORMATTER EDITS IN PLACE, SO A FAILED RUN CAN LEAVE THE FILE
 		// NEITHER FORMATTED NOR AS WRITTEN. Killed by the deadline or by the
@@ -157,6 +163,7 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 		// read that fails leaves the same ambiguity this exists to remove.
 		if restoreErr := os.WriteFile(absolutePath, []byte(writtenContent), 0o644); restoreErr != nil {
 			unformatted.RestoreFailed = true
+			unformatted.ContentKnown = false
 		}
 		// OUR deadline, not the caller's cancellation and not the formatter's own
 		// exit status. A cancelled tool call is already being reported as
@@ -169,9 +176,10 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 		}
 		return unformatted
 	}
-	formatted, err := os.ReadFile(absolutePath)
+	formatted, err := readFormattedFile(absolutePath)
 	if err != nil {
+		unformatted.ContentKnown = false
 		return unformatted
 	}
-	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
+	return formatOnWriteResult{Content: string(formatted), ContentKnown: true, Formatter: command[0]}
 }

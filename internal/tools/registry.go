@@ -343,7 +343,7 @@ func scrubResultSecrets(res Result) Result {
 		res.Display.Preview = scrubbed
 		res.Redacted = true
 	}
-	fileDiffs := res.FileDiffs[:0]
+	fileDiffs := make([]FileDiff, 0, len(res.FileDiffs))
 	for _, diff := range res.FileDiffs {
 		// Never normalize control bytes in a diff: normalizing after redaction can
 		// reassemble a split credential. Decline unsafe rich content entirely and

@@ -884,7 +884,7 @@ func TestStructuredPatchAddDoesNotOverwriteRacedDestination(t *testing.T) {
 		after: "patch content\n", mode: 0o644,
 	}
 
-	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
+	_, err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
 	if err == nil || !errors.Is(err, os.ErrExist) {
 		t.Fatalf("raced add destination = %v, want os.ErrExist", err)
 	}
@@ -910,7 +910,7 @@ func TestStructuredPatchFailedDeleteDoesNotRecreateMissingFile(t *testing.T) {
 		before: "removed by another writer\n", mode: 0o644,
 	}
 
-	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
+	_, err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
 	if err == nil {
 		t.Fatal("delete of an already removed file should fail")
 	}
@@ -947,7 +947,7 @@ func TestStructuredPatchMoveWithMissingSourceIsRefusedBeforePublishing(t *testin
 	}
 	defer func() { structuredPatchBeforeCommit = nil }()
 
-	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
+	_, err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
 	if !removed {
 		t.Fatal("pre-commit hook did not run")
 	}
@@ -1070,7 +1070,7 @@ func TestStructuredPatchPartialFailureLeavesCompletedChangeAndClearsTrackedState
 		},
 	}
 
-	err = applyStructuredPatchChanges(workspace, changes, tracker)
+	_, err = applyStructuredPatchChanges(workspace, changes, tracker)
 	if err == nil || !strings.Contains(err.Error(), "partially applied") {
 		t.Fatalf("second change = %v, want partial-application error", err)
 	}

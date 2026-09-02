@@ -98,7 +98,7 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
 	formatting := maybeFormatWrittenFile(context.Background(), filepath.Join(t.TempDir(), "notes.xyz"), "raw   text")
-	if formatting.Content != "raw   text" {
+	if formatting.Content != "raw   text" || !formatting.ContentKnown {
 		t.Fatalf("unknown extension must pass through: %q", formatting.Content)
 	}
 	if notice := formatting.notice("notes.xyz"); notice != "" {
@@ -115,10 +115,128 @@ func TestFormatOnWriteFormatterLookupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	formatting := maybeFormatWrittenFile(context.Background(), targetPath, uglyContent)
-	if formatting.Content != uglyContent {
+	if formatting.Content != uglyContent || !formatting.ContentKnown {
 		t.Fatalf("missing formatter must return written content, got %q", formatting.Content)
 	}
 	if notice := formatting.notice("a.go"); notice != "" {
 		t.Fatalf("an uninstalled formatter is a standing fact, not a miss worth reporting, got %q", notice)
+	}
+}
+
+func TestFormatOnWriteReadsMutatedFileAfterFormatterFailure(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	targetPath := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(targetPath, []byte("requested"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(_ context.Context, _ string, _ []string, _ string) error {
+		if err := os.WriteFile(targetPath, []byte("formatter-mutated"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return exec.ErrNotFound
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+
+	formatting := maybeFormatWrittenFile(context.Background(), targetPath, "requested")
+	if !formatting.ContentKnown || formatting.Content != "requested" {
+		t.Fatalf("formatter failure content = %q, known=%t", formatting.Content, formatting.ContentKnown)
+	}
+}
+
+func TestFormatOnWriteMarksUnreadableFinalStateUnknown(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	targetPath := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(targetPath, []byte("requested"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorRunner := runFormatOnWriteCommand
+	priorReader := readFormattedFile
+	runFormatOnWriteCommand = func(context.Context, string, []string, string) error { return nil }
+	readFormattedFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	t.Cleanup(func() {
+		runFormatOnWriteCommand = priorRunner
+		readFormattedFile = priorReader
+	})
+
+	formatting := maybeFormatWrittenFile(context.Background(), targetPath, "requested")
+	if formatting.ContentKnown || formatting.Content != "requested" {
+		t.Fatalf("unreadable formatter result = %q, known=%t", formatting.Content, formatting.ContentKnown)
+	}
+}
+
+func TestWriteFileUsesVerifiedBytesAfterFormatterFailure(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "a.go")
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(_ context.Context, _ string, _ []string, _ string) error {
+		if err := os.WriteFile(targetPath, []byte("formatter-mutated\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return exec.ErrNotFound
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "a.go", "content": "requested\n",
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("write status = %s: %s", result.Status, result.Output)
+	}
+	if got := result.FileDiffs; len(got) != 1 || got[0].NewText != "requested\n" {
+		t.Fatalf("formatter-failure FileDiff = %#v", got)
+	}
+}
+
+func TestEditFileUsesVerifiedBytesAfterFormatterFailure(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "a.go")
+	if err := os.WriteFile(targetPath, []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(_ context.Context, _ string, _ []string, _ string) error {
+		if err := os.WriteFile(targetPath, []byte("formatter-mutated\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return exec.ErrNotFound
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+
+	result := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "a.go", "old_string": "before", "new_string": "requested",
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("edit status = %s: %s", result.Status, result.Output)
+	}
+	if got := result.FileDiffs; len(got) != 1 || got[0].OldText != "before\n" || got[0].NewText != "requested\n" {
+		t.Fatalf("formatter-failure edit FileDiff = %#v", got)
+	}
+}
+
+func TestWriteFileOmitsRichDiffWhenFormatterFinalReadFails(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	priorRunner := runFormatOnWriteCommand
+	priorReader := readFormattedFile
+	runFormatOnWriteCommand = func(context.Context, string, []string, string) error { return nil }
+	readFormattedFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	t.Cleanup(func() {
+		runFormatOnWriteCommand = priorRunner
+		readFormattedFile = priorReader
+	})
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "a.go", "content": "requested\n",
+	})
+	if result.Status != StatusOK || len(result.ChangedFiles) != 1 || len(result.FileDiffs) != 0 {
+		t.Fatalf("unverified formatter result = status=%s changed=%#v diffs=%#v", result.Status, result.ChangedFiles, result.FileDiffs)
 	}
 }
