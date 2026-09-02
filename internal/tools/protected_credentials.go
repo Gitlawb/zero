@@ -1,11 +1,13 @@
 package tools
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
-	"github.com/Gitlawb/zero/internal/pathjail"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -16,10 +18,10 @@ import (
 //
 // Reads open through an os.Root tied to the selected workspace/scope root, then
 // compare metadata from that same handle with the protected credential set.
-// Writes build a complete temporary file under the same root and atomically
-// publish it by rename (or an exclusive no-replace operation for creates).
-// Consequently neither path resolution nor a later truncating open can be
-// redirected to the token between authorization and use.
+// Writes open through the same root, verify the opened identity before
+// truncation, and exclusively create new files. Consequently path resolution
+// cannot be redirected to the token between authorization and use, while an
+// ordinary existing file keeps its inode-level metadata and hard links.
 
 // protectedReadOpen opens path through the workspace root and verifies the
 // identity obtained from that same handle before any content is consumed.
@@ -78,9 +80,9 @@ func protectedRootRead(root *os.Root, relative, absolute, workspaceRoot string) 
 	return file, info, nil
 }
 
-// protectedMutationDenied is the early, lexical refusal. The actual mutation
-// must still use writeRootedFile so a raced hard-link or symlink replacement is
-// replaced atomically rather than opened and modified.
+// protectedMutationDenied is the early, lexical refusal. Existing files are
+// checked again from the handle that writeRootedFile will modify, closing a
+// swap race without replacing the file's inode and losing its metadata.
 func protectedMutationDenied(path, workspaceRoot string) error {
 	exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
 	if exclusions.PathExcluded(path) {
@@ -89,37 +91,41 @@ func protectedMutationDenied(path, workspaceRoot string) error {
 	return nil
 }
 
-func protectedCredentialsActive(workspaceRoot string) bool {
-	exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
-	return exclusions.Active()
-}
-
-func writeRootedFile(root *os.Root, relative string, content []byte, mode os.FileMode, createOnly bool) (bool, error) {
+func writeRootedFile(root *os.Root, relative, absolute, workspaceRoot string, content []byte, mode os.FileMode, createOnly bool) (bool, error) {
 	parent := filepath.Dir(relative)
 	if err := root.MkdirAll(parent, 0o755); err != nil {
 		return false, err
 	}
-	temp, tempName, err := pathjail.CreateTemp(root, parent, "zero-write", filepath.Ext(relative)+".tmp")
+	flags := os.O_WRONLY
+	if createOnly {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	file, err := root.OpenFile(relative, flags, mode.Perm())
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = removeStructuredPatchTemp(root, tempName) }()
-	if _, err := temp.Write(content); err != nil {
-		_ = temp.Close()
-		return false, err
+	committed := createOnly
+	if !createOnly {
+		info, statErr := file.Stat()
+		if statErr != nil {
+			file.Close()
+			return false, statErr
+		}
+		exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
+		if exclusions.FileExcluded(absolute, info) {
+			file.Close()
+			return false, protectedCredentialErr(absolute, "writable")
+		}
+		if err := file.Truncate(0); err != nil {
+			file.Close()
+			return false, err
+		}
+		committed = true
 	}
-	if err := temp.Chmod(mode.Perm()); err != nil {
-		_ = temp.Close()
-		return false, err
-	}
-	if err := temp.Close(); err != nil {
-		return false, err
-	}
-	if createOnly {
-		return publishStructuredPatchNoReplace(root, tempName, relative, mode)
-	}
-	if err := root.Rename(tempName, relative); err != nil {
-		return false, err
+	_, writeErr := io.Copy(file, bytes.NewReader(content))
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		return committed, errors.Join(writeErr, closeErr)
 	}
 	return true, nil
 }

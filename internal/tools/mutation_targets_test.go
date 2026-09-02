@@ -1,10 +1,14 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 func TestMutationTargets(t *testing.T) {
@@ -114,5 +118,71 @@ func TestStripPatchPrefixStripsOnlyOne(t *testing.T) {
 	})
 	if len(got) != 1 || got[0] != "b/foo.txt" {
 		t.Fatalf("expected [b/foo.txt], got %v", got)
+	}
+}
+
+func TestApplyPatchGateAndRewindUseExecutorOperationPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch string
+	}{
+		{
+			name: "delete header disagrees with diff git",
+			patch: "diff --git a/decoy.txt b/decoy.txt\n" +
+				"deleted file mode 100644\n" +
+				"--- a/secret.txt\n" +
+				"+++ /dev/null\n" +
+				"@@ -1 +0,0 @@\n" +
+				"-secret\n",
+		},
+		{
+			name: "unmatched a b prefixes",
+			patch: "diff --git a/secret.txt secret.txt\n" +
+				"--- a/secret.txt\n" +
+				"+++ secret.txt\n" +
+				"@@ -1 +1 @@\n" +
+				"-secret\n" +
+				"+changed\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared, err := prepareApplyPatchArguments(map[string]any{"patch": tc.patch})
+			if err != nil {
+				t.Fatalf("prepare patch: %v", err)
+			}
+			if got, want := prepared.paths, []string{"secret.txt"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("executor paths = %v, want %v", got, want)
+			}
+
+			ws := t.TempDir()
+			secret := filepath.Join(ws, "secret.txt")
+			if err := os.WriteFile(secret, []byte("secret\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := MutationTargets(ws, "apply_patch", map[string]any{"patch": tc.patch}), []string{"secret.txt"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("rewind targets = %v, want %v", got, want)
+			}
+
+			engine := sandbox.NewEngine(sandbox.EngineOptions{
+				WorkspaceRoot: ws,
+				Policy: sandbox.Policy{
+					Mode:             sandbox.ModeEnforce,
+					EnforceWorkspace: true,
+					DenyWrite:        []string{secret},
+				},
+			})
+			registry := NewRegistry()
+			registry.Register(NewScopedApplyPatchTool(ws, nil))
+			result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": tc.patch}, RunOptions{
+				Sandbox:           engine,
+				PermissionGranted: true,
+			})
+			if result.Status == StatusOK || !strings.Contains(result.Output, "denied") {
+				t.Fatalf("DenyWrite did not block executor target: status=%s output=%q", result.Status, result.Output)
+			}
+			if content, err := os.ReadFile(secret); err != nil || string(content) != "secret\n" {
+				t.Fatalf("denied target changed: content=%q err=%v", content, err)
+			}
+		})
 	}
 }

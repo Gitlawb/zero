@@ -15,6 +15,40 @@ type applyPatchTool struct {
 	scope         PathScope
 }
 
+type applyPatchPreparation struct {
+	patch      string
+	operations []structuredPatchOperation
+	paths      []string
+}
+
+func prepareApplyPatchArguments(args map[string]any) (*applyPatchPreparation, error) {
+	patch, err := aliasedStringArg(args, []string{"patch", "diff"}, "", true, false)
+	if err != nil {
+		return nil, fmt.Errorf("invalid arguments for apply_patch: %w", err)
+	}
+	var operations []structuredPatchOperation
+	if isStructuredPatch(patch) {
+		operations, err = parseStructuredPatch(patch)
+	} else {
+		operations, err = parseUnifiedPatch(patch)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &applyPatchPreparation{
+		patch:      patch,
+		operations: operations,
+		paths:      structuredPatchOperationPaths(operations),
+	}, nil
+}
+
+func preparedPatchPaths(prepared *applyPatchPreparation) []string {
+	if prepared == nil {
+		return nil
+	}
+	return prepared.paths
+}
+
 func (applyPatchTool) isBuiltInApplyPatch() {}
 
 // PrepareFreeformApplyPatchArguments converts native structured-patch input
@@ -150,57 +184,17 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
-	if isStructuredPatch(patch) {
-		return tool.runStructuredPatch(applyRoot, relativeRoot, patch, options)
+	prepared := options.preparedApplyPatch
+	if prepared == nil || prepared.patch != patch {
+		prepared, err = prepareApplyPatchArguments(args)
+		if err != nil {
+			return errorResult("Error applying patch: " + err.Error())
+		}
 	}
-	// Fail closed on a path-bearing git header this process cannot interpret
-	// exactly, using the SAME parser the sandbox gate uses: a target the two
-	// disagree about is one the policy never saw. This is also the only
-	// path-level refusal apply_patch has when reached through the plain
-	// registry API, with no sandbox engine to consult.
-	patchPaths, err := sandbox.PatchHeaderPaths(patch)
-	if err != nil {
-		return errorResult("Error applying patch: patch paths cannot be established safely: " + err.Error())
-	}
-	if err := validatePatchPaths(applyRoot, patchPaths); err != nil {
+	if err := validatePatchPaths(applyRoot, prepared.paths); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
-	// Unified diffs are translated into the same operations and applied by
-	// the same os.Root engine, so neither format opens a target by pathname
-	// after validation (no check-to-use window) and git is not needed.
-	operations, err := parseUnifiedPatch(patch)
-	if err != nil {
-		return errorResult("Error applying patch: " + err.Error())
-	}
-	return applyPatchOperations(applyRoot, relativeRoot, operations, options)
-}
-
-// changedFilesFromPatch extracts the unique, WORKSPACE-relative paths a patch
-// touches, reusing the same per-line parser used for validation. Patch paths are
-// relative to the apply cwd, so relativeRoot (the workspace-relative cwd, e.g.
-// "sub/dir", or "." for the workspace root) is prefixed so callers get true
-// workspace-relative paths regardless of cwd. When the apply cwd resolves to an
-// extra write root, resolveScopedPath returns the absolute path as relativeRoot;
-// in that case the entries in the returned slice are absolute paths, since
-// workspace-relative would be ambiguous there.
-func changedFilesFromPatch(relativeRoot string, patchPaths []string) []string {
-	seen := map[string]bool{}
-	var paths []string
-	for _, path := range patchPaths {
-		if path == "" || path == "/dev/null" {
-			continue
-		}
-		workspacePath := path
-		if relativeRoot != "" && relativeRoot != "." {
-			workspacePath = filepath.ToSlash(filepath.Join(relativeRoot, path))
-		}
-		if seen[workspacePath] {
-			continue
-		}
-		seen[workspacePath] = true
-		paths = append(paths, workspacePath)
-	}
-	return paths
+	return applyPatchOperations(applyRoot, relativeRoot, prepared.operations, options)
 }
 
 // normalizePatchPathForRoot resolves platform-level symlinks (macOS /var ->

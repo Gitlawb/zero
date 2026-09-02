@@ -2,8 +2,6 @@ package tools
 
 import (
 	"path/filepath"
-
-	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // MutationTargets returns the workspace-relative paths a tool call will write to,
@@ -31,7 +29,7 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 		if err != nil {
 			return nil
 		}
-		patchPaths, err := sandbox.PatchHeaderPaths(patch)
+		prepared, err := prepareApplyPatchArguments(map[string]any{"patch": patch})
 		if err != nil {
 			return nil
 		}
@@ -46,30 +44,13 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 		if err != nil {
 			return nil
 		}
-		if isStructuredPatch(patch) {
-			operations, err := parseStructuredPatch(patch)
-			if err != nil {
-				return nil
-			}
-			paths := structuredPatchOperationPaths(operations)
-			for _, path := range paths {
-				if _, _, err := resolveWorkspaceTargetPath(applyRoot, path); err != nil {
-					return nil
-				}
-			}
-			return prefixPatchPaths(relativeRoot, paths)
-		}
 		// Enforce the same workspace confinement apply_patch applies (against the
 		// resolved apply dir), so a patch with a traversal path (../x) never yields
 		// an out-of-workspace target.
-		if err := validatePatchPaths(applyRoot, patchPaths); err != nil {
+		if err := validatePatchPaths(applyRoot, prepared.paths); err != nil {
 			return nil
 		}
-		paths := changedFilesFromPatch(relativeRoot, patchPaths)
-		if len(paths) == 0 {
-			return nil
-		}
-		return paths
+		return prefixPatchPaths(relativeRoot, prepared.paths)
 	default:
 		return nil
 	}

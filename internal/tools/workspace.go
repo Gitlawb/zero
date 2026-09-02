@@ -296,29 +296,6 @@ func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath 
 	return "", "", firstErr
 }
 
-func resolveScopedReadTarget(workspaceRoot string, scope PathScope, requestedPath string) (rootedScopedPath, error) {
-	absolute, display, err := resolveScopedReadPath(workspaceRoot, scope, requestedPath)
-	if err != nil {
-		return rootedScopedPath{}, err
-	}
-	if spillPath, ok := resolveSpillReadPath(requestedPath); ok && spillPath == absolute {
-		root, relative, err := rootedPathWithin([]string{spillRootPath()}, absolute)
-		if err != nil {
-			return rootedScopedPath{}, err
-		}
-		return rootedScopedPath{absolute: absolute, display: display, root: root, relative: relative}, nil
-	}
-	roots, err := scopedReadRoots(workspaceRoot, scope)
-	if err != nil {
-		return rootedScopedPath{}, err
-	}
-	root, relative, err := rootedPathWithin(roots, absolute)
-	if err != nil {
-		return rootedScopedPath{}, err
-	}
-	return rootedScopedPath{absolute: absolute, display: display, root: root, relative: relative}, nil
-}
-
 // resolveScopedPath is resolveWorkspacePath generalized to a scope: relative
 // paths resolve against the workspace root only; an absolute path resolves
 // against the first root that contains it. The workspace root's error is

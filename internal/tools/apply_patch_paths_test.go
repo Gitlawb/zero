@@ -7,20 +7,18 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
-func mustPatchHeaderPaths(t *testing.T, patch string) []string {
+func mustApplyPatchPaths(t *testing.T, patch string) []string {
 	t.Helper()
-	paths, err := sandbox.PatchHeaderPaths(patch)
+	prepared, err := prepareApplyPatchArguments(map[string]any{"patch": patch})
 	if err != nil {
-		t.Fatalf("PatchHeaderPaths: %v", err)
+		t.Fatalf("prepareApplyPatchArguments: %v", err)
 	}
-	return paths
+	return prepared.paths
 }
 
-func TestPatchHeaderPathsHandlesQuotedAndSpacedNames(t *testing.T) {
+func TestApplyPatchPathsHandleQuotedAndSpacedNames(t *testing.T) {
 	// git C-quotes a path that contains a space; the old strings.Fields parse kept
 	// only the first whitespace-delimited token ("a/dir/file" and the literal `name`
 	// pieces would split), losing the real name. The whole post-prefix value, with a
@@ -28,15 +26,15 @@ func TestPatchHeaderPathsHandlesQuotedAndSpacedNames(t *testing.T) {
 	patch := "--- \"a/dir/file name.go\"\t2024-01-01 00:00:00\n" +
 		"+++ \"b/dir/file name.go\"\n" +
 		"@@ -1 +1 @@\n-old\n+new\n"
-	got := mustPatchHeaderPaths(t, patch)
+	got := mustApplyPatchPaths(t, patch)
 	if !slices.Contains(got, "dir/file name.go") {
 		t.Fatalf("quoted spaced path not extracted: %v", got)
 	}
 }
 
-func TestPatchHeaderPathsUnspacedStillWorks(t *testing.T) {
+func TestApplyPatchPathsUnspacedStillWork(t *testing.T) {
 	patch := "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-old\n+new\n"
-	got := mustPatchHeaderPaths(t, patch)
+	got := mustApplyPatchPaths(t, patch)
 	if !slices.Contains(got, "x.go") {
 		t.Fatalf("plain path not extracted: %v", got)
 	}
@@ -50,11 +48,11 @@ func TestPatchHeaderPathsUnspacedStillWorks(t *testing.T) {
 // whose last byte is an ordinary space reaches the header raw. git apply reads
 // it to the tab or newline and patches that exact file, so trimming the operand
 // here would leave the token gate comparing against a neighbouring pathname.
-func TestPatchHeaderPathsPreservesSurroundingSpacesInNames(t *testing.T) {
+func TestApplyPatchPathsPreserveSurroundingSpacesInNames(t *testing.T) {
 	patch := "--- a/bridge-token \t2024-01-01 00:00:00\n" +
 		"+++ b/bridge-token \n" +
 		"@@ -1 +1 @@\n-old\n+new\n"
-	got := mustPatchHeaderPaths(t, patch)
+	got := mustApplyPatchPaths(t, patch)
 	if !slices.Contains(got, "bridge-token ") {
 		t.Fatalf("trailing-space path not preserved: %q", got)
 	}
@@ -63,33 +61,14 @@ func TestPatchHeaderPathsPreservesSurroundingSpacesInNames(t *testing.T) {
 	}
 }
 
-func TestPatchHeaderPathsHandlesCQuotedDiffGitOperands(t *testing.T) {
-	patch := "diff --git \"a/bridge\\040token\" \"b/exposed\\tcopy\"\n"
-	got := mustPatchHeaderPaths(t, patch)
-	want := []string{"bridge token", "exposed\tcopy"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("C-quoted diff --git operands = %q, want %q", got, want)
+func TestApplyPatchPathsRejectAmbiguousDiffOperands(t *testing.T) {
+	patch := "diff --git a/source b/part b/destination\nnew file mode 100644\n"
+	if prepared, err := prepareApplyPatchArguments(map[string]any{"patch": patch}); err == nil {
+		t.Fatalf("prepareApplyPatchArguments = %#v, want ambiguous-path error", prepared)
 	}
 }
 
-func TestPatchHeaderPathsPreservesTrailingSpaceInBinaryDiffOperands(t *testing.T) {
-	patch := "diff --git a/bridge-token  b/bridge-token \n" +
-		"GIT binary patch\n"
-	got := mustPatchHeaderPaths(t, patch)
-	want := []string{"bridge-token ", "bridge-token "}
-	if !slices.Equal(got, want) {
-		t.Fatalf("binary diff paths = %q, want %q", got, want)
-	}
-}
-
-func TestPatchHeaderPathsRejectsAmbiguousDiffOperands(t *testing.T) {
-	patch := "diff --git a/source b/part b/destination\nGIT binary patch\n"
-	if paths, err := sandbox.PatchHeaderPaths(patch); err == nil {
-		t.Fatalf("PatchHeaderPaths = %q, want ambiguous-path error", paths)
-	}
-}
-
-func TestPatchHeaderPathsParsesGitDefaultAndNoPrefixOutput(t *testing.T) {
+func TestApplyPatchPathsParseGitDefaultAndNoPrefixOutput(t *testing.T) {
 	for _, operation := range []string{"rename", "copy", "modify"} {
 		for _, noPrefix := range []bool{false, true} {
 			name := operation + "/default-prefix"
@@ -98,7 +77,7 @@ func TestPatchHeaderPathsParsesGitDefaultAndNoPrefixOutput(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				patch, source, destination := gitGeneratedPatch(t, operation, noPrefix)
-				got := mustPatchHeaderPaths(t, patch)
+				got := mustApplyPatchPaths(t, patch)
 				for _, want := range []string{source, destination} {
 					if !slices.Contains(got, want) {
 						t.Fatalf("Git-generated %s paths = %q, want %q\npatch:\n%s", operation, got, want, patch)
@@ -109,13 +88,13 @@ func TestPatchHeaderPathsParsesGitDefaultAndNoPrefixOutput(t *testing.T) {
 	}
 }
 
-func TestPatchHeaderPathsRejectsMismatchedNoPrefixRenameMetadata(t *testing.T) {
+func TestApplyPatchPathsUseExecutorRenameMetadata(t *testing.T) {
 	patch := "diff --git source.txt destination.txt\n" +
 		"similarity index 100%\n" +
 		"rename from other.txt\n" +
 		"rename to destination.txt\n"
-	if paths, err := sandbox.PatchHeaderPaths(patch); err == nil {
-		t.Fatalf("PatchHeaderPaths = %q, want mismatched-header error", paths)
+	if got, want := mustApplyPatchPaths(t, patch), []string{"other.txt", "destination.txt"}; !slices.Equal(got, want) {
+		t.Fatalf("executor paths = %q, want %q", got, want)
 	}
 }
 

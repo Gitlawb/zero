@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // The gate and the tool must resolve a path argument to the SAME bytes.
@@ -183,13 +181,12 @@ func TestDaemonTokenProtectionMatrix(t *testing.T) {
 				if err != nil || string(contents) != "bridge-secret\n" {
 					t.Fatalf("token changed after a denied patch: contents=%q err=%v", contents, err)
 				}
-				headerPaths, err := sandbox.PatchHeaderPaths(patch)
+				prepared, err := prepareApplyPatchArguments(map[string]any{"patch": patch})
 				if err != nil {
-					t.Fatalf("PatchHeaderPaths: %v", err)
+					t.Fatalf("prepareApplyPatchArguments: %v", err)
 				}
-				if len(headerPaths) != 2 || headerPaths[0] != filepath.ToSlash(target) ||
-					headerPaths[1] != filepath.ToSlash(target) {
-					t.Fatalf("patch header paths = %q, want exact target spelling twice", headerPaths)
+				if len(prepared.paths) != 1 || prepared.paths[0] != filepath.ToSlash(target) {
+					t.Fatalf("executor paths = %q, want exact target spelling", prepared.paths)
 				}
 				// Every spelling — absolute included — must be refused by the
 				// credential gate itself. An absolute path inside the workspace

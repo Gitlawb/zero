@@ -398,8 +398,14 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 			result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
 				"patch": tc.patch,
 			}, RunOptions{Sandbox: engine, PermissionGranted: true})
-			if result.Status == StatusOK || !strings.Contains(result.Output, "remote bridge token") {
+			if result.Status == StatusOK {
+				t.Fatalf("apply_patch unexpectedly accepted the protected patch: output=%q", result.Output)
+			}
+			if tc.controlUnsupported == "" && !strings.Contains(result.Output, "remote bridge token") {
 				t.Fatalf("apply_patch: status=%s output=%q, want bridge-token denial", result.Status, result.Output)
+			}
+			if tc.controlUnsupported != "" && !strings.Contains(result.Output, tc.controlUnsupported) {
+				t.Fatalf("unsupported protected patch refusal = %q, want %q", result.Output, tc.controlUnsupported)
 			}
 
 			contents, err := os.ReadFile(token)
@@ -463,14 +469,7 @@ func TestApplyPatchDeniesTrailingSpaceDaemonTokenPath(t *testing.T) {
 // on whether the installed git version happens to reject the same ambiguity.
 func TestAmbiguousGitHeaderFailsClosedBeforeApply(t *testing.T) {
 	patch := "diff --git a/bridge b/token b/exposed-token\n" +
-		"GIT binary patch\n" +
-		"literal 5\n" +
-		"LcmZQzU|<4=0Rj{Q\n\n" +
-		"literal 0\n" +
-		"HcmV?d00001\n\n"
-	if paths, err := sandbox.PatchHeaderPaths(patch); err == nil {
-		t.Fatalf("PatchHeaderPaths = %q, want ambiguous-path error", paths)
-	}
+		"new file mode 100644\n"
 
 	workspace := t.TempDir()
 	registry := NewRegistry()
@@ -485,7 +484,7 @@ func TestAmbiguousGitHeaderFailsClosedBeforeApply(t *testing.T) {
 		result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
 			"patch": patch,
 		}, options)
-		if result.Status == StatusOK || !strings.Contains(result.Output, "cannot be established safely") {
+		if result.Status == StatusOK || !strings.Contains(result.Output, "file mode header without a diff --git path") {
 			t.Fatalf("ambiguous patch: status=%s output=%q, want pre-apply parse denial", result.Status, result.Output)
 		}
 	}

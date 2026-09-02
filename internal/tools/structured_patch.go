@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/pathjail"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -123,14 +124,6 @@ func structuredHunkAnchor(context string) string {
 
 func isStructuredPatch(patch string) bool {
 	return sandbox.IsStructuredPatch(patch)
-}
-
-func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch string, options RunOptions) Result {
-	operations, err := parseStructuredPatch(patch)
-	if err != nil {
-		return errorResult("Error applying patch: " + err.Error())
-	}
-	return applyPatchOperations(applyRoot, relativeRoot, operations, options)
 }
 
 // applyPatchOperations applies parsed operations (from either patch format)
@@ -756,10 +749,10 @@ func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bo
 		}
 		return true, nil
 	case structuredPatchAdd, structuredPatchCopy:
-		return writeRootedFile(root, change.to.relative, []byte(change.after), change.mode, true)
+		return writeStructuredPatchFile(root, change.to, change.after, change.mode, true)
 	case structuredPatchUpdate:
 		moving := change.from.absolute != change.to.absolute
-		committed, err := writeRootedFile(root, change.to.relative, []byte(change.after), change.mode, moving)
+		committed, err := writeStructuredPatchFile(root, change.to, change.after, change.mode, moving)
 		if err != nil {
 			return committed, err
 		}
@@ -771,6 +764,36 @@ func applyStructuredPatchChange(root *os.Root, change structuredPatchChange) (bo
 		return true, nil
 	}
 	return false, fmt.Errorf("unsupported structured patch operation")
+}
+
+func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, content string, mode os.FileMode, createOnly bool) (bool, error) {
+	parent := filepath.Dir(target.relative)
+	if err := root.MkdirAll(parent, 0o755); err != nil {
+		return false, fmt.Errorf("creating parent directory for %s: %w", target.relative, err)
+	}
+	temp, tempName, err := pathjail.CreateTemp(root, parent, "zero-patch", ".tmp")
+	if err != nil {
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	defer func() { _ = removeStructuredPatchTemp(root, tempName) }()
+	if _, err := temp.WriteString(content); err != nil {
+		_ = temp.Close()
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	if err := temp.Chmod(mode.Perm()); err != nil {
+		_ = temp.Close()
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	if err := temp.Close(); err != nil {
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	if createOnly {
+		return publishStructuredPatchNoReplace(root, tempName, target.relative, mode)
+	}
+	if err := root.Rename(tempName, target.relative); err != nil {
+		return false, fmt.Errorf("writing %s: %w", target.relative, err)
+	}
+	return true, nil
 }
 
 func publishStructuredPatchNoReplace(root *os.Root, source, target string, mode os.FileMode) (bool, error) {

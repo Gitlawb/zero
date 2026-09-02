@@ -273,7 +273,7 @@ func TestRootedMutationPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
 			case "unified_patch":
 				// A unified diff is translated into the same operations the
 				// structured engine applies, so it publishes through the same
-				// rooted atomic write rather than a pathname-level open.
+				// rooted atomic write rather than an unrestricted pathname open.
 				operations, perr := parseUnifiedPatch("--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-ordinary\n+patched\n")
 				if perr != nil {
 					t.Fatal(perr)
@@ -284,11 +284,10 @@ func TestRootedMutationPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
 					err = applyStructuredPatchChanges(root, changes, nil)
 				}
 			default:
-				_, err = writeRootedFile(root, "notes.txt", []byte("updated\n"), 0o644, false)
+				_, err = writeRootedFile(root, "notes.txt", path, ws, []byte("updated\n"), 0o644, false)
 			}
-			// Planning refuses the raced alias outright; publishing, when it does
-			// run, must not reach the token either. Either outcome is acceptable,
-			// an altered token is not.
+			// Planning or the write-side handle check refuses the raced alias. The
+			// token must remain unchanged regardless of which layer catches it.
 			if err != nil && !strings.Contains(err.Error(), "remote bridge token") {
 				t.Fatal(err)
 			}
@@ -369,5 +368,55 @@ func TestStructuredPatchPlanningRejectsProtectedAliasHandle(t *testing.T) {
 	defer root.Close()
 	if changes, err := planStructuredPatch(root, operations, nil); err == nil || len(changes) != 0 {
 		t.Fatalf("structured plan accepted protected alias: changes=%#v err=%v", changes, err)
+	}
+}
+
+func TestDirectFileToolsPreserveHardLinks(t *testing.T) {
+	for _, name := range []string{"write_file", "edit_file"} {
+		t.Run(name, func(t *testing.T) {
+			ws := t.TempDir()
+			path := filepath.Join(ws, "file.txt")
+			alias := filepath.Join(ws, "alias.txt")
+			if err := os.WriteFile(path, []byte("before\n"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(path, alias); err != nil {
+				t.Skipf("workspace filesystem is not hard-linkable: %v", err)
+			}
+
+			var result Result
+			switch name {
+			case "write_file":
+				result = NewScopedWriteFileTool(ws, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+					"path": "file.txt", "content": "after\n", "overwrite": true,
+				}, RunOptions{})
+			case "edit_file":
+				tracker := NewFileTracker()
+				read := NewScopedReadFileTool(ws, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": "file.txt"}, RunOptions{FileTracker: tracker})
+				if read.Status != StatusOK {
+					t.Fatalf("read failed: %+v", read)
+				}
+				result = NewScopedEditFileTool(ws, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+					"path": "file.txt", "old_string": "before", "new_string": "after",
+				}, RunOptions{FileTracker: tracker})
+			}
+			if result.Status != StatusOK {
+				t.Fatalf("%s failed: %+v", name, result)
+			}
+			if content, err := os.ReadFile(alias); err != nil || string(content) != "after\n" {
+				t.Fatalf("hard-link content = %q, err=%v", content, err)
+			}
+			pathInfo, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasInfo, err := os.Stat(alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(pathInfo, aliasInfo) {
+				t.Fatal("tool replaced the existing inode and broke its hard link")
+			}
+		})
 	}
 }

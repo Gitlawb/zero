@@ -103,24 +103,17 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		}
 	}
 
-	// Engine-independent lexical refusal, followed by an atomic rooted publish.
-	// If a concurrent writer swaps this name to a token hard link after the
-	// check, Rename replaces that directory entry; it never truncates the token
-	// inode. A create uses an exclusive no-replace publish for the same reason.
+	// The lexical check rejects the configured path early. writeRootedFile then
+	// checks the opened handle before truncating, so a raced alias cannot redirect
+	// the write to the token. Existing files retain their inode, ACLs and links.
 	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if _, err := writeRootedFile(root, target.relative, []byte(content), writeMode, !overwrite); err != nil {
+	if _, err := writeRootedFile(root, target.relative, absolutePath, tool.workspaceRoot, []byte(content), writeMode, !existed); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
-	// Pathname-based formatters and diagnostics reopen the published name. Skip
-	// them while a protected token is selected, or they would reintroduce the
-	// same swap window the rooted atomic write closes.
-	credentialsActive := protectedCredentialsActive(tool.workspaceRoot)
-	if !credentialsActive {
-		content = maybeFormatWrittenFile(ctx, absolutePath, content)
-	}
+	content = maybeFormatWrittenFile(ctx, absolutePath, content)
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
 	newInfo, _ := root.Stat(target.relative)
@@ -143,9 +136,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		lines++
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
-	if !credentialsActive {
-		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
-	}
+	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for

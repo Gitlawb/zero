@@ -15,12 +15,10 @@ import (
 // TestApplyPatchExecutesHeaderPathBytesVerbatim closes the parser/consumer gap
 // between the layer that authorizes a patch and the layer that applies it.
 //
-// sandbox.PatchHeaderPaths decides whether a patch may run by reading every
-// unquoted byte after "--- ", "+++ ", "rename from " and friends as pathname
-// data. If the executor re-read those headers with its own trimming, a patch
-// naming the unprotected sibling "bridge-token " would clear the gate and then
-// mutate the protected "bridge-token" beside it — the gate's check would be
-// authorizing a different file than the one os.Root opens.
+// The executor parser supplies both the paths the sandbox authorizes and the
+// operations that run. If either consumer trimmed those paths independently, a
+// patch naming the unprotected sibling "bridge-token " could clear the gate and
+// then mutate the protected "bridge-token" beside it.
 //
 // Each case therefore proves both halves at once: the whitespace-bearing name
 // is a real, patchable file (the control effect lands on it, byte for byte),

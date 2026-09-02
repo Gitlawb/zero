@@ -277,25 +277,20 @@ func requestPaths(request Request) []string {
 		}
 	}
 	if request.ToolName == "apply_patch" {
-		paths = append(paths, applyPatchRequestPaths(request.Args)...)
+		paths = append(paths, applyPatchRequestPaths(request)...)
 	}
 	return paths
 }
 
-func applyPatchRequestPaths(args map[string]any) []string {
-	patch := firstExactStringArg(args, "patch", "diff")
-	if patch == "" {
+func applyPatchRequestPaths(request Request) []string {
+	if request.PatchPaths == nil {
 		return nil
 	}
 	// apply_patch consumes cwd as exact pathname data. Trimming here would make
-	// the gate derive targets under a different directory than git applies them.
-	cwd := firstExactStringArg(args, "cwd")
+	// the gate derive targets under a different directory than the tool applies them.
+	cwd := firstExactStringArg(request.Args, "cwd")
 	var paths []string
-	parsed, err := PatchHeaderPaths(patch)
-	if err != nil {
-		return nil
-	}
-	for _, path := range parsed {
+	for _, path := range request.PatchPaths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -315,18 +310,17 @@ func applyPatchPathBlock(request Request) *pathBlock {
 	if patch == "" {
 		return nil
 	}
-	paths, err := PatchHeaderPaths(patch)
-	if err != nil {
+	if request.PatchPaths == nil {
 		return &pathBlock{
 			Code:   BlockDenied,
-			Reason: "patch paths cannot be established safely: " + err.Error(),
+			Reason: "patch paths were not supplied by the apply_patch executor",
 		}
 	}
 	// Only relative traversal is rejected up front. Absolute paths flow through
 	// the regular workspace-scope validation below (requestPaths), which accepts
 	// one inside the workspace and denies one outside — a model that echoes the
 	// absolute path read_file showed it must not be blocked for that alone.
-	for _, path := range paths {
+	for _, path := range request.PatchPaths {
 		if path == "" || path == "/dev/null" {
 			continue
 		}
@@ -368,208 +362,6 @@ func IsStructuredPatch(patch string) bool {
 	return StructuredPatchMarker(first) == "begin"
 }
 
-// PatchHeaderPaths returns every source and destination path declared by a
-// patch. Keeping this parser shared with apply_patch ensures the sandbox gate
-// and the tool's own path validation agree on what the executor will read or write. A
-// path-bearing git header that cannot be interpreted exactly rejects the patch:
-// silently omitting it would let git operate on a path the policy never saw.
-func PatchHeaderPaths(patch string) ([]string, error) {
-	if IsStructuredPatch(patch) {
-		return structuredPatchHeaderPaths(patch), nil
-	}
-	return patchHeaderPaths(patch)
-}
-
-// structuredPatchHeaderPaths is intentionally a small, conservative scanner for
-// the sandbox boundary. The executor validates the complete hunk grammar before
-// writing; the sandbox only needs every possible target path so it can reject an
-// unsafe request before the tool runs.
-func structuredPatchHeaderPaths(patch string) []string {
-	var paths []string
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		for _, prefix := range []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "} {
-			if path, ok := strings.CutPrefix(trimmed, prefix); ok {
-				path = strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(path)), "\\", "/")
-				if path != "" {
-					paths = append(paths, path)
-				}
-				break
-			}
-		}
-	}
-	return paths
-}
-
-func patchHeaderPaths(patch string) ([]string, error) {
-	var paths []string
-	oldRemaining, newRemaining := 0, 0
-	inHunk := false
-	type diffSection struct {
-		rawDiff               string
-		parsedSource          string
-		parsedDestination     string
-		diffParsed            bool
-		extendedSource        string
-		extendedDestination   string
-		hasExtendedSource     bool
-		hasExtendedDest       bool
-		unifiedSource         string
-		unifiedDestination    string
-		hasUnifiedSource      bool
-		hasUnifiedDestination bool
-	}
-	var section diffSection
-	flushSection := func() error {
-		if section.rawDiff == "" {
-			return nil
-		}
-		if section.hasExtendedSource != section.hasExtendedDest {
-			return fmt.Errorf("incomplete copy or rename path headers")
-		}
-		if section.hasUnifiedSource != section.hasUnifiedDestination {
-			return fmt.Errorf("incomplete unified file path headers")
-		}
-
-		var source, destination string
-		switch {
-		case section.hasExtendedSource:
-			source, destination = section.extendedSource, section.extendedDestination
-			if !diffGitLineMatchesChange(section.rawDiff, section.parsedSource, section.parsedDestination, section.diffParsed, source, destination) {
-				return fmt.Errorf("diff --git paths disagree with the copy or rename headers")
-			}
-		case section.hasUnifiedSource && section.unifiedSource != "/dev/null" && section.unifiedDestination != "/dev/null":
-			var ok bool
-			source, destination, ok = normalizeUnifiedDiffPaths(section.rawDiff, section.parsedSource, section.parsedDestination, section.diffParsed, section.unifiedSource, section.unifiedDestination)
-			if !ok {
-				return fmt.Errorf("diff --git paths disagree with the unified file path headers")
-			}
-		case section.diffParsed:
-			source, destination = normalizeDiffGitPaths(section.parsedSource, section.parsedDestination)
-		default:
-			return fmt.Errorf("ambiguous diff --git path operands")
-		}
-		paths = append(paths, filepath.ToSlash(source), filepath.ToSlash(destination))
-		return nil
-	}
-	setExtendedPath := func(source bool, path string) error {
-		if source {
-			if section.hasExtendedSource && section.extendedSource != path {
-				return fmt.Errorf("conflicting copy or rename source paths")
-			}
-			section.extendedSource, section.hasExtendedSource = path, true
-		} else {
-			if section.hasExtendedDest && section.extendedDestination != path {
-				return fmt.Errorf("conflicting copy or rename destination paths")
-			}
-			section.extendedDestination, section.hasExtendedDest = path, true
-		}
-		return nil
-	}
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
-		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
-			switch {
-			case strings.HasPrefix(line, "-"):
-				oldRemaining--
-			case strings.HasPrefix(line, "+"):
-				newRemaining--
-			case strings.HasPrefix(line, "\\"):
-			default:
-				oldRemaining--
-				newRemaining--
-			}
-			continue
-		}
-		inHunk = false
-		switch {
-		case strings.HasPrefix(line, "diff --git "):
-			if err := flushSection(); err != nil {
-				return nil, err
-			}
-			section = diffSection{rawDiff: line[len("diff --git "):]}
-			section.parsedSource, section.parsedDestination, section.diffParsed = parseDiffGitPaths(section.rawDiff)
-		case strings.HasPrefix(line, "copy from "):
-			path, ok := parseExtendedGitPath(line[len("copy from "):])
-			if !ok || section.rawDiff == "" {
-				return nil, fmt.Errorf("invalid copy source path header")
-			}
-			if err := setExtendedPath(true, path); err != nil {
-				return nil, err
-			}
-		case strings.HasPrefix(line, "copy to "):
-			path, ok := parseExtendedGitPath(line[len("copy to "):])
-			if !ok || section.rawDiff == "" {
-				return nil, fmt.Errorf("invalid copy destination path header")
-			}
-			if err := setExtendedPath(false, path); err != nil {
-				return nil, err
-			}
-		case strings.HasPrefix(line, "rename from "):
-			path, ok := parseExtendedGitPath(line[len("rename from "):])
-			if !ok || section.rawDiff == "" {
-				return nil, fmt.Errorf("invalid rename source path header")
-			}
-			if err := setExtendedPath(true, path); err != nil {
-				return nil, err
-			}
-		case strings.HasPrefix(line, "rename to "):
-			path, ok := parseExtendedGitPath(line[len("rename to "):])
-			if !ok || section.rawDiff == "" {
-				return nil, fmt.Errorf("invalid rename destination path header")
-			}
-			if err := setExtendedPath(false, path); err != nil {
-				return nil, err
-			}
-		case strings.HasPrefix(line, "rename old "):
-			path, ok := parseExtendedGitPath(line[len("rename old "):])
-			if !ok || section.rawDiff == "" {
-				return nil, fmt.Errorf("invalid rename source path header")
-			}
-			if err := setExtendedPath(true, path); err != nil {
-				return nil, err
-			}
-		case strings.HasPrefix(line, "rename new "):
-			path, ok := parseExtendedGitPath(line[len("rename new "):])
-			if !ok || section.rawDiff == "" {
-				return nil, fmt.Errorf("invalid rename destination path header")
-			}
-			if err := setExtendedPath(false, path); err != nil {
-				return nil, err
-			}
-		case strings.HasPrefix(line, "@@"):
-			oldRemaining, newRemaining = parsePatchHunkCounts(line)
-			inHunk = oldRemaining > 0 || newRemaining > 0
-		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			if strings.HasPrefix(line, "--- ") && section.rawDiff != "" &&
-				section.hasUnifiedSource && section.hasUnifiedDestination {
-				if err := flushSection(); err != nil {
-					return nil, err
-				}
-				section = diffSection{}
-			}
-			path, ok := patchFileHeaderPath(line)
-			if !ok {
-				return nil, fmt.Errorf("invalid unified file path header")
-			}
-			if path == "" {
-				continue
-			}
-			if section.rawDiff == "" {
-				paths = append(paths, stripPatchPrefix(path))
-				continue
-			}
-			if strings.HasPrefix(line, "--- ") {
-				section.unifiedSource, section.hasUnifiedSource = path, true
-			} else {
-				section.unifiedDestination, section.hasUnifiedDestination = path, true
-			}
-		}
-	}
-	if err := flushSection(); err != nil {
-		return nil, err
-	}
-	return paths, nil
-}
 func parseDiffGitPaths(line string) (string, string, bool) {
 	if line == "" {
 		return "", "", false
@@ -661,49 +453,6 @@ func normalizeDiffGitPaths(source, destination string) (string, string) {
 	return source, destination
 }
 
-func diffGitLineMatchesChange(raw, parsedSource, parsedDestination string, parsed bool, source, destination string) bool {
-	// Compare separator-normalized spellings. A patch may name the same file
-	// with "/" in its `diff --git` operands and the host separator in its
-	// `---`/`+++` headers; treating those as disagreeing would reject a patch
-	// the executor applies to one file, which is a fail-closed refusal of valid
-	// input rather than a security boundary. filepath.ToSlash is a no-op on
-	// Unix, where a backslash is an ordinary filename byte.
-	source, destination = filepath.ToSlash(source), filepath.ToSlash(destination)
-	if parsed {
-		parsedSource, parsedDestination := filepath.ToSlash(parsedSource), filepath.ToSlash(parsedDestination)
-		if parsedSource == source && parsedDestination == destination {
-			return true
-		}
-		if parsedSource == "a/"+source && parsedDestination == "b/"+destination {
-			return true
-		}
-	}
-	return diffGitLineMatchesPaths(raw, source, destination) ||
-		diffGitLineMatchesPaths(raw, "a/"+source, "b/"+destination)
-}
-
-func normalizeUnifiedDiffPaths(raw, parsedSource, parsedDestination string, parsed bool, source, destination string) (string, string, bool) {
-	if hasDefaultGitPrefixes(source, destination) {
-		normalizedSource, normalizedDestination := source[2:], destination[2:]
-		if diffGitLineMatchesChange(raw, parsedSource, parsedDestination, parsed, normalizedSource, normalizedDestination) {
-			return normalizedSource, normalizedDestination, true
-		}
-	}
-	if diffGitLineMatchesChange(raw, parsedSource, parsedDestination, parsed, source, destination) {
-		return source, destination, true
-	}
-	return "", "", false
-}
-
-func diffGitLineMatchesPaths(line, source, destination string) bool {
-	for separator := range len(line) {
-		if line[separator] == ' ' && line[:separator] == source && line[separator+1:] == destination {
-			return true
-		}
-	}
-	return false
-}
-
 // Extended copy/rename headers consume the whole unquoted remainder as the
 // pathname, including leading spaces. For a C-quoted name Git consumes the
 // first complete quoted string, so trailing header text is not pathname data.
@@ -777,10 +526,8 @@ func patchFileHeaderPath(line string) (string, bool) {
 	return rest, rest != ""
 }
 
-// The parser above defines the authorization target of a patch. The executor
-// that applies the patch must select its files from the same bytes, or a header
-// the gate reads as `bridge-token ` can reach `os.Root` as `bridge-token`. The
-// exported wrappers below are that shared surface, and they carry one contract:
+// The apply_patch executor uses the exported parsers below for every pathname
+// operand. They carry one contract:
 // every byte of a header's pathname operand is pathname data. Only structural
 // formatting is removed — the fixed header prefix, a tab-separated timestamp, a
 // C-quoted operand's quoting, and matching a/ b/ prefixes. Nothing is trimmed,
@@ -805,7 +552,7 @@ func ExtendedGitHeaderPath(operand string) (string, bool) {
 // DiffGitPaths returns the source and destination named by the operand section
 // of a "diff --git " line (the text after the prefix), with a matching a/ and
 // b/ prefix pair removed. It reports false for operands whose split between the
-// two pathnames is ambiguous, which is the same refusal PatchHeaderPaths makes.
+// two pathnames is ambiguous.
 func DiffGitPaths(operands string) (string, string, bool) {
 	source, destination, ok := parseDiffGitPaths(operands)
 	if !ok {
@@ -819,37 +566,6 @@ func DiffGitPaths(operands string) (string, string, bool) {
 // and normalizes separators to "/", preserving every other byte.
 func StripPatchPrefix(path string) string {
 	return stripPatchPrefix(path)
-}
-
-func parsePatchHunkCounts(line string) (int, int) {
-	_, rest, ok := strings.Cut(line, "@@")
-	if !ok {
-		return 0, 0
-	}
-	rangeSection := rest
-	if before, _, ok := strings.Cut(rest, "@@"); ok {
-		rangeSection = before
-	}
-	old, next := 0, 0
-	for _, field := range strings.Fields(rangeSection) {
-		switch {
-		case strings.HasPrefix(field, "-"):
-			old = patchHunkCount(field[1:])
-		case strings.HasPrefix(field, "+"):
-			next = patchHunkCount(field[1:])
-		}
-	}
-	return old, next
-}
-
-func patchHunkCount(spec string) int {
-	if _, count, ok := strings.Cut(spec, ","); ok {
-		if n, err := strconv.Atoi(count); err == nil {
-			return n
-		}
-		return 0
-	}
-	return 1
 }
 
 func stripPatchPrefix(path string) string {

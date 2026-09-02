@@ -167,19 +167,14 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	// Publish a complete replacement through the same root. A raced swap to the
-	// token is replaced as a directory entry, never opened for truncation.
-	if _, err := writeRootedFile(root, target.relative, []byte(updated), readInfo.Mode(), false); err != nil {
+	// The write-side handle is checked before truncation, so a target swapped
+	// after the read cannot redirect the edit to the token. In-place publication
+	// preserves the existing inode, ACLs and hard links.
+	if _, err := writeRootedFile(root, target.relative, absolutePath, tool.workspaceRoot, []byte(updated), readInfo.Mode(), false); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
-	// Pathname-based formatters and diagnostics reopen the published name. Skip
-	// them while a protected token is selected, or they would reintroduce the
-	// same swap window the rooted atomic write closes.
-	credentialsActive := protectedCredentialsActive(tool.workspaceRoot)
-	if !credentialsActive {
-		updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
-	}
+	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := root.Stat(target.relative)
@@ -212,9 +207,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		suffix = "s"
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
-	if !credentialsActive {
-		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
-	}
+	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line
