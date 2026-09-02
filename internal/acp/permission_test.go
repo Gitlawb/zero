@@ -89,8 +89,8 @@ func TestPermissionToolCallKeepsTheBrowserDescriptor(t *testing.T) {
 		ToolName:   "browser_connect",
 		Args:       map[string]any{"target": "127.0.0.1:9222"},
 	})
-	if call.Browser == nil || call.Browser.Version != 1 || call.Browser.Command != "connect" {
-		t.Fatalf("browser descriptor = %#v", call.Browser)
+	if got := browserDescriptor(t, call); got != (BrowserToolDetails{Version: 1, Command: "connect"}) {
+		t.Fatalf("browser descriptor = %#v", got)
 	}
 	if call.Title != "browser connect" {
 		t.Fatalf("title = %q", call.Title)

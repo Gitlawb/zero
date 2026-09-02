@@ -149,9 +149,7 @@ func permissionToolCall(req agent.PermissionRequest) ToolCallUpdate {
 		Status:     ToolStatusPending,
 		RawInput:   rawInputBytes(args),
 	}
-	if browser, ok := browserToolDetails(req.ToolName); ok {
-		upd.Browser = browser
-	}
+	attachBrowserToolDetails(&upd, req.ToolName)
 	return upd
 }
 

@@ -210,11 +210,10 @@ type ToolCallUpdate struct {
 	RawInput      json.RawMessage    `json:"rawInput,omitempty"`
 	Content       []ToolCallContent  `json:"content,omitempty"`
 	Locations     []ToolCallLocation `json:"locations,omitempty"`
-	// Browser is present only for ZERO's built-in browser helper tools. It is a
-	// deliberately narrow presentation descriptor for ACP clients: the raw
-	// request may contain typed text, a full URL, or a local DevTools endpoint,
-	// none of which belongs in a durable browser-status surface.
-	Browser *BrowserToolDetails `json:"browser,omitempty"`
+	// Meta is ACP's extension channel. ZERO-owned values must remain beneath a
+	// namespaced key so protocol-shaped clients can preserve them while decoding
+	// and re-encoding a tool call.
+	Meta map[string]json.RawMessage `json:"_meta,omitempty"`
 }
 
 // BrowserToolDetails identifies the browser helper operation behind a tool

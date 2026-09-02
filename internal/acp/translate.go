@@ -73,6 +73,23 @@ func browserToolDetails(name string) (*BrowserToolDetails, bool) {
 	}
 }
 
+const zeroBrowserMetaKey = "github.com/Gitlawb/zero/browser"
+
+// attachBrowserToolDetails stores ZERO's browser descriptor in ACP's reserved
+// extension channel. Keeping this in one helper prevents start, result, and
+// permission payloads from drifting onto different wire shapes.
+func attachBrowserToolDetails(update *ToolCallUpdate, name string) {
+	browser, ok := browserToolDetails(name)
+	if !ok {
+		return
+	}
+	raw, err := json.Marshal(browser)
+	if err != nil {
+		return
+	}
+	update.Meta = map[string]json.RawMessage{zeroBrowserMetaKey: raw}
+}
+
 // browserToolTitle avoids putting browser_type text, an attached DevTools
 // endpoint, or a URL query/fragment in a tool-card title. Those values can
 // carry credentials or session data; the UI only needs the operation and, for
@@ -178,9 +195,7 @@ func toolCallStart(call agent.ToolCall) ToolCallUpdate {
 		Status:        ToolStatusInProgress,
 		RawInput:      rawInput(call.Arguments),
 	}
-	if browser, ok := browserToolDetails(call.Name); ok {
-		upd.Browser = browser
-	}
+	attachBrowserToolDetails(&upd, call.Name)
 	return upd
 }
 
@@ -201,9 +216,7 @@ func toolCallResult(result agent.ToolResult) ToolCallUpdate {
 	if locs := toolResultLocations(result); len(locs) > 0 {
 		upd.Locations = locs
 	}
-	if browser, ok := browserToolDetails(result.Name); ok {
-		upd.Browser = browser
-	}
+	attachBrowserToolDetails(&upd, result.Name)
 	return upd
 }
 

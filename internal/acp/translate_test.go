@@ -10,6 +10,19 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
+func browserDescriptor(t *testing.T, update ToolCallUpdate) BrowserToolDetails {
+	t.Helper()
+	raw, ok := update.Meta[zeroBrowserMetaKey]
+	if !ok {
+		t.Fatalf("browser metadata = %#v, want %q", update.Meta, zeroBrowserMetaKey)
+	}
+	var details BrowserToolDetails
+	if err := json.Unmarshal(raw, &details); err != nil {
+		t.Fatalf("decode browser metadata: %v", err)
+	}
+	return details
+}
+
 func TestAgentMessageAndThoughtChunks(t *testing.T) {
 	m := agentMessageChunk("hello")
 	if m.SessionUpdate != UpdateAgentMessageChunk || m.Content.Type != "text" || m.Content.Text != "hello" {
@@ -63,8 +76,8 @@ func TestBrowserToolUpdatesAreStructuredAndPresentationSafe(t *testing.T) {
 		Name:      "browser_open",
 		Arguments: `{"url":"https://example.com/settings?token=not-for-a-title#account"}`,
 	})
-	if start.Browser == nil || start.Browser.Version != 1 || start.Browser.Command != "open" {
-		t.Fatalf("browser descriptor = %#v, want open", start.Browser)
+	if got := browserDescriptor(t, start); got != (BrowserToolDetails{Version: 1, Command: "open"}) {
+		t.Fatalf("browser descriptor = %#v, want open", got)
 	}
 	if start.Title != "browser open https://example.com" {
 		t.Fatalf("browser title = %q", start.Title)
@@ -77,13 +90,13 @@ func TestBrowserToolUpdatesAreStructuredAndPresentationSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	var wire struct {
-		Browser BrowserToolDetails `json:"browser"`
+		Meta map[string]json.RawMessage `json:"_meta"`
 	}
 	if err := json.Unmarshal(encoded, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire.Browser != (BrowserToolDetails{Version: 1, Command: "open"}) {
-		t.Fatalf("browser wire descriptor = %#v", wire.Browser)
+	if _, ok := wire.Meta[zeroBrowserMetaKey]; !ok {
+		t.Fatalf("browser wire metadata = %#v", wire.Meta)
 	}
 
 	typed := toolCallStart(agent.ToolCall{
@@ -91,8 +104,8 @@ func TestBrowserToolUpdatesAreStructuredAndPresentationSafe(t *testing.T) {
 		Name:      "browser_type",
 		Arguments: `{"ref":"email","text":"secret@example.test"}`,
 	})
-	if typed.Browser == nil || typed.Browser.Command != "type" {
-		t.Fatalf("browser type descriptor = %#v", typed.Browser)
+	if got := browserDescriptor(t, typed); got.Command != "type" {
+		t.Fatalf("browser type descriptor = %#v", got)
 	}
 	if typed.Title != "browser type" || strings.Contains(typed.Title, "secret@example.test") {
 		t.Fatalf("browser type title = %q", typed.Title)
@@ -112,8 +125,77 @@ func TestBrowserToolUpdatesAreStructuredAndPresentationSafe(t *testing.T) {
 		Name:       "browser_type",
 		Status:     tools.StatusOK,
 	})
-	if result.Browser == nil || result.Browser.Command != "type" {
-		t.Fatalf("browser result descriptor = %#v", result.Browser)
+	if got := browserDescriptor(t, result); got.Command != "type" {
+		t.Fatalf("browser result descriptor = %#v", got)
+	}
+}
+
+func TestBrowserDescriptorSurvivesProtocolShapedRoundTrip(t *testing.T) {
+	updates := []ToolCallUpdate{
+		toolCallStart(agent.ToolCall{
+			ID:        "start",
+			Name:      "browser_open",
+			Arguments: `{"url":"https://user:password@example.test/private?token=secret#fragment"}`,
+		}),
+		toolCallResult(agent.ToolResult{
+			ToolCallID: "result",
+			Name:       "browser_type",
+			Status:     tools.StatusOK,
+		}),
+		permissionToolCall(agent.PermissionRequest{
+			ToolCallID: "permission",
+			ToolName:   "browser_connect",
+			Args:       map[string]any{"target": "127.0.0.1:9222"},
+		}),
+	}
+
+	type protocolToolCallUpdate struct {
+		SessionUpdate string                     `json:"sessionUpdate,omitempty"`
+		ToolCallID    string                     `json:"toolCallId"`
+		Title         string                     `json:"title,omitempty"`
+		Kind          string                     `json:"kind,omitempty"`
+		Status        string                     `json:"status,omitempty"`
+		RawInput      json.RawMessage            `json:"rawInput,omitempty"`
+		Content       []ToolCallContent          `json:"content,omitempty"`
+		Locations     []ToolCallLocation         `json:"locations,omitempty"`
+		Meta          map[string]json.RawMessage `json:"_meta,omitempty"`
+	}
+
+	for _, update := range updates {
+		encoded, err := json.Marshal(update)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &root); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := root["browser"]; ok {
+			t.Fatalf("browser descriptor escaped ACP _meta: %s", encoded)
+		}
+
+		var protocol protocolToolCallUpdate
+		if err := json.Unmarshal(encoded, &protocol); err != nil {
+			t.Fatal(err)
+		}
+		forwarded, err := json.Marshal(protocol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var roundTripped ToolCallUpdate
+		if err := json.Unmarshal(forwarded, &roundTripped); err != nil {
+			t.Fatal(err)
+		}
+		details := browserDescriptor(t, roundTripped)
+		if details.Version != 1 || details.Command == "" {
+			t.Fatalf("round-tripped browser descriptor = %#v", details)
+		}
+		descriptorJSON := string(roundTripped.Meta[zeroBrowserMetaKey])
+		for _, secret := range []string{"password", "private", "token", "fragment", "127.0.0.1", "9222"} {
+			if strings.Contains(descriptorJSON, secret) {
+				t.Fatalf("browser descriptor leaked %q: %s", secret, descriptorJSON)
+			}
+		}
 	}
 }
 
@@ -140,8 +222,8 @@ func TestBrowserPermissionTitlesMirrorSafeToolArguments(t *testing.T) {
 
 func TestBrowserDescriptorDoesNotClaimSimilarlyNamedMCPTools(t *testing.T) {
 	start := toolCallStart(agent.ToolCall{ID: "mcp-1", Name: "browser_plugin_open", Arguments: `{}`})
-	if start.Browser != nil {
-		t.Fatalf("MCP-like tool received built-in browser descriptor: %#v", start.Browser)
+	if len(start.Meta) != 0 {
+		t.Fatalf("MCP-like tool received built-in browser metadata: %#v", start.Meta)
 	}
 	encoded, err := json.Marshal(start)
 	if err != nil {
