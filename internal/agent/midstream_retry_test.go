@@ -363,12 +363,40 @@ func TestIsMidStreamTransportAbort(t *testing.T) {
 		"i/o timeout",
 		"504 Gateway Timeout",
 		"provider request error: request does not satisfy oneOf schema",
+		"provider request error: connection closed is not a supported finish reason",
+		"auth error: connection reset by peer",
+		"rate limit error: server closed",
 		"schema error: property oneOf is invalid",
 	}
 	for _, m := range notAborts {
 		if isMidStreamTransportAbort(m) {
 			t.Fatalf("must NOT classify as mid-stream transport abort: %q", m)
 		}
+	}
+}
+
+func TestRunDoesNotRetryClassifiedProviderErrorWithSocketPhrase(t *testing.T) {
+	p := &midStreamAbortProvider{
+		abortBefore: 1,
+		abortError:  "provider request error: connection closed is not a supported finish reason",
+	}
+	var notices string
+	opts := Options{
+		Registry:    tools.NewRegistry(),
+		OnReasoning: func(s string) { notices += s },
+	}
+	_, err := Run(context.Background(), "go", p, opts)
+	if err == nil {
+		t.Fatal("expected application error, got nil")
+	}
+	if got := atomic.LoadInt32(&p.calls); got != 1 {
+		t.Fatalf("classified provider error with 'connection closed' must not retry (got %d calls, want 1)", got)
+	}
+	if notices != "" {
+		t.Fatalf("expected no reconnect notices, got %q", notices)
+	}
+	if !strings.Contains(err.Error(), "connection closed") {
+		t.Fatalf("expected original error preserved, got %v", err)
 	}
 }
 

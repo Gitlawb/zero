@@ -175,6 +175,12 @@ var midStreamAbortNeedles = []string{
 	"forcibly closed",
 }
 
+var classifiedNonTransportPrefixes = []string{
+	"provider request error:",
+	"auth error:",
+	"rate limit error:",
+}
+
 // isMidStreamTransportAbort reports whether a collected stream error string is a
 // retryable mid-stream transport abort. It does NOT delegate to shouldReconnect:
 // that list is a connect-phase argument ("no response was received"). The stream
@@ -187,6 +193,11 @@ func isMidStreamTransportAbort(message string) bool {
 	lowered := strings.ToLower(strings.TrimSpace(message))
 	if lowered == "" || isContextLimitError(lowered) {
 		return false
+	}
+	for _, prefix := range classifiedNonTransportPrefixes {
+		if strings.Contains(lowered, prefix) {
+			return false
+		}
 	}
 	if errhint.HasStatusCode(lowered, "500", "502", "503", "504") {
 		return false
