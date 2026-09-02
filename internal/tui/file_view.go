@@ -509,7 +509,9 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	if elem, ok := c.items[targetPath]; ok {
 		entry := elem.Value.(*fileViewCachedEntry)
-		if entry.sourceRev >= reqSourceRev && entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
+		forceReload := (entry.sourceRev < reqSourceRev)
+		refreshSource := forceReload
+		if !refreshSource && entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
 			if fileViewSuperseded(liveSeq, seq) {
 				c.mu.Unlock()
 				return "", errFileViewSuperseded
