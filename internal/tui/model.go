@@ -5496,8 +5496,44 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ContextWindowFor = func(modelID string) int {
 			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
 		}
+		var activeDescriptorID string
+		if descriptor, ok := m.activeProviderDescriptor(); ok {
+			activeDescriptorID = descriptor.ID
+		}
+		discoveredSnapshot := make(map[string][]providermodeldiscovery.Model, len(m.modelPickerLiveByProvider))
+		for pID, list := range m.modelPickerLiveByProvider {
+			copiedList := make([]providermodeldiscovery.Model, len(list))
+			for i, dm := range list {
+				copied := dm
+				if len(dm.InputModalities) > 0 {
+					copied.InputModalities = append([]string{}, dm.InputModalities...)
+				}
+				copiedList[i] = copied
+			}
+			discoveredSnapshot[pID] = copiedList
+		}
+		catalog := m.modelCatalog
 		options.SupportsVision = func(modelID string) bool {
-			return m.modelSupportsVisionFor(modelID)
+			trimmed := strings.TrimSpace(modelID)
+			if trimmed == "" {
+				return false
+			}
+			if entry, known := catalog.Resolve(trimmed); known {
+				return entry.Supports(modelregistry.ModelCapabilityVision)
+			}
+			if activeDescriptorID != "" {
+				if models, ok := discoveredSnapshot[activeDescriptorID]; ok {
+					if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+						return supported
+					}
+				}
+			}
+			for _, models := range discoveredSnapshot {
+				if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+					return supported
+				}
+			}
+			return modelregistry.SupportsVision(catalog, trimmed)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it

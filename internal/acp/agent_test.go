@@ -497,6 +497,48 @@ func TestACPRunTurnWiresSandboxAndScopedRegistry(t *testing.T) {
 	}
 }
 
+func TestACPWiresSupportsVision(t *testing.T) {
+	deps := testDeps(t)
+	var captured agent.Options
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		captured = opts
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	deps.DiscoverModels = func(_ context.Context, _ config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "custom-vision", InputModalities: []string{"text", "image"}},
+			{ID: "custom-text", InputModalities: []string{"text"}},
+		}, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	var promptRes PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt: []ContentBlock{
+			{Type: "text", Text: "hello"},
+		},
+	}, &promptRes); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if captured.SupportsVision == nil {
+		t.Fatal("SupportsVision was not wired into agent.Options")
+	}
+	if !captured.SupportsVision("custom-vision") {
+		t.Fatal("SupportsVision(custom-vision) = false, want true")
+	}
+	if captured.SupportsVision("custom-text") {
+		t.Fatal("SupportsVision(custom-text) = true, want false")
+	}
+}
+
 // TestACPRejectsInvalidCwd confirms session/new fails when the workspace root
 // resolver rejects the client cwd (e.g. filesystem root).
 func TestACPRejectsInvalidCwd(t *testing.T) {

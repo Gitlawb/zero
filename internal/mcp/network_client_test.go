@@ -385,11 +385,11 @@ func TestScanSSEEventsLargeImagePayload(t *testing.T) {
 		}
 	})
 
-	t.Run("Oversized event exceeding 16 MiB rejected cleanly", func(t *testing.T) {
+	t.Run("Oversized event exceeding 32 MiB rejected cleanly", func(t *testing.T) {
 		oversizedRPC, marshalErr := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
 			"id":      1,
-			"result":  map[string]any{"padding": strings.Repeat("A", 17*1024*1024)},
+			"result":  map[string]any{"padding": strings.Repeat("A", 33*1024*1024)},
 		})
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
@@ -397,7 +397,7 @@ func TestScanSSEEventsLargeImagePayload(t *testing.T) {
 		stream := "event: message\ndata: " + string(oversizedRPC) + "\n\n"
 		_, err := decodeSSERPCMessage(strings.NewReader(stream))
 		if err == nil {
-			t.Fatal("expected error for 17 MiB event, got nil")
+			t.Fatal("expected error for 33 MiB event, got nil")
 		}
 	})
 }

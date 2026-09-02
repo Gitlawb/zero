@@ -362,9 +362,13 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 		output = strings.TrimSpace(output + "\n\n" + note)
 	}
 	if uninspected := droppedContentNote(result.Content, disp, dispUninspected); uninspected != "" {
-		note := "[zero] this server also returned " + uninspected + ", which was not inspected because the aggregate image budget was reached."
+		verb := "which was not inspected"
+		if !strings.HasPrefix(uninspected, "1 ") {
+			verb = "which were not inspected"
+		}
+		note := "[zero] this server also returned " + uninspected + ", " + verb + " because the aggregate image budget was reached."
 		if output == "" {
-			note = "[zero] this server returned " + uninspected + ", which was not inspected because the aggregate image budget was reached."
+			note = "[zero] this server returned " + uninspected + ", " + verb + " because the aggregate image budget was reached."
 		}
 		output = strings.TrimSpace(output + "\n\n" + note)
 	}

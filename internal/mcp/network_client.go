@@ -651,10 +651,10 @@ func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {
 	return rpcMessage{}, fmt.Errorf("missing MCP SSE response data")
 }
 
-// maxSSEEventBytes bounds a single SSE line/event. It accommodates an accepted
-// 10 MiB image payload in base64 (~13.98 MiB) plus JSON-RPC envelope, metadata,
-// and SSE framing overhead.
-const maxSSEEventBytes = 16 * 1024 * 1024
+// maxSSEEventBytes bounds a single SSE line/event. It accommodates multi-image
+// responses (such as 8 MiB + 4 MiB) in base64 (~16.8 MiB) plus JSON-RPC envelope,
+// metadata, and SSE framing overhead.
+const maxSSEEventBytes = 32 * 1024 * 1024
 
 func scanSSEEvents(reader io.Reader, handle func(sseEvent) bool) error {
 	scanner := bufio.NewScanner(reader)

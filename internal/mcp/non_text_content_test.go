@@ -468,7 +468,7 @@ func TestImagePayloadsAreDecodedOnceAndNotPastTheBudget(t *testing.T) {
 	if !strings.Contains(result.Output, "image/png") {
 		t.Errorf("skipped images were not named:\n%s", result.Output)
 	}
-	if !strings.Contains(result.Output, "which was not inspected because the aggregate image budget was reached") {
+	if !strings.Contains(result.Output, "which were not inspected because the aggregate image budget was reached") {
 		t.Errorf("uninspected images are not described correctly:\n%s", result.Output)
 	}
 	if strings.Contains(result.Output, "Retrying with fewer images can recover this payload.") {
