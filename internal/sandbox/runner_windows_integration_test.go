@@ -82,13 +82,9 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 	if publicDir == "" {
 		t.Log("PUBLIC is not set; skipping C:\\Users\\Public write-jail probe")
 	} else {
-		publicMarker := filepath.Join(publicDir, "zero-elevated-write-denied.txt")
-		_ = os.Remove(publicMarker)
-		runWindowsRealSmokeCommand(t, runnerExe, config, []string{
-			"cmd.exe", "/d", "/s", "/c", "echo leaked>" + publicMarker,
-		}, 1)
-		if _, err := os.Stat(publicMarker); err == nil {
-			_ = os.Remove(publicMarker)
+		publicProbe := allocateSharedDirectoryProbe(t, publicDir, "elevated-public")
+		runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(publicProbe.Path()), deniedWriteExitCode)
+		if _, err := os.Stat(publicProbe.Path()); err == nil {
 			t.Fatalf("Windows sandbox allowed a write to the shared C:\\Users\\Public directory")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat public marker: %v", err)
@@ -240,15 +236,9 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 	// Verify write to C:\ProgramData is blocked
 	programData := os.Getenv("ProgramData")
 	if programData != "" {
-		programDataMarker := filepath.Join(programData, "zero-unelevated-write-denied.txt")
-		_ = os.Remove(programDataMarker)
-
-		runWindowsRealSmokeCommand(t, runnerExe, config, []string{
-			"cmd.exe", "/d", "/s", "/c", "echo leaked>" + programDataMarker,
-		}, 1)
-
-		if _, err := os.Stat(programDataMarker); err == nil {
-			_ = os.Remove(programDataMarker)
+		programDataProbe := allocateSharedDirectoryProbe(t, programData, "unelevated-programdata")
+		runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(programDataProbe.Path()), deniedWriteExitCode)
+		if _, err := os.Stat(programDataProbe.Path()); err == nil {
 			t.Fatalf("unelevated sandbox allowed a write to ProgramData shared directory")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat ProgramData marker: %v", err)
@@ -583,7 +573,49 @@ const deniedWriteExitCode = 77
 // deniedWriteCommand attempts a write and reports deniedWriteExitCode when the
 // redirect is refused, so the exit code also proves cmd.exe actually ran.
 func deniedWriteCommand(marker string) []string {
-	return []string{"cmd.exe", "/d", "/s", "/c", "echo leaked>" + marker + " || exit " + strconv.Itoa(deniedWriteExitCode)}
+	return []string{"cmd.exe", "/d", "/s", "/c", "echo leaked>" + cmdQuote(marker) + " || exit " + strconv.Itoa(deniedWriteExitCode)}
+}
+
+func cmdQuote(path string) string {
+	return `"` + strings.ReplaceAll(path, `"`, `\"`) + `"`
+}
+
+type sharedDirectoryProbe struct {
+	path string
+}
+
+func allocateSharedDirectoryProbe(t testing.TB, dir, prefix string) *sharedDirectoryProbe {
+	t.Helper()
+	if dir == "" {
+		t.Skip("shared directory path is not set")
+	}
+	var probePath string
+	for attempt := 0; attempt < 50; attempt++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("zero-smoke-%s-%d-%d-%d.txt", prefix, os.Getpid(), time.Now().UnixNano(), attempt))
+		if _, err := os.Lstat(candidate); os.IsNotExist(err) {
+			probePath = candidate
+			break
+		}
+	}
+	if probePath == "" {
+		t.Fatalf("allocate shared directory probe in %s: failed to find unused filename", dir)
+	}
+	p := &sharedDirectoryProbe{path: probePath}
+	t.Cleanup(func() {
+		p.cleanup(t)
+	})
+	return p
+}
+
+func (p *sharedDirectoryProbe) Path() string {
+	return p.path
+}
+
+func (p *sharedDirectoryProbe) cleanup(t testing.TB) {
+	t.Helper()
+	if _, err := os.Lstat(p.path); err == nil {
+		_ = os.Remove(p.path)
+	}
 }
 
 func powershellSingleQuote(value string) string {
@@ -596,4 +628,40 @@ func powershellSingleQuote(value string) string {
 		}
 	}
 	return out + "'"
+}
+
+func TestSharedDirectoryProbeLifecycle(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1. Two simultaneous allocations produce distinct non-colliding paths.
+	probe1 := allocateSharedDirectoryProbe(t, dir, "p1")
+	probe2 := allocateSharedDirectoryProbe(t, dir, "p2")
+	if probe1.Path() == probe2.Path() {
+		t.Fatalf("expected distinct probe paths, got %q and %q", probe1.Path(), probe2.Path())
+	}
+
+	// 2. Pre-existing unrelated file is never selected or deleted.
+	unrelatedFile := filepath.Join(dir, "unrelated.txt")
+	if err := os.WriteFile(unrelatedFile, []byte("preserve me"), 0o600); err != nil {
+		t.Fatalf("write unrelated file: %v", err)
+	}
+	probe3 := allocateSharedDirectoryProbe(t, dir, "p3")
+	probe3.cleanup(t)
+	if data, err := os.ReadFile(unrelatedFile); err != nil || string(data) != "preserve me" {
+		t.Fatalf("unrelated file was modified or deleted: data=%q, err=%v", data, err)
+	}
+
+	// 3. Interrupted / no-create path: cleanup on absent file succeeds quietly.
+	probe4 := allocateSharedDirectoryProbe(t, dir, "p4")
+	probe4.cleanup(t)
+
+	// 4. Unexpected write created during test is cleaned up.
+	probe5 := allocateSharedDirectoryProbe(t, dir, "p5")
+	if err := os.WriteFile(probe5.Path(), []byte("leaked"), 0o600); err != nil {
+		t.Fatalf("write probe5 file: %v", err)
+	}
+	probe5.cleanup(t)
+	if _, err := os.Lstat(probe5.Path()); !os.IsNotExist(err) {
+		t.Fatalf("expected probe5 to be cleaned up after creation, stat err=%v", err)
+	}
 }

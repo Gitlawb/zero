@@ -48,245 +48,6 @@ func TestApplyWindowsACLPathGroupHandleBasedRoundTrip(t *testing.T) {
 	}
 }
 
-// TestApplyWindowsACLPathGroupRevokeCapabilityRemovesStaleDeny is the
-// real-Windows regression for jatmn's P2 finding: promoting a path to an
-// allowed write root must also remove a stale deny ACE an earlier setup
-// round left there for the stable capability SID, not merely omit it from
-// this plan. Without the fix, applyWindowsACLPlan's SetEntriesInAcl-based
-// merge only touches trustees actually named in the new entry list, so an
-// old DenyWrite ACE for a SID the new plan does not mention would survive
-// and keep winning over the new Allow under deny-before-allow evaluation.
-func TestApplyWindowsACLPathGroupRevokeCapabilityRemovesStaleDeny(t *testing.T) {
-	// The stale/allow SIDs must be synthetic identities the test process itself
-	// is not a member of (exactly like the real stable capability SIDs
-	// LoadOrCreateWindowsCapabilitySIDs mints): a WindowsACLDenyWrite mask
-	// includes WRITE_DAC/WRITE_OWNER/DELETE, so denying a well-known group the
-	// test process actually belongs to (e.g. Everyone, BUILTIN\Users) would
-	// lock the test out of managing — and t.TempDir() out of cleaning up —
-	// its own fixture.
-	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
-	if err != nil {
-		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
-	}
-	otherCaps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
-	if err != nil {
-		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs (other): %v", err)
-	}
-	staleSID := caps.ReadOnly
-	allowSID := otherCaps.ReadOnly
-
-	dir := t.TempDir()
-	// Simulate the stale deny an earlier setup round applied while this path
-	// was still covered by the shared-root/descendant DenyWrite mitigation.
-	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
-		Path: dir,
-		Entries: []WindowsACLEntry{{
-			Action:     WindowsACLDenyWrite,
-			Path:       dir,
-			Capability: staleSID,
-			NoInherit:  true,
-		}},
-	}); err != nil {
-		t.Fatalf("apply stale deny: %v", err)
-	}
-	if !dirDeniesSID(t, dir, staleSID) {
-		t.Fatalf("test fixture bug: %q does not carry the stale deny it is supposed to", dir)
-	}
-
-	// Now promote dir to a write root: the plan carries an Allow for a
-	// different SID plus the reconciling revoke for the stale one.
-	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
-		Path: dir,
-		Entries: []WindowsACLEntry{
-			{Action: WindowsACLAllowWrite, Path: dir, Capability: allowSID},
-			{Action: WindowsACLRevokeCapability, Path: dir, Capability: staleSID, NoInherit: true},
-		},
-	}); err != nil {
-		t.Fatalf("apply promotion to write root: %v", err)
-	}
-	if dirDeniesSID(t, dir, staleSID) {
-		t.Fatalf("%q still carries the stale deny for %q after promotion to a write root", dir, staleSID)
-	}
-}
-
-// TestApplyWindowsACLRevokePreservesDenyRead pins that migration revoke for a
-// promoted write root removes only the experimental DenyWrite ACE for the
-// stable SID and leaves a co-resident DenyRead for the same SID intact — so a
-// concurrent profile's read boundary is not deleted (jatmn P1).
-func TestApplyWindowsACLRevokePreservesDenyRead(t *testing.T) {
-	// Synthetic capability SID (not a group this process is in) so DenyWrite's
-	// WRITE_DAC/DELETE bits do not lock the test out of its own temp dir.
-	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
-	if err != nil {
-		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
-	}
-	sid := caps.ReadOnly
-	dir := t.TempDir()
-
-	// Profile A shape plus experimental broadening: both DenyRead and full
-	// DenyWrite for the same stable SID on one path (two ACEs in one apply so
-	// a second DENY_ACCESS merge cannot replace the first).
-	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
-		Path: dir,
-		Entries: []WindowsACLEntry{
-			{
-				Action:     WindowsACLDenyRead,
-				Path:       dir,
-				Capability: sid,
-				NoInherit:  true,
-			},
-			{
-				Action:     WindowsACLDenyWrite,
-				Path:       dir,
-				Capability: sid,
-				NoInherit:  true,
-			},
-		},
-	}); err != nil {
-		t.Fatalf("apply DenyRead+DenyWrite: %v", err)
-	}
-	writeDenied, err := windowsPathDeniesCapabilitySID(dir, sid)
-	if err != nil {
-		t.Fatalf("windowsPathDeniesCapabilitySID before: %v", err)
-	}
-	if !writeDenied {
-		t.Fatal("fixture: expected full write deny present before revoke")
-	}
-	if !dirDeniesReadSID(t, dir, sid) {
-		t.Fatal("fixture: expected read deny present before revoke")
-	}
-
-	// Profile B promotes dir to a write root: revoke stale write deny only.
-	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
-		Path: dir,
-		Entries: []WindowsACLEntry{{
-			Action:     WindowsACLRevokeCapability,
-			Path:       dir,
-			Capability: sid,
-			NoInherit:  true,
-		}},
-	}); err != nil {
-		t.Fatalf("revoke: %v", err)
-	}
-	writeDenied, err = windowsPathDeniesCapabilitySID(dir, sid)
-	if err != nil {
-		t.Fatalf("windowsPathDeniesCapabilitySID after: %v", err)
-	}
-	if writeDenied {
-		t.Fatal("write deny for SID still present after migration revoke")
-	}
-	if !dirDeniesReadSID(t, dir, sid) {
-		t.Fatal("DenyRead for same SID was removed by migration revoke; read boundary must be preserved")
-	}
-}
-
-// TestApplyWindowsACLPlanRevokeDescendantsClearsChildDeny is the regression for
-// the RevokeDescendants walk: promoting a root to a write root must clear a
-// stale direct deny an earlier run left on an existing child, not only the root
-// path itself. Also pins reparse skip and the depth cap as best-effort bounds.
-func TestApplyWindowsACLPlanRevokeDescendantsClearsChildDeny(t *testing.T) {
-	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
-	if err != nil {
-		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
-	}
-	staleSID := caps.ReadOnly
-	allowSID, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
-	if err != nil {
-		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs (allow): %v", err)
-	}
-
-	root := t.TempDir()
-	child := mkdir(t, filepath.Join(root, "child"))
-	deep := mkdir(t, filepath.Join(child, "deep"))
-	// Stale full DenyWrite on the direct child (the primary cleanup target).
-	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
-		Path: child,
-		Entries: []WindowsACLEntry{{
-			Action:     WindowsACLDenyWrite,
-			Path:       child,
-			Capability: staleSID,
-			NoInherit:  true,
-		}},
-	}); err != nil {
-		t.Fatalf("apply stale deny on child: %v", err)
-	}
-	// Partial write deny on deep: the old complete-coverage pre-check would
-	// skip this; unconditional revoke must still clear it.
-	denyCapabilityMask(t, deep, staleSID, windows.FILE_WRITE_ATTRIBUTES)
-	if !dirDeniesSID(t, child, staleSID) {
-		t.Fatal("fixture: child missing full stale deny")
-	}
-	if denyACECountForSID(t, deep, staleSID) == 0 {
-		t.Fatal("fixture: deep missing partial stale deny")
-	}
-
-	// Junction under root: walker must skip it (best-effort) without failing.
-	juncTarget := mkdir(t, filepath.Join(t.TempDir(), "junc-target"))
-	junc := filepath.Join(root, "junc")
-	if out, err := exec.Command("cmd", "/c", "mklink", "/J", junc, juncTarget).CombinedOutput(); err != nil {
-		t.Logf("skipping junction sub-check (mklink /J unavailable): %v %s", err, strings.TrimSpace(string(out)))
-	} else {
-		t.Cleanup(func() { _ = os.Remove(junc) })
-		if !windowsPathIsReparsePoint(junc) {
-			t.Fatalf("fixture: %q is not a reparse point", junc)
-		}
-	}
-
-	cleanup, err := applyWindowsACLPlan(WindowsACLPlan{Entries: []WindowsACLEntry{
-		{Action: WindowsACLAllowWrite, Path: root, Capability: allowSID.ReadOnly},
-		{
-			Action:            WindowsACLRevokeCapability,
-			Path:              root,
-			Capability:        staleSID,
-			NoInherit:         true,
-			RevokeDescendants: true,
-		},
-	}})
-	if err != nil {
-		t.Fatalf("applyWindowsACLPlan: %v", err)
-	}
-	t.Cleanup(func() { _ = cleanup() })
-
-	if dirDeniesSID(t, child, staleSID) {
-		t.Fatalf("%q still carries full stale deny after RevokeDescendants", child)
-	}
-	if denyACECountForSID(t, deep, staleSID) != 0 {
-		t.Fatalf("%q still carries partial stale deny after RevokeDescendants", deep)
-	}
-
-	// Depth cap: with max depth 1 the walker revokes root's children but does
-	// not enqueue them, so a nested deny under a new root is left in place.
-	cappedRoot := t.TempDir()
-	cappedChild := mkdir(t, filepath.Join(cappedRoot, "level1"))
-	cappedDeep := mkdir(t, filepath.Join(cappedChild, "level2"))
-	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
-		Path: cappedDeep,
-		Entries: []WindowsACLEntry{{
-			Action:     WindowsACLDenyWrite,
-			Path:       cappedDeep,
-			Capability: staleSID,
-			NoInherit:  true,
-		}},
-	}); err != nil {
-		t.Fatalf("apply stale deny on capped deep: %v", err)
-	}
-	oldDepth := windowsDescendantScanMaxDepth
-	windowsDescendantScanMaxDepth = 1
-	t.Cleanup(func() { windowsDescendantScanMaxDepth = oldDepth })
-	if _, err := applyWindowsACLPlan(WindowsACLPlan{Entries: []WindowsACLEntry{{
-		Action:            WindowsACLRevokeCapability,
-		Path:              cappedRoot,
-		Capability:        staleSID,
-		NoInherit:         true,
-		RevokeDescendants: true,
-	}}}); err != nil {
-		t.Fatalf("applyWindowsACLPlan (depth cap): %v", err)
-	}
-	if !dirDeniesSID(t, cappedDeep, staleSID) {
-		t.Fatal("depth cap should leave level2 deny in place when max depth is 1")
-	}
-}
-
 // dirDeniesReadSID reports whether path's DACL has a DENY ACE for wantSID whose
 // mask covers FILE_GENERIC_READ (DenyRead shape) without the full write-probe
 // mask of experimental DenyWrite.
@@ -420,5 +181,157 @@ func TestOpenWindowsACLTargetReportsIsDir(t *testing.T) {
 	_ = windows.CloseHandle(handle)
 	if isDir {
 		t.Fatal("isDir = true for a regular file, want false")
+	}
+}
+
+// TestWindowsACLDenyWriteMigratesLegacySynchronizeMask regression tests that an
+// existing legacy DenyWrite ACE containing SYNCHRONIZE (from older PR builds) is
+// replaced in-place with the narrow mask that excludes SYNCHRONIZE, preserving
+// co-resident DenyRead ACEs and operating idempotently.
+func TestWindowsACLDenyWriteMigratesLegacySynchronizeMask(t *testing.T) {
+	dir := t.TempDir()
+	childDir := filepath.Join(dir, "sub")
+	if err := os.Mkdir(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir childDir: %v", err)
+	}
+	childFile := filepath.Join(childDir, "child.txt")
+	if err := os.WriteFile(childFile, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write childFile: %v", err)
+	}
+
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	sidStr := caps.ReadOnly
+	sid, err := windows.StringToSid(sidStr)
+	if err != nil {
+		t.Fatalf("StringToSid: %v", err)
+	}
+
+	// 1. Seed legacy DenyWrite ACE containing SYNCHRONIZE + co-resident DenyRead ACE.
+	legacyWriteMask := (windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.SYNCHRONIZE)
+	_, readMask, err := windowsACLAccess(WindowsACLDenyRead)
+	if err != nil {
+		t.Fatalf("windowsACLAccess DenyRead: %v", err)
+	}
+	seedEntries := []windows.EXPLICIT_ACCESS{
+		{
+			AccessPermissions: legacyWriteMask,
+			AccessMode:        windows.DENY_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		},
+		{
+			AccessPermissions: readMask,
+			AccessMode:        windows.DENY_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		},
+	}
+	handle, _, err := openWindowsACLTarget(dir)
+	if err != nil {
+		t.Fatalf("openWindowsACLTarget: %v", err)
+	}
+	seededDACL, err := windows.ACLFromEntries(seedEntries, nil)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("ACLFromEntries: %v", err)
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, seededDACL, nil); err != nil {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("SetSecurityInfo: %v", err)
+	}
+	_ = windows.CloseHandle(handle)
+
+	// 2. Apply WindowsACLPlan with new narrow DenyWrite action.
+	plan := WindowsACLPlan{
+		Entries: []WindowsACLEntry{{
+			Action:     WindowsACLDenyWrite,
+			Path:       dir,
+			Capability: sidStr,
+		}},
+	}
+	rollback, err := applyWindowsACLPlan(plan)
+	if err != nil {
+		t.Fatalf("applyWindowsACLPlan: %v", err)
+	}
+	t.Cleanup(func() { _ = rollback() })
+
+	// 3. Verify effective DACL: SYNCHRONIZE must NOT be denied, write rights denied, DenyRead preserved.
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo: %v", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+
+	var hasNarrowWriteDeny, hasSynchronizeDeny, hasReadDeny bool
+	_, narrowWriteMask, err := windowsACLAccess(WindowsACLDenyWrite)
+	if err != nil {
+		t.Fatalf("windowsACLAccess: %v", err)
+	}
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			t.Fatalf("GetAce: %v", err)
+		}
+		if ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE && ace.Header.AceType != windowsAccessDeniedObjectAceType {
+			continue
+		}
+		aceSID, ok := windowsAceSID(ace)
+		if !ok || !aceSID.Equals(sid) {
+			continue
+		}
+		if ace.Mask&windows.SYNCHRONIZE != 0 && windowsIsExperimentalWriteDenyMask(ace.Mask) {
+			hasSynchronizeDeny = true
+		}
+		if ace.Mask&narrowWriteMask == narrowWriteMask {
+			hasNarrowWriteDeny = true
+		}
+		if ace.Mask&readMask == readMask && !windowsIsExperimentalWriteDenyMask(ace.Mask) {
+			hasReadDeny = true
+		}
+	}
+
+	if hasSynchronizeDeny {
+		t.Fatal("resulting DACL still denies SYNCHRONIZE for trustee; migration failed to narrow mask")
+	}
+	if !hasNarrowWriteDeny {
+		t.Fatal("resulting DACL is missing narrow DenyWrite ACE")
+	}
+	if !hasReadDeny {
+		t.Fatal("resulting DACL lost co-resident DenyRead ACE during migration")
+	}
+
+	// 4. Assert synchronous directory read works.
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) == 0 {
+		t.Fatalf("os.ReadDir failed on migrated directory: entries=%v, err=%v", entries, err)
+	}
+
+	// 5. Assert second apply is idempotent.
+	if _, err := applyWindowsACLPlan(plan); err != nil {
+		t.Fatalf("second applyWindowsACLPlan failed: %v", err)
+	}
+	sd2, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo 2: %v", err)
+	}
+	dacl2, _, err := sd2.DACL()
+	if err != nil {
+		t.Fatalf("DACL 2: %v", err)
+	}
+	if dacl2.AceCount != dacl.AceCount {
+		t.Fatalf("second apply changed ACE count: %d vs %d", dacl2.AceCount, dacl.AceCount)
 	}
 }

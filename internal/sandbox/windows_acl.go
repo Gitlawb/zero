@@ -35,18 +35,6 @@ type WindowsACLEntry struct {
 	// flag rather than rely on inheritance.
 	NoInherit   bool `json:"noInherit,omitempty"`
 	Materialize bool `json:"materialize,omitempty"`
-	// ScanDescendants marks a shared-root DenyWrite entry whose EXISTING
-	// writable descendants must ALSO be denied, one direct (non-inheriting)
-	// deny per writable descendant, at apply time. This flag and its associated
-	// walker are consumed by applyWindowsACLPlan and tests; no current
-	// plan-generation path sets this flag since broad shared-root DenyWrite ACEs
-	// and SID broadening are no longer planned.
-	ScanDescendants bool `json:"-"`
-	// RevokeDescendants marks a WindowsACLRevokeCapability entry as needing
-	// stale-deny cleanup applied recursively to existing descendants, not just
-	// the root path itself. This flag is consumed by applyWindowsACLPlan for
-	// migration cleanup and tests; no current plan-generation path sets this flag.
-	RevokeDescendants bool `json:"-"`
 }
 
 type WindowsACLPlan struct {

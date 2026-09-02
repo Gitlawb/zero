@@ -15,7 +15,7 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 4
+const windowsSandboxSetupMarkerSchemaVersion = 5
 
 type WindowsSandboxSetupArgsOptions struct {
 	SandboxHome       string

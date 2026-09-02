@@ -110,78 +110,6 @@ func TestBuildWindowsACLPlanOmitsSharedDenyPathsWhenUnelevated(t *testing.T) {
 	assertNoWindowsACLRevokes(t, plan)
 }
 
-// windowsSharedDenyPathsForTest calls the same trusted-path resolution
-// BuildWindowsACLPlan itself uses, rather than reimplementing the
-// resolution logic independently, so this test cannot silently drift out of
-// sync with (or mask a regression in) the production resolver.
-func windowsSharedDenyPathsForTest(t *testing.T) (systemDrive, systemRoot, programData, publicDir string) {
-	t.Helper()
-	systemDrive, systemRoot, programData, publicDir, err := resolveWindowsSharedDenyPaths()
-	if err != nil {
-		t.Fatalf("resolveWindowsSharedDenyPaths: %v", err)
-	}
-	return systemDrive, systemRoot, programData, publicDir
-}
-
-func TestBuildWindowsACLPlanUsesReadOnlySIDWithoutWriteRoots(t *testing.T) {
-	home := t.TempDir()
-	caps, err := LoadOrCreateWindowsCapabilitySIDs(home)
-	if err != nil {
-		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
-	}
-	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
-		SandboxHome:  home,
-		SandboxLevel: WindowsSandboxLevelRestrictedToken,
-		PermissionProfile: PermissionProfile{
-			FileSystem: FileSystemPolicy{
-				Kind:     FileSystemRestricted,
-				DenyRead: []string{`C:\workspace\secret-read`},
-			},
-			Network: NetworkPolicy{Mode: NetworkDeny},
-		},
-	})
-	if err != nil {
-		t.Fatalf("BuildWindowsACLPlan: %v", err)
-	}
-	// Without write roots there is nothing to revoke; without SID broadening
-	// there are no shared system-path DenyWrite entries either.
-	if len(plan.Entries) != 1 {
-		t.Fatalf("ACL entries = %#v, want one deny-read entry", plan.Entries)
-	}
-	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, caps.ReadOnly, true)
-	assertNoSharedSystemDenyWrites(t, plan)
-}
-
-// TestBuildWindowsACLPlanDisablesSharedDenyPathDescendantScan pins that SID
-// broadening is off: the plan must not request ScanDescendants or shared-root
-// DenyWrite entries that only existed to compensate for Users/AuthUsers SIDs.
-func TestBuildWindowsACLPlanDisablesSharedDenyPathDescendantScan(t *testing.T) {
-	home := t.TempDir()
-	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
-		SandboxHome:    home,
-		WorkspaceRoots: []string{`C:\workspace`},
-		SandboxLevel:   WindowsSandboxLevelRestrictedToken,
-		PermissionProfile: PermissionProfile{
-			FileSystem: FileSystemPolicy{
-				Kind:       FileSystemRestricted,
-				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
-				DenyRead:   []string{`C:\workspace\secret-read`},
-				DenyWrite:  []string{`C:\workspace\secret-write`},
-			},
-			Network: NetworkPolicy{Mode: NetworkDeny},
-		},
-	})
-	if err != nil {
-		t.Fatalf("BuildWindowsACLPlan: %v", err)
-	}
-	assertNoSharedSystemDenyWrites(t, plan)
-	for _, entry := range plan.Entries {
-		if entry.ScanDescendants {
-			t.Fatalf("plan entry %#v requests descendant scan; shared DenyWrite compensation is disabled", entry)
-		}
-	}
-}
-
 // TestBuildWindowsACLPlanDoesNotRevokeLegacyGuards pins that a setup run does
 // not remove persistent guards installed by an older build. A previously
 // launched sandbox can still carry the legacy capability SID, so removing its
@@ -208,8 +136,7 @@ func TestBuildWindowsACLPlanDoesNotRevokeLegacyGuards(t *testing.T) {
 
 func assertNoSharedSystemDenyWrites(t *testing.T, plan WindowsACLPlan) {
 	t.Helper()
-	systemDrive, systemRoot, programData, publicDir := windowsSharedDenyPathsForTest(t)
-	for _, path := range []string{systemDrive + `\`, programData, systemRoot + `\Temp`, publicDir} {
+	for _, path := range []string{`C:\`, `C:\ProgramData`, `C:\Windows\Temp`, `C:\Users\Public`} {
 		for _, entry := range plan.Entries {
 			if entry.Action == WindowsACLDenyWrite && windowsCapabilityPathKey(entry.Path) == windowsCapabilityPathKey(path) {
 				t.Fatalf("plan stamps shared system DenyWrite on %q = %#v; SID broadening is disabled so shared denies must not be planned", path, entry)

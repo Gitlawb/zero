@@ -157,8 +157,8 @@ func TestWindowsSandboxSetupMarkerValidatesBothNetworkModes(t *testing.T) {
 	}
 }
 
-// A pre-v4 marker on disk must be rejected as out of date so the schema bump
-// forces a clean re-setup (old markers scoped the filter to write SIDs).
+// A pre-v5 marker on disk must be rejected as out of date so the schema bump
+// forces a clean re-setup (old markers had legacy DenyWrite ACEs).
 func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 	config := WindowsSandboxSetupConfig{
 		SandboxHome:    t.TempDir(),
@@ -173,7 +173,7 @@ func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupMarker: %v", err)
 	}
-	marker.SchemaVersion = 3
+	marker.SchemaVersion = 4
 	bytes, err := json.Marshal(marker)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -183,7 +183,7 @@ func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 	}
 	err = ValidateWindowsSandboxSetupMarker(config)
 	if err == nil || !strings.Contains(err.Error(), "out of date") {
-		t.Fatalf("schema-3 marker must be out of date, got: %v", err)
+		t.Fatalf("schema-4 marker must be out of date, got: %v", err)
 	}
 }
 

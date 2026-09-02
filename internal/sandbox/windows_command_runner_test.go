@@ -38,8 +38,11 @@ func TestWindowsDenyReadRestrictedTokenUnsupported(t *testing.T) {
 		if strings.Contains(msg, "--sandbox forbid") {
 			t.Fatalf("%s error advertises unsupported --sandbox forbid recovery: %q", level, msg)
 		}
-		if !strings.Contains(msg, "sandbox_permissions") {
-			t.Fatalf("%s error should name the documented sandbox_permissions recovery flow: %q", level, msg)
+		if strings.Contains(msg, "sandbox_permissions") || strings.Contains(msg, "require_escalated") {
+			t.Fatalf("%s error advertises unusable escalation recovery: %q", level, msg)
+		}
+		if !strings.Contains(msg, "Remove DenyRead") {
+			t.Fatalf("%s error should advise removing DenyRead: %q", level, msg)
 		}
 	}
 
