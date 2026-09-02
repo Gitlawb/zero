@@ -915,20 +915,22 @@ func createRuntimeDirRecording(root string) ([]windowsCreatedRuntimeDir, error) 
 		}
 		current = parent
 	}
-	var created []windowsCreatedRuntimeDir
+	// HANDLE-RELATIVE FROM HERE DOWN. The walk above found the deepest ancestor
+	// that already exists, and that is the only thing opened by name. Every
+	// missing component beneath it is created relative to its parent's handle,
+	// no-follow, so a junction swapped into an owned component between the
+	// pre-check and the create is seen as the link it is rather than descended
+	// into. The old loop reopened each parent by name, which is exactly the
+	// interval a swap needs; the pre and post checks below are now belt and
+	// braces rather than the authorization. Outermost first, so each parent
+	// exists before its child.
+	tail := make([]string, 0, len(missing))
 	for index := len(missing) - 1; index >= 0; index-- {
-		// IDENTITY FROM THE CREATION, not from a reopen of the name. Creating and
-		// then re-resolving is two chances to name a different object, and the
-		// ledger only means anything if it describes the directory this run made.
-		identity, identified, err := createRuntimeDirIdentified(missing[index])
-		if err != nil {
-			if os.IsExist(err) {
-				// Raced with something else creating it; not ours to remove.
-				continue
-			}
-			return created, fmt.Errorf("create sandbox runtime root %s: %w", missing[index], err)
-		}
-		created = append(created, windowsCreatedRuntimeDir{path: missing[index], identity: identity, identified: identified})
+		tail = append(tail, missing[index])
+	}
+	created, err := createRuntimeTailHandleRelative(current, tail)
+	if err != nil {
+		return created, err
 	}
 	// Re-checked after creation. If an ancestor was swapped for a junction while
 	// we were creating, the leaf we just made is in the wrong tree, and granting
