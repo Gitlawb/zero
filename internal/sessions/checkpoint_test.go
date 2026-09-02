@@ -250,7 +250,7 @@ func TestImportedSessionRewindUsesCapturedLocalWorkspaceBinding(t *testing.T) {
 		SessionID:    "imported-session",
 		Cwd:          foreignWorkspace,
 		WorkspaceKey: foreignWorkspace,
-		Tag:          "imported:claude-code:foreign-id",
+		Tag:          ImportedSessionTag("claude-code", "foreign-id"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestImportedSessionRefusesLegacyCheckpointWithoutLocalBinding(t *testing.T)
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	if _, err := store.Create(CreateInput{
 		SessionID: "imported-session",
-		Tag:       "imported:codex:foreign-id",
+		Tag:       ImportedSessionTag("codex", "foreign-id"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -307,6 +307,42 @@ func TestImportedSessionRefusesLegacyCheckpointWithoutLocalBinding(t *testing.T)
 	}
 	if len(events) != 2 {
 		t.Fatalf("failed rewind modified the event log: got %d events, want 2", len(events))
+	}
+}
+
+func TestNativeImportedPrefixTagCanApplyLegacyCheckpoint(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "config.yaml")
+	mustWriteFile(t, path, "before")
+	if _, err := store.Create(CreateInput{SessionID: "native-tagged", Tag: "imported:archive"}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.AppendEvent("native-tagged", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "before"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := store.writeBlob("native-tagged", []byte("before"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent("native-tagged", AppendEventInput{Type: EventSessionCheckpoint, Payload: CheckpointPayload{
+		Tool: "write_file",
+		Files: []CheckpointFile{{
+			Path:  "config.yaml",
+			Blob:  blob,
+			Bytes: len("before"),
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, path, "after")
+
+	if _, err := store.ApplyRewind("native-tagged", workspace, target.Sequence); err != nil {
+		t.Fatalf("native tagged rewind: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "before" {
+		t.Fatalf("legacy checkpoint was not restored: got %q err=%v", got, err)
 	}
 }
 

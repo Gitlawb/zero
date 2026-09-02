@@ -307,7 +307,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
 	}
 	persistedModel := strings.TrimSpace(meta.ModelID)
-	imported := strings.HasPrefix(strings.TrimSpace(meta.Tag), "imported:")
+	imported := sessions.IsImportedSession(*meta)
 	if persistedModel != "" && !imported && (!restrictModels || modelChoiceExists(models, persistedModel)) {
 		model = persistedModel
 		if !modelChoiceExists(models, persistedModel) {

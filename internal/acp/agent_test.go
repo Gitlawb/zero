@@ -532,11 +532,12 @@ func TestACPLoadImportedSessionDoesNotRestoreUnadvertisedForeignModel(t *testing
 			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
 		}}, nil
 	}
+	workspace := t.TempDir()
 	meta, err := deps.Store.Create(sessions.CreateInput{
 		Title:   "legacy imported session",
-		Cwd:     t.TempDir(),
+		Cwd:     workspace,
 		ModelID: "foreign-expensive-model",
-		Tag:     "imported:claude-code:foreign-id",
+		Tag:     sessions.ImportedSessionTag("claude-code", "foreign-id"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -548,13 +549,44 @@ func TestACPLoadImportedSessionDoesNotRestoreUnadvertisedForeignModel(t *testing
 	var loaded LoadSessionResult
 	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
 		SessionID: meta.SessionID,
-		Cwd:       t.TempDir(),
+		Cwd:       workspace,
 	}, &loaded); err != nil {
 		t.Fatalf("session/load: %v", err)
 	}
 	option := loaded.ConfigOptions[0]
 	if option.CurrentValue != "workspace-model" || modelChoiceExists(option.Options, "foreign-expensive-model") {
 		t.Fatalf("imported model gained ACP authority: %+v", option)
+	}
+}
+
+func TestACPLoadNativeImportedPrefixTagRestoresItsModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	workspace := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:   "native archived session",
+		Cwd:     workspace,
+		ModelID: "native-model",
+		Tag:     "imported:archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: workspace}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "native-model" || !modelChoiceExists(option.Options, "native-model") {
+		t.Fatalf("native tagged model was discarded as foreign: %+v", option)
 	}
 }
 
@@ -1120,7 +1152,7 @@ func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
 		Title:        "imported session",
 		Cwd:          displayCwd,
 		WorkspaceKey: operationalCwd,
-		Tag:          "imported:claude-code:foreign-id",
+		Tag:          sessions.ImportedSessionTag("claude-code", "foreign-id"),
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
