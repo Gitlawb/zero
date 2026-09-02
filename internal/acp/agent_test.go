@@ -1574,8 +1574,18 @@ func TestACPPromptPersistsToolActivityForFreshLoad(t *testing.T) {
 	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace}, &LoadSessionResult{}); err != nil {
 		t.Fatalf("fresh session/load: %v", err)
 	}
-	start := <-loader.tools
-	result := <-loader.tools
+	nextReplay := func(label string) ToolCallUpdate {
+		t.Helper()
+		select {
+		case update := <-loader.tools:
+			return update
+		case <-ctx.Done():
+			t.Fatalf("replayed %s never arrived: %v", label, ctx.Err())
+			return ToolCallUpdate{}
+		}
+	}
+	start := nextReplay("tool start")
+	result := nextReplay("tool result")
 	if start.SessionUpdate != UpdateToolCall || start.ToolCallID != "call-live" || start.Status != ToolStatusInProgress {
 		t.Fatalf("replayed tool start = %+v", start)
 	}
