@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/errhint"
@@ -96,31 +97,33 @@ type model struct {
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
 	// fall back to a per-run manager. Torn down in quit().
-	lspManager           *lsp.Manager
-	sessionStore         *sessions.Store
-	peerService          *peermsg.Service
-	peerInbox            []peermsg.InboundMessage
-	peerApprovalQueue    []peermsg.InboundMessage
-	peerPendingApproval  *peermsg.InboundMessage
-	sandboxStore         *sandbox.GrantStore
-	mcpConfig            config.MCPConfig
-	mcpPermissionStore   *internalmcp.PermissionStore
-	mcpTokenStore        *internalmcp.TokenStore
-	mcpCommand           func(context.Context, []string) MCPCommandResult
-	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
-	mcpViewStateCache    MCPViewState
-	mcpViewStateReady    bool
-	mcpCommandSeq        int
-	mcpCommandCancel     context.CancelFunc
-	sandboxSetupSeq      int
-	sandboxSetupInFlight bool
-	doctorCommandSeq     int
-	doctorInFlight       bool
-	doctorFrame          int
-	activeSession        sessions.Metadata
-	pendingSessionTitle  string
-	sessionEvents        []sessions.Event
-	btw                  btwState
+	lspManager            *lsp.Manager
+	sessionStore          *sessions.Store
+	agentSessionsEnv      agentsessions.Env
+	sessionImportInFlight bool
+	peerService           *peermsg.Service
+	peerInbox             []peermsg.InboundMessage
+	peerApprovalQueue     []peermsg.InboundMessage
+	peerPendingApproval   *peermsg.InboundMessage
+	sandboxStore          *sandbox.GrantStore
+	mcpConfig             config.MCPConfig
+	mcpPermissionStore    *internalmcp.PermissionStore
+	mcpTokenStore         *internalmcp.TokenStore
+	mcpCommand            func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand   func(context.Context) SandboxSetupCommandResult
+	mcpViewStateCache     MCPViewState
+	mcpViewStateReady     bool
+	mcpCommandSeq         int
+	mcpCommandCancel      context.CancelFunc
+	sandboxSetupSeq       int
+	sandboxSetupInFlight  bool
+	doctorCommandSeq      int
+	doctorInFlight        bool
+	doctorFrame           int
+	activeSession         sessions.Metadata
+	pendingSessionTitle   string
+	sessionEvents         []sessions.Event
+	btw                   btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
 	// surface. It survives returning to the parent so a late message from an old
 	// side run can never match a run in a later BTW conversation.
@@ -902,6 +905,10 @@ func newModel(ctx context.Context, options Options) model {
 	if sessionStore == nil {
 		sessionStore = sessions.NewStore(sessions.StoreOptions{})
 	}
+	agentSessionsEnv := agentsessions.OSEnv()
+	if options.AgentSessionsEnv != nil {
+		agentSessionsEnv = *options.AgentSessionsEnv
+	}
 	sandboxStore := options.SandboxStore
 	modelCatalog, err := modelregistry.DefaultRegistry()
 	if err != nil {
@@ -991,6 +998,7 @@ func newModel(ctx context.Context, options Options) model {
 		registry:                    registry,
 		awaitToolReadiness:          options.AwaitToolReadiness,
 		sessionStore:                sessionStore,
+		agentSessionsEnv:            agentSessionsEnv,
 		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
@@ -1366,6 +1374,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
 			m.petCellPixelHeight = msg.Height
+		}
+		return m, nil
+	case foreignSessionImportedMsg:
+		m, text := m.finishForeignSessionImport(msg)
+		if text != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		return m, nil
 	case peerMessageMsg:
@@ -2012,6 +2026,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
+			}
+			// A tabbed picker (currently /resume) claims Tab to cycle its agent
+			// strip. Checked before the suggestion path below, which already
+			// requires picker == nil, so nothing else changes behaviour.
+			if m.picker != nil && m.picker.hasTabs() {
+				m.picker.cycleTab(1)
+				return m, nil
 			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
@@ -4491,7 +4512,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
 		// rebuilds the transcript (returning "" on success, an error note on failure).
 		text := ""
-		m, text = m.handleResumeCommand(item.Value)
+		if item.ForeignSource != nil {
+			m, text, cmd = m.startForeignSessionImport(*item.ForeignSource)
+		} else {
+			m, text, cmd = m.startResumeCommand(item.Value)
+		}
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
@@ -4806,7 +4831,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			}
 		}
 		text := ""
-		m, text = m.handleResumeCommand(command.text)
+		m, text, cmd := m.startResumeCommand(command.text)
 		if strings.HasPrefix(text, sessionsCardsPrefix) {
 			// The list payload renders as stacked session cards, not a note.
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
@@ -4817,7 +4842,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		} else if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
-		return m, nil
+		return m, cmd
 	case commandRename:
 		if title := strings.TrimSpace(command.text); title != "" {
 			return m.renameActiveSession(title), nil

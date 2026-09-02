@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -1052,8 +1053,15 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 		if !strings.Contains(item.Label, want.title) {
 			t.Fatalf("picker Label %q should contain the title %q", item.Label, want.title)
 		}
-		if item.Meta != "" {
-			t.Fatalf("picker %q should not expose raw session id metadata, got %q", want.title, item.Meta)
+		// Meta now carries the source agent ("zero", "codex", …) so the picker's
+		// All tab says where each session came from. What it must never carry is
+		// the raw session id, which is what this check has always been about:
+		// rendering the id consumed half the picker and truncated the title.
+		if strings.Contains(item.Meta, want.id) {
+			t.Fatalf("picker %q exposes the raw session id in metadata: %q", want.title, item.Meta)
+		}
+		if item.Meta != "zero" {
+			t.Fatalf("picker %q metadata = %q, want the source agent", want.title, item.Meta)
 		}
 	}
 	// The picker overlay renders clean title rows plus a position indicator.
@@ -1166,7 +1174,8 @@ func TestResumePickerHidesEmptyFailedSessions(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	picker := newModel(context.Background(), Options{SessionStore: store}).newSessionPicker()
+	env := agentsessions.Env{Home: t.TempDir()}
+	picker := newModel(context.Background(), Options{SessionStore: store, AgentSessionsEnv: &env}).newSessionPicker()
 	if picker == nil {
 		t.Fatal("expected a picker containing the real session")
 	}
@@ -1630,6 +1639,25 @@ func TestToolResultSessionPayloadKeepsPreviewForResume(t *testing.T) {
 	rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: encoded}})
 	if len(rows) != 1 || rows[0].detail != preview {
 		t.Fatalf("resumed row lost the display preview: %#v", rows)
+	}
+}
+
+func TestResumedUnknownToolResultDoesNotRenderAsSuccess(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"toolCallId": "codex-1",
+		"name":       "write_file",
+		"status":     "unknown",
+		"output":     "permission denied",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: payload}})
+	if len(rows) != 1 || rows[0].status != tools.StatusUnknown {
+		t.Fatalf("unknown result row = %#v", rows)
+	}
+	if !strings.Contains(rows[0].text, "write_file unknown permission denied") || strings.Contains(rows[0].text, "write_file ok") {
+		t.Fatalf("unknown result was rendered as success: %q", rows[0].text)
 	}
 }
 

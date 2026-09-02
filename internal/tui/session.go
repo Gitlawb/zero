@@ -7,10 +7,14 @@ import (
 	"math"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -214,19 +218,45 @@ func tuiSessionTitle(prompt string) string {
 	return title
 }
 
+type foreignSessionImportedMsg struct {
+	result        agentsessions.ImportResult
+	originSession string
+	err           error
+}
+
+// startResumeCommand keeps foreign transcript I/O off Bubble Tea's Update
+// loop. Local Zero resumes stay synchronous; a foreign reference returns a
+// command whose result is applied by finishForeignSessionImport.
+func (m model) startResumeCommand(args string) (model, string, tea.Cmd) {
+	args = strings.TrimSpace(args)
+	if !strings.Contains(args, ":") {
+		next, text := m.handleResumeCommand(args)
+		return next, text, nil
+	}
+	if m.sessionImportInFlight {
+		return m, "Sessions\na foreign session import is already in progress", nil
+	}
+	m.sessionImportInFlight = true
+	return m, "", m.importForeignSessionCmd(args)
+}
+
 func (m model) handleResumeCommand(args string) (model, string) {
 	args = strings.TrimSpace(args)
 	if args == "" {
 		return m, m.resumeText()
 	}
+	return m.resumeZeroSession(args, "")
+}
+
+func (m model) resumeZeroSession(args string, importNote string) (model, string) {
 
 	session, err := m.resolveResumeSession(args)
 	if err != nil {
-		return m, "Sessions\n" + err.Error()
+		return m, "Sessions\n" + agentsessions.DisplayField(err.Error())
 	}
 	events, err := m.resumeEvents(session.SessionID)
 	if err != nil {
-		return m, "Sessions\nerror: " + err.Error()
+		return m, "Sessions\nerror: " + agentsessions.DisplayField(err.Error())
 	}
 
 	// Capture the current session id before switching so loops are only torn down
@@ -248,6 +278,9 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	}
 
 	rows := initialTranscript()
+	if importNote != "" {
+		rows = appendRow(rows, rowSystem, importNote)
+	}
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
 	if loopsCleared > 0 {
 		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
@@ -330,7 +363,7 @@ func (m model) resumeEvents(sessionID string) ([]sessions.Event, error) {
 func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) string {
 	modelLine := "model: " + displayValue(m.modelName, "none")
 	if recorded := strings.TrimSpace(session.ModelID); recorded != "" && !strings.EqualFold(recorded, m.modelName) {
-		modelLine += "  (recorded: " + recorded + ")"
+		modelLine += "  (recorded: " + agentsessions.DisplayField(recorded) + ")"
 	}
 	providerLine := "provider: " + displayValue(m.providerName, "none")
 	if recorded := strings.TrimSpace(session.Provider); recorded != "" && !strings.EqualFold(recorded, m.providerName) {
@@ -338,7 +371,7 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	}
 	lines := []string{
 		"id: " + session.SessionID,
-		"title: " + displayValue(session.Title, "untitled"),
+		"title: " + displayValue(agentsessions.DisplayField(session.Title), "untitled"),
 		modelLine,
 		providerLine,
 		fmt.Sprintf("events: %d", eventCount),
@@ -368,6 +401,13 @@ func sessionWhen(timestamp string, now time.Time) string {
 	if err != nil {
 		return ""
 	}
+	return sessionWhenTime(parsed, now)
+}
+
+func sessionWhenTime(parsed time.Time, now time.Time) string {
+	if parsed.IsZero() {
+		return ""
+	}
 	parsed, now = parsed.Local(), now.Local()
 	switch {
 	case parsed.Year() == now.Year() && parsed.YearDay() == now.YearDay():
@@ -386,8 +426,15 @@ func (m model) newSessionPicker() *commandPicker {
 	if m.sessionStore == nil {
 		return nil
 	}
+	// A FAILED READ IS THE ONLY REASON TO GIVE UP HERE. An EMPTY local history is
+	// not: foreign sessions are discovered independently of the store, and the
+	// user with no Zero sessions at all is exactly the one this picker's import
+	// path exists for — someone who has just installed Zero and wants to carry on
+	// work another agent started. Returning early on len(metas) == 0 made the
+	// feature invisible to precisely that user, and visible only once they had
+	// already done the thing it was meant to save them.
 	metas, err := m.sessionStore.ListResumable()
-	if err != nil || len(metas) == 0 {
+	if err != nil {
 		return nil
 	}
 	now := m.now()
@@ -398,7 +445,7 @@ func (m model) newSessionPicker() *commandPicker {
 		// per-session event read below, so a large global history doesn't pay 50
 		// full file reads to build one workspace's list. Sessions with no recorded
 		// Cwd (older runs) stay visible rather than vanishing.
-		if !sessionMatchesWorkspace(meta.Cwd, m.cwd) {
+		if !sessionMatchesWorkspace(sessions.OperationalCwd(meta), m.cwd) {
 			continue
 		}
 		// A zero-event session has nothing to resume — skip it without a file read.
@@ -414,17 +461,32 @@ func (m model) newSessionPicker() *commandPicker {
 		// Lead with a fixed-width timestamp so titles form one scannable column.
 		// The raw id remains the selection/search value but stays out of the row:
 		// rendering it consumed half the picker and truncated the useful title.
-		label := displayValue(meta.Title, "untitled")
+		label := displayValue(agentsessions.DisplayField(meta.Title), "untitled")
 		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
+		agent := sessionAgentName(meta.Tag)
 		items = append(items, pickerItem{
 			Label: label,
 			Value: meta.SessionID,
+			// Shown on the right of the row, so the "All" tab says at a glance
+			// which agent each session came from.
+			Meta: agent,
+			Tab:  agent,
 		})
 	}
+	return pickerFromParts(items, m.foreignSessionItems(metas, now))
+}
+
+// pickerFromParts assembles the picker from the two independent sources, and
+// decides emptiness AFTER combining them rather than from either alone. Split
+// out so that decision is testable without a session store on disk: it is the
+// step that previously hid the whole import path from a user with no local
+// history.
+func pickerFromParts(local []pickerItem, foreign []pickerItem) *commandPicker {
+	items := append(append([]pickerItem{}, local...), foreign...)
 	if len(items) == 0 {
-		return nil // every resumable session was an empty/failed run
+		return nil // nothing local worth resuming, and nothing foreign to import
 	}
 	return &commandPicker{
 		kind:     pickerSession,
@@ -432,7 +494,217 @@ func (m model) newSessionPicker() *commandPicker {
 		items:    items,
 		allItems: append([]pickerItem{}, items...),
 		selected: 0,
+		tabs:     sessionPickerTabs(items),
 	}
+}
+
+// importForeignSession copies another agent's session into Zero and returns the
+// new Zero session id, plus a note for the transcript saying what happened.
+//
+// Resuming a foreign session cannot be silent: it creates a durable Zero session
+// the user did not explicitly ask for, and it may have run in a different
+// directory, so the note names both.
+func (m model) importForeignSessionCmd(ref string) tea.Cmd {
+	store := m.sessionStore
+	env := m.agentSessionsEnv
+	originSession := m.activeSession.SessionID
+	return func() tea.Msg {
+		if store == nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: errors.New("no session store")}
+		}
+		adapter, id, err := agentsessions.ParseRef(env, ref)
+		if err != nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: err}
+		}
+		// A resume imports the complete visible transcript by design. The total
+		// event count is uncapped, but each source line remains bounded by the
+		// agentsessions reader so one malformed record cannot exhaust memory.
+		result, err := agentsessions.Import(store, adapter, id, agentsessions.ReadOptions{})
+		return foreignSessionImportedMsg{result: result, originSession: originSession, err: err}
+	}
+}
+
+func (m model) startForeignSessionImport(source agentsessions.ForeignSession) (model, string, tea.Cmd) {
+	if m.sessionImportInFlight {
+		return m, "Sessions\na foreign session import is already in progress", nil
+	}
+	m.sessionImportInFlight = true
+	return m, "", m.importForeignSessionSourceCmd(source)
+}
+
+func (m model) importForeignSessionSourceCmd(source agentsessions.ForeignSession) tea.Cmd {
+	store := m.sessionStore
+	env := m.agentSessionsEnv
+	originSession := m.activeSession.SessionID
+	return func() tea.Msg {
+		if store == nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: errors.New("no session store")}
+		}
+		adapter, _, err := agentsessions.ParseRef(env, source.Agent+":"+source.ID)
+		if err != nil {
+			return foreignSessionImportedMsg{originSession: originSession, err: err}
+		}
+		result, err := agentsessions.ImportSource(store, adapter, source, agentsessions.ReadOptions{})
+		return foreignSessionImportedMsg{result: result, originSession: originSession, err: err}
+	}
+}
+
+func (m model) finishForeignSessionImport(msg foreignSessionImportedMsg) (model, string) {
+	m.sessionImportInFlight = false
+	if msg.err != nil {
+		return m, "Sessions\n" + agentsessions.DisplayField(msg.err.Error())
+	}
+	// This session is no longer un-imported, so the memo that says otherwise
+	// must go before the picker is rebuilt.
+	agentsessions.InvalidateDiscovery()
+	if m.pending || m.activeSession.SessionID != msg.originSession {
+		note := importedSessionNote(msg.result, m.cwd)
+		return m, note + "\nThe import completed, but Zero did not resume it because the active session changed or a run started."
+	}
+	return m.resumeZeroSession(msg.result.Session.SessionID, importedSessionNote(msg.result, m.cwd))
+}
+
+// importedSessionNote is the transcript row an import writes.
+//
+// IT IS A TRANSCRIPT ROW, drawn with the same trust as the picker row built
+// below — which already sanitizes. The foreign id is the transcript's FILE NAME
+// and the cwd a record inside it, and both reached appendRow raw, where an
+// escape repaints the rows around it. DisplayField strips controls and then
+// redacts, in that order. The agent name is this build's own adapter label and
+// the Zero id is Zero's, so neither is foreign input.
+//
+// Split from importForeignSession so the cwd half can be proved: agentsessions
+// .Import now sanitizes what it stores, so through the real entry point that
+// call is unobservable and a test would pass with or without it. It still earns
+// its place — a session imported by an earlier build holds whatever the foreign
+// transcript said, and this is what draws it.
+func importedSessionNote(result agentsessions.ImportResult, workspace string) string {
+	note := fmt.Sprintf("Imported %s session %s into Zero as %s (%d events).",
+		result.Source.Agent, agentsessions.DisplayField(result.Source.ID), result.Session.SessionID, result.Events)
+	if recorded := strings.TrimSpace(result.Source.Cwd); recorded != "" && !sessionMatchesWorkspace(recorded, workspace) {
+		note += "\nIt ran in " + agentsessions.DisplayField(recorded) + ", so paths it mentions refer to that tree."
+	}
+	return note
+}
+
+// foreignSessionItems lists sessions belonging to OTHER coding agents that have
+// not been imported yet, so /resume shows the work that exists rather than only
+// the part already copied into Zero. Choosing one imports it and then resumes,
+// which is why its Value is an "<agent>:<id>" reference rather than a Zero id.
+//
+// Reading these is a bounded index of each transcript's head, never the whole
+// file (see internal/agentsessions). A store that is missing or has changed
+// shape contributes nothing rather than failing the picker — /resume must still
+// open on a machine where one vendor shipped a new format this morning.
+// importedSourceRefs is the set of foreign sessions that have actually been
+// imported, so the picker can skip offering them a second time — listing a
+// session twice, once as itself and once as its copy, is worse than not offering
+// it at all.
+//
+// A SESSION WITH NO EVENTS DOES NOT COUNT AS IMPORTED. Import creates the local
+// session and appends its transcript as two steps, so an append that fails
+// leaves a session carrying the import tag and nothing else. The tag alone used
+// to be enough to suppress the foreign source here, while the loop that builds
+// the local rows drops the same session for having EventCount == 0 — so the
+// work disappeared from the picker entirely: not offered as the original, not
+// listed as the copy, and a retry impossible because the source was hidden. The
+// two filters have to agree on what a real session is.
+//
+// Current imports roll back a session whose event append fails. This filter is
+// retained for empty import records left by older builds or interrupted
+// cleanup, so upgrading restores the source to the picker and makes it
+// retryable. Reported by @jatmn.
+func importedSourceRefs(existing []sessions.Metadata) map[string]bool {
+	imported := map[string]bool{}
+	for _, meta := range existing {
+		if meta.EventCount == 0 {
+			continue
+		}
+		if agent, sourceID, ok := agentsessions.ParseImportTag(meta.Tag); ok {
+			imported[agent+":"+sourceID] = true
+		}
+	}
+	return imported
+}
+
+func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) []pickerItem {
+	imported := importedSourceRefs(existing)
+
+	found, _ := agentsessions.DiscoverAllCached(m.agentSessionsEnv, m.cwd)
+	items := make([]pickerItem, 0, len(found))
+	for _, session := range found {
+		ref := session.Agent + ":" + session.ID
+		if imported[ref] {
+			continue
+		}
+		// Sanitized AND redacted: stripping controls stops the row being repainted,
+		// but a title is often the user's first prompt and can carry a pasted key.
+		// agentsessions.DisplayField does both, in the order the redaction tests
+		// pin — controls first, so a secret split by an escape byte is reassembled
+		// before the shape match runs.
+		label := displayValue(agentsessions.DisplayField(session.Title), "untitled")
+		if when := sessionWhenTime(session.UpdatedAt, now); when != "" {
+			label = sessionPickerLabel(when, label)
+		}
+		source := session
+		agent := displayAgentName(session.Agent, "unknown")
+		items = append(items, pickerItem{
+			Label:         label,
+			Value:         ref,
+			Meta:          agent,
+			Tab:           agent,
+			ForeignSource: &source,
+		})
+	}
+	return items
+}
+
+// sessionAgentName is the agent a session came from, for the picker's tab strip.
+//
+// Imported sessions carry "imported:<agent>" in their tag (see
+// internal/agentsessions). Everything else is Zero's own work. Deriving this
+// from the tag rather than storing a second field keeps one source of truth —
+// two fields recording the same fact would drift (repo invariant #5).
+func sessionAgentName(tag string) string {
+	if agent := agentsessions.ImportedAgent(tag); agent != "" {
+		return displayAgentName(agent, "zero")
+	}
+	return "zero"
+}
+
+func displayAgentName(agent, fallback string) string {
+	return displayValue(agentsessions.DisplayField(agent), fallback)
+}
+
+// sessionPickerTabs builds the tab strip: "All" first, then one tab per agent
+// actually present, most-populated first so the busiest source is nearest.
+//
+// Only agents with sessions get a tab. A strip advertising "codex" on a machine
+// that has never run Codex is a dead end the user has to discover by pressing
+// Tab twice.
+func sessionPickerTabs(items []pickerItem) []string {
+	counts := map[string]int{}
+	order := []string{}
+	for _, item := range items {
+		if item.Tab == "" {
+			continue
+		}
+		if _, seen := counts[item.Tab]; !seen {
+			order = append(order, item.Tab)
+		}
+		counts[item.Tab]++
+	}
+	if len(order) < 2 {
+		// One source only — the strip would say "All | zero" and mean nothing.
+		return nil
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		if counts[order[a]] != counts[order[b]] {
+			return counts[order[a]] > counts[order[b]]
+		}
+		return order[a] < order[b]
+	})
+	return append([]string{pickerTabAll}, order...)
 }
 
 const sessionPickerTimeWidth = len("Jan 02 15:04")
@@ -457,7 +729,7 @@ func (m model) latestResumableInWorkspace() (*sessions.Metadata, error) {
 		return nil, err
 	}
 	for i := range metas {
-		if !sessionMatchesWorkspace(metas[i].Cwd, m.cwd) {
+		if !sessionMatchesWorkspace(sessions.OperationalCwd(metas[i]), m.cwd) {
 			continue
 		}
 		if metas[i].EventCount == 0 {
@@ -485,6 +757,12 @@ func sessionMatchesWorkspace(sessionCwd, workspaceCwd string) bool {
 	}
 	a := filepath.Clean(sessionCwd)
 	b := filepath.Clean(workspaceCwd)
+	if resolved, err := filepath.EvalSymlinks(a); err == nil {
+		a = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(b); err == nil {
+		b = resolved
+	}
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(a, b)
 	}

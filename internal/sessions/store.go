@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -92,36 +93,42 @@ type Goal struct {
 }
 
 type Metadata struct {
-	SessionID           string      `json:"sessionId"`
-	SessionKind         SessionKind `json:"sessionKind,omitempty"`
-	Title               string      `json:"title,omitempty"`
-	Cwd                 string      `json:"cwd,omitempty"`
-	ModelID             string      `json:"modelId,omitempty"`
-	Provider            string      `json:"provider,omitempty"`
-	Tag                 string      `json:"tag,omitempty"`
-	Depth               int         `json:"depth,omitempty"`
-	ParentSessionID     string      `json:"parentSessionId,omitempty"`
-	RootSessionID       string      `json:"rootSessionId,omitempty"`
-	AgentName           string      `json:"agentName,omitempty"`
-	TaskID              string      `json:"taskId,omitempty"`
-	ForkedFromEventID   string      `json:"forkedFromEventId,omitempty"`
-	ForkedFromSequence  int         `json:"forkedFromSequence,omitempty"`
-	SpawnedFromEventID  string      `json:"spawnedFromEventId,omitempty"`
-	SpawnedFromSequence int         `json:"spawnedFromSequence,omitempty"`
-	SpecID              string      `json:"specId,omitempty"`
-	SpecFilePath        string      `json:"specFilePath,omitempty"`
-	SpecStatus          SpecStatus  `json:"specStatus,omitempty"`
-	SpecDraftModelID    string      `json:"specDraftModelId,omitempty"`
-	SpecDraftReasoning  string      `json:"specDraftReasoning,omitempty"`
-	SpecUserComment     string      `json:"specUserComment,omitempty"`
-	SpecRejectReason    string      `json:"specRejectReason,omitempty"`
-	SpecSourceSessionID string      `json:"specSourceSessionId,omitempty"`
-	SpecImplSessionID   string      `json:"specImplSessionId,omitempty"`
-	Goal                *Goal       `json:"goal,omitempty"`
-	CreatedAt           string      `json:"createdAt"`
-	UpdatedAt           string      `json:"updatedAt"`
-	EventCount          int         `json:"eventCount"`
-	LastEventType       EventType   `json:"lastEventType,omitempty"`
+	SessionID   string      `json:"sessionId"`
+	SessionKind SessionKind `json:"sessionKind,omitempty"`
+	Title       string      `json:"title,omitempty"`
+	Cwd         string      `json:"cwd,omitempty"`
+	// WorkspaceKey is the operational workspace identity when Cwd is a
+	// display-safe, lossy representation. Never render this field directly.
+	WorkspaceKey string `json:"workspaceKey,omitempty"`
+	ModelID      string `json:"modelId,omitempty"`
+	// SourceModelID records a foreign transcript's model as provenance only.
+	// Runtime/provider selection must use ModelID, never this field.
+	SourceModelID       string     `json:"sourceModelId,omitempty"`
+	Provider            string     `json:"provider,omitempty"`
+	Tag                 string     `json:"tag,omitempty"`
+	Depth               int        `json:"depth,omitempty"`
+	ParentSessionID     string     `json:"parentSessionId,omitempty"`
+	RootSessionID       string     `json:"rootSessionId,omitempty"`
+	AgentName           string     `json:"agentName,omitempty"`
+	TaskID              string     `json:"taskId,omitempty"`
+	ForkedFromEventID   string     `json:"forkedFromEventId,omitempty"`
+	ForkedFromSequence  int        `json:"forkedFromSequence,omitempty"`
+	SpawnedFromEventID  string     `json:"spawnedFromEventId,omitempty"`
+	SpawnedFromSequence int        `json:"spawnedFromSequence,omitempty"`
+	SpecID              string     `json:"specId,omitempty"`
+	SpecFilePath        string     `json:"specFilePath,omitempty"`
+	SpecStatus          SpecStatus `json:"specStatus,omitempty"`
+	SpecDraftModelID    string     `json:"specDraftModelId,omitempty"`
+	SpecDraftReasoning  string     `json:"specDraftReasoning,omitempty"`
+	SpecUserComment     string     `json:"specUserComment,omitempty"`
+	SpecRejectReason    string     `json:"specRejectReason,omitempty"`
+	SpecSourceSessionID string     `json:"specSourceSessionId,omitempty"`
+	SpecImplSessionID   string     `json:"specImplSessionId,omitempty"`
+	Goal                *Goal      `json:"goal,omitempty"`
+	CreatedAt           string     `json:"createdAt"`
+	UpdatedAt           string     `json:"updatedAt"`
+	EventCount          int        `json:"eventCount"`
+	LastEventType       EventType  `json:"lastEventType,omitempty"`
 }
 
 type CreateInput struct {
@@ -129,7 +136,9 @@ type CreateInput struct {
 	SessionKind         SessionKind
 	Title               string
 	Cwd                 string
+	WorkspaceKey        string
 	ModelID             string
+	SourceModelID       string
 	Provider            string
 	Tag                 string
 	Depth               int
@@ -286,7 +295,9 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		SessionKind:         input.SessionKind,
 		Title:               strings.TrimSpace(input.Title),
 		Cwd:                 strings.TrimSpace(input.Cwd),
+		WorkspaceKey:        strings.TrimSpace(input.WorkspaceKey),
 		ModelID:             strings.TrimSpace(input.ModelID),
+		SourceModelID:       strings.TrimSpace(input.SourceModelID),
 		Provider:            strings.TrimSpace(input.Provider),
 		Tag:                 strings.TrimSpace(input.Tag),
 		Depth:               input.Depth,
@@ -335,6 +346,17 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	return session, nil
 }
 
+// CreateDiscardable creates a session and returns a cleanup function scoped to
+// that exact creation. It is intended for multi-step setup flows that must roll
+// back when a later step fails, without exposing a general session-deletion API.
+func (store *Store) CreateDiscardable(input CreateInput) (Metadata, func() error, error) {
+	created, err := store.Create(input)
+	if err != nil {
+		return Metadata{}, nil, err
+	}
+	return created, func() error { return store.discardCreated(created) }, nil
+}
+
 func (store *Store) Get(sessionID string) (*Metadata, error) {
 	if !ValidSessionID(sessionID) {
 		return nil, fmt.Errorf("invalid zero session id %q", sessionID)
@@ -347,6 +369,58 @@ func (store *Store) Get(sessionID string) (*Metadata, error) {
 		return nil, err
 	}
 	return &session, nil
+}
+
+// discardCreated removes a session created by the current operation when that
+// operation failed before it could commit any events to metadata. The complete Metadata
+// returned by Create acts as the ownership receipt: a caller cannot use this
+// helper to remove an unrelated session with only a guessed id. A session whose
+// metadata committed any event is never removed. The events file may contain an
+// uncommitted append when AppendEvents failed during sync or metadata update;
+// that partial batch belongs to the failed operation and is removed too.
+func (store *Store) discardCreated(created Metadata) error {
+	if !ValidSessionID(created.SessionID) {
+		return fmt.Errorf("invalid zero session id %q", created.SessionID)
+	}
+	unlock, err := store.lockSession(created.SessionID)
+	if err != nil {
+		return err
+	}
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+
+	current, err := store.readMetadata(created.SessionID)
+	if err != nil {
+		return fmt.Errorf("read zero session before cleanup: %w", err)
+	}
+	if !reflect.DeepEqual(current, created) {
+		return fmt.Errorf("zero session %s no longer matches the session created by this operation", created.SessionID)
+	}
+	if current.EventCount != 0 {
+		return fmt.Errorf("zero session %s has committed events", created.SessionID)
+	}
+
+	var cleanupErr error
+	for _, path := range []string{store.eventsPath(created.SessionID), store.metadataPath(created.SessionID)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	unlock()
+	locked = false
+	for _, path := range []string{store.lockPath(created.SessionID), store.sessionPath(created.SessionID)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if cleanupErr != nil {
+		return fmt.Errorf("discard created zero session %s: %w", created.SessionID, cleanupErr)
+	}
+	return nil
 }
 
 func (store *Store) List() ([]Metadata, error) {
@@ -456,12 +530,23 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if kind != SessionKindFork && kind != SessionKindSide {
 		return Metadata{}, fmt.Errorf("invalid zero fork session kind %q", kind)
 	}
+	parentModelID := parent.ModelID
+	sourceModelID := parent.SourceModelID
+	if IsImportedSession(*parent) && sourceModelID == "" {
+		// Older imports stored the foreign model in the operational field. A new
+		// fork must migrate that value to provenance instead of inheriting it as a
+		// local provider choice.
+		sourceModelID = parentModelID
+		parentModelID = ""
+	}
 	fork, err := store.Create(CreateInput{
 		SessionID:          input.SessionID,
 		SessionKind:        kind,
 		Title:              title,
 		Cwd:                firstNonEmpty(input.Cwd, parent.Cwd),
-		ModelID:            firstNonEmpty(input.ModelID, parent.ModelID),
+		WorkspaceKey:       derivedWorkspaceKey(input.Cwd, parent.WorkspaceKey),
+		ModelID:            firstNonEmpty(input.ModelID, parentModelID),
+		SourceModelID:      sourceModelID,
 		Provider:           firstNonEmpty(input.Provider, parent.Provider),
 		Tag:                input.Tag,
 		ParentSessionID:    parent.SessionID,
@@ -473,6 +558,8 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		return Metadata{}, err
 	}
 	copyInputs := []AppendEventInput{}
+	copiedCheckpoints := 0
+	skippedCheckpoints := 0
 	for _, event := range events {
 		// Do NOT copy usage accounting into the fork. It already counted against the
 		// parent, and a usage report that aggregates the parent and the fork would
@@ -480,6 +567,13 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		// (messages, tool calls, checkpoints) to continue; usage is not replayed.
 		if event.Type == EventUsage {
 			continue
+		}
+		if event.Type == EventSessionCheckpoint {
+			if !checkpointCanFollowFork(event.Payload, *parent, input.Cwd) {
+				skippedCheckpoints++
+				continue
+			}
+			copiedCheckpoints++
 		}
 		copyInputs = append(copyInputs, AppendEventInput{Type: event.Type, Payload: event.Payload})
 	}
@@ -491,17 +585,20 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	// copied EventSessionCheckpoint events resolve to real blobs and a rewind on
 	// the fork can restore file content (otherwise rewind reads missing blobs
 	// and silently skips the files).
-	if err := store.copyBlobs(parent.SessionID, fork.SessionID); err != nil {
-		return Metadata{}, err
+	if copiedCheckpoints > 0 {
+		if err := store.copyBlobs(parent.SessionID, fork.SessionID); err != nil {
+			return Metadata{}, err
+		}
 	}
 	if _, err := store.AppendEvent(fork.SessionID, AppendEventInput{
 		Type: EventSessionFork,
 		Payload: map[string]any{
-			"parentSessionId":    parent.SessionID,
-			"parentEventCount":   parent.EventCount,
-			"copiedEventCount":   copied,
-			"forkedFromEventId":  last.ID,
-			"forkedFromSequence": last.Sequence,
+			"parentSessionId":        parent.SessionID,
+			"parentEventCount":       parent.EventCount,
+			"copiedEventCount":       copied,
+			"skippedCheckpointCount": skippedCheckpoints,
+			"forkedFromEventId":      last.ID,
+			"forkedFromSequence":     last.Sequence,
 		},
 	}); err != nil {
 		return Metadata{}, err
@@ -511,6 +608,53 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		return Metadata{}, err
 	}
 	return loaded, nil
+}
+
+// checkpointCanFollowFork keeps location-bound restore side effects out of a
+// fork that explicitly selects another workspace. A fork that inherits its
+// parent's workspace preserves legacy behavior. With an explicit workspace,
+// only checkpoints carrying that same verified binding are portable; corrupt
+// or unbound payloads fail closed unless the explicit workspace is also the
+// parent's locally authored workspace.
+func checkpointCanFollowFork(payload json.RawMessage, parent Metadata, explicitCwd string) bool {
+	if strings.TrimSpace(explicitCwd) == "" {
+		return true
+	}
+	var checkpoint CheckpointPayload
+	if err := json.Unmarshal(payload, &checkpoint); err != nil {
+		return false
+	}
+	boundRoot := strings.TrimSpace(checkpoint.WorkspaceRoot)
+	if boundRoot == "" {
+		boundRoot = OperationalCwd(parent)
+	}
+	return sessionWorkspacePathEqual(boundRoot, explicitCwd)
+}
+
+func sessionWorkspacePathEqual(left, right string) bool {
+	normalize := func(path string) string {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			return ""
+		}
+		cleaned := filepath.Clean(trimmed)
+		if absolute, err := filepath.Abs(cleaned); err == nil {
+			cleaned = absolute
+		}
+		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+			cleaned = resolved
+		}
+		return filepath.Clean(cleaned)
+	}
+	left = normalize(left)
+	right = normalize(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func (store *Store) RecordSpec(sessionID string, input RecordSpecInput) (Metadata, Event, error) {
@@ -1140,6 +1284,20 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// OperationalCwd returns the canonical workspace used for matching and file
+// operations. Cwd remains the display-safe value exposed by existing session
+// surfaces; imported foreign sessions may therefore carry a separate key.
+func OperationalCwd(session Metadata) string {
+	return firstNonEmpty(session.WorkspaceKey, session.Cwd)
+}
+
+func derivedWorkspaceKey(explicitCwd, inheritedKey string) string {
+	if strings.TrimSpace(explicitCwd) != "" {
+		return ""
+	}
+	return strings.TrimSpace(inheritedKey)
 }
 
 func normalizeSpecStatus(status SpecStatus) SpecStatus {

@@ -160,6 +160,12 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	}
 	cwdInput := p.Cwd
 	if strings.TrimSpace(cwdInput) == "" {
+		// WorkspaceKey is populated from foreign transcript metadata. It is useful
+		// for matching/provenance, but it is not execution authority: only the ACP
+		// client may bind an imported session to a workspace tool boundary.
+		if strings.TrimSpace(meta.WorkspaceKey) != "" {
+			return nil, RPCError(codeInvalidParams, "cwd is required when loading an imported session")
+		}
 		cwdInput = meta.Cwd
 	}
 	root, err := a.deps.ResolveWorkspaceRoot(cwdInput)
@@ -174,7 +180,9 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
 	}
-	if persistedModel := strings.TrimSpace(meta.ModelID); persistedModel != "" && (!restrictModels || modelChoiceExists(models, persistedModel)) {
+	persistedModel := strings.TrimSpace(meta.ModelID)
+	imported := sessions.IsImportedSession(*meta)
+	if persistedModel != "" && !imported && (!restrictModels || modelChoiceExists(models, persistedModel)) {
 		model = persistedModel
 		if !modelChoiceExists(models, persistedModel) {
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
