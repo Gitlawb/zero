@@ -31,8 +31,12 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
+	finalized := false
 	// Phase 1: Arm generic handle cleanup immediately upon launch.
 	t.Cleanup(func() {
+		if finalized {
+			return
+		}
 		_ = h.Kill()
 		_, _ = h.Wait()
 	})
@@ -40,6 +44,9 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 	// Phase 2: Obtain descendant PID and arm direct descendant fallback before leader exits.
 	childPID := readWorkerPIDLine(t, h)
 	t.Cleanup(func() {
+		if finalized {
+			return
+		}
 		if childPID > 0 {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 		}
@@ -52,6 +59,9 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 	if w.cmd != nil && w.cmd.Process != nil {
 		leaderPID := w.cmd.Process.Pid
 		t.Cleanup(func() {
+			if finalized {
+				return
+			}
 			_ = syscall.Kill(-leaderPID, syscall.SIGKILL)
 			_ = syscall.Kill(leaderPID, syscall.SIGKILL)
 		})
@@ -78,6 +88,33 @@ func TestExecWorkerKillTerminatesProcessGroup(t *testing.T) {
 		t.Fatalf("Wait after Kill: %v", err)
 	}
 	assertProcessStopped(t, childPID)
+	finalized = true
+}
+
+func TestExecWorkerKillAfterWaitIsNoop(t *testing.T) {
+	launcher, err := NewExecLauncher(ExecLauncherConfig{
+		Executable: "/bin/sh",
+		BaseArgs:   []string{"-c", "echo hello; exit 0"},
+		Env:        []string{},
+	})
+	if err != nil {
+		t.Fatalf("NewExecLauncher: %v", err)
+	}
+	h, err := launcher(context.Background(), WorkerSpec{})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	w, ok := h.(*execWorker)
+	if !ok {
+		t.Fatalf("launcher returned %T, want *execWorker", h)
+	}
+	if _, err := w.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	// Calling Kill after Wait must be an idempotent no-op and never signal
+	if err := w.Kill(); err != nil {
+		t.Fatalf("Kill after Wait returned error: %v", err)
+	}
 }
 
 func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
@@ -100,8 +137,12 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
+	finalized := false
 	// Phase 1: Arm generic handle cleanup immediately upon launch.
 	t.Cleanup(func() {
+		if finalized {
+			return
+		}
 		_ = h.Kill()
 		_, _ = h.Wait()
 	})
@@ -109,6 +150,9 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 	// Phase 2: Obtain descendant PID and arm direct descendant fallback.
 	childPID := readWorkerPIDLine(t, h)
 	t.Cleanup(func() {
+		if finalized {
+			return
+		}
 		if childPID > 0 {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 		}
@@ -121,6 +165,9 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 	if w.cmd != nil && w.cmd.Process != nil {
 		leaderPID := w.cmd.Process.Pid
 		t.Cleanup(func() {
+			if finalized {
+				return
+			}
 			_ = syscall.Kill(-leaderPID, syscall.SIGKILL)
 			_ = syscall.Kill(leaderPID, syscall.SIGKILL)
 		})
@@ -145,6 +192,7 @@ func TestExecLauncherCancelTerminatesProcessGroup(t *testing.T) {
 		t.Fatal("Wait after cancel did not reap the exited worker leader")
 	}
 	assertProcessStopped(t, childPID)
+	finalized = true
 }
 
 func readWorkerPIDLine(t *testing.T, h WorkerHandle) int {

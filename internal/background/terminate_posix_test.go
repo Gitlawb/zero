@@ -55,8 +55,12 @@ func TestTerminateOwnedProcessKillsChildAfterLeaderExits(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	finalized := false
 	var childPID int
 	t.Cleanup(func() {
+		if finalized {
+			return
+		}
 		if childPID > 0 {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 		}
@@ -94,6 +98,7 @@ func TestTerminateOwnedProcessKillsChildAfterLeaderExits(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	finalized = true
 }
 
 func TestTerminateOwnedProcessNil(t *testing.T) {

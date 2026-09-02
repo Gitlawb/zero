@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/Gitlawb/zero/internal/background"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -47,6 +48,8 @@ func scrubWorkerEnv(env []string) []string {
 // execWorker is a WorkerHandle backed by a `zero exec` child process speaking
 // stream-json on stdout.
 type execWorker struct {
+	mu     sync.Mutex
+	reaped bool
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
 	lines  Lines
@@ -57,7 +60,19 @@ func (w *execWorker) Stdout() Lines { return w.lines }
 func (w *execWorker) Pid() int      { return w.pid }
 
 func (w *execWorker) Wait() (int, error) {
+	w.mu.Lock()
+	if w.reaped {
+		w.mu.Unlock()
+		return 0, nil
+	}
+	w.mu.Unlock()
+
 	err := w.cmd.Wait()
+
+	w.mu.Lock()
+	w.reaped = true
+	w.mu.Unlock()
+
 	if err == nil {
 		return 0, nil
 	}
@@ -69,7 +84,9 @@ func (w *execWorker) Wait() (int, error) {
 }
 
 func (w *execWorker) Kill() error {
-	if w.cmd.Process == nil {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.reaped || w.cmd.Process == nil {
 		return nil
 	}
 	// TerminateOwnedProcess uses the launch-time group identity from
