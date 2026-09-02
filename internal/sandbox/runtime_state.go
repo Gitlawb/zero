@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/peermsg"
 )
 
 var sandboxUserCacheDir = os.UserCacheDir
@@ -81,10 +85,23 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 	if err != nil {
 		return SandboxRuntime{}, nil, err
 	}
+	// THE ANCHOR IS PROVEN BEFORE THE TREE IS BUILT, on both paths that can
+	// hand back a fallback root: sandboxRuntimeRootFor returns one itself when
+	// the cache lands inside the workspace, and the branch below asks for one
+	// when the cache root cannot be leased. A deterministic name under the
+	// shared temp is only safe beneath a directory this user owns; if the anchor
+	// is a link, or exists and belongs to someone else, this refuses rather than
+	// leasing, creating and chmod-ing through it.
+	if err := ensureFallbackRuntimeAnchor(root); err != nil {
+		return SandboxRuntime{}, nil, err
+	}
 	lease, err := prepareSandboxRuntimeLease(root)
 	if err != nil {
 		root, err = fallbackSandboxRuntimeRoot(workspaceRoot)
 		if err != nil {
+			return SandboxRuntime{}, nil, err
+		}
+		if err := ensureFallbackRuntimeAnchor(root); err != nil {
 			return SandboxRuntime{}, nil, err
 		}
 		lease, err = prepareSandboxRuntimeLease(root)
@@ -201,6 +218,63 @@ func combineSandboxCleanups(cleanups ...func()) func() {
 	}
 }
 
+// fallbackRuntimeAnchor is the per-user directory the deterministic fallback
+// runtime tree lives beneath.
+//
+// DETERMINISM IS NOT OWNERSHIP. The fallback moved from a fresh, private
+// os.MkdirTemp parent to a predictable name so that elevated setup and the
+// later command process agree on the runtime root. That agreement is required
+// and must stay. But a predictable path directly under the shared system temp
+// is not a private allocation: on an ordinary shared /tmp another local user
+// can create /tmp/zero with mode 0700 first, and every affected user then fails
+// before the sandbox command starts; a pre-existing redirected component makes
+// host-side preparation operate somewhere other than the derived tree.
+//
+// So the tree is rooted beneath an anchor that names THIS user, and the anchor
+// is created and validated by peermsg.EnsurePrivateDir before anything is
+// built under it: handle-relative descent, no-follow, refused if any component
+// is a link or the leaf is not owned by the current user, mode 0700. On Unix
+// the uid is in the name because /tmp is shared between users; on Windows
+// os.TempDir is already per-user, and the private descriptor plus the owner
+// check do the rest.
+func fallbackRuntimeAnchor() string {
+	tag := "user"
+	if runtime.GOOS != "windows" {
+		tag = strconv.Itoa(os.Getuid())
+	}
+	return filepath.Join(os.TempDir(), "zero-runtime-"+tag)
+}
+
+// isFallbackRuntimeRoot reports whether root was derived by
+// fallbackSandboxRuntimeRoot, so the caller knows the anchor must be validated
+// before the tree beneath it is prepared. Both candidates a command derives can
+// be fallback roots: sandboxRuntimeRootFor returns one itself when the cache
+// lands inside the workspace, and prepareSandboxRuntime asks for one when the
+// cache root cannot be leased.
+func isFallbackRuntimeRoot(root string) bool {
+	// pathWithinRoot(parent, child): is root beneath the anchor. The first
+	// draft had these reversed, which asked whether the anchor was beneath the
+	// root, answered false every time, and skipped the validation entirely
+	// while every test that depended on it reported success through a
+	// junction. Argument order is the whole function.
+	return pathWithinRoot(fallbackRuntimeAnchor(), root)
+}
+
+// ensureFallbackRuntimeAnchor validates the anchor beneath which a fallback
+// runtime tree is about to be built, and fails closed. Called only when the
+// root is a fallback root; the cache-derived root lives under the user cache,
+// which is already the user's own directory.
+func ensureFallbackRuntimeAnchor(root string) error {
+	if !isFallbackRuntimeRoot(root) {
+		return nil
+	}
+	anchor := fallbackRuntimeAnchor()
+	if err := peermsg.EnsurePrivateDir(anchor); err != nil {
+		return fmt.Errorf("sandbox runtime fallback anchor %s is not a private directory owned by this user: %w", anchor, err)
+	}
+	return nil
+}
+
 // fallbackSandboxRuntimeRoot returns the runtime root for a workspace whose
 // cache-derived root would land inside itself.
 //
@@ -222,7 +296,7 @@ func combineSandboxCleanups(cleanups ...func()) func() {
 // a tree without materializing it now holds for the fallback as well.
 func fallbackSandboxRuntimeRoot(workspaceRoot string) (string, error) {
 	digest := sha256.Sum256([]byte(workspaceRoot))
-	root := filepath.Join(os.TempDir(), "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
+	root := filepath.Join(fallbackRuntimeAnchor(), "v1", hex.EncodeToString(digest[:8]))
 	if pathWithinRoot(workspaceRoot, root) {
 		// Both candidates land inside the workspace, so there is nowhere left to
 		// put a runtime tree the workspace's own policy does not govern. Refused
