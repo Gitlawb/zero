@@ -5575,19 +5575,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ContextWindowFor = func(modelID string) int {
 			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
 		}
-<<<<<<< HEAD
-		// And make that switch reachable, when the operator asked for it. The
-		// consequences of an escalation were already handled here (the window
-		// above, and the summarizer resolved against the active profile) while
-		// nothing on this surface could cause one: escalate_model was registered
-		// only by exec.
-		//
-		// BUILT FROM THE ACTIVE PROFILE, NOT THE STARTUP ONE. A TUI session can
-		// change models with /model, so escalating from the profile captured at
-		// launch would switch from whatever the session began with rather than
-		// from what is in force now, and would carry that stale profile's base URL
-		// and credential with it. m.providerProfile tracks the switches, which is
-		// why this is built per turn rather than once in the caller.
 		if m.allowEscalation {
 			options.ModelSwitcher, options.ModelSessionSwitcher = providers.EscalationSwitchers(
 				m.providerProfile, m.provider, m.newProvider,
@@ -5597,8 +5584,44 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				func(modelID string) { usageModelID = modelID },
 			)
 		}
+		var activeDescriptorID string
+		if descriptor, ok := m.activeProviderDescriptor(); ok {
+			activeDescriptorID = descriptor.ID
+		}
+		discoveredSnapshot := make(map[string][]providermodeldiscovery.Model, len(m.modelPickerLiveByProvider))
+		for pID, list := range m.modelPickerLiveByProvider {
+			copiedList := make([]providermodeldiscovery.Model, len(list))
+			for i, dm := range list {
+				copied := dm
+				if len(dm.InputModalities) > 0 {
+					copied.InputModalities = append([]string{}, dm.InputModalities...)
+				}
+				copiedList[i] = copied
+			}
+			discoveredSnapshot[pID] = copiedList
+		}
+		catalog := m.modelCatalog
 		options.SupportsVision = func(modelID string) bool {
-			return m.modelSupportsVisionFor(modelID)
+			trimmed := strings.TrimSpace(modelID)
+			if trimmed == "" {
+				return false
+			}
+			if entry, known := catalog.Resolve(trimmed); known {
+				return entry.Supports(modelregistry.ModelCapabilityVision)
+			}
+			if activeDescriptorID != "" {
+				if models, ok := discoveredSnapshot[activeDescriptorID]; ok {
+					if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+						return supported
+					}
+				}
+			}
+			for _, models := range discoveredSnapshot {
+				if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+					return supported
+				}
+			}
+			return modelregistry.SupportsVision(catalog, trimmed)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it

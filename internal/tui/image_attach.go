@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/terminalpet"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 	_ "golang.org/x/image/webp"
@@ -111,31 +112,38 @@ func (m model) modelSupportsVisionFor(modelID string) bool {
 	if entry, known := m.modelCatalog.Resolve(trimmed); known {
 		return entry.Supports(modelregistry.ModelCapabilityVision)
 	}
-	// Check the discovered model list (from models.dev) for InputModalities
-	// containing "image". This covers custom/ollama/cloud models not in the
-	// curated catalog — models.dev knows their capabilities.
-	for _, models := range m.modelPickerLiveByProvider {
-		for _, dm := range models {
-			if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
-				// A provider's authenticated listing may only establish which models
-				// are available, without repeating modalities. Treat an empty list as
-				// unknown rather than as an explicit image-input denial, so the
-				// curated registry/name capability fallback remains available while
-				// models.dev metadata is temporarily unavailable.
-				if len(dm.InputModalities) == 0 {
-					continue
-				}
-				for _, modality := range dm.InputModalities {
-					if strings.EqualFold(strings.TrimSpace(modality), "image") {
-						return true
-					}
-				}
-				return false // found the model in discovered list, no image modality
+	// Check the discovered model list, preferring the ACTIVE provider's models.
+	if descriptor, ok := m.activeProviderDescriptor(); ok && descriptor.ID != "" {
+		if models, ok := m.modelPickerLiveByProvider[descriptor.ID]; ok {
+			if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+				return supported
 			}
+		}
+	}
+	for _, models := range m.modelPickerLiveByProvider {
+		if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+			return supported
 		}
 	}
 	// Fall back to curated catalog or the name heuristic.
 	return modelregistry.SupportsVision(m.modelCatalog, trimmed)
+}
+
+func discoveredVisionSupport(models []providermodeldiscovery.Model, modelID string) (bool, bool) {
+	for _, dm := range models {
+		if strings.EqualFold(strings.TrimSpace(dm.ID), modelID) {
+			if len(dm.InputModalities) == 0 {
+				return false, false
+			}
+			for _, modality := range dm.InputModalities {
+				if strings.EqualFold(strings.TrimSpace(modality), "image") {
+					return true, true
+				}
+			}
+			return false, true // found model with explicit modalities, no image modality
+		}
+	}
+	return false, false
 }
 
 func (m model) modelSupportsVisionTUI() bool {

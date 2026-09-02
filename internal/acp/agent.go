@@ -15,6 +15,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -508,6 +509,13 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	}
 	queue(messageEvent("user", userText))
 
+	supportsVision := func(modelID string) bool {
+		return a.modelSupportsVision(ctx, resolved.Provider, modelID)
+	}
+	if len(images) > 0 && !supportsVision(resolved.Provider.Model) {
+		images = nil
+	}
+
 	opts := agent.Options{
 		Cwd:            sess.cwd,
 		SessionID:      sess.id,
@@ -519,6 +527,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		DeferThreshold: workspace.DeferThreshold,
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
+		SupportsVision: supportsVision,
 		OnText:         note.text,
 		OnReasoning:    note.thought,
 		OnToolCall: func(call agent.ToolCall) {
@@ -1304,4 +1313,33 @@ func sameWorkspace(left, right string) bool {
 		return false
 	}
 	return os.SameFile(leftInfo, rightInfo)
+}
+
+func (a *Agent) modelSupportsVision(ctx context.Context, profile config.ProviderProfile, modelID string) bool {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return false
+	}
+	reg, _ := modelregistry.DefaultRegistry()
+	if entry, known := reg.Resolve(trimmed); known {
+		return entry.Supports(modelregistry.ModelCapabilityVision)
+	}
+	if a.deps.DiscoverModels != nil {
+		if discovered, err := a.deps.DiscoverModels(ctx, profile); err == nil {
+			for _, dm := range discovered {
+				if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
+					if len(dm.InputModalities) > 0 {
+						for _, mod := range dm.InputModalities {
+							if strings.EqualFold(strings.TrimSpace(mod), "image") {
+								return true
+							}
+						}
+						return false
+					}
+					break
+				}
+			}
+		}
+	}
+	return modelregistry.SupportsVision(reg, trimmed)
 }
