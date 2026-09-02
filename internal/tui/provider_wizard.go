@@ -1471,27 +1471,11 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 }
 
 func deleteProviderKey(configPath, provider string) (bool, error) {
-	candidates := []string{provider}
-	if strings.TrimSpace(configPath) != "" {
-		resolved, _, err := config.ProviderCredentialCandidates(configPath, provider)
-		if err != nil {
-			return false, err
-		}
-		candidates = resolved
-	}
 	store, err := config.ProviderKeyStoreForConfigPath(configPath)
 	if err != nil {
 		return false, err
 	}
-	removed := false
-	for _, candidate := range candidates {
-		candidateRemoved, err := store.Delete(candidate)
-		if err != nil {
-			return false, err
-		}
-		removed = removed || candidateRemoved
-	}
-	return removed, nil
+	return store.Delete(provider)
 }
 
 func providerWizardRuntimeProfile(profile config.ProviderProfile) config.ProviderProfile {

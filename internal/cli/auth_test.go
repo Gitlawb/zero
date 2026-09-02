@@ -986,39 +986,70 @@ func TestRunAuthLogoutDeletesCatalogIDToken(t *testing.T) {
 	}
 }
 
-// TestRunAuthLogoutDeletesCatalogIDAPIKey covers jatmn's second #725 follow-up
-// finding: logout's OAuth-token deletion covers the profile name, canonical
-// persisted name, and catalog id, but API-key deletion only covered the first
-// two — a key stored under the catalog id (e.g. captured via `zero auth
-// openrouter`-style catalog flows) survived `zero auth logout my-xai`.
-func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
+// API keys belong to persisted row names. Catalog ids share the same flat store
+// namespace with dictation, so OAuth's catalog-alias expansion must not be used
+// for API-key deletion.
+func TestRunAuthLogoutDeletesOnlyPersistedRowAPIKey(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
 	withAuthStore(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-xai","catalogId":"xai","apiKeyStored":true}]}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-groq","catalogId":"groq","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := keyStore.Set("xai", "catalog-id-key"); err != nil {
+	if err := keyStore.Set("my-groq", "chat-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("groq", "dictation-key"); err != nil {
 		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDeps([]string{"auth", "logout", "my-xai"}, &stdout, &stderr, appDeps{
+	code := runWithDeps([]string{"auth", "logout", "my-groq"}, &stdout, &stderr, appDeps{
 		userConfigPath: func() (string, error) { return configPath, nil },
 	})
 	if code != exitSuccess {
 		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
 	}
-	if _, ok, err := keyStore.Get("xai"); err != nil || ok {
-		t.Fatalf("catalog-id API key survived logout: ok=%v err=%v", ok, err)
+	if _, ok, err := keyStore.Get("my-groq"); err != nil || ok {
+		t.Fatalf("persisted row API key survived logout: ok=%v err=%v", ok, err)
+	}
+	if key, ok, err := keyStore.Get("groq"); err != nil || !ok || key != "dictation-key" {
+		t.Fatalf("dictation key = %q, %v, %v; want it preserved", key, ok, err)
 	}
 	if !strings.Contains(stdout.String(), "Logged out") {
 		t.Fatalf("stdout = %q, want a logout confirmation", stdout.String())
+	}
+}
+
+func TestRunAuthLogoutWithoutPersistedRowPreservesDictationKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"stt":{"provider":"groq"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("groq", "dictation-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "groq"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if key, ok, err := keyStore.Get("groq"); err != nil || !ok || key != "dictation-key" {
+		t.Fatalf("dictation key = %q, %v, %v; want it preserved", key, ok, err)
 	}
 }
 
@@ -1075,14 +1106,9 @@ func TestRunAuthLogoutKeepsDistinctUnicodeCredentials(t *testing.T) {
 	}
 }
 
-// TestRunAuthLogoutResolvesCandidatesDespiteUnrelatedAmbiguousConfig covers
-// jatmn's third #725 follow-up finding: identity resolution and OAuth/API-key
-// candidate expansion were gated on PreflightUserConfig succeeding, even
-// though PersistedProviderIdentity/ProviderRow only read+parse raw JSON and
-// never validate case-duplicate names. An unrelated ambiguous pair elsewhere
-// in the file (demo/DEMO) must not suppress deleting every credential for the
-// unambiguous profile actually being logged out — only the final marker-write
-// should fail on that unrelated validation error.
+// TestRunAuthLogoutRejectsUnrelatedAmbiguousConfigBeforeCredentialDeletion
+// verifies that fail-closed config validation runs before any credential is
+// changed, even when the addressed profile itself is unambiguous.
 func TestRunAuthLogoutRejectsUnrelatedAmbiguousConfigBeforeCredentialDeletion(t *testing.T) {
 	setCLIUserConfigRoot(t)
 	storePath := withAuthStore(t)

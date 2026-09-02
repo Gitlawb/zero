@@ -495,8 +495,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// not just the spelling the user typed. A profile saved as
 	// {name:"my-xai", catalogId:"xai"} logged in via `zero auth login xai`
 	// stores its token under "xai"; `zero auth logout my-xai` must delete that
-	// too, or the login silently survives. The same candidate set is used below
-	// for the API key store, which has the identical asymmetry.
+	// too, or the login silently survives.
 	//
 	// The catalog id joins that set only when the resolved profile is the ONLY
 	// row claiming it. Catalog ids are shared by design — stored-key "work-xai",
@@ -513,26 +512,28 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		}
 		removed = removed || candidateRemoved
 	}
-	// Also drop any stored API key and its marker so `auth logout` clears the whole
-	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
-	// failures rather than reporting success while a credential remains.
+	// Also drop the addressed row's stored API key and marker so `auth logout`
+	// clears the whole credential (OAuth token AND key), not just the OAuth side.
+	// API-key lookup is row-name-only; unlike OAuth, it never reads a catalog-id
+	// alias. Expanding this deletion to the OAuth candidates can erase an unrelated
+	// dictation key stored under a catalog id such as "groq".
+	//
 	// Clear the marker before deleting the shared credential. The reverse order
 	// can leave apiKeyStored:true with no secret behind it when config publication
 	// fails. Resolve catalog aliases first, but mutate the exact persisted row.
-	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, configProvider); clearErr != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
-	}
-	keyStore, keyErr := config.ProviderKeyStoreForConfigPath(configPath)
-	if keyErr != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
-	}
 	keyRemoved := false
-	for _, candidate := range credentialCandidates {
-		candidateRemoved, candidateErr := keyStore.Delete(candidate)
-		if candidateErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(candidateErr, redaction.Options{}), exitCrash)
+	if configProvider != "" {
+		if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, configProvider); clearErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 		}
-		keyRemoved = keyRemoved || candidateRemoved
+		keyStore, keyErr := config.ProviderKeyStoreForConfigPath(configPath)
+		if keyErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
+		}
+		keyRemoved, keyErr = keyStore.Delete(configProvider)
+		if keyErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
+		}
 	}
 	removed = removed || keyRemoved
 	if parsed.json {

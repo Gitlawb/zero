@@ -615,11 +615,11 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 // named owner and by nothing else in the persisted config — neither as another
 // row's name nor as another row's catalog id.
 //
-// Credential cleanup uses this before treating the catalog id as one of the
-// target profile's own credential keys. With stored-key "work-xai",
-// stored-key "xai", and keyless "personal-xai" all carrying catalogId "xai",
-// the "xai" token and key belong to whoever logged in under that spelling —
-// deleting them while logging out of "work-xai" takes down a sibling's login.
+// OAuth credential cleanup uses this before treating the catalog id as one of
+// the target profile's own token keys. With stored-key "work-xai", stored-key
+// "xai", and keyless "personal-xai" all carrying catalogId "xai", the "xai"
+// token belongs to whoever logged in under that spelling — deleting it while
+// logging out of "work-xai" takes down a sibling's login.
 func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 	catalogID = strings.TrimSpace(catalogID)
 	owner = strings.TrimSpace(owner)
@@ -642,15 +642,16 @@ func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 	return true, nil
 }
 
-// ProviderCredentialCandidates returns every credential-store key that can
-// belong exclusively to the addressed persisted profile. The requested spelling
-// and canonical row name are always included; a catalog id is included only when
-// no sibling row can own credentials under it. Auth status, refresh, and logout
-// share this resolver so each command addresses the same stored login.
+// ProviderCredentialCandidates returns every OAuth-store key that can belong
+// exclusively to the addressed persisted profile. The requested spelling and
+// canonical row name are included; a catalog id is included only when no sibling
+// row can own a token under it. Auth status, refresh, and logout share this
+// resolver so each command addresses the same stored login.
 //
-// The canonical name is returned separately for marker mutations. On a config
+// The canonical name is returned separately for row-scoped API-key marker and
+// key deletion; it is empty when no persisted row owns the address. On a config
 // read error, callers still receive the requested spelling so logout can delete
-// the credential it was explicitly asked to clear before reporting the error.
+// the OAuth credential it was explicitly asked to clear before reporting the error.
 // An ambiguous provider identity is different: it returns no candidates at all,
 // so a destructive caller cannot act on a spelling several profiles could own.
 func ProviderCredentialCandidates(path, addressedName string) (candidates []string, canonicalName string, err error) {
@@ -670,7 +671,10 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 		return candidates, canonicalName, err
 	}
 	if match == PersistedIdentityNone {
-		return candidates, canonicalName, nil
+		// Keep the requested spelling as an OAuth candidate, but return no
+		// canonical row name: without a persisted row there is no API-key entry
+		// this address is proven to own.
+		return candidates, "", nil
 	}
 	canonicalName = strings.TrimSpace(row.Name)
 	add(canonicalName)

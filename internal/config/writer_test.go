@@ -1915,6 +1915,15 @@ func TestProviderCredentialCandidates(t *testing.T) {
 		}
 	})
 
+	t.Run("does not invent an API-key owner for an unsaved address", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{}, 0o600)
+		candidates, canonical, err := ProviderCredentialCandidates(path, "groq")
+		if err != nil || !slices.Equal(candidates, []string{"groq"}) || canonical != "" {
+			t.Fatalf("candidates = %q canonical = %q err = %v, want OAuth candidate and no persisted row owner", candidates, canonical, err)
+		}
+	})
+
 	t.Run("retains the requested candidate on a config read failure", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
 		if err := os.WriteFile(path, []byte(`{"providers":`), 0o600); err != nil {

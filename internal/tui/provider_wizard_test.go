@@ -1219,7 +1219,7 @@ func TestWizardProviderStoredKey(t *testing.T) {
 
 func TestProviderWizardManageKeyRemove(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
-	t.Run("exclusive catalog alias is removed and memory is refreshed", func(t *testing.T) {
+	t.Run("only the persisted row key is removed and memory is refreshed", func(t *testing.T) {
 		userRoot := t.TempDir()
 		t.Setenv("HOME", userRoot)
 		t.Setenv("APPDATA", userRoot)
@@ -1237,7 +1237,10 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.Set("acme-cloud", "sk-secret"); err != nil {
+		if err := store.Set("acme", "sk-secret"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Set("acme-cloud", "unrelated-secret"); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1247,8 +1250,11 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		if next.providerWizard != nil {
 			t.Fatal("remove should close the wizard")
 		}
-		if _, ok, _ := store.Get("acme-cloud"); ok {
-			t.Fatal("remove should delete the catalog-alias key from the credential store")
+		if _, ok, _ := store.Get("acme"); ok {
+			t.Fatal("remove should delete the persisted row key from the credential store")
+		}
+		if key, ok, err := store.Get("acme-cloud"); err != nil || !ok || key != "unrelated-secret" {
+			t.Fatalf("catalog-id key = %q, %v, %v; want it preserved", key, ok, err)
 		}
 		if cfg := readProviderWizardConfigFixture(t, configPath); cfg.Providers[0].APIKeyStored {
 			t.Fatal("case-variant removal left apiKeyStored set")

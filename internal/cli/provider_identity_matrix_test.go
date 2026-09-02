@@ -10,29 +10,28 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 )
 
-// providerIdentityFixture seeds a config file plus the user-scoped credential
+// providerIdentityFixture seeds a config file plus its co-located credential
 // store and hands back the config path. Every row of the matrix below starts
 // from one of these so CLI mutations and runtime credential lookup see the same
-// store even when the injected config path is non-default.
+// store when the injected config path is non-default.
 type providerIdentityFixture struct {
 	// configJSON is written verbatim: these scenarios need spellings and
 	// duplicate rows that FileConfig round-tripping would not preserve.
 	configJSON string
-	// storedKeys are seeded into the user-scoped credential store.
+	// storedKeys are seeded into the config-adjacent credential store.
 	storedKeys map[string]string
 }
 
 func seedProviderIdentityFixture(t *testing.T, fixture providerIdentityFixture) string {
 	t.Helper()
 
-	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, []byte(fixture.configJSON), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 	if len(fixture.storedKeys) > 0 {
-		store, err := config.ProviderKeyStore()
+		store, err := config.ProviderKeyStoreAt(dir)
 		if err != nil {
 			t.Fatalf("open credential store: %v", err)
 		}
@@ -45,10 +44,10 @@ func seedProviderIdentityFixture(t *testing.T, fixture providerIdentityFixture) 
 	return configPath
 }
 
-func storedProviderKey(t *testing.T, provider string) (string, bool) {
+func storedProviderKey(t *testing.T, configPath string, provider string) (string, bool) {
 	t.Helper()
 
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatalf("open credential store: %v", err)
 	}
@@ -81,7 +80,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		if cfg := readFileConfig(t, configPath); len(cfg.Providers) != 0 {
 			t.Fatalf("providers = %#v, want the row removed", cfg.Providers)
 		}
-		if _, ok := storedProviderKey(t, "work"); ok {
+		if _, ok := storedProviderKey(t, configPath, "work"); ok {
 			t.Fatal("stored key survived removal of its only owner")
 		}
 	})
@@ -123,7 +122,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		if string(after) != seed {
 			t.Fatalf("rejected removal rewrote config:\n%s", after)
 		}
-		if key, ok := storedProviderKey(t, "work"); !ok || key != "sk-work" {
+		if key, ok := storedProviderKey(t, configPath, "work"); !ok || key != "sk-work" {
 			t.Fatalf("stored key does not match (present=%v, len=%d), want sk-work untouched", ok, len(key))
 		}
 	})
@@ -142,12 +141,12 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "WORK" || !cfg.Providers[0].APIKeyStored {
 			t.Fatalf("config = %#v, want WORK surviving with its marker", cfg)
 		}
-		key, ok := storedProviderKey(t, "WORK")
+		key, ok := storedProviderKey(t, configPath, "WORK")
 		if !ok || key != "sk-shared" {
 			t.Fatalf("stored key does not match (present=%v, len=%d), want the survivor's sk-shared kept", ok, len(key))
 		}
 		// The survivor must actually be able to load it.
-		store, err := config.ProviderKeyStore()
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -168,7 +167,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		}
 		// The surviving WORK row never claimed the credential, so keeping the
 		// secret would only orphan it behind a marker ApplyStoredAPIKey skips.
-		if _, ok := storedProviderKey(t, "WORK"); ok {
+		if _, ok := storedProviderKey(t, configPath, "WORK"); ok {
 			t.Fatal("stored key was orphaned behind a markerless survivor")
 		}
 		if !strings.Contains(stdout.String(), "Deleted its stored API key.") {
@@ -225,10 +224,10 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "ſ" {
 			t.Fatalf("config = %#v, want only the long-s row remaining", cfg)
 		}
-		if key, ok := storedProviderKey(t, "ſ"); !ok || key != "sk-long" {
+		if key, ok := storedProviderKey(t, configPath, "ſ"); !ok || key != "sk-long" {
 			t.Fatalf("long-s key does not match (present=%v, len=%d), want sk-long untouched", ok, len(key))
 		}
-		if _, ok := storedProviderKey(t, "s"); ok {
+		if _, ok := storedProviderKey(t, configPath, "s"); ok {
 			t.Fatal("latin-s key survived removal of its only owner")
 		}
 	})

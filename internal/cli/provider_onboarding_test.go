@@ -119,6 +119,7 @@ func TestRunProvidersRepairConfigMigratesLegacyActiveReference(t *testing.T) {
 }
 
 func TestProviderRepairCommandsCanResolveIndependentLegacyNameProblems(t *testing.T) {
+	setCLIUserConfigRoot(t)
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{
@@ -640,9 +641,9 @@ func writeProviderOnboardingConfig(t *testing.T, path string, cfg config.FileCon
 	}
 }
 
-// Runtime provider credentials are user-scoped even when tests inject a
-// non-default config path.
-func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
+// Provider credentials live beside the config being edited. An injected config
+// path must not redirect deletion into the default per-user credential store.
+func TestRunProvidersRemoveDeletesKeyFromConfigStore(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
@@ -651,11 +652,18 @@ func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	store, err := config.ProviderKeyStore()
+	defaultStore, err := config.ProviderKeyStore()
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("open default store: %v", err)
 	}
-	if err := store.Set("gw", "sk-secret"); err != nil {
+	if err := defaultStore.Set("gw", "ambient-secret"); err != nil {
+		t.Fatalf("seed default key: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatalf("open config store: %v", err)
+	}
+	if err := store.Set("gw", "config-secret"); err != nil {
 		t.Fatalf("seed key: %v", err)
 	}
 
@@ -681,7 +689,10 @@ func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 		t.Fatalf("active must hand off, got %q", payload.ActiveProvider)
 	}
 	if _, ok, _ := store.Get("gw"); ok {
-		t.Fatalf("stored key must be deleted from the user-scoped store")
+		t.Fatalf("stored key must be deleted from the config-adjacent store")
+	}
+	if key, ok, getErr := defaultStore.Get("gw"); getErr != nil || !ok || key != "ambient-secret" {
+		t.Fatalf("default-store key = %q, %v, %v; want it untouched", key, ok, getErr)
 	}
 }
 
@@ -693,13 +704,12 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("ZERO_CRED_STORAGE", "file")
-			setCLIUserConfigRoot(t)
 			dir := t.TempDir()
 			configPath := filepath.Join(dir, "config.json")
 			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			store, err := config.ProviderKeyStore()
+			store, err := config.ProviderKeyStoreAt(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -708,11 +718,7 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 			}
 			// A directory at the lock-file path is a hermetic, cross-platform
 			// failure: Delete cannot acquire its write lock.
-			userConfigPath, err := config.DefaultUserConfigPath()
-			if err != nil {
-				t.Fatal(err)
-			}
-			lockPath := filepath.Join(filepath.Dir(userConfigPath), "credentials.json.lock")
+			lockPath := filepath.Join(dir, "credentials.json.lock")
 			if err := os.Remove(lockPath); err != nil {
 				t.Fatal(err)
 			}
@@ -757,14 +763,13 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 
 func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
-	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	seed := []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
 	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStore()
+	store, err := config.ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,6 +797,38 @@ func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testin
 	}
 	if payload.KeyRemoved {
 		t.Fatal("remove reported deleting a credential still owned by the survivor")
+	}
+}
+
+func TestRunProvidersRemoveReportsRetainedSharedCredential(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	seed := []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Kept its stored API key because another saved provider still uses that credential.") {
+		t.Fatalf("stdout = %q, want retained-key explanation", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no warning", stderr.String())
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("shared key present=%v matched=%v err=%v; want present, matching, nil", ok, key == "sk-shared", getErr)
 	}
 }
 

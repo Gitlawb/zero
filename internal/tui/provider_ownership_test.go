@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -12,6 +13,24 @@ import (
 	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
+
+func setTUIUserConfigRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", root)
+	case "darwin":
+		t.Setenv("HOME", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error = %v", err)
+	}
+	return configRoot
+}
 
 // caseSiblingModel builds the shape the resolver validly produces and the
 // identity comparisons could not tell apart: user config holds "work", and the
@@ -25,8 +44,7 @@ import (
 // status line nor a config row can show.
 func caseSiblingModel(t *testing.T, activeName string, builtProfiles *[]config.ProviderProfile) model {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", home)
+	home := setTUIUserConfigRoot(t)
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 

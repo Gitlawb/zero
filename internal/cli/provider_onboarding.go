@@ -502,13 +502,18 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	// Provider credentials are user-scoped, so delete from the same default user
-	// store runtime lookup uses. A surviving case variant that still claims the
-	// credential keeps it (see config.CredentialKeyRetained); a survivor that
-	// never claimed it does not.
+	// Delete from the store beside the config being edited, which is the same store
+	// config resolution and every provider write path use for that config. A
+	// surviving case variant that still claims the credential keeps it (see
+	// config.CredentialKeyRetained); a survivor that never claimed it does not.
+	keyRetained := config.CredentialKeyRetained(cfg.Providers, name)
 	keyRemoved, keyErr := false, error(nil)
-	if !config.CredentialKeyRetained(cfg.Providers, name) {
-		keyRemoved, keyErr = config.ForgetProviderKey(name)
+	if !keyRetained {
+		keyStore, storeErr := config.ProviderKeyStoreForConfigPath(configPath)
+		keyErr = storeErr
+		if keyErr == nil {
+			keyRemoved, keyErr = keyStore.Delete(name)
+		}
 	}
 	if options.json {
 		payload := map[string]any{
@@ -539,6 +544,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return exitCrash
 	} else if keyRemoved {
 		if _, err := fmt.Fprintln(stdout, "Deleted its stored API key."); err != nil {
+			return exitCrash
+		}
+	} else if keyRetained {
+		if _, err := fmt.Fprintln(stdout, "Kept its stored API key because another saved provider still uses that credential."); err != nil {
 			return exitCrash
 		}
 	}
