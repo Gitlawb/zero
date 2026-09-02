@@ -309,12 +309,26 @@ func capEventsDropped(events []sessions.AppendEventInput, max int, alreadyDroppe
 	if alreadyDropped == 0 && (max <= 0 || len(events) <= max) {
 		return events
 	}
+	if max <= 0 {
+		out := []sessions.AppendEventInput{noteEvent(plural(alreadyDropped, "earlier event") +
+			" from this session were not imported; all retained events are shown.")}
+		return append(out, events...)
+	}
+	if max == 1 {
+		// A one-event budget cannot disclose loss and retain source content. Keep
+		// the latest source event, matching the public tail guarantee.
+		if len(events) > 0 {
+			return []sessions.AppendEventInput{events[len(events)-1]}
+		}
+		return []sessions.AppendEventInput{noteEvent(plural(alreadyDropped, "earlier event") + " from this session were not imported.")}
+	}
 	// The note itself occupies one of the max slots, so one more original event
 	// (the oldest of the tail) is dropped to make room for it. The reported
 	// count must include that event: len(events)-max alone understates the loss
 	// by one, and a truncation that reads as smaller than it was is how someone
 	// concludes the other agent did less than it did.
-	shown := events[len(events)-max+1:]
+	shownCount := min(len(events), max-1)
+	shown := events[len(events)-shownCount:]
 	baseShown := len(shown)
 	shown, orphaned := withoutOrphanToolResults(shown)
 	dropped := alreadyDropped + len(events) - baseShown + orphaned
@@ -329,6 +343,13 @@ func capEventsDropped(events []sessions.AppendEventInput, max int, alreadyDroppe
 // to evict the actual transcript tail. Context receives spare/reserved slots,
 // but at least the final source event always survives when source exists.
 func capTranslatedEventsDropped(source, contextEvents []sessions.AppendEventInput, max int, alreadyDropped int) []sessions.AppendEventInput {
+	// Re-establish call/result structure after every lossy source boundary. A
+	// byte-tail read can omit the call while retaining its result even when the
+	// event cap never fires; event-cap loss is already represented by
+	// alreadyDropped and includes paired results removed here.
+	var orphaned int
+	source, orphaned = withoutOrphanToolResults(source)
+	alreadyDropped += orphaned
 	if alreadyDropped == 0 && (max <= 0 || len(source)+len(contextEvents) <= max) {
 		return append(append([]sessions.AppendEventInput{}, source...), contextEvents...)
 	}
@@ -353,7 +374,7 @@ func capTranslatedEventsDropped(source, contextEvents []sessions.AppendEventInpu
 	// source slot for capEvents' disclosure note. Keeping only the final source
 	// event would satisfy the tail guarantee while silently hiding that earlier
 	// transcript events were dropped.
-	if len(source) > sourceSlots && max >= 2 && sourceSlots < 2 {
+	if (len(source) > sourceSlots || alreadyDropped > 0) && max >= 2 && sourceSlots < 2 {
 		sourceSlots = 2
 		contextSlots = max - sourceSlots
 	}

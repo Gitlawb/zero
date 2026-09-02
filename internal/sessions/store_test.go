@@ -181,6 +181,26 @@ func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	}
 }
 
+func TestNativeImportedPrefixTagRetainsOperationalModelOnFork(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(CreateInput{
+		SessionID: "native-tagged",
+		ModelID:   "native-model",
+		Tag:       "imported:archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fork, err := store.Fork(parent.SessionID, ForkInput{SessionID: "native-tagged-fork"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fork.ModelID != "native-model" || fork.SourceModelID != "" {
+		t.Fatalf("native tag was treated as foreign provenance: %+v", fork)
+	}
+}
+
 func TestStoreForkSupportsNonResumableSideSession(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent"})

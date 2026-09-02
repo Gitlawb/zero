@@ -1,7 +1,6 @@
 package agentsessions
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,7 +18,7 @@ func (invalidImportAdapter) Discover(string) ([]ForeignSession, error) {
 	return []ForeignSession{{Agent: "invalid", ID: "broken", Title: "broken"}}, nil
 }
 
-func TestImportBindsMetadataAndContentToExactDiscoveredTranscript(t *testing.T) {
+func TestDuplicateAdapterIDsAreRejectedAcrossDiscoveryAndImportScopes(t *testing.T) {
 	home := t.TempDir()
 	older := filepath.Join(home, ".claude", "projects", "-old", "duplicate.jsonl")
 	newer := filepath.Join(home, ".claude", "projects", "-new", "duplicate.jsonl")
@@ -42,23 +41,8 @@ func TestImportBindsMetadataAndContentToExactDiscoveredTranscript(t *testing.T) 
 		t.Fatalf("newest selected row = %+v, want /new", found[0])
 	}
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
-	result, err := ImportSource(store, adapter, found[0], ReadOptions{})
-	if err != nil {
-		t.Fatalf("ImportSource: %v", err)
-	}
-	if result.Session.Cwd != "/new" || result.Session.SourceModelID != "newer-model" {
-		t.Fatalf("imported metadata = %+v, want selected /new transcript", result.Session)
-	}
-	events, err := store.ReadEvents(result.Session.SessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encodedEvents, err := json.Marshal(events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(encodedEvents), "newer content") || strings.Contains(string(encodedEvents), "older content") {
-		t.Fatalf("imported events did not come from selected transcript: %+v", events)
+	if _, err := ImportSource(store, adapter, found[0], ReadOptions{}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("exact-source import error = %v, want adapter-global duplicate ambiguity", err)
 	}
 
 	if _, err := Import(store, adapter, "duplicate", ReadOptions{}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
@@ -72,6 +56,19 @@ func TestImportBindsMetadataAndContentToExactDiscoveredTranscript(t *testing.T) 
 	}
 	if !strings.Contains(fmt.Sprint(problems), "ambiguous") {
 		t.Fatalf("duplicate discovery problems = %v, want ambiguity", problems)
+	}
+	for _, cwd := range []string{"/old", "/new"} {
+		listed, problems := DiscoverAll(testEnv(home, nil), cwd)
+		if len(listed) != 0 || !strings.Contains(fmt.Sprint(problems), "ambiguous") {
+			t.Fatalf("scoped discovery for %s = %+v, %v; want no advertised duplicate and an ambiguity warning", cwd, listed, problems)
+		}
+	}
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("ambiguous imports left durable provenance: %+v", metas)
 	}
 }
 

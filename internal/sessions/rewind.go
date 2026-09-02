@@ -48,7 +48,7 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 	if err != nil {
 		return report, err
 	}
-	imported := strings.HasPrefix(strings.TrimSpace(metadata.Tag), "imported:")
+	imported := IsImportedSession(metadata)
 	checkpoints, err := store.sortedCheckpointsAfter(sessionID, targetSeq)
 	if err != nil {
 		return report, err
