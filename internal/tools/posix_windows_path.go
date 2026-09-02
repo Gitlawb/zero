@@ -225,10 +225,11 @@ func rewritePosixWorkspacePath(goos, workspaceRoot, requested string) string {
 }
 
 // existingLiteralPosixWorkspacePath reports whether the un-rewritten POSIX
-// path already names an existing file inside the workspace. When it does,
-// the rewrite must not steal the request: a model that named
-// /tmp/<repo>/x when that file exists should read and write that file,
-// not a different x at the workspace root.
+// path already names an existing file or directory inside the workspace. When
+// it does (or its immediate parent directory exists on disk), the rewrite must
+// not steal the request: a model that named /tmp/<repo>/x when that file or its
+// parent directory exists should read and write that file, not a different x at
+// the workspace root.
 func existingLiteralPosixWorkspacePath(goos, workspaceRoot, requested string) bool {
 	if goos != "windows" {
 		return false
@@ -252,8 +253,16 @@ func existingLiteralPosixWorkspacePath(goos, workspaceRoot, requested string) bo
 	if _, err := workspaceRelative(root, target, requested); err != nil {
 		return false
 	}
-	_, err = os.Lstat(target)
-	return err == nil
+	if _, err := os.Lstat(target); err == nil {
+		return true
+	}
+	parent := filepath.Dir(target)
+	if parent != root && len(parent) > len(root) {
+		if fi, err := os.Lstat(parent); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func isMissingPathError(err error) bool {

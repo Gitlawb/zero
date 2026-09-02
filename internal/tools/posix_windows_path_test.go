@@ -494,6 +494,30 @@ func TestResolveWorkspaceTargetPathPrefersExistingLiteralOverRewrite(t *testing.
 	}
 }
 
+func TestResolveWorkspaceTargetPathPrefersExistingLiteralDirectoryOverRewrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "zero")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	literalDir := filepath.Join(root, "tmp", "zero")
+	if err := os.MkdirAll(literalDir, 0o755); err != nil {
+		t.Fatalf("mkdir literal dir: %v", err)
+	}
+
+	absolute, relative, err := resolveWorkspaceTargetPathForGOOS("windows", root, "/tmp/zero/new.md")
+	if err != nil {
+		t.Fatalf("write target in existing literal directory should resolve: %v", err)
+	}
+	wantRel := filepath.ToSlash(filepath.Join("tmp", "zero", "new.md"))
+	if relative != wantRel {
+		t.Fatalf("relative = %q, want %q (existing literal directory must win over rewrite)", relative, wantRel)
+	}
+	wantAbs := filepath.Join(root, "tmp", "zero", "new.md")
+	if absolute != wantAbs {
+		t.Fatalf("absolute = %q, want %q", absolute, wantAbs)
+	}
+}
+
 func TestRecheckWorkspaceWriteTargetAfterPosixRewrite(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "zero")
 	if err := os.Mkdir(root, 0o755); err != nil {
