@@ -42,8 +42,12 @@ func TestFileLockReportsBusyInsteadOfBlockingForever(t *testing.T) {
 	const bound = time.Second
 	select {
 	case err := <-done:
-		if elapsed := time.Since(started); elapsed > bound {
-			t.Fatalf("contending acquireFileLock took %s, want it bounded by credentialLockTimeout", elapsed)
+		elapsed := time.Since(started)
+		if elapsed < credentialLockTimeout {
+			t.Fatalf("contending acquireFileLock returned after %s, before credentialLockTimeout %s", elapsed, credentialLockTimeout)
+		}
+		if elapsed > bound {
+			t.Fatalf("contending acquireFileLock took %s, want it bounded by %s", elapsed, bound)
 		}
 		if err == nil || !strings.Contains(err.Error(), "credential store is busy") {
 			t.Fatalf("contending acquireFileLock = %v, want a busy error", err)
