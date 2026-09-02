@@ -99,6 +99,28 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 		return &result
 	}
 	profile := sandbox.PermissionProfileFromPolicy(workspaceRoot, doctorSandboxPolicy(sandboxConfig), scope)
+	// A RECORDED ROOT IS HISTORY, NOT PROOF. Doctor pins the marker's runtime
+	// root so the stamp check can run without taking a lease, but a command does
+	// not pin blindly: it derives the current cache and fallback candidates and
+	// honours the marker only when its root is one of them. Run setup with the
+	// cache at A, relocate the cache so commands derive B, and the stamped A tree
+	// remains: pinning A here reported a healthy sandbox immediately before every
+	// real command rejected A and failed on the out-of-date marker.
+	//
+	// So ask the command's own question first, through the command's own
+	// function. Only a root a command would still select is used to validate
+	// the marker; anything else is reported as out of date, with the remedy.
+	if recorded, current, err := sandbox.WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot); err == nil && recorded != "" && !current {
+		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but the runtime root setup recorded (%s) is not one a command would select now, so the setup is out of date.", backend.Name, recorded), map[string]any{
+			"backend":      string(backend.Name),
+			"platform":     goos,
+			"supportLevel": string(backend.SupportLevel()),
+			"setupStatus":  "runtime-root-stale",
+			"runtimeRoot":  recorded,
+			"remedy":       "run `zero sandbox setup` to prepare the Windows native sandbox for the current cache location",
+		})
+		return &result
+	}
 	setupConfig := sandbox.WindowsSandboxSetupConfig{
 		SandboxHome:    sandboxHome,
 		CommandCWD:     workspaceRoot,

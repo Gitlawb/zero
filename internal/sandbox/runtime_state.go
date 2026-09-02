@@ -471,6 +471,42 @@ func pinnedSandboxRuntimeRoot(preferred, fallback, sandboxHome string) string {
 // on the command side and false during setup: setup is making the choice, so it
 // must not consult a record it is about to overwrite, or a single unlucky
 // relocation to the temp fallback would pin every future setup to temp.
+// WindowsSandboxRecordedRuntimeRootIsCurrent answers the question a diagnostic
+// has to ask before trusting the marker: would a command run NOW still select
+// the runtime root that setup recorded?
+//
+// The marker's root is a historical fact, needed to check the stamp without
+// mutating anything. It is not proof that the root is still selectable. Setup
+// can run with the user cache at A, the cache can then move so commands derive
+// B, and the stamped A tree stays behind. A diagnostic that pins A reports a
+// healthy machine while every real command rejects A as not a current
+// candidate and fails on the out-of-date marker.
+//
+// This derives the same candidates a command derives, through the same
+// resolver, and applies the same equality, by calling the same function the
+// command path calls. It takes no lease and creates nothing.
+func WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot string) (recorded string, current bool, err error) {
+	recorded = WindowsSandboxRecordedRuntimeRoot(sandboxHome)
+	if recorded == "" {
+		return "", false, nil
+	}
+	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
+	if workspaceRoot == "" || workspaceRoot == "." {
+		return recorded, false, errors.New("sandbox runtime requires a workspace root")
+	}
+	cacheRoot, err := sandboxUserCacheDir()
+	if err != nil {
+		return recorded, false, fmt.Errorf("resolve user cache directory: %w", err)
+	}
+	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
+	preferred, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	if err != nil {
+		return recorded, false, err
+	}
+	fallback, _ := fallbackSandboxRuntimeRoot(workspaceRoot)
+	return recorded, pinnedSandboxRuntimeRoot(preferred, fallback, sandboxHome) != "", nil
+}
+
 func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxHome string) (string, *sandboxRuntimeLease, error) {
 	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
 	if workspaceRoot == "" || workspaceRoot == "." {
