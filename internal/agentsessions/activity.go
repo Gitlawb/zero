@@ -182,11 +182,17 @@ func (log *activityLog) observeCall(callID string, name string, arguments string
 func (log *activityLog) observeResult(callID string, name string, status tools.Status, output string) {
 	claim, hadClaim := log.pendingPath[callID]
 	delete(log.pendingPath, callID)
-	if status != tools.StatusError {
+	if status == tools.StatusOK {
 		// Success confirms the call ran: only now is its path recorded.
 		if hadClaim {
 			log.commitClaim(claim)
 		}
+		return
+	}
+	if status != tools.StatusError {
+		// A foreign format that supplies no outcome evidence is not proof of
+		// success or failure. Drop its pending factual claim while preserving the
+		// raw result event for history.
 		return
 	}
 	// The call did not do what it claimed, so its pending claim is dropped

@@ -1642,6 +1642,25 @@ func TestToolResultSessionPayloadKeepsPreviewForResume(t *testing.T) {
 	}
 }
 
+func TestResumedUnknownToolResultDoesNotRenderAsSuccess(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"toolCallId": "codex-1",
+		"name":       "write_file",
+		"status":     "unknown",
+		"output":     "permission denied",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: payload}})
+	if len(rows) != 1 || rows[0].status != tools.StatusUnknown {
+		t.Fatalf("unknown result row = %#v", rows)
+	}
+	if !strings.Contains(rows[0].text, "write_file unknown permission denied") || strings.Contains(rows[0].text, "write_file ok") {
+		t.Fatalf("unknown result was rendered as success: %q", rows[0].text)
+	}
+}
+
 // TestReasoningRefreshesActivityClock: a reasoning delta is live provider output,
 // so it must bump lastStreamActivity (else the quiet hint mis-fires mid-think).
 func TestReasoningRefreshesActivityClock(t *testing.T) {

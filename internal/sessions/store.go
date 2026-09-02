@@ -532,7 +532,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	}
 	parentModelID := parent.ModelID
 	sourceModelID := parent.SourceModelID
-	if strings.HasPrefix(strings.TrimSpace(parent.Tag), "imported:") && sourceModelID == "" {
+	if IsImportedSession(*parent) && sourceModelID == "" {
 		// Older imports stored the foreign model in the operational field. A new
 		// fork must migrate that value to provenance instead of inheriting it as a
 		// local provider choice.

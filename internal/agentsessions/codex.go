@@ -252,11 +252,11 @@ func translateCodex(root string, path string, options ReadOptions) ([]sessions.A
 			if name == "" {
 				name = "unknown"
 			}
-			// Codex records no success flag on an output, so every result imports
-			// as ok. Inventing an error status from the text would be guesswork,
-			// and a false "error" is worse than a plain result the reader can see.
-			activity.observeResult(payload.CallID, name, tools.StatusOK, "")
-			events.add(toolResultEvent(identities, name, payload.CallID, tools.StatusOK, codexOutputText(payload.Output)))
+			// Codex records no structured success flag on an output. Preserve that
+			// uncertainty instead of turning arbitrary output text into either a
+			// success claim or a brittle error heuristic.
+			activity.observeResult(payload.CallID, name, tools.StatusUnknown, "")
+			events.add(toolResultEvent(identities, name, payload.CallID, tools.StatusUnknown, codexOutputText(payload.Output)))
 			delete(toolNames, payload.CallID)
 		}
 		return true

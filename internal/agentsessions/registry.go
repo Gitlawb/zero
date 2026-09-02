@@ -1,7 +1,6 @@
 package agentsessions
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -34,7 +33,11 @@ func DiscoverAll(env Env, cwd string) ([]ForeignSession, []error) {
 	found := []ForeignSession{}
 	problems := []error{}
 	for _, adapter := range Adapters(env) {
-		discovered, err := adapter.Discover(cwd)
+		// Source IDs are adapter-global public identities. Establish uniqueness
+		// across the complete readable store before applying the workspace view;
+		// otherwise discover can advertise a ref that import later finds
+		// ambiguous, and durable agent:id provenance collapses two sources.
+		discovered, err := adapter.Discover("")
 		if err != nil {
 			problems = append(problems, errors.New(adapter.Name()+": "+err.Error()))
 			continue
@@ -46,10 +49,13 @@ func DiscoverAll(env Env, cwd string) ([]ForeignSession, []error) {
 		ambiguous := map[string]bool{}
 		for _, session := range discovered {
 			if counts[session.ID] > 1 {
-				if !ambiguous[session.ID] {
+				if !ambiguous[session.ID] && (strings.TrimSpace(cwd) == "" || sameDir(cwd, session.Cwd)) {
 					problems = append(problems, fmt.Errorf("%s: session id %q is ambiguous across multiple transcripts", adapter.Name(), DisplayField(session.ID)))
 					ambiguous[session.ID] = true
 				}
+				continue
+			}
+			if strings.TrimSpace(cwd) != "" && !sameDir(cwd, session.Cwd) {
 				continue
 			}
 			found = append(found, session)
@@ -95,7 +101,6 @@ func AdapterNames(env Env) []string {
 
 // importTagPrefix marks a Zero session as a copy of another agent's transcript.
 const importTagPrefix = "imported:"
-const importTagVersion = "v1:"
 
 // ImportTag is the provenance stamp an imported session carries:
 // "imported:v1:<base64url agent>:<base64url foreign session id>".
@@ -106,35 +111,14 @@ const importTagVersion = "v1:"
 // already-imported session apart from one still only on the other agent's disk,
 // which the /resume picker needs in order not to list both.
 func ImportTag(agent string, sourceID string) string {
-	encode := base64.RawURLEncoding.EncodeToString
-	return importTagPrefix + importTagVersion + encode([]byte(agent)) + ":" + encode([]byte(sourceID))
+	return sessions.ImportedSessionTag(agent, sourceID)
 }
 
 // ParseImportTag splits an import tag back into its agent and source id.
 // Reports false for a tag that is not an import stamp, including the older
 // two-part "imported:<agent>" form, which records no source id to return.
 func ParseImportTag(tag string) (agent string, sourceID string, ok bool) {
-	rest := strings.TrimPrefix(strings.TrimSpace(tag), importTagPrefix)
-	if rest == strings.TrimSpace(tag) {
-		return "", "", false
-	}
-	if encoded := strings.TrimPrefix(rest, importTagVersion); encoded != rest {
-		encodedAgent, encodedID, found := strings.Cut(encoded, ":")
-		if !found || encodedAgent == "" || encodedID == "" {
-			return "", "", false
-		}
-		decodedAgent, agentErr := base64.RawURLEncoding.DecodeString(encodedAgent)
-		decodedID, idErr := base64.RawURLEncoding.DecodeString(encodedID)
-		if agentErr != nil || idErr != nil || len(decodedAgent) == 0 || len(decodedID) == 0 {
-			return "", "", false
-		}
-		return string(decodedAgent), string(decodedID), true
-	}
-	agent, sourceID, found := strings.Cut(rest, ":")
-	if !found || agent == "" || sourceID == "" {
-		return "", "", false
-	}
-	return agent, sourceID, true
+	return sessions.ParseImportedSessionTag(tag)
 }
 
 // ImportedAgent is the agent a session was imported from, or "" for a session
@@ -189,6 +173,11 @@ func ImportSource(store *sessions.Store, adapter Adapter, source ForeignSession,
 	id := source.ID
 	if adapter == nil || !strings.EqualFold(strings.TrimSpace(source.Agent), adapter.Name()) || strings.TrimSpace(id) == "" {
 		return ImportResult{}, errors.New("foreign session source does not match its adapter")
+	}
+	// Exact snapshots prevent redirection, but they cannot make a duplicate
+	// adapter ID a durable identity. Reject the same ambiguity as CLI import.
+	if _, err := describe(adapter, id); err != nil {
+		return ImportResult{}, err
 	}
 	if strings.TrimSpace(options.Cwd) == "" {
 		options.Cwd = source.Cwd

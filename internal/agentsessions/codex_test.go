@@ -115,11 +115,76 @@ func TestCodexToolCallsPairUpAcrossBothCallShapes(t *testing.T) {
 		if str(t, call, "name") != str(t, result, "name") {
 			t.Errorf("result name %q does not match its call %q", str(t, result, "name"), str(t, call, "name"))
 		}
+		if status := str(t, result, "status"); status != "unknown" {
+			t.Errorf("Codex result status = %q, want unknown without structured outcome evidence", status)
+		}
 	}
 	// An output stored as an escaped JSON array must render as its text, not as
 	// raw JSON the reader has to decode by eye.
 	if got := str(t, events[3], "output"); got != "a.go" {
 		t.Errorf("escaped-array output = %q, want the flattened text", got)
+	}
+}
+
+func TestCodexUnknownToolOutcomePreservesOutputWithoutClaimingAFileChange(t *testing.T) {
+	_, path := writeCodexStore(t,
+		`{"type":"session_meta","timestamp":"2026-08-01T10:00:00.000Z","payload":{"session_id":"s","cwd":"/w"}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"write_file","call_id":"call_1","arguments":"{\"path\":\"/w/config.go\"}"}}`,
+		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"permission denied"}}`,
+	)
+	events, err := translateCodex("", path, ReadOptions{Cwd: "/w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := conversationEvents(events)
+	if len(conversation) != 2 {
+		t.Fatalf("conversation events = %d, want call/result: %+v", len(conversation), conversation)
+	}
+	result := conversation[1]
+	if got := str(t, result, "status"); got != "unknown" {
+		t.Fatalf("result status = %q, want unknown", got)
+	}
+	if got := str(t, result, "output"); got != "permission denied" {
+		t.Fatalf("raw result output = %q", got)
+	}
+	for _, summary := range summaryTexts(t, events) {
+		if strings.Contains(summary, "Files changed") || strings.Contains(summary, "config.go") {
+			t.Fatalf("unverified Codex output created a factual file claim: %q", summary)
+		}
+	}
+}
+
+func TestCodexByteTailDropsOrphanResultButKeepsLaterPairAndDisclosure(t *testing.T) {
+	padding := strings.Repeat("x", importByteLimit)
+	_, path := writeCodexStore(t,
+		`{"type":"session_meta","timestamp":"2026-08-01T10:00:00.000Z","payload":{"session_id":"s","cwd":"/w"}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"old_call","call_id":"old","arguments":"{}"}}`,
+		`{"type":"padding","payload":"`+padding+`"}`,
+		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"old","output":"orphaned output"}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"new_call","call_id":"new","arguments":"{}"}}`,
+		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"new","output":"kept output"}}`,
+	)
+	events, err := translateCodex("", path, ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := conversationEvents(events)
+	if len(conversation) != 2 {
+		t.Fatalf("byte-tail conversation = %d events, want only later pair: %+v", len(conversation), conversation)
+	}
+	if str(t, conversation[0], "name") != "new_call" ||
+		str(t, conversation[1], "name") != "new_call" ||
+		str(t, conversation[0], "toolCallId") != str(t, conversation[1], "toolCallId") {
+		t.Fatalf("later valid pair was not retained: %+v", conversation)
+	}
+	for _, event := range conversation {
+		if str(t, event, "name") == "old_call" || str(t, event, "output") == "orphaned output" {
+			t.Fatalf("orphan result survived byte-tail normalization: %+v", event)
+		}
+	}
+	joined := strings.Join(summaryTexts(t, events), "\n")
+	if !strings.Contains(joined, "Older transcript records were not imported") {
+		t.Fatalf("byte-tail loss was not disclosed: %q", joined)
 	}
 }
 
