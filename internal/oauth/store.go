@@ -207,18 +207,11 @@ func ResolveKeyringLockPath(env map[string]string) (string, error) {
 		}
 		return filepath.Abs(override)
 	}
-	home := strings.TrimSpace(firstNonEmpty(envValue(env, "HOME"), envValue(env, "USERPROFILE")))
-	if home == "" {
-		var err error
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("oauth: resolve user home for keyring lock: %w", err)
-		}
-	} else if !filepath.IsAbs(home) {
-		resolved, err := filepath.Abs(home)
-		if err != nil {
-			return "", err
-		}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("oauth: resolve user home for keyring lock: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
 		home = resolved
 	}
 	return filepath.Join(home, ".zero", "oauth-keyring.lockfile"), nil
@@ -483,6 +476,21 @@ func (b fileBlob) reset() error {
 	if err := os.Remove(b.path + ".secret"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, err)
 	}
+	for _, dir := range []string{b.path + ".publish", b.path + ".secret.publish"} {
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "publish-") {
+					if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+						errs = append(errs, err)
+					}
+				}
+			}
+		}
+	}
+	if err := os.Remove(b.path + ".secret.lock"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
@@ -602,8 +610,8 @@ type keyringManifest struct {
 }
 
 func (b keyringBlob) corruptError(detail string) error {
-	return fmt.Errorf("oauth: keyring token data at %s (account %q) %s; run `zero auth reset` or remove entries %q and %q.[a|b].0..%d to recover",
-		b.location(), b.account, detail, b.account, b.account, keyringMaxChunks-1)
+	return fmt.Errorf("oauth: keyring token data at %s (account %q) %s; run `zero auth reset` or remove entries %q, %q.a.0..%d, and %q.b.0..%d to recover",
+		b.location(), b.account, detail, b.account, b.account, keyringMaxChunks-1, b.account, keyringMaxChunks-1)
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
@@ -695,6 +703,7 @@ func (b keyringBlob) writeWhole(encoded string, previous keyringManifest) error 
 	if err := b.kr.Set(b.service, b.account, encoded); err != nil {
 		return err
 	}
+	b.sweepCleanupAccount()
 	err := b.deleteChunkRange(keyringChunkFamilyA, 0, previous.counts[keyringChunkFamilyA], nil)
 	if err = b.deleteChunkRange(keyringChunkFamilyB, 0, previous.counts[keyringChunkFamilyB], err); err != nil {
 		return fmt.Errorf("oauth: tokens were saved, but a superseded keyring entry at %s could not be removed: %w", b.location(), err)
@@ -703,6 +712,7 @@ func (b keyringBlob) writeWhole(encoded string, previous keyringManifest) error 
 }
 
 func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringManifest) (retErr error) {
+	b.sweepCleanupAccount()
 	family := keyringChunkFamilyA
 	if previous.live == keyringChunkFamilyA {
 		family = keyringChunkFamilyB
@@ -764,7 +774,12 @@ func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringM
 			// During the first migration from whole-entry to chunked layout,
 			// a failure before the manifest commit point must clean up any chunks
 			// written so far to avoid leaving orphaned credential material in the keychain.
-			_ = b.deleteChunkRange(family, 0, writtenChunks, nil)
+			if err := b.deleteChunkRange(family, 0, writtenChunks, nil); err != nil {
+				_ = b.kr.Set(b.service, b.cleanupAccount(), fmt.Sprintf("%s:%d", family, writtenChunks))
+				retErr = errors.Join(retErr, fmt.Errorf("cleanup orphaned migration chunks: %w", err))
+			} else {
+				_, _ = b.kr.Delete(b.service, b.cleanupAccount())
+			}
 		}
 	}()
 
@@ -804,13 +819,59 @@ func (b keyringBlob) writeChunked(data []byte, encoded string, previous keyringM
 }
 
 func (b keyringBlob) reset() error {
-	var err error
-	err = b.deleteChunkRange(keyringChunkFamilyA, 0, keyringMaxChunks, nil)
-	err = b.deleteChunkRange(keyringChunkFamilyB, 0, keyringMaxChunks, err)
-	if _, kerr := b.kr.Delete(b.service, b.account); kerr != nil && err == nil {
-		err = fmt.Errorf("remove %s: %w", b.account, kerr)
+	b.sweepCleanupAccount()
+	_, bounded := b.kr.MaxSecretLen(b.service, b.account)
+	if !bounded {
+		var errs []error
+		if _, err := b.kr.Delete(b.service, b.account); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", b.account, err))
+		}
+		_, _ = b.kr.Delete(b.service, b.cleanupAccount())
+		return errors.Join(errs...)
 	}
-	return err
+
+	manifest, err := b.readManifest()
+	if err == nil && (manifest.live != "" || len(manifest.counts) > 0) {
+		var delErr error
+		delErr = b.deleteChunkRange(keyringChunkFamilyA, 0, manifest.counts[keyringChunkFamilyA], nil)
+		delErr = b.deleteChunkRange(keyringChunkFamilyB, 0, manifest.counts[keyringChunkFamilyB], delErr)
+		if _, kerr := b.kr.Delete(b.service, b.account); kerr != nil && delErr == nil {
+			delErr = fmt.Errorf("remove %s: %w", b.account, kerr)
+		}
+		_, _ = b.kr.Delete(b.service, b.cleanupAccount())
+		return delErr
+	}
+
+	var delErr error
+	delErr = b.deleteChunkRange(keyringChunkFamilyA, 0, keyringMaxChunks, nil)
+	delErr = b.deleteChunkRange(keyringChunkFamilyB, 0, keyringMaxChunks, delErr)
+	if _, kerr := b.kr.Delete(b.service, b.account); kerr != nil && delErr == nil {
+		delErr = fmt.Errorf("remove %s: %w", b.account, kerr)
+	}
+	_, _ = b.kr.Delete(b.service, b.cleanupAccount())
+	return delErr
+}
+
+func (b keyringBlob) cleanupAccount() string {
+	return b.account + ".cleanup"
+}
+
+func (b keyringBlob) sweepCleanupAccount() {
+	raw, ok, err := b.kr.Get(b.service, b.cleanupAccount())
+	if err != nil || !ok {
+		return
+	}
+	raw = strings.TrimSpace(raw)
+	if raw != "" {
+		parts := strings.Split(raw, ":")
+		if len(parts) == 2 {
+			family := parts[0]
+			if count, err := strconv.Atoi(parts[1]); err == nil && count > 0 {
+				_ = b.deleteChunkRange(family, 0, count, nil)
+			}
+		}
+	}
+	_, _ = b.kr.Delete(b.service, b.cleanupAccount())
 }
 
 // readManifest returns the live manifest, or a zero manifest when the anchor

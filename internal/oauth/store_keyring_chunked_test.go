@@ -856,3 +856,131 @@ func TestStoreKeyringShrinkResidueIsReclaimedOnRegrowth(t *testing.T) {
 		t.Error("token stored across the regrowth did not survive")
 	}
 }
+
+// TestStoreKeyringFirstMigrationRollbackFailurePreservesReclaimableCleanup tests that
+// if first-migration chunk write fails and compensating deletion also fails, the
+// cleanup error is joined into the return error and cleanup state is durably recorded
+// such that a subsequent small save reclaims the stranded chunks.
+func TestStoreKeyringFirstMigrationRollbackFailurePreservesReclaimableCleanup(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	s := newCappedKeyringStore(t, kr)
+
+	smallToken := Token{
+		AccessToken: "small-secret-token",
+		TokenType:   "Bearer",
+		Account:     "user@example.com",
+	}
+	mustSave(t, s, "small", smallToken)
+
+	// Inject failure on writing chunk 1, AND failure on deleting chunk 0 during rollback.
+	writeBoom := errors.New("keychain write failed on chunk 1")
+	deleteBoom := errors.New("keychain delete failed on chunk 0 during rollback")
+	kr.failSet = func(account string) error {
+		if strings.HasSuffix(account, "."+keyringChunkFamilyA+".1") {
+			return writeBoom
+		}
+		return nil
+	}
+	kr.failDelete = func(account string) error {
+		if strings.HasSuffix(account, "."+keyringChunkFamilyA+".0") {
+			return deleteBoom
+		}
+		return nil
+	}
+
+	hugeToken := bigToken("x")
+	hugeToken.AccessToken = strings.Repeat("x", 4000)
+	err := s.Save(ProviderKey("big"), hugeToken)
+	if err == nil {
+		t.Fatal("expected Save to fail")
+	}
+	if !errors.Is(err, writeBoom) {
+		t.Errorf("expected error to wrap writeBoom: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup orphaned migration chunks") {
+		t.Errorf("expected error to join rollback cleanup failure: %v", err)
+	}
+
+	// Verify the original small token is still intact and readable.
+	if got := mustLoad(t, s, "small"); got.AccessToken != smallToken.AccessToken {
+		t.Fatalf("small token was damaged by failed migration: %v", got)
+	}
+
+	// Clear failure hooks.
+	kr.failSet = nil
+	kr.failDelete = nil
+
+	// Verify chunk 0 was stranded initially.
+	if chunksA := kr.chunkAccounts(keyringChunkFamilyA); len(chunksA) != 1 {
+		t.Fatalf("expected 1 stranded chunk in family A before cleanup, got %v", chunksA)
+	}
+
+	// Perform a subsequent small save (which uses writeWhole).
+	mustSave(t, s, "small2", smallToken)
+
+	// Verify both families are now completely empty of chunks.
+	if chunksA := kr.chunkAccounts(keyringChunkFamilyA); len(chunksA) != 0 {
+		t.Fatalf("chunks for family A survived subsequent small save: %v", chunksA)
+	}
+	if chunksB := kr.chunkAccounts(keyringChunkFamilyB); len(chunksB) != 0 {
+		t.Fatalf("chunks for family B found after subsequent small save: %v", chunksB)
+	}
+	if _, ok, _ := kr.Get(keyringService, keyringAccount+".cleanup"); ok {
+		t.Fatal(".cleanup marker was not removed after sweep")
+	}
+}
+
+// TestStoreKeyringResetIsBoundedByBackendAndManifest verifies that Reset only
+// issues the necessary delete operations according to backend capabilities and
+// known manifest layout.
+func TestStoreKeyringResetIsBoundedByBackendAndManifest(t *testing.T) {
+	t.Run("unbounded backend issues only anchor delete", func(t *testing.T) {
+		kr := newFakeKR()
+		s := newCappedKeyringStore(t, kr)
+
+		mustSave(t, s, "first", bigToken("a"))
+		mustSave(t, s, "second", bigToken("b"))
+
+		kr.deletes = map[string]int{}
+		if err := s.Reset(); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+
+		totalDeletes := 0
+		for _, count := range kr.deletes {
+			totalDeletes += count
+		}
+		// On unbounded backend (Linux), at most anchor + cleanup marker = 2 deletes, not 129
+		if totalDeletes > 2 {
+			t.Errorf("unbounded reset performed %d delete calls, want <= 2", totalDeletes)
+		}
+	})
+
+	t.Run("bounded backend with valid manifest issues bounded chunk deletes", func(t *testing.T) {
+		kr := newCappedFakeKR(macOSLikeBudget)
+		s := newCappedKeyringStore(t, kr)
+
+		mustSave(t, s, "first", bigToken("a"))
+		mustSave(t, s, "second", bigToken("b"))
+
+		manifest := manifestOf(t, kr)
+		expectedChunks := manifest.counts[keyringChunkFamilyA] + manifest.counts[keyringChunkFamilyB]
+		if expectedChunks == 0 {
+			t.Fatal("expected non-zero chunks in manifest")
+		}
+
+		kr.deletes = map[string]int{}
+		if err := s.Reset(); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+
+		totalDeletes := 0
+		for _, count := range kr.deletes {
+			totalDeletes += count
+		}
+		// Chunk count + anchor + cleanup marker
+		if totalDeletes > expectedChunks+2 {
+			t.Errorf("manifest-bounded reset performed %d delete calls, want <= %d", totalDeletes, expectedChunks+2)
+		}
+	})
+}
