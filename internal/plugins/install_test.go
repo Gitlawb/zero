@@ -507,3 +507,70 @@ func TestRemoveLeavesNothingARecoveryCanResurrect(t *testing.T) {
 		}
 	}
 }
+
+// A commit killed after its publish rename but before it cleared the workspace
+// leaves the tree the install replaced in a backup beside the live plugin.
+// Removing that plugin deletes the live tree and its lockfile entry, so a
+// backup that outlived it would be published again by the next install's
+// recovery, and Load enumerates directories rather than the lockfile: the
+// removed plugin would be live again with no entry naming it.
+func TestRemoveLeavesNoSupersededBackupARecoveryCanResurrect(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The state a kill in that window leaves: the plugin live at its target,
+	// with the tree it replaced still retained in the workspace beside it.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	if err := os.WriteFile(filepath.Join(workspace, "target"), []byte("zero.demo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(workspace, "previous")
+	if err := os.MkdirAll(previous, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, "zero.demo", manifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, manifestFileName), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(dir, "zero.demo"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	other := validManifest()
+	other["id"] = "zero.other"
+	src2 := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src2"), other)
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "zero.demo")); !os.IsNotExist(err) {
+		t.Errorf("a removed plugin was put back on disk: %v", err)
+	}
+	loaded, err := Load(LoadOptions{Roots: []Root{{Source: SourceUser, Path: dir}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range loaded.Plugins {
+		if p.ID == "zero.demo" {
+			t.Errorf("a removed plugin is loadable again")
+		}
+	}
+	lock, err := ReadLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lock["zero.demo"]; ok {
+		t.Errorf("the lockfile still names a removed plugin")
+	}
+}
