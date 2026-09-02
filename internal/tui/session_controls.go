@@ -786,6 +786,23 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	// pre-rewind scrollback above it stays, as scrollback cannot be un-printed.
 	m.resetFlushFrontier("· rewound ·")
 
+	// Workspace files have been restored to checkpoint state: invalidate the file view
+	// cache and trigger an authoritative reload if full file view is active.
+	defaultFileViewCache.clear()
+	if m.fileView.active {
+		m.fileView.requiredSourceRev++
+		if m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+			if cmd != nil {
+				msg := cmd()
+				if loadedMsg, ok := msg.(fileViewLoadedMsg); ok {
+					m, _ = m.handleFileViewLoaded(loadedMsg)
+				}
+			}
+		}
+	}
+
 	summary := fmt.Sprintf("Rewound to sequence %d\n%d file(s) restored, %d deleted, %d skipped.",
 		target, report.FilesRestored, report.FilesDeleted, len(report.Skipped))
 	if len(report.Skipped) > 0 {

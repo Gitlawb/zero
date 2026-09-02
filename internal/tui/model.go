@@ -1658,7 +1658,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if keyIs(msg, tea.KeyEnter) && m.selectedFile != "" {
-				return m.selectFile(m.selectedFile)
+				overlayWidth := minInt(72, maxInt(40, m.width-8))
+				inner := maxInt(12, overlayWidth-4)
+				layout := m.runDetailsLayout(inner)
+				for _, h := range layout.fileHits {
+					if h.path == m.selectedFile {
+						return m.selectFile(m.selectedFile)
+					}
+				}
+				return m, nil
 			}
 			return m, nil
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
@@ -2932,21 +2940,45 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if isPlanCommandTool(msg.row.tool) {
 				var sweep tea.Cmd
 				m, sweep = m.maybeGitSweep()
-				if m.fileView.active && m.fileView.mode == fileViewFull {
-					var loadCmd tea.Cmd
-					m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
-					return m, tea.Batch(sweep, loadCmd)
+				if m.fileView.active {
+					target := m.fileView.path
+					if !filepath.IsAbs(target) {
+						target = filepath.Join(m.cwd, target)
+					}
+					defaultFileViewCache.invalidatePath(target)
+					m.fileView.requiredSourceRev++
+					if m.fileView.mode == fileViewFull {
+						var loadCmd tea.Cmd
+						m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+						return m, tea.Batch(sweep, loadCmd)
+					}
 				}
 				return m, sweep
 			}
-			if m.fileView.active && m.fileView.mode == fileViewFull {
-				for _, p := range msg.row.changedFiles {
-					if p == m.fileView.path {
-						var loadCmd tea.Cmd
-						m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
-						return m, loadCmd
+			var loadCmds []tea.Cmd
+			for _, p := range msg.row.changedFiles {
+				target := p
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(m.cwd, target)
+				}
+				rev := defaultFileViewCache.invalidatePath(target)
+				if m.fileView.active && (p == m.fileView.path || target == m.fileView.path) {
+					if rev > m.fileView.requiredSourceRev {
+						m.fileView.requiredSourceRev = rev
+					} else {
+						m.fileView.requiredSourceRev++
+					}
+					if m.fileView.mode == fileViewFull {
+						var cmd tea.Cmd
+						m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+						if cmd != nil {
+							loadCmds = append(loadCmds, cmd)
+						}
 					}
 				}
+			}
+			if len(loadCmds) > 0 {
+				return m, tea.Batch(loadCmds...)
 			}
 		}
 		return m, nil

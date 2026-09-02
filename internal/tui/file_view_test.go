@@ -2056,7 +2056,7 @@ func TestFileViewCacheHitRespectsLiveSeq(t *testing.T) {
 	defer func() { fileViewBeforeCacheCommit = nil }()
 	target := filepath.Join(dir, name)
 	gen := defaultFileViewCache.generation()
-	_, err := defaultFileViewCache.loadAndRender(target, name, m.fileView.loadedWidth+17, nil, m.fileView.loadedFingerprint, gen, zeroTheme, false, live, seq)
+	_, err := defaultFileViewCache.loadAndRender(target, name, m.fileView.loadedWidth+17, nil, m.fileView.loadedFingerprint, gen, zeroTheme, 0, live, seq)
 	if !errors.Is(err, errFileViewSuperseded) {
 		t.Fatalf("cache-hit put after supersede: err=%v", err)
 	}
@@ -2107,5 +2107,359 @@ func TestFileViewPlanToolRefreshesWhenGitSweepNil(t *testing.T) {
 	got := plainRender(t, m.renderFileViewFull(80))
 	if !strings.Contains(got, "package new") {
 		t.Fatalf("stale view after git-nil mutation: %s", got)
+	}
+}
+
+func TestFileViewTransitionMatrix_MutationClosedDiffFull(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "sample.go"
+	filePath := filepath.Join(dir, name)
+
+	// Phase 1: Closed mutation with equal size & equal mtime
+	if err := os.WriteFile(filePath, []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+
+	// Seed cache
+	m = testOpenFile(m, name)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package old") {
+		t.Fatal("initial seed must show package old")
+	}
+	m = m.exitFileView()
+
+	// Mutate on disk with same length ("package new\n" has 12 bytes == "package old\n")
+	fi, _ := os.Stat(filePath)
+	oldTime := fi.ModTime()
+	if err := os.WriteFile(filePath, []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(filePath, oldTime, oldTime)
+
+	// Deliver mutation row while closed
+	updated, _ := m.Update(agentRowMsg{
+		runID: 1,
+		row: transcriptRow{
+			kind:         rowToolResult,
+			tool:         "edit_file",
+			status:       tools.StatusOK,
+			changedFiles: []string{name},
+		},
+	})
+	m = updated.(model)
+
+	// Re-open and switch to full mode: must not reuse stale cache entry
+	m = testOpenFile(m, name)
+	m = testSetMode(m, fileViewFull)
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("reopening after closed mutation must render package new, got: %s", got)
+	}
+
+	// Phase 2: Diff mode mutation with equal metadata
+	if err := os.WriteFile(filePath, []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(filePath, oldTime, oldTime)
+	m = testSetMode(m, fileViewFull) // refreshed to old
+	m = testSetMode(m, fileViewDiff)
+
+	// Mutate while in diff mode
+	if err := os.WriteFile(filePath, []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(filePath, oldTime, oldTime)
+	updated, _ = m.Update(agentRowMsg{
+		runID: 1,
+		row: transcriptRow{
+			kind:         rowToolResult,
+			tool:         "edit_file",
+			status:       tools.StatusOK,
+			changedFiles: []string{name},
+		},
+	})
+	m = updated.(model)
+
+	// Switch back to full mode: must not reuse stale cache entry
+	m = testSetMode(m, fileViewFull)
+	got = plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("switching to full after diff mutation must render package new, got: %s", got)
+	}
+
+	// Phase 3: Full mode live mutation
+	if err := os.WriteFile(filePath, []byte("package live\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(agentRowMsg{
+		runID: 1,
+		row: transcriptRow{
+			kind:         rowToolResult,
+			tool:         "edit_file",
+			status:       tools.StatusOK,
+			changedFiles: []string{name},
+		},
+	})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("full mode mutation must yield refresh cmd")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+	got = plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package live") {
+		t.Fatalf("full mode live mutation must render package live, got: %s", got)
+	}
+}
+
+func TestFileViewTransitionMatrix_RefreshResizeThemeOrdering(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "order.go"
+	filePath := filepath.Join(dir, name)
+
+	if err := os.WriteFile(filePath, []byte("package v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+	m = testOpenFile(m, name)
+
+	// Mutate to v2 with equal size & mtime
+	fi, _ := os.Stat(filePath)
+	oldTime := fi.ModTime()
+	if err := os.WriteFile(filePath, []byte("package v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(filePath, oldTime, oldTime)
+
+	// 1. Tool mutation schedules refresh
+	updated, refreshCmd := m.Update(agentRowMsg{
+		runID: 1,
+		row: transcriptRow{
+			kind:         rowToolResult,
+			tool:         "edit_file",
+			status:       tools.StatusOK,
+			changedFiles: []string{name},
+		},
+	})
+	m = updated.(model)
+	if refreshCmd == nil {
+		t.Fatal("mutation must schedule refresh")
+	}
+
+	// 2. Before refreshCmd completes, a resize event arrives (advances desiredSeq with refreshSource=false)
+	updated, resizeCmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(model)
+	if resizeCmd == nil {
+		t.Fatal("resize must yield load cmd")
+	}
+
+	// 3. Obsolete refreshCmd returns: must be rejected
+	oldRefreshMsg := refreshCmd()
+	updated, _ = m.Update(oldRefreshMsg)
+	m = updated.(model)
+
+	// 4. Winning resizeCmd completes: MUST inherit requiredSourceRev and render v2
+	resizeMsg := resizeCmd()
+	updated, _ = m.Update(resizeMsg)
+	m = updated.(model)
+
+	got := plainRender(t, m.renderFileViewFull(120))
+	if !strings.Contains(got, "package v2") {
+		t.Fatalf("resize following mutation must render package v2, got: %s", got)
+	}
+}
+
+func TestFileViewTransitionMatrix_DeterministicStageHooksSupersession(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "hooks.go"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte("package hooks\nfunc Work() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hooks := []struct {
+		name       string
+		isCacheHit bool
+		set        func(fn func())
+	}{
+		{"InsideLoad", false, func(fn func()) { fileViewInsideLoad = fn }},
+		{"BeforeCacheHitFormat", true, func(fn func()) { fileViewBeforeCacheHitFormat = fn }},
+		{"BeforeDiskRead", false, func(fn func()) { fileViewBeforeDiskRead = fn }},
+		{"BeforeHighlight", false, func(fn func()) { fileViewBeforeHighlight = fn }},
+		{"BeforeFormat", false, func(fn func()) { fileViewBeforeFormat = fn }},
+		{"BeforeCacheCommit", false, func(fn func()) { fileViewBeforeCacheCommit = fn }},
+	}
+
+	for _, tc := range hooks {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFileViewCacheForTest()
+			m := filesPanelTestModel()
+			m.cwd = dir
+
+			if tc.isCacheHit {
+				// Seed cache first
+				m = testOpenFile(m, name)
+				m = testSetMode(m, fileViewFull)
+			}
+
+			m, cmd := m.openFileView(name)
+			if tc.isCacheHit {
+				var loadCmd tea.Cmd
+				m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth() + 15) // width variant
+				cmd = loadCmd
+			}
+			if cmd == nil {
+				t.Fatal("load cmd")
+			}
+			live := m.fileView.liveSeq
+			seq := m.fileView.desiredSeq
+
+			executedHook := false
+			tc.set(func() {
+				executedHook = true
+				live.Store(seq + 1) // supersede A with B
+			})
+			defer tc.set(nil)
+
+			msg := cmd()
+			if !executedHook {
+				t.Fatalf("hook %s was never executed", tc.name)
+			}
+			loaded := msg.(fileViewLoadedMsg)
+			if !errors.Is(loaded.err, errFileViewSuperseded) {
+				t.Fatalf("hook %s: expected errFileViewSuperseded, got %v", tc.name, loaded.err)
+			}
+
+			// Delivery of superseded message must be a complete no-op
+			updated, nextCmd := m.handleFileViewLoaded(loaded)
+			if nextCmd != nil {
+				t.Fatalf("hook %s: superseded message must not schedule retry", tc.name)
+			}
+			if updated.fileView.snapshotReady {
+				t.Fatalf("hook %s: superseded message must not mark snapshotReady", tc.name)
+			}
+		})
+	}
+}
+
+func TestFileViewTransitionMatrix_CurrentCompletionFollowedByObsoleteCompletion(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "race.go"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte("package race\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m, cmd1 := m.openFileView(name)
+	if cmd1 == nil {
+		t.Fatal("cmd1")
+	}
+
+	// Resize to advance sequence from 1 to 2
+	updated, cmd2 := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(model)
+	if cmd2 == nil {
+		t.Fatal("cmd2")
+	}
+
+	// Sequence 2 completes first
+	msg2 := cmd2()
+	updated, _ = m.Update(msg2)
+	m = updated.(model)
+	if !m.fileView.snapshotReady || m.fileView.loadedSeq != 2 {
+		t.Fatalf("seq 2 must be loaded, ready=%v seq=%d", m.fileView.snapshotReady, m.fileView.loadedSeq)
+	}
+
+	// Sequence 1 arrives late: must be a complete no-op
+	msg1 := cmd1()
+	updated, lateCmd := m.Update(msg1)
+	m = updated.(model)
+	if lateCmd != nil {
+		t.Fatal("late completion must not schedule retry")
+	}
+	if !m.fileView.snapshotReady || m.fileView.loadedSeq != 2 {
+		t.Fatalf("late completion must not degrade state: ready=%v seq=%d", m.fileView.snapshotReady, m.fileView.loadedSeq)
+	}
+}
+
+func TestFileView_ChangedLineMatchingWithTabsAndControlChars(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "tabmatch.go"
+	content := "package main\n\nvar Field\t= 1\nvar Clean = 2\n"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.transcript = append(m.transcript, transcriptRow{
+		kind:         rowToolResult,
+		tool:         "edit_file",
+		status:       tools.StatusOK,
+		changedFiles: []string{name},
+		detail:       "--- a/tabmatch.go\n+++ b/tabmatch.go\n@@ -1,2 +1,3 @@\n+var Field\t= 1\n",
+	})
+
+	m = testOpenFile(m, name)
+	m = testSetMode(m, fileViewFull)
+	rendered := m.renderFileViewFull(80)
+
+	// The rendered source displays 4 spaces instead of raw tab, and retains the accent gutter marker ▎
+	if strings.Contains(rendered, "\t") {
+		t.Fatal("rendered output must not contain raw tab characters")
+	}
+	if !strings.Contains(rendered, "▎") {
+		t.Fatalf("added line with interior tab must retain accent gutter marker, got:\n%s", rendered)
+	}
+}
+
+func TestRunDetails_KeyboardActivationStrictRowTargets(t *testing.T) {
+	m := filesPanelTestModel()
+	m.altScreen = true
+	m.width = 80
+	m.height = 30
+	m.runDetailsOpen = true
+
+	// Build a transcript with 7 files touched so files 0..3 are visible, file 4 is overflow trailer ("… more in transcript"), files 5..6 hidden
+	for i := 0; i < 7; i++ {
+		name := fmt.Sprintf("file_%d.go", i)
+		m.transcript = append(m.transcript, transcriptRow{
+			kind:         rowToolResult,
+			tool:         "edit_file",
+			status:       tools.StatusOK,
+			changedFiles: []string{name},
+		})
+	}
+
+	// 1. Visible file (file_6.go) can be activated on Enter
+	m.selectedFile = "file_6.go"
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	res := updated.(model)
+	if !res.fileView.active || res.fileView.path != "file_6.go" {
+		t.Fatalf("visible file in run details must be activated on Enter: active=%v path=%s", res.fileView.active, res.fileView.path)
+	}
+
+	// Reset file view
+	m = res.exitFileView()
+	m.runDetailsOpen = true
+
+	// 2. Hidden / overflow file (file_0.go) must NOT be activated on Enter
+	m.selectedFile = "file_0.go"
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	res = updated.(model)
+	if res.fileView.active {
+		t.Fatalf("overflow hidden file (file_0.go) must not be activated on Enter from run details modal")
 	}
 }
