@@ -131,7 +131,7 @@ type knownField struct {
 }
 
 func derefType(t reflect.Type) reflect.Type {
-	for t != nil && t.Kind() == reflect.Pointer {
+	for t != nil && t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
 	return t

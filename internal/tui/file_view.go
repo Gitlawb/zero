@@ -98,6 +98,7 @@ type fileViewCachedEntry struct {
 	displayPath  string
 	modTime      time.Time
 	size         int64
+	sourceRev    uint64
 	lines        []string
 	display      []string
 	truncated    bool
@@ -151,22 +152,42 @@ func (e *fileViewCachedEntry) putRender(key string, val string) {
 }
 
 type fileViewRenderCache struct {
-	mu         sync.Mutex
-	maxEntries int
-	items      map[string]*list.Element // targetPath -> *list.Element containing *fileViewCachedEntry
-	lru        *list.List
-	gen        int
-	statsData  fileViewCacheStats
+	mu            sync.Mutex
+	maxEntries    int
+	items         map[string]*list.Element // targetPath -> *list.Element containing *fileViewCachedEntry
+	lru           *list.List
+	gen           int
+	pathRevisions map[string]uint64
+	statsData     fileViewCacheStats
 }
 
 var defaultFileViewCache = newFileViewRenderCache(defaultFileViewCacheMaxEntries)
 
 func newFileViewRenderCache(maxEntries int) *fileViewRenderCache {
 	return &fileViewRenderCache{
-		maxEntries: maxEntries,
-		items:      make(map[string]*list.Element),
-		lru:        list.New(),
+		maxEntries:    maxEntries,
+		items:         make(map[string]*list.Element),
+		lru:           list.New(),
+		pathRevisions: make(map[string]uint64),
 	}
+}
+
+func (c *fileViewRenderCache) invalidatePath(targetPath string) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pathRevisions[targetPath]++
+	rev := c.pathRevisions[targetPath]
+	if elem, ok := c.items[targetPath]; ok {
+		c.lru.Remove(elem)
+		delete(c.items, targetPath)
+	}
+	return rev
+}
+
+func (c *fileViewRenderCache) requiredRevision(targetPath string) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pathRevisions[targetPath]
 }
 
 func (c *fileViewRenderCache) clear() {
@@ -175,6 +196,9 @@ func (c *fileViewRenderCache) clear() {
 	c.gen++
 	c.items = make(map[string]*list.Element)
 	c.lru.Init()
+	for k := range c.pathRevisions {
+		c.pathRevisions[k]++
+	}
 	c.statsData.ThemeClears++
 }
 
@@ -335,6 +359,28 @@ func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBy
 	}
 }
 
+// canonicalChangedLineKey normalizes a line for changed-line matching:
+// - Replaces tabs with 4 spaces (matching sanitizeRawFileLine)
+// - Strips ANSI escape sequences and non-printable control characters
+// - Trims leading and trailing whitespace
+func canonicalChangedLineKey(s string) string {
+	var out strings.Builder
+	for _, r := range s {
+		if r == '\t' {
+			out.WriteString("    ")
+		} else if r == '\r' || r == '\n' {
+			continue
+		} else if r < 32 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			if r == '\x1b' {
+				out.WriteString("^[")
+			}
+		} else {
+			out.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(out.String())
+}
+
 func changedLinesFingerprint(changed map[string]bool) string {
 	if len(changed) == 0 {
 		return ""
@@ -360,7 +406,7 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 			b.WriteString("\n")
 		}
 		marker := " "
-		if changed != nil && len(lines) > i && changed[strings.TrimSpace(lines[i])] {
+		if changed != nil && len(lines) > i && changed[canonicalChangedLineKey(lines[i])] {
 			marker = theme.accent.Render("▎")
 		}
 		b.WriteString(theme.faintest.Render(fmt.Sprintf("%*d ", gutterW, i+1)))
@@ -383,8 +429,8 @@ func formatFileViewLines(lines []string, display []string, changed map[string]bo
 // peekRenderOnly looks up an already-formatted variant in memory. It performs
 // strictly 0 I/O and 0 string formatting/allocations, guaranteeing O(1) instantaneous
 // access on the View() drawing path.
-func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, changedFingerprint string, loadedSeq, desiredSeq uint64) (string, bool) {
-	if loadedSeq != desiredSeq {
+func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, changedFingerprint string, loadedSeq, desiredSeq uint64, loadedRev, reqRev uint64) (string, bool) {
+	if loadedSeq != desiredSeq || loadedRev < reqRev {
 		return "", false
 	}
 	c.mu.Lock()
@@ -394,6 +440,10 @@ func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, chang
 		return "", false
 	}
 	entry := elem.Value.(*fileViewCachedEntry)
+	if entry.sourceRev < reqRev {
+		c.mu.Unlock()
+		return "", false
+	}
 	c.lru.MoveToFront(elem)
 	c.statsData.CacheHits++
 	c.mu.Unlock()
@@ -407,15 +457,20 @@ func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, chang
 // intended to be executed from a tea.Cmd / background worker, off the View path.
 var errFileViewSuperseded = errors.New("file view request superseded")
 
-var fileViewInsideLoad func()
-
-var fileViewBeforeCacheCommit func()
+var (
+	fileViewInsideLoad           func()
+	fileViewBeforeCacheHitFormat func()
+	fileViewBeforeDiskRead       func()
+	fileViewBeforeHighlight      func()
+	fileViewBeforeFormat         func()
+	fileViewBeforeCacheCommit    func()
+)
 
 func fileViewSuperseded(liveSeq *atomic.Uint64, seq uint64) bool {
 	return liveSeq != nil && liveSeq.Load() != seq
 }
 
-func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, refreshSource bool, liveSeq *atomic.Uint64, seq uint64) (string, error) {
+func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, reqSourceRev uint64, liveSeq *atomic.Uint64, seq uint64) (string, error) {
 	if fileViewSuperseded(liveSeq, seq) {
 		return "", errFileViewSuperseded
 	}
@@ -447,29 +502,43 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return "", errors.New("request superseded by cache invalidation")
 	}
 
-	if !refreshSource {
-		if elem, ok := c.items[targetPath]; ok {
-			entry := elem.Value.(*fileViewCachedEntry)
-			if entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
-				c.statsData.CacheHits++
-				c.lru.MoveToFront(elem)
+	curRequiredRev := c.pathRevisions[targetPath]
+	if reqSourceRev < curRequiredRev {
+		reqSourceRev = curRequiredRev
+	}
+
+	if elem, ok := c.items[targetPath]; ok {
+		entry := elem.Value.(*fileViewCachedEntry)
+		if entry.sourceRev >= reqSourceRev && entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
+			if fileViewSuperseded(liveSeq, seq) {
 				c.mu.Unlock()
+				return "", errFileViewSuperseded
+			}
+			c.statsData.CacheHits++
+			c.lru.MoveToFront(elem)
+			c.mu.Unlock()
 
-				if rendered, ok := entry.getRender(renderKey); ok {
-					return rendered, nil
-				}
-
-				// Re-format for the new width or changed markers using cached display and lines
-				rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
-				if fileViewBeforeCacheCommit != nil {
-					fileViewBeforeCacheCommit()
-				}
-				if fileViewSuperseded(liveSeq, seq) {
-					return "", errFileViewSuperseded
-				}
-				entry.putRender(renderKey, rendered)
+			if rendered, ok := entry.getRender(renderKey); ok {
 				return rendered, nil
 			}
+
+			if fileViewBeforeCacheHitFormat != nil {
+				fileViewBeforeCacheHitFormat()
+			}
+			if fileViewSuperseded(liveSeq, seq) {
+				return "", errFileViewSuperseded
+			}
+
+			// Re-format for the new width or changed markers using cached display and lines
+			rendered := formatFileViewLines(entry.lines, entry.display, changed, entry.truncated, entry.omittedLines, width, theme)
+			if fileViewBeforeCacheCommit != nil {
+				fileViewBeforeCacheCommit()
+			}
+			if fileViewSuperseded(liveSeq, seq) {
+				return "", errFileViewSuperseded
+			}
+			entry.putRender(renderKey, rendered)
+			return rendered, nil
 		}
 	}
 
@@ -481,6 +550,13 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	c.statsData.CacheMisses++
 	c.statsData.DiskReads++
 	c.mu.Unlock()
+
+	if fileViewBeforeDiskRead != nil {
+		fileViewBeforeDiskRead()
+	}
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
+	}
 
 	readRes := readFileViewBounded(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes)
 	if readRes.err != nil && len(readRes.lines) == 0 {
@@ -494,6 +570,9 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return rendered, readRes.err
 	}
 
+	if fileViewBeforeHighlight != nil {
+		fileViewBeforeHighlight()
+	}
 	if fileViewSuperseded(liveSeq, seq) {
 		return "", errFileViewSuperseded
 	}
@@ -512,6 +591,13 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		display = cleanLines
 	}
 
+	if fileViewBeforeFormat != nil {
+		fileViewBeforeFormat()
+	}
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
+	}
+
 	rendered := formatFileViewLines(cleanLines, display, changed, readRes.truncated, readRes.omittedLines, width, theme)
 
 	if fileViewBeforeCacheCommit != nil {
@@ -526,6 +612,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		displayPath:  displayPath,
 		modTime:      modTime,
 		size:         size,
+		sourceRev:    reqSourceRev,
 		lines:        cleanLines,
 		display:      display,
 		truncated:    readRes.truncated,
@@ -546,7 +633,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	if elem, ok := c.items[targetPath]; ok {
 		existing := elem.Value.(*fileViewCachedEntry)
-		if existing.modTime.After(modTime) {
+		if existing.modTime.After(modTime) && existing.sourceRev > reqSourceRev {
 			c.mu.Unlock()
 			return rendered, nil
 		}
@@ -593,39 +680,41 @@ func sanitizeRawFileLine(s string) string {
 
 func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
 	fingerprint := changedLinesFingerprint(changed)
-	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, fingerprint, c.generation(), zeroTheme, false, nil, 0)
+	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, fingerprint, c.generation(), zeroTheme, 0, nil, 0)
 	return rendered
 }
 
 // fileViewLoadedMsg delivers the result of an asynchronous file read & render.
 type fileViewLoadedMsg struct {
-	lifetimeToken [16]byte
-	seq           uint64
-	generation    int
-	targetPath    string
-	displayPath   string
-	width         int
-	fingerprint   string
-	rendered      string
-	err           error
+	lifetimeToken     [16]byte
+	seq               uint64
+	requiredSourceRev uint64
+	generation        int
+	targetPath        string
+	displayPath       string
+	width             int
+	fingerprint       string
+	rendered          string
+	err               error
 }
 
-func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, theme tuiTheme, refreshSource bool, liveSeq *atomic.Uint64) tea.Cmd {
+func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, reqRev uint64, theme tuiTheme, liveSeq *atomic.Uint64) tea.Cmd {
 	return func() tea.Msg {
 		if fileViewSuperseded(liveSeq, seq) {
-			return fileViewLoadedMsg{lifetimeToken: token, seq: seq, generation: gen, displayPath: displayPath, width: width, fingerprint: fingerprint, err: errFileViewSuperseded}
+			return fileViewLoadedMsg{lifetimeToken: token, seq: seq, requiredSourceRev: reqRev, generation: gen, targetPath: targetPath, displayPath: displayPath, width: width, fingerprint: fingerprint, err: errFileViewSuperseded}
 		}
-		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme, refreshSource, liveSeq, seq)
+		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme, reqRev, liveSeq, seq)
 		return fileViewLoadedMsg{
-			lifetimeToken: token,
-			seq:           seq,
-			generation:    gen,
-			targetPath:    targetPath,
-			displayPath:   displayPath,
-			width:         width,
-			fingerprint:   fingerprint,
-			rendered:      rendered,
-			err:           err,
+			lifetimeToken:     token,
+			seq:               seq,
+			requiredSourceRev: reqRev,
+			generation:        gen,
+			targetPath:        targetPath,
+			displayPath:       displayPath,
+			width:             width,
+			fingerprint:       fingerprint,
+			rendered:          rendered,
+			err:               err,
 		}
 	}
 }
@@ -643,6 +732,7 @@ type fileViewState struct {
 
 	// Monotonically advancing desired snapshot sequence & requested parameters
 	desiredSeq         uint64
+	requiredSourceRev  uint64
 	desiredWidth       int
 	desiredFingerprint string
 	desiredGen         int
@@ -655,6 +745,7 @@ type fileViewState struct {
 	loadedFingerprint string
 	loadedToken       [16]byte
 	loadedSeq         uint64
+	loadedRev         uint64
 	loading           bool
 	hasError          bool
 	snapshotReady     bool
@@ -677,6 +768,19 @@ func (m model) startFileViewLoad(width int, refreshSource bool) (model, tea.Cmd)
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
+	if refreshSource {
+		rev := defaultFileViewCache.invalidatePath(target)
+		if rev > m.fileView.requiredSourceRev {
+			m.fileView.requiredSourceRev = rev
+		} else {
+			m.fileView.requiredSourceRev++
+		}
+	}
+	curReq := defaultFileViewCache.requiredRevision(target)
+	if curReq > m.fileView.requiredSourceRev {
+		m.fileView.requiredSourceRev = curReq
+	}
+
 	m.fileView.desiredSeq++
 	m.fileView.desiredWidth = width
 	m.fileView.loading = true
@@ -692,8 +796,9 @@ func (m model) startFileViewLoad(width int, refreshSource bool) (model, tea.Cmd)
 	fingerprint := changedLinesFingerprint(changed)
 	m.fileView.desiredFingerprint = fingerprint
 	m.fileView.desiredGen = gen
+	reqRev := m.fileView.requiredSourceRev
 	theme := zeroTheme
-	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, seq, gen, theme, refreshSource, m.fileView.liveSeq)
+	return m, loadFileViewCmd(target, m.fileView.path, width, changed, fingerprint, token, seq, gen, reqRev, theme, m.fileView.liveSeq)
 }
 
 // openFileView activates the drill-in for path in diff mode. Opening from an
@@ -718,6 +823,10 @@ func (m model) openFileView(path string) (model, tea.Cmd) {
 	if !m.fileView.active {
 		m.fileView.parentScrollOffset = m.chatScrollOffset
 	}
+	target := path
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.cwd, target)
+	}
 	m.fileView.active = true
 	m.fileView.path = path
 	m.fileView.mode = fileViewDiff
@@ -725,6 +834,8 @@ func (m model) openFileView(path string) (model, tea.Cmd) {
 	m.fileView.renderedContent = ""
 	m.fileView.loadedToken = [16]byte{}
 	m.fileView.loadedSeq = 0
+	m.fileView.loadedRev = 0
+	m.fileView.requiredSourceRev = defaultFileViewCache.requiredRevision(target)
 	m.fileView.hasError = false
 	// A file only the git sweep knows about (bash/subagent mutation) has no edit
 	// cards to stack — open straight on the full file instead of a placeholder.
@@ -772,22 +883,31 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode != fileViewFull {
 		return m, nil
 	}
+	if errors.Is(msg.err, errFileViewSuperseded) {
+		return m, nil
+	}
 	// 1. Session lifetime identity match
 	if m.fileView.lifetimeToken != msg.lifetimeToken || m.fileView.path != msg.displayPath {
 		return m, nil
 	}
-	// 2. Exact desired snapshot match: reject superseded / out-of-order completions
+	// 2. Exact desired snapshot match: reject superseded / out-of-order completions without any side effects
 	if msg.seq != m.fileView.desiredSeq ||
 		msg.width != m.fileView.desiredWidth ||
-		msg.fingerprint != m.fileView.desiredFingerprint ||
-		msg.generation != defaultFileViewCache.generation() {
-		if msg.generation != defaultFileViewCache.generation() {
-			// Cache was invalidated (e.g. theme switch) while this request was in flight.
-			return m.startFileViewLoadCmd(m.chatColumnWidth())
-		}
-		// Out-of-order or obsolete completion: drop without modifying state
+		msg.fingerprint != m.fileView.desiredFingerprint {
+		// Out-of-order or obsolete sequence: drop without modifying state or triggering retries
 		return m, nil
 	}
+
+	// 3. Current sequence with invalid theme generation: request a retry inheriting current source revision requirement
+	if msg.generation != defaultFileViewCache.generation() {
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
+	}
+
+	// 4. Source revision monotonic check: if required revision was advanced while in flight, request a refresh
+	if msg.requiredSourceRev < m.fileView.requiredSourceRev {
+		return m.startFileViewRefreshCmd(m.chatColumnWidth())
+	}
+
 	m.fileView.loading = false
 	m.fileView.snapshotReady = true
 	m.fileView.renderedContent = msg.rendered
@@ -797,6 +917,7 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	m.fileView.loadedFingerprint = msg.fingerprint
 	m.fileView.loadedToken = msg.lifetimeToken
 	m.fileView.loadedSeq = msg.seq
+	m.fileView.loadedRev = msg.requiredSourceRev
 	m.fileView.hasError = (msg.err != nil)
 	return m, nil
 }
@@ -886,12 +1007,13 @@ func (m model) renderFileViewFull(width int) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint, m.fileView.loadedSeq, m.fileView.desiredSeq); ok {
+	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint, m.fileView.loadedSeq, m.fileView.desiredSeq, m.fileView.loadedRev, m.fileView.requiredSourceRev); ok {
 		return cached
 	}
 	if m.fileView.snapshotReady &&
 		m.fileView.loadedPath == m.fileView.path &&
 		m.fileView.loadedSeq == m.fileView.desiredSeq &&
+		m.fileView.loadedRev >= m.fileView.requiredSourceRev &&
 		m.fileView.loadedGen == defaultFileViewCache.generation() &&
 		m.fileView.loadedToken == m.fileView.lifetimeToken {
 		return m.fileView.renderedContent
@@ -911,8 +1033,9 @@ func (m model) fileViewChangedLines() map[string]bool {
 			if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
 				continue
 			}
-			if text := strings.TrimSpace(strings.TrimPrefix(line, "+")); len(text) >= 4 {
-				changed[text] = true
+			raw := strings.TrimPrefix(line, "+")
+			if key := canonicalChangedLineKey(raw); len(key) >= 4 {
+				changed[key] = true
 			}
 		}
 	}
