@@ -10,9 +10,10 @@ import (
 	"github.com/Gitlawb/zero/internal/acp"
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/tools"
 )
 
 const acpUsage = `zero acp — serve the Agent Client Protocol (ACP) over stdio
@@ -57,20 +58,8 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		// surface — no ACP-specific credential handling needed.
 		NewProvider: deps.newProvider,
 		RunAgent:    agent.Run,
-		// Build the SCOPED registry + sandbox engine per workspace, exactly like the
-		// exec surface, so ACP shell/file tools are confined — never run unconfined.
-		BuildWorkspace: func(workspaceRoot string, resolved config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
-			scope, err := sandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots)
-			if err != nil {
-				return nil, nil, err
-			}
-			engine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, scope)
-			if err != nil {
-				return nil, nil, err
-			}
-			registry := newCoreRegistryScoped(workspaceRoot, scope)
-			registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
-			return registry, engine, nil
+		BuildWorkspace: func(ctx context.Context, workspaceRoot string, resolved config.ResolvedConfig, mode agent.PermissionMode) (*acp.Workspace, error) {
+			return buildACPWorkspace(ctx, workspaceRoot, resolved, mode, deps)
 		},
 		ResolveWorkspaceRoot: acpWorkspaceRootResolver(deps),
 		Store:                deps.newSessionStore(),
@@ -83,6 +72,44 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		return writeAppError(stderr, "acp: "+err.Error(), exitCrash)
 	}
 	return exitSuccess
+}
+
+// buildACPWorkspace matches exec's registry construction for one ACP turn. MCP
+// servers use the same sandbox-prepared execution runner, project configuration is
+// gated by the validated workspace's trust state, and their runtime is released
+// when acp.Agent completes the turn. ACP deliberately stays at low autonomy: an
+// editor connection never upgrades MCP permissions beyond an interactive prompt.
+func buildACPWorkspace(ctx context.Context, workspaceRoot string, resolved config.ResolvedConfig, mode agent.PermissionMode, deps appDeps) (*acp.Workspace, error) {
+	scope, err := sandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots)
+	if err != nil {
+		return nil, err
+	}
+	engine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, scope)
+	if err != nil {
+		return nil, err
+	}
+	registry := newCoreRegistryScoped(workspaceRoot, scope)
+
+	workspace := &acp.Workspace{Registry: registry, Sandbox: engine}
+	if mode != agent.PermissionModePlan {
+		// MCP stdio servers are subprocesses. Passing the engine to their runner
+		// keeps them inside the exact sandbox / lifecycle path used by zero exec.
+		runtime, _, err := registerMCPToolsForWorkspace(ctx, workspaceRoot, registry, deps, mcp.AutonomyLow, workspaceRoot, execution.NewRunner(engine))
+		if err != nil {
+			// RegisterTools may have connected an earlier server before reporting a
+			// later failure, so do not orphan a partial runtime on this error path.
+			if runtime != nil {
+				_ = runtime.Close()
+			}
+			return nil, err
+		}
+		workspace.Cleanup = runtime.Close
+	}
+	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+	// MCP tools are deferred-eligible. Register their loader only after every
+	// ACP-visible tool is present, using the same mode the agent receives.
+	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, mode, nil, nil)
+	return workspace, nil
 }
 
 // acpWorkspaceRootResolver validates a client-supplied cwd into a confinement
