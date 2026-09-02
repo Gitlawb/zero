@@ -4,74 +4,61 @@ package execution
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
 
-func TestRunCommandContinuesWhenJobAssignmentFails(t *testing.T) {
-	originalAssign := assignCommandProcessToJob
-	assignCommandProcessToJob = func(windows.Handle, windows.Handle) error {
-		return windows.ERROR_ACCESS_DENIED
-	}
-	t.Cleanup(func() { assignCommandProcessToJob = originalAssign })
-
-	ctx := context.Background()
-	command := exec.CommandContext(ctx, "cmd", "/C", "exit /b 0")
-	if err := RunCommand(ctx, command); err != nil {
-		t.Fatalf("RunCommand failed after optional job assignment failed: %v", err)
-	}
-}
-
-func TestCommandTreeFallbackDoesNotTargetExitedProcessPID(t *testing.T) {
-	originalAssign := assignCommandProcessToJob
-	assignCommandProcessToJob = func(windows.Handle, windows.Handle) error {
-		return windows.ERROR_ACCESS_DENIED
-	}
-	t.Cleanup(func() { assignCommandProcessToJob = originalAssign })
-
-	taskkillCalls := 0
-	originalCancelByPID := cancelCommandTreeByPID
-	cancelCommandTreeByPID = func(int) error {
-		taskkillCalls++
-		return nil
-	}
-	t.Cleanup(func() { cancelCommandTreeByPID = originalCancelByPID })
-
-	command := exec.Command("cmd", "/C", "exit /b 0")
-	tree, err := prepareCommandTree(command)
-	if err != nil {
-		t.Fatalf("prepareCommandTree: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := tree.close(); closeErr != nil {
-			t.Errorf("close command tree: %v", closeErr)
+func TestRunCommandFailsBeforeDescendantCanEscapeWhenJobAssignmentFails(t *testing.T) {
+	switch os.Getenv("ZERO_ASSIGNMENT_FAILURE_TREE_HELPER") {
+	case "root":
+		child := exec.Command(os.Args[0], "-test.run=^TestRunCommandFailsBeforeDescendantCanEscapeWhenJobAssignmentFails$")
+		child.Env = append(os.Environ(), "ZERO_ASSIGNMENT_FAILURE_TREE_HELPER=child")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(2)
 		}
-	})
-	if err := command.Start(); err != nil {
-		_ = tree.attach(nil)
-		t.Fatalf("Start: %v", err)
-	}
-	if err := tree.attach(command.Process); err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		t.Fatalf("attachCommandTree: %v", err)
-	}
-	if tree.contained {
-		t.Fatal("command unexpectedly reported job containment after forced assignment failure")
-	}
-	if tree.processHandle == 0 {
-		t.Fatal("command tree did not retain the fallback process identity")
-	}
-	if err := command.Wait(); err != nil {
-		t.Fatalf("Wait: %v", err)
+		if err := os.WriteFile(os.Getenv("ZERO_ASSIGNMENT_FAILURE_TREE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			os.Exit(3)
+		}
+		return
+	case "child":
+		time.Sleep(30 * time.Second)
+		return
 	}
 
-	if err := tree.cancel(); err != nil {
-		t.Fatalf("cancel after root exit: %v", err)
+	originalAssign := assignCommandProcessToJob
+	assignCommandProcessToJob = func(windows.Handle, windows.Handle) error {
+		return windows.ERROR_ACCESS_DENIED
 	}
-	if taskkillCalls != 0 {
-		t.Fatalf("fallback targeted an exited root's numeric PID %d time(s)", taskkillCalls)
+	t.Cleanup(func() { assignCommandProcessToJob = originalAssign })
+
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	ctx := context.Background()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunCommandFailsBeforeDescendantCanEscapeWhenJobAssignmentFails$")
+	command.Env = append(os.Environ(),
+		"ZERO_ASSIGNMENT_FAILURE_TREE_HELPER=root",
+		"ZERO_ASSIGNMENT_FAILURE_TREE_PID_FILE="+pidFile,
+	)
+	started := time.Now()
+	err := RunCommand(ctx, command)
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("RunCommand took %s after job assignment failed", elapsed)
+	}
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("RunCommand error = %v, want ERROR_ACCESS_DENIED", err)
+	}
+	if command.ProcessState == nil || !command.ProcessState.Exited() {
+		t.Fatalf("suspended command was not killed and reaped: state = %v", command.ProcessState)
+	}
+	if _, statErr := os.Stat(pidFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("suspended command spawned a descendant after job assignment failed: PID file error = %v", statErr)
 	}
 }
