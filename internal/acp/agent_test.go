@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -67,9 +70,14 @@ func testDeps(t *testing.T) Deps {
 // clientHarness wires a client Conn to an Agent over in-memory pipes and collects
 // session/update text chunks.
 type clientHarness struct {
-	client  *Conn
-	updates chan string
-	stop    func()
+	client        *Conn
+	updates       chan string
+	notifications chan ContentChunk
+	// tools carries replayed and live tool-call notifications. They are a
+	// different wire shape from a message chunk, so decoding them into
+	// ContentChunk would silently blank every field the assertions need.
+	tools chan ToolCallUpdate
+	stop  func()
 }
 
 func newHarness(t *testing.T, deps Deps) *clientHarness {
@@ -80,18 +88,38 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 	client := NewConn(br, bw)
 	a := NewAgent(agentConn, deps)
 
-	h := &clientHarness{client: client, updates: make(chan string, 128)}
+	h := &clientHarness{client: client, updates: make(chan string, 128), notifications: make(chan ContentChunk, 128), tools: make(chan ToolCallUpdate, 128)}
 	client.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
-		var probe struct {
+		// Decode the discriminator ALONE first. ContentChunk and ToolCallUpdate
+		// disagree on the shape of "content" (a block vs an array of them), so
+		// decoding straight into ContentChunk makes every tool_call_update fail
+		// to unmarshal and vanish — which reads exactly like a notification that
+		// was never sent.
+		var kind struct {
 			Update struct {
 				SessionUpdate string `json:"sessionUpdate"`
-				Content       struct {
-					Text string `json:"text"`
-				} `json:"content"`
 			} `json:"update"`
+		}
+		if json.Unmarshal(params, &kind) != nil {
+			return
+		}
+		if kind.Update.SessionUpdate == UpdateToolCall || kind.Update.SessionUpdate == UpdateToolCallUpdate {
+			var toolProbe struct {
+				Update ToolCallUpdate `json:"update"`
+			}
+			if json.Unmarshal(params, &toolProbe) == nil {
+				h.tools <- toolProbe.Update
+			}
+			return
+		}
+		var probe struct {
+			Update ContentChunk `json:"update"`
 		}
 		if json.Unmarshal(params, &probe) != nil {
 			return
+		}
+		if probe.Update.SessionUpdate == UpdateAgentMessageChunk || probe.Update.SessionUpdate == UpdateUserMessageChunk {
+			h.notifications <- probe.Update
 		}
 		if probe.Update.SessionUpdate == UpdateAgentMessageChunk {
 			h.updates <- probe.Update.Content.Text
@@ -124,7 +152,8 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	if initRes.ProtocolVersion != ProtocolVersion {
 		t.Fatalf("protocol version = %d", initRes.ProtocolVersion)
 	}
-	if !initRes.AgentCapabilities.LoadSession || !initRes.AgentCapabilities.PromptCapabilities.Image {
+	if !initRes.AgentCapabilities.LoadSession || !initRes.AgentCapabilities.PromptCapabilities.Image ||
+		initRes.AgentCapabilities.SessionCapabilities == nil || initRes.AgentCapabilities.SessionCapabilities.List == nil || initRes.AgentCapabilities.SessionCapabilities.Resume == nil {
 		t.Fatalf("unexpected capabilities: %+v", initRes.AgentCapabilities)
 	}
 
@@ -164,6 +193,170 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	}
 }
 
+func TestACPListsOnlyResumableSessionMetadata(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) { return filepath.Clean(cwd), nil }
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	for _, input := range []sessions.CreateInput{
+		{SessionID: "desktop-a", Title: "First", Cwd: workspaceA, ModelID: "model-a"},
+		{SessionID: "desktop-b", Title: "Second", Cwd: workspaceB, ModelID: "model-b"},
+		{SessionID: "child-run", SessionKind: sessions.SessionKindChild, Title: "Internal child", Cwd: workspaceA},
+	} {
+		if _, err := deps.Store.Create(input); err != nil {
+			t.Fatalf("create %s: %v", input.SessionID, err)
+		}
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var all ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &all); err != nil {
+		t.Fatalf("session/list: %v", err)
+	}
+	if len(all.Sessions) != 2 {
+		t.Fatalf("all sessions = %+v, want two resumable sessions", all.Sessions)
+	}
+	byID := make(map[string]SessionInfo, len(all.Sessions))
+	for _, item := range all.Sessions {
+		byID[item.SessionID] = item
+	}
+	if _, found := byID["child-run"]; found {
+		t.Fatal("agent-owned child session leaked into the desktop session picker")
+	}
+	if got := byID["desktop-a"]; got.Title != "First" || got.Cwd != workspaceA || got.Meta == nil || got.Meta.ModelID != "model-a" || got.Meta.CreatedAt == "" || got.UpdatedAt == "" {
+		t.Fatalf("desktop-a summary = %+v", got)
+	}
+
+	var filtered ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: workspaceB}, &filtered); err != nil {
+		t.Fatalf("filtered session/list: %v", err)
+	}
+	if len(filtered.Sessions) != 1 || filtered.Sessions[0].SessionID != "desktop-b" {
+		t.Fatalf("filtered sessions = %+v, want only desktop-b", filtered.Sessions)
+	}
+
+	var equivalent ListSessionsResult
+	equivalentPath := workspaceB + string(os.PathSeparator) + "."
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: equivalentPath}, &equivalent); err != nil {
+		t.Fatalf("equivalent-path session/list: %v", err)
+	}
+	if len(equivalent.Sessions) != 1 || equivalent.Sessions[0].SessionID != "desktop-b" {
+		t.Fatalf("equivalent-path sessions = %+v, want only desktop-b", equivalent.Sessions)
+	}
+
+	err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cursor: "not-issued"}, &ListSessionsResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+		t.Fatalf("invalid cursor error = %v, want invalid params", err)
+	}
+}
+
+func TestACPLoadReplaysHistoryAndResumeDoesNot(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "replay-session", Title: "Replay", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "first user"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "first answer"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "second user"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	loader := newHarness(t, deps)
+	var loaded LoadSessionResult
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	wantKinds := []string{UpdateUserMessageChunk, UpdateAgentMessageChunk, UpdateUserMessageChunk}
+	wantText := []string{"first user", "first answer", "second user"}
+	seenIDs := map[string]bool{}
+	firstLoadIDs := make([]string, 0, len(wantKinds))
+	for i := range wantKinds {
+		select {
+		case update := <-loader.notifications:
+			if update.SessionUpdate != wantKinds[i] || update.Content.Text != wantText[i] {
+				t.Fatalf("history update %d = %+v", i, update)
+			}
+			if update.MessageID == "" || seenIDs[update.MessageID] {
+				t.Fatalf("history update %d has missing/duplicate message id %q", i, update.MessageID)
+			}
+			seenIDs[update.MessageID] = true
+			firstLoadIDs = append(firstLoadIDs, update.MessageID)
+		case <-ctx.Done():
+			t.Fatalf("history update %d was not replayed", i)
+		}
+	}
+	loader.stop()
+	secondLoader := newHarness(t, deps)
+	if err := secondLoader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("second session/load: %v", err)
+	}
+	for i, wantID := range firstLoadIDs {
+		select {
+		case update := <-secondLoader.notifications:
+			if update.MessageID != wantID {
+				t.Fatalf("second load message id %d = %q, want stable %q", i, update.MessageID, wantID)
+			}
+		case <-ctx.Done():
+			t.Fatalf("second load history update %d was not replayed", i)
+		}
+	}
+	secondLoader.stop()
+
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	select {
+	case update := <-resumer.notifications:
+		t.Fatalf("session/resume replayed history: %+v", update)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestACPLoadAndResumeStayBoundToThePersistedWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "workspace-bound", Cwd: workspaceA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		err := h.client.Call(ctx, method, LoadSessionParams{SessionID: created.SessionID, Cwd: workspaceB, McpServers: []McpServer{}}, &LoadSessionResult{})
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || !strings.Contains(rpcErr.Message, "persisted workspace") {
+			t.Fatalf("%s with mismatched cwd error = %v, want persisted-workspace invalid params", method, err)
+		}
+	}
+
+	missing, err := deps.Store.Create(sessions.CreateInput{SessionID: "workspace-missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: missing.SessionID, Cwd: workspaceA, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || !strings.Contains(rpcErr.Message, "no persisted workspace") {
+		t.Fatalf("resume with missing persisted cwd error = %v, want invalid params", err)
+	}
+}
+
 func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	deps := testDeps(t)
 	deps.ResolveConfig = func(_ string, o config.Overrides) (config.ResolvedConfig, error) {
@@ -185,8 +378,9 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	workspace := t.TempDir()
 	var created NewSessionResult
-	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
 	option := created.ConfigOptions[0]
@@ -216,7 +410,7 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	h = newHarness(t, deps)
 	defer h.stop()
 	var loaded LoadSessionResult
-	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID}, &loaded); err != nil {
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace}, &loaded); err != nil {
 		t.Fatalf("session/load: %v", err)
 	}
 	if len(loaded.ConfigOptions) != 2 || loaded.ConfigOptions[0].CurrentValue != "gpt-5.4-mini" {
@@ -267,8 +461,9 @@ func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	workspace := t.TempDir()
 	var created NewSessionResult
-	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
 	var selected SetSessionConfigOptionResult
@@ -284,7 +479,7 @@ func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
 	h = newHarness(t, deps)
 	defer h.stop()
 	var loaded LoadSessionResult
-	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID}, &loaded); err != nil {
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace}, &loaded); err != nil {
 		t.Fatalf("session/load: %v", err)
 	}
 	option := loaded.ConfigOptions[0]
@@ -597,5 +792,872 @@ func drainTextUntil(t *testing.T, ch <-chan string, done func(string) bool) stri
 		case <-deadline:
 			return b.String()
 		}
+	}
+}
+
+// normalisingResolver reproduces what ResolveWorkspaceRoot actually does — abs,
+// Clean, and a stat that the path exists — WITHOUT resolving symlinks or folding
+// case, which is the behaviour that makes two spellings of one directory produce
+// two different roots.
+//
+// The package's own testDeps resolver is the identity function. Under it the
+// workspace guard degenerates to "are these two strings different", fed two
+// unrelated temp directories, so it can only ever answer yes: the rejection
+// direction is pinned and the acceptance direction is asserted nowhere.
+func normalisingResolver(t *testing.T) func(string) (string, error) {
+	t.Helper()
+	return func(cwd string) (string, error) {
+		absolute, err := filepath.Abs(cwd)
+		if err != nil {
+			return "", err
+		}
+		absolute = filepath.Clean(absolute)
+		info, err := os.Stat(absolute)
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", errors.New("workspace is not a directory")
+		}
+		return absolute, nil
+	}
+}
+
+// ONE DIRECTORY UNDER TWO SPELLINGS IS ONE WORKSPACE.
+//
+// A session persisted from the TUI has to stay resumable from an editor holding
+// a different spelling of the same project folder — the two processes most
+// likely to disagree about spelling, and the case this feature exists for. It
+// failed closed, so it blocked legitimate resumes rather than admitting foreign
+// ones, but session/list filtered by the other spelling returned nothing, which
+// makes it an invisible failure rather than a reported one.
+func TestACPResumesAcrossTwoSpellingsOfOneWorkspace(t *testing.T) {
+	real := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	directoryAlias(t, real, alias)
+	// The premise: the resolver really does produce two different strings.
+	resolve := normalisingResolver(t)
+	realRoot, err := resolve(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot, err := resolve(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realRoot == aliasRoot {
+		t.Skipf("this filesystem folds the alias away (%q == %q); the guard cannot be exercised", realRoot, aliasRoot)
+	}
+
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = resolve
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "aliased-workspace", Cwd: real})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// ACCEPTANCE: resume and load under the OTHER spelling must both work.
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		var result LoadSessionResult
+		if err := h.client.Call(ctx, method, LoadSessionParams{SessionID: created.SessionID, Cwd: alias, McpServers: []McpServer{}}, &result); err != nil {
+			t.Errorf("%s under an alias of the persisted workspace failed: %v", method, err)
+		}
+	}
+
+	// And session/list filtered by the alias must still find it.
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: alias}, &listed); err != nil {
+		t.Fatalf("session/list: %v", err)
+	}
+	found := false
+	for _, item := range listed.Sessions {
+		if item.SessionID == created.SessionID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("session/list filtered by an alias of its own workspace returned %d sessions without it", len(listed.Sessions))
+	}
+
+	// REJECTION still holds: a genuinely different directory is refused.
+	other := t.TempDir()
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: other, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+		t.Errorf("resume from an unrelated workspace = %v, want invalid params", err)
+	}
+}
+
+// THE WIRE KEYS ARE AN EXTERNAL CONTRACT, not internal names.
+//
+// Nothing pinned them, so renaming a Go field — or dropping an omitempty —
+// would break every client and leave the suite green. These are the keys this
+// feature adds to the protocol; a change here is a change to what editors
+// consume.
+func TestSessionWireKeysAreStable(t *testing.T) {
+	marshalled := func(v any) map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	has := func(where string, got map[string]any, want ...string) {
+		t.Helper()
+		for _, key := range want {
+			if _, ok := got[key]; !ok {
+				t.Errorf("%s is missing the wire key %q; got %v", where, key, keysOf(got))
+			}
+		}
+	}
+
+	has("SessionInfo", marshalled(SessionInfo{
+		SessionID: "s1", Cwd: "/w", Title: "t", UpdatedAt: "now",
+		Meta: &SessionInfoMeta{ModelID: "m", CreatedAt: "then"},
+	}), "sessionId", "cwd", "title", "updatedAt", "_meta")
+
+	has("SessionInfoMeta", marshalled(SessionInfoMeta{ModelID: "m", CreatedAt: "then"}),
+		"modelId", "createdAt")
+
+	has("ListSessionsResult", marshalled(ListSessionsResult{
+		Sessions: []SessionInfo{}, NextCursor: "c",
+	}), "sessions", "nextCursor")
+
+	has("ListSessionsParams", marshalled(ListSessionsParams{Cwd: "/w", Cursor: "c"}),
+		"cwd", "cursor")
+
+	// sessionCapabilities is omitempty, so it must appear when SET — a client
+	// discovers list/resume support through it.
+	has("AgentCapabilities", marshalled(AgentCapabilities{
+		LoadSession:         true,
+		SessionCapabilities: &SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}},
+	}), "loadSession", "promptCapabilities", "sessionCapabilities")
+
+	capabilities := marshalled(SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}})
+	has("SessionCapabilities", capabilities, "list", "resume")
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// directoryAlias makes `alias` a second name for `target`.
+//
+// A JUNCTION ON WINDOWS, not a symlink. os.Symlink needs a privilege an ordinary
+// Windows session does not hold, so a test built on it SKIPS there — and Windows
+// is where junctions exist and where this bug came from. The guard would have
+// been verified only on the two platforms that never had the problem. mklink /J
+// needs no privilege, which is also how the defect was found.
+func directoryAlias(t *testing.T, target, alias string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", alias, target).CombinedOutput(); err != nil {
+			t.Skipf("cannot create a junction: %v %s", err, out)
+		}
+		return
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("cannot create a directory alias here: %v", err)
+	}
+}
+
+// A SESSION WITH NO PERSISTED WORKSPACE IS NOT RESUMABLE, SO IT IS NOT LISTED.
+//
+// activatePersistedSession refuses a session whose Cwd is empty, but the listing
+// advertised it anyway — offering the client a menu entry that only fails when
+// taken. Both halves are asserted together, because the listing is only correct
+// relative to what resume will accept.
+func TestSessionListOmitsSessionsWithoutAWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	usable, err := deps.Store.Create(sessions.CreateInput{SessionID: "has-cwd", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "no-cwd"}); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &listed); err != nil {
+		t.Fatal(err)
+	}
+	sawUsable := false
+	for _, item := range listed.Sessions {
+		if item.SessionID == "no-cwd" {
+			t.Errorf("session/list advertised a session with no persisted workspace")
+		}
+		if item.SessionID == usable.SessionID {
+			sawUsable = true
+		}
+	}
+	if !sawUsable {
+		t.Errorf("session/list dropped a usable session while filtering; got %d", len(listed.Sessions))
+	}
+
+	// The other half of the contract: resuming the omitted one really does fail,
+	// which is why omitting it is right rather than merely tidy.
+	err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: "no-cwd", Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || !strings.Contains(rpcErr.Message, "persisted workspace") {
+		t.Errorf("resume of a workspace-less session = %v, want a persisted-workspace error", err)
+	}
+}
+
+// EVERY LISTED SESSION IS ONE THE CLIENT CAN ACTUALLY TAKE.
+//
+// Resolving the persisted workspace only when a cwd filter was supplied left two
+// shapes on the menu that resume then refuses: a session whose workspace has
+// since been deleted, and a legacy entry holding a relative path — reported as
+// cwd "." although ACP requires SessionInfo.cwd to be absolute.
+func TestSessionListResolvesEveryWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = normalisingResolver(t)
+
+	gone := t.TempDir()
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "gone-ws", Cwd: gone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "relative-ws", Cwd: "."}); err != nil {
+		t.Fatal(err)
+	}
+	live := t.TempDir()
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "live-ws", Cwd: live}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var listed ListSessionsResult
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &listed); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]string{}
+	for _, item := range listed.Sessions {
+		seen[item.SessionID] = item.Cwd
+	}
+	if _, listedGone := seen["gone-ws"]; listedGone {
+		t.Error("a session whose workspace no longer exists was advertised; resume would refuse it")
+	}
+	if _, listedLive := seen["live-ws"]; !listedLive {
+		t.Error("a usable session was dropped while filtering unusable ones")
+	}
+	// THE RELATIVE ENTRY IS DROPPED. An earlier revision of this test asserted the
+	// opposite — that "." be normalised and kept — which reads as the generous
+	// choice but resolves the stored path against whatever directory this ACP
+	// server was started in. That does not recover the session's workspace; it
+	// invents one, and then advertises the invention as fact, so a conversation
+	// created for one project becomes resumable against another project's files,
+	// configuration and tools. The original base is not knowable from the
+	// metadata, so no entry is the only honest answer.
+	if invented, listedRelative := seen["relative-ws"]; listedRelative {
+		t.Errorf("a relative persisted workspace was listed as %q, rebased onto the current process directory", invented)
+	}
+	// EVERY reported cwd is absolute, which is the contract clients rely on.
+	for id, cwd := range seen {
+		if !filepath.IsAbs(cwd) {
+			t.Errorf("session %s was listed with a relative cwd %q; ACP requires an absolute path", id, cwd)
+		}
+	}
+}
+
+func TestResumeRefusesARelativePersistedWorkspace(t *testing.T) {
+	// OMITTING THE ENTRY FROM THE LISTING IS NOT THE WHOLE FIX. A client can ask
+	// to resume any id it already knows, and a stored "." still resolves against
+	// this process's directory — so a request naming that directory would be told
+	// it matched, and the conversation bound to a workspace it never belonged to.
+	// Both doors need the same lock.
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = normalisingResolver(t)
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "relative-ws", Cwd: "."}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// The directory the stored "." rebases onto. Naming it explicitly is what
+	// makes this test reach the persisted-cwd guard: a request with no cwd is now
+	// refused earlier, for a different reason, and would pass either way.
+	here, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// BOTH ACTIVATING METHODS, not just one. session/load and session/resume are
+	// separate entry points that today share activatePersistedSession — so a test
+	// through either passes while the guard holds. Naming both here is what keeps
+	// that true: if resume is ever given its own path, this fails rather than
+	// silently covering half the surface it claims to.
+	elsewhere := t.TempDir()
+	var out LoadSessionResult
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		// The invented root offered back as the answer: without the guard the two
+		// sides agree, because both were produced by resolving "." here.
+		err := h.client.Call(ctx, method, LoadSessionParams{SessionID: "relative-ws", Cwd: here}, &out)
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || !strings.Contains(rpcErr.Message, "not an absolute path") {
+			t.Errorf("%s of a relative persisted workspace into the ACP process directory %q = %v, want a persisted-workspace error", method, here, err)
+		}
+		// And an unrelated workspace must not be accepted as its home either.
+		if err := h.client.Call(ctx, method, ResumeSessionParams{SessionID: "relative-ws", Cwd: elsewhere}, &out); err == nil {
+			t.Errorf("%s of a relative persisted workspace into %q succeeded", method, elsewhere)
+		}
+	}
+}
+
+// processDirectoryResolver mirrors internal/cli/exec.go resolveWorkspaceRoot,
+// the resolver the real ACP surface is wired with: a blank cwd becomes the
+// directory the process was started in, a relative one is joined onto it. base
+// stands in for that directory so the test never depends on where `go test`
+// happens to run.
+func processDirectoryResolver(t *testing.T, base string) func(string) (string, error) {
+	t.Helper()
+	return func(cwd string) (string, error) {
+		resolved := strings.TrimSpace(cwd)
+		if resolved == "" {
+			resolved = base
+		} else if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(base, resolved)
+		}
+		resolved = filepath.Clean(resolved)
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", errors.New("workspace is not a directory")
+		}
+		return resolved, nil
+	}
+}
+
+// A REQUEST THAT NAMES NO WORKSPACE ACTIVATES NOTHING.
+//
+// ResumeSessionParams is an alias for LoadSessionParams, and cwd is a plain
+// string on both, so JSON decoding cannot tell an omitted field from an empty
+// one. The blank case used to be answered with the persisted cwd, which made
+// {"sessionId":"known"} — a request carrying no workspace at all — a complete
+// and successful activation. A relative cwd was worse than useless rather than
+// rejected: it was joined onto whatever directory the editor spawned `zero acp`
+// in, so it could agree with the persisted root by accident and hand the session
+// over anyway.
+//
+// The cases go over the wire as raw JSON on purpose. Marshalling a Go struct
+// always emits "cwd":"" and would never exercise the absent field, which is
+// where the defect lives.
+func TestActivationRequiresAnAbsoluteRequestWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	processDir := t.TempDir()
+	workspace := filepath.Join(processDir, "project")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deps.ResolveWorkspaceRoot = processDirectoryResolver(t, processDir)
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "persisted", Cwd: workspace}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		params  json.RawMessage
+		message string
+	}{
+		// The finding: cwd absent from the wire entirely.
+		{"omitted", json.RawMessage(`{"sessionId":"persisted","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{"empty", json.RawMessage(`{"sessionId":"persisted","cwd":"","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{"whitespace", json.RawMessage(`{"sessionId":"persisted","cwd":"   ","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		// "project" resolves onto processDir and MATCHES the persisted root, so
+		// this is the relative case that used to be accepted, not merely mis-erroring.
+		{"relative", json.RawMessage(`{"sessionId":"persisted","cwd":"project","mcpServers":[]}`), "cwd must be an absolute path: project"},
+		{"dot relative", json.RawMessage(`{"sessionId":"persisted","cwd":"./project","mcpServers":[]}`), "cwd must be an absolute path: ./project"},
+	}
+
+	// BOTH ACTIVATING METHODS. They share activatePersistedSession today; naming
+	// both keeps this honest if resume is ever given its own path.
+	for _, method := range []string{MethodSessionLoad, MethodSessionResume} {
+		for _, tc := range cases {
+			t.Run(method+"/"+tc.name, func(t *testing.T) {
+				h := newHarness(t, deps)
+				defer h.stop()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				var out LoadSessionResult
+				err := h.client.Call(ctx, method, tc.params, &out)
+				var rpcErr *rpcError
+				if !errors.As(err, &rpcErr) {
+					t.Fatalf("%s %s = %v, want a JSON-RPC error", method, tc.params, err)
+				}
+				if rpcErr.Code != codeInvalidParams {
+					t.Errorf("%s %s error code = %d, want %d", method, tc.params, rpcErr.Code, codeInvalidParams)
+				}
+				if rpcErr.Message != tc.message {
+					t.Errorf("%s %s error = %q, want %q", method, tc.params, rpcErr.Message, tc.message)
+				}
+				// AND THE SESSION IS NOT LIVE. The error alone would not prove it:
+				// activation publishes the session before it returns, so a refusal
+				// that still registered would leave session/prompt and session/set_mode
+				// working on a workspace the client never named.
+				modeErr := h.client.Call(ctx, MethodSessionSetMode,
+					SetSessionModeParams{SessionID: "persisted", ModeID: string(agent.PermissionModeAuto)},
+					&SetSessionModeResult{})
+				if !errors.As(modeErr, &rpcErr) || rpcErr.Message != "unknown session: persisted" {
+					t.Errorf("after a refused %s the session was live: set_mode = %v, want %q", method, modeErr, "unknown session: persisted")
+				}
+			})
+		}
+	}
+
+	// The same request with the workspace spelled out is what the client is
+	// expected to send, and it still works.
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: "persisted", Cwd: workspace, McpServers: []McpServer{}}, &out); err != nil {
+		t.Fatalf("session/resume with an absolute cwd: %v", err)
+	}
+}
+
+// session/new roots a BRAND NEW session, and its sandbox and file-tool
+// confinement, at the client's cwd. The same absent-field decoding applied
+// there: {"mcpServers":[]} created a session rooted at the ACP process's own
+// directory and persisted that invented path as the session's workspace.
+func TestSessionNewRequiresAnAbsoluteWorkspace(t *testing.T) {
+	deps := testDeps(t)
+	processDir := t.TempDir()
+	deps.ResolveWorkspaceRoot = processDirectoryResolver(t, processDir)
+	if err := os.MkdirAll(filepath.Join(processDir, "project"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, tc := range []struct {
+		params  json.RawMessage
+		message string
+	}{
+		{json.RawMessage(`{"mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{json.RawMessage(`{"cwd":"","mcpServers":[]}`), "cwd is required and must be an absolute path"},
+		{json.RawMessage(`{"cwd":"project","mcpServers":[]}`), "cwd must be an absolute path: project"},
+	} {
+		var created NewSessionResult
+		err := h.client.Call(ctx, MethodSessionNew, tc.params, &created)
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || rpcErr.Message != tc.message {
+			t.Errorf("session/new %s = %v, want invalid params %q", tc.params, err, tc.message)
+		}
+		if created.SessionID != "" {
+			t.Errorf("session/new %s created session %q despite refusing the request", tc.params, created.SessionID)
+		}
+	}
+
+	listed, err := deps.Store.ListResumable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Errorf("refused session/new requests persisted %d session(s); the first is rooted at %q", len(listed), listed[0].Cwd)
+	}
+}
+
+// The cwd filter is the one ACP leaves optional, so blank still means "no
+// filter" — but a relative one would be rebased onto the ACP process directory
+// and answer about a workspace the client never named.
+func TestSessionListRejectsARelativeCwdFilter(t *testing.T) {
+	deps := testDeps(t)
+	processDir := t.TempDir()
+	workspace := filepath.Join(processDir, "project")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deps.ResolveWorkspaceRoot = processDirectoryResolver(t, processDir)
+	if _, err := deps.Store.Create(sessions.CreateInput{SessionID: "persisted", Cwd: workspace}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out ListSessionsResult
+	err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{Cwd: "project"}, &out)
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams || rpcErr.Message != "cwd must be an absolute path: project" {
+		t.Errorf("session/list with a relative cwd filter = %v, want invalid params %q", err, "cwd must be an absolute path: project")
+	}
+
+	// Omitting the filter is still legal, and still lists the session.
+	if err := h.client.Call(ctx, MethodSessionList, ListSessionsParams{}, &out); err != nil {
+		t.Fatalf("session/list without a filter: %v", err)
+	}
+	if len(out.Sessions) != 1 || out.Sessions[0].SessionID != "persisted" {
+		t.Errorf("unfiltered session/list = %+v, want the one persisted session", out.Sessions)
+	}
+}
+
+// A COMPACTED SESSION MUST RESUME AS THE CONVERSATION IT BECAME, NOT THE ONE IT
+// WAS. This session's first three turns were compacted into one summary. Reading
+// the raw log would replay those superseded turns and drop the summary; reading
+// the rehydrated view without projecting EventCompaction would drop the summary
+// and the turns both. Load and resume must agree, so both are asserted.
+func TestACPCompactedHistoryReplacesCompactedTurnsWithTheirSummary(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "compacted-session", Title: "Compacted", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appended, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "compacted question"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "compacted answer"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "surviving question"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(appended) != 3 {
+		t.Fatalf("appended %d events, want 3", len(appended))
+	}
+	const summary = "Earlier: the user asked about scope roots and got an answer."
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{{
+		Type: sessions.EventCompaction,
+		Payload: map[string]any{
+			"summary":      summary,
+			"preserveLast": 1,
+			"compactableEvents": []map[string]any{
+				{"id": appended[0].ID, "sequence": appended[0].Sequence},
+				{"id": appended[1].ID, "sequence": appended[1].Sequence},
+			},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	loader := newHarness(t, deps)
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	wantKinds := []string{UpdateAgentMessageChunk, UpdateUserMessageChunk}
+	wantText := []string{summary, "surviving question"}
+	for i := range wantKinds {
+		select {
+		case update := <-loader.notifications:
+			if update.SessionUpdate != wantKinds[i] || update.Content.Text != wantText[i] {
+				t.Fatalf("replayed update %d = %+v, want %s %q", i, update, wantKinds[i], wantText[i])
+			}
+		case <-ctx.Done():
+			t.Fatalf("replayed update %d never arrived", i)
+		}
+	}
+	// The compacted-away turns must NOT also be replayed after the summary.
+	select {
+	case update := <-loader.notifications:
+		t.Fatalf("a compacted-away turn was replayed: %+v", update)
+	case <-time.After(150 * time.Millisecond):
+	}
+	loader.stop()
+
+	// Resume takes the same history. Its prompt context is what proves it: the
+	// summary must be in there and the compacted originals must not, so the
+	// prompt the agent loop actually receives is captured rather than inferred.
+	prompts := make(chan string, 4)
+	realRun := deps.RunAgent
+	deps.RunAgent = func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		prompts <- prompt
+		return realRun(ctx, prompt, provider, opts)
+	}
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	if err := resumer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID,
+		Prompt:    []ContentBlock{{Type: "text", Text: "carry on"}},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	prompt := <-prompts
+	if !strings.Contains(prompt, summary) {
+		t.Fatalf("resumed prompt lost the compaction summary:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "compacted answer") {
+		t.Fatalf("resumed prompt replayed a compacted-away turn:\n%s", prompt)
+	}
+}
+
+// Tool activity is part of the transcript a client redraws on session/load, and
+// a result is only renderable if it pairs with its call by the SAME id. Resume
+// stays replay-free.
+func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "tool-replay-session", Title: "Tools", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "read the file"}},
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "arguments": `{"path":"scope.go"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "status": "ok", "output": "package sandbox", "changedFiles": []string{"scope.go", "scope_test.go"}}},
+		// An older record spells the id "id" rather than "toolCallId".
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "bash", "id": "call-88", "arguments": `{"command":"go build"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "bash", "id": "call-88", "status": "error", "output": "build failed"}},
+		// A start with no result is an interrupted call, not a completed one.
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "grep", "toolCallId": "call-99", "arguments": `{"pattern":"TODO"}`}},
+		// No id at all: unpairable, so it must be skipped rather than replayed.
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "orphan", "arguments": "{}"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	loader := newHarness(t, deps)
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	type want struct {
+		kind, id, status string
+		locations        []string
+	}
+	wants := []want{
+		{UpdateToolCall, "call-77", ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, "call-77", ToolStatusCompleted, []string{"scope.go", "scope_test.go"}},
+		{UpdateToolCall, "call-88", ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, "call-88", ToolStatusFailed, nil},
+		{UpdateToolCall, "call-99", ToolStatusInProgress, nil},
+	}
+	for i, w := range wants {
+		select {
+		case update := <-loader.tools:
+			if update.SessionUpdate != w.kind || update.ToolCallID != w.id || update.Status != w.status {
+				t.Fatalf("tool update %d = %+v, want %s/%s/%s", i, update, w.kind, w.id, w.status)
+			}
+			if len(update.Locations) != len(w.locations) {
+				t.Fatalf("tool update %d locations = %+v, want %v", i, update.Locations, w.locations)
+			}
+			for j, path := range w.locations {
+				if update.Locations[j].Path != path {
+					t.Fatalf("tool update %d location %d = %+v, want %q", i, j, update.Locations[j], path)
+				}
+			}
+		case <-ctx.Done():
+			t.Fatalf("tool update %d never arrived", i)
+		}
+	}
+	select {
+	case update := <-loader.tools:
+		t.Fatalf("an unpairable tool call was replayed: %+v", update)
+	case <-time.After(150 * time.Millisecond):
+	}
+	loader.stop()
+
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	select {
+	case update := <-resumer.tools:
+		t.Fatalf("session/resume replayed tool activity: %+v", update)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// Drive the callback-to-store boundary through session/prompt rather than
+// seeding replay-shaped events by hand. A fresh agent must then reconstruct the
+// same call/result pair and changed-file locations from the durable log.
+func TestACPPromptPersistsToolActivityForFreshLoad(t *testing.T) {
+	deps := testDeps(t)
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		call := agent.ToolCall{ID: "call-live", Name: "edit_file", Arguments: `{"path":"a.go"}`}
+		result := agent.ToolResult{
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusOK,
+			Output:       "updated",
+			ChangedFiles: []string{"a.go", "b.go"},
+		}
+		opts.OnToolCall(call)
+		opts.OnToolResult(result)
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workspace := t.TempDir()
+	writer := newHarness(t, deps)
+	var created NewSessionResult
+	if err := writer.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := writer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID,
+		Prompt:    []ContentBlock{{Type: "text", Text: "edit the files"}},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	writer.stop()
+
+	events, err := deps.Store.ReadEvents(created.SessionID)
+	if err != nil {
+		t.Fatalf("read persisted prompt events: %v", err)
+	}
+	wantTypes := []sessions.EventType{
+		sessions.EventMessage,
+		sessions.EventToolCall,
+		sessions.EventToolResult,
+		sessions.EventMessage,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("persisted %d events, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for i, want := range wantTypes {
+		if events[i].Type != want {
+			t.Fatalf("event %d type = %s, want %s", i, events[i].Type, want)
+		}
+	}
+	rawResult, err := json.Marshal(events[2].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedResult struct {
+		ToolCallID   string   `json:"toolCallId"`
+		ChangedFiles []string `json:"changedFiles"`
+	}
+	if err := json.Unmarshal(rawResult, &storedResult); err != nil {
+		t.Fatal(err)
+	}
+	if storedResult.ToolCallID != "call-live" || strings.Join(storedResult.ChangedFiles, ",") != "a.go,b.go" {
+		t.Fatalf("stored tool result = %+v", storedResult)
+	}
+
+	loader := newHarness(t, deps)
+	defer loader.stop()
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	nextReplay := func(label string) ToolCallUpdate {
+		t.Helper()
+		select {
+		case update := <-loader.tools:
+			return update
+		case <-ctx.Done():
+			t.Fatalf("replayed %s never arrived: %v", label, ctx.Err())
+			return ToolCallUpdate{}
+		}
+	}
+	start := nextReplay("tool start")
+	result := nextReplay("tool result")
+	if start.SessionUpdate != UpdateToolCall || start.ToolCallID != "call-live" || start.Status != ToolStatusInProgress {
+		t.Fatalf("replayed tool start = %+v", start)
+	}
+	if result.SessionUpdate != UpdateToolCallUpdate || result.ToolCallID != "call-live" || result.Status != ToolStatusCompleted {
+		t.Fatalf("replayed tool result = %+v", result)
+	}
+	if len(result.Locations) != 2 || result.Locations[0].Path != "a.go" || result.Locations[1].Path != "b.go" {
+		t.Fatalf("replayed tool locations = %+v", result.Locations)
+	}
+}
+
+// sessionCapabilities is omitempty. The positive case is asserted above; this is
+// the other half — an agent that does NOT support list/resume must omit the key
+// entirely rather than send a null a client could read as "supported". Raised by
+// CodeRabbit.
+func TestSessionCapabilitiesAreOmittedWhenUnset(t *testing.T) {
+	encoded, err := json.Marshal(AgentCapabilities{LoadSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["sessionCapabilities"]; ok {
+		t.Fatalf("unset sessionCapabilities was still serialized: %s", encoded)
+	}
+}
+
+// A RESUME THAT CANNOT RESTORE ITS CONTEXT MUST FAIL, NOT SUCCEED QUIETLY.
+// Resume's entire contract is "carry on from where this left off". If the events
+// file is unreadable, the old behaviour registered the session anyway and
+// returned success: the client held a live session ID under the old identity
+// whose next prompt ran as a fresh conversation. Nothing on the wire said so.
+//
+// Load keeps the best-effort policy deliberately — it replays what it can and
+// warns — so both halves are asserted here to keep the two from being
+// accidentally unified again.
+func TestACPResumeFailsWhenHistoryCannotBeRestored(t *testing.T) {
+	deps := testDeps(t)
+	cwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: cwd})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	eventsPath := filepath.Join(deps.Store.RootDir, meta.SessionID, sessions.EventsFile)
+	if err := os.WriteFile(eventsPath, []byte("{bad json}\n"), 0o600); err != nil {
+		t.Fatalf("write corrupt events: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	err = resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &ResumeSessionResult{})
+	if err == nil {
+		t.Fatal("session/resume reported success despite unreadable history")
+	}
+	// And the session must not have been published: a prompt against it has to
+	// be refused, not silently answered with no context.
+	if err := resumer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: meta.SessionID,
+		Prompt:    []ContentBlock{TextBlock("carry on")},
+	}, &PromptResult{}); err == nil {
+		t.Fatal("a session whose resume failed was still promptable")
+	}
+
+	// Load is the deliberate exception and still opens.
+	loader := newHarness(t, deps)
+	defer loader.stop()
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load must stay best-effort, got: %v", err)
 	}
 }
