@@ -21,10 +21,19 @@ import (
 // connection usability have different lifetimes. A sink that was never published
 // to means Start never happened, so prepare, pipe, and Start failures stay silent
 // exactly as before.
+//
+// IT IS ALSO AN EVENT, NOT ONLY A VALUE. A retained sink that nobody re-reads is
+// still a lost disclosure: both production reporters sample once, immediately
+// after registration returns, and a Start that completes after that sample had
+// no way to reach them. onPublish lets a reporter subscribe; if the launch has
+// already happened by the time it subscribes, it is told at once, so the fact
+// reaches exactly one presentation regardless of which side won the race.
 type launchSink struct {
-	mu       sync.Mutex
-	launched bool
-	notices  []string
+	mu        sync.Mutex
+	launched  bool
+	notices   []string
+	onPublish func(notices []string)
+	delivered bool
 }
 
 type launchSinkKey struct{}
@@ -46,9 +55,22 @@ func publishLaunch(ctx context.Context, notices []string) {
 		return
 	}
 	sink.mu.Lock()
-	defer sink.mu.Unlock()
 	sink.launched = true
 	sink.notices = append([]string(nil), notices...)
+	deliver := sink.pendingDeliveryLocked()
+	sink.mu.Unlock()
+	if deliver != nil {
+		deliver()
+	}
+}
+
+// PublishLaunchForTest is publishLaunch for a test in another package that
+// injects a client factory and needs to mark its fake process as started. It
+// is the same function with the same context lookup, so a test exercises the
+// real sink rather than a stand-in, and it is inert on any context that did
+// not come through registration.
+func PublishLaunchForTest(ctx context.Context, notices []string) {
+	publishLaunch(ctx, notices)
 }
 
 // observe reports whether Start was reached and what applied to it. Read from
@@ -61,4 +83,36 @@ func (sink *launchSink) observe() (bool, []string) {
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 	return sink.launched, append([]string(nil), sink.notices...)
+}
+
+// subscribe registers the one presentation this launch should reach. If the
+// launch already happened, fn runs before subscribe returns; otherwise it runs
+// from publishLaunch. Either way it runs at most once, and a second subscriber
+// replaces nothing: the first delivery is the only delivery.
+func (sink *launchSink) subscribe(fn func(notices []string)) {
+	if sink == nil || fn == nil {
+		return
+	}
+	sink.mu.Lock()
+	if sink.onPublish == nil {
+		sink.onPublish = fn
+	}
+	deliver := sink.pendingDeliveryLocked()
+	sink.mu.Unlock()
+	if deliver != nil {
+		deliver()
+	}
+}
+
+// pendingDeliveryLocked returns the delivery to perform, or nil, and marks it
+// done. Called with mu held; the returned closure must be invoked with mu
+// released, since a subscriber may itself take other locks.
+func (sink *launchSink) pendingDeliveryLocked() func() {
+	if !sink.launched || sink.onPublish == nil || sink.delivered {
+		return nil
+	}
+	sink.delivered = true
+	fn := sink.onPublish
+	notices := append([]string(nil), sink.notices...)
+	return func() { fn(notices) }
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -202,5 +203,58 @@ func TestRestoredNoPreviewCardShowsTheDisclosureExactlyOnce(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A CLI-WRITTEN RESULT RESUMED IN THE TUI MUST STILL DISCLOSE, ONCE.
+//
+// The headless writers and the interactive writer append to the same default
+// session store, and the TUI resumes from it. The headless payload used to
+// carry only the decorated ModelOutput: no typed notices, no undecorated body.
+// On restore the transcript found neither, and for a long result the card is
+// collapsed by default, so there was no body to carry the decorated text and no
+// notice furniture to draw it. The disclosure the run had shown was simply gone
+// from the resumed transcript.
+//
+// Both writers now go through ToolResultSessionPayload, so this exercises the
+// exact bytes the CLI persists, restores them the way the TUI does, and renders
+// the collapsed card, which is the shape the old CLI test could not reach.
+func TestHeadlessWrittenCollapsedResultRestoresTheDisclosureExactlyOnce(t *testing.T) {
+	var lines []string
+	for i := 0; i < cardBodyMaxLines*3; i++ {
+		lines = append(lines, fmt.Sprintf("PROBE-LINE-%03d", i))
+	}
+	result := agent.ToolResult{
+		ToolCallID:         "call-cli",
+		Name:               "bash",
+		Status:             tools.StatusOK,
+		Output:             strings.Join(lines, "\n"),
+		EnforcementNotices: []string{cardNotice},
+	}
+
+	// The CLI's persisted payload IS this function now; encode it as the
+	// session store would.
+	encoded, err := json.Marshal(ToolResultSessionPayload(result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: json.RawMessage(encoded)}})
+	if len(rows) != 1 {
+		t.Fatalf("expected one restored row, got %d", len(rows))
+	}
+	if len(rows[0].enforcementNotices) == 0 {
+		t.Fatal("the headless payload carried no typed notices, so the resumed card cannot render the disclosure")
+	}
+
+	for _, expanded := range []bool{false, true} {
+		card := renderedCard(rows[0], expanded)
+		if n := strings.Count(card, "WRITE_RESTRICTED"); n != 1 {
+			t.Errorf("expanded=%v: restored headless card rendered the disclosure %d time(s), want exactly 1:\n%s", expanded, n, card)
+		}
+	}
+	// Collapsed is the case that used to lose it: with no body shown there was
+	// nothing to carry a decorated notice.
+	if card := renderedCard(rows[0], false); !strings.Contains(card, "WRITE_RESTRICTED") {
+		t.Errorf("the collapsed restored card has no disclosure at all:\n%s", card)
 	}
 }
