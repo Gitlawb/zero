@@ -80,8 +80,14 @@ type Runtime struct {
 	// sink outlives registration and StartupDisclosures reads through it, so a
 	// late Start is reported instead of lost. See StartupDisclosures.
 	disclosureSources []disclosureSource
-	once              sync.Once
-	err               error
+	// disclosureStream is the typed hand-off to whoever owns the output. Created
+	// on the first StartupDisclosureStream call and closed by Close, so a launch
+	// that resolves after the runtime is gone has somewhere defined to land:
+	// nowhere.
+	disclosureStreamOnce sync.Once
+	disclosureStream     *StartupDisclosureStream
+	once                 sync.Once
+	err                  error
 }
 
 // disclosureSource pairs a server with both the notices known at commit time and
@@ -114,23 +120,32 @@ type disclosureSource struct {
 //
 // Late deliveries arrive in completion order, which is the only order they
 // have; the immediate set keeps server order.
-func (runtime *Runtime) ReportStartupDisclosures(report func(StartupDisclosure)) {
-	if runtime == nil || report == nil {
-		return
+//
+// A STREAM, NOT A CALLBACK. An earlier version took the presentation function
+// and invoked it from whichever goroutine resolved the launch, which for an
+// abandoned attempt is the connect goroutine. That put a write to the caller's
+// writer on a goroutine and at a time the caller did not control. The runtime
+// owns the fact; it appends the fact here and the owner drains it. See
+// StartupDisclosureStream.
+func (runtime *Runtime) StartupDisclosureStream() *StartupDisclosureStream {
+	if runtime == nil {
+		return nil
 	}
-	for _, source := range runtime.disclosureSources {
-		if len(source.notices) > 0 {
-			report(StartupDisclosure{Name: source.name, Notices: append([]string(nil), source.notices...)})
-			continue
-		}
-		name := source.name
-		source.sink.subscribe(func(notices []string) {
-			if len(notices) == 0 {
-				return
+	runtime.disclosureStreamOnce.Do(func() {
+		stream := newStartupDisclosureStream()
+		runtime.disclosureStream = stream
+		for _, source := range runtime.disclosureSources {
+			if len(source.notices) > 0 {
+				stream.offer(StartupDisclosure{Name: source.name, Notices: append([]string(nil), source.notices...)})
+				continue
 			}
-			report(StartupDisclosure{Name: name, Notices: notices})
-		})
-	}
+			name := source.name
+			source.sink.subscribe(func(notices []string) {
+				stream.offer(StartupDisclosure{Name: name, Notices: notices})
+			})
+		}
+	})
+	return runtime.disclosureStream
 }
 
 // Skipped returns the servers that were skipped during registration (unreachable
@@ -409,6 +424,10 @@ func (runtime *Runtime) Close() error {
 		return nil
 	}
 	runtime.once.Do(func() {
+		// End disclosure delivery FIRST. A launch that resolves while the clients
+		// are being closed has no owner left to print it, and the runtime must not
+		// leave a subscriber holding a writer whose lifetime it does not know.
+		runtime.disclosureStream.Close()
 		for _, client := range runtime.clients {
 			if err := client.Close(); err != nil && runtime.err == nil {
 				runtime.err = err

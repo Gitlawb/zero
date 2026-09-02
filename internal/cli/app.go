@@ -875,7 +875,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// report nothing, which is why the optional background registration is not
 	// asked: its only member is the built-in HTTP default, which starts no local
 	// process. A stdio default would need this statement from that path too.
-	reportMCPStartupDisclosures(stderr, mcpRuntime)
+	// NOT deferred: stderr here is the bare terminal, and the TUI takes it over at
+	// deps.runTUI below. Delivery stops before that hand-off, so a late launch can
+	// never write raw text into the alt screen; see stopMCPDisclosures's call site.
+	stopMCPDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
 	// Make local plugins live: register their declared tools into the registry and
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
@@ -967,6 +970,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
+	// The terminal stops being ours on the next line. Stop and join the disclosure
+	// pump first: anything already queued is printed here, on this goroutine, and a
+	// launch that resolves later is dropped rather than written raw over the TUI.
+	stopMCPDisclosures()
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,
