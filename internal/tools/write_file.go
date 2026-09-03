@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -93,13 +94,23 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 
 	// Capture the prior content (before we replace it) so an overwrite can show a
-	// real diff; a fresh create stays "" and previews as all-additions.
+	// real diff, and so the bytes read_file normalizes away — a BOM, CRLF endings —
+	// survive the rewrite. A fresh create stays "" and previews as all-additions.
+	//
+	// Fail CLOSED when an existing target cannot be read: those bytes are the only
+	// evidence of the convention to restore, so overwriting without them would
+	// write the model's normalized content over a CRLF/BOM file and silently
+	// destroy exactly what this read exists to preserve.
 	priorContent := ""
 	if existed {
-		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
-			priorContent = string(prev)
+		prev, rerr := os.ReadFile(absolutePath)
+		if rerr != nil {
+			return errorResult("Error writing file " + relativePath + ": cannot read the existing file to preserve its line endings and BOM: " + rerr.Error())
 		}
+		priorContent = string(prev)
+		content = preserveWriteFileEncoding(prev, content)
 	}
+	modelEquivalentContent := content
 
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
@@ -110,7 +121,6 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
@@ -119,7 +129,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	if content == modelKnownContent {
+	if content == modelEquivalentContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
@@ -145,6 +155,38 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// re-reads the file — the rich preview costs zero model tokens.
 	result.Display = Display{Summary: summary, Kind: "file", Preview: boundedUnifiedDiff(relativePath, priorContent, content)}
 	return result
+}
+
+var utf8BOM = []byte{0xef, 0xbb, 0xbf}
+
+// preserveWriteFileEncoding restores byte-level features hidden by read_file's
+// normalized text view. It keeps line endings consistent with the existing
+// file, while still allowing an LF file to be explicitly replaced with
+// consistently CRLF content.
+func preserveWriteFileEncoding(existing []byte, content string) string {
+	updated := []byte(content)
+	if bytes.HasPrefix(existing, utf8BOM) && !bytes.HasPrefix(updated, utf8BOM) {
+		updated = append(append([]byte(nil), utf8BOM...), updated...)
+	}
+
+	existingCRLF, existingLF := lineEndingCounts(existing)
+	updatedCRLF, updatedLF := lineEndingCounts(updated)
+	useCRLF := existingCRLF > existingLF
+	if !useCRLF && updatedCRLF > updatedLF {
+		// Unlike LF returned by read_file, caller-supplied dominant CRLF is an
+		// unambiguous request to change an LF file's convention.
+		useCRLF = true
+	}
+	updated = bytes.ReplaceAll(updated, []byte("\r\n"), []byte("\n"))
+	if useCRLF {
+		updated = bytes.ReplaceAll(updated, []byte("\n"), []byte("\r\n"))
+	}
+	return string(updated)
+}
+
+func lineEndingCounts(content []byte) (crlf, loneLF int) {
+	crlf = bytes.Count(content, []byte("\r\n"))
+	return crlf, bytes.Count(content, []byte("\n")) - crlf
 }
 
 // fileContentArg reads the file body from "content" or a common alias that weaker
