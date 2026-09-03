@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/hooks"
@@ -26,16 +25,13 @@ import (
 // delivery that matters. A unit test on the joining helper cannot see whether
 // the loop captures the messages at all.
 func TestSuccessfulBeforeToolHookOutputReachesTheModel(t *testing.T) {
+	// Any command that exits 0 and prints to stdout will do; the go binary is
+	// already required to run this test at all. runtime.GOROOT is deliberately not
+	// used as a fallback: it is deprecated, and a skip is the honest answer when
+	// there is no command to run.
 	goBinary, err := exec.LookPath("go")
 	if err != nil {
-		goRoot := runtime.GOROOT()
-		if goRoot == "" {
-			t.Skip("go binary unavailable for the hook command")
-		}
-		goBinary = filepath.Join(goRoot, "bin", "go")
-		if runtime.GOOS == "windows" {
-			goBinary += ".exe"
-		}
+		t.Skip("go binary unavailable for the hook command")
 	}
 	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
 	if err != nil {
