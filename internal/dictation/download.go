@@ -1748,7 +1748,7 @@ func promoteStagedDir(txn *destTxn, stageDir, destDir, label string, report func
 			return fmt.Errorf("setting aside previous %s install: %w", label, err)
 		}
 		restore = func() error { return fsutil.RenameWithRetry(previous, destDir, holderFS.rename) }
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("checking previous %s install: %w", label, err)
 	}
 
