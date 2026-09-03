@@ -403,28 +403,51 @@ type stagedExtract struct {
 	stamped bool
 }
 
-// stagingStamp reads back the ordering stamp extractBundle put in a staging
-// name. New names carry a per-directory sequence; names written by released
-// versions carry wall-clock nanoseconds. Both are plain int64s and compare the
-// same way, which is what lets one directory hold a mix of them.
+// stagingStamp reads back the per-directory sequence createSequencedStagingDir
+// put in a staging name. The grammar is exact: the prefix, stagingSeqDigits
+// ASCII digits, the suffix, nothing else. No released version wrote a stamped
+// name at all, so a looser parse buys no migration and costs ownership: v0.8.0
+// staged under os.MkdirTemp(parent, ".staging-*"), whose decimal suffix carries
+// no second '-', and dot-prefixed link ids were once accepted, so a published
+// work tree can sit under any name at all. One that reads as a sequence gets a
+// say in the ordering, and one at the maximum stops the allocator for every link
+// in the directory.
 func stagingStamp(name string) (int64, bool) {
-	digits, _, found := strings.Cut(strings.TrimPrefix(name, stagingPrefix), "-")
-	if !found {
+	digits, ok := strings.CutPrefix(name, stagingPrefix)
+	if !ok {
 		return 0, false
+	}
+	digits, ok = strings.CutSuffix(digits, stagingSeqSuffix)
+	if !ok || len(digits) != stagingSeqDigits {
+		return 0, false
+	}
+	for i := 0; i < len(digits); i++ {
+		// ParseInt accepts a leading sign, and a link id may contain '-', so
+		// without this a legacy name reads back as a negative sequence the
+		// writer could never have emitted.
+		if digits[i] < '0' || digits[i] > '9' {
+			return 0, false
+		}
 	}
 	stamp, err := strconv.ParseInt(digits, 10, 64)
 	if err != nil {
+		// Digits alone can still name a number past int64.
 		return 0, false
 	}
 	return stamp, true
 }
 
-// stagingSeqSuffix closes a sequenced staging name. The parsers cut on the first
-// '-' after the digits, so a name that ends at the digits reads back as
-// unstamped, which is silent: an unstamped entry sorts last and is always
-// retained, so the ordering key would simply stop existing with nothing failing.
-// os.MkdirTemp used to supply this separator with its random suffix.
-const stagingSeqSuffix = "-seq"
+// stagingSeqSuffix closes a sequenced staging name, and stagingSeqDigits is the
+// width createSequencedStagingDir's %020d writes. The parser requires both
+// exactly, and createSequencedStagingDir reads its own name back before using
+// it, so a format string that drifted from either would fail there rather than
+// putting a name on disk that reads as unstamped: an unstamped entry sorts last
+// and is always retained, so the ordering key would simply stop existing with
+// nothing failing.
+const (
+	stagingSeqSuffix = "-seq"
+	stagingSeqDigits = 20
+)
 
 // stagingSeqAttempts bounds the walk up from a taken number, in the spirit of
 // the retry limit os.MkdirTemp applies to its own random names.
@@ -465,9 +488,20 @@ func nextStagingSeq(dir string) (int64, error) {
 		default:
 			continue
 		}
-		if stamp, ok := stagingStamp(name); ok && stamp > high {
-			high = stamp
+		stamp, ok := stagingStamp(name)
+		if !ok || stamp <= high {
+			continue
 		}
+		// A dir with a .git at its own root is a work tree, not something this
+		// package wrote: link ids starting with '.' used to be accepted, so one
+		// can carry the exact generated name. The clone and the set-aside tree a
+		// live staging dir holds are one level down, in repo/ and backup/, so
+		// this vetoes the legacy tree without releasing a number that is still
+		// spoken for.
+		if _, err := stagingFS.stat(filepath.Join(dir, entry.Name(), ".git")); err == nil {
+			continue
+		}
+		high = stamp
 	}
 	if high == math.MaxInt64 {
 		// The addition below would wrap negative, and %020d of a negative
