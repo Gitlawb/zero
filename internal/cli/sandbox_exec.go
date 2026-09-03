@@ -130,6 +130,14 @@ func runSandboxPlannedCommand(plan zeroSandbox.CommandPlan, stdout io.Writer, st
 		if errors.As(err, &exitErr) {
 			// The command's own status, not ours. A harness asserting "the write
 			// was refused" needs the refusal's exit code, not a wrapper's.
+			// A SIGNALED CHILD HAS NO EXIT CODE TO REPORT. ExitCode() answers -1
+			// there, and os.Exit truncates that to 255, so a child that took SIGTERM
+			// became indistinguishable from one that chose to exit 255. Fold the
+			// signal into the conventional 128+n a shell would report, which needs
+			// the ProcessState rather than the integer.
+			if status, signaled := signaledExitStatus(exitErr.ProcessState); signaled {
+				return status
+			}
 			return exitErr.ExitCode()
 		}
 		fmt.Fprintf(stderr, "sandbox exec: %v\n", err)

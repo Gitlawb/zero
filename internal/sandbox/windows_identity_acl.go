@@ -144,7 +144,7 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 		// so everything underneath stays writable.
 		entries = append(entries, WindowsACLEntry{
 			Action:     WindowsACLDenyDelete,
-			Path:       filepath.Join(cleaned, sandboxRenameProtectedMetadataName),
+			Path:       windowsRenameProtectedObject(cleaned),
 			Capability: input.PrincipalSID,
 		})
 	}
