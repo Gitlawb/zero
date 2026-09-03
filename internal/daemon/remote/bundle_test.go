@@ -1022,12 +1022,15 @@ func TestRecoverBundleDirLeavesALiveExtractAlone(t *testing.T) {
 }
 
 // stageBackup plants a staging dir holding a backup tree for linkID, named the
-// way extractBundle names one so recovery can order it. A stamp of 0 plants an
-// unstamped name, which is the shape recovery must refuse to order.
+// way extractBundle names one so recovery can order it. A stamp above 0 gets the
+// allocator's exact grammar, because that is now the only shape recovery orders;
+// the name argument then only distinguishes unstamped fixtures, which are the
+// shape recovery must refuse to order. Two stamped fixtures in one directory
+// need distinct stamps, as two extracts do.
 func stageBackup(t *testing.T, dir, name, linkID, content string, stamp int64) string {
 	t.Helper()
 	if stamp > 0 {
-		name = fmt.Sprintf("%020d-%s", stamp, name)
+		name = fmt.Sprintf("%020d%s", stamp, stagingSeqSuffix)
 	}
 	staging := filepath.Join(dir, stagingPrefix+name)
 	backup := filepath.Join(staging, "backup")
@@ -1428,20 +1431,27 @@ func TestStagingNamesAllocateInOrderAndParse(t *testing.T) {
 		}
 	})
 
-	// The upgrade case: a released binary wrote wall-clock nanoseconds, so
-	// seeding from the highest present is the whole migration.
-	t.Run("seeds above a legacy nanosecond name", func(t *testing.T) {
+	// The upgrade case. v0.8.0 staged under os.MkdirTemp(parent, ".staging-*"),
+	// whose suffix is a decimal uint32 with no second '-', and this branch's
+	// intermediate commits wrote a random one. Neither shape is a sequence this
+	// package ever handed out, so the allocator reads none of them and starts at
+	// one; the residue is left where it is for recovery to report.
+	t.Run("ignores a legacy MkdirTemp-shaped name", func(t *testing.T) {
 		dir := t.TempDir()
 		const legacy = int64(1_700_000_000_000_000_000)
-		if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d-x7Kq3", stagingPrefix, legacy)), 0o700); err != nil {
+		name := fmt.Sprintf("%s%020d-x7Kq3", stagingPrefix, legacy)
+		if err := os.Mkdir(filepath.Join(dir, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		seq, err := nextStagingSeq(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if seq <= legacy {
-			t.Errorf("next sequence = %d, want strictly greater than the legacy stamp %d", seq, legacy)
+		if seq != 1 {
+			t.Errorf("next sequence = %d, want 1: a name this package never wrote is not a sequence", seq)
+		}
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("the legacy entry must be left alone: %v", err)
 		}
 	})
 
@@ -1459,6 +1469,129 @@ func TestStagingNamesAllocateInOrderAndParse(t *testing.T) {
 			t.Errorf("next sequence = %d, want strictly greater than the parked 7", seq)
 		}
 	})
+}
+
+// The grammar is the first ownership filter: a name that is not exactly what
+// createSequencedStagingDir writes was written by something else, and reading a
+// sequence out of it is how a legacy work tree gets a say in the ordering.
+func TestStagingStampRequiresTheExactGrammar(t *testing.T) {
+	// No '*', '?' or ':' in any name here: a table entry Windows cannot name
+	// would fail its own setup rather than test the parser.
+	cases := []struct {
+		name string
+		seq  int64
+		ok   bool
+	}{
+		{stagingPrefix + "00000000000000000042" + stagingSeqSuffix, 42, true},
+		{stagingPrefix + "42" + stagingSeqSuffix, 0, false},
+		// The shape this branch's intermediate commits wrote before the suffix
+		// was fixed, and the shape os.MkdirTemp writes.
+		{stagingPrefix + "00000000000000000042-x7Kq3", 0, false},
+		// The v0.8.0 shape: MkdirTemp's decimal suffix with no second '-'.
+		{stagingPrefix + "1234567890", 0, false},
+		{stagingPrefix + "00000000000000000042" + stagingSeqSuffix + "-extra", 0, false},
+		{stagingPrefix + "0000000000000000004a" + stagingSeqSuffix, 0, false},
+		// Twenty characters, and ParseInt would take the sign. A link id may
+		// contain '-', so this is a name a legacy work tree can carry.
+		{stagingPrefix + "-0000000000000000042" + stagingSeqSuffix, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seq, ok := stagingStamp(tc.name)
+			if ok != tc.ok {
+				t.Fatalf("stagingStamp(%q) ok = %v, want %v", tc.name, ok, tc.ok)
+			}
+			if ok && seq != tc.seq {
+				t.Errorf("stagingStamp(%q) = %d, want %d", tc.name, seq, tc.seq)
+			}
+		})
+	}
+}
+
+// Link ids starting with '.' used to be accepted, so a published work tree can
+// sit under a name that now reads as a staging sequence. One at the maximum
+// would make the allocator refuse to allocate anything, permanently, and no
+// extract for any link in the directory could run again.
+func TestNextStagingSeqIgnoresALegacyWorkTreeAtTheMaximum(t *testing.T) {
+	dir := t.TempDir()
+	// Twenty digits, so it passes the grammar and only the .git veto keeps it
+	// out of the ordering.
+	planted := []string{
+		fmt.Sprintf("%s%020d%s", stagingPrefix, int64(math.MaxInt64), stagingSeqSuffix),
+		// Nineteen digits, the name from the review: the grammar alone rejects it.
+		stagingPrefix + "9223372036854775807" + stagingSeqSuffix,
+	}
+	for _, name := range planted {
+		if err := os.MkdirAll(filepath.Join(dir, name, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A legacy staging dir at the maximum with no work tree in it: the grammar
+	// is the only thing that can keep this one out, so loosening the grammar is
+	// visible here even with the veto in place.
+	if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d-x7Kq3", stagingPrefix, int64(math.MaxInt64))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	seq, err := nextStagingSeq(dir)
+	if err != nil {
+		t.Fatalf("a legacy entry must not stop the allocator: %v", err)
+	}
+	if seq != 1 {
+		t.Errorf("next sequence = %d, want 1: none of these names is one this package wrote", seq)
+	}
+	for _, name := range planted {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("the allocator must not touch %s: %v", name, err)
+		}
+	}
+}
+
+// The veto is keyed on .git at the entry's own root. A live extract's staging
+// dir holds its clone one level down, in repo/, so its number still counts;
+// handing it out again would put two transactions on one name.
+func TestNextStagingSeqCountsAStagingDirHoldingAClone(t *testing.T) {
+	dir := t.TempDir()
+	staging := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, 4, stagingSeqSuffix))
+	if err := os.MkdirAll(filepath.Join(staging, "repo", ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(staging, "backup", ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	seq, err := nextStagingSeq(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 5 {
+		t.Errorf("next sequence = %d, want 5: a live extract's number is still spoken for", seq)
+	}
+}
+
+// Kept backups are named off the staging name, so they are counted, and they are
+// counted under the same grammar: a loose read of one is the same defect as a
+// loose read of a staging name, one prefix over.
+func TestNextStagingSeqCountsKeptNamesUnderTheSameGrammar(t *testing.T) {
+	dir := t.TempDir()
+	kept := filepath.Join(dir, fmt.Sprintf("%s%020d%s", keptPrefix, 7, stagingSeqSuffix))
+	if err := os.Mkdir(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(kept, txnMarker{Kind: txnKindBundleExtract, Dest: "proj-1", Seq: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d-x", keptPrefix, 99)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	seq, err := nextStagingSeq(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 8 {
+		t.Errorf("next sequence = %d, want 8: the parked 7 is spoken for and the loose 99 is not a sequence", seq)
+	}
 }
 
 // A publish that succeeded but could not clear its staging dir reports success to
@@ -1541,7 +1674,7 @@ func TestCreateSequencedStagingDirSkipsAnOccupiedNumber(t *testing.T) {
 // belongs where the addition is.
 func TestNextStagingSeqRefusesOverflow(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d-x", stagingPrefix, int64(math.MaxInt64))), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, int64(math.MaxInt64), stagingSeqSuffix)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if seq, err := nextStagingSeq(dir); err == nil {
@@ -1739,13 +1872,14 @@ func TestRecoverBundleDirIsIdempotent(t *testing.T) {
 	}
 }
 
-// Two extracts can stamp the same instant. Recovery restores one of them and
-// must then keep the other rather than deleting it as superseded: equal stamps
-// are not evidence that one came first.
+// Two backups can both carry names recovery cannot order: v0.8.0 residue, or a
+// crash before the marker. Recovery restores one of them and must then keep the
+// other rather than deleting it as superseded, because no order exists to say
+// which came first.
 func TestRecoverBundleDirKeepsABackupItCannotTellApartFromTheRestore(t *testing.T) {
 	dir := t.TempDir()
-	first := stageBackup(t, dir, "one", "proj-1", "v1", 100)
-	second := stageBackup(t, dir, "two", "proj-1", "v2", 100)
+	first := stageBackup(t, dir, "one", "proj-1", "v1", 0)
+	second := stageBackup(t, dir, "two", "proj-1", "v2", 0)
 
 	recoverBundleDir(dir, nil)
 
