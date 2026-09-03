@@ -204,6 +204,9 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 			Command:     command,
 			Enforcement: executionEnforcement(plan),
 			Report:      plan.ExecutionReport,
+			// A wrapped plan starts a helper; the requested child is created inside
+			// it and only the adapter sees that transition.
+			ChildLaunchOwnedByAdapter: plan.ChildLaunchOwnedByAdapter(),
 			Cleanup: func() {
 				plan.Cleanup()
 				cancel()
@@ -229,8 +232,9 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		exitCode: processResult.ExitCode, exited: processResult.Exited, relativeCwd: processResult.RelativeCwd,
 		tty: processResult.TTY, request: processResult.Request, enforcement: processResult.Enforcement,
 		report: processResult.Report, reportErr: processResult.ReportErr, changes: processResult.Changes,
-		sandboxMeta:     processResult.Metadata,
-		maxOutputTokens: maxOutputTokens,
+		childLaunchOwnedByAdapter: processResult.ChildLaunchOwnedByAdapter,
+		sandboxMeta:               processResult.Metadata,
+		maxOutputTokens:           maxOutputTokens,
 	}, directBudget)
 }
 
@@ -366,7 +370,8 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 		exitCode: processResult.ExitCode, exited: processResult.Exited, relativeCwd: processResult.RelativeCwd,
 		tty: processResult.TTY, interrupted: processResult.Interrupted, request: processResult.Request,
 		enforcement: processResult.Enforcement, report: processResult.Report, reportErr: processResult.ReportErr,
-		changes: processResult.Changes, sandboxMeta: processResult.Metadata,
+		childLaunchOwnedByAdapter: processResult.ChildLaunchOwnedByAdapter,
+		changes:                   processResult.Changes, sandboxMeta: processResult.Metadata,
 		maxOutputTokens: maxOutputTokens,
 	})
 }
@@ -408,17 +413,20 @@ type execToolResultInput struct {
 	// exec_command paths set it true because a start failure returns an
 	// errorResult before reaching here; bash cannot, because it routes a
 	// pre-start Run error through the same conversion.
-	launched        bool
-	relativeCwd     string
-	tty             bool
-	interrupted     bool
-	request         execution.Request
-	enforcement     execution.Enforcement
-	sandboxMeta     map[string]string
-	report          execution.AdapterReport
-	reportErr       error
-	changes         []execution.Change
-	maxOutputTokens int
+	launched bool
+	// childLaunchOwnedByAdapter marks a wrapped plan, where launched above
+	// describes the helper rather than the requested process.
+	childLaunchOwnedByAdapter bool
+	relativeCwd               string
+	tty                       bool
+	interrupted               bool
+	request                   execution.Request
+	enforcement               execution.Enforcement
+	sandboxMeta               map[string]string
+	report                    execution.AdapterReport
+	reportErr                 error
+	changes                   []execution.Change
+	maxOutputTokens           int
 }
 
 func execToolResult(input execToolResultInput) Result {
@@ -438,10 +446,15 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	for key, value := range input.sandboxMeta {
 		meta[key] = value
 	}
-	// True here by construction: every path that reaches this conversion has
-	// already started a process, because a start failure returns an errorResult
-	// above without building an execution outcome.
-	input.launched = true
+	// A process started here by construction, because a start failure returns an
+	// errorResult above without building an execution outcome. But for a wrapped
+	// plan that process is the SANDBOX HELPER, which creates the requested child
+	// only after marker, ACL, network, SID and token setup. So hand the observation
+	// to the same resolution every other launcher uses instead of asserting it.
+	// The retained path matters most here: the helper can be returned before it
+	// has attempted the inner launch, and an absent report then means not yet
+	// launched rather than launched.
+	input.launched = execution.ResolveChildLaunched(true, input.childLaunchOwnedByAdapter, input.report)
 	outcome := execExecutionOutcome(input)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)

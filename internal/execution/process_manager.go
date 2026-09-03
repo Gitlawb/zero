@@ -74,8 +74,12 @@ type ProcessResult struct {
 	Enforcement     Enforcement
 	Report          AdapterReport
 	ReportErr       error
-	Changes         []Change
-	Metadata        map[string]string
+	// ChildLaunchOwnedByAdapter carries the prepared plan's ownership of the
+	// requested-child launch fact through to the caller, which for a retained
+	// session no longer has the plan.
+	ChildLaunchOwnedByAdapter bool
+	Changes                   []Change
+	Metadata                  map[string]string
 }
 
 type ProcessSnapshot struct {
@@ -148,6 +152,7 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 		command:     command,
 		request:     request,
 		enforcement: input.Prepared.Enforcement,
+		ownedLaunch: input.Prepared.ChildLaunchOwnedByAdapter,
 		report:      input.Prepared.Report,
 		cleanup:     input.Prepared.Cleanup,
 		stdin:       stdin,
@@ -372,6 +377,7 @@ type managedProcess struct {
 	command      *exec.Cmd
 	request      Request
 	enforcement  Enforcement
+	ownedLaunch  bool
 	report       func() (AdapterReport, error)
 	cleanup      func()
 	stdin        io.WriteCloser
@@ -413,7 +419,8 @@ func (process *managedProcess) collectResult(ctx context.Context, wait time.Dura
 		TTY: process.tty, Output: output, OutputTruncated: truncated, Exited: exited,
 		ExitCode: exitCode, Interrupted: interrupted, Request: process.request,
 		Enforcement: process.enforcement, Report: process.resultReport, ReportErr: process.reportErr,
-		Changes: append([]Change(nil), process.changes...), Metadata: cloneStringMap(process.metadata),
+		ChildLaunchOwnedByAdapter: process.ownedLaunch,
+		Changes:                   append([]Change(nil), process.changes...), Metadata: cloneStringMap(process.metadata),
 	}
 	process.mu.Unlock()
 	return result

@@ -189,6 +189,10 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 	var cmd *exec.Cmd
 	var cleanup func()
 	var plannedEnforcement execution.Enforcement
+	// Retained from the prepared plan rather than dropped: for a wrapped plan the
+	// adapter, not cmd.Start, owns whether the requested server process exists.
+	var adapterReport func() (execution.AdapterReport, error)
+	var ownedLaunch bool
 	cleanupTransferred := false
 	defer func() {
 		if cleanup != nil && !cleanupTransferred {
@@ -214,6 +218,8 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		cmd = prepared.Command
 		cleanup = prepared.Cleanup
 		plannedEnforcement = prepared.Enforcement
+		adapterReport = prepared.Report
+		ownedLaunch = prepared.ChildLaunchOwnedByAdapter
 	} else {
 		cmd = exec.CommandContext(ctx, server.Command, server.Args...)
 		cmd.Env = mergeProcessEnv(server.Env)
@@ -237,7 +243,30 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 	// tools/list above it in the caller) can hang past that. Announcing the launch
 	// here is what lets an abandoned attempt still disclose the confinement its
 	// process ran under.
-	publishLaunch(ctx, plannedEnforcement.Notices)
+	//
+	// EXCEPT WHEN START IS NOT THE LAUNCH. For a wrapped plan the process started
+	// above is the sandbox helper, which creates the MCP server only after marker,
+	// ACL, network, SID and token setup, any of which can fail leaving no server at
+	// all. Publishing here would make the durable delivery machinery reliably
+	// announce a confinement nothing ever ran under. Those plans publish from
+	// publishAdapterLaunch below, once the adapter has stated the fact.
+	if !ownedLaunch {
+		publishLaunch(ctx, plannedEnforcement.Notices)
+	}
+	// publishAdapterLaunch announces a wrapped plan's launch, but only if the
+	// adapter confirms the requested child was created. Called on both ways this
+	// attempt can end, which is also where an attempt abandoned at the connect
+	// timeout eventually arrives, so a late disclosure is still delivered once.
+	publishAdapterLaunch := func() {
+		if !ownedLaunch || adapterReport == nil {
+			return
+		}
+		report, err := adapterReport()
+		if err != nil || report.ChildLaunched == nil || !*report.ChildLaunched {
+			return
+		}
+		publishLaunch(ctx, plannedEnforcement.Notices)
+	}
 
 	client := &Client{
 		server:  server,
@@ -262,6 +291,7 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		// had, so the operator was told the server was unavailable and not that it
 		// had already run without the write jail.
 		_ = client.Close()
+		publishAdapterLaunch()
 		message := strings.TrimSpace(stderr.String())
 		failure := fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
 		if message != "" {
@@ -269,6 +299,7 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		}
 		return nil, &startupDisclosureError{err: failure, notices: client.StartupNotices()}
 	}
+	publishAdapterLaunch()
 	return client, nil
 }
 

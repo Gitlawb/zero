@@ -78,6 +78,14 @@ type CommandPlan struct {
 	childLaunchReported bool
 }
 
+// ChildLaunchOwnedByAdapter reports whether this plan starts a WRAPPER whose
+// helper creates the requested process itself, so the requested child launched
+// only if the adapter says so. False for a direct command, where the process the
+// caller starts IS the requested one.
+func (plan CommandPlan) ChildLaunchOwnedByAdapter() bool {
+	return plan.childLaunchReported
+}
+
 // Cleanup releases any resources the plan holds. It is safe to call on a zero
 // plan and to call more than once.
 func (plan CommandPlan) Cleanup() {

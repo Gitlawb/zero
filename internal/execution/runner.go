@@ -114,15 +114,7 @@ func (runner *Runner) ExecuteCaptured(ctx context.Context, input CapturedRequest
 	// reports that reads were denied as requested when only the unsandboxed
 	// adapter ran. An adapter that owns the inner transition overrides it; one
 	// that stays silent leaves the direct-command observation alone.
-	switch {
-	case report.ChildLaunched != nil:
-		launched = *report.ChildLaunched
-	case prepared.ChildLaunchOwnedByAdapter:
-		// The adapter owns this fact and did not state it, so the restricted child
-		// is not known to exist. Fail closed: an absent report must not be read as
-		// proof that enforcement applied.
-		launched = false
-	}
+	launched = ResolveChildLaunched(launched, prepared.ChildLaunchOwnedByAdapter, report)
 	result := CapturedResult{
 		Stdout:    stdout.String(),
 		Stderr:    stderr.String(),
@@ -185,6 +177,28 @@ func (runner *Runner) Prepare(ctx context.Context, request Request) (PreparedCom
 		return PreparedCommand{}, errors.New("execution adapter is not configured")
 	}
 	return preparer.PrepareExecution(ctx, request)
+}
+
+// ResolveChildLaunched decides whether the REQUESTED process launched.
+//
+// ONE IMPLEMENTATION, because every launcher needs the same answer and each one
+// that re-derived it got a different one. observed is what the caller saw of the
+// process IT started, which for a wrapped plan is the helper and not the
+// requested child.
+//
+//   - the adapter stated the fact: believe the adapter, in both directions.
+//   - the adapter owns the fact and stayed silent: not launched. An absent report
+//     must not be read as proof that enforcement applied.
+//   - nobody owns it but the caller: keep the direct observation, which is
+//     correct for a direct command and for bwrap.
+func ResolveChildLaunched(observed bool, ownedByAdapter bool, report AdapterReport) bool {
+	if report.ChildLaunched != nil {
+		return *report.ChildLaunched
+	}
+	if ownedByAdapter {
+		return false
+	}
+	return observed
 }
 
 func capturedSetupFailure(message string, err error, enforcement Enforcement) CapturedResult {
