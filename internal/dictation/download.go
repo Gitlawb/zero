@@ -899,28 +899,14 @@ func isInstallDestName(name string) bool {
 // out. The budget expiring is errInstallInProgress, which the caller answers by
 // re-checking the destination rather than by failing.
 func lockDestination(ctx context.Context, destRoot, dest string) (*destTxn, error) {
-	if !isInstallDestName(dest) {
-		return nil, fmt.Errorf("dictation download: %q is not an install destination name", dest)
-	}
-	// destRoot is otherwise created lazily by the download this lock covers, and
-	// lockutil opens the root with O_DIRECTORY, so on a first run there would be
-	// no directory to take the lock in.
-	if err := os.MkdirAll(destRoot, 0o755); err != nil {
-		return nil, err
-	}
-	lockDir := filepath.Join(destRoot, installLockDir)
-	if err := holderFS.mkdir(lockDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-		return nil, err
-	}
-	lockPath := filepath.Join(lockDir, dest+".lock")
 	deadline := time.Now().Add(installLockWait)
 	for {
-		lock, err := lockutil.TryAcquireFileLockAt(destRoot, lockPath)
-		if err == nil {
-			return &destTxn{root: destRoot, dest: dest, lock: lock}, nil
-		}
-		if !errors.Is(err, lockutil.ErrLockHeld) {
+		txn, held, err := tryLockDestination(destRoot, dest)
+		if err != nil {
 			return nil, err
+		}
+		if !held {
+			return txn, nil
 		}
 		// Waiting is the normal case: the holder is almost always another
 		// process installing this very component, and failing on the first
@@ -934,6 +920,36 @@ func lockDestination(ctx context.Context, destRoot, dest string) (*destTxn, erro
 		case <-time.After(installLockPoll):
 		}
 	}
+}
+
+// tryLockDestination takes one destination's Install lock without waiting. Held
+// is not an error: a caller either waits the holder out, as lockDestination
+// does, or leaves that destination alone, as the operator's reclaim does. An
+// operator command cannot use the waiting form, because the wait budget covers a
+// download and stalling a terminal for two minutes to report a refusal is not a
+// refusal anyone reads.
+func tryLockDestination(destRoot, dest string) (txn *destTxn, held bool, err error) {
+	if !isInstallDestName(dest) {
+		return nil, false, fmt.Errorf("dictation download: %q is not an install destination name", dest)
+	}
+	// destRoot is otherwise created lazily by the download this lock covers, and
+	// lockutil opens the root with O_DIRECTORY, so on a first run there would be
+	// no directory to take the lock in.
+	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		return nil, false, err
+	}
+	lockDir := filepath.Join(destRoot, installLockDir)
+	if err := holderFS.mkdir(lockDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, false, err
+	}
+	lock, err := lockutil.TryAcquireFileLockAt(destRoot, filepath.Join(lockDir, dest+".lock"))
+	if err != nil {
+		if errors.Is(err, lockutil.ErrLockHeld) {
+			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	return &destTxn{root: destRoot, dest: dest, lock: lock}, false, nil
 }
 
 // withDestinationLock runs fn under dest's Install lock. A wait that runs out is
@@ -1194,6 +1210,141 @@ func keptHolderPath(holder string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(dir, name[:cut]+keptSuffix+name[cut+len(holderSuffix):]), true
+}
+
+// keptHolderStamp splits a Kept backup name into the install it was set aside
+// for and its sequence. The install's own name is the leading part, so the
+// grammar alone does NOT bound the name to one path component: "../x.kept-N-seq"
+// parses as destination "../x". Callers check both halves are base names before
+// joining either of them to anything.
+func keptHolderStamp(name string) (base string, seq int64, ok bool) {
+	cut := strings.LastIndex(name, keptSuffix)
+	if cut <= 0 {
+		return "", 0, false
+	}
+	base = name[:cut]
+	seq, ok = holderStamp(base, name)
+	if !ok {
+		return "", 0, false
+	}
+	return base, seq, true
+}
+
+// KeptBackup is one copy recovery moved under the Kept prefix rather than
+// deleted, as an operator sees it. Recovery never enumerates that prefix and
+// nothing reclaims one on its own, so this listing is the only way a retained
+// copy is found again. Owned false is a directory carrying the Kept name that
+// nothing on disk attributes, listed beside the real backups so recovery's
+// residue is visible rather than silent until a disk fills.
+type KeptBackup struct {
+	Path  string
+	Dest  string
+	Seq   int64
+	Bytes int64
+	Owned bool
+}
+
+// ListKeptBackups reports every Kept backup under an install root. The
+// destination is reported only when the marker inside the copy agrees with the
+// name it sits in: a name is what anything that can write in this directory
+// says, and a copy attributed on its name alone is one an operator would remove
+// believing it belonged to an install it never came from.
+func ListKeptBackups(destRoot string) ([]KeptBackup, error) {
+	entries, err := holderFS.readDir(destRoot)
+	if err != nil {
+		return nil, err
+	}
+	var out []KeptBackup
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		base, seq, ok := keptHolderStamp(entry.Name())
+		if !ok {
+			continue
+		}
+		path := filepath.Join(destRoot, entry.Name())
+		backup := KeptBackup{Path: path, Seq: seq, Bytes: dirBytes(path)}
+		if ownedKeptHolder(path, base, seq) == nil {
+			backup.Dest = base
+			backup.Owned = true
+		}
+		out = append(out, backup)
+	}
+	slices.SortFunc(out, func(a, b KeptBackup) int { return cmp.Compare(a.Path, b.Path) })
+	return out, nil
+}
+
+// ownedKeptHolder is the whole ownership proof for a Kept backup: a marker this
+// site wrote, for this destination, carrying the sequence its name carries. It
+// is the same agreement ownedHoldersBeside requires before recovery touches a
+// holder, applied here so an operator's delete is licensed by no less.
+func ownedKeptHolder(path, base string, seq int64) error {
+	m, err := readHolderMarker(path)
+	if err != nil {
+		return err
+	}
+	if m.Kind != holderMarkerKind || m.Seq != seq || m.Dest != base || !isInstallDestName(m.Dest) {
+		return fmt.Errorf("the transaction marker in %s does not match its name", path)
+	}
+	return nil
+}
+
+// RemoveKeptBackup deletes the one Kept backup an operator named. It is not an
+// rm: the name has to be a single component under destRoot, pass the Kept
+// grammar, and carry a marker whose kind, destination, and sequence all agree,
+// and the destination's Install lock has to be free. Anything else is refused
+// and left for the operator to remove by hand, because a Kept backup here is
+// often the only offline copy of an engine or a model.
+func RemoveKeptBackup(destRoot, name string) error {
+	if !isInstallDestName(name) {
+		// Ahead of every filesystem call: the Kept grammar accepts a leading
+		// install name with a separator in it, so without this the join reaches
+		// outside destRoot.
+		return fmt.Errorf("dictation download: %q is not the name of an entry in %s", name, destRoot)
+	}
+	base, seq, ok := keptHolderStamp(name)
+	if !ok || !isInstallDestName(base) {
+		return fmt.Errorf("dictation download: %s is not a kept backup; recovery may still act on it, so remove it by hand", name)
+	}
+	path := filepath.Join(destRoot, name)
+	if err := ownedKeptHolder(path, base, seq); err != nil {
+		return fmt.Errorf("dictation download: nothing on disk attributes %s to an install (%w); remove it by hand", name, err)
+	}
+	txn, held, err := tryLockDestination(destRoot, base)
+	if err != nil {
+		return err
+	}
+	if held {
+		return fmt.Errorf("dictation download: %s is being installed by another process; try again once it finishes", base)
+	}
+	defer txn.release()
+	// Re-read under the lock. The check above ran with nothing excluding a live
+	// promotion, and a directory that stopped being this install's in between is
+	// one that must not be deleted on the strength of the earlier reading.
+	if err := ownedKeptHolder(path, base, seq); err != nil {
+		return fmt.Errorf("dictation download: %s is no longer attributable to %s (%w); leaving it in place", name, base, err)
+	}
+	return holderFS.removeAll(path)
+}
+
+// dirBytes sums the regular files under path. Unreadable entries are skipped
+// rather than failing the listing: a size an operator cannot see is a worse
+// answer than a size that is short, and the entry itself is still reported.
+func dirBytes(path string) int64 {
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
 }
 
 // nextHolderSeq is the number a new holder should claim: one past the highest
