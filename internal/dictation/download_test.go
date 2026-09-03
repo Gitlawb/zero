@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -384,14 +385,7 @@ func TestPromoteStagedDirKeepsTheSetAsideCopyWhenRestoreAlsoFails(t *testing.T) 
 func TestRestoreInterruptedPromotionPutsTheInstallBack(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	holder := filepath.Join(root, filepath.Base(dest)+".previous-abc")
-	install := filepath.Join(holder, "install")
-	if err := os.MkdirAll(install, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(install, "engine"), []byte("kept"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	holder := plantHolder(t, dest, 1, "kept")
 
 	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
@@ -516,14 +510,7 @@ func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			holder := filepath.Join(root, filepath.Base(dest)+".previous-abc")
-			install := filepath.Join(holder, "install")
-			if err := os.MkdirAll(install, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(install, "engine"), []byte("stale"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			install := filepath.Join(plantHolder(t, dest, 1, "stale"), "install")
 
 			restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
@@ -566,8 +553,11 @@ func TestEnsureLocalEngineRestoresAnInterruptedModelPromotion(t *testing.T) {
 	// Stop the world where promoteStagedDir has moved the model aside but has
 	// not yet published the staged copy.
 	modelDir := filepath.Dir(comp.ModelPath)
-	holder := modelDir + ".previous-abc"
-	if err := os.MkdirAll(holder, 0o755); err != nil {
+	holder := fmt.Sprintf("%s%s%020d%s", modelDir, holderSuffix, 1, holderSeqSuffix)
+	if err := os.MkdirAll(holder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHolderMarker(holder, txnMarker{Kind: holderMarkerKind, Dest: filepath.Base(modelDir), Seq: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(modelDir, filepath.Join(holder, "install")); err != nil {
@@ -620,16 +610,21 @@ func testPublished(dir string) bool {
 	return err == nil
 }
 
-// plantHolder writes an install into a holder named the way promoteStagedDir
-// names one, so recovery sees the same shape it does in production.
-func plantHolder(t *testing.T, destDir string, stamp int64, content string) string {
+// plantHolder writes an install into a holder named and marked the way
+// promoteStagedDir writes one, so recovery sees the same shape it does in
+// production: the name alone is not ownership, and a fixture without the marker
+// would test a directory recovery is supposed to leave alone.
+func plantHolder(t *testing.T, destDir string, seq int64, content string) string {
 	t.Helper()
-	holder := fmt.Sprintf("%s%s%020d-%d", destDir, holderSuffix, stamp, stamp)
+	holder := fmt.Sprintf("%s%s%020d%s", destDir, holderSuffix, seq, holderSeqSuffix)
 	install := filepath.Join(holder, "install")
 	if err := os.MkdirAll(install, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(install, "engine"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHolderMarker(holder, txnMarker{Kind: holderMarkerKind, Dest: filepath.Base(destDir), Seq: seq}); err != nil {
 		t.Fatal(err)
 	}
 	return holder
@@ -867,23 +862,34 @@ func TestHolderNamesAllocateInOrderAndParse(t *testing.T) {
 		}
 	})
 
-	t.Run("seeds above a legacy nanosecond name", func(t *testing.T) {
+	// No released version of this package ever wrote a holder: v0.8.0 staged
+	// under .stage-* and published with a plain rename. A nanosecond-shaped name
+	// beside an install is therefore something this code did not write, and
+	// counting it would let any such directory dictate the sequence, up to the
+	// maximum that refuses installs outright.
+	t.Run("ignores a nanosecond-shaped name it did not write", func(t *testing.T) {
 		root := t.TempDir()
 		dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-		const legacy = int64(1_700_000_000_000_000_000)
-		// Both shapes a released binary could have left: the MkdirTemp random
-		// suffix, and the digits-only one the test helper plants.
+		const nano = int64(1_700_000_000_000_000_000)
+		var planted []string
 		for _, suffix := range []string{"x7Kq3", "12345"} {
-			if err := os.MkdirAll(fmt.Sprintf("%s%s%020d-%s", dest, holderSuffix, legacy, suffix), 0o700); err != nil {
+			path := fmt.Sprintf("%s%s%020d-%s", dest, holderSuffix, nano, suffix)
+			if err := os.MkdirAll(path, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			planted = append(planted, path)
 		}
 		seq, err := nextHolderSeq(dest)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if seq <= legacy {
-			t.Errorf("next sequence = %d, want strictly greater than the legacy stamp %d", seq, legacy)
+		if seq != 1 {
+			t.Errorf("next sequence = %d, want 1: neither planted name is one this code wrote", seq)
+		}
+		for _, path := range planted {
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("a name this code did not write must be left alone: %v", err)
+			}
 		}
 	})
 }
@@ -909,7 +915,7 @@ func TestCreateSequencedHolderSkipsAnOccupiedNumber(t *testing.T) {
 func TestNextHolderSeqRefusesOverflow(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	if err := os.MkdirAll(fmt.Sprintf("%s%s%020d-x", dest, holderSuffix, int64(math.MaxInt64)), 0o700); err != nil {
+	if err := os.MkdirAll(fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, int64(math.MaxInt64), holderSeqSuffix), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if seq, err := nextHolderSeq(dest); err == nil {
@@ -1022,36 +1028,41 @@ func requireUmaskAllowsWiderThan0700(t *testing.T, parent string) {
 	}
 }
 
-// A holder this package did not name carries no ordering anyone can read, so it
-// is the least recent thing recovery can claim to know about and must lose to
-// any stamped holder, however old that one's stamp is.
-func TestRestoreInterruptedPromotionPrefersAStampedHolderOverAnUnstampedOne(t *testing.T) {
+// Recovery restores only from a holder it can prove it wrote for THIS install.
+// Both decoys carry content that would land at the destination if the name alone
+// were the attribution, and both sort FIRST lexically, so only the ownership
+// rule can produce the wanted answer.
+func TestRestoreInterruptedPromotionRestoresOnlyFromAnOwnedHolder(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	// The unstamped name sorts after the stamped one lexically, so a pass that
-	// ignored the stamp entirely would still get this right; give it a name that
-	// sorts FIRST, so only the stamped-wins rule can produce the wanted answer.
-	unstamped := dest + holderSuffix + "aaa"
-	if err := os.MkdirAll(filepath.Join(unstamped, "install"), 0o755); err != nil {
-		t.Fatal(err)
+	// A user's own directory that happens to start like a holder name.
+	collide := dest + holderSuffix + "aaa"
+	// A name this code would have written, with nothing behind it saying it did.
+	unmarked := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 900, holderSeqSuffix)
+	for _, decoy := range []string{collide, unmarked} {
+		if err := os.MkdirAll(filepath.Join(decoy, "install"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(decoy, "install", "engine"), []byte("not ours"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(unstamped, "install", "engine"), []byte("unstamped"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	stamped := plantHolder(t, dest, 100, "stamped")
+	owned := plantHolder(t, dest, 100, "ours")
 
 	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
-	if err != nil || string(got) != "stamped" {
-		t.Fatalf("a stamped holder must win over an unstamped one: got %q err %v", got, err)
+	if err != nil || string(got) != "ours" {
+		t.Fatalf("recovery restored from a holder it cannot prove it wrote: got %q err %v", got, err)
 	}
-	if _, err := os.Stat(stamped); !os.IsNotExist(err) {
+	if _, err := os.Stat(owned); !os.IsNotExist(err) {
 		t.Errorf("the restored holder should be cleared, got %v", err)
 	}
-	// The one recovery did not use is left for a human, never deleted on a guess.
-	if _, err := os.Stat(filepath.Join(unstamped, "install", "engine")); err != nil {
-		t.Errorf("the unused holder must be kept: %v", err)
+	// Neither decoy is recovery's to move or delete.
+	for _, decoy := range []string{collide, unmarked} {
+		if _, err := os.Stat(filepath.Join(decoy, "install", "engine")); err != nil {
+			t.Errorf("%s must be left exactly as found: %v", filepath.Base(decoy), err)
+		}
 	}
 }
 
@@ -1063,9 +1074,14 @@ func TestRestoreInterruptedPromotionSkipsAHolderWithNoInstall(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
 	usable := plantHolder(t, dest, 100, "kept")
-	// Newer, so ordering reaches it first, but it holds nothing.
-	empty := fmt.Sprintf("%s%s%020d-x", dest, holderSuffix, 200)
-	if err := os.MkdirAll(empty, 0o755); err != nil {
+	// Newer AND owned, so ordering reaches it first and it is a real candidate,
+	// but it holds nothing: exactly what a stop between the allocation and the
+	// set-aside rename leaves.
+	empty := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 200, holderSeqSuffix)
+	if err := os.MkdirAll(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHolderMarker(empty, txnMarker{Kind: holderMarkerKind, Dest: filepath.Base(dest), Seq: 200}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1784,4 +1800,373 @@ func TestEnsureLocalEngineTreatsAnExpiredWaitAsBenign(t *testing.T) {
 			t.Errorf("nothing should have been created for a destination that was never locked: %v", err)
 		}
 	})
+}
+
+// The grammar is the first ownership filter: a name that does not read back as
+// one createSequencedHolder wrote is not this code's to move or delete. Loose
+// parsing is what let a sibling merely NAMED like a holder be attributed to the
+// install, which is the review's P3 finding on this site.
+func TestHolderStampRequiresTheExactGrammar(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "engine-1.2.3-linux-x64")
+	base := filepath.Base(dest)
+	for _, tc := range []struct {
+		name string
+		want int64
+		ok   bool
+	}{
+		{base + ".previous-00000000000000000042-seq", 42, true},
+		{base + ".kept-00000000000000000042-seq", 42, true},
+		{base + ".previous-42-seq", 0, false},
+		{base + ".previous-00000000000000000042-x7Kq3", 0, false},
+		{base + ".previous-1234567890", 0, false},
+		{base + ".previous-00000000000000000042-seq-extra", 0, false},
+		{base + ".previous-0000000000000000004a-seq", 0, false},
+		{base + ".previous-notes", 0, false},
+		{base + ".previous-", 0, false},
+		{base + ".kept-42-seq", 0, false},
+		{"other-install.previous-00000000000000000042-seq", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := holderStamp(dest, filepath.Join(filepath.Dir(dest), tc.name))
+			if ok != tc.ok || got != tc.want {
+				t.Errorf("holderStamp(%q) = (%d, %v), want (%d, %v)", tc.name, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// The allocator counts the Kept prefix as well as the scanned one. Recovery
+// parks a holder by renaming it under .kept-, and a sequence that stopped
+// counting there would hand the next promotion a number a parked copy already
+// carries, so the park would collide or the ordering would repeat.
+func TestNextHolderSeqCountsKeptNames(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	kept := fmt.Sprintf("%s%s%020d%s", dest, keptSuffix, 9, holderSeqSuffix)
+	if err := os.MkdirAll(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	seq, err := nextHolderSeq(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 10 {
+		t.Errorf("nextHolderSeq = %d, want 10: a parked copy already holds sequence 9", seq)
+	}
+}
+
+// The review's P3 reproduction. A directory whose NAME collides with the holder
+// prefix is not this install's copy, and attributing one by name is what put a
+// user's unrelated directory in reach of recovery's moves and deletes.
+func TestOwnedHoldersBesideIgnoresAPrefixCollidingSibling(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "model-a")
+	other := filepath.Join(root, "model-b")
+
+	mine := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 1, holderSeqSuffix)
+	makeDir(t, mine)
+	if err := writeHolderMarker(mine, txnMarker{Kind: holderMarkerKind, Dest: "model-a", Seq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// Named for model-a, marked for model-b: evidence it belongs to another
+	// destination's transaction, so model-a's pass has no claim on it at all.
+	foreign := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 2, holderSeqSuffix)
+	makeDir(t, foreign)
+	if err := writeHolderMarker(foreign, txnMarker{Kind: holderMarkerKind, Dest: filepath.Base(other), Seq: 2}); err != nil {
+		t.Fatal(err)
+	}
+	// A name the grammar rejects: a user's own directory that happens to start
+	// the same way.
+	collide := dest + holderSuffix + "mine"
+	makeDir(t, collide)
+	// The grammar passes and no marker backs it: retained and reported, never
+	// restored and never deleted.
+	unmarked := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 3, holderSeqSuffix)
+	makeDir(t, unmarked)
+
+	owned, unowned := ownedHoldersBeside(dest)
+
+	gotOwned := make([]string, 0, len(owned))
+	for _, c := range owned {
+		gotOwned = append(gotOwned, c.path)
+	}
+	if want := []string{mine}; !slices.Equal(gotOwned, want) {
+		t.Errorf("owned = %v, want %v", gotOwned, want)
+	}
+	if want := []string{unmarked}; !slices.Equal(unowned, want) {
+		t.Errorf("unowned = %v, want %v", unowned, want)
+	}
+	for _, path := range []string{foreign, collide} {
+		if slices.Contains(gotOwned, path) || slices.Contains(unowned, path) {
+			t.Errorf("%s is not this destination's to classify", filepath.Base(path))
+		}
+	}
+	if len(owned) == 1 && owned[0].seq != 1 {
+		t.Errorf("owned seq = %d, want 1", owned[0].seq)
+	}
+}
+
+// makeDir creates one directory the fixtures need, with the mode the allocator
+// gives a holder.
+func makeDir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Parking is how a copy recovery will not restore and cannot prove superseded
+// leaves the scan without leaving the disk: the same directory under a prefix
+// the scan does not enumerate, keeping its sequence so the operator can still
+// name it.
+func TestParkKeptHolderMovesTheCopyUnderTheKeptPrefix(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	holder := plantHolder(t, dest, 7, "kept")
+
+	if err := parkKeptHolder(holder); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	kept := fmt.Sprintf("%s%s%020d%s", dest, keptSuffix, 7, holderSeqSuffix)
+	got, err := os.ReadFile(filepath.Join(kept, "install", "engine"))
+	if err != nil || string(got) != "kept" {
+		t.Fatalf("parked copy = %q (err %v), want %q under %s", got, err, "kept", filepath.Base(kept))
+	}
+	if _, err := os.Stat(holder); !os.IsNotExist(err) {
+		t.Errorf("the holder should be gone from the scanned prefix, got %v", err)
+	}
+	owned, unowned := ownedHoldersBeside(dest)
+	if len(owned) != 0 || len(unowned) != 0 {
+		t.Errorf("a parked copy must leave the scan: owned %v unowned %v", owned, unowned)
+	}
+}
+
+// A park that would have to clear something first is a park onto a copy that is
+// not ours to remove, so it fails and leaves both where they are. Only a
+// clobbering implementation (remove the destination, then rename) can lose the
+// occupant.
+func TestParkKeptHolderDoesNotClobber(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	holder := plantHolder(t, dest, 7, "new")
+	occupied := fmt.Sprintf("%s%s%020d%s", dest, keptSuffix, 7, holderSeqSuffix)
+	makeDir(t, filepath.Join(occupied, "install"))
+	if err := os.WriteFile(filepath.Join(occupied, "install", "engine"), []byte("older"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := parkKeptHolder(holder); err == nil {
+		t.Error("parking onto an occupied Kept name must fail")
+	}
+	got, err := os.ReadFile(filepath.Join(occupied, "install", "engine"))
+	if err != nil || string(got) != "older" {
+		t.Errorf("the occupant was clobbered: %q err %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(holder, "install", "engine")); err != nil {
+		t.Errorf("a failed park must leave the holder where it is: %v", err)
+	}
+}
+
+// soleHolder returns the one holder beside destDir, failing when there is not
+// exactly one.
+func soleHolder(t *testing.T, destDir string) string {
+	t.Helper()
+	holders := holdersFor(t, destDir)
+	if len(holders) != 1 {
+		t.Fatalf("want exactly one holder beside %s, got %v", destDir, holders)
+	}
+	return holders[0]
+}
+
+// hasFile reports whether path exists.
+func hasFile(t *testing.T, path string) bool {
+	t.Helper()
+	_, err := os.Lstat(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return err == nil
+}
+
+// The marker goes in before the first destructive rename. A holder that takes
+// the only copy of an install before it can be proven ours is one recovery has
+// to leave in place forever, since nothing on disk says who wrote it.
+func TestPromoteStagedDirWritesTheMarkerBeforeSettingAside(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	injectFault(t, "rename", func(args ...string) bool {
+		return filepath.Base(args[1]) == "install"
+	}, errors.New("injected set-aside failure"))
+	// The holder is cleaned up on this failure path, which is right and would
+	// also erase what this test is asserting on.
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil); err == nil {
+		t.Fatal("a failed set-aside must be reported")
+	}
+	holder := soleHolder(t, dest)
+	m, err := readHolderMarker(holder)
+	if err != nil {
+		t.Fatalf("the holder was filled before it carried a marker: %v", err)
+	}
+	seq, ok := holderStamp(dest, holder)
+	if !ok {
+		t.Fatalf("the allocator wrote a name the grammar rejects: %q", filepath.Base(holder))
+	}
+	if m.Kind != holderMarkerKind || m.Dest != filepath.Base(dest) || m.Seq != seq {
+		t.Errorf("marker = %+v, want kind %q dest %q seq %d", m, holderMarkerKind, filepath.Base(dest), seq)
+	}
+	if hasFile(t, filepath.Join(holder, "install")) {
+		t.Error("the set-aside failed, so nothing should have moved into the holder")
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "old" {
+		t.Errorf("the previous install must be untouched: %q err %v", got, err)
+	}
+}
+
+// A torn marker write must leave no marker at all: the atomic rename is what
+// makes "missing" and "ours" the only two answers a crash can produce, so a
+// partial file can never be read as ownership.
+func TestPromoteStagedDirMarkerWriteIsAtomic(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	injectFault(t, "rename", func(args ...string) bool {
+		return filepath.Base(args[1]) == holderMarkerFile
+	}, errors.New("injected marker publish failure"))
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil); err == nil {
+		t.Fatal("a failed marker write must be reported")
+	}
+	holder := soleHolder(t, dest)
+	if hasFile(t, filepath.Join(holder, holderMarkerFile)) {
+		t.Error("a marker that was never published must not be readable")
+	}
+	if _, err := readHolderMarker(holder); !errors.Is(err, errMarkerMissing) {
+		t.Errorf("readHolderMarker = %v, want errMarkerMissing", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "old" {
+		t.Errorf("the previous install must be untouched: %q err %v", got, err)
+	}
+}
+
+// The commit flag is what proves to a later pass that the copy in the holder was
+// superseded by a publish that actually landed. It goes in after the publish and
+// before the cleanup, so a crash in that window costs a retained copy rather
+// than the install.
+func TestPromoteStagedDirCreatesTheCommitFlagAfterPublish(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	// Fail only the final cleanup, so the holder the flag was written into is
+	// still there to assert on.
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("engine = %q err %v, want %q", got, err, "new")
+	}
+	holder := soleHolder(t, dest)
+	if !hasFile(t, filepath.Join(holder, committedFile)) {
+		t.Error("a published promotion must mark the copy it superseded")
+	}
+	if kept, err := os.ReadFile(filepath.Join(holder, "install", "engine")); err != nil || string(kept) != "old" {
+		t.Errorf("the superseded copy = %q err %v, want %q", kept, err, "old")
+	}
+}
+
+// A publish that never happened must leave no evidence that it did. The flag is
+// the only thing licensing a later pass to delete the copy in the holder, so a
+// flag beside a copy that was never superseded authorizes deleting the only
+// install the user has. Both renames into the destination fail, which is the
+// state a crash mid-publish leaves: the holder retained, holding everything.
+func TestPromoteStagedDirPublishFailureLeavesNoCommitFlag(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	injectFault(t, "rename", func(args ...string) bool {
+		return args[1] == dest
+	}, errors.New("injected publish failure"))
+
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil); err == nil {
+		t.Fatal("a failed publish must be reported")
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatalf("neither rename into %s succeeded, so it should be absent, got %v", dest, err)
+	}
+	holder := soleHolder(t, dest)
+	if kept, err := os.ReadFile(filepath.Join(holder, "install", "engine")); err != nil || string(kept) != "old" {
+		t.Fatalf("the only copy = %q err %v, want it retained as %q", kept, err, "old")
+	}
+	if found := findNamed(t, root, committedFile); len(found) != 0 {
+		t.Errorf("a promotion that never published must leave no commit flag, found %v", found)
+	}
+}
+
+// A commit flag that cannot be written leaves the superseded copy on disk. The
+// alternative is deleting a whole install on the word of a step that just
+// failed, and the report is what tells the user where the copy went.
+func TestPromoteStagedDirFailedCommitFlagKeepsTheHolder(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	injectFault(t, "create", func(args ...string) bool {
+		return filepath.Base(args[0]) == committedFile
+	}, errors.New("injected commit flag failure"))
+	var reported []string
+	report := func(line string) { reported = append(reported, line) }
+
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", report); err != nil {
+		t.Fatalf("a published install must not be reported as a failure: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("engine = %q err %v, want the published %q", got, err, "new")
+	}
+	holder := soleHolder(t, dest)
+	if kept, err := os.ReadFile(filepath.Join(holder, "install", "engine")); err != nil || string(kept) != "old" {
+		t.Errorf("the superseded copy = %q err %v, want it retained as %q", kept, err, "old")
+	}
+	if hasFile(t, filepath.Join(holder, committedFile)) {
+		t.Error("the flag write failed, so no flag should exist")
+	}
+	if !slices.ContainsFunc(reported, func(line string) bool { return strings.Contains(line, holder) }) {
+		t.Errorf("the report must name the retained copy, got %v", reported)
+	}
+}
+
+// findNamed lists every path under root whose base name is name.
+func findNamed(t *testing.T, root, name string) []string {
+	t.Helper()
+	var found []string
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Name() == name {
+			found = append(found, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return found
 }
