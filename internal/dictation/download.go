@@ -1173,17 +1173,27 @@ func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []stri
 // else claims, and a park that would have to clear something first is a park
 // onto a copy that is not ours to remove.
 func parkKeptHolder(holder string) error {
+	kept, ok := keptHolderPath(holder)
+	if !ok {
+		return fmt.Errorf("%q is not a holder name", filepath.Base(holder))
+	}
+	return fsutil.RenameWithRetry(holder, kept, holderFS.rename)
+}
+
+// keptHolderPath is the Kept name a holder parks under: the same sequence, the
+// other prefix. Recovery names it in its report before the rename as well as
+// after, so the operator is told the same path whether the park lands or not.
+func keptHolderPath(holder string) (string, bool) {
 	dir, name := filepath.Split(holder)
 	cut := strings.LastIndex(name, holderSuffix)
 	if cut < 0 {
-		return fmt.Errorf("%q is not a holder name", name)
+		return "", false
 	}
 	destDir := filepath.Join(dir, name[:cut])
 	if _, ok := holderStamp(destDir, holder); !ok {
-		return fmt.Errorf("%q is not a holder name", name)
+		return "", false
 	}
-	kept := filepath.Join(dir, name[:cut]+keptSuffix+name[cut+len(holderSuffix):])
-	return fsutil.RenameWithRetry(holder, kept, holderFS.rename)
+	return filepath.Join(dir, name[:cut]+keptSuffix+name[cut+len(holderSuffix):]), true
 }
 
 // nextHolderSeq is the number a new holder should claim: one past the highest
@@ -1243,73 +1253,262 @@ func createSequencedHolder(destDir string, n int64) (string, error) {
 	return "", fmt.Errorf("could not claim a holder name for %s after %d attempts", filepath.Base(destDir), holderSeqAttempts)
 }
 
-// restoreInterruptedPromotion puts back an install that promoteStagedDir set
-// aside but never replaced, which is what a process stop between its two renames
-// leaves behind: destDir absent and the only usable copy in a .previous-* holder
-// nothing else looks at. Anything already at destDir wins, and the check for it
-// is explicit rather than leaning on os.Rename refusing an existing directory.
-// Best effort by design, since the caller can still download a fresh engine.
-// published reports whether destDir holds an install this caller can actually
-// use. Recovery needs it because "there is something at destDir" and "a
-// promotion published there" are different claims, and only the second one
-// makes a holder beside it superseded.
+// holderState is one owned holder after classification. Recovery decides what
+// every candidate IS before it moves anything: a ruling made while the disk is
+// half-read is a ruling made on a state that no longer exists by the time it is
+// acted on, which is how a copy that was the last usable one gets deleted.
+type holderState struct {
+	holderCandidate
+	// empty means the marker is there and the set-aside content is not, so the
+	// holder provably holds no copy of any install.
+	empty bool
+	// committed means the publish this copy was set aside for actually landed.
+	// It is the only evidence that licenses removing a copy.
+	committed bool
+	// usable is the CALLER's predicate applied to the copy itself. Recovery has
+	// no opinion about what an install looks like; the consumer does.
+	usable bool
+}
+
+// classifyHolder answers what one owned holder is, or reports that it cannot be
+// read. Unusable and unreadable are deliberately different answers: the first is
+// durable and the copy is skipped and kept, the second is a filesystem fault,
+// and turning a fault into a classification is how a transient error becomes a
+// permanent ruling about a copy nobody can get back.
+func classifyHolder(c holderCandidate, published func(string) bool) (holderState, error) {
+	st := holderState{holderCandidate: c}
+	install := filepath.Join(c.path, "install")
+	// ReadDir rather than Stat: a copy whose contents cannot be listed is one
+	// whose usability cannot be decided either, and the predicate below would
+	// answer "unusable" for it without ever having seen it.
+	if _, err := holderFS.readDir(install); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return holderState{}, err
+		}
+		st.empty = true
+		return st, nil
+	}
+	if _, err := holderFS.stat(filepath.Join(c.path, committedFile)); err == nil {
+		st.committed = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return holderState{}, err
+	}
+	st.usable = published(install)
+	return st, nil
+}
+
+// retainHolder gets one copy recovery will not restore out of the scan without
+// getting it off the disk. An owned holder that provably holds nothing is
+// removed; everything else moves under the Kept prefix, where the next pass does
+// not look and the operator can still find it by name. A park that fails leaves
+// the copy exactly where it is: the next pass reaches the same branch and tries
+// again, and nothing here ever turns a retain into a delete.
+func retainHolder(st holderState, report func(string)) {
+	if st.empty {
+		if err := holderFS.removeAll(st.path); err != nil {
+			report(fmt.Sprintf("Could not remove the empty holder %s (%v)", st.path, err))
+		}
+		return
+	}
+	kept, ok := keptHolderPath(st.path)
+	if !ok {
+		report(fmt.Sprintf("Keeping a copy of this install in %s", st.path))
+		return
+	}
+	if err := parkKeptHolder(st.path); err != nil {
+		report(fmt.Sprintf("Keeping a copy of this install in %s; it could not be moved to %s (%v)", st.path, kept, err))
+		return
+	}
+	report(fmt.Sprintf("Keeping a copy of this install in %s", kept))
+}
+
+// setAsideUnusableDest moves a destination that exists but holds no usable
+// install into a fresh sequenced holder, so a usable copy can be restored over
+// it. Fresh rather than the candidate's own holder: nesting one set-aside copy
+// inside another is how a copy stops being findable by its own name. Only ever
+// called once a candidate has been selected, so a destination nothing can
+// replace is never taken apart.
+func setAsideUnusableDest(destDir string) (string, error) {
+	seq, err := nextHolderSeq(destDir)
+	if err != nil {
+		return "", err
+	}
+	holder, err := createSequencedHolder(destDir, seq)
+	if err != nil {
+		return "", err
+	}
+	claimed, ok := holderStamp(destDir, holder)
+	if !ok {
+		_ = holderFS.removeAll(holder)
+		return "", fmt.Errorf("holder name %q is not one recovery can order", filepath.Base(holder))
+	}
+	// Same order the write path uses: the marker goes in before the first
+	// destructive rename, so a stop in this window leaves a holder recovery can
+	// prove is its own rather than one nothing on disk claims.
+	if err := writeHolderMarker(holder, txnMarker{Kind: holderMarkerKind, Dest: filepath.Base(destDir), Seq: claimed}); err != nil {
+		_ = holderFS.removeAll(holder)
+		return "", err
+	}
+	if err := fsutil.RenameWithRetry(destDir, filepath.Join(holder, "install"), holderFS.rename); err != nil {
+		// Owned and holding nothing, which is the one shape that costs nothing
+		// to remove. Leaving it would accumulate scratch on every failed pass.
+		_ = holderFS.removeAll(holder)
+		return "", err
+	}
+	return holder, nil
+}
+
+// restoreInterruptedPromotion reconciles one destination with every copy of it
+// beside it. A process stopped between promoteStagedDir's two renames leaves the
+// only usable install in a .previous-* holder nothing else looks at, and an
+// offline caller has no download to fall back on; a failed cleanup leaves a copy
+// that IS superseded; and recovery itself can leave a destination holding a tree
+// the caller cannot use. So every candidate is classified before anything moves,
+// and the ruling is a function of on-disk state alone: a second pass with no
+// memory of the first reaches the same answer.
+//
+// published reports whether a directory holds an install this caller can
+// actually use. It is the whole basis of every decision here, because "there is
+// something at destDir" and "a promotion published there" are different claims,
+// and only the second makes a copy beside it superseded.
 func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(string) bool, report func(string)) {
+	if report == nil {
+		report = func(string) {}
+	}
 	// Recovery moves and deletes whole installs. Without destDir's Install lock
 	// it can restore a holder a promotion in another process is parked on and
 	// remove it, leaving that promotion's rollback nothing to put back.
 	if !txn.holds(destDir) {
-		if report != nil {
-			report(fmt.Sprintf("Skipping recovery of %s: no install lock is held for it", filepath.Base(destDir)))
-		}
+		report(fmt.Sprintf("Skipping recovery of %s: no install lock is held for it", filepath.Base(destDir)))
 		return
 	}
-	if _, err := holderFS.lstat(destDir); err == nil {
-		// destDir is live. A holder is only ever filled by renaming destDir
-		// aside, so a destDir holding a USABLE install means a later promotion
-		// published over every holder beside it. Those are superseded copies of
-		// whole installs, and promoteStagedDir's cleanup is the only thing that
-		// removes them: when it fails the copy is stranded for good, and each
-		// later replacement strands another.
-		//
-		// Merely non-empty is not that evidence. An empty husk, or a half
-		// populated directory left by something outside this transaction, can
-		// sit at destDir while the only usable copy is in the holder; reaping on
-		// either would delete exactly what the caller is about to need, and an
-		// offline caller has no download to fall back on. So the holder only
-		// loses to a destination that is genuinely usable.
-		//
-		// A removal that fails is left for the next call, which reaches this
-		// same branch and tries again.
-		if published != nil && published(destDir) {
-			owned, _ := ownedHoldersBeside(destDir)
-			for _, candidate := range owned {
-				_ = holderFS.removeAll(candidate.path)
-			}
-		}
+	// Every ruling below rests on the predicate. With none there is no evidence
+	// for any of them, and acting anyway would delete or publish a copy on the
+	// strength of a directory merely existing.
+	if published == nil {
+		report(fmt.Sprintf("Skipping recovery of %s: no usability check was supplied", filepath.Base(destDir)))
 		return
 	}
 	// Only holders this code can prove it wrote for THIS destination. A sibling
 	// that merely collides with the prefix is not a copy of this install and is
-	// never restored from or removed on its account.
-	owned, _ := ownedHoldersBeside(destDir)
+	// never restored from, removed, or reported on its account.
+	owned, unowned := ownedHoldersBeside(destDir)
+	for _, path := range unowned {
+		report(fmt.Sprintf("Keeping %s: nothing in it identifies it as a copy of %s", path, filepath.Base(destDir)))
+	}
+	states := make([]holderState, 0, len(owned))
+	for _, candidate := range owned {
+		st, err := classifyHolder(candidate, published)
+		if err != nil {
+			// One unreadable candidate stops the whole destination. Ruling on
+			// the rest would mean choosing between copies while one of them is
+			// unread, and the copy nobody could read may be the newest.
+			report(fmt.Sprintf("Stopping recovery of %s: %s could not be read (%v)", filepath.Base(destDir), candidate.path, err))
+			return
+		}
+		states = append(states, st)
+	}
 	// Newest first: the sequence in the name, which the marker agrees with, is
-	// the only record of which copy was live last.
-	slices.SortStableFunc(owned, func(a, b holderCandidate) int {
+	// the only record of which copy was live last. No decision here reads a
+	// clock, so a backward clock cannot reorder them.
+	slices.SortStableFunc(states, func(a, b holderState) int {
 		return cmp.Compare(b.seq, a.seq)
 	})
-	for _, candidate := range owned {
-		holder := candidate.path
-		install := filepath.Join(holder, "install")
-		if _, err := holderFS.stat(install); err != nil {
-			continue
-		}
-		if err := holderFS.rename(install, destDir); err != nil {
-			continue
-		}
-		// Only the holder this install came out of is removed; an older one is
-		// left for a human, never deleted on a guess about which is current.
-		_ = holderFS.removeAll(holder)
+
+	destPresent := false
+	if _, err := holderFS.lstat(destDir); err == nil {
+		destPresent = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		report(fmt.Sprintf("Stopping recovery of %s: it could not be read (%v)", filepath.Base(destDir), err))
 		return
+	}
+
+	if destPresent && published(destDir) {
+		// The destination holds a real install, so every copy beside it was set
+		// aside by some earlier transaction. Only the ones carrying the commit
+		// flag are provably superseded by it; the rest may still be the last
+		// usable copy of something and are kept.
+		for _, st := range states {
+			if st.committed && !st.empty {
+				if err := holderFS.removeAll(st.path); err != nil {
+					report(fmt.Sprintf("Could not remove the superseded copy in %s (%v)", st.path, err))
+				}
+				continue
+			}
+			retainHolder(st, report)
+		}
+		return
+	}
+
+	// The destination is absent or holds nothing this caller can use, so a
+	// usable copy beside it is what should be live. Uncommitted first: it was
+	// set aside by the transaction that never finished, which makes it the most
+	// recent state anything can prove.
+	selected := -1
+	for i, st := range states {
+		if !st.empty && !st.committed && st.usable {
+			selected = i
+			break
+		}
+	}
+	if selected < 0 {
+		for i, st := range states {
+			if !st.empty && st.committed && st.usable {
+				selected = i
+				break
+			}
+		}
+	}
+	if selected < 0 {
+		if destPresent {
+			// Nothing beside it can replace it, so taking it apart would leave
+			// the caller with no destination at all instead of an unusable one.
+			report(fmt.Sprintf("%s holds no usable install and no copy beside it can replace it; it is left as it is", destDir))
+		}
+		for _, st := range states {
+			retainHolder(st, report)
+		}
+		return
+	}
+
+	// Classify, select, THEN set aside. A husk moved before a candidate is
+	// chosen is a destination taken apart for a restore that may never happen,
+	// and a failed restore would strand it under a prefix recovery never reads.
+	husk := ""
+	if destPresent {
+		var err error
+		husk, err = setAsideUnusableDest(destDir)
+		if err != nil {
+			report(fmt.Sprintf("Leaving %s as it is: it could not be set aside (%v)", destDir, err))
+			return
+		}
+	}
+	winner := states[selected]
+	if err := fsutil.RenameWithRetry(filepath.Join(winner.path, "install"), destDir, holderFS.rename); err != nil {
+		// No fallback to an older copy: installing one would put a tree at the
+		// destination that the next pass reads as evidence the newer copy was
+		// superseded, which is exactly how provenance is lost.
+		if husk != "" {
+			if backErr := fsutil.RenameWithRetry(filepath.Join(husk, "install"), destDir, holderFS.rename); backErr != nil {
+				report(fmt.Sprintf("%s could not be put back and is kept in %s (%v)", destDir, husk, backErr))
+			} else if rmErr := holderFS.removeAll(husk); rmErr != nil {
+				report(fmt.Sprintf("Could not remove the empty holder %s (%v)", husk, rmErr))
+			}
+		}
+		report(fmt.Sprintf("Keeping the copy of %s in %s: it could not be moved back into place (%v)", filepath.Base(destDir), winner.path, err))
+		return
+	}
+	// The winner's holder is owned and now holds nothing.
+	if err := holderFS.removeAll(winner.path); err != nil {
+		report(fmt.Sprintf("Could not remove the empty holder %s (%v)", winner.path, err))
+	}
+	if husk != "" {
+		retainHolder(holderState{holderCandidate: holderCandidate{path: husk}}, report)
+	}
+	for i, st := range states {
+		if i != selected {
+			retainHolder(st, report)
+		}
 	}
 }
 
