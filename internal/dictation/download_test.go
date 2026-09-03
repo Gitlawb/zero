@@ -2781,3 +2781,223 @@ func recordRemoveAll(t *testing.T) *[]string {
 	}
 	return &paths
 }
+
+// ---- the reclaim surface ---------------------------------------------------
+
+// plantKeptHolder writes what recovery leaves under the Kept prefix: a holder,
+// named and marked the way promoteStagedDir writes one, renamed to the Kept name
+// recovery parks it under. Going through the real helpers is what keeps the
+// fixture from testing a shape production never writes.
+func plantKeptHolder(t *testing.T, destDir string, seq int64, content string) string {
+	t.Helper()
+	holder := plantHolder(t, destDir, seq, content, false)
+	kept := keptName(t, destDir, holder)
+	if err := os.Rename(holder, kept); err != nil {
+		t.Fatal(err)
+	}
+	return kept
+}
+
+// keptHolderBytes is what the listing should report for a backup
+// plantKeptHolder wrote: the marker and the one file in the copy. Summed from
+// the two names the fixture created rather than by walking, so the assertion is
+// not the implementation restated.
+func keptHolderBytes(t *testing.T, kept, content string) int64 {
+	t.Helper()
+	info, err := os.Stat(filepath.Join(kept, holderMarkerFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size() + int64(len(content))
+}
+
+func findKept(t *testing.T, list []KeptBackup, path string) KeptBackup {
+	t.Helper()
+	for _, b := range list {
+		if b.Path == path {
+			return b
+		}
+	}
+	t.Fatalf("%s is missing from the listing %v", path, list)
+	return KeptBackup{}
+}
+
+// A Kept backup an operator cannot find is one that can never be reclaimed, and
+// this listing is the only thing that finds them: recovery deliberately never
+// enumerates the prefix. Here the copy is the only offline copy of an engine or
+// a model, so a directory nothing attributes is reported unowned rather than
+// dropped: the operator has to be able to see recovery's residue.
+func TestListKeptBackupsReportsDestSeqAndSize(t *testing.T) {
+	root := t.TempDir()
+	engine := filepath.Join(root, "engine-a")
+	model := filepath.Join(root, "model-b")
+	first := plantKeptHolder(t, engine, 1, "engine-bytes")
+	second := plantKeptHolder(t, model, 2, "model")
+
+	// Kept grammar, nothing attributing it: the shape a crash between the mkdir
+	// and the marker write leaves, parked by a later pass.
+	bare := fmt.Sprintf("%s%s%020d%s", engine, keptSuffix, 3, holderSeqSuffix)
+	if err := os.Mkdir(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A marker naming another destination is evidence this copy belongs to a
+	// transaction that is not the one the name claims.
+	skewed := plantKeptHolder(t, engine, 4, "skew")
+	if err := writeHolderMarker(skewed, txnMarker{Kind: holderMarkerKind, Dest: "engine-z", Seq: 4}); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling that fails the grammar was never a holder and is not listed.
+	if err := os.Mkdir(engine+keptSuffix+"notanumber"+holderSeqSuffix, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := ListKeptBackups(root)
+	if err != nil {
+		t.Fatalf("ListKeptBackups: %v", err)
+	}
+	if len(list) != 4 {
+		t.Fatalf("listed %d kept backups, want 4: %v", len(list), list)
+	}
+
+	got := findKept(t, list, first)
+	if !got.Owned || got.Dest != "engine-a" || got.Seq != 1 || got.Bytes != keptHolderBytes(t, first, "engine-bytes") {
+		t.Errorf("first = %+v, want owned engine-a seq 1 bytes %d", got, keptHolderBytes(t, first, "engine-bytes"))
+	}
+	got = findKept(t, list, second)
+	if !got.Owned || got.Dest != "model-b" || got.Seq != 2 || got.Bytes != keptHolderBytes(t, second, "model") {
+		t.Errorf("second = %+v, want owned model-b seq 2 bytes %d", got, keptHolderBytes(t, second, "model"))
+	}
+	for _, path := range []string{bare, skewed} {
+		got := findKept(t, list, path)
+		if got.Owned {
+			t.Errorf("%s is attributed by nothing on disk and must be listed unowned, got %+v", path, got)
+		}
+		// The destination has to be empty too: naming one off the directory's
+		// own name tells the operator this copy belongs to an install the
+		// marker does not support.
+		if got.Dest != "" {
+			t.Errorf("%s: unowned entries carry no destination, got %q", path, got.Dest)
+		}
+	}
+}
+
+// Removal carries the same ownership proof recovery's own deletes carry. This is
+// the one thing that deletes a Kept backup here, and the copy it deletes may be
+// the only offline copy of an engine, so an entry nothing attributes survives it
+// and the operator is told to remove that one by hand.
+func TestRemoveKeptBackupRefusesAnUnownedEntry(t *testing.T) {
+	t.Run("no marker", func(t *testing.T) {
+		root := t.TempDir()
+		kept := plantKeptHolder(t, filepath.Join(root, "engine-a"), 1, "engine")
+		if err := os.Remove(filepath.Join(kept, holderMarkerFile)); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeptBackup(root, filepath.Base(kept)); err == nil {
+			t.Fatal("a directory with no marker must not be removed")
+		}
+		if _, err := os.Stat(filepath.Join(kept, "install", "engine")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
+	t.Run("marker disagrees with the sequence", func(t *testing.T) {
+		root := t.TempDir()
+		kept := plantKeptHolder(t, filepath.Join(root, "engine-a"), 1, "engine")
+		if err := writeHolderMarker(kept, txnMarker{Kind: holderMarkerKind, Dest: "engine-a", Seq: 42}); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeptBackup(root, filepath.Base(kept)); err == nil {
+			t.Fatal("a marker for another sequence must not license a removal")
+		}
+		if _, err := os.Stat(filepath.Join(kept, "install", "engine")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
+	t.Run("marker disagrees with the destination", func(t *testing.T) {
+		root := t.TempDir()
+		kept := plantKeptHolder(t, filepath.Join(root, "engine-a"), 1, "engine")
+		if err := writeHolderMarker(kept, txnMarker{Kind: holderMarkerKind, Dest: "engine-z", Seq: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeptBackup(root, filepath.Base(kept)); err == nil {
+			t.Fatal("a marker for another destination must not license a removal")
+		}
+		if _, err := os.Stat(filepath.Join(kept, "install", "engine")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
+}
+
+// The lock is what separates a Kept backup from a copy a live install is about
+// to roll back to: on disk the two are the same directory, and removing one
+// mid-promotion takes the only copy of the install.
+func TestRemoveKeptBackupRefusesWhileTheDestinationIsLocked(t *testing.T) {
+	root := t.TempDir()
+	kept := plantKeptHolder(t, filepath.Join(root, "engine-a"), 1, "engine")
+	lockDir := filepath.Join(root, installLockDir)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := lockutil.TryAcquireFileLockAt(root, filepath.Join(lockDir, "engine-a.lock"))
+	if err != nil {
+		t.Fatalf("take the lock as the other install would: %v", err)
+	}
+	if err := RemoveKeptBackup(root, filepath.Base(kept)); err == nil {
+		_ = held.Release()
+		t.Fatal("a removal must not run while another process holds the destination")
+	}
+	if _, err := os.Stat(filepath.Join(kept, "install", "engine")); err != nil {
+		t.Errorf("the copy must be left intact: %v", err)
+	}
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveKeptBackup(root, filepath.Base(kept)); err != nil {
+		t.Fatalf("the same removal must go through once the lock is free: %v", err)
+	}
+	if _, err := os.Stat(kept); !os.IsNotExist(err) {
+		t.Errorf("the copy should be gone, got %v", err)
+	}
+}
+
+// The command takes a name, never a path. The Kept grammar here is a
+// destination's own name followed by the suffix, so a name carrying a separator
+// still passes it: "../x.kept-...-seq" parses as destination "../x". Only the
+// base-name check keeps that from joining to a directory outside the root, and
+// it has to run before any filesystem call.
+func TestRemoveKeptBackupRejectsANameThatIsNotABaseName(t *testing.T) {
+	root := t.TempDir()
+	suffix := fmt.Sprintf("%s%020d%s", keptSuffix, 1, holderSeqSuffix)
+	for _, step := range []string{"removeAll", "stat", "readFile", "mkdir"} {
+		injectFault(t, step, func(args ...string) bool {
+			t.Errorf("a rejected name must not reach the filesystem, got %s(%v)", step, args)
+			return false
+		}, nil)
+	}
+	names := []string{
+		"../x" + suffix,
+		"a/b" + suffix,
+		filepath.Join(root, "engine-a") + suffix,
+		"." + suffix,
+		".." + suffix,
+		"", ".", "..",
+	}
+	for _, name := range names {
+		if err := RemoveKeptBackup(root, name); err == nil {
+			t.Errorf("RemoveKeptBackup(%q) = nil, want a refusal", name)
+		}
+	}
+}
+
+// The scanned prefix is recovery's, not the operator's: a holder under it may
+// belong to a promotion running right now, and recovery has a disposition for it
+// either way. Only the Kept prefix is this command's to touch.
+func TestRemoveKeptBackupNeverTouchesTheScannedPrefix(t *testing.T) {
+	root := t.TempDir()
+	holder := plantHolder(t, filepath.Join(root, "engine-a"), 1, "engine", false)
+	if err := RemoveKeptBackup(root, filepath.Base(holder)); err == nil {
+		t.Fatal("a holder under the scanned prefix must not be removed by name")
+	}
+	if _, err := os.Stat(filepath.Join(holder, "install", "engine")); err != nil {
+		t.Errorf("the copy must be left intact: %v", err)
+	}
+}

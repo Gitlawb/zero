@@ -497,6 +497,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runCron(args[1:], stdout, stderr, deps)
 	case "repo-info", "repoinfo":
 		return runRepoInfo(args[1:], stdout, stderr, deps)
+	case "kept-backups":
+		return runKeptBackups(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
 	case "acp":

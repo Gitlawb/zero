@@ -927,6 +927,134 @@ func parkKeptBackup(dir, staging, id string, logf func(string, ...any)) {
 	}
 }
 
+// keptStamp reads the sequence out of a Kept backup name. It is the same
+// grammar the scanned prefix uses with the other prefix in front, and it is
+// deliberately the ONLY prefix this file's operator commands accept: a directory
+// under stagingPrefix may be the staging dir of an extract running right now,
+// and recovery has a disposition for it either way.
+func keptStamp(name string) (int64, bool) {
+	rest, ok := strings.CutPrefix(name, keptPrefix)
+	if !ok {
+		return 0, false
+	}
+	return stagingStamp(stagingPrefix + rest)
+}
+
+// KeptBackup is one copy recovery moved under the Kept prefix rather than
+// deleted, as an operator sees it. Recovery never enumerates that prefix, so
+// this listing is the only way a retained copy is found again; nothing reclaims
+// one on its own. Owned false is a directory carrying the Kept name that nothing
+// on disk attributes, listed beside the real backups so recovery's residue is
+// visible rather than silent until a disk fills.
+type KeptBackup struct {
+	Path  string
+	Dest  string
+	Seq   int64
+	Bytes int64
+	Owned bool
+}
+
+// ListKeptBackups reports every Kept backup in a bundle dir. The destination
+// comes off the marker and never off the name: a bundle Kept name carries no
+// link id at all, so a name-derived destination would be an invention.
+func ListKeptBackups(dir string) ([]KeptBackup, error) {
+	entries, err := stagingFS.readDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []KeptBackup
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		seq, ok := keptStamp(entry.Name())
+		if !ok {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		backup := KeptBackup{Path: path, Seq: seq, Bytes: dirBytes(path)}
+		// The same proof recovery requires before it touches a directory: the
+		// work-tree veto, then a marker agreeing with the name and naming a link
+		// the write path would have accepted.
+		if id, ok := attributeStagingDir(dir, path, seq, discardLog); ok {
+			backup.Dest = id
+			backup.Owned = true
+		}
+		out = append(out, backup)
+	}
+	slices.SortFunc(out, func(a, b KeptBackup) int { return cmp.Compare(a.Path, b.Path) })
+	return out, nil
+}
+
+// RemoveKeptBackup deletes the one Kept backup an operator named. It is not an
+// rm: the name has to be a single component under dir, pass the Kept grammar,
+// hold no work tree at its root, and carry a marker whose kind, link, and
+// sequence all agree, and the link's extract locks have to be free. Anything
+// else is refused and left for the operator to remove by hand, because this is
+// the only command that deletes a Kept backup and a wrong answer here is the
+// last copy of a tree.
+func RemoveKeptBackup(dir, name string) error {
+	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
+		// Ahead of every filesystem call: a name carrying a separator joins to a
+		// path outside dir, which would make this a remote rm.
+		return fmt.Errorf("remote: %q is not the name of an entry in %s", name, dir)
+	}
+	seq, ok := keptStamp(name)
+	if !ok {
+		return fmt.Errorf("remote: %s is not a kept backup; recovery may still act on it, so remove it by hand", name)
+	}
+	path := filepath.Join(dir, name)
+	id, ok := attributeStagingDir(dir, path, seq, discardLog)
+	if !ok {
+		return fmt.Errorf("remote: nothing on disk attributes %s to a link; remove it by hand", name)
+	}
+	dest := filepath.Join(dir, id)
+	unlock, held := tryLockExtract(dest)
+	if held {
+		return fmt.Errorf("remote: an extract in this process holds %s; try again once it finishes", id)
+	}
+	defer unlock()
+	unlockFile, heldFile, err := tryLockExtractFile(dir, dest)
+	if err != nil {
+		return err
+	}
+	if heldFile {
+		return fmt.Errorf("remote: another process holds %s; try again once it finishes", id)
+	}
+	defer unlockFile()
+	// Re-read under the lock. The attribution above ran with nothing excluding a
+	// live extract, and a directory that stopped being this link's in between is
+	// one that must not be deleted on the strength of the earlier reading.
+	if again, ok := attributeStagingDir(dir, path, seq, discardLog); !ok || again != id {
+		return fmt.Errorf("remote: %s is no longer attributable to %s; leaving it in place", name, id)
+	}
+	return stagingFS.removeAll(path)
+}
+
+// dirBytes sums the regular files under path. Unreadable entries are skipped
+// rather than failing the listing: a size an operator cannot see is a worse
+// answer than a size that is short, and the entry itself is still reported.
+func dirBytes(path string) int64 {
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
+}
+
+// discardLog is the reporter the operator commands hand the recovery helpers
+// they reuse. Those helpers narrate every refusal for the recovery pass's log;
+// here the refusal comes back as an error instead.
+func discardLog(string, ...any) {}
+
 // txnMarker is what a staging dir carries to prove which transaction created it.
 // Seq repeats the number in the directory's own name: a marker that disagrees
 // with its name proves nothing about who wrote either, so the pair is what makes

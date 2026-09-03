@@ -2926,3 +2926,237 @@ func TestRecoverBundleDirLeavesALiveExtractsScratchAlone(t *testing.T) {
 		t.Fatalf("a.txt = %q err %v, want the published %q", got, err, "v1")
 	}
 }
+
+// ---- the reclaim surface ---------------------------------------------------
+
+// plantKeptBackup writes what recovery leaves under the Kept prefix: a staged
+// copy, named and marked for linkID, moved out of the prefix the scan
+// enumerates. Going through stageBackup and the real park name is what keeps the
+// fixture from testing a shape production never writes.
+func plantKeptBackup(t *testing.T, dir, linkID, content string, seq int64) string {
+	t.Helper()
+	staging := stageBackup(t, dir, "", linkID, content, seq)
+	kept := filepath.Join(dir, keptPrefix+strings.TrimPrefix(filepath.Base(staging), stagingPrefix))
+	if err := os.Rename(staging, kept); err != nil {
+		t.Fatal(err)
+	}
+	return kept
+}
+
+// keptBytes is what the listing should report for a backup plantKeptBackup
+// wrote: the marker and the one file in the copy. Summed from the two names the
+// fixture created rather than by walking, so the assertion is not the
+// implementation restated.
+func keptBytes(t *testing.T, kept, content string) int64 {
+	t.Helper()
+	info, err := os.Stat(filepath.Join(kept, stagingMarkerFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size() + int64(len(content))
+}
+
+func findKept(t *testing.T, list []KeptBackup, path string) KeptBackup {
+	t.Helper()
+	for _, b := range list {
+		if b.Path == path {
+			return b
+		}
+	}
+	t.Fatalf("%s is missing from the listing %v", path, list)
+	return KeptBackup{}
+}
+
+// A Kept backup an operator cannot find is one that can never be reclaimed, and
+// this listing is the only thing that finds them: recovery deliberately never
+// enumerates the prefix. The destination comes off the marker, because the
+// bundle site's Kept name carries no link id at all, and anything that merely
+// carries the name is reported unowned so recovery's own residue is visible
+// beside the real backups.
+func TestListKeptBackupsReportsDestSeqAndSize(t *testing.T) {
+	dir := t.TempDir()
+	first := plantKeptBackup(t, dir, "proj-1", "one", 1)
+	second := plantKeptBackup(t, dir, "proj-2", "second-copy", 2)
+
+	// Kept grammar, nothing attributing it: the empty directory a crash between
+	// Mkdir and the marker write leaves, parked by a later pass.
+	bare := filepath.Join(dir, fmt.Sprintf("%s%020d%s", keptPrefix, 3, stagingSeqSuffix))
+	if err := os.Mkdir(bare, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A marker that contradicts the name it sits in proves nothing about who
+	// wrote either of them.
+	skewed := plantKeptBackup(t, dir, "proj-3", "skew", 4)
+	if err := writeMarker(skewed, txnMarker{Kind: txnKindBundleExtract, Dest: "proj-3", Seq: 99}); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling that fails the grammar is not a Kept backup and is not listed.
+	if err := os.Mkdir(filepath.Join(dir, keptPrefix+"notanumber-seq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := ListKeptBackups(dir)
+	if err != nil {
+		t.Fatalf("ListKeptBackups: %v", err)
+	}
+	if len(list) != 4 {
+		t.Fatalf("listed %d kept backups, want 4: %v", len(list), list)
+	}
+
+	got := findKept(t, list, first)
+	if !got.Owned || got.Dest != "proj-1" || got.Seq != 1 || got.Bytes != keptBytes(t, first, "one") {
+		t.Errorf("first = %+v, want owned proj-1 seq 1 bytes %d", got, keptBytes(t, first, "one"))
+	}
+	got = findKept(t, list, second)
+	if !got.Owned || got.Dest != "proj-2" || got.Seq != 2 || got.Bytes != keptBytes(t, second, "second-copy") {
+		t.Errorf("second = %+v, want owned proj-2 seq 2 bytes %d", got, keptBytes(t, second, "second-copy"))
+	}
+	for _, path := range []string{bare, skewed} {
+		got := findKept(t, list, path)
+		if got.Owned {
+			t.Errorf("%s is attributed by nothing on disk and must be listed unowned, got %+v", path, got)
+		}
+		// The destination has to be empty too: naming one the marker does not
+		// support tells the operator this copy belongs to a link it may not.
+		if got.Dest != "" {
+			t.Errorf("%s: unowned entries carry no destination, got %q", path, got.Dest)
+		}
+	}
+}
+
+// Removal carries the same ownership proof recovery's own deletes carry. It is
+// the one thing on this machine that deletes a Kept backup, so an entry nothing
+// attributes has to survive it: the operator is told to remove that one by hand.
+func TestRemoveKeptBackupRefusesAnUnownedEntry(t *testing.T) {
+	t.Run("no marker", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "one", 1)
+		if err := os.Remove(filepath.Join(kept, stagingMarkerFile)); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err == nil {
+			t.Fatal("a directory with no marker must not be removed")
+		}
+		if _, err := os.Stat(filepath.Join(kept, "backup", "a.txt")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
+	t.Run("marker disagrees with the name", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "one", 1)
+		if err := writeMarker(kept, txnMarker{Kind: txnKindBundleExtract, Dest: "proj-1", Seq: 42}); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err == nil {
+			t.Fatal("a marker for another sequence must not license a removal")
+		}
+		if _, err := os.Stat(filepath.Join(kept, "backup", "a.txt")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
+	// Link ids beginning with '.' used to be accepted, so a published work tree
+	// can sit under the exact Kept name and carry a file called txn at its root.
+	// The work-tree veto has to run ahead of the marker read, or that file
+	// licenses removing a user's checkout.
+	t.Run("work tree beside a valid-looking marker", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "one", 1)
+		if err := os.MkdirAll(filepath.Join(kept, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err == nil {
+			t.Fatal("a work tree must not be removed whatever its marker says")
+		}
+		if _, err := os.Stat(filepath.Join(kept, ".git")); err != nil {
+			t.Errorf("the work tree must be left intact: %v", err)
+		}
+	})
+}
+
+// The lock is what separates a Kept backup from one a live extract is about to
+// restore from: on disk the two are the same directory, and removing one
+// mid-transaction takes the copy the transaction rolls back to.
+func TestRemoveKeptBackupRefusesWhileTheDestinationIsLocked(t *testing.T) {
+	t.Run("in process", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "one", 1)
+		unlock := lockExtract(filepath.Join(dir, "proj-1"))
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err == nil {
+			unlock()
+			t.Fatal("a removal must not run while an extract in this process holds the link")
+		}
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+		unlock()
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err != nil {
+			t.Fatalf("the same removal must go through once the lock is free: %v", err)
+		}
+		if _, err := os.Stat(kept); !os.IsNotExist(err) {
+			t.Errorf("the copy should be gone, got %v", err)
+		}
+	})
+	t.Run("another process", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "one", 1)
+		lockDir := filepath.Join(dir, lockDirName)
+		if err := os.MkdirAll(lockDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		held, err := lockutil.TryAcquireFileLockAt(dir, filepath.Join(lockDir, "proj-1.lock"))
+		if err != nil {
+			t.Fatalf("take the lock as the other daemon would: %v", err)
+		}
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err == nil {
+			_ = held.Release()
+			t.Fatal("a removal must not run while another process holds the link")
+		}
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+		if err := held.Release(); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err != nil {
+			t.Fatalf("the same removal must go through once the lock is free: %v", err)
+		}
+	})
+}
+
+// The command takes a name, never a path. A separator in the argument would join
+// to a directory outside the bundle dir, which turns an operator's reclaim into
+// a remote rm, so the name is refused before any filesystem call happens at all.
+func TestRemoveKeptBackupRejectsANameThatIsNotABaseName(t *testing.T) {
+	dir := t.TempDir()
+	injectFault(t, "removeAll", func(args ...string) bool {
+		t.Errorf("a rejected name must not reach the filesystem, got removeAll(%v)", args)
+		return false
+	}, nil)
+	injectFault(t, "stat", func(args ...string) bool {
+		t.Errorf("a rejected name must not reach the filesystem, got stat(%v)", args)
+		return false
+	}, nil)
+	injectFault(t, "readFile", func(args ...string) bool {
+		t.Errorf("a rejected name must not reach the filesystem, got readFile(%v)", args)
+		return false
+	}, nil)
+	for _, name := range []string{"../x", "a/b", filepath.Join(dir, ".kept-x"), ".", "..", ""} {
+		if err := RemoveKeptBackup(dir, name); err == nil {
+			t.Errorf("RemoveKeptBackup(%q) = nil, want a refusal", name)
+		}
+	}
+}
+
+// The scanned prefix is recovery's, not the operator's: a directory under it may
+// be the staging dir of an extract running right now, and the next pass has a
+// disposition for it either way. Only the Kept prefix is this command's to touch.
+func TestRemoveKeptBackupNeverTouchesTheScannedPrefix(t *testing.T) {
+	dir := t.TempDir()
+	staging := stageBackup(t, dir, "", "proj-1", "one", 1)
+	if err := RemoveKeptBackup(dir, filepath.Base(staging)); err == nil {
+		t.Fatal("a directory under the scanned prefix must not be removed by name")
+	}
+	if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+		t.Errorf("the copy must be left intact: %v", err)
+	}
+}
