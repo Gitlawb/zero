@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/fsutil"
 	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
@@ -794,8 +795,10 @@ func resolveEnginePaths(engineDir string, targetWindows bool) (bin, server strin
 // because recovery has to pick the NEWEST holder when a failed cleanup left an
 // older one behind, and nothing else records that order: Glob sorts lexically
 // and a directory mtime tracks the install's contents, not its promotion. The
-// number is one past the highest already beside this install, so a clock moving
-// backward cannot invert it the way the wall-clock stamp it replaces could.
+// number is a per-install sequence, one past the highest already beside this
+// install, so no decision here reads a clock. There is no older shape to accept:
+// released versions staged under .stage-* and published with a plain rename,
+// and none of them ever created a holder.
 // fsOps is the filesystem seam the promotion path, the holder allocator, and
 // recovery take every step through. A step that calls os directly cannot be made
 // to fail, and the crash each of these steps exists to survive is then only
@@ -881,15 +884,22 @@ func (t *destTxn) release() {
 	_ = t.lock.Release()
 }
 
+// isInstallDestName reports whether name is one path component naming an install
+// destination. A destination is one path component: any other shape puts the
+// lock file somewhere else, and two callers for the same destination would then
+// lock different inodes and both proceed. Recovery runs the same check over the
+// destination name it reads out of a marker, so a name off disk is never trusted
+// further than one the caller supplied.
+func isInstallDestName(name string) bool {
+	return name != "" && name == filepath.Base(name) && name != "." && name != ".."
+}
+
 // lockDestination takes the Install lock for one destination under destRoot,
 // waiting out another process that holds it until ctx ends or the budget runs
 // out. The budget expiring is errInstallInProgress, which the caller answers by
 // re-checking the destination rather than by failing.
 func lockDestination(ctx context.Context, destRoot, dest string) (*destTxn, error) {
-	// A destination is one path component. Any other shape puts the lock file
-	// somewhere else, and two callers for the same destination would then lock
-	// different inodes and both proceed.
-	if dest == "" || dest != filepath.Base(dest) || dest == "." || dest == ".." {
+	if !isInstallDestName(dest) {
 		return nil, fmt.Errorf("dictation download: %q is not an install destination name", dest)
 	}
 	// destRoot is otherwise created lazily by the download this lock covers, and
@@ -944,15 +954,47 @@ func withDestinationLock(ctx context.Context, destRoot, dest string, usable func
 
 const holderSuffix = ".previous-"
 
+// keptSuffix names a holder recovery decided to retain rather than restore or
+// delete. It is a different prefix from holderSuffix so recovery's scan never
+// enumerates a copy it has already ruled on, while the allocator still counts
+// both and cannot reissue a number a Kept backup already carries.
+const keptSuffix = ".kept-"
+
+// holderSeqDigits is how many digits a sequenced name carries. Fixed width is
+// what makes the grammar exact: a name one digit short is a name this code did
+// not write, whatever else it looks like.
+const holderSeqDigits = 20
+
 // holderStamp reads back the ordering number in a holder name, reporting false
-// for a name it cannot order (one this package did not write). New names carry a
-// per-install sequence; names written by released versions carry wall-clock
-// nanoseconds. Both compare the same way.
+// for any name this code did not write. The grammar is exact and it is the
+// first ownership filter: the install's own base name, then .previous- or
+// .kept-, then twenty digits, then holderSeqSuffix, and nothing else. Loose
+// parsing is what let a sibling merely NAMED like a holder be attributed to the
+// install and moved on its account. No released version wrote a holder at all,
+// so there is no older shape to accept.
 func holderStamp(destDir, holder string) (int64, bool) {
-	rest := strings.TrimPrefix(filepath.Base(holder), filepath.Base(destDir)+holderSuffix)
-	digits, _, found := strings.Cut(rest, "-")
-	if !found {
+	name := filepath.Base(holder)
+	base := filepath.Base(destDir)
+	var rest string
+	switch {
+	case strings.HasPrefix(name, base+holderSuffix):
+		rest = name[len(base)+len(holderSuffix):]
+	case strings.HasPrefix(name, base+keptSuffix):
+		rest = name[len(base)+len(keptSuffix):]
+	default:
 		return 0, false
+	}
+	digits, ok := strings.CutSuffix(rest, holderSeqSuffix)
+	if !ok || len(digits) != holderSeqDigits {
+		return 0, false
+	}
+	for _, c := range []byte(digits) {
+		// ParseInt would take a leading '+' or '-', and a signed number renders
+		// back through %020d as a different string, so the writer and the reader
+		// would disagree about a name they both accept.
+		if c < '0' || c > '9' {
+			return 0, false
+		}
 	}
 	stamp, err := strconv.ParseInt(digits, 10, 64)
 	if err != nil {
@@ -961,31 +1003,203 @@ func holderStamp(destDir, holder string) (int64, bool) {
 	return stamp, true
 }
 
-// holderSeqSuffix closes a sequenced holder name. holderStamp cuts on the first
-// '-' after the digits, so a name ending at the digits reads back as unstamped,
-// which is silent: an unstamped holder sorts last and is still restorable, so
-// the ordering key would stop existing with nothing failing. os.MkdirTemp used
-// to supply this separator with its random suffix.
+// holderSeqSuffix closes a sequenced holder name. It is what the grammar ends
+// on, so a name that stops at the digits, or carries anything after the suffix,
+// is not one this code wrote.
 const holderSeqSuffix = "-seq"
 
 // holderSeqAttempts bounds the walk up from a taken number, in the spirit of the
 // retry limit os.MkdirTemp applies to its own random names.
 const holderSeqAttempts = 10000
 
+// holderMarkerFile names the transaction marker written inside every holder
+// before anything is moved into it. The name alone is not ownership: any
+// directory can be named to look like a holder, and moving or deleting one on
+// its name is how a sibling that merely collides with the prefix loses its
+// contents.
+const holderMarkerFile = "txn"
+
+// committedFile is the flag promoteStagedDir creates inside a holder after the
+// publish rename succeeds. It is the only evidence that the copy in the holder
+// was superseded by an install that actually landed, and so the only thing that
+// licenses removing it.
+const committedFile = "committed"
+
+// holderMarkerKind is what this site writes in a marker's kind field. The two
+// install sites use one marker format and different kinds, so a directory
+// written by the other one is never read as this one's.
+const holderMarkerKind = "dictation-promote"
+
+// txnMarker is the ownership proof inside a holder: the transaction that created
+// it, the destination it was created for, and the sequence in its name. All
+// three have to agree with what recovery already knows before the holder is
+// this code's to touch.
+type txnMarker struct {
+	Kind string `json:"kind"`
+	Dest string `json:"dest"`
+	Seq  int64  `json:"seq"`
+}
+
+// errMarkerMissing separates "there is no marker" from "the marker could not be
+// read". The first is a directory this code cannot claim; the second is a
+// filesystem fault, and treating them alike would let a transient read error
+// silently reclassify a copy.
+var errMarkerMissing = errors.New("no transaction marker")
+
+// writeHolderMarker writes the marker atomically: a temp file in the same
+// directory, then a rename. A torn write cannot then leave a partial marker that
+// parses, which is what makes "the marker is missing" and "the marker is ours"
+// the only two answers a crash can produce.
+func writeHolderMarker(dir string, m txnMarker) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	f, err := holderFS.createTemp(dir, holderMarkerFile+"-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if err := writeAndSync(f, data); err != nil {
+		_ = holderFS.removeAll(tmp)
+		return err
+	}
+	if err := fsutil.RenameWithRetry(tmp, filepath.Join(dir, holderMarkerFile), holderFS.rename); err != nil {
+		_ = holderFS.removeAll(tmp)
+		return err
+	}
+	return nil
+}
+
+// writeAndSync fills the marker's temp file and gets it to disk before the
+// rename that publishes it. Without the Sync the rename can be visible after a
+// crash while the bytes behind it are not.
+func writeAndSync(f *os.File, data []byte) error {
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// readHolderMarker reads a holder's marker. A missing one is errMarkerMissing;
+// anything else is returned as it came back, so a caller can tell a directory it
+// cannot claim from one it cannot read.
+func readHolderMarker(dir string) (txnMarker, error) {
+	data, err := holderFS.readFile(filepath.Join(dir, holderMarkerFile))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return txnMarker{}, fmt.Errorf("%w in %s", errMarkerMissing, dir)
+		}
+		return txnMarker{}, err
+	}
+	var m txnMarker
+	if err := json.Unmarshal(data, &m); err != nil {
+		return txnMarker{}, fmt.Errorf("unreadable transaction marker in %s: %w", dir, err)
+	}
+	return m, nil
+}
+
+// writeCommitFlag records that the publish this holder's copy was set aside for
+// actually landed. O_EXCL because a flag that is already there was written by a
+// different transaction, and overwriting it would move the evidence.
+func writeCommitFlag(dir string) error {
+	f, err := holderFS.create(filepath.Join(dir, committedFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// holderCandidate is one holder recovery may act on, with the sequence its name
+// and its marker agree on.
+type holderCandidate struct {
+	path string
+	seq  int64
+}
+
+// ownedHoldersBeside splits the entries beside destDir into the holders this
+// code can prove it wrote for THIS destination and the ones it cannot. Owned
+// means the exact name grammar and a marker whose kind, destination, and
+// sequence all agree with it; unowned means a name this code would have written
+// with no such marker behind it, which is retained and reported, never moved.
+// An entry that only collides with the prefix is neither: it was never this
+// install's, so it is not even reported on its account.
+func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []string) {
+	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
+	// and a '[' anywhere in it opens a character class to Glob, which then
+	// matches nothing and strands the install this exists to put back.
+	parent := filepath.Dir(destDir)
+	base := filepath.Base(destDir)
+	entries, err := holderFS.readDir(parent)
+	if err != nil {
+		return nil, nil
+	}
+	prefix := base + holderSuffix
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		path := filepath.Join(parent, name)
+		seq, ok := holderStamp(destDir, name)
+		if !ok {
+			continue
+		}
+		m, err := readHolderMarker(path)
+		if err != nil {
+			unowned = append(unowned, path)
+			continue
+		}
+		// Everything read off disk goes back through the check the write path
+		// applied, and the whole marker has to agree: a marker naming another
+		// destination or another sequence is evidence this directory belongs to
+		// a transaction that is not the one being recovered.
+		if m.Kind != holderMarkerKind || m.Seq != seq || m.Dest != base || !isInstallDestName(m.Dest) {
+			continue
+		}
+		owned = append(owned, holderCandidate{path: path, seq: seq})
+	}
+	return owned, unowned
+}
+
+// parkKeptHolder renames a holder under the Kept prefix, which is how a copy
+// recovery will not restore and cannot prove superseded leaves the scan without
+// leaving the disk. A plain rename: the Kept name is a distinct sequence nothing
+// else claims, and a park that would have to clear something first is a park
+// onto a copy that is not ours to remove.
+func parkKeptHolder(holder string) error {
+	dir, name := filepath.Split(holder)
+	cut := strings.LastIndex(name, holderSuffix)
+	if cut < 0 {
+		return fmt.Errorf("%q is not a holder name", name)
+	}
+	destDir := filepath.Join(dir, name[:cut])
+	if _, ok := holderStamp(destDir, holder); !ok {
+		return fmt.Errorf("%q is not a holder name", name)
+	}
+	kept := filepath.Join(dir, name[:cut]+keptSuffix+name[cut+len(holderSuffix):])
+	return fsutil.RenameWithRetry(holder, kept, holderFS.rename)
+}
+
 // nextHolderSeq is the number a new holder should claim: one past the highest
-// already set aside for this install. That is what makes the order survive a
-// clock that moves backward, since a promotion that reads an existing holder
-// always allocates above it. Holders for a different install are a separate
-// sequence and are never compared against this one.
+// already set aside for this install, counting BOTH the scanned prefix and the
+// Kept one. Recovery parks a holder by renaming it under .kept-, and a sequence
+// that stopped counting there would reissue a number a parked copy already
+// carries. Holders for a different install are a separate sequence and are never
+// compared against this one, and a name the grammar rejects raises nothing.
 func nextHolderSeq(destDir string) (int64, error) {
 	entries, err := holderFS.readDir(filepath.Dir(destDir))
 	if err != nil {
 		return 0, err
 	}
-	prefix := filepath.Base(destDir) + holderSuffix
 	var high int64
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+		if !entry.IsDir() {
 			continue
 		}
 		if stamp, ok := holderStamp(destDir, entry.Name()); ok && stamp > high {
@@ -1067,30 +1281,24 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 		// A removal that fails is left for the next call, which reaches this
 		// same branch and tries again.
 		if published != nil && published(destDir) {
-			for _, holder := range holdersBeside(destDir) {
-				_ = holderFS.removeAll(holder)
+			owned, _ := ownedHoldersBeside(destDir)
+			for _, candidate := range owned {
+				_ = holderFS.removeAll(candidate.path)
 			}
 		}
 		return
 	}
-	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
-	// and a '[' anywhere in it opens a character class to Glob, which then
-	// matches nothing and strands the install this exists to put back.
-	holders := holdersBeside(destDir)
-	// Newest first: an unstamped holder is the least recent thing we can claim
-	// to know about, so it is only reached once every stamped one has failed.
-	slices.SortStableFunc(holders, func(a, b string) int {
-		sa, oka := holderStamp(destDir, a)
-		sb, okb := holderStamp(destDir, b)
-		if oka != okb {
-			if oka {
-				return -1
-			}
-			return 1
-		}
-		return cmp.Compare(sb, sa)
+	// Only holders this code can prove it wrote for THIS destination. A sibling
+	// that merely collides with the prefix is not a copy of this install and is
+	// never restored from or removed on its account.
+	owned, _ := ownedHoldersBeside(destDir)
+	// Newest first: the sequence in the name, which the marker agrees with, is
+	// the only record of which copy was live last.
+	slices.SortStableFunc(owned, func(a, b holderCandidate) int {
+		return cmp.Compare(b.seq, a.seq)
 	})
-	for _, holder := range holders {
+	for _, candidate := range owned {
+		holder := candidate.path
 		install := filepath.Join(holder, "install")
 		if _, err := holderFS.stat(install); err != nil {
 			continue
@@ -1103,28 +1311,6 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 		_ = holderFS.removeAll(holder)
 		return
 	}
-}
-
-// holdersBeside lists the holders promoteStagedDir may have left for destDir.
-// The prefix is the attribution: a holder for a different install is a separate
-// concern and is never touched on this one's account.
-func holdersBeside(destDir string) []string {
-	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
-	// and a '[' anywhere in it opens a character class to Glob, which then
-	// matches nothing and strands the install this exists to put back.
-	parent := filepath.Dir(destDir)
-	entries, err := holderFS.readDir(parent)
-	if err != nil {
-		return nil
-	}
-	prefix := filepath.Base(destDir) + holderSuffix
-	holders := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-			holders = append(holders, filepath.Join(parent, entry.Name()))
-		}
-	}
-	return holders
 }
 
 // promoteStagedDir moves stageDir into place at destDir. os.Rename refuses to
@@ -1161,21 +1347,49 @@ func promoteStagedDir(txn *destTxn, stageDir, destDir, label string, report func
 		if err != nil {
 			return fmt.Errorf("setting aside previous %s install: %w", label, err)
 		}
-		previous := filepath.Join(holder, "install")
-		if err := holderFS.rename(destDir, previous); err != nil {
+		// createSequencedHolder walks up from seq when a name is taken, so the
+		// marker has to carry the number actually claimed. A marker that
+		// disagrees with the name it sits in is not ownership, and recovery
+		// would leave the copy in place forever.
+		claimed, ok := holderStamp(destDir, holder)
+		if !ok {
+			return fmt.Errorf("setting aside previous %s install: holder name %q is not one recovery can order", label, filepath.Base(holder))
+		}
+		// The marker goes in BEFORE the first destructive rename. A holder that
+		// takes the only copy of an install before it can be proven ours is one
+		// nothing on disk lets recovery claim.
+		if err := writeHolderMarker(holder, txnMarker{Kind: holderMarkerKind, Dest: filepath.Base(destDir), Seq: claimed}); err != nil {
 			return fmt.Errorf("setting aside previous %s install: %w", label, err)
 		}
-		restore = func() error { return holderFS.rename(previous, destDir) }
+		previous := filepath.Join(holder, "install")
+		if err := fsutil.RenameWithRetry(destDir, previous, holderFS.rename); err != nil {
+			return fmt.Errorf("setting aside previous %s install: %w", label, err)
+		}
+		restore = func() error { return fsutil.RenameWithRetry(previous, destDir, holderFS.rename) }
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("checking previous %s install: %w", label, err)
 	}
 
-	if err := holderFS.rename(stageDir, destDir); err != nil {
+	if err := fsutil.RenameWithRetry(stageDir, destDir, holderFS.rename); err != nil {
 		if restoreErr := restore(); restoreErr != nil {
 			cleanupHolder = false
 			return fmt.Errorf("promoting staged %s: %w (previous install left in %s: %v)", label, err, holder, restoreErr)
 		}
 		return fmt.Errorf("promoting staged %s: %w", label, err)
+	}
+	if holder != "" {
+		// The flag follows the publish and precedes the cleanup, so the only
+		// thing a crash in that window costs is a retained copy. Writing it any
+		// earlier would license deleting a copy that is still the only one.
+		if err := writeCommitFlag(holder); err != nil {
+			// The install itself landed. Deleting a whole previous install on
+			// the word of a step that just failed is the one outcome worse than
+			// leaving it on disk, so the copy stays and the report says where.
+			cleanupHolder = false
+			if report != nil {
+				report(fmt.Sprintf("Installed %s, but the previous install could not be marked superseded and is kept in %s (%v)", label, holder, err))
+			}
+		}
 	}
 	return nil
 }
