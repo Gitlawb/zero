@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Tiny tar.bz2 fixtures (generated in-repo): the engine has top/bin/sherpa-onnx-
@@ -267,7 +269,7 @@ func TestPromoteStagedDirReplacesAPreviousInstall(t *testing.T) {
 	stagedTree(t, dest, "old")
 	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
 
-	if err := promoteStagedDir(stage, dest, "engine"); err != nil {
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
@@ -290,7 +292,7 @@ func TestPromoteStagedDirWorksWithNoPreviousInstall(t *testing.T) {
 	dest := filepath.Join(root, "engine-dir")
 	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
 
-	if err := promoteStagedDir(stage, dest, "engine"); err != nil {
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
@@ -319,7 +321,7 @@ func TestPromoteStagedDirKeepsThePreviousInstallWhenPromotionFails(t *testing.T)
 	}
 	t.Cleanup(func() { holderFS.rename = real })
 
-	if err := promoteStagedDir(stage, dest, "engine"); err == nil {
+	if err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil); err == nil {
 		t.Fatal("a failed promotion must be reported")
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
@@ -349,7 +351,7 @@ func TestPromoteStagedDirKeepsTheSetAsideCopyWhenRestoreAlsoFails(t *testing.T) 
 	}
 	t.Cleanup(func() { holderFS.rename = real })
 
-	err := promoteStagedDir(stage, dest, "engine")
+	err := promoteStagedDir(lockFor(t, dest), stage, dest, "engine", nil)
 	if err == nil {
 		t.Fatal("a failed promotion must be reported")
 	}
@@ -391,7 +393,7 @@ func TestRestoreInterruptedPromotionPutsTheInstallBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restoreInterruptedPromotion(dest, testPublished)
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil {
@@ -422,7 +424,7 @@ func TestRestoreInterruptedPromotionReapsAHolderSupersededByALiveInstall(t *test
 	stranded := plantHolder(t, dest, 100, "old")
 	older := plantHolder(t, dest, 50, "older")
 
-	restoreInterruptedPromotion(dest, testPublished)
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 	// The live install is never touched. This is the assertion that matters most.
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
@@ -484,7 +486,7 @@ func TestRestoreInterruptedPromotionKeepsAHolderWhenDestIsNotAUsableInstall(t *t
 			tc.seed(t, dest)
 			holder := plantHolder(t, dest, 100, "the only copy")
 
-			restoreInterruptedPromotion(dest, tc.usable)
+			restoreInterruptedPromotion(lockFor(t, dest), dest, tc.usable, nil)
 
 			got, err := os.ReadFile(filepath.Join(holder, "install", "engine"))
 			if err != nil || string(got) != "the only copy" {
@@ -523,7 +525,7 @@ func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			restoreInterruptedPromotion(dest, testPublished)
+			restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 			got, err := os.ReadFile(filepath.Join(dest, "engine"))
 			if tc.live == "" {
@@ -597,6 +599,20 @@ func offlineAPIBase(t *testing.T) string {
 	return url
 }
 
+// lockFor takes the Install lock the promotion path now requires, for the
+// destination the test is about to drive. Released in cleanup, and release is
+// idempotent, so a test that goes on to call EnsureLocalEngine releases it
+// early rather than waiting out its own lock.
+func lockFor(t *testing.T, destDir string) *destTxn {
+	t.Helper()
+	txn, err := lockDestination(context.Background(), filepath.Dir(destDir), filepath.Base(destDir))
+	if err != nil {
+		t.Fatalf("locking %s: %v", destDir, err)
+	}
+	t.Cleanup(txn.release)
+	return txn
+}
+
 // testPublished is the "is this a real install" predicate these tests use: the
 // fixtures write an "engine" file, so its presence is what publication means here.
 func testPublished(dir string) bool {
@@ -628,7 +644,7 @@ func TestRestoreInterruptedPromotionPrefersTheNewestHolder(t *testing.T) {
 	stale := plantHolder(t, dest, 100, "stale")
 	current := plantHolder(t, dest, 200, "current")
 
-	restoreInterruptedPromotion(dest, testPublished)
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "current" {
@@ -647,7 +663,7 @@ func TestRestoreInterruptedPromotionPrefersTheNewestHolder(t *testing.T) {
 // between its two renames leaves: destDir absent, the only install in a holder
 // promoteStagedDir named. Both renames fail, so nothing is put back in process
 // and the holder is retained rather than cleaned up.
-func interruptPromotion(t *testing.T, destDir, label string) {
+func interruptPromotion(t *testing.T, txn *destTxn, destDir, label string) {
 	t.Helper()
 	stage := destDir + ".incoming"
 	if err := os.MkdirAll(stage, 0o755); err != nil {
@@ -660,7 +676,7 @@ func interruptPromotion(t *testing.T, destDir, label string) {
 		}
 		return real(from, to)
 	}
-	err := promoteStagedDir(stage, destDir, label)
+	err := promoteStagedDir(txn, stage, destDir, label, nil)
 	holderFS.rename = real
 	if err == nil {
 		t.Fatalf("a promotion whose publish and restore both fail must report an error")
@@ -725,7 +741,12 @@ func TestEnsureLocalEngineRecoversARealInterruptedPromotionOffline(t *testing.T)
 			}
 
 			target := tc.dirFor(t, dest, comp)
-			interruptPromotion(t, target, tc.label)
+			targetTxn := lockFor(t, target)
+			interruptPromotion(t, targetTxn, target, tc.label)
+			// Released before EnsureLocalEngine below, which takes the same
+			// lock: the wait is cross-process but flock conflicts between two
+			// opens in one process too.
+			targetTxn.release()
 			holders := holdersFor(t, target)
 			if len(holders) != 1 {
 				t.Fatalf("want exactly one holder beside %s, got %v", target, holders)
@@ -778,7 +799,7 @@ func TestRestoreInterruptedPromotionFindsHoldersUnderAnAwkwardPath(t *testing.T)
 				t.Fatal(err)
 			}
 
-			restoreInterruptedPromotion(dest, testPublished)
+			restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 			got, err := os.ReadFile(filepath.Join(dest, "engine"))
 			if err != nil || string(got) != "kept" {
@@ -806,9 +827,10 @@ func TestRestoreInterruptedPromotionPrefersTheRealNewerInstallOverAFutureStamped
 	stale := plantHolder(t, dest, farFuture, "stale")
 
 	// The real transaction sets "new" aside and never publishes.
-	interruptPromotion(t, dest, "engine")
+	txn := lockFor(t, dest)
+	interruptPromotion(t, txn, dest, "engine")
 
-	restoreInterruptedPromotion(dest, testPublished)
+	restoreInterruptedPromotion(txn, dest, testPublished, nil)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "new" {
@@ -1018,7 +1040,7 @@ func TestRestoreInterruptedPromotionPrefersAStampedHolderOverAnUnstampedOne(t *t
 	}
 	stamped := plantHolder(t, dest, 100, "stamped")
 
-	restoreInterruptedPromotion(dest, testPublished)
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "stamped" {
@@ -1047,7 +1069,7 @@ func TestRestoreInterruptedPromotionSkipsAHolderWithNoInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restoreInterruptedPromotion(dest, testPublished)
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "kept" {
@@ -1398,4 +1420,368 @@ func TestBlockStepHoldsTheCallUntilRelease(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("the released call did not run: %v", err)
 	}
+}
+
+// ---- the per-destination Install lock ---------------------------------------
+
+// shortenInstallLockWait cuts the wait budget so a test can observe an expiry
+// without spending the production two minutes on it.
+func shortenInstallLockWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	real := installLockWait
+	installLockWait = d
+	t.Cleanup(func() { installLockWait = real })
+}
+
+// gateRename holds the one rename from -> to until the returned release runs and
+// then fails it. blockStep gates every call to a step, which cannot tell a
+// promotion's set-aside rename from the publish that follows it, and this test
+// needs the transaction parked precisely between the two.
+func gateRename(t *testing.T, from, to string, fail error) (reached <-chan struct{}, release func()) {
+	t.Helper()
+	gate := make(chan struct{})
+	hit := make(chan struct{})
+	var once, announced sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	real := holderFS
+	t.Cleanup(release)
+	t.Cleanup(func() { holderFS = real })
+	holderFS.rename = func(f, to2 string) error {
+		if f != from || to2 != to {
+			return real.rename(f, to2)
+		}
+		announced.Do(func() { close(hit) })
+		<-gate
+		return fail
+	}
+	return hit, release
+}
+
+// A promotion moves a whole install out of the way and puts it back, so running
+// one without the destination's Install lock is what lets a second process
+// delete the copy this one is about to roll back to. A handle for a DIFFERENT
+// destination is the same defect wearing a lock, which is why destDir stays an
+// explicit parameter.
+func TestPromoteStagedDirRefusesWithoutADestinationLock(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "model-a")
+	stagedTree(t, dest, "old")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	if err := promoteStagedDir(nil, stage, dest, "engine", nil); err == nil {
+		t.Error("a promotion with no Install lock must be refused")
+	}
+	if err := promoteStagedDir(lockFor(t, filepath.Join(root, "model-b")), stage, dest, "engine", nil); err == nil {
+		t.Error("a promotion holding another destination's Install lock must be refused")
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "old" {
+		t.Errorf("the destination was touched without its lock: %q err %v", got, err)
+	}
+	got, err = os.ReadFile(filepath.Join(stage, "engine"))
+	if err != nil || string(got) != "new" {
+		t.Errorf("the staged copy was touched without the lock: %q err %v", got, err)
+	}
+}
+
+// Recovery restores and deletes whole installs, so it fails closed the same way,
+// and it says so: it has no error to return and a silent skip reads as "there
+// was nothing to recover".
+func TestRestoreInterruptedPromotionRefusesWithoutADestinationLock(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	holder := plantHolder(t, dest, 100, "the only copy")
+
+	var reported []string
+	restoreInterruptedPromotion(nil, dest, testPublished, func(s string) { reported = append(reported, s) })
+	if len(reported) == 0 {
+		t.Error("a recovery pass that refuses to run must say so")
+	}
+	restoreInterruptedPromotion(lockFor(t, filepath.Join(root, "engine-other")), dest, testPublished, nil)
+
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Errorf("recovery ran without the destination's lock: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(holder, "install", "engine"))
+	if err != nil || string(got) != "the only copy" {
+		t.Errorf("the holder was touched without the lock: %q err %v", got, err)
+	}
+}
+
+// The download half fails closed too, or a caller that forgot the lock still
+// reaches promoteStagedDir with a full extraction behind it.
+func TestDownloadVerifyExtractRefusesWithoutADestinationLock(t *testing.T) {
+	srv := fakeReleaseServer(t, engineSHA, modelSHA)
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-test-linux-amd64")
+	// A real asset the download would otherwise install, so the refusal is what
+	// keeps the destination empty rather than a download that was going to fail.
+	asset, err := resolveAsset(context.Background(), http.DefaultClient, srv.URL, "test", "sherpa-onnx-", engineAssetSuffix["linux-amd64"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var requests atomic.Int64
+	client := &http.Client{Transport: countingTransport(&requests)}
+	if err := downloadVerifyExtract(context.Background(), client, asset, "", false, "Engine", dest, nil, func(string) {}); err == nil {
+		t.Fatal("a download with no Install lock must be refused")
+	}
+	// Refused before the transfer, not after it: the promotion at the end would
+	// refuse too, and then a caller that forgot the lock still pays for the
+	// whole download every start.
+	if got := requests.Load(); got != 0 {
+		t.Errorf("%d asset request(s) were made without the Install lock, want 0", got)
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Errorf("the destination was installed to without its lock: %v", err)
+	}
+}
+
+// countingTransport counts the asset transfers a client performs, which is how a
+// test tells "refused before the download" from "refused after it".
+func countingTransport(n *atomic.Int64) http.RoundTripper {
+	return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		n.Add(1)
+		return http.DefaultTransport.RoundTrip(r)
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The lock is the cross-process one, so a second open of the same lock file has
+// to conflict, and a caller has to wait the holder out rather than fail on the
+// first contended try.
+func TestLockDestinationSerializesAcrossProcesses(t *testing.T) {
+	root := t.TempDir()
+	lockDir := filepath.Join(root, installLockDir)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := lockutil.TryAcquireFileLockAt(root, filepath.Join(lockDir, "engine-a.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := lockDestination(ctx, root, "engine-a"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lockDestination = %v, want the context error while another holder has the lock", err)
+	}
+	if waited := time.Since(start); waited < 150*time.Millisecond {
+		t.Errorf("lockDestination gave up after %v; it must wait the holder out", waited)
+	}
+
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := lockDestination(context.Background(), root, "engine-a")
+	if err != nil {
+		t.Fatalf("the lock was not free after the holder released it: %v", err)
+	}
+	txn.release()
+}
+
+// A destination name is one path component. Anything else would put the lock
+// file somewhere other than beside its peers, so two callers for the same
+// destination could hold different inodes and both proceed.
+func TestLockDestinationRefusesADestinationThatIsNotABaseName(t *testing.T) {
+	root := t.TempDir()
+	for _, dest := range []string{"", ".", "..", "a/b", filepath.Join("..", "escape")} {
+		if _, err := lockDestination(context.Background(), root, dest); err == nil {
+			t.Errorf("lockDestination(%q) must be refused", dest)
+		}
+	}
+}
+
+// The likeliest reason a caller finds the destination locked is that another
+// process is installing the very thing it wants. Failing on the first contended
+// try turns a normal race into a user-visible install failure.
+func TestEnsureLocalEngineWaitsForAConcurrentInstall(t *testing.T) {
+	srv := fakeReleaseServer(t, engineSHA, modelSHA)
+	root := t.TempDir()
+	txn := lockFor(t, filepath.Join(root, "engine-test-linux-amd64"))
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		txn.release()
+	}()
+
+	comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "test", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err != nil {
+		t.Fatalf("an install that waited out a concurrent one must succeed: %v", err)
+	}
+	if !fileExists(comp.BinaryPath) {
+		t.Errorf("engine binary missing at %q", comp.BinaryPath)
+	}
+}
+
+// The review's P2: a promotion parked between its two renames has the only copy
+// of the install in a holder and destDir absent. A recovery pass that runs in
+// that window restores the holder and removes it, and the promotion's rollback
+// then has nothing to put back. The lock is what makes that window unreachable.
+func TestRecoveryDoesNotDeleteALiveRollbackSource(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "live")
+	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
+
+	reached, release := gateRename(t, stage, dest, errors.New("injected publish failure"))
+	txn := lockFor(t, dest)
+	promoted := make(chan error, 1)
+	go func() { promoted <- promoteStagedDir(txn, stage, dest, "engine", nil) }()
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the promotion never reached its publish rename")
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatalf("the parked promotion should leave %s absent, got %v", dest, err)
+	}
+	holders := holdersFor(t, dest)
+	if len(holders) != 1 {
+		t.Fatalf("want exactly one holder beside %s, got %v", dest, holders)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := withDestinationLock(ctx, root, filepath.Base(dest), testPublished, func(rec *destTxn) error {
+		restoreInterruptedPromotion(rec, dest, testPublished, nil)
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("recovery = %v, want the context error while a promotion holds the destination", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(holders[0], "install", "engine"))
+	if readErr != nil || string(got) != "live" {
+		t.Fatalf("recovery took the copy the promotion still needs: %q err %v", got, readErr)
+	}
+
+	release()
+	if err := <-promoted; err == nil {
+		t.Fatal("the injected publish failure must be reported")
+	}
+	got, readErr = os.ReadFile(filepath.Join(dest, "engine"))
+	if readErr != nil || string(got) != "live" {
+		t.Fatalf("the rollback did not put the previous install back: %q err %v", got, readErr)
+	}
+	txn.release()
+}
+
+// The two destinations are locked one after the other. Taking both up front
+// would let a model install someone else is running block the engine step, which
+// is shared and usually already done.
+func TestEnsureLocalEngineLocksEngineAndModelSeparately(t *testing.T) {
+	shortenInstallLockWait(t, 200*time.Millisecond)
+	srv := fakeReleaseServer(t, engineSHA, modelSHA)
+	root := t.TempDir()
+	modelTxn := lockFor(t, filepath.Join(root, "model-moonshine-tiny-en-int8"))
+
+	_, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "test", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+	})
+	if !errors.Is(err, errInstallInProgress) {
+		t.Fatalf("EnsureLocalEngine = %v, want the model step to report an install in progress", err)
+	}
+	bin, _ := resolveEnginePaths(filepath.Join(root, "engine-test-linux-amd64"), false)
+	if !fileExists(bin) {
+		t.Errorf("the engine step must not wait on the model's lock: %s missing", bin)
+	}
+	modelTxn.release()
+}
+
+// The lock directory sits beside the installs and holds nothing anyone else
+// needs to read.
+func TestLockDirectoryIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Go permission bits do not map to Windows ACLs")
+	}
+	root := t.TempDir()
+	requireUmaskAllowsWiderThan0700(t, root)
+	lockFor(t, filepath.Join(root, "engine-a"))
+
+	info, err := os.Stat(filepath.Join(root, installLockDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("%s mode = %o, want 0700", installLockDir, got)
+	}
+}
+
+// DestRoot is created lazily by the download that follows, and lockutil opens
+// the root with O_DIRECTORY, so a first run has no root to lock in.
+func TestLockDestinationCreatesTheDestRootFirst(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "stt", "nested")
+	txn, err := lockDestination(context.Background(), root, "engine-a")
+	if err != nil {
+		t.Fatalf("lockDestination on a DestRoot that does not exist yet: %v", err)
+	}
+	defer txn.release()
+	if _, err := os.Stat(filepath.Join(root, installLockDir, "engine-a.lock")); err != nil {
+		t.Errorf("the lock file should sit under the created root: %v", err)
+	}
+}
+
+// A wait that runs out is not an install failure. The other process was almost
+// certainly installing the same thing, so the destination is re-checked before
+// anyone is told anything went wrong, and what comes back when it really is
+// missing is a named outcome the caller can report rather than a raw timeout.
+func TestEnsureLocalEngineTreatsAnExpiredWaitAsBenign(t *testing.T) {
+	shortenInstallLockWait(t, 100*time.Millisecond)
+
+	t.Run("a usable destination means the other install finished", func(t *testing.T) {
+		root := t.TempDir()
+		engineDir := filepath.Join(root, "engine-test-linux-amd64")
+		bin, server := enginePaths(engineDir, false)
+		if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{bin, server} {
+			if err := os.WriteFile(p, []byte("planted"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		modelDir := filepath.Join(root, "model-moonshine-tiny-en-int8")
+		if err := os.MkdirAll(modelDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(modelDir, "tokens.txt"), []byte("planted"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		txn := lockFor(t, engineDir)
+		defer txn.release()
+
+		// Nothing is listening on the API base, so any download attempt fails
+		// outright rather than quietly re-installing what is already there.
+		comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+			DestRoot: root, EngineVersion: "test", APIBase: offlineAPIBase(t), platformKey: "linux-amd64", skipPinned: true,
+		})
+		if err != nil {
+			t.Fatalf("an expired wait over a usable destination must read as installed: %v", err)
+		}
+		if comp.BinaryPath != bin {
+			t.Errorf("BinaryPath = %q, want the install already at the destination %q", comp.BinaryPath, bin)
+		}
+	})
+
+	t.Run("an unusable destination is a named in-progress outcome", func(t *testing.T) {
+		root := t.TempDir()
+		engineDir := filepath.Join(root, "engine-test-linux-amd64")
+		txn := lockFor(t, engineDir)
+		defer txn.release()
+
+		_, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+			DestRoot: root, EngineVersion: "test", APIBase: offlineAPIBase(t), platformKey: "linux-amd64", skipPinned: true,
+		})
+		if !errors.Is(err, errInstallInProgress) {
+			t.Fatalf("EnsureLocalEngine = %v, want an error satisfying errInstallInProgress", err)
+		}
+		if _, err := os.Lstat(engineDir); !os.IsNotExist(err) {
+			t.Errorf("nothing should have been created for a destination that was never locked: %v", err)
+		}
+	})
 }

@@ -20,6 +20,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Auto-download of the local engine + a default model (opt-in, behind a confirm
@@ -489,32 +492,40 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		apiBase = defaultAPIBase
 	}
 
-	engineDir := filepath.Join(opts.DestRoot, "engine-"+version+"-"+key)
+	engineName := "engine-" + version + "-" + key
+	engineDir := filepath.Join(opts.DestRoot, engineName)
 	targetWindows := strings.HasPrefix(key, "windows-")
 	// Resolve through the tarball's flattened subdir so an ALREADY-extracted
 	// engine is found and not needlessly re-downloaded (the idempotency check).
-	// A previous run may have been stopped mid-promotion, leaving the only
-	// install in a holder beside engineDir. Put it back before deciding whether
-	// anything needs downloading.
-	restoreInterruptedPromotion(engineDir, func(dir string) bool {
+	enginePublished := func(dir string) bool {
 		bin, _ := resolveEnginePaths(dir, targetWindows)
 		return fileExists(bin)
-	})
-	binPath, serverPath := resolveEnginePaths(engineDir, targetWindows)
-	if !fileExists(binPath) {
+	}
+	// The engine lock covers recovery, the decision to download, and the
+	// promotion, and it is released before the model lock is taken. Holding
+	// both would give two concurrent installs of different models an ordering
+	// to get wrong for no gain.
+	if err := withDestinationLock(ctx, opts.DestRoot, engineName, enginePublished, func(txn *destTxn) error {
+		// A previous run may have been stopped mid-promotion, leaving the only
+		// install in a holder beside engineDir. Put it back before deciding
+		// whether anything needs downloading.
+		restoreInterruptedPromotion(txn, engineDir, enginePublished, progress)
+		if enginePublished(engineDir) {
+			return nil
+		}
 		pinned := ""
 		if version == DefaultSherpaVersion && !opts.skipPinned {
 			pinned = pinnedEngineDigest[key]
 		}
 		asset, err := resolveAsset(ctx, client, apiBase, version, "sherpa-onnx-", suffix)
 		if err != nil {
-			return EngineComponents{}, err
+			return err
 		}
-		if err := downloadVerifyExtract(ctx, client, asset, pinned, false, "Engine", engineDir, progress); err != nil {
-			return EngineComponents{}, err
-		}
-		binPath, serverPath = resolveEnginePaths(engineDir, targetWindows)
+		return downloadVerifyExtract(ctx, client, asset, pinned, false, "Engine", engineDir, txn, progress)
+	}); err != nil {
+		return EngineComponents{}, err
 	}
+	binPath, serverPath := resolveEnginePaths(engineDir, targetWindows)
 	if !fileExists(binPath) {
 		return EngineComponents{}, fmt.Errorf("dictation download: engine binary not found after extraction in %s", engineDir)
 	}
@@ -528,14 +539,18 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		modelDirName = "model-moonshine-tiny-en-int8"
 	}
 	modelDir := filepath.Join(opts.DestRoot, modelDirName)
-	// promoteStagedDir is shared with the model, so a stop mid-promotion leaves
-	// the model in a holder too. Put it back before deciding anything is
-	// missing: without this an offline user has no download to fall back on.
-	restoreInterruptedPromotion(modelDir, dirHasModel)
-	if !dirHasModel(modelDir) {
+	if err := withDestinationLock(ctx, opts.DestRoot, modelDirName, dirHasModel, func(txn *destTxn) error {
+		// promoteStagedDir is shared with the model, so a stop mid-promotion
+		// leaves the model in a holder too. Put it back before deciding
+		// anything is missing: without this an offline user has no download to
+		// fall back on.
+		restoreInterruptedPromotion(txn, modelDir, dirHasModel, progress)
+		if dirHasModel(modelDir) {
+			return nil
+		}
 		asset, err := resolveAsset(ctx, client, apiBase, modelReleaseTag, modelName, "")
 		if err != nil {
-			return EngineComponents{}, err
+			return err
 		}
 		modelPinned := opts.ModelPinnedDigest
 		// Only fall back to the built-in digest for the DEFAULT model — a different
@@ -555,9 +570,9 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		// download (the model release predates GitHub's per-asset digests). The
 		// engine BINARY above never allows this — a native executable is always
 		// digest-verified.
-		if err := downloadVerifyExtract(ctx, client, asset, modelPinned, true, modelLabel, modelDir, progress); err != nil {
-			return EngineComponents{}, err
-		}
+		return downloadVerifyExtract(ctx, client, asset, modelPinned, true, modelLabel, modelDir, txn, progress)
+	}); err != nil {
+		return EngineComponents{}, err
 	}
 	resolvedModel := modelDir
 	if !hasTokensFile(resolvedModel) {
@@ -632,7 +647,12 @@ func resolveAsset(ctx context.Context, client *http.Client, apiBase, tag, namePr
 // (against the API digest, and — when pinned is set — a cross-check that the
 // resolved digest equals the audited value), and extracts the tar.bz2. A
 // mismatch aborts before anything is extracted or run.
-func downloadVerifyExtract(ctx context.Context, client *http.Client, asset resolvedAsset, pinned string, allowUnverified bool, label, destDir string, progress func(string)) error {
+func downloadVerifyExtract(ctx context.Context, client *http.Client, asset resolvedAsset, pinned string, allowUnverified bool, label, destDir string, txn *destTxn, progress func(string)) error {
+	// Refused here as well as in promoteStagedDir, so a caller that forgot the
+	// lock does not get a full download and extraction before finding out.
+	if !txn.holds(destDir) {
+		return fmt.Errorf("dictation download: refusing to install %s: no install lock is held for %s", label, destDir)
+	}
 	// Determine the digest to verify against: the API digest and the pinned digest
 	// must agree when both exist; at least one must exist unless allowUnverified
 	// (models are data files from the official release — TLS-only is acceptable;
@@ -712,7 +732,7 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, asset resol
 	if err := extractTarBz2(tmpPath, stageDir, "Extracting "+label, progress); err != nil {
 		return err
 	}
-	if err := promoteStagedDir(stageDir, destDir, label); err != nil {
+	if err := promoteStagedDir(txn, stageDir, destDir, label, progress); err != nil {
 		return err
 	}
 	cleanupStage = false
@@ -807,6 +827,119 @@ var holderFS = fsOps{
 	writeFile:  os.WriteFile,
 	create:     os.OpenFile,
 	createTemp: os.CreateTemp,
+}
+
+// errInstallInProgress reports that another process held this destination's
+// Install lock for the whole wait budget and the destination is still not
+// usable. It is not an install failure: nothing was attempted, and the caller
+// reports it and moves on.
+var errInstallInProgress = errors.New("another install of this component is already running")
+
+// installLockWait bounds how long a caller waits for another process to finish
+// with a destination. It covers a download, so a budget shorter than the
+// critical section it guards is a scheduled failure. A var so a test can shorten
+// it; nothing else assigns to it.
+var installLockWait = 2 * time.Minute
+
+// installLockPoll is the retry interval while waiting. The lock is advisory and
+// held by an open file handle, so there is nothing to wake us and polling is how
+// the wait ends.
+const installLockPoll = 50 * time.Millisecond
+
+// installLockDir holds one lock file per destination. It is a sibling of the
+// destinations rather than a file beside each one, so a lock file is never
+// mistaken for part of an install and never moves with one.
+const installLockDir = ".install-locks"
+
+// destTxn is the handle proving its holder owns the Install lock for one
+// destination. Recovery and promotion move and delete whole installs, so both
+// take one: without it a second process can delete the copy this one is about
+// to roll back to.
+type destTxn struct {
+	root string
+	dest string
+	lock *lockutil.FileLock
+}
+
+// destDir is the destination this handle locks. Callers keep passing their own
+// destDir alongside the handle so a handle for a DIFFERENT destination is
+// representable, which is what makes the mismatch testable rather than assumed.
+func (t *destTxn) destDir() string { return filepath.Join(t.root, t.dest) }
+
+// holds reports whether this handle actually locks destDir. A nil handle and a
+// handle for another destination both fail closed.
+func (t *destTxn) holds(destDir string) bool {
+	return t != nil && t.lock != nil && t.destDir() == destDir
+}
+
+// release drops the Install lock. Idempotent, so a caller can release early and
+// still defer it.
+func (t *destTxn) release() {
+	if t == nil || t.lock == nil {
+		return
+	}
+	_ = t.lock.Release()
+}
+
+// lockDestination takes the Install lock for one destination under destRoot,
+// waiting out another process that holds it until ctx ends or the budget runs
+// out. The budget expiring is errInstallInProgress, which the caller answers by
+// re-checking the destination rather than by failing.
+func lockDestination(ctx context.Context, destRoot, dest string) (*destTxn, error) {
+	// A destination is one path component. Any other shape puts the lock file
+	// somewhere else, and two callers for the same destination would then lock
+	// different inodes and both proceed.
+	if dest == "" || dest != filepath.Base(dest) || dest == "." || dest == ".." {
+		return nil, fmt.Errorf("dictation download: %q is not an install destination name", dest)
+	}
+	// destRoot is otherwise created lazily by the download this lock covers, and
+	// lockutil opens the root with O_DIRECTORY, so on a first run there would be
+	// no directory to take the lock in.
+	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		return nil, err
+	}
+	lockDir := filepath.Join(destRoot, installLockDir)
+	if err := holderFS.mkdir(lockDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, err
+	}
+	lockPath := filepath.Join(lockDir, dest+".lock")
+	deadline := time.Now().Add(installLockWait)
+	for {
+		lock, err := lockutil.TryAcquireFileLockAt(destRoot, lockPath)
+		if err == nil {
+			return &destTxn{root: destRoot, dest: dest, lock: lock}, nil
+		}
+		if !errors.Is(err, lockutil.ErrLockHeld) {
+			return nil, err
+		}
+		// Waiting is the normal case: the holder is almost always another
+		// process installing this very component, and failing on the first
+		// contended try would turn that into a user-visible install failure.
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("%w: %s is locked by another process", errInstallInProgress, dest)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(installLockPoll):
+		}
+	}
+}
+
+// withDestinationLock runs fn under dest's Install lock. A wait that runs out is
+// not by itself a failure: the likeliest reason is that the other process
+// finished this exact install, so usable re-checks the destination before the
+// caller is told anything is wrong.
+func withDestinationLock(ctx context.Context, destRoot, dest string, usable func(string) bool, fn func(*destTxn) error) error {
+	txn, err := lockDestination(ctx, destRoot, dest)
+	if err != nil {
+		if errors.Is(err, errInstallInProgress) && usable(filepath.Join(destRoot, dest)) {
+			return nil
+		}
+		return err
+	}
+	defer txn.release()
+	return fn(txn)
 }
 
 const holderSuffix = ".previous-"
@@ -906,7 +1039,16 @@ func createSequencedHolder(destDir string, n int64) (string, error) {
 // use. Recovery needs it because "there is something at destDir" and "a
 // promotion published there" are different claims, and only the second one
 // makes a holder beside it superseded.
-func restoreInterruptedPromotion(destDir string, published func(string) bool) {
+func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(string) bool, report func(string)) {
+	// Recovery moves and deletes whole installs. Without destDir's Install lock
+	// it can restore a holder a promotion in another process is parked on and
+	// remove it, leaving that promotion's rollback nothing to put back.
+	if !txn.holds(destDir) {
+		if report != nil {
+			report(fmt.Sprintf("Skipping recovery of %s: no install lock is held for it", filepath.Base(destDir)))
+		}
+		return
+	}
 	if _, err := holderFS.lstat(destDir); err == nil {
 		// destDir is live. A holder is only ever filled by renaming destDir
 		// aside, so a destDir holding a USABLE install means a later promotion
@@ -990,7 +1132,16 @@ func holdersBeside(destDir string) []string {
 // the way first; it is set aside rather than deleted, and put back if the
 // promotion fails, so destDir is never left holding no install at all. If the
 // restore fails too, the set-aside copy is kept and named in the error.
-func promoteStagedDir(stageDir, destDir, label string) error {
+func promoteStagedDir(txn *destTxn, stageDir, destDir, label string, report func(string)) error {
+	// Same reason recovery refuses: the window between the two renames has the
+	// only copy of the install in a holder, and nothing else keeps a concurrent
+	// recovery out of it.
+	if !txn.holds(destDir) {
+		if report != nil {
+			report(fmt.Sprintf("Refusing to install %s: no install lock is held for %s", label, filepath.Base(destDir)))
+		}
+		return fmt.Errorf("promoting staged %s: no install lock is held for %s", label, destDir)
+	}
 	holder := ""
 	cleanupHolder := true
 	defer func() {
