@@ -385,7 +385,7 @@ func TestPromoteStagedDirKeepsTheSetAsideCopyWhenRestoreAlsoFails(t *testing.T) 
 func TestRestoreInterruptedPromotionPutsTheInstallBack(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	holder := plantHolder(t, dest, 1, "kept")
+	holder := plantHolder(t, dest, 1, "kept", false)
 
 	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
@@ -402,63 +402,122 @@ func TestRestoreInterruptedPromotionPutsTheInstallBack(t *testing.T) {
 }
 
 // A promotion that published its install but could not remove the holder leaves
-// a complete copy of the OLD install beside a live one. Nothing else ever
-// removes it, and every later replacement adds another, so recovery reaps it.
-// The holder is filled by renaming destDir aside, so a destDir that holds
-// something means a later promotion published over this holder.
-func TestRestoreInterruptedPromotionReapsAHolderSupersededByALiveInstall(t *testing.T) {
+// a complete copy of the OLD install beside a live one, and the commit flag
+// inside it is the evidence that a publish actually landed over it. Only that
+// flag licenses the delete: a copy with no flag may still be the last usable
+// one, so it is parked rather than reaped, and a destination that merely EXISTS
+// proves nothing about either.
+func TestRestoreInterruptedPromotionDeletesOnlyCommittedHolders(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dest, "engine"), []byte("new"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	stranded := plantHolder(t, dest, 100, "old")
-	older := plantHolder(t, dest, 50, "older")
+	stagedTree(t, dest, "new")
+	superseded := plantHolder(t, dest, 100, "old", true)
+	uncommitted := plantHolder(t, dest, 50, "older", false)
+	// One handle for both passes: the lock is per open file description, so a
+	// second acquire in this process contends with the first rather than nests.
+	txn := lockFor(t, dest)
 
-	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
+	var reported []string
+	restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
 
 	// The live install is never touched. This is the assertion that matters most.
 	got, err := os.ReadFile(filepath.Join(dest, "engine"))
 	if err != nil || string(got) != "new" {
 		t.Fatalf("the live install must be left alone: got %q err %v", got, err)
 	}
-	for _, holder := range []string{stranded, older} {
-		if _, err := os.Stat(holder); !os.IsNotExist(err) {
-			t.Errorf("a holder superseded by the live install should be reaped, got %v", err)
-		}
+	if _, err := os.Stat(superseded); !os.IsNotExist(err) {
+		t.Errorf("a copy proven superseded by its commit flag should be reaped, got %v", err)
+	}
+	parked := keptName(t, dest, uncommitted)
+	if _, err := os.Stat(uncommitted); !os.IsNotExist(err) {
+		t.Errorf("the uncommitted copy should have left the scanned prefix, got %v", err)
+	}
+	kept, err := os.ReadFile(filepath.Join(parked, "install", "engine"))
+	if err != nil || string(kept) != "older" {
+		t.Fatalf("the uncommitted copy must survive the park intact: %q err %v", kept, err)
+	}
+	assertReports(t, reported, parked)
+
+	// No memory: the parked copy is under a prefix the scan does not read, so a
+	// second pass has nothing left to decide.
+	reported = nil
+	restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+	if _, err := os.Stat(filepath.Join(parked, "install", "engine")); err != nil {
+		t.Errorf("the second pass must leave the parked copy alone: %v", err)
+	}
+	if len(reported) != 0 {
+		t.Errorf("a pass with nothing beside the destination should report nothing, got %v", reported)
+	}
+}
+
+// A copy parked by recovery is permanent: a later install that publishes over
+// the destination sets the CURRENT install aside, never a Kept backup, so it can
+// never write the commit flag that would license removing one. Nothing but the
+// operator takes a Kept backup off disk.
+func TestRestoreInterruptedPromotionKeepsAParkedCopyAfterALaterInstall(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "new")
+	uncommitted := plantHolder(t, dest, 50, "older", false)
+	txn := lockFor(t, dest)
+
+	restoreInterruptedPromotion(txn, dest, testPublished, nil)
+	parked := keptName(t, dest, uncommitted)
+	if _, err := os.Stat(filepath.Join(parked, "install", "engine")); err != nil {
+		t.Fatalf("seeding a parked copy: %v", err)
+	}
+
+	// A real later install over the same destination.
+	stage := stagedTree(t, filepath.Join(root, "stage"), "newest")
+	if err := promoteStagedDir(txn, stage, dest, "engine", nil); err != nil {
+		t.Fatalf("the later install failed: %v", err)
+	}
+	var reported []string
+	restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+
+	// Silence is the assertion that the Kept prefix is outside the scan: a pass
+	// that enumerated it would have to rule on the copy, and every ruling it
+	// could reach (park, delete, restore) says so in the report.
+	if len(reported) != 0 {
+		t.Errorf("recovery must not enumerate the Kept prefix, it reported %v", reported)
+	}
+	kept, err := os.ReadFile(filepath.Join(parked, "install", "engine"))
+	if err != nil || string(kept) != "older" {
+		t.Errorf("a Kept backup must survive a later successful install: %q err %v", kept, err)
+	}
+	live, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(live) != "newest" {
+		t.Errorf("the later install should be live: %q err %v", live, err)
 	}
 }
 
 // A destDir that is merely NOT EMPTY is no evidence a promotion published there.
-// An empty husk and a half-populated one are the same thing to recovery, and
-// reaping on either would delete the copy the user still needs, so the holder
-// only loses to a destination that holds a genuinely usable install.
-func TestRestoreInterruptedPromotionKeepsAHolderWhenDestIsNotAUsableInstall(t *testing.T) {
+// An empty husk and a half-populated one are the same thing to recovery, and a
+// copy beside one may be the last usable install there is. So the destination is
+// not what wins: the usable copy is restored over the husk, and the husk itself
+// is set aside rather than deleted, which is how an offline caller stops being
+// stuck beside an install it cannot use.
+func TestRestoreInterruptedPromotionReplacesADestThatIsNotAUsableInstall(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		seed   func(t *testing.T, dest string)
-		usable func(string) bool
+		name    string
+		seed    func(t *testing.T, dest string)
+		usable  func(string) bool
+		content string
 	}{
 		{
-			name:   "empty husk",
-			seed:   func(t *testing.T, dest string) {},
-			usable: func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+			name:    "empty husk",
+			seed:    func(t *testing.T, dest string) {},
+			usable:  func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+			content: "bin/sherpa-onnx-offline",
 		},
 		{
 			name: "non-empty but no engine binary",
 			seed: func(t *testing.T, dest string) {
 				t.Helper()
-				if err := os.MkdirAll(filepath.Join(dest, "bin"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(dest, "bin", "README"), []byte("partial"), 0o644); err != nil {
-					t.Fatal(err)
-				}
+				plantUnusableDest(t, dest)
 			},
-			usable: func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+			usable:  func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+			content: "bin/sherpa-onnx-offline",
 		},
 		{
 			name: "model dir without tokens.txt",
@@ -468,7 +527,8 @@ func TestRestoreInterruptedPromotionKeepsAHolderWhenDestIsNotAUsableInstall(t *t
 					t.Fatal(err)
 				}
 			},
-			usable: dirHasModel,
+			usable:  dirHasModel,
+			content: "tokens.txt",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -478,26 +538,46 @@ func TestRestoreInterruptedPromotionKeepsAHolderWhenDestIsNotAUsableInstall(t *t
 				t.Fatal(err)
 			}
 			tc.seed(t, dest)
-			holder := plantHolder(t, dest, 100, "the only copy")
+			// The copy has to pass the case's own predicate, which is the whole
+			// point: recovery applies the CALLER's predicate to a candidate, not
+			// a structural guess about what an install looks like.
+			holder := plantHolder(t, dest, 100, "the only copy", false)
+			install := filepath.Join(holder, "install")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(install, tc.content)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(install, tc.content), []byte("x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
 
 			restoreInterruptedPromotion(lockFor(t, dest), dest, tc.usable, nil)
 
-			got, err := os.ReadFile(filepath.Join(holder, "install", "engine"))
+			if !tc.usable(dest) {
+				t.Errorf("the usable copy should be live at %s", dest)
+			}
+			got, err := os.ReadFile(filepath.Join(dest, "engine"))
 			if err != nil || string(got) != "the only copy" {
-				t.Errorf("a dest that is not a usable install must not cost the holder its copy: got %q err %v", got, err)
+				t.Errorf("the destination should hold the copy: got %q err %v", got, err)
+			}
+			if _, err := os.Stat(holder); !os.IsNotExist(err) {
+				t.Errorf("the restored copy's holder should be cleared, got %v", err)
 			}
 		})
 	}
 }
 
-// A holder is a leftover, never a replacement for whatever is already at destDir,
-// empty or not. os.Rename refuses an existing directory either way, so this
-// pins the behavior rather than one implementation of it. What happens to the
-// holder afterwards differs by case and is asserted below.
-func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
-	for _, tc := range []struct{ name, live string }{
-		{"empty dest", ""},
-		{"populated dest", "live"},
+// A holder never replaces a destination that holds a USABLE install: that
+// install is the published one and the copy beside it is the leftover. Against
+// an unusable destination the ruling inverts, and the husk moves aside rather
+// than being deleted.
+func TestRestoreInterruptedPromotionKeepsAUsableDestAndReplacesAnUnusableOne(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		live      string
+		committed bool
+	}{
+		{name: "empty dest", live: ""},
+		{name: "populated dest", live: "live", committed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -510,27 +590,29 @@ func TestRestoreInterruptedPromotionLeavesAnExistingDestAlone(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			install := filepath.Join(plantHolder(t, dest, 1, "stale"), "install")
+			holder := plantHolder(t, dest, 1, "stale", tc.committed)
 
 			restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
 			got, err := os.ReadFile(filepath.Join(dest, "engine"))
 			if tc.live == "" {
-				if err == nil {
-					t.Fatalf("an existing dest was replaced by a stale holder: engine = %q", got)
+				// The husk was unusable, so the copy beside it wins and the husk
+				// is set aside under a Kept name rather than dropped.
+				if err != nil || string(got) != "stale" {
+					t.Fatalf("the usable copy should have replaced the husk: %q err %v", got, err)
 				}
-			} else if err != nil || string(got) != tc.live {
+				if _, err := os.Stat(holder); !os.IsNotExist(err) {
+					t.Errorf("the restored copy's holder should be cleared, got %v", err)
+				}
+				return
+			}
+			if err != nil || string(got) != tc.live {
 				t.Fatalf("engine = %q, err %v, want the live %q", got, err, tc.live)
 			}
-			// A live dest supersedes the holder and reaps it; an empty husk is
-			// no such evidence and the holder stays. Either way the assertion
-			// above stands: dest is never replaced by a holder.
-			_, err = os.Stat(install)
-			if tc.live == "" && err != nil {
-				t.Errorf("an empty dest must leave the holder intact: %v", err)
-			}
-			if tc.live != "" && !os.IsNotExist(err) {
-				t.Errorf("a live dest should reap the holder it superseded, got %v", err)
+			// Its commit flag proves the live install published over it, which
+			// is the only thing that licenses the delete.
+			if _, err := os.Stat(holder); !os.IsNotExist(err) {
+				t.Errorf("a live dest should reap the copy it provably superseded, got %v", err)
 			}
 		})
 	}
@@ -613,8 +695,10 @@ func testPublished(dir string) bool {
 // plantHolder writes an install into a holder named and marked the way
 // promoteStagedDir writes one, so recovery sees the same shape it does in
 // production: the name alone is not ownership, and a fixture without the marker
-// would test a directory recovery is supposed to leave alone.
-func plantHolder(t *testing.T, destDir string, seq int64, content string) string {
+// would test a directory recovery is supposed to leave alone. committed plants
+// the flag the publish writes, which is the only evidence that licenses removing
+// the copy, so a fixture has to say which of the two it is.
+func plantHolder(t *testing.T, destDir string, seq int64, content string, committed bool) string {
 	t.Helper()
 	holder := fmt.Sprintf("%s%s%020d%s", destDir, holderSuffix, seq, holderSeqSuffix)
 	install := filepath.Join(holder, "install")
@@ -627,7 +711,70 @@ func plantHolder(t *testing.T, destDir string, seq int64, content string) string
 	if err := writeHolderMarker(holder, txnMarker{Kind: holderMarkerKind, Dest: filepath.Base(destDir), Seq: seq}); err != nil {
 		t.Fatal(err)
 	}
+	if committed {
+		if err := writeCommitFlag(holder); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return holder
+}
+
+// keptName is the name a parked holder takes: the same sequence under the Kept
+// prefix, which is what makes a retained copy findable by the operator and
+// invisible to the next scan.
+func keptName(t *testing.T, destDir, holder string) string {
+	t.Helper()
+	seq, ok := holderStamp(destDir, holder)
+	if !ok {
+		t.Fatalf("holder name %q carries no sequence", filepath.Base(holder))
+	}
+	return fmt.Sprintf("%s%s%020d%s", destDir, keptSuffix, seq, holderSeqSuffix)
+}
+
+// plantUnowned creates a directory carrying the exact holder name grammar and no
+// marker: the shape recovery must retain in place rather than restore from or
+// reap, since nothing on disk attributes it.
+func plantUnowned(t *testing.T, destDir string, seq int64, content string) string {
+	t.Helper()
+	holder := fmt.Sprintf("%s%s%020d%s", destDir, holderSuffix, seq, holderSeqSuffix)
+	install := filepath.Join(holder, "install")
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(install, "engine"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return holder
+}
+
+// plantUnusableDest leaves a directory at destDir that testPublished rejects:
+// present, non-empty, and holding no install. It is the husk the review's P2
+// chain ends at, and the state recovery has to be able to leave.
+func plantUnusableDest(t *testing.T, destDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(destDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "bin", "README"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reporterFor collects the recovery report so a retain assertion can check the
+// copy was named. A copy recovery keeps and never names is one an operator
+// cannot find.
+func reporterFor(reported *[]string) func(string) {
+	return func(m string) { *reported = append(*reported, m) }
+}
+
+// assertReports fails unless some report line mentions each wanted fragment.
+func assertReports(t *testing.T, reported []string, want ...string) {
+	t.Helper()
+	for _, fragment := range want {
+		if !slices.ContainsFunc(reported, func(m string) bool { return strings.Contains(m, fragment) }) {
+			t.Errorf("the report should name %q, got %v", fragment, reported)
+		}
+	}
 }
 
 // A cleanup that could not finish leaves an old holder behind; a later
@@ -636,8 +783,8 @@ func plantHolder(t *testing.T, destDir string, seq int64, content string) string
 func TestRestoreInterruptedPromotionPrefersTheNewestHolder(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	stale := plantHolder(t, dest, 100, "stale")
-	current := plantHolder(t, dest, 200, "current")
+	stale := plantHolder(t, dest, 100, "stale", false)
+	current := plantHolder(t, dest, 200, "current", false)
 
 	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
@@ -648,9 +795,13 @@ func TestRestoreInterruptedPromotionPrefersTheNewestHolder(t *testing.T) {
 	if _, err := os.Stat(current); !os.IsNotExist(err) {
 		t.Errorf("the restored holder should be cleared, got %v", err)
 	}
-	// The loser is left for a human rather than deleted on a guess.
-	if _, err := os.Stat(filepath.Join(stale, "install", "engine")); err != nil {
-		t.Errorf("the older holder must be left intact: %v", err)
+	// The loser is kept rather than deleted on a guess, and it moves under the
+	// Kept prefix so the next pass has nothing left to rule on.
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the older holder should have left the scanned prefix, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(keptName(t, dest, stale), "install", "engine")); err != nil {
+		t.Errorf("the older holder must be kept intact under the Kept prefix: %v", err)
 	}
 }
 
@@ -789,7 +940,7 @@ func TestRestoreInterruptedPromotionFindsHoldersUnderAnAwkwardPath(t *testing.T)
 		t.Run(dirName, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), dirName)
 			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-			install := filepath.Join(plantHolder(t, dest, 100, "kept"), "install")
+			install := filepath.Join(plantHolder(t, dest, 100, "kept", false), "install")
 			if _, err := os.Stat(install); err != nil {
 				t.Fatal(err)
 			}
@@ -819,7 +970,7 @@ func TestRestoreInterruptedPromotionPrefersTheRealNewerInstallOverAFutureStamped
 	if err := os.WriteFile(filepath.Join(dest, "engine"), []byte("new"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stale := plantHolder(t, dest, farFuture, "stale")
+	stale := plantHolder(t, dest, farFuture, "stale", false)
 
 	// The real transaction sets "new" aside and never publishes.
 	txn := lockFor(t, dest)
@@ -831,8 +982,8 @@ func TestRestoreInterruptedPromotionPrefersTheRealNewerInstallOverAFutureStamped
 	if err != nil || string(got) != "new" {
 		t.Errorf("restored %q (err %v), want the install that was live last, %q", got, err, "new")
 	}
-	// Whichever holder won, the one that lost is left for a human.
-	if _, err := os.Stat(filepath.Join(stale, "install", "engine")); err != nil {
+	// Whichever holder won, the one that lost is kept, under the Kept prefix.
+	if _, err := os.Stat(filepath.Join(keptName(t, dest, stale), "install", "engine")); err != nil {
 		t.Errorf("a holder that lost the ordering must be kept, not deleted: %v", err)
 	}
 }
@@ -1047,7 +1198,7 @@ func TestRestoreInterruptedPromotionRestoresOnlyFromAnOwnedHolder(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	owned := plantHolder(t, dest, 100, "ours")
+	owned := plantHolder(t, dest, 100, "ours", false)
 
 	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
 
@@ -1073,7 +1224,7 @@ func TestRestoreInterruptedPromotionRestoresOnlyFromAnOwnedHolder(t *testing.T) 
 func TestRestoreInterruptedPromotionSkipsAHolderWithNoInstall(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	usable := plantHolder(t, dest, 100, "kept")
+	usable := plantHolder(t, dest, 100, "kept", false)
 	// Newer AND owned, so ordering reaches it first and it is a real candidate,
 	// but it holds nothing: exactly what a stop between the allocation and the
 	// set-aside rename leaves.
@@ -1093,6 +1244,11 @@ func TestRestoreInterruptedPromotionSkipsAHolderWithNoInstall(t *testing.T) {
 	}
 	if _, err := os.Stat(usable); !os.IsNotExist(err) {
 		t.Errorf("the restored holder should be cleared, got %v", err)
+	}
+	// A holder that is provably this code's and provably holds nothing costs
+	// nothing to remove, and leaving it is what accumulates scratch forever.
+	if _, err := os.Stat(empty); !os.IsNotExist(err) {
+		t.Errorf("an owned holder with no install should be removed, got %v", err)
 	}
 }
 
@@ -1506,7 +1662,7 @@ func TestPromoteStagedDirRefusesWithoutADestinationLock(t *testing.T) {
 func TestRestoreInterruptedPromotionRefusesWithoutADestinationLock(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	holder := plantHolder(t, dest, 100, "the only copy")
+	holder := plantHolder(t, dest, 100, "the only copy", false)
 
 	var reported []string
 	restoreInterruptedPromotion(nil, dest, testPublished, func(s string) { reported = append(reported, s) })
@@ -1923,7 +2079,7 @@ func makeDir(t *testing.T, path string) {
 func TestParkKeptHolderMovesTheCopyUnderTheKeptPrefix(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	holder := plantHolder(t, dest, 7, "kept")
+	holder := plantHolder(t, dest, 7, "kept", false)
 
 	if err := parkKeptHolder(holder); err != nil {
 		t.Fatalf("park: %v", err)
@@ -1949,7 +2105,7 @@ func TestParkKeptHolderMovesTheCopyUnderTheKeptPrefix(t *testing.T) {
 func TestParkKeptHolderDoesNotClobber(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-	holder := plantHolder(t, dest, 7, "new")
+	holder := plantHolder(t, dest, 7, "new", false)
 	occupied := fmt.Sprintf("%s%s%020d%s", dest, keptSuffix, 7, holderSeqSuffix)
 	makeDir(t, filepath.Join(occupied, "install"))
 	if err := os.WriteFile(filepath.Join(occupied, "install", "engine"), []byte("older"), 0o644); err != nil {
@@ -2169,4 +2325,459 @@ func findNamed(t *testing.T, root, name string) []string {
 		t.Fatal(err)
 	}
 	return found
+}
+
+// ---- recovery reconciliation ----------------------------------------------
+
+// Which copy is NEWEST and which copy is USABLE are different questions, and the
+// review's P2 is what happens when the code answers only the first: a stop
+// between the holder's creation and the set-aside leaves a newer holder whose
+// install directory is there and empty, and restoring from it publishes nothing
+// over a destination that has nothing either. The caller's predicate is what
+// decides, and it has to reach every candidate, not just the winner.
+func TestRestoreInterruptedPromotionAppliesThePredicateToEveryHolder(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	usable := plantHolder(t, dest, 1, "the only copy", false)
+	// Newer, owned, and holding an install directory with nothing in it: the
+	// exact shape a Stat-only check reads as the copy to restore.
+	newer := plantHolder(t, dest, 2, "", false)
+	if err := os.Remove(filepath.Join(newer, "install", "engine")); err != nil {
+		t.Fatal(err)
+	}
+
+	var reported []string
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, reporterFor(&reported))
+
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "the only copy" {
+		t.Fatalf("recovery published a copy its own caller cannot use: %q err %v", got, err)
+	}
+	if _, err := os.Stat(usable); !os.IsNotExist(err) {
+		t.Errorf("the restored copy's holder should be cleared, got %v", err)
+	}
+	parked := keptName(t, dest, newer)
+	if _, err := os.Stat(parked); err != nil {
+		t.Errorf("the unusable copy should be kept under the Kept prefix: %v", err)
+	}
+	assertReports(t, reported, parked)
+}
+
+// Falling back to an older copy after the newest one could not be restored is
+// what manufactures the provenance loss: an older tree lands at the destination
+// and the next pass reads it as evidence that the newer copy was superseded. So
+// a failed restore stops the destination, keeps every copy, and says so.
+func TestRestoreInterruptedPromotionStopsWhenTheNewestRestoreFails(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	older := plantHolder(t, dest, 1, "older", false)
+	newest := plantHolder(t, dest, 2, "newest", false)
+	txn := lockFor(t, dest)
+
+	// The fault belongs to the two failing passes only, so the third pass runs
+	// against a real filesystem and shows the retry the report promises.
+	func() {
+		saved := holderFS
+		defer func() { holderFS = saved }()
+		injectFault(t, "rename", func(args ...string) bool {
+			return args[0] == filepath.Join(newest, "install")
+		}, errors.New("injected restore failure"))
+
+		for pass := 1; pass <= 2; pass++ {
+			var reported []string
+			restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+			if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+				t.Fatalf("pass %d: an older copy was installed after the newest failed: %v", pass, err)
+			}
+			for _, holder := range []string{older, newest} {
+				if _, err := os.Stat(filepath.Join(holder, "install", "engine")); err != nil {
+					t.Errorf("pass %d: every copy must be kept where it is: %v", pass, err)
+				}
+			}
+			assertReports(t, reported, newest)
+		}
+	}()
+
+	restoreInterruptedPromotion(txn, dest, testPublished, nil)
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "newest" {
+		t.Fatalf("the pass after the fault cleared should restore the newest copy: %q err %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(keptName(t, dest, older), "install", "engine")); err != nil {
+		t.Errorf("the older copy must be kept: %v", err)
+	}
+}
+
+// The review's P2 chain end to end: recovery leaves a partial tree at the
+// destination, the caller's predicate rejects it, and an offline start then has
+// no engine while a usable copy sits beside it. The exit is to set the husk
+// aside and restore the copy, which costs one Kept backup and leaves the user
+// with a working install instead of a permanent stuck state.
+func TestRestoreInterruptedPromotionExitsTheStuckState(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	plantUnusableDest(t, dest)
+	holder := plantHolder(t, dest, 1, "the only copy", false)
+	txn := lockFor(t, dest)
+
+	var reported []string
+	restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "the only copy" {
+		t.Fatalf("the usable copy should be live at the destination: %q err %v", got, err)
+	}
+	if _, err := os.Stat(holder); !os.IsNotExist(err) {
+		t.Errorf("the restored copy's holder should be cleared, got %v", err)
+	}
+	// The husk moves into a FRESH sequenced holder, above the one the copy came
+	// out of, so holders never nest and the operator can name it.
+	husk := filepath.Join(keptName(t, dest, fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 2, holderSeqSuffix)), "install")
+	if _, err := os.Stat(filepath.Join(husk, "bin", "README")); err != nil {
+		t.Errorf("the husk must be kept, not deleted: %v", err)
+	}
+	assertReports(t, reported, filepath.Dir(husk))
+
+	// No memory: the destination is usable now and the husk is under the Kept
+	// prefix, so there is nothing left to rule on.
+	reported = nil
+	restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+	if got, err := os.ReadFile(filepath.Join(dest, "engine")); err != nil || string(got) != "the only copy" {
+		t.Errorf("the second pass changed the live install: %q err %v", got, err)
+	}
+	if len(reported) != 0 {
+		t.Errorf("the second pass should have nothing to report, got %v", reported)
+	}
+
+	// A later real install sets the now-usable destination aside as an ordinary
+	// holder and the Kept husk is still where recovery put it.
+	stage := stagedTree(t, filepath.Join(root, "stage"), "newest")
+	if err := promoteStagedDir(txn, stage, dest, "engine", nil); err != nil {
+		t.Fatalf("the later install failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(husk, "bin", "README")); err != nil {
+		t.Errorf("a later install must not disturb a Kept backup: %v", err)
+	}
+}
+
+// An unusable destination with nothing usable beside it is not a state recovery
+// can improve, and moving the husk out of the way anyway would leave the caller
+// with no destination at all. So the destination is left exactly as found and
+// only the report changes.
+func TestRestoreInterruptedPromotionLeavesAnUnusableDestinationWithNoCandidateAlone(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	plantUnusableDest(t, dest)
+	// Owned, uncommitted, and holding an install nothing can use.
+	unusable := plantHolder(t, dest, 1, "", false)
+	if err := os.Remove(filepath.Join(unusable, "install", "engine")); err != nil {
+		t.Fatal(err)
+	}
+	unowned := plantUnowned(t, dest, 2, "not ours")
+	txn := lockFor(t, dest)
+
+	for pass := 1; pass <= 2; pass++ {
+		var reported []string
+		restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+
+		if _, err := os.Stat(filepath.Join(dest, "bin", "README")); err != nil {
+			t.Fatalf("pass %d: the destination must be left exactly as found: %v", pass, err)
+		}
+		if testPublished(dest) {
+			t.Fatalf("pass %d: nothing was restored, so the destination cannot have become usable", pass)
+		}
+		parked := keptName(t, dest, unusable)
+		if _, err := os.Stat(filepath.Join(parked, "install")); err != nil {
+			t.Errorf("pass %d: the unusable copy should be kept under the Kept prefix: %v", pass, err)
+		}
+		if _, err := os.Stat(filepath.Join(unowned, "install", "engine")); err != nil {
+			t.Errorf("pass %d: an unowned directory is never moved: %v", pass, err)
+		}
+		if pass == 1 {
+			assertReports(t, reported, parked, unowned, dest)
+		} else {
+			assertReports(t, reported, unowned, dest)
+		}
+	}
+}
+
+// The husk moves only after a candidate is chosen, and it moves BACK when the
+// restore fails. Parking it first would strand the destination's own contents
+// under a prefix recovery never enumerates, which is the one outcome worse than
+// the stuck state this branch exists to exit.
+func TestRestoreInterruptedPromotionPutsTheHuskBackWhenTheRestoreFails(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	plantUnusableDest(t, dest)
+	holder := plantHolder(t, dest, 1, "the only copy", false)
+	txn := lockFor(t, dest)
+
+	func() {
+		saved := holderFS
+		defer func() { holderFS = saved }()
+		injectFault(t, "rename", func(args ...string) bool {
+			return args[0] == filepath.Join(holder, "install")
+		}, errors.New("injected restore failure"))
+
+		for pass := 1; pass <= 2; pass++ {
+			var reported []string
+			restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+
+			if _, err := os.Stat(filepath.Join(dest, "bin", "README")); err != nil {
+				t.Fatalf("pass %d: the destination must be left exactly as found: %v", pass, err)
+			}
+			if _, err := os.Stat(filepath.Join(holder, "install", "engine")); err != nil {
+				t.Errorf("pass %d: the copy must stay at its own name: %v", pass, err)
+			}
+			kept, err := filepath.Glob(dest + keptSuffix + "*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(kept) != 0 {
+				t.Errorf("pass %d: a failed restore must leave no Kept backup, got %v", pass, kept)
+			}
+			assertReports(t, reported, holder)
+		}
+	}()
+
+	restoreInterruptedPromotion(txn, dest, testPublished, nil)
+	got, err := os.ReadFile(filepath.Join(dest, "engine"))
+	if err != nil || string(got) != "the only copy" {
+		t.Fatalf("the pass after the fault cleared should restore the copy: %q err %v", got, err)
+	}
+	kept, err := filepath.Glob(dest + keptSuffix + "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("the husk should be kept exactly once, got %v", kept)
+	}
+	if _, err := os.Stat(filepath.Join(kept[0], "install", "bin", "README")); err != nil {
+		t.Errorf("the husk must be kept intact: %v", err)
+	}
+}
+
+// A committed copy is only provably superseded by a destination that is present
+// AND usable. With no such destination it is the last usable copy there is, so
+// it is the fallback selection rather than something to reclaim.
+func TestRestoreInterruptedPromotionRestoresACommittedHolderOverAnUnusableDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seedDest func(t *testing.T, dest string)
+		wantHusk bool
+	}{
+		{
+			name:     "unusable destination",
+			seedDest: plantUnusableDest,
+			wantHusk: true,
+		},
+		{
+			name:     "absent destination",
+			seedDest: func(t *testing.T, dest string) {},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+			tc.seedDest(t, dest)
+			holder := plantHolder(t, dest, 1, "the only copy", true)
+
+			restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
+
+			got, err := os.ReadFile(filepath.Join(dest, "engine"))
+			if err != nil || string(got) != "the only copy" {
+				t.Fatalf("the last usable copy should be live: %q err %v", got, err)
+			}
+			if _, err := os.Stat(holder); !os.IsNotExist(err) {
+				t.Errorf("the restored copy's holder should be cleared, got %v", err)
+			}
+			kept, err := filepath.Glob(dest + keptSuffix + "*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantHusk {
+				if len(kept) != 1 {
+					t.Fatalf("the husk should be kept exactly once, got %v", kept)
+				}
+				if _, err := os.Stat(filepath.Join(kept[0], "install", "bin", "README")); err != nil {
+					t.Errorf("the husk must be kept intact: %v", err)
+				}
+				return
+			}
+			if len(kept) != 0 {
+				t.Errorf("nothing was set aside, so there is no Kept backup to write: %v", kept)
+			}
+		})
+	}
+}
+
+// A directory that merely starts like a holder name was never this install's,
+// so it is neither acted on nor reported on this install's account. Reporting it
+// would be as wrong as moving it: it tells the operator a copy of their install
+// is somewhere it is not.
+func TestRestoreInterruptedPromotionIgnoresAPrefixCollidingSibling(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "live")
+	sibling := dest + holderSuffix + "notes"
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "note"), []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	committed := plantHolder(t, dest, 1, "old", true)
+
+	var reported []string
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, reporterFor(&reported))
+
+	if got, err := os.ReadFile(filepath.Join(sibling, "note")); err != nil || string(got) != "mine" {
+		t.Errorf("a prefix-colliding sibling must be left exactly as found: %q err %v", got, err)
+	}
+	if _, err := os.Stat(committed); !os.IsNotExist(err) {
+		t.Errorf("the superseded copy should be reaped, got %v", err)
+	}
+	for _, m := range reported {
+		if strings.Contains(m, sibling) {
+			t.Errorf("a sibling that is not this install's must not be reported on its account: %q", m)
+		}
+	}
+}
+
+// Unusable and unreadable are different answers. Unusable is durable and the
+// candidate is skipped and kept; unreadable is a filesystem fault, and deciding
+// anything on it would turn a transient error into a permanent ruling. So a
+// candidate that cannot be read stops the destination with everything intact.
+func TestRestoreInterruptedPromotionStopsOnAnUnreadableHolder(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions")
+	}
+	for _, tc := range []struct {
+		name string
+		// seed makes the holder's install unreadable without touching the holder
+		// itself: chmod the holder and the MARKER stops being readable too, the
+		// directory is classified unowned, and the branch under test is never
+		// reached.
+		seed func(t *testing.T, holder string)
+	}{
+		{
+			name: "install is a symlink through an unreadable directory",
+			seed: func(t *testing.T, holder string) {
+				t.Helper()
+				locked := filepath.Join(holder, "locked")
+				if err := os.Rename(filepath.Join(holder, "install"), locked); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(locked, "inner"), filepath.Join(holder, "install")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(locked, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+			},
+		},
+		{
+			name: "install itself cannot be read",
+			seed: func(t *testing.T, holder string) {
+				t.Helper()
+				install := filepath.Join(holder, "install")
+				if err := os.Chmod(install, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(install, 0o700) })
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+			holder := plantHolder(t, dest, 1, "the only copy", false)
+			tc.seed(t, holder)
+
+			var reported []string
+			// The delete is recorded rather than inferred from the disk: a
+			// holder whose own contents cannot be read cannot be removed
+			// either, so a pass that classified it as empty and ASKED for the
+			// delete leaves exactly the same directory behind as one that
+			// never touched it.
+			removed := recordRemoveAll(t)
+			restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, reporterFor(&reported))
+
+			if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+				t.Errorf("nothing readable was found, so nothing may be published: %v", err)
+			}
+			if _, err := os.Lstat(holder); err != nil {
+				t.Errorf("a copy that could not be read must be left where it is: %v", err)
+			}
+			if slices.Contains(*removed, holder) {
+				t.Errorf("a copy that could not be read must never be handed to a delete: %v", *removed)
+			}
+			assertNoOtherEntries(t, root, filepath.Base(holder), installLockDir)
+			assertReports(t, reported, holder)
+		})
+	}
+}
+
+// A directory carrying the exact generated name with no marker behind it is one
+// this code cannot claim. Restoring from it would publish a stranger's tree as
+// the user's install, and deleting it would destroy something that was never
+// ours, so it is kept where it is and named.
+func TestRestoreInterruptedPromotionRetainsUnownedHolders(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	unowned := plantUnowned(t, dest, 1, "not ours")
+	txn := lockFor(t, dest)
+
+	for pass := 1; pass <= 2; pass++ {
+		var reported []string
+		restoreInterruptedPromotion(txn, dest, testPublished, reporterFor(&reported))
+
+		if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+			t.Errorf("pass %d: an unowned directory must never be restored: %v", pass, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(unowned, "install", "engine")); err != nil || string(got) != "not ours" {
+			t.Errorf("pass %d: an unowned directory must be left exactly as found: %q err %v", pass, got, err)
+		}
+		assertReports(t, reported, unowned)
+	}
+}
+
+// The predicate is what tells a published install from a directory that merely
+// exists. Without one there is no such evidence, and every ruling recovery could
+// make rests on it, so a caller that supplies none gets no mutation at all.
+func TestRestoreInterruptedPromotionNilPredicateNeverDeletesOrRestores(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	stagedTree(t, dest, "live")
+	committed := plantHolder(t, dest, 1, "old", true)
+
+	restoreInterruptedPromotion(lockFor(t, dest), dest, nil, nil)
+
+	if got, err := os.ReadFile(filepath.Join(dest, "engine")); err != nil || string(got) != "live" {
+		t.Errorf("the destination must be left alone: %q err %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(committed, "install", "engine")); err != nil || string(got) != "old" {
+		t.Errorf("with no predicate nothing is proven superseded: %q err %v", got, err)
+	}
+	assertNoOtherEntries(t, root, filepath.Base(dest), filepath.Base(committed), installLockDir)
+}
+
+// recordRemoveAll collects every path recovery asks the seam to delete, and
+// passes each call through. It is how a test tells "the delete was refused by
+// the filesystem" from "the delete was never asked for", which the directory
+// left on disk cannot show.
+func recordRemoveAll(t *testing.T) *[]string {
+	t.Helper()
+	var paths []string
+	real := holderFS
+	t.Cleanup(func() { holderFS = real })
+	holderFS.removeAll = func(path string) error {
+		paths = append(paths, path)
+		return real.removeAll(path)
+	}
+	return &paths
 }
