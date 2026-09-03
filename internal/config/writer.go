@@ -478,18 +478,23 @@ func ProviderKeyRetainedAfterRemoval(path string, name string) (bool, error) {
 // A missing file is an empty list, not an error: every caller here asks "what
 // is already saved?", and "nothing yet" is a legitimate answer.
 func persistedProviders(path string) ([]ProviderProfile, error) {
+	cfg, err := persistedFileConfig(path)
+	return cfg.Providers, err
+}
+
+func persistedFileConfig(path string) (FileConfig, error) {
 	data, err := os.ReadFile(strings.TrimSpace(path))
 	if os.IsNotExist(err) {
-		return nil, nil
+		return FileConfig{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var cfg FileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
-	return cfg.Providers, nil
+	return cfg, nil
 }
 
 // PersistedProviderIdentity reports whether a persisted user-config row already
@@ -615,22 +620,25 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 // named owner and by nothing else in the persisted config — neither as another
 // row's name nor as another row's catalog id.
 //
-// OAuth credential cleanup uses this before treating the catalog id as one of
-// the target profile's own token keys. With stored-key "work-xai", stored-key
-// "xai", and keyless "personal-xai" all carrying catalogId "xai", the "xai"
-// token belongs to whoever logged in under that spelling — deleting it while
-// logging out of "work-xai" takes down a sibling's login.
+// Credential cleanup uses this before treating the catalog id as one of the
+// target profile's own keys. Claims include provider rows and dictation because
+// both use the same flat credential-store namespace. Any future feature that
+// stores keys there must add its claims here too.
 func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 	catalogID = strings.TrimSpace(catalogID)
 	owner = strings.TrimSpace(owner)
 	if catalogID == "" || owner == "" {
 		return false, nil
 	}
-	providers, err := persistedProviders(path)
+	cfg, err := persistedFileConfig(path)
 	if err != nil {
 		return false, err
 	}
-	for _, row := range providers {
+	if sameProviderIdentity(string(cfg.STT.Provider), catalogID) ||
+		sameProviderIdentity(string(cfg.STT.StreamProvider), catalogID) {
+		return false, nil
+	}
+	for _, row := range cfg.Providers {
 		name := strings.TrimSpace(row.Name)
 		if name == owner {
 			continue

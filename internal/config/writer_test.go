@@ -1854,6 +1854,26 @@ func TestCatalogIdentityExclusive(t *testing.T) {
 	if exclusive, err := CatalogIdentityExclusive(sole, "openrouter", "my-router"); err != nil || !exclusive {
 		t.Fatalf("exclusive = %v err = %v, want true when only the owner claims the id", exclusive, err)
 	}
+
+	for name, stt := range map[string]STTConfig{
+		"batch dictation":     {Provider: STTProviderGroq},
+		"streaming dictation": {StreamProvider: STTProviderDeepgram},
+	} {
+		t.Run(name, func(t *testing.T) {
+			catalogID := string(stt.Provider)
+			if catalogID == "" {
+				catalogID = string(stt.StreamProvider)
+			}
+			path := filepath.Join(t.TempDir(), "config.json")
+			writeConfigFixture(t, path, FileConfig{
+				Providers: []ProviderProfile{{Name: "my-" + catalogID, CatalogID: catalogID}},
+				STT:       stt,
+			}, 0o600)
+			if exclusive, err := CatalogIdentityExclusive(path, catalogID, "my-"+catalogID); err != nil || exclusive {
+				t.Fatalf("exclusive = %v err = %v, want false when dictation claims the catalog id", exclusive, err)
+			}
+		})
+	}
 }
 
 func TestProviderCredentialCandidates(t *testing.T) {

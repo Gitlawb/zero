@@ -512,17 +512,31 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		}
 		removed = removed || candidateRemoved
 	}
-	// Also drop the addressed row's stored API key and marker so `auth logout`
+	// Also drop the addressed row's stored API keys and marker so `auth logout`
 	// clears the whole credential (OAuth token AND key), not just the OAuth side.
-	// API-key lookup is row-name-only; unlike OAuth, it never reads a catalog-id
-	// alias. Expanding this deletion to the OAuth candidates can erase an unrelated
-	// dictation key stored under a catalog id such as "groq".
+	// ProviderCredentialCandidates includes a catalog alias only when no sibling
+	// provider or dictation configuration claims it.
 	//
 	// Clear the marker before deleting the shared credential. The reverse order
 	// can leave apiKeyStored:true with no secret behind it when config publication
 	// fails. Resolve catalog aliases first, but mutate the exact persisted row.
 	keyRemoved := false
 	if configProvider != "" {
+		row, match, resolveErr := config.ResolvePersistedProviderIdentity(configPath, configProvider)
+		if resolveErr != nil || match == config.PersistedIdentityNone || match == config.PersistedIdentityAmbiguous {
+			if resolveErr == nil {
+				resolveErr = fmt.Errorf("provider %q no longer resolves to a persisted row", configProvider)
+			}
+			return writeAppError(stderr, redaction.ErrorMessage(resolveErr, redaction.Options{}), exitCrash)
+		}
+		catalogExclusive, exclusiveErr := config.CatalogIdentityExclusive(configPath, row.CatalogID, configProvider)
+		if exclusiveErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(exclusiveErr, redaction.Options{}), exitCrash)
+		}
+		keyCandidates := []string{configProvider}
+		if catalogExclusive && !config.SameProviderIdentity(row.CatalogID, configProvider) {
+			keyCandidates = append(keyCandidates, row.CatalogID)
+		}
 		if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, configProvider); clearErr != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 		}
@@ -530,9 +544,12 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		if keyErr != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 		}
-		keyRemoved, keyErr = keyStore.Delete(configProvider)
-		if keyErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
+		for _, candidate := range keyCandidates {
+			candidateRemoved, candidateErr := keyStore.Delete(candidate)
+			if candidateErr != nil {
+				return writeAppError(stderr, redaction.ErrorMessage(candidateErr, redaction.Options{}), exitCrash)
+			}
+			keyRemoved = keyRemoved || candidateRemoved
 		}
 	}
 	removed = removed || keyRemoved

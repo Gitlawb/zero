@@ -986,15 +986,14 @@ func TestRunAuthLogoutDeletesCatalogIDToken(t *testing.T) {
 	}
 }
 
-// API keys belong to persisted row names. Catalog ids share the same flat store
-// namespace with dictation, so OAuth's catalog-alias expansion must not be used
-// for API-key deletion.
-func TestRunAuthLogoutDeletesOnlyPersistedRowAPIKey(t *testing.T) {
+// Catalog ids share the flat API-key store with dictation, so logout must leave
+// a catalog alias alone when dictation also claims it.
+func TestRunAuthLogoutPreservesDictationCatalogAPIKey(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
 	withAuthStore(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-groq","catalogId":"groq","apiKeyStored":true}]}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-groq","catalogId":"groq","apiKeyStored":true}],"stt":{"provider":"groq"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
@@ -1009,7 +1008,7 @@ func TestRunAuthLogoutDeletesOnlyPersistedRowAPIKey(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDeps([]string{"auth", "logout", "my-groq"}, &stdout, &stderr, appDeps{
+	code := runWithDeps([]string{"auth", "logout", "groq"}, &stdout, &stderr, appDeps{
 		userConfigPath: func() (string, error) { return configPath, nil },
 	})
 	if code != exitSuccess {
@@ -1020,6 +1019,40 @@ func TestRunAuthLogoutDeletesOnlyPersistedRowAPIKey(t *testing.T) {
 	}
 	if key, ok, err := keyStore.Get("groq"); err != nil || !ok || key != "dictation-key" {
 		t.Fatalf("dictation key = %q, %v, %v; want it preserved", key, ok, err)
+	}
+	if !strings.Contains(stdout.String(), "Logged out") {
+		t.Fatalf("stdout = %q, want a logout confirmation", stdout.String())
+	}
+}
+
+// TestRunAuthLogoutDeletesCatalogIDAPIKey covers jatmn's #725 finding: a key
+// stored under a profile's exclusive catalog id by a catalog-style auth flow
+// must not survive logout of that profile's persisted name.
+func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-xai","catalogId":"xai","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("xai", "catalog-flow-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "my-xai"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if _, ok, err := keyStore.Get("xai"); err != nil || ok {
+		t.Fatalf("catalog-id API key survived logout: ok=%v err=%v", ok, err)
 	}
 	if !strings.Contains(stdout.String(), "Logged out") {
 		t.Fatalf("stdout = %q, want a logout confirmation", stdout.String())
