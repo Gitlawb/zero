@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"io/fs"
 	"path/filepath"
 
 	"github.com/Gitlawb/zero/internal/daemon/remote"
@@ -101,16 +101,23 @@ func keptBackupsList(args []string, bundleDir string, stdout io.Writer, stderr i
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	sttBackups, err := dictation.ListKeptBackups(root)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	found := writeKeptBackups(stdout, "stt", sttKeptLines(sttBackups))
+	found, err := writeKeptBackups(stdout, "stt", sttKeptLines(sttBackups))
+	if err != nil {
+		return exitCrash
+	}
 	if bundleDir != "" {
 		bundleBackups, err := remote.ListKeptBackups(bundleDir)
-		if err != nil && !os.IsNotExist(err) {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
-		found = writeKeptBackups(stdout, "bundle", bundleKeptLines(bundleBackups)) || found
+		bundleFound, err := writeKeptBackups(stdout, "bundle", bundleKeptLines(bundleBackups))
+		if err != nil {
+			return exitCrash
+		}
+		found = bundleFound || found
 	}
 	if !found {
 		if _, err := fmt.Fprintln(stdout, "No kept backups."); err != nil {
@@ -151,7 +158,7 @@ func bundleKeptLines(backups []remote.KeptBackup) []keptBackupLine {
 // the site because it is exactly what `remove` takes; the destination is the
 // install or link the copy was set aside for, and an entry nothing on disk
 // attributes says so instead of borrowing a destination from its own name.
-func writeKeptBackups(stdout io.Writer, site string, lines []keptBackupLine) bool {
+func writeKeptBackups(stdout io.Writer, site string, lines []keptBackupLine) (bool, error) {
 	for _, line := range lines {
 		dest := line.dest
 		if dest == "" {
@@ -162,10 +169,13 @@ func writeKeptBackups(stdout io.Writer, site string, lines []keptBackupLine) boo
 			suffix = " unowned"
 		}
 		if _, err := fmt.Fprintf(stdout, "%s %s dest=%s seq=%d bytes=%d%s\n", site, line.name, dest, line.seq, line.bytes, suffix); err != nil {
-			break
+			// A listing cut short is not a listing. Reporting success here tells
+			// an operator they have seen every retained copy when they have not,
+			// and this command is the only place those copies are visible.
+			return false, err
 		}
 	}
-	return len(lines) > 0
+	return len(lines) > 0, nil
 }
 
 func keptBackupsRemove(args []string, bundleDir string, stdout io.Writer, stderr io.Writer, deps appDeps) int {

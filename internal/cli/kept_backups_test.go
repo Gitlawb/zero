@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -382,3 +383,22 @@ func TestKeptBackupsRefusalsAndUsage(t *testing.T) {
 		})
 	}
 }
+
+// The listing is the only place a retained copy is visible, so a listing cut
+// short must not report success: an operator who sees a clean exit believes
+// they have seen every copy that exists.
+func TestKeptBackupsListFailsOnAShortWrite(t *testing.T) {
+	userConfigPath := filepath.Join(t.TempDir(), "config.json")
+	root := filepath.Join(filepath.Dir(userConfigPath), "stt")
+	plantSTTKept(t, root, "engine-a", 1, "the only offline copy")
+
+	var stderr bytes.Buffer
+	if code := runWithDeps([]string{"kept-backups", "list"}, shortWriter{}, &stderr, keptDeps(userConfigPath)); code == exitSuccess {
+		t.Error("a listing that could not be written must not exit successfully")
+	}
+}
+
+// shortWriter fails every write, standing in for a closed pipe or a full disk.
+type shortWriter struct{}
+
+func (shortWriter) Write([]byte) (int, error) { return 0, errors.New("short write") }

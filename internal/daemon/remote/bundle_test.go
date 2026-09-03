@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -3381,5 +3382,51 @@ func TestExtractBundleGivesUpWaitingForTheInProcessLock(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a queued extract waited on the in-process lock with no bound")
+	}
+}
+
+// Every not-exist probe in this file runs on a seam result, and a seam can hand
+// back a wrapped error. os.IsNotExist does not unwrap, so a wrapped ENOENT took
+// the opposite branch from the one the same syscall takes unwrapped: the
+// classifier read "no backup here" as "this copy cannot be read" and stopped a
+// destination that had nothing wrong with it.
+func TestClassifierTreatsAWrappedNotExistAsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	staging := stageBackup(t, dir, "", "proj-1", "v1", 1)
+	if err := os.RemoveAll(filepath.Join(staging, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	injectFault(t, "stat", func(args ...string) bool {
+		return args[0] == filepath.Join(staging, "backup")
+	}, fmt.Errorf("seam wrapped: %w", fs.ErrNotExist))
+
+	recoverBundleDir(dir, func(string, ...any) {})
+
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("a marked copy holding nothing is owned-and-empty and should be reaped, got %v", err)
+	}
+}
+
+// Windows strips a trailing dot and a trailing space when it resolves a path,
+// so two link ids that differ only there name one directory on that platform.
+// The two extract locks key on the id, not on the resolved path, so the pair
+// would take different locks and clone into the same tree at the same time.
+// Reserved device names resolve away from the directory entirely.
+func TestSanitizeLinkIDRefusesNamesThatAreNotDistinctOnWindows(t *testing.T) {
+	for _, id := range []string{"proj.", "proj..", "CON", "con", "nul", "COM1", "lpt9", "AUX.txt"} {
+		if got, err := sanitizeLinkID(id); err == nil {
+			t.Errorf("sanitizeLinkID(%q) = %q, want a refusal: it is not one distinct directory on every platform", id, got)
+		}
+	}
+	for _, id := range []string{"proj-1", "proj.git", "console", "com10", "auxiliary", "nulls"} {
+		if _, err := sanitizeLinkID(id); err != nil {
+			t.Errorf("sanitizeLinkID(%q) = %v, want it accepted", id, err)
+		}
+	}
+	// Surrounding space is not aliasing: it is trimmed before any path is
+	// built, so both spellings become one id and take one lock.
+	trimmed, err := sanitizeLinkID("proj-1 ")
+	if err != nil || trimmed != "proj-1" {
+		t.Errorf(`sanitizeLinkID("proj-1 ") = %q, %v; want it normalized to "proj-1"`, trimmed, err)
 	}
 }

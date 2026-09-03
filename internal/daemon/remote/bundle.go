@@ -425,7 +425,7 @@ type bundleCandidate struct {
 func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCandidate {
 	entries, err := stagingFS.readDir(dir)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			logf("remote: could not scan bundle dir %s: %v", dir, err)
 		}
 		return nil
@@ -602,7 +602,7 @@ func classifyCandidate(dir string, c bundleCandidate, logf func(string, ...any))
 	backup := filepath.Join(c.path, "backup")
 	switch _, err := stagingFS.stat(backup); {
 	case err == nil:
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		// A readable marker with no set-aside content is the one shape that
 		// proves the directory holds nothing: owned, and empty.
 		st.empty = true
@@ -614,7 +614,7 @@ func classifyCandidate(dir string, c bundleCandidate, logf func(string, ...any))
 	switch _, err := stagingFS.stat(filepath.Join(c.path, committedFile)); {
 	case err == nil:
 		st.committed = true
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 	default:
 		logf("remote: could not read the commit flag in %s: %v", c.path, err)
 		return st, verdictUnreadable
@@ -622,7 +622,7 @@ func classifyCandidate(dir string, c bundleCandidate, logf func(string, ...any))
 	switch _, err := stagingFS.stat(filepath.Join(backup, ".git")); {
 	case err == nil:
 		st.usable = true
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		// Durable: this copy will never pass the predicate, so it is skipped in
 		// selection and kept. That is a different fact from the error below.
 	default:
@@ -640,7 +640,7 @@ func classifyCandidate(dir string, c bundleCandidate, logf func(string, ...any))
 func classifyDest(dest string, logf func(string, ...any)) (present, usable, ok bool) {
 	switch _, err := stagingFS.stat(dest); {
 	case err == nil:
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		return false, false, true
 	default:
 		logf("remote: could not read %s: %v; leaving its staged copies in place", dest, err)
@@ -649,7 +649,7 @@ func classifyDest(dest string, logf func(string, ...any)) (present, usable, ok b
 	switch _, err := stagingFS.stat(filepath.Join(dest, ".git")); {
 	case err == nil:
 		return true, true, true
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		return true, false, true
 	default:
 		logf("remote: could not tell whether %s is usable: %v; leaving its staged copies in place", dest, err)
@@ -1151,7 +1151,7 @@ func writeMarker(dir string, m txnMarker) error {
 func readMarker(dir string) (txnMarker, error) {
 	raw, err := stagingFS.readFile(filepath.Join(dir, stagingMarkerFile))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return txnMarker{}, errMarkerMissing
 		}
 		return txnMarker{}, fmt.Errorf("read transaction marker in %s: %w", dir, err)
@@ -1248,7 +1248,7 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	restore := func() error { return nil }
 	if err := fsutil.RenameWithRetry(dest, backup, stagingFS.rename); err == nil {
 		restore = func() error { return fsutil.RenameWithRetry(backup, dest, stagingFS.rename) }
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	if err := fsutil.RenameWithRetry(cloneDest, dest, stagingFS.rename); err != nil {
@@ -1420,6 +1420,17 @@ func sanitizeLinkID(id string) (string, error) {
 	if strings.HasPrefix(id, ".") {
 		return "", errors.New("remote: link id may not start with '.'")
 	}
+	// Windows drops a trailing dot or space when it resolves a path, and maps
+	// the reserved device names onto devices rather than directory entries. An
+	// id that is not one distinct directory on every platform breaks the thing
+	// both extract locks assume: they key on the id, so two ids that resolve to
+	// one tree take two different locks and clone into it at the same time.
+	if strings.HasSuffix(id, ".") {
+		return "", errors.New("remote: link id may not end with '.'")
+	}
+	if isReservedDeviceName(id) {
+		return "", errors.New("remote: link id may not be a reserved device name")
+	}
 	for _, r := range id {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
@@ -1459,4 +1470,22 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// isReservedDeviceName reports whether name is one of the Windows device names,
+// which resolve to a device on that platform whatever directory they sit in.
+// The check is case-insensitive and ignores an extension, because CON, con and
+// AUX.txt all resolve the same way.
+func isReservedDeviceName(name string) bool {
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		name = name[:i]
+	}
+	switch strings.ToUpper(name) {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(name) == 4 && (strings.EqualFold(name[:3], "COM") || strings.EqualFold(name[:3], "LPT")) {
+		return name[3] >= '1' && name[3] <= '9'
+	}
+	return false
 }
