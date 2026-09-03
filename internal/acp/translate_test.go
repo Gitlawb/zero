@@ -94,8 +94,8 @@ func TestToolCallResult(t *testing.T) {
 	if diff := ok.Content[1]; diff.Type != "diff" || diff.Path != path || diff.OldText == nil || *diff.OldText != "before\n" || diff.NewText == nil || *diff.NewText != "after\n" {
 		t.Fatalf("unexpected diff content: %+v", diff)
 	}
-	if len(ok.Locations) != 1 || ok.Locations[0].Path != path {
-		t.Fatalf("rich diff location should use the same absolute path, got %+v", ok.Locations)
+	if len(ok.Locations) != 2 || ok.Locations[0].Path != path || ok.Locations[1].Path != "a.go" {
+		t.Fatalf("unproven absolute/relative aliases must both remain visible, got %+v", ok.Locations)
 	}
 
 	failed := toolCallResult(agent.ToolResult{ToolCallID: "tc2", Status: tools.StatusError, Output: "boom"})
@@ -135,17 +135,81 @@ func TestToolCallDiffJSONPreservesEmptyFilesWithoutClaimingDeletion(t *testing.T
 	}
 }
 
-func TestToolResultLocationsCorrelateRichDiffsAndKeepFallbacks(t *testing.T) {
+func TestToolResultLocationsPreserveDistinctPathIdentities(t *testing.T) {
 	root := t.TempDir()
-	richPath := filepath.Join(root, "rich.go")
-	locations := toolResultLocations(agent.ToolResult{
-		ChangedFiles: []string{"rich.go", "fallback.go"},
+	rootPath := filepath.Join(root, "a.go")
+	nestedPath := filepath.Join(root, "sub", "a.go")
+	diff := func(path string) tools.FileDiff {
+		return tools.FileDiff{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: "after"}
+	}
+	for _, tc := range []struct {
+		name  string
+		diffs []tools.FileDiff
+		want  []string
+	}{
+		{name: "both rich", diffs: []tools.FileDiff{diff(rootPath), diff(nestedPath)}, want: []string{rootPath, nestedPath, "a.go", filepath.Join("sub", "a.go")}},
+		{name: "root rich", diffs: []tools.FileDiff{diff(rootPath)}, want: []string{rootPath, "a.go", filepath.Join("sub", "a.go")}},
+		{name: "nested rich", diffs: []tools.FileDiff{diff(nestedPath)}, want: []string{nestedPath, "a.go", filepath.Join("sub", "a.go")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			locations := toolResultLocations(agent.ToolResult{
+				ChangedFiles: []string{"a.go", filepath.Join("sub", "a.go")},
+				FileDiffs:    tc.diffs,
+			})
+			if len(locations) != len(tc.want) {
+				t.Fatalf("locations = %#v, want %#v", locations, tc.want)
+			}
+			for index := range tc.want {
+				if locations[index].Path != tc.want[index] {
+					t.Fatalf("locations = %#v, want %#v", locations, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestToolCallResultPreservesWhitespaceInFilePaths(t *testing.T) {
+	relativePath := " report.txt "
+	absolutePath := filepath.Join(t.TempDir(), relativePath)
+	update := toolCallResult(agent.ToolResult{
+		ChangedFiles: []string{relativePath},
 		FileDiffs: []tools.FileDiff{{
-			Path: richPath, OldExists: true, NewExists: true, OldText: "before", NewText: "after",
+			Path: absolutePath, OldExists: true, NewExists: true, OldText: "before", NewText: "after",
 		}},
 	})
-	if len(locations) != 2 || locations[0].Path != richPath || locations[1].Path != "fallback.go" {
-		t.Fatalf("locations = %#v", locations)
+	if len(update.Content) != 1 || update.Content[0].Path != absolutePath {
+		t.Fatalf("diff content path = %#v, want %q", update.Content, absolutePath)
+	}
+	if len(update.Locations) != 2 || update.Locations[0].Path != absolutePath || update.Locations[1].Path != relativePath {
+		t.Fatalf("locations = %#v, want exact paths %q and %q", update.Locations, absolutePath, relativePath)
+	}
+}
+
+func TestToolResultLocationsDeduplicateOnlyExactPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.go")
+	locations := toolResultLocations(agent.ToolResult{
+		ChangedFiles: []string{path, path},
+		FileDiffs:    []tools.FileDiff{{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: "after"}},
+	})
+	if len(locations) != 1 || locations[0].Path != path {
+		t.Fatalf("exact duplicate locations = %#v", locations)
+	}
+}
+
+func TestDeletedFileKeepsPathOnlyLocation(t *testing.T) {
+	relativePath := "deleted.go"
+	absolutePath := filepath.Join(t.TempDir(), relativePath)
+	update := toolCallResult(agent.ToolResult{
+		ChangedFiles: []string{relativePath},
+		FileDiffs: []tools.FileDiff{{
+			Path: absolutePath, OldExists: true, NewExists: false, OldText: "before",
+		}},
+	})
+	if len(update.Content) != 0 {
+		t.Fatalf("deleted file must not emit an ambiguous ACP diff: %#v", update.Content)
+	}
+	if len(update.Locations) != 2 || update.Locations[0].Path != absolutePath || update.Locations[1].Path != relativePath {
+		t.Fatalf("deleted file locations = %#v", update.Locations)
 	}
 }
 

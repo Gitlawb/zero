@@ -97,7 +97,7 @@ func TestStructuredPatchFileDiffsPreserveEmptyOperationsAndResultBudget(t *testi
 		}
 	}
 
-	large := strings.Repeat("x", 40*1024)
+	large := strings.Repeat("x", maxToolResultFileDiffBytes/3+1)
 	budgeted := fileDiffsFromStructuredPatch(".", []structuredPatchChange{
 		{kind: structuredPatchAdd, to: structuredPatchTarget{absolute: filepath.Join(root, "one")}, after: large},
 		{kind: structuredPatchAdd, to: structuredPatchTarget{absolute: filepath.Join(root, "two")}, after: "tiny"},
@@ -106,6 +106,28 @@ func TestStructuredPatchFileDiffsPreserveEmptyOperationsAndResultBudget(t *testi
 	})
 	if len(budgeted) != 3 || filepath.Base(budgeted[0].Path) != "one" || filepath.Base(budgeted[1].Path) != "two" || filepath.Base(budgeted[2].Path) != "three" {
 		t.Fatalf("ordered aggregate file-diff budget = %#v", budgeted)
+	}
+}
+
+func TestStructuredPatchFileDiffsKeepEligibleSameBasenameSibling(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	diffs := fileDiffsFromStructuredPatch(".", []structuredPatchChange{
+		{
+			kind:  structuredPatchAdd,
+			to:    structuredPatchTarget{absolute: filepath.Join(root, "a.go"), relative: "a.go"},
+			after: strings.Repeat("x", maxToolPreviewBytes+1),
+		},
+		{
+			kind:  structuredPatchAdd,
+			to:    structuredPatchTarget{absolute: filepath.Join(root, "sub", "a.go"), relative: filepath.Join("sub", "a.go")},
+			after: "package sub\n",
+		},
+	})
+	if len(diffs) != 1 || diffs[0].Path != filepath.Join(root, "sub", "a.go") {
+		t.Fatalf("same-basename rich diffs = %#v", diffs)
 	}
 }
 

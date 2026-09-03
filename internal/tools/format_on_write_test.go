@@ -233,4 +233,35 @@ func TestWriteFileOmitsRichDiffWhenFormatterFinalReadFails(t *testing.T) {
 	if result.Status != StatusOK || len(result.ChangedFiles) != 1 || len(result.FileDiffs) != 0 {
 		t.Fatalf("unverified formatter result = status=%s changed=%#v diffs=%#v", result.Status, result.ChangedFiles, result.FileDiffs)
 	}
+	if result.Display.Preview != "" {
+		t.Fatalf("unverified formatter result exposed stale preview: %q", result.Display.Preview)
+	}
+}
+
+func TestEditFileOmitsPreviewWhenFormatterFinalReadFails(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "a.go")
+	if err := os.WriteFile(targetPath, []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorRunner := runFormatOnWriteCommand
+	priorReader := readFormattedFile
+	runFormatOnWriteCommand = func(context.Context, string, []string, string) error { return nil }
+	readFormattedFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	t.Cleanup(func() {
+		runFormatOnWriteCommand = priorRunner
+		readFormattedFile = priorReader
+	})
+
+	result := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "a.go", "old_string": "before", "new_string": "requested",
+	})
+	if result.Status != StatusOK || len(result.ChangedFiles) != 1 || len(result.FileDiffs) != 0 {
+		t.Fatalf("unverified formatter result = status=%s changed=%#v diffs=%#v", result.Status, result.ChangedFiles, result.FileDiffs)
+	}
+	if result.Display.Preview != "" {
+		t.Fatalf("unverified formatter result exposed stale preview: %q", result.Display.Preview)
+	}
 }

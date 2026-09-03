@@ -157,39 +157,26 @@ func toolResultLocations(result agent.ToolResult) []ToolCallLocation {
 	locs := make([]ToolCallLocation, 0, len(result.FileDiffs)+len(result.ChangedFiles))
 	seen := make(map[string]bool, len(result.FileDiffs)+len(result.ChangedFiles))
 	for _, diff := range result.FileDiffs {
-		path := strings.TrimSpace(diff.Path)
+		path := diff.Path
 		if path == "" || seen[path] {
 			continue
 		}
 		seen[path] = true
 		locs = append(locs, ToolCallLocation{Path: path})
 	}
+	// FileDiff.Path is canonical absolute path data while ChangedFiles is
+	// normally workspace-relative. Without the trusted workspace root these
+	// coordinate systems cannot be correlated safely: a suffix match would let
+	// /workspace/sub/a.go consume the fallback for a distinct root a.go. The
+	// shared seen set deduplicates only identities already exactly comparable.
 	for _, f := range result.ChangedFiles {
-		f = strings.TrimSpace(f)
-		if f == "" || locationCoveredByFileDiff(f, result.FileDiffs) || seen[f] {
+		if f == "" || seen[f] {
 			continue
 		}
 		seen[f] = true
 		locs = append(locs, ToolCallLocation{Path: f})
 	}
 	return locs
-}
-
-func locationCoveredByFileDiff(changed string, diffs []tools.FileDiff) bool {
-	changed = filepath.Clean(changed)
-	for _, diff := range diffs {
-		diffPath := filepath.Clean(diff.Path)
-		if filepath.IsAbs(changed) {
-			if diffPath == changed {
-				return true
-			}
-			continue
-		}
-		if diffPath == changed || strings.HasSuffix(diffPath, string(filepath.Separator)+changed) {
-			return true
-		}
-	}
-	return false
 }
 
 // planUpdate maps ZERO's plan items to an ACP "plan" update.

@@ -476,15 +476,18 @@ func TestScrubResultSecretsDropsControlSplitFileDiff(t *testing.T) {
 
 func TestScrubResultSecretsDoesNotMutateCallerFileDiffSlice(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x")
+	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	retainedOld := "before token=" + secret
+	retainedNew := "after token=" + secret
 	original := []FileDiff{
 		{Path: path, OldExists: true, NewExists: true, OldText: "token=sk-proj-abc\x00def", NewText: "unsafe"},
-		{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: "after"},
+		{Path: path, OldExists: true, NewExists: true, OldText: retainedOld, NewText: retainedNew},
 	}
 	result := scrubResultSecrets(Result{FileDiffs: original})
-	if len(result.FileDiffs) != 1 || result.FileDiffs[0].OldText != "before" {
+	if len(result.FileDiffs) != 1 || strings.Contains(result.FileDiffs[0].OldText, secret) || strings.Contains(result.FileDiffs[0].NewText, secret) {
 		t.Fatalf("filtered FileDiffs = %#v", result.FileDiffs)
 	}
-	if original[0].NewText != "unsafe" || original[1].OldText != "before" {
+	if original[0].NewText != "unsafe" || original[1].OldText != retainedOld || original[1].NewText != retainedNew {
 		t.Fatalf("caller slice was mutated: %#v", original)
 	}
 }

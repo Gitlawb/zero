@@ -211,7 +211,11 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line
 	// summary, so the red/green diff costs zero model tokens.
-	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: boundedUnifiedDiff(relativePath, content, updated)}
+	preview := ""
+	if finalContentKnown {
+		preview = boundedUnifiedDiff(relativePath, content, updated)
+	}
+	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: preview}
 	return result
 }
 
