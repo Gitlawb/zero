@@ -1370,6 +1370,7 @@ Commands:
   usage      Summarize token usage and estimated cost
   cron       Schedule agent jobs (foreground, file-backed)
   repo-info  Characterize the current repository (local git only)
+  kept-backups  List and remove copies a recovery pass retained
   serve      Run Zero protocol servers
   acp        Serve the Agent Client Protocol over stdio (editor backend)
   help       Show this help

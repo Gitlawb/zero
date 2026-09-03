@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/fsutil"
@@ -862,6 +863,10 @@ type destTxn struct {
 	root string
 	dest string
 	lock *lockutil.FileLock
+	// released is atomic because holds is the guard every locked entry point
+	// consults, and a handle can be released on one goroutine while another is
+	// still asking whether it is safe to act.
+	released atomic.Bool
 }
 
 // destDir is the destination this handle locks. Callers keep passing their own
@@ -872,13 +877,16 @@ func (t *destTxn) destDir() string { return filepath.Join(t.root, t.dest) }
 // holds reports whether this handle actually locks destDir. A nil handle and a
 // handle for another destination both fail closed.
 func (t *destTxn) holds(destDir string) bool {
-	return t != nil && t.lock != nil && t.destDir() == destDir
+	return t != nil && t.lock != nil && !t.released.Load() && t.destDir() == destDir
 }
 
 // release drops the Install lock. Idempotent, so a caller can release early and
 // still defer it.
 func (t *destTxn) release() {
 	if t == nil || t.lock == nil {
+		return
+	}
+	if t.released.Swap(true) {
 		return
 	}
 	_ = t.lock.Release()
@@ -1145,7 +1153,7 @@ type holderCandidate struct {
 // with no such marker behind it, which is retained and reported, never moved.
 // An entry that only collides with the prefix is neither: it was never this
 // install's, so it is not even reported on its account.
-func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []string) {
+func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []string, unreadable string) {
 	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
 	// and a '[' anywhere in it opens a character class to Glob, which then
 	// matches nothing and strands the install this exists to put back.
@@ -1153,7 +1161,7 @@ func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []stri
 	base := filepath.Base(destDir)
 	entries, err := holderFS.readDir(parent)
 	if err != nil {
-		return nil, nil
+		return nil, nil, ""
 	}
 	prefix := base + holderSuffix
 	for _, entry := range entries {
@@ -1168,6 +1176,14 @@ func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []stri
 		}
 		m, err := readHolderMarker(path)
 		if err != nil {
+			if !errors.Is(err, errMarkerMissing) {
+				// A marker this pass could not read is not a marker proving the
+				// holder is someone else's. Walking past it would let recovery
+				// install an older copy and let the next pass read that copy as
+				// proof this one was superseded, which is the provenance loss
+				// the no-fallback rule exists to prevent.
+				return nil, nil, path
+			}
 			unowned = append(unowned, path)
 			continue
 		}
@@ -1180,7 +1196,7 @@ func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []stri
 		}
 		owned = append(owned, holderCandidate{path: path, seq: seq})
 	}
-	return owned, unowned
+	return owned, unowned, ""
 }
 
 // parkKeptHolder renames a holder under the Kept prefix, which is how a copy
@@ -1543,7 +1559,11 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 	// Only holders this code can prove it wrote for THIS destination. A sibling
 	// that merely collides with the prefix is not a copy of this install and is
 	// never restored from, removed, or reported on its account.
-	owned, unowned := ownedHoldersBeside(destDir)
+	owned, unowned, unreadable := ownedHoldersBeside(destDir)
+	if unreadable != "" {
+		report(fmt.Sprintf("dictation: leaving every retained copy for %s in place until %s can be read", filepath.Base(destDir), unreadable))
+		return
+	}
 	for _, path := range unowned {
 		report(fmt.Sprintf("Keeping %s: nothing in it identifies it as a copy of %s", path, filepath.Base(destDir)))
 	}
@@ -1669,11 +1689,17 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 // promotion fails, so destDir is never left holding no install at all. If the
 // restore fails too, the set-aside copy is kept and named in the error.
 func promoteStagedDir(txn *destTxn, stageDir, destDir, label string, report func(string)) error {
+	// Normalized once so every later report is one call rather than a nil check
+	// a new one can forget. A caller with nowhere to report to still gets the
+	// same behavior; only the message goes nowhere.
+	if report == nil {
+		report = func(string) {}
+	}
 	// Same reason recovery refuses: the window between the two renames has the
 	// only copy of the install in a holder, and nothing else keeps a concurrent
 	// recovery out of it.
 	if !txn.holds(destDir) {
-		if report != nil {
+		{
 			report(fmt.Sprintf("Refusing to install %s: no install lock is held for %s", label, filepath.Base(destDir)))
 		}
 		return fmt.Errorf("promoting staged %s: no install lock is held for %s", label, destDir)
@@ -1682,7 +1708,13 @@ func promoteStagedDir(txn *destTxn, stageDir, destDir, label string, report func
 	cleanupHolder := true
 	defer func() {
 		if holder != "" && cleanupHolder {
-			_ = holderFS.removeAll(holder)
+			// A failure here strands a whole copy of the previous install under
+			// a name recovery no longer enumerates, so say so rather than
+			// leaking it silently: the operator's reclaim command is the only
+			// thing that removes it afterwards.
+			if err := holderFS.removeAll(holder); err != nil {
+				report(fmt.Sprintf("dictation: could not remove the superseded %s copy in %s: %v", label, holder, err))
+			}
 		}
 	}()
 

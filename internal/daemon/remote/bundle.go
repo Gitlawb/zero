@@ -418,7 +418,7 @@ func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCan
 			logf("remote: %s does not carry a name this code writes; leaving it in place", staging)
 			continue
 		}
-		id, ok := attributeStagingDir(dir, staging, seq, logf)
+		id, ok, _ := attributeStagingDir(dir, staging, seq, logf)
 		if !ok {
 			continue
 		}
@@ -432,26 +432,30 @@ func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCan
 // because link ids starting with '.' used to be accepted, so a published work
 // tree can sit under the exact generated name AND carry a file called txn at its
 // root. Reading the marker first would let that file license a delete.
-func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...any)) (string, bool) {
+func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...any)) (id string, ok bool, unreadable bool) {
 	if _, err := stagingFS.stat(filepath.Join(staging, ".git")); err == nil {
 		logf("remote: %s holds a work tree, not a staged extract; leaving it in place", staging)
-		return "", false
+		return "", false, false
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		// Not knowing whether this is a work tree is not the same as knowing it
 		// is not one. The veto sits ahead of the marker because a published tree
 		// can carry a file named txn at its own root, so falling through on an
 		// unreadable probe would let the tree answer for itself.
 		logf("remote: %s could not be checked for a work tree (%v); leaving it in place", staging, err)
-		return "", false
+		return "", false, true
 	}
 	m, err := readMarker(staging)
 	if err != nil {
 		logf("remote: %s has no usable transaction marker (%v); leaving it in place", staging, err)
-		return "", false
+		// A marker that is absent says this transaction never got far enough to
+		// claim the directory. A marker that could not be read says nothing at
+		// all, and treating the two alike lets an older copy be published over
+		// the one whose state is still unknown.
+		return "", false, !errors.Is(err, errMarkerMissing)
 	}
 	if m.Kind != txnKindBundleExtract {
 		logf("remote: %s carries a %q transaction marker, which no extract wrote; leaving it in place", staging, m.Kind)
-		return "", false
+		return "", false, false
 	}
 	if m.Seq != seq {
 		// The name is the authority: createSequencedStagingDir walks up from the
@@ -459,21 +463,21 @@ func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...an
 		// marker that disagrees with the name proves nothing about who wrote
 		// either of them.
 		logf("remote: %s carries a marker for sequence %d but is named %d; leaving it in place", staging, m.Seq, seq)
-		return "", false
+		return "", false, false
 	}
 	// Everything read off disk goes back through the write path's own checks. A
 	// marker is a file, and a file can be edited by anything that can reach the
 	// bundle dir.
-	id, err := sanitizeLinkID(m.Dest)
+	id, err = sanitizeLinkID(m.Dest)
 	if err != nil {
 		logf("remote: staged tree in %s names an invalid link (%v); leaving it in place", staging, err)
-		return "", false
+		return "", false, false
 	}
 	if !withinDir(dir, filepath.Join(dir, id)) {
 		logf("remote: staged tree in %s names a link outside the bundle dir; leaving it in place", staging)
-		return "", false
+		return "", false, false
 	}
-	return id, true
+	return id, true, false
 }
 
 // candidateState is one candidate classified per the recovery design. empty,
@@ -565,7 +569,10 @@ func classifyCandidates(dir, id string, cands []bundleCandidate, logf func(strin
 
 func classifyCandidate(dir string, c bundleCandidate, logf func(string, ...any)) (candidateState, candidateVerdict) {
 	st := candidateState{bundleCandidate: c}
-	id, ok := attributeStagingDir(dir, c.path, c.seq, logf)
+	id, ok, unreadable := attributeStagingDir(dir, c.path, c.seq, logf)
+	if unreadable {
+		return st, verdictUnreadable
+	}
 	if !ok || id != c.dest {
 		return st, verdictDropped
 	}
@@ -929,7 +936,7 @@ func createSequencedStagingDir(dir string, n int64) (string, error) {
 // it is, which is the same fail-safe one pass later.
 func parkKeptBackup(dir, staging, id string, logf func(string, ...any)) {
 	parked := filepath.Join(dir, keptPrefix+strings.TrimPrefix(filepath.Base(staging), stagingPrefix))
-	if err := stagingFS.rename(staging, parked); err != nil {
+	if err := fsutil.RenameWithRetry(staging, parked, stagingFS.rename); err != nil {
 		logf("remote: could not park the kept backup for %s at %s: %v", id, parked, err)
 	}
 }
@@ -983,7 +990,7 @@ func ListKeptBackups(dir string) ([]KeptBackup, error) {
 		// The same proof recovery requires before it touches a directory: the
 		// work-tree veto, then a marker agreeing with the name and naming a link
 		// the write path would have accepted.
-		if id, ok := attributeStagingDir(dir, path, seq, discardLog); ok {
+		if id, ok, _ := attributeStagingDir(dir, path, seq, discardLog); ok {
 			backup.Dest = id
 			backup.Owned = true
 		}
@@ -1011,7 +1018,7 @@ func RemoveKeptBackup(dir, name string) error {
 		return fmt.Errorf("remote: %s is not a kept backup; recovery may still act on it, so remove it by hand", name)
 	}
 	path := filepath.Join(dir, name)
-	id, ok := attributeStagingDir(dir, path, seq, discardLog)
+	id, ok, _ := attributeStagingDir(dir, path, seq, discardLog)
 	if !ok {
 		return fmt.Errorf("remote: nothing on disk attributes %s to a link; remove it by hand", name)
 	}
@@ -1032,7 +1039,7 @@ func RemoveKeptBackup(dir, name string) error {
 	// Re-read under the lock. The attribution above ran with nothing excluding a
 	// live extract, and a directory that stopped being this link's in between is
 	// one that must not be deleted on the strength of the earlier reading.
-	if again, ok := attributeStagingDir(dir, path, seq, discardLog); !ok || again != id {
+	if again, ok, _ := attributeStagingDir(dir, path, seq, discardLog); !ok || again != id {
 		return fmt.Errorf("remote: %s is no longer attributable to %s; leaving it in place", name, id)
 	}
 	return stagingFS.removeAll(path)

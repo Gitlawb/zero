@@ -2041,7 +2041,7 @@ func TestOwnedHoldersBesideIgnoresAPrefixCollidingSibling(t *testing.T) {
 	unmarked := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 3, holderSeqSuffix)
 	makeDir(t, unmarked)
 
-	owned, unowned := ownedHoldersBeside(dest)
+	owned, unowned, _ := ownedHoldersBeside(dest)
 
 	gotOwned := make([]string, 0, len(owned))
 	for _, c := range owned {
@@ -2092,7 +2092,7 @@ func TestParkKeptHolderMovesTheCopyUnderTheKeptPrefix(t *testing.T) {
 	if _, err := os.Stat(holder); !os.IsNotExist(err) {
 		t.Errorf("the holder should be gone from the scanned prefix, got %v", err)
 	}
-	owned, unowned := ownedHoldersBeside(dest)
+	owned, unowned, _ := ownedHoldersBeside(dest)
 	if len(owned) != 0 || len(unowned) != 0 {
 		t.Errorf("a parked copy must leave the scan: owned %v unowned %v", owned, unowned)
 	}
@@ -2999,5 +2999,55 @@ func TestRemoveKeptBackupNeverTouchesTheScannedPrefix(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(holder, "install", "engine")); err != nil {
 		t.Errorf("the copy must be left intact: %v", err)
+	}
+}
+
+// A marker this pass could not read is not a marker proving the holder belongs
+// to someone else. Treating the two the same lets recovery walk past the copy
+// whose state it failed to establish and install an older one, which is the
+// provenance loss the whole no-fallback rule exists to prevent.
+func TestRestoreInterruptedPromotionStopsWhenAMarkerCannotBeRead(t *testing.T) {
+	root := t.TempDir()
+	destDir := filepath.Join(root, "engine-a")
+	newest := plantHolder(t, destDir, 2, "v2", false)
+	older := plantHolder(t, destDir, 1, "v1", false)
+	txn := lockFor(t, destDir)
+
+	injectFault(t, "readFile", func(args ...string) bool {
+		return strings.HasPrefix(args[0], newest)
+	}, errors.New("injected marker read failure"))
+
+	var reported []string
+	restoreInterruptedPromotion(txn, destDir, testPublished, reporterFor(&reported))
+
+	if _, err := os.Lstat(destDir); !os.IsNotExist(err) {
+		t.Fatalf("recovery installed a copy while one holder's marker was unreadable: %v", err)
+	}
+	for _, holder := range []string{newest, older} {
+		if _, err := os.Stat(filepath.Join(holder, "install", "engine")); err != nil {
+			t.Errorf("every copy must be retained until the unreadable one can be read: %v", err)
+		}
+	}
+	if len(reported) == 0 {
+		t.Error("an unreadable marker must be reported")
+	}
+}
+
+// A handle kept past its release must be refused. Reporting the lock as still
+// held after it was given up is the fail-open direction: the guard exists so a
+// call site that forgets the lifecycle is stopped, not trusted.
+func TestDestTxnDoesNotClaimALockItReleased(t *testing.T) {
+	root := t.TempDir()
+	destDir := filepath.Join(root, "engine-a")
+	txn, err := lockDestination(context.Background(), root, "engine-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !txn.holds(destDir) {
+		t.Fatal("a fresh handle must hold its own destination")
+	}
+	txn.release()
+	if txn.holds(destDir) {
+		t.Error("a released handle must not report that it still holds the destination")
 	}
 }

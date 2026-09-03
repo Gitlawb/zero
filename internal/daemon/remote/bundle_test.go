@@ -3178,7 +3178,39 @@ func TestAttributeStagingDirRetainsWhenTheWorkTreeProbeFails(t *testing.T) {
 		return filepath.Base(args[0]) == ".git"
 	}, errors.New("injected work-tree probe failure"))
 
-	if _, ok := attributeStagingDir(dir, staging, 1, func(string, ...any) {}); ok {
+	if _, ok, _ := attributeStagingDir(dir, staging, 1, func(string, ...any) {}); ok {
 		t.Fatal("a directory whose work-tree probe could not be read must not be attributed")
+	}
+}
+
+// A marker that read cleanly during the scan and fails when it is re-read under
+// the lock stops that destination. The scan already named the destination, so
+// the stop can be scoped to it; an entry whose marker never read at all carries
+// no destination and is retained by the scan instead, since blocking every link
+// on this host would cost more than the one wrong version it prevents.
+func TestRecoverBundleDirStopsWhenAMarkerGoesUnreadableUnderTheLock(t *testing.T) {
+	dir := t.TempDir()
+	newest := stageBackup(t, dir, "", "proj-1", "v2", 2)
+	older := stageBackup(t, dir, "", "proj-1", "v1", 1)
+
+	var scanned atomic.Bool
+	injectFault(t, "readFile", func(args ...string) bool {
+		if !strings.HasPrefix(args[0], newest) {
+			return false
+		}
+		// The scan reads every marker first; the re-read under the lock is the
+		// one this fault is for.
+		return !scanned.CompareAndSwap(false, true)
+	}, errors.New("injected marker read failure"))
+
+	recoverBundleDir(dir, func(string, ...any) {})
+
+	if _, err := os.Lstat(filepath.Join(dir, "proj-1")); !os.IsNotExist(err) {
+		t.Fatalf("recovery published a copy while a candidate went unreadable under the lock: %v", err)
+	}
+	for _, staging := range []string{newest, older} {
+		if _, err := os.Stat(filepath.Join(staging, "backup", ".git")); err != nil {
+			t.Errorf("every copy must be retained until the unreadable one can be read: %v", err)
+		}
 	}
 }
