@@ -353,7 +353,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// Deferred AFTER closeMCPRuntime was deferred, so it runs BEFORE it: the
 		// pump stops and joins while stderr is still ours, and only then are the
 		// clients closed.
-		stopDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
+		// Adopt the guarded writer for the rest of startup: the pump is live from
+		// here until stop, and everything below writes to this same stderr.
+		guardedStderr, stopDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
+		stderr = guardedStderr
 		defer stopDisclosures()
 	}
 	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
