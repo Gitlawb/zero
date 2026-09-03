@@ -10,6 +10,13 @@ import (
 	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
+// ErrLockUnavailable reports that the config lock was still held by another
+// process (or goroutine) when configLockTimeout expired. A caller that would
+// otherwise make a SECOND config write after a failed one branches on this: the
+// lock has not been released, so the second attempt can only spend another full
+// timeout to fail the same way, turning one keystroke into two stalls.
+var ErrLockUnavailable = errors.New("config lock unavailable")
+
 const (
 	configLockTimeout    = 10 * time.Second
 	configLockRetryDelay = 20 * time.Millisecond
@@ -80,7 +87,7 @@ func lockConfigFile(path string) (func() error, error) {
 			return nil, fmt.Errorf("config: acquire config lock: %w", err)
 		}
 		if !time.Now().Before(deadline) {
-			return nil, fmt.Errorf("config: timed out acquiring config lock for %s", path)
+			return nil, fmt.Errorf("config: timed out acquiring config lock for %s: %w", path, ErrLockUnavailable)
 		}
 		time.Sleep(configLockRetryDelay)
 	}

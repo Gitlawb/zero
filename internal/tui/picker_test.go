@@ -955,6 +955,136 @@ func TestCrossProviderPickerShowsPersistenceFailure(t *testing.T) {
 	}
 }
 
+// TestActiveProviderPickerShowsPersistenceFailure is the same-provider half of
+// TestCrossProviderPickerShowsPersistenceFailure. A picker row owned by the
+// ACTIVE provider goes through handleModelCommand, which reports a failed
+// persistence attempt inside its status text — and choosePicker discards that
+// text in favour of its own applied-notice. Without the outcome plumbed through
+// as a value, the user saw an unqualified success for a selection the config
+// never received, and only found out when the old model came back on restart.
+//
+// The elapsed-time bound is the second assertion, not decoration: the recent
+// model history is written under the same lock, so a version that still tried
+// to persist it after the selection write failed would pay TWO full lock
+// timeouts for one keystroke.
+func TestActiveProviderPickerShowsPersistenceFailure(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{
+		Name: "openrouter", CatalogID: "openrouter", Model: "google/gemini-2.5-pro",
+	}, true); err != nil {
+		t.Fatalf("seed openrouter provider: %v", err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		t.Fatalf("hold config lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := unlock(); err != nil {
+			t.Errorf("release config lock: %v", err)
+		}
+	})
+
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	// OwnerProvider left blank: the row resolves against the active provider,
+	// which is the branch that reaches handleModelCommand.
+	m.picker = &commandPicker{
+		kind:  pickerModel,
+		items: []pickerItem{{Value: "anthropic/claude-sonnet-4.5"}},
+	}
+
+	started := time.Now()
+	updated, _ := m.choosePicker()
+	elapsed := time.Since(started)
+	next := updated.(model)
+
+	if next.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("in-session picker selection was lost: model=%q", next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") ||
+		!strings.Contains(next.transientNotice.text, "timed out acquiring config lock") {
+		t.Fatalf("picker notice = %q, want a concrete not-saved lock failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("picker notice tone = %v, want warning", next.transientNotice.tone)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("selection blocked for %s; want a single bounded persistence attempt", elapsed)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after failed selection: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("failed selection changed config\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// TestTypedModelCommandShowsPersistenceFailure is the typed half of the same
+// gap: on a committed switch, dispatchCommand also replaces handleModelCommand's
+// status text with the applied-notice, so "· not saved (…)" was dropped there
+// too. An unwritable config path fails the persistence attempt immediately,
+// which keeps this case off the ten-second lock timeout the picker test needs.
+func TestTypedModelCommandShowsPersistenceFailure(t *testing.T) {
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("block config directory creation"), 0o600); err != nil {
+		t.Fatalf("write blocking parent: %v", err)
+	}
+	m := newModel(context.Background(), Options{
+		UserConfigPath: filepath.Join(blockedParent, "config.json"),
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model anthropic/claude-sonnet-4.5")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if next.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("in-session switch was lost: model=%q", next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") {
+		t.Fatalf("notice = %q, want persistence failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("notice tone = %v, want warning", next.transientNotice.tone)
+	}
+}
+
 func TestModelCommandAcceptsManualModelForCustomProvider(t *testing.T) {
 	var captured config.ProviderProfile
 	m := newModel(context.Background(), Options{

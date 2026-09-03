@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -394,31 +395,39 @@ func relativeAge(timestamp string, now time.Time) string {
 	}
 }
 
-func (m model) handleModelCommand(args string) (model, string) {
+// handleModelCommand applies a model switch against the ACTIVE provider (the
+// picker routes cross-provider selections to switchProviderModel instead).
+//
+// The returned error reports the same thing switchProviderModel's does: the
+// in-session switch committed, but its config write did not. It is not
+// redundant with the status text — the picker replaces that text with its own
+// applied-notice, so a caller that only read the text would show an unqualified
+// success for a selection that will be gone after a restart.
+func (m model) handleModelCommand(args string) (model, string, error) {
 	args = strings.TrimSpace(args)
 	switch strings.ToLower(args) {
 	case "":
-		return m, m.modelText(args)
+		return m, m.modelText(args), nil
 	case "list", "ls":
-		return m, m.modelListText()
+		return m, m.modelListText(), nil
 	}
 	if m.pending {
-		return m, "Model\nCannot switch models while a run is active."
+		return m, "Model\nCannot switch models while a run is active.", nil
 	}
 
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
-		return m, "Model\nFailed to load model catalog: " + err.Error()
+		return m, "Model\nFailed to load model catalog: " + err.Error(), nil
 	}
 	target, ok := m.resolveModelSwitchTarget(registry, args)
 	if !ok {
-		return m, "Model\nunknown Zero model " + strconv.Quote(args)
+		return m, "Model\nunknown Zero model " + strconv.Quote(args), nil
 	}
 	if !config.HasProviderProfile(m.providerProfile) {
-		return m, "Model\nNo provider profile is available for TUI model switching."
+		return m, "Model\nNo provider profile is available for TUI model switching.", nil
 	}
 	if m.newProvider == nil {
-		return m, "Model\nProvider rebuild is not available for this TUI session."
+		return m, "Model\nProvider rebuild is not available for this TUI session.", nil
 	}
 
 	previousProviderName := m.providerName
@@ -434,7 +443,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	nextProfile = m.profileWithCredential(nextProfile)
 	metadata, err := providers.ResolveRuntimeMetadata(nextProfile, providers.Options{})
 	if err != nil {
-		return m, "Model\n" + err.Error()
+		return m, "Model\n" + err.Error(), nil
 	}
 
 	if guarded, text, requested := m.requestCompactionBeforeModelSwitch(modelSwitchCompactionRequest{
@@ -442,12 +451,12 @@ func (m model) handleModelCommand(args string) (model, string) {
 		TargetProvider:      string(metadata.ProviderKind),
 		TargetContextWindow: modelregistry.AgentContextWindow(m.modelContextWindow(target.modelID)),
 	}, "Model"); requested {
-		return guarded, text
+		return guarded, text, nil
 	}
 
 	nextProvider, err := m.newProvider(nextProfile)
 	if err != nil {
-		return m, "Model\n" + err.Error()
+		return m, "Model\n" + err.Error(), nil
 	}
 	persisted, persistErr := m.persistSelectedModel(nextProfile)
 
@@ -464,14 +473,25 @@ func (m model) handleModelCommand(args string) (model, string) {
 	// it once. Recording old-then-new leaves new at the front, with old right
 	// behind it. recordRecentModels batches both into a single normalize+persist
 	// instead of two separate disk writes for this one switch.
-	m = m.recordRecentModels(
-		config.RecentModelEntry{Provider: previousProviderName, Model: previousModel},
+	recent := []config.RecentModelEntry{
+		{Provider: previousProviderName, Model: previousModel},
 		// Record under m.providerName (the same resolved value recentModelPairsForPicker
 		// pins the active row with), not the raw nextProfile.Name: for a provider profile
 		// with no Name set, those two diverge and the pinned active row would fail to
 		// dedupe against the entry just persisted here, showing the same switch twice.
-		config.RecentModelEntry{Provider: m.providerName, Model: target.modelID},
-	)
+		{Provider: m.providerName, Model: target.modelID},
+	}
+	if errors.Is(persistErr, config.ErrLockUnavailable) {
+		// The selection write already lost its race for the config lock, which is
+		// still held. A second blocking attempt would make one unavailable lock
+		// cost two full waits and add a redundant save error to the transcript, so
+		// keep the history in session only — the trade switchProviderModel makes.
+		// Any OTHER persistence failure (no config file yet, for one) says nothing
+		// about this write, which still has its own reason to be attempted.
+		m, _ = m.updateRecentModels(recent...)
+	} else {
+		m = m.recordRecentModels(recent...)
+	}
 	// Drop a known-unsupported preference, void any profile bookkeeping the
 	// drop erased, and re-derive an active profile's per-model effort fill.
 	// The ring is authoritative only for catalog-resolved targets
@@ -515,7 +535,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if warn := m.visionDropWarning(); warn != "" {
 		lines = append(lines, warn)
 	}
-	return m, strings.Join(lines, "\n")
+	return m, strings.Join(lines, "\n"), persistErr
 }
 
 // switchProviderModel switches the active provider to providerName (one of the
