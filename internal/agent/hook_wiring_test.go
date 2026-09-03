@@ -93,3 +93,37 @@ func TestDispatchHelpersAreNoopWithoutDispatcher(t *testing.T) {
 		t.Fatalf("a nil dispatcher must yield no feedback, got %q", feedback)
 	}
 }
+
+// A SUCCESSFUL beforeTool HOOK'S OUTPUT MUST REACH THE MODEL, NOT ONLY THE AUDIT.
+//
+// executeToolCall used to read the beforeTool outcome only when Blocked was true,
+// so a hook that ran fine and produced an enforcement notice — for instance that
+// it ran under the weakened DenyRead token — put that notice in the audit record
+// and nowhere anybody could see it. Only vetoes and afterTool feedback reached a
+// surface. joinHookMessages is the delivery: beforeTool's messages ride out on
+// the same tool result afterTool feedback already uses.
+func TestJoinHookMessagesDeliversSuccessfulBeforeToolOutput(t *testing.T) {
+	const notice = "hook ran without WRITE_RESTRICTED because denyRead is configured"
+
+	// A successful beforeTool hook alone still reaches the model.
+	if got := joinHookMessages([]string{notice}, ""); got != notice {
+		t.Fatalf("a successful beforeTool notice was dropped: %q", got)
+	}
+	// And it does not displace afterTool feedback; both arrive, in order.
+	got := joinHookMessages([]string{notice}, "gofmt reformatted main.go")
+	if !strings.Contains(got, notice) || !strings.Contains(got, "gofmt reformatted main.go") {
+		t.Fatalf("expected both the beforeTool notice and the afterTool feedback, got %q", got)
+	}
+	if strings.Index(got, notice) > strings.Index(got, "gofmt reformatted main.go") {
+		t.Fatalf("beforeTool output should precede afterTool feedback, got %q", got)
+	}
+	// Empty and whitespace-only messages contribute nothing, so a run with no hook
+	// output stays silent rather than appending an empty header.
+	if got := joinHookMessages([]string{"", "   "}, ""); got != "" {
+		t.Fatalf("blank hook messages produced %q, want nothing", got)
+	}
+	// afterTool alone is unchanged, which is the behaviour that already worked.
+	if got := joinHookMessages(nil, "vet found an issue"); got != "vet found an issue" {
+		t.Fatalf("afterTool-only feedback changed shape: %q", got)
+	}
+}
