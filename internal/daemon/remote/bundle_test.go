@@ -3358,3 +3358,28 @@ func TestRecoverBundleDirStopsWhenAMarkerGoesUnreadableUnderTheLock(t *testing.T
 		}
 	}
 }
+
+// The in-process lock is taken before the one carrying a budget, so an upload
+// queued behind a live extract used to wait on a bare mutex with no bound at
+// all. A client that keeps sending to one link id then pins a connection slot
+// per upload and nothing ever gives the slot back.
+func TestExtractBundleGivesUpWaitingForTheInProcessLock(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	release := lockExtract(dest)
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- extractBundle(ctx, filepath.Join(dir, "absent.bundle"), dest, nil) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a queued extract must not report success while another holds the link")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a queued extract waited on the in-process lock with no bound")
+	}
+}

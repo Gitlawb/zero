@@ -271,6 +271,29 @@ func lockExtract(dest string) func() {
 	}
 }
 
+// waitForExtract takes the in-process lock under the same budget the per-link
+// file lock waits out, so a queued upload gives the connection slot back rather
+// than holding it for as long as the extract ahead of it runs. A bare Lock here
+// is the one step in the whole extract with no bound: it is taken before the
+// file lock, so its wait is not covered by that one's deadline.
+func waitForExtract(ctx context.Context, dest string) (func(), error) {
+	deadline := time.NewTimer(gitTimeout)
+	defer deadline.Stop()
+	for {
+		release, held := tryLockExtract(dest)
+		if !held {
+			return release, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("remote: timed out waiting for an extract in this process to finish with %s", dest)
+		case <-time.After(extractLockPoll):
+		}
+	}
+}
+
 // tryLockExtract takes the in-process lock without waiting, reporting held when
 // a goroutine in this daemon owns dest. Recovery cannot use lockExtract: an
 // extract holds its destination across the whole clone, so a recovering pass
@@ -1162,7 +1185,10 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return err
 	}
-	unlock := lockExtract(dest)
+	unlock, err := waitForExtract(ctx, dest)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	unlockFile, err := lockExtractFile(ctx, parent, dest)
 	if err != nil {
