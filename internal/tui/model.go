@@ -4464,19 +4464,21 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerModel:
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
+		var switchPersistErr error
 		owner := strings.TrimSpace(item.OwnerProvider)
 		_, ownerIsSavedProvider := m.savedProviderByName(owner)
 		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
 			// A model from another saved provider: switch provider + model together.
-			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
+			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
 			// OwnerProvider is blank, matches the active provider, or (registry-fallback
 			// / stale-history rows) doesn't resolve to any saved provider: apply against
 			// the active provider instead of attempting an unresolvable provider switch.
-			m, text = m.handleModelCommand(item.Value)
+			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {
-			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), cmd
+			notice, tone := m.modelAppliedNoticeFor(switchPersistErr)
+			return m.showTransientNoticeInline(notice, tone), cmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerEffort:
@@ -4750,9 +4752,13 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		}
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
-		m, text = m.handleModelCommand(command.text)
+		var persistErr error
+		m, text, persistErr = m.handleModelCommand(command.text)
 		if m.providerName != previousProvider || m.modelName != previousModel {
-			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), nil
+			// The status text this branch drops is the only other place the failure
+			// appears, so the typed command needs the qualifier as much as the picker.
+			notice, tone := m.modelAppliedNoticeFor(persistErr)
+			return m.showTransientNoticeInline(notice, tone), nil
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
