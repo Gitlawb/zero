@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Gitlawb/zero/internal/fsutil"
 	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
@@ -193,9 +194,21 @@ const keptPrefix = ".kept-"
 // across processes. Dot-prefixed for the same reason stagingPrefix is.
 const lockDirName = ".extract-locks"
 
-// stagingLinkFile records, inside a staging dir, which link the backup beside it
-// belongs to. Without it a crash leaves an orphan nothing can attribute.
-const stagingLinkFile = "link"
+// stagingMarkerFile records, inside a staging dir, the transaction that created
+// it: its kind, the link it is for, and the sequence in its own name. Without it
+// a crash leaves an orphan nothing can attribute, and recovery has to retain a
+// copy it can never name.
+const stagingMarkerFile = "txn"
+
+// committedFile records, inside a staging dir, that the publish rename landed.
+// It is the only evidence that the copy in backup was superseded, so recovery
+// has to keep a backup that carries no flag.
+const committedFile = "committed"
+
+// txnKindBundleExtract is the marker kind extractBundle writes. A marker naming
+// another kind belongs to another site's transaction and is not this code's to
+// act on.
+const txnKindBundleExtract = "bundle-extract"
 
 // extractLockPoll is how often a cross-process extract lock is retried.
 const extractLockPoll = 50 * time.Millisecond
@@ -505,12 +518,12 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 	if _, err := stagingFS.stat(backup); err != nil {
 		return false
 	}
-	raw, err := stagingFS.readFile(filepath.Join(staging, stagingLinkFile))
+	m, err := readMarker(staging)
 	if err != nil {
-		logf("remote: staged tree in %s has no link marker; leaving it in place", staging)
+		logf("remote: staged tree in %s has no usable transaction marker (%v); leaving it in place", staging, err)
 		return true
 	}
-	id, err := sanitizeLinkID(string(raw))
+	id, err := sanitizeLinkID(m.Dest)
 	if err != nil {
 		logf("remote: staged tree in %s names an invalid link (%v); leaving it in place", staging, err)
 		return true
@@ -583,14 +596,91 @@ func parkKeptBackup(dir, staging, id string, logf func(string, ...any)) {
 	}
 }
 
+// txnMarker is what a staging dir carries to prove which transaction created it.
+// Seq repeats the number in the directory's own name: a marker that disagrees
+// with its name proves nothing about who wrote either, so the pair is what makes
+// the directory owned rather than the name alone.
+type txnMarker struct {
+	Kind string `json:"kind"`
+	Dest string `json:"dest"`
+	Seq  int64  `json:"seq"`
+}
+
+// errMarkerMissing reports that a staging dir carries no marker at all, which is
+// a different fact from a marker that could not be read: the first is a crash
+// before the marker was written, the second is a filesystem fault. Deciding
+// between them off a bare error would fold a fault into "not ours".
+var errMarkerMissing = errors.New("remote: staging dir carries no transaction marker")
+
+// writeMarker publishes m into dir under stagingMarkerFile, through a temp file
+// in that same directory so the rename is the only step a reader can observe. A
+// plain write can be torn by a crash, and a half-written marker parses as
+// nothing while still occupying the name recovery reads to decide ownership.
+func writeMarker(dir string, m txnMarker) error {
+	payload, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	tmp, err := stagingFS.createTemp(dir, stagingMarkerFile+"-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	// Sync before the rename: the rename can reach disk ahead of the bytes it
+	// names, which is exactly the partial marker the temp file exists to avoid.
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		_ = stagingFS.removeAll(name)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = stagingFS.removeAll(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = stagingFS.removeAll(name)
+		return err
+	}
+	if err := fsutil.RenameWithRetry(name, filepath.Join(dir, stagingMarkerFile), stagingFS.rename); err != nil {
+		_ = stagingFS.removeAll(name)
+		return err
+	}
+	return nil
+}
+
+// readMarker reads back what writeMarker published. A dir with no marker yields
+// errMarkerMissing; every other failure is wrapped, so a caller can tell "this
+// was never ours" from "this could not be read", which are opposite decisions.
+func readMarker(dir string) (txnMarker, error) {
+	raw, err := stagingFS.readFile(filepath.Join(dir, stagingMarkerFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return txnMarker{}, errMarkerMissing
+		}
+		return txnMarker{}, fmt.Errorf("read transaction marker in %s: %w", dir, err)
+	}
+	var m txnMarker
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return txnMarker{}, fmt.Errorf("parse transaction marker in %s: %w", dir, err)
+	}
+	return m, nil
+}
+
 // extractBundle clones bundleFile into a staging dir beside dest, then swaps the
 // clone into place (replacing any prior extraction for this link id). git clone
-// needs a non-existent target, hence the staging dir. The live tree is moved
-// aside rather than deleted and is put back if the publish fails, so on every
-// error return dest holds either the prior extraction or the new one, never
-// neither. Swapping a directory is two renames and cannot be made atomic, so a
-// crash between them leaves dest absent with the prior tree in staging/backup;
-// nothing reaps that on restart. logf may be nil.
+// needs a non-existent target, hence the staging dir. The steps run in this
+// order: allocate the sequenced staging dir, write its transaction marker, clone
+// into it, set the live tree aside, publish the clone, record the commit flag,
+// remove the staging dir. The marker precedes the first destructive rename and
+// the flag follows the publish, so every copy this leaves on disk names the
+// transaction that wrote it and says whether that transaction committed. The
+// live tree is moved aside rather than deleted and is put back if the publish
+// fails, so on every error return dest holds either the prior extraction or the
+// new one, never neither. Swapping a directory is two renames and cannot be made
+// atomic, so a crash between them leaves dest absent with the prior tree in
+// staging/backup, which the marker is what lets recovery attribute and put back.
+// logf may be nil.
 func extractBundle(ctx context.Context, bundleFile, dest string, logf func(string, ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -611,9 +701,10 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	// recovery tell an older leftover staging dir from a newer one. It is one
 	// past the highest number already in the directory, claimed by exclusive
 	// creation, so a concurrent extract for another link cannot take the same
-	// value and a clock that moves backward cannot invert the order. Numbers
-	// written by released versions are wall-clock nanoseconds; seeding from the
-	// highest present keeps those sorting older with no migration step.
+	// value and a clock that moves backward cannot invert the order. Every number
+	// on disk is one of these per-directory sequences: no released version wrote
+	// a stamped name at all (v0.8.0 staged under os.MkdirTemp's random suffix),
+	// so nothing here is ordering against a wall clock it inherited.
 	seq, err := nextStagingSeq(parent)
 	if err != nil {
 		return err
@@ -636,6 +727,16 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 			logf("remote: could not remove bundle staging dir %s: %v", staging, err)
 		}
 	}()
+	// Attribute the staging dir before anything else touches the filesystem: from
+	// here on every failure can leave a copy of a tree behind, and a copy no
+	// marker names is one recovery can neither put back nor ever reclaim. The
+	// name is the authority on the sequence, because createSequencedStagingDir
+	// walks up from seq when a name is taken, and a marker that disagrees with
+	// its own directory name proves nothing.
+	claimed, _ := stagingStamp(filepath.Base(staging))
+	if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: filepath.Base(dest), Seq: claimed}); err != nil {
+		return err
+	}
 	cloneCtx, cancelClone := context.WithTimeout(ctx, gitTimeout)
 	defer cancelClone()
 	cloneDest := filepath.Join(staging, "repo")
@@ -645,18 +746,13 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 
 	// Every rename stays inside parent, so none of them crosses a filesystem.
 	backup := filepath.Join(staging, "backup")
-	// Record the link before moving its tree, so a crash in the swap window
-	// leaves something recoverBundleDir can attribute and put back.
-	if err := stagingFS.writeFile(filepath.Join(staging, stagingLinkFile), []byte(filepath.Base(dest)), 0o600); err != nil {
-		return err
-	}
 	restore := func() error { return nil }
-	if err := stagingFS.rename(dest, backup); err == nil {
-		restore = func() error { return stagingFS.rename(backup, dest) }
+	if err := fsutil.RenameWithRetry(dest, backup, stagingFS.rename); err == nil {
+		restore = func() error { return fsutil.RenameWithRetry(backup, dest, stagingFS.rename) }
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := stagingFS.rename(cloneDest, dest); err != nil {
+	if err := fsutil.RenameWithRetry(cloneDest, dest, stagingFS.rename); err != nil {
 		if restoreErr := restore(); restoreErr != nil {
 			// dest is empty and the only copy of the prior tree is the backup,
 			// so keep staging rather than deleting the tree on the way out.
@@ -665,6 +761,17 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 		}
 		return err
 	}
+	// The flag is the only evidence that the copy in backup was published over.
+	// Without it that copy has to be kept, so a failure here costs one retained
+	// tree and never the publish, which has already landed and is reported as
+	// the success it is.
+	flag, err := stagingFS.create(filepath.Join(staging, committedFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		cleanupStaging = false
+		logf("remote: published %s but could not record the commit flag in %s: %v", dest, staging, err)
+		return nil
+	}
+	_ = flag.Close()
 	return nil
 }
 

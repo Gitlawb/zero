@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -440,13 +441,270 @@ func TestExtractBundleKeepsBackupWhenRestoreAlsoFails(t *testing.T) {
 	}
 }
 
+// soleStaging returns the one staging dir under dir, and fails if there is not
+// exactly one. A test that asserts on "the" staging dir has to prove that is
+// what it found, or a second one left by an earlier step reads as a pass.
+func soleStaging(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := []string{}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), stagingPrefix) {
+			found = append(found, filepath.Join(dir, e.Name()))
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("staging dirs in %s = %v, want exactly one", dir, found)
+	}
+	return found[0]
+}
+
+// The marker is what lets recovery name the copy a crash leaves behind, so it
+// has to be on disk before anything destructive runs. A clone that fails is the
+// first step after it, and the marker must already be readable there.
+func TestExtractBundleWritesTheMarkerBeforeTheClone(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	// The staging dir is cleaned up on the way out of a failed extract, so the
+	// cleanup is blocked to leave the on-disk state this test is about.
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	err := extractBundle(context.Background(), filepath.Join(dir, "missing.bundle"), dest, nil)
+	if err == nil {
+		t.Fatal("cloning a bundle that does not exist must fail")
+	}
+
+	staging := soleStaging(t, dir)
+	seq, ok := stagingStamp(filepath.Base(staging))
+	if !ok {
+		t.Fatalf("staging name %s carries no sequence", staging)
+	}
+	m, err := readMarker(staging)
+	if err != nil {
+		t.Fatalf("read the marker the extract should have written: %v", err)
+	}
+	if want := (txnMarker{Kind: txnKindBundleExtract, Dest: "proj-1", Seq: seq}); m != want {
+		t.Fatalf("marker = %+v, want %+v", m, want)
+	}
+	if _, err := os.Stat(filepath.Join(staging, "backup")); !os.IsNotExist(err) {
+		t.Errorf("nothing should have been set aside before the clone, got %v", err)
+	}
+}
+
+// A torn marker occupies the name recovery reads and parses as nothing, so the
+// bytes reach their name through a rename or not at all.
+func TestExtractBundleMarkerIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	injected := errors.New("injected marker rename failure")
+	injectFault(t, "rename", func(args ...string) bool { return filepath.Base(args[1]) == stagingMarkerFile }, injected)
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, nil)
+	if !errors.Is(err, injected) {
+		t.Fatalf("extract = %v, want the injected marker rename failure", err)
+	}
+
+	staging := soleStaging(t, dir)
+	entries, readErr := os.ReadDir(staging)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, e := range entries {
+		if e.Name() == stagingMarkerFile {
+			t.Errorf("a marker that never got renamed must not occupy %s", filepath.Join(staging, stagingMarkerFile))
+		}
+	}
+	got, readErr := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if readErr != nil || string(got) != "v0" {
+		t.Fatalf("dest a.txt = %q, err %v, want the prior tree %q untouched", got, readErr, "v0")
+	}
+	if _, err := os.Stat(filepath.Join(staging, "backup")); !os.IsNotExist(err) {
+		t.Errorf("a failed marker must stop the extract before the set-aside, got %v", err)
+	}
+}
+
+// The flag is the evidence a later recovery needs that the copy in backup was
+// superseded. It only means that if the publish already landed.
+func TestExtractBundleCreatesTheCommitFlagAfterPublish(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	// Blocking the final cleanup is what leaves the committed staging dir on
+	// disk to assert on; a cleanup failure is logged, never returned.
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, nil); err != nil {
+		t.Fatalf("extract = %v, want the cleanup failure to be logged, not returned", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("dest a.txt = %q, err %v, want %q", got, err, "v1")
+	}
+	staging := soleStaging(t, dir)
+	got, err = os.ReadFile(filepath.Join(staging, "backup", "a.txt"))
+	if err != nil || string(got) != "v0" {
+		t.Fatalf("backup a.txt = %q, err %v, want the prior tree %q", got, err, "v0")
+	}
+	if _, err := os.Stat(filepath.Join(staging, committedFile)); err != nil {
+		t.Fatalf("a published extract must record the commit flag: %v", err)
+	}
+}
+
+// Without the flag the copy in backup has no proof it was superseded, so the
+// staging dir stays: deleting it would drop the only evidence recovery has.
+func TestExtractBundleFailedCommitFlagKeepsTheStagingDir(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	injectFault(t, "create", func(args ...string) bool { return filepath.Base(args[0]) == committedFile }, errors.New("injected commit flag failure"))
+	var logged []string
+	err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("extract = %v, want a committed publish reported as success", err)
+	}
+
+	got, readErr := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if readErr != nil || string(got) != "v1" {
+		t.Fatalf("dest a.txt = %q, err %v, want the published tree %q", got, readErr, "v1")
+	}
+	staging := soleStaging(t, dir)
+	got, readErr = os.ReadFile(filepath.Join(staging, "backup", "a.txt"))
+	if readErr != nil || string(got) != "v0" {
+		t.Fatalf("backup a.txt = %q, err %v, want the retained prior tree %q", got, readErr, "v0")
+	}
+	if _, err := os.Stat(filepath.Join(staging, committedFile)); !os.IsNotExist(err) {
+		t.Errorf("the flag failed to be created, so it must not exist: %v", err)
+	}
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, staging) }) {
+		t.Errorf("the retained staging dir should be named in the log, got %v", logged)
+	}
+}
+
+// A publish that never landed supersedes nothing, so no flag may appear beside
+// the copy that is still the live tree's only other copy.
+func TestExtractBundlePublishFailureLeavesNoCommitFlag(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	injected := errors.New("injected publish failure")
+	injectFault(t, "rename", func(args ...string) bool { return filepath.Base(args[0]) == "repo" }, injected)
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, nil)
+	if !errors.Is(err, injected) {
+		t.Fatalf("extract = %v, want the injected publish failure", err)
+	}
+
+	got, readErr := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if readErr != nil || string(got) != "v0" {
+		t.Fatalf("dest a.txt = %q, err %v, want the restored prior tree %q", got, readErr, "v0")
+	}
+	staging := soleStaging(t, dir)
+	if _, err := os.Stat(filepath.Join(staging, committedFile)); !os.IsNotExist(err) {
+		t.Errorf("a failed publish must leave no commit flag, got %v", err)
+	}
+}
+
+// Every rename goes through fsutil.RenameWithRetry, which absorbs the momentary
+// sharing violation an open file produces on Windows. The retry is Windows-only
+// (fsutil/rename.go: ten attempts, 10 ms apart, guarded by runtime.GOOS), so on
+// every other platform the assertion is only that the error comes back
+// unchanged. This guard is falsifiable on Windows CI alone.
+func TestExtractBundleRenamesRetryOnTransientErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(ctx, testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	// The third rename of the second extract is the publish: the marker, then
+	// the set-aside, then the swap into dest.
+	injected := &os.LinkError{Op: "rename", Old: "repo", New: dest, Err: syscall.Errno(32)}
+	injectFault(t, "rename", nthCall(3), injected)
+
+	err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, nil)
+	want := "v0"
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("extract = %v, want the sharing violation absorbed by the retry", err)
+		}
+		want = "v1"
+	} else if !errors.Is(err, injected) {
+		t.Fatalf("extract = %v, want the sharing violation returned unchanged", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if readErr != nil || string(got) != want {
+		t.Fatalf("dest a.txt = %q, err %v, want %q", got, readErr, want)
+	}
+}
+
+// Missing and unreadable are opposite decisions for recovery: the first says the
+// directory was never this code's to act on, the second says the filesystem
+// failed and nothing may be concluded. Folding one into the other is what turns
+// a fault into a licence.
+func TestReadMarkerDistinguishesMissingFromUnreadable(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := readMarker(dir); !errors.Is(err, errMarkerMissing) {
+		t.Fatalf("readMarker of a dir with no marker = %v, want errMarkerMissing", err)
+	}
+
+	// What a released version left at this name is not JSON; it parses as
+	// nothing, which is a marker that exists and cannot be trusted.
+	if err := os.WriteFile(filepath.Join(dir, stagingMarkerFile), []byte("proj-1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readMarker(dir)
+	if err == nil {
+		t.Fatal("an unparseable marker must be an error")
+	}
+	if errors.Is(err, errMarkerMissing) {
+		t.Fatalf("an unparseable marker = %v, want an error distinct from errMarkerMissing", err)
+	}
+
+	injected := errors.New("injected marker read failure")
+	injectFault(t, "readFile", nil, injected)
+	_, err = readMarker(dir)
+	if !errors.Is(err, injected) {
+		t.Fatalf("readMarker over a failing read = %v, want the injected failure", err)
+	}
+	if errors.Is(err, errMarkerMissing) {
+		t.Fatalf("a read failure = %v, want an error distinct from errMarkerMissing", err)
+	}
+}
+
 // The link marker is read off disk, so a hostile or corrupt one must not steer a
 // rename anywhere outside the bundle dir.
 func TestRecoverBundleDirRefusesAMarkerThatEscapesTheBundleDir(t *testing.T) {
 	for _, marker := range []string{"../evil", "/etc/evil", "..", "a/b", ".hidden"} {
 		dir := t.TempDir()
 		staging := plantInterruptedExtract(t, dir, "proj-1", "v0")
-		if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(marker), 0o600); err != nil {
+		if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: marker}); err != nil {
 			t.Fatal(err)
 		}
 		outside := filepath.Join(filepath.Dir(dir), "evil")
@@ -478,7 +736,7 @@ func plantInterruptedExtract(t *testing.T, bundleDir, linkID, content string) st
 	if err := os.WriteFile(filepath.Join(backup, "a.txt"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(linkID), 0o600); err != nil {
+	if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: linkID}); err != nil {
 		t.Fatal(err)
 	}
 	return staging
@@ -531,7 +789,7 @@ func TestRecoverBundleDirDropsBackupWhenTheLinkAlreadyHasATree(t *testing.T) {
 func TestRecoverBundleDirKeepsABackupItCannotAttribute(t *testing.T) {
 	dir := t.TempDir()
 	staging := plantInterruptedExtract(t, dir, "proj-1", "v0")
-	if err := os.Remove(filepath.Join(staging, stagingLinkFile)); err != nil {
+	if err := os.Remove(filepath.Join(staging, stagingMarkerFile)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -541,7 +799,7 @@ func TestRecoverBundleDirKeepsABackupItCannotAttribute(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
 		t.Errorf("an unattributable tree must be left alone, not deleted: %v", err)
 	}
-	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "no link marker") }) {
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "no usable transaction marker") }) {
 		t.Errorf("an unattributable tree should be reported, got %v", logged)
 	}
 }
@@ -779,7 +1037,8 @@ func stageBackup(t *testing.T, dir, name, linkID, content string, stamp int64) s
 	if err := os.WriteFile(filepath.Join(backup, "a.txt"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(linkID), 0o600); err != nil {
+	seq, _ := stagingStamp(filepath.Base(staging))
+	if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: linkID, Seq: seq}); err != nil {
 		t.Fatal(err)
 	}
 	return staging
