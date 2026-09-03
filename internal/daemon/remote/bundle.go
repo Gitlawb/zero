@@ -200,9 +200,38 @@ const stagingLinkFile = "link"
 // extractLockPoll is how often a cross-process extract lock is retried.
 const extractLockPoll = 50 * time.Millisecond
 
-// renameDir moves a directory into its published location. It is a var so tests
-// can force a failure at the steps whose errors would otherwise be unrecoverable.
-var renameDir = os.Rename
+// fsOps is the filesystem seam the write path, the allocator, and recovery take
+// every step through. A step that calls os directly cannot be made to fail, and
+// the crash each of these steps exists to survive is then only reasoned about.
+// Every field is one call, so a test can fail the second remove or the rename
+// whose source is one particular backup and leave the rest of the pass real.
+type fsOps struct {
+	rename     func(from, to string) error
+	removeAll  func(path string) error
+	stat       func(name string) (os.FileInfo, error)
+	lstat      func(name string) (os.FileInfo, error)
+	readDir    func(name string) ([]os.DirEntry, error)
+	readFile   func(name string) ([]byte, error)
+	mkdir      func(name string, perm os.FileMode) error
+	writeFile  func(name string, data []byte, perm os.FileMode) error
+	create     func(name string, flag int, perm os.FileMode) (*os.File, error)
+	createTemp func(dir, pattern string) (*os.File, error)
+}
+
+// stagingFS is the seam every filesystem step in this file goes through. Tests
+// swap a field and restore it; nothing else writes to it.
+var stagingFS = fsOps{
+	rename:     os.Rename,
+	removeAll:  os.RemoveAll,
+	stat:       os.Stat,
+	lstat:      os.Lstat,
+	readDir:    os.ReadDir,
+	readFile:   os.ReadFile,
+	mkdir:      os.Mkdir,
+	writeFile:  os.WriteFile,
+	create:     os.OpenFile,
+	createTemp: os.CreateTemp,
+}
 
 // extractLocks serializes extracts per destination. Each bundle upload runs in
 // its own connection goroutine, so two uploads of one link id would otherwise
@@ -291,7 +320,7 @@ func recoverBundleDir(dir string, logf func(string, ...any)) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := stagingFS.readDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logf("remote: could not scan bundle dir %s: %v", dir, err)
@@ -336,17 +365,17 @@ func recoverBundleDir(dir string, logf func(string, ...any)) {
 		// all: link ids starting with '.' used to be accepted, so this may be a
 		// work tree someone published under a name that now looks reserved.
 		// Never reap that.
-		if _, err := os.Stat(filepath.Join(staging, ".git")); err == nil {
+		if _, err := stagingFS.stat(filepath.Join(staging, ".git")); err == nil {
 			logf("remote: %s holds a work tree, not a staged extract; leaving it in place", staging)
 			continue
 		}
 		// Only reap once no clone can still be running: gitTimeout bounds a
 		// clone, so anything older than that is abandoned.
-		info, err := os.Stat(staging)
+		info, err := stagingFS.stat(staging)
 		if err != nil || time.Since(info.ModTime()) < 2*gitTimeout {
 			continue
 		}
-		if err := os.RemoveAll(staging); err != nil {
+		if err := stagingFS.removeAll(staging); err != nil {
 			logf("remote: could not remove abandoned staging dir %s: %v", staging, err)
 		}
 	}
@@ -400,7 +429,7 @@ const stagingSeqAttempts = 10000
 // pass deletes it as superseded. Counting kept names keeps a parked number out
 // of circulation. Recovery still does not enumerate them.
 func nextStagingSeq(dir string) (int64, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := stagingFS.readDir(dir)
 	if err != nil {
 		return 0, err
 	}
@@ -452,7 +481,7 @@ func createSequencedStagingDir(dir string, n int64) (string, error) {
 			return "", fmt.Errorf("remote: staging name %q does not read back as sequence %d", name, n)
 		}
 		path := filepath.Join(dir, name)
-		err := os.Mkdir(path, 0o700)
+		err := stagingFS.mkdir(path, 0o700)
 		if err == nil {
 			return path, nil
 		}
@@ -473,10 +502,10 @@ func createSequencedStagingDir(dir string, n int64) (string, error) {
 func restoreStagedBackup(dir string, s stagedExtract, restored map[string]stagedExtract, logf func(string, ...any)) bool {
 	staging := s.path
 	backup := filepath.Join(staging, "backup")
-	if _, err := os.Stat(backup); err != nil {
+	if _, err := stagingFS.stat(backup); err != nil {
 		return false
 	}
-	raw, err := os.ReadFile(filepath.Join(staging, stagingLinkFile))
+	raw, err := stagingFS.readFile(filepath.Join(staging, stagingLinkFile))
 	if err != nil {
 		logf("remote: staged tree in %s has no link marker; leaving it in place", staging)
 		return true
@@ -503,7 +532,7 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 		return true
 	}
 	defer release()
-	if _, err := os.Stat(dest); err == nil {
+	if _, err := stagingFS.stat(dest); err == nil {
 		// The link already has a tree, and a backup only ever holds the tree that
 		// was live BEFORE it: backup is filled by renaming dest aside, so dest
 		// holding anything at all means a later extract published over it. That
@@ -524,18 +553,18 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 		// reclaimed, so a bridge that ran without a logger configured is not the
 		// difference between the space being accounted for and not.
 		logf("remote: reclaiming the staged tree in %s that %s's live tree superseded", staging, id)
-		if err := os.RemoveAll(staging); err != nil {
+		if err := stagingFS.removeAll(staging); err != nil {
 			logf("remote: could not remove superseded staging dir %s: %v", staging, err)
 		}
 		return true
 	}
-	if err := os.Rename(backup, dest); err != nil {
+	if err := stagingFS.rename(backup, dest); err != nil {
 		logf("remote: could not restore the staged tree for %s from %s: %v", id, staging, err)
 		return true
 	}
 	restored[dest] = s
 	logf("remote: restored the work tree for %s from %s after an interrupted extract", id, staging)
-	if err := os.RemoveAll(staging); err != nil {
+	if err := stagingFS.removeAll(staging); err != nil {
 		logf("remote: could not remove staging dir %s after restoring %s: %v", staging, id, err)
 	}
 	return true
@@ -549,7 +578,7 @@ func restoreStagedBackup(dir string, s stagedExtract, restored map[string]staged
 // it is, which is the same fail-safe one pass later.
 func parkKeptBackup(dir, staging, id string, logf func(string, ...any)) {
 	parked := filepath.Join(dir, keptPrefix+strings.TrimPrefix(filepath.Base(staging), stagingPrefix))
-	if err := os.Rename(staging, parked); err != nil {
+	if err := stagingFS.rename(staging, parked); err != nil {
 		logf("remote: could not park the kept backup for %s at %s: %v", id, parked, err)
 	}
 }
@@ -603,7 +632,7 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 		// A failure here strands a whole copy of the prior tree under a
 		// dot-prefixed dir nothing else enumerates, so say so rather than
 		// leaking it silently.
-		if err := os.RemoveAll(staging); err != nil {
+		if err := stagingFS.removeAll(staging); err != nil {
 			logf("remote: could not remove bundle staging dir %s: %v", staging, err)
 		}
 	}()
@@ -618,16 +647,16 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	backup := filepath.Join(staging, "backup")
 	// Record the link before moving its tree, so a crash in the swap window
 	// leaves something recoverBundleDir can attribute and put back.
-	if err := os.WriteFile(filepath.Join(staging, stagingLinkFile), []byte(filepath.Base(dest)), 0o600); err != nil {
+	if err := stagingFS.writeFile(filepath.Join(staging, stagingLinkFile), []byte(filepath.Base(dest)), 0o600); err != nil {
 		return err
 	}
 	restore := func() error { return nil }
-	if err := os.Rename(dest, backup); err == nil {
-		restore = func() error { return renameDir(backup, dest) }
+	if err := stagingFS.rename(dest, backup); err == nil {
+		restore = func() error { return stagingFS.rename(backup, dest) }
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := renameDir(cloneDest, dest); err != nil {
+	if err := stagingFS.rename(cloneDest, dest); err != nil {
 		if restoreErr := restore(); restoreErr != nil {
 			// dest is empty and the only copy of the prior tree is the backup,
 			// so keep staging rather than deleting the tree on the way out.

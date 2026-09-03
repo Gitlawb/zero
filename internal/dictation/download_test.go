@@ -12,10 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Tiny tar.bz2 fixtures (generated in-repo): the engine has top/bin/sherpa-onnx-
@@ -303,16 +307,17 @@ func TestPromoteStagedDirKeepsThePreviousInstallWhenPromotionFails(t *testing.T)
 	stagedTree(t, dest, "old")
 	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
 
-	real := renameStagedDir
-	calls := 0
-	renameStagedDir = func(from, to string) error {
-		calls++
-		if calls == 1 {
+	// Fail only the promotion, so the restore that follows it still runs. The
+	// set-aside rename goes through the same seam now, and it has to stay real
+	// or there is no previous install to put back.
+	real := holderFS.rename
+	holderFS.rename = func(from, to string) error {
+		if from == stage {
 			return errors.New("injected promotion failure")
 		}
 		return real(from, to)
 	}
-	t.Cleanup(func() { renameStagedDir = real })
+	t.Cleanup(func() { holderFS.rename = real })
 
 	if err := promoteStagedDir(stage, dest, "engine"); err == nil {
 		t.Fatal("a failed promotion must be reported")
@@ -333,9 +338,16 @@ func TestPromoteStagedDirKeepsTheSetAsideCopyWhenRestoreAlsoFails(t *testing.T) 
 	stagedTree(t, dest, "old")
 	stage := stagedTree(t, filepath.Join(root, "stage"), "new")
 
-	real := renameStagedDir
-	renameStagedDir = func(string, string) error { return errors.New("injected rename failure") }
-	t.Cleanup(func() { renameStagedDir = real })
+	// The promotion and the restore are the two renames into dest; the set-aside
+	// that fills the holder stays real, or there is no retained copy to assert on.
+	real := holderFS.rename
+	holderFS.rename = func(from, to string) error {
+		if to == dest {
+			return errors.New("injected rename failure")
+		}
+		return real(from, to)
+	}
+	t.Cleanup(func() { holderFS.rename = real })
 
 	err := promoteStagedDir(stage, dest, "engine")
 	if err == nil {
@@ -641,10 +653,15 @@ func interruptPromotion(t *testing.T, destDir, label string) {
 	if err := os.MkdirAll(stage, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	real := renameStagedDir
-	renameStagedDir = func(string, string) error { return errors.New("injected rename failure") }
+	real := holderFS.rename
+	holderFS.rename = func(from, to string) error {
+		if to == destDir {
+			return errors.New("injected rename failure")
+		}
+		return real(from, to)
+	}
 	err := promoteStagedDir(stage, destDir, label)
-	renameStagedDir = real
+	holderFS.rename = real
 	if err == nil {
 		t.Fatalf("a promotion whose publish and restore both fail must report an error")
 	}
@@ -1038,5 +1055,347 @@ func TestRestoreInterruptedPromotionSkipsAHolderWithNoInstall(t *testing.T) {
 	}
 	if _, err := os.Stat(usable); !os.IsNotExist(err) {
 		t.Errorf("the restored holder should be cleared, got %v", err)
+	}
+}
+
+// ---- filesystem seam -------------------------------------------------------
+
+// injectFault swaps one field of holderFS for a wrapper that fails the call
+// whose arguments satisfy match and passes every other call through to the real
+// primitive. The call ordinal is appended to the arguments handed to match, so
+// nthCall can select by call order without a second counter, and it is counted
+// with an atomic because the racing scenarios drive one seam from two
+// goroutines. The whole struct is restored in t.Cleanup, so a test that injects
+// twice unwinds in reverse.
+func injectFault(t *testing.T, step string, match func(args ...string) bool, err error) {
+	t.Helper()
+	var calls atomic.Int64
+	real := holderFS
+	t.Cleanup(func() { holderFS = real })
+	fire := func(args ...string) bool {
+		n := calls.Add(1)
+		if match == nil {
+			return true
+		}
+		return match(append(args, strconv.FormatInt(n, 10))...)
+	}
+	switch step {
+	case "rename":
+		holderFS.rename = func(from, to string) error {
+			if fire(from, to) {
+				return err
+			}
+			return real.rename(from, to)
+		}
+	case "removeAll":
+		holderFS.removeAll = func(path string) error {
+			if fire(path) {
+				return err
+			}
+			return real.removeAll(path)
+		}
+	case "stat":
+		holderFS.stat = func(name string) (os.FileInfo, error) {
+			if fire(name) {
+				return nil, err
+			}
+			return real.stat(name)
+		}
+	case "lstat":
+		holderFS.lstat = func(name string) (os.FileInfo, error) {
+			if fire(name) {
+				return nil, err
+			}
+			return real.lstat(name)
+		}
+	case "readDir":
+		holderFS.readDir = func(name string) ([]os.DirEntry, error) {
+			if fire(name) {
+				return nil, err
+			}
+			return real.readDir(name)
+		}
+	case "readFile":
+		holderFS.readFile = func(name string) ([]byte, error) {
+			if fire(name) {
+				return nil, err
+			}
+			return real.readFile(name)
+		}
+	case "mkdir":
+		holderFS.mkdir = func(name string, perm os.FileMode) error {
+			if fire(name) {
+				return err
+			}
+			return real.mkdir(name, perm)
+		}
+	case "writeFile":
+		holderFS.writeFile = func(name string, data []byte, perm os.FileMode) error {
+			if fire(name) {
+				return err
+			}
+			return real.writeFile(name, data, perm)
+		}
+	case "create":
+		holderFS.create = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+			if fire(name) {
+				return nil, err
+			}
+			return real.create(name, flag, perm)
+		}
+	case "createTemp":
+		holderFS.createTemp = func(dir, pattern string) (*os.File, error) {
+			if fire(dir, pattern) {
+				return nil, err
+			}
+			return real.createTemp(dir, pattern)
+		}
+	default:
+		t.Fatalf("injectFault: unknown step %q", step)
+	}
+}
+
+// nthCall selects the nth call through an injected seam. It reads the ordinal
+// injectFault appends to the arguments rather than counting for itself, so the
+// two share one counter and a concurrent test has one place to be correct.
+func nthCall(n int) func(args ...string) bool {
+	return func(args ...string) bool {
+		return len(args) > 0 && args[len(args)-1] == strconv.Itoa(n)
+	}
+}
+
+// blockStep holds every call to step until the returned release runs, which is
+// how a test parks one transaction mid-step and lets another reach the same
+// destination. Releasing twice is safe, so a test can release on the happy path
+// and still defer it.
+func blockStep(t *testing.T, step string) (release func()) {
+	t.Helper()
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	injectFaultGate(t, step, gate)
+	return release
+}
+
+// injectFaultGate is blockStep's half of the swap, split out so the wrapper it
+// installs sits beside the fault wrappers above.
+func injectFaultGate(t *testing.T, step string, gate <-chan struct{}) {
+	t.Helper()
+	real := holderFS
+	t.Cleanup(func() { holderFS = real })
+	switch step {
+	case "rename":
+		holderFS.rename = func(from, to string) error {
+			<-gate
+			return real.rename(from, to)
+		}
+	case "removeAll":
+		holderFS.removeAll = func(path string) error {
+			<-gate
+			return real.removeAll(path)
+		}
+	case "stat":
+		holderFS.stat = func(name string) (os.FileInfo, error) {
+			<-gate
+			return real.stat(name)
+		}
+	default:
+		t.Fatalf("blockStep: unknown step %q", step)
+	}
+}
+
+// The seam has to be the real filesystem until a test swaps a field. A nil field
+// is a panic in whatever production path reaches it first, and a field that no
+// longer behaves like its os function makes every test above it prove nothing.
+func TestHolderFSDefaultsAreTheRealPrimitives(t *testing.T) {
+	for name, missing := range map[string]bool{
+		"rename":     holderFS.rename == nil,
+		"removeAll":  holderFS.removeAll == nil,
+		"stat":       holderFS.stat == nil,
+		"lstat":      holderFS.lstat == nil,
+		"readDir":    holderFS.readDir == nil,
+		"readFile":   holderFS.readFile == nil,
+		"mkdir":      holderFS.mkdir == nil,
+		"writeFile":  holderFS.writeFile == nil,
+		"create":     holderFS.create == nil,
+		"createTemp": holderFS.createTemp == nil,
+	} {
+		if missing {
+			t.Errorf("holderFS.%s is nil", name)
+		}
+	}
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "one")
+	if err := holderFS.mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := filepath.Join(dir, "a.txt")
+	if err := holderFS.writeFile(file, []byte("v0"), 0o600); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	if _, err := holderFS.stat(file); err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if _, err := holderFS.lstat(file); err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if got, err := holderFS.readFile(file); err != nil || string(got) != "v0" {
+		t.Fatalf("readFile = %q, %v, want %q", got, err, "v0")
+	}
+	entries, err := holderFS.readDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "a.txt" {
+		t.Fatalf("readDir = %v, %v, want one entry a.txt", entries, err)
+	}
+	tmp, err := holderFS.createTemp(dir, "seam-*")
+	if err != nil {
+		t.Fatalf("createTemp: %v", err)
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp: %v", err)
+	}
+	opened, err := holderFS.create(tmpName, os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatalf("close opened: %v", err)
+	}
+	moved := filepath.Join(root, "two")
+	if err := holderFS.rename(dir, moved); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := holderFS.stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("stat of the old name = %v, want not-exist", err)
+	}
+	if err := holderFS.removeAll(moved); err != nil {
+		t.Fatalf("removeAll: %v", err)
+	}
+	if _, err := holderFS.stat(moved); !os.IsNotExist(err) {
+		t.Fatalf("stat after removeAll = %v, want not-exist", err)
+	}
+}
+
+// The matrix needs both selections: "fail the rename whose source is seq 2's
+// set-aside copy" is an argument match, and "fail the second remove" is an
+// ordinal one.
+// An ordinal alone cannot express the first, and an argument match cannot
+// express a step that runs twice on the same path.
+func TestInjectFaultMatchesByArgumentAndByOrdinal(t *testing.T) {
+	injected := errors.New("injected seam failure")
+	root := t.TempDir()
+
+	t.Run("by argument", func(t *testing.T) {
+		injectFault(t, "rename", func(args ...string) bool {
+			return strings.HasSuffix(args[0], filepath.Join("seq", "backup"))
+		}, injected)
+		for _, name := range []string{"one", "seq", "three"} {
+			from := filepath.Join(root, name, "backup")
+			if err := os.MkdirAll(from, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := holderFS.rename(from, filepath.Join(root, name, "moved"))
+			if name == "seq" {
+				if !errors.Is(err, injected) {
+					t.Fatalf("rename of %s = %v, want the injected failure", from, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("rename of %s = %v, want it to pass through", from, err)
+			}
+		}
+	})
+
+	t.Run("by ordinal", func(t *testing.T) {
+		injectFault(t, "removeAll", nthCall(2), injected)
+		for i := 1; i <= 3; i++ {
+			dir := filepath.Join(root, fmt.Sprintf("remove-%d", i))
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := holderFS.removeAll(dir)
+			if i == 2 {
+				if !errors.Is(err, injected) {
+					t.Fatalf("removeAll call %d = %v, want the injected failure", i, err)
+				}
+				if _, statErr := os.Stat(dir); statErr != nil {
+					t.Fatalf("the failed call must not have removed %s: %v", dir, statErr)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("removeAll call %d = %v, want it to pass through", i, err)
+			}
+			if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+				t.Fatalf("removeAll call %d left %s behind: %v", i, dir, statErr)
+			}
+		}
+	})
+
+	if got, want := reflect.ValueOf(holderFS.removeAll).Pointer(), reflect.ValueOf(os.RemoveAll).Pointer(); got != want {
+		t.Fatal("holderFS.removeAll was not restored after the subtest's cleanup")
+	}
+	if got, want := reflect.ValueOf(holderFS.rename).Pointer(), reflect.ValueOf(os.Rename).Pointer(); got != want {
+		t.Fatal("holderFS.rename was not restored after the subtest's cleanup")
+	}
+
+	// One seam, two goroutines: the ordinal must come from a counter that is
+	// safe to increment concurrently, or the racing rows this seam exists for
+	// report a race instead of a result.
+	t.Run("concurrently", func(t *testing.T) {
+		injectFault(t, "stat", nthCall(1), injected)
+		start := make(chan struct{})
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		for i := range errs {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				_, errs[i] = holderFS.stat(root)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		failed := 0
+		for _, err := range errs {
+			if errors.Is(err, injected) {
+				failed++
+			} else if err != nil {
+				t.Fatalf("the call that was not selected = %v, want it to pass through", err)
+			}
+		}
+		if failed != 1 {
+			t.Fatalf("%d of 2 concurrent calls failed, want exactly 1", failed)
+		}
+	})
+}
+
+// A blocked step has to stay blocked: the racing rows park one transaction
+// inside a step and only then let the second one reach the same destination.
+func TestBlockStepHoldsTheCallUntilRelease(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "blocked")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release := blockStep(t, "removeAll")
+	done := make(chan error, 1)
+	go func() { done <- holderFS.removeAll(dir) }()
+	select {
+	case err := <-done:
+		t.Fatalf("removeAll returned %v before release", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	release()
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("removeAll after release: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the released call did not run: %v", err)
 	}
 }

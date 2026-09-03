@@ -776,6 +776,39 @@ func resolveEnginePaths(engineDir string, targetWindows bool) (bin, server strin
 // and a directory mtime tracks the install's contents, not its promotion. The
 // number is one past the highest already beside this install, so a clock moving
 // backward cannot invert it the way the wall-clock stamp it replaces could.
+// fsOps is the filesystem seam the promotion path, the holder allocator, and
+// recovery take every step through. A step that calls os directly cannot be made
+// to fail, and the crash each of these steps exists to survive is then only
+// reasoned about. Every field is one call, so a test can fail the second remove
+// or the rename whose source is one particular holder and leave the rest real.
+type fsOps struct {
+	rename     func(from, to string) error
+	removeAll  func(path string) error
+	stat       func(name string) (os.FileInfo, error)
+	lstat      func(name string) (os.FileInfo, error)
+	readDir    func(name string) ([]os.DirEntry, error)
+	readFile   func(name string) ([]byte, error)
+	mkdir      func(name string, perm os.FileMode) error
+	writeFile  func(name string, data []byte, perm os.FileMode) error
+	create     func(name string, flag int, perm os.FileMode) (*os.File, error)
+	createTemp func(dir, pattern string) (*os.File, error)
+}
+
+// holderFS is the seam every filesystem step in the promotion path goes through.
+// Tests swap a field and restore it; nothing else writes to it.
+var holderFS = fsOps{
+	rename:     os.Rename,
+	removeAll:  os.RemoveAll,
+	stat:       os.Stat,
+	lstat:      os.Lstat,
+	readDir:    os.ReadDir,
+	readFile:   os.ReadFile,
+	mkdir:      os.Mkdir,
+	writeFile:  os.WriteFile,
+	create:     os.OpenFile,
+	createTemp: os.CreateTemp,
+}
+
 const holderSuffix = ".previous-"
 
 // holderStamp reads back the ordering number in a holder name, reporting false
@@ -812,7 +845,7 @@ const holderSeqAttempts = 10000
 // always allocates above it. Holders for a different install are a separate
 // sequence and are never compared against this one.
 func nextHolderSeq(destDir string) (int64, error) {
-	entries, err := os.ReadDir(filepath.Dir(destDir))
+	entries, err := holderFS.readDir(filepath.Dir(destDir))
 	if err != nil {
 		return 0, err
 	}
@@ -848,7 +881,7 @@ func createSequencedHolder(destDir string, n int64) (string, error) {
 		if stamp, ok := holderStamp(destDir, path); !ok || stamp != n {
 			return "", fmt.Errorf("holder name %q does not read back as sequence %d", filepath.Base(path), n)
 		}
-		err := os.Mkdir(path, 0o700)
+		err := holderFS.mkdir(path, 0o700)
 		if err == nil {
 			return path, nil
 		}
@@ -874,7 +907,7 @@ func createSequencedHolder(destDir string, n int64) (string, error) {
 // promotion published there" are different claims, and only the second one
 // makes a holder beside it superseded.
 func restoreInterruptedPromotion(destDir string, published func(string) bool) {
-	if _, err := os.Lstat(destDir); err == nil {
+	if _, err := holderFS.lstat(destDir); err == nil {
 		// destDir is live. A holder is only ever filled by renaming destDir
 		// aside, so a destDir holding a USABLE install means a later promotion
 		// published over every holder beside it. Those are superseded copies of
@@ -893,7 +926,7 @@ func restoreInterruptedPromotion(destDir string, published func(string) bool) {
 		// same branch and tries again.
 		if published != nil && published(destDir) {
 			for _, holder := range holdersBeside(destDir) {
-				_ = os.RemoveAll(holder)
+				_ = holderFS.removeAll(holder)
 			}
 		}
 		return
@@ -917,15 +950,15 @@ func restoreInterruptedPromotion(destDir string, published func(string) bool) {
 	})
 	for _, holder := range holders {
 		install := filepath.Join(holder, "install")
-		if _, err := os.Stat(install); err != nil {
+		if _, err := holderFS.stat(install); err != nil {
 			continue
 		}
-		if err := renameStagedDir(install, destDir); err != nil {
+		if err := holderFS.rename(install, destDir); err != nil {
 			continue
 		}
 		// Only the holder this install came out of is removed; an older one is
 		// left for a human, never deleted on a guess about which is current.
-		_ = os.RemoveAll(holder)
+		_ = holderFS.removeAll(holder)
 		return
 	}
 }
@@ -938,7 +971,7 @@ func holdersBeside(destDir string) []string {
 	// and a '[' anywhere in it opens a character class to Glob, which then
 	// matches nothing and strands the install this exists to put back.
 	parent := filepath.Dir(destDir)
-	entries, err := os.ReadDir(parent)
+	entries, err := holderFS.readDir(parent)
 	if err != nil {
 		return nil
 	}
@@ -962,12 +995,12 @@ func promoteStagedDir(stageDir, destDir, label string) error {
 	cleanupHolder := true
 	defer func() {
 		if holder != "" && cleanupHolder {
-			_ = os.RemoveAll(holder)
+			_ = holderFS.removeAll(holder)
 		}
 	}()
 
 	restore := func() error { return nil }
-	if _, err := os.Lstat(destDir); err == nil {
+	if _, err := holderFS.lstat(destDir); err == nil {
 		var seq int64
 		seq, err = nextHolderSeq(destDir)
 		if err != nil {
@@ -978,15 +1011,15 @@ func promoteStagedDir(stageDir, destDir, label string) error {
 			return fmt.Errorf("setting aside previous %s install: %w", label, err)
 		}
 		previous := filepath.Join(holder, "install")
-		if err := os.Rename(destDir, previous); err != nil {
+		if err := holderFS.rename(destDir, previous); err != nil {
 			return fmt.Errorf("setting aside previous %s install: %w", label, err)
 		}
-		restore = func() error { return renameStagedDir(previous, destDir) }
+		restore = func() error { return holderFS.rename(previous, destDir) }
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("checking previous %s install: %w", label, err)
 	}
 
-	if err := renameStagedDir(stageDir, destDir); err != nil {
+	if err := holderFS.rename(stageDir, destDir); err != nil {
 		if restoreErr := restore(); restoreErr != nil {
 			cleanupHolder = false
 			return fmt.Errorf("promoting staged %s: %w (previous install left in %s: %v)", label, err, holder, restoreErr)
@@ -995,10 +1028,6 @@ func promoteStagedDir(stageDir, destDir, label string) error {
 	}
 	return nil
 }
-
-// renameStagedDir moves a directory into its published location. It is a var so
-// tests can force the failures the restore path above exists for.
-var renameStagedDir = os.Rename
 
 // extractTarBz2 unpacks a bzip2-compressed tar into destDir, guarding against
 // path-traversal entries. It reports extraction progress by how much of the
