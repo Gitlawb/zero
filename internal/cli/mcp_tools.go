@@ -228,12 +228,23 @@ type mcpStartupStreaming interface {
 // when stop runs is still printed, on the caller's goroutine, with the pump
 // already finished.
 //
+// ONE WRITER, ONE CALLER AT A TIME. Joining the pump stops writes after its
+// lifetime but does nothing about the overlap: startup keeps emitting plugin,
+// trust, peer, provider and validation output to the same writer while the pump
+// is live. That is unsafe for an ordinary bytes.Buffer and interleaves lines even
+// on a writer that tolerates concurrent calls. A mutex private to the pump would
+// not help, because the other writes do not go through it. So the returned writer
+// is a guarded view of the caller's, and the caller adopts it for the rest of
+// startup; both sides then take the same lock.
+//
 // The pull form is kept for a runtime that implements no stream, which today is
-// only test doubles; it has no late launches to deliver, so its stop is a no-op.
-func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) (stop func()) {
+// only test doubles; it has no late launches to deliver, so its stop is a no-op
+// and its writer is handed back unchanged.
+func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) (guarded io.Writer, stop func()) {
+	serialized := &serializedWriter{writer: stderr}
 	print := func(disclosure mcp.StartupDisclosure) {
 		for _, notice := range disclosure.Notices {
-			fmt.Fprintf(stderr, "notice: MCP server %s started with reduced enforcement: %s\n", disclosure.Name, notice)
+			fmt.Fprintf(serialized, "notice: MCP server %s started with reduced enforcement: %s\n", disclosure.Name, notice)
 		}
 	}
 	printAll := func(disclosures []mcp.StartupDisclosure) {
@@ -246,11 +257,11 @@ func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) (stop
 		if disclosing, ok := runtime.(mcpStartupDisclosing); ok {
 			printAll(disclosing.StartupDisclosures())
 		}
-		return func() {}
+		return stderr, func() {}
 	}
 	stream := streaming.StartupDisclosureStream()
 	if stream == nil {
-		return func() {}
+		return stderr, func() {}
 	}
 	printAll(stream.Drain())
 	pumped := make(chan struct{})
@@ -261,11 +272,25 @@ func reportMCPStartupDisclosures(stderr io.Writer, runtime mcpToolRuntime) (stop
 		}
 	}()
 	var once sync.Once
-	return func() {
+	return serialized, func() {
 		once.Do(func() {
 			stream.Close()
 			<-pumped
 			printAll(stream.Drain())
 		})
 	}
+}
+
+// serializedWriter gives one underlying writer a single owner at a time, so the
+// late-disclosure pump and the foreground startup path cannot be inside it
+// together.
+type serializedWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (w *serializedWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.Write(data)
 }

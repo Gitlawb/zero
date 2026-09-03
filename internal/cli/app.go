@@ -878,7 +878,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// NOT deferred: stderr here is the bare terminal, and the TUI takes it over at
 	// deps.runTUI below. Delivery stops before that hand-off, so a late launch can
 	// never write raw text into the alt screen; see stopMCPDisclosures's call site.
-	stopMCPDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
+	guardedStderr, stopMCPDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
+	stderr = guardedStderr
 	// Make local plugins live: register their declared tools into the registry and
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the

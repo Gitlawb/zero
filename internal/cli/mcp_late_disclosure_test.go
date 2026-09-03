@@ -62,7 +62,7 @@ func TestLateMCPLaunchReachesTheStartupReporterExactlyOnce(t *testing.T) {
 	// The reporter runs ONCE, here, exactly as runExec and the interactive
 	// startup path run it: before the launch has resolved.
 	var stderr bytes.Buffer
-	stop := reportMCPStartupDisclosures(&stderr, runtime)
+	_, stop := reportMCPStartupDisclosures(&stderr, runtime)
 
 	close(released)
 	<-published
@@ -104,7 +104,7 @@ func TestKnownMCPLaunchIsNotReportedTwice(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Close() })
 
 	var stderr bytes.Buffer
-	stop := reportMCPStartupDisclosures(&stderr, runtime)
+	_, stop := reportMCPStartupDisclosures(&stderr, runtime)
 	stop()
 	if n := strings.Count(stderr.String(), notice); n != 1 {
 		t.Fatalf("a launch known at registration was disclosed %d time(s), want exactly 1:\n%s", n, stderr.String())
@@ -144,7 +144,7 @@ func TestMCPDisclosureAfterStopIsDroppedNotWritten(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Close() })
 
 	var stderr bytes.Buffer
-	stop := reportMCPStartupDisclosures(&stderr, runtime)
+	_, stop := reportMCPStartupDisclosures(&stderr, runtime)
 	// The owner gives up the writer BEFORE the launch resolves, which is the
 	// interactive hand-off to the TUI.
 	stop()
