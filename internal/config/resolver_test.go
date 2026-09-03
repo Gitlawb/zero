@@ -1864,65 +1864,43 @@ func TestResolveNotifyInvalidFocusMode(t *testing.T) {
 	}
 }
 
-func TestResolveNotifyDefaultEmpty(t *testing.T) {
-	path := writeConfig(t, `{}`)
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+// An unconfigured notify block must resolve EMPTY. Defaults live in the TUI
+// (effectiveTUINotifyMode) and in `zero config notify`'s display, not in the
+// resolver: a filled-in default here leaks into headless `zero exec` (BEL +
+// OSC-9 bytes on stderr under -o json) and into the CLI/TUI preserve paths,
+// which must treat "user never chose" differently from "user chose both"
+// (maintainer review, PR #1001).
+func TestResolveNotifyUnconfiguredStaysEmpty(t *testing.T) {
+	// No config file at all.
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	// Missing notify block falls back to the built-in defaults so the
-	// permission-prompt alert works for users who never ran setup.
-	if resolved.Notify.Mode != "both" {
-		t.Errorf("unset notify.mode should default to %q, got %q", "both", resolved.Notify.Mode)
+	if resolved.Notify.Mode != "" || resolved.Notify.FocusMode != "" {
+		t.Fatalf("no config file: notify = %+v, want empty (resolver must not default)", resolved.Notify)
 	}
-	if resolved.Notify.FocusMode != "unfocused" {
-		t.Errorf("unset notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
-	}
-}
 
-func TestResolveNotifyDefaultEmptyBlock(t *testing.T) {
-	// An explicit empty notify block should behave the same as a missing one:
-	// fall back to the built-in defaults.
-	path := writeConfig(t, `{"notify":{}}`)
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if resolved.Notify.Mode != "both" {
-		t.Errorf("empty notify.mode should default to %q, got %q", "both", resolved.Notify.Mode)
-	}
-	if resolved.Notify.FocusMode != "unfocused" {
-		t.Errorf("empty notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
-	}
-}
-
-func TestResolveNotifyDefaultPartialEmpty(t *testing.T) {
-	// Only one field is set; the other should still get the default.
-	path := writeConfig(t, `{"notify":{"mode":"off"}}`)
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if resolved.Notify.Mode != "off" {
-		t.Errorf("notify.mode should be preserved as %q, got %q", "off", resolved.Notify.Mode)
-	}
-	if resolved.Notify.FocusMode != "unfocused" {
-		t.Errorf("empty notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
-	}
-}
-
-func TestResolveNotifyDefaultNoConfigFile(t *testing.T) {
-	// No config file at all: defaults should still apply so the
-	// permission-prompt alert is on for first-run users.
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: "", Env: map[string]string{}})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if resolved.Notify.Mode != "both" {
-		t.Errorf("missing config: notify.mode should default to %q, got %q", "both", resolved.Notify.Mode)
-	}
-	if resolved.Notify.FocusMode != "unfocused" {
-		t.Errorf("missing config: notify.focusMode should default to %q, got %q", "unfocused", resolved.Notify.FocusMode)
+	for name, body := range map[string]string{
+		"empty config": `{}`,
+		"empty block":  `{"notify":{}}`,
+		"mode only":    `{"notify":{"mode":"off"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolved, err := Resolve(ResolveOptions{UserConfigPath: writeConfig(t, body), Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if name == "mode only" {
+				if resolved.Notify.Mode != "off" {
+					t.Errorf("notify.mode = %q, want preserved off", resolved.Notify.Mode)
+				}
+			} else if resolved.Notify.Mode != "" {
+				t.Errorf("notify.mode = %q, want empty (resolver must not default)", resolved.Notify.Mode)
+			}
+			if resolved.Notify.FocusMode != "" {
+				t.Errorf("notify.focusMode = %q, want empty (resolver must not default)", resolved.Notify.FocusMode)
+			}
+		})
 	}
 }
 
