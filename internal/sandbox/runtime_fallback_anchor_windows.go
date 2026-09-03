@@ -27,10 +27,16 @@ import (
 // the directory actually is. Same recipe as verifyWindowsACLTargetNotRedirected,
 // which is why the flag constants and the prefix trim are shared.
 func physicalTempDir() (string, error) {
-	path := os.TempDir()
+	return physicalDir(os.TempDir())
+}
+
+// physicalDir resolves any directory through a handle, for the other places
+// that have to hand EnsurePrivateDir a physical parent. GetFinalPathNameByHandle
+// rather than EvalSymlinks, because EvalSymlinks does not traverse a junction.
+func physicalDir(path string) (string, error) {
 	utf16Path, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return "", fmt.Errorf("encode temp dir %s: %w", path, err)
+		return "", fmt.Errorf("encode directory %s: %w", path, err)
 	}
 	handle, err := windows.CreateFile(
 		utf16Path,
@@ -42,13 +48,13 @@ func physicalTempDir() (string, error) {
 		0,
 	)
 	if err != nil {
-		return "", fmt.Errorf("open temp dir %s: %w", path, err)
+		return "", fmt.Errorf("open directory %s: %w", path, err)
 	}
 	defer windows.CloseHandle(handle)
 	buffer := make([]uint16, windows.MAX_LONG_PATH)
 	n, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], uint32(len(buffer)), windowsFileNameNormalized|windowsVolumeNameDOS)
 	if err != nil {
-		return "", fmt.Errorf("resolve temp dir %s: %w", path, err)
+		return "", fmt.Errorf("resolve directory %s: %w", path, err)
 	}
 	if int(n) < len(buffer) {
 		buffer = buffer[:n]

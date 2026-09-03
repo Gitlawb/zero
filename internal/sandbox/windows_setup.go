@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/peermsg"
 )
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
@@ -708,11 +710,68 @@ func windowsSandboxProfileWithRuntime(profile PermissionProfile, workspaceRoots 
 // created its own root would be granting itself one.
 func ensureWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
 	for _, root := range windowsSandboxRuntimeCandidates(workspaceRoots) {
-		if err := os.MkdirAll(root, 0o700); err != nil {
+		if err := ensureRuntimeCandidateDir(root); err != nil {
 			return fmt.Errorf("create sandbox runtime root %s: %w", root, err)
 		}
 	}
 	return nil
+}
+
+// ensureRuntimeCandidateDir creates one candidate without following a reparse
+// point into anything Zero does not own.
+//
+// VALIDATION BEFORE THE PRIVILEGED MUTATION, NOT AFTER IT. This runs as
+// Administrator, and os.MkdirAll follows links: the invoking user can prepare
+// either candidate's ancestry, so a junction planted at a not-yet-created
+// component below the cache directory, or at the fallback anchor, made elevated
+// setup create the tree beneath a redirected, Administrator-writable target. The
+// ACL applier's own no-follow check runs later and correctly spots the
+// redirection, but by then the privileged create has already happened, outside
+// the applier's rollback boundary. A leaf check after MkdirAll would leave the
+// same gap.
+//
+// EnsurePrivateDir is the descent that does not have it: handle-relative,
+// no-follow, refusing any component that is a link and any leaf this user does
+// not own. It is given a PHYSICAL base first, because it walks from the volume
+// root and a redirected cache or TEMP above the owned tail is the operator's
+// business, not ours -- the same pairing the fallback anchor uses, and the same
+// mistake that refused every fallback on macOS when the parent was left
+// unresolved.
+func ensureRuntimeCandidateDir(root string) error {
+	base, ok := runtimeCandidateBase(root)
+	if !ok {
+		return fmt.Errorf("candidate %s does not sit beneath a known base, so its trust boundary cannot be established", root)
+	}
+	tail, err := filepath.Rel(base, root)
+	if err != nil {
+		return fmt.Errorf("locate %s beneath %s: %w", root, base, err)
+	}
+	// A resolve failure keeps the unresolved base deliberately: EnsurePrivateDir
+	// is still the fail-closed check, and refusing there names the real component
+	// rather than hiding it behind a resolver error.
+	physical := base
+	if resolved, resolveErr := physicalDir(base); resolveErr == nil && resolved != "" {
+		physical = resolved
+	}
+	return peermsg.EnsurePrivateDir(filepath.Join(physical, tail))
+}
+
+// runtimeCandidateBase returns the ancestor of a candidate that belongs to the
+// operator rather than to Zero. Everything below it was created by us and has
+// no business being a link.
+func runtimeCandidateBase(root string) (string, bool) {
+	// The fallback candidate is <temp>/zero-runtime-<tag>/v1/<digest>, and the
+	// anchor's own parent is the operator's temp directory.
+	if isFallbackRuntimeRoot(root) {
+		return filepath.Dir(fallbackRuntimeAnchor()), true
+	}
+	// The cache candidate is <cacheRoot>/zero/runtime/v1/<digest>.
+	if cacheRoot, err := sandboxUserCacheDir(); err == nil {
+		if cleaned := canonicalSandboxWorkspaceRoot(cacheRoot); cleaned != "" && cleaned != "." && pathWithinRoot(cleaned, root) {
+			return cleaned, true
+		}
+	}
+	return "", false
 }
 
 // shortWindowsACLPlanHash trims a plan hash for a human-facing error. Twelve hex
