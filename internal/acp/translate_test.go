@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -217,6 +218,53 @@ func TestBrowserPermissionTitlesMirrorSafeToolArguments(t *testing.T) {
 	title := browserToolTitle("open", `{"url":"`+longHost+`"}`)
 	if !utf8.ValidString(title) || utf8.RuneCountInString(title) > len("browser open ")+61 || strings.Contains(title, "token=") {
 		t.Fatalf("bounded browser origin title = %q", title)
+	}
+}
+
+func TestBrowserOpenTitlesRejectDecodedUnicodePresentationControls(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://safe.example%E2%80%AEevil.test/path",
+		"https://safe.example%E2%81%A6evil.test/path",
+		"https://safe.example%C2%85evil.test/path",
+		"https://safe.example%E2%80%A8evil.test/path",
+		"https://safe.example%E2%80%A9evil.test/path",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			normalized, err := tools.NormalizeBrowserOpenURL(rawURL)
+			if err != nil {
+				t.Fatalf("execution URL rejected: %v", err)
+			}
+			if normalized != rawURL {
+				t.Fatalf("execution URL = %q, want unchanged %q", normalized, rawURL)
+			}
+
+			args, err := json.Marshal(map[string]any{"url": rawURL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			updates := []ToolCallUpdate{
+				toolCallStart(agent.ToolCall{ID: "start", Name: "browser_open", Arguments: string(args)}),
+				permissionToolCall(agent.PermissionRequest{ToolCallID: "permission", ToolName: "browser_open", Args: map[string]any{"url": rawURL}}),
+			}
+			for _, update := range updates {
+				encoded, err := json.Marshal(update)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var decoded ToolCallUpdate
+				if err := json.Unmarshal(encoded, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				if decoded.Title != "browser open" {
+					t.Fatalf("unsafe browser title survived wire round trip: %q", decoded.Title)
+				}
+				for _, r := range decoded.Title {
+					if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+						t.Fatalf("browser title contains unsafe presentation rune %U: %q", r, decoded.Title)
+					}
+				}
+			}
+		})
 	}
 }
 

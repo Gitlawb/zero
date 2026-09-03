@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -119,13 +120,29 @@ func browserToolTitle(command, rawArgs string) string {
 			return "browser open"
 		}
 		origin := u.Scheme + "://" + u.Host
-		if !utf8.ValidString(origin) {
+		if !browserTitleTextSafe(origin) {
 			return "browser open"
 		}
 		return "browser open " + truncateHint(origin)
 	default:
 		return "browser " + command
 	}
+}
+
+// browserTitleTextSafe validates text after URL parsing has decoded escaped
+// UTF-8 in the host. Valid UTF-8 alone is not presentation-safe: control,
+// format/bidi, and line/paragraph separator runes can reorder or split the
+// permission label shown to a user. The execution URL remains unchanged.
+func browserTitleTextSafe(text string) bool {
+	if !utf8.ValidString(text) {
+		return false
+	}
+	for _, r := range text {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // exactJSONStringArg mirrors ZERO's map-based tool argument decoding: only the
