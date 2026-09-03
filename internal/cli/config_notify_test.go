@@ -399,6 +399,73 @@ func TestRunConfigNotifyResetClearsStoredValues(t *testing.T) {
 	}
 }
 
+// CodeRabbit regression (PR #1001): the command manages a user preference and
+// must not require provider resolution. A brand-new user with NO provider
+// configured (the resolver would return ErrNoActiveProvider) can still read,
+// set, and reset their notification preference.
+func TestRunConfigNotifyWorksWithoutAnyProviderConfigured(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// resolveConfig fails the way the real resolver does for a fresh user —
+	// the command must never call it, so a panic-free stub is enough to prove
+	// the point; use the failing resolver to catch any regression to the
+	// resolve-first shape.
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+	}
+
+	// Read works and shows defaults.
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"config", "notify"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("read: exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "mode:      (default)") {
+		t.Errorf("read should show (default), got: %s", stdout.String())
+	}
+
+	// Write works.
+	stdout.Reset()
+	exitCode = runWithDeps([]string{"config", "notify", "--mode", "bell", "--focus", "always"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("write: exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if cfg.Notify.Mode != "bell" || cfg.Notify.FocusMode != "always" {
+		t.Fatalf("write: Notify = %+v, want bell/always", cfg.Notify)
+	}
+
+	// JSON read reflects the stored pair.
+	stdout.Reset()
+	exitCode = runWithDeps([]string{"config", "notify", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("json: exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json output invalid: %v\n%s", err, stdout.String())
+	}
+	if payload["mode"] != "bell" || payload["focusMode"] != "always" {
+		t.Errorf("json = mode %v focus %v, want bell/always", payload["mode"], payload["focusMode"])
+	}
+
+	// Reset works.
+	stdout.Reset()
+	exitCode = runWithDeps([]string{"config", "notify", "--reset"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("reset: exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	cfg = readFileConfig(t, configPath)
+	if cfg.Notify.Mode != "" || cfg.Notify.FocusMode != "" {
+		t.Errorf("reset: Notify = %+v, want empty", cfg.Notify)
+	}
+}
+
 // `zero config` (no subcommand) still works after the dispatch change.
 func TestRunConfigSummaryStillWorks(t *testing.T) {
 	var stdout bytes.Buffer
