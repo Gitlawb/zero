@@ -17,30 +17,6 @@ import (
 
 const processStillActive = 259
 
-func awaitProcessExit(t *testing.T, pid int) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for processIsActive(pid) {
-		if time.Now().After(deadline) {
-			t.Fatalf("descendant process %d is still running after command cancellation", pid)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func processIsActive(pid int) bool {
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
-		return false
-	}
-	defer windows.CloseHandle(handle)
-	var exitCode uint32
-	if err := windows.GetExitCodeProcess(handle, &exitCode); err != nil {
-		return false
-	}
-	return exitCode == processStillActive
-}
-
 func TestRunCommandPreservesDetachedChildAfterSuccessfulExit(t *testing.T) {
 	switch os.Getenv("ZERO_SUCCESSFUL_COMMAND_TREE_HELPER") {
 	case "root":
@@ -50,7 +26,10 @@ func TestRunCommandPreservesDetachedChildAfterSuccessfulExit(t *testing.T) {
 		}
 		defer nullFile.Close()
 		child := exec.Command(os.Args[0], "-test.run=^TestRunCommandPreservesDetachedChildAfterSuccessfulExit$")
-		child.Env = append(os.Environ(), "ZERO_SUCCESSFUL_COMMAND_TREE_HELPER=child")
+		child.Env = append(os.Environ(),
+			"ZERO_SUCCESSFUL_COMMAND_TREE_HELPER=child",
+			"ZERO_SUCCESSFUL_COMMAND_TREE_STOP_FILE="+os.Getenv("ZERO_SUCCESSFUL_COMMAND_TREE_STOP_FILE"),
+		)
 		child.Stdin = nullFile
 		child.Stdout = nullFile
 		child.Stderr = nullFile
@@ -61,48 +40,34 @@ func TestRunCommandPreservesDetachedChildAfterSuccessfulExit(t *testing.T) {
 			os.Exit(3)
 		}
 		if err := os.WriteFile(os.Getenv("ZERO_SUCCESSFUL_COMMAND_TREE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_ = os.WriteFile(os.Getenv("ZERO_SUCCESSFUL_COMMAND_TREE_STOP_FILE"), nil, 0o600)
+			_ = child.Wait()
 			os.Exit(4)
 		}
 		return
 	case "child":
-		time.Sleep(30 * time.Second)
+		waitForCommandTreeStop(os.Getenv("ZERO_SUCCESSFUL_COMMAND_TREE_STOP_FILE"), 30*time.Second)
 		return
 	}
 
-	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	ctx := context.Background()
+	root := t.TempDir()
+	pidFile := filepath.Join(root, "child.pid")
+	stopFile := filepath.Join(root, "stop")
+	child := ownHelperProcess(t, pidFile, stopFile)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunCommandPreservesDetachedChildAfterSuccessfulExit$")
 	command.Env = append(os.Environ(),
 		"ZERO_SUCCESSFUL_COMMAND_TREE_HELPER=root",
 		"ZERO_SUCCESSFUL_COMMAND_TREE_PID_FILE="+pidFile,
+		"ZERO_SUCCESSFUL_COMMAND_TREE_STOP_FILE="+stopFile,
 	)
-	if err := RunCommand(ctx, command); err != nil {
+	result := runCommandAsync(ctx, command)
+	pid := child.waitReady(t, 2*time.Second)
+	if err := waitForRunCommand(t, result, 4*time.Second); err != nil {
 		t.Fatalf("RunCommand failed: %v", err)
 	}
-	pidData, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("read detached child PID: %v", err)
-	}
-	pid, err := strconv.Atoi(string(pidData))
-	if err != nil {
-		t.Fatalf("parse detached child PID %q: %v", pidData, err)
-	}
-	t.Cleanup(func() {
-		if !processIsActive(pid) {
-			return
-		}
-		process, findErr := os.FindProcess(pid)
-		if findErr != nil {
-			t.Errorf("find detached child %d: %v", pid, findErr)
-			return
-		}
-		if killErr := process.Kill(); killErr != nil {
-			t.Errorf("kill detached child %d: %v", pid, killErr)
-			return
-		}
-		awaitProcessExit(t, pid)
-	})
-	if !processIsActive(pid) {
+	if !child.running() {
 		t.Fatalf("successful RunCommand terminated detached child %d", pid)
 	}
 }

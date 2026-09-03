@@ -30,26 +30,45 @@ func beforeToolConfig(hooks ...Definition) Config {
 func TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
 	switch os.Getenv("ZERO_HOOK_TREE_HELPER") {
 	case "parent":
+		if err := os.WriteFile(os.Getenv("ZERO_HOOK_TREE_PARENT_PID_FILE"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			os.Exit(2)
+		}
 		child := exec.Command(os.Args[0], "-test.run=^TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput$")
-		child.Env = append(os.Environ(), "ZERO_HOOK_TREE_HELPER=grandchild")
+		child.Env = append(os.Environ(),
+			"ZERO_HOOK_TREE_HELPER=grandchild",
+			"ZERO_HOOK_TREE_STOP_FILE="+os.Getenv("ZERO_HOOK_TREE_STOP_FILE"),
+		)
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil {
-			os.Exit(2)
-		}
-		if err := os.WriteFile(os.Getenv("ZERO_HOOK_TREE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
 			os.Exit(3)
 		}
-		select {}
+		if err := os.WriteFile(os.Getenv("ZERO_HOOK_TREE_GRANDCHILD_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_ = os.WriteFile(os.Getenv("ZERO_HOOK_TREE_STOP_FILE"), nil, 0o600)
+			_ = child.Wait()
+			os.Exit(4)
+		}
+		if err := os.WriteFile(os.Getenv("ZERO_HOOK_TREE_READY_FILE"), []byte("ready"), 0o600); err != nil {
+			_ = os.WriteFile(os.Getenv("ZERO_HOOK_TREE_STOP_FILE"), nil, 0o600)
+			_ = child.Wait()
+			os.Exit(5)
+		}
+		waitForHookTreeStop(os.Getenv("ZERO_HOOK_TREE_STOP_FILE"), 30*time.Second)
+		_ = child.Wait()
+		return
 	case "grandchild":
-		time.Sleep(30 * time.Second)
+		waitForHookTreeStop(os.Getenv("ZERO_HOOK_TREE_STOP_FILE"), 30*time.Second)
 		os.Exit(0)
 	}
 
-	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	root := t.TempDir()
+	parentPIDFile := filepath.Join(root, "parent.pid")
+	grandchildPIDFile := filepath.Join(root, "grandchild.pid")
+	readyFile := filepath.Join(root, "ready")
+	stopFile := filepath.Join(root, "stop")
+	owner := newHookTestProcessOwner(t, stopFile, parentPIDFile, grandchildPIDFile)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	started := time.Now()
 	resultChannel := make(chan commandResult, 1)
 	go func() {
 		resultChannel <- execCommandRunner(
@@ -58,15 +77,23 @@ func TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
 			[]string{"-test.run=^TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput$"},
 			nil,
 			"",
-			append(os.Environ(), "ZERO_HOOK_TREE_HELPER=parent", "ZERO_HOOK_TREE_PID_FILE="+pidFile),
+			append(os.Environ(),
+				"ZERO_HOOK_TREE_HELPER=parent",
+				"ZERO_HOOK_TREE_PARENT_PID_FILE="+parentPIDFile,
+				"ZERO_HOOK_TREE_GRANDCHILD_PID_FILE="+grandchildPIDFile,
+				"ZERO_HOOK_TREE_READY_FILE="+readyFile,
+				"ZERO_HOOK_TREE_STOP_FILE="+stopFile,
+			),
 		)
 	}()
+	parentPID, grandchildPID := awaitHookTreeReady(t, owner, readyFile, parentPIDFile, grandchildPIDFile)
+	started := time.Now()
 	var result commandResult
 	select {
 	case result = <-resultChannel:
-	case <-time.After(4 * time.Second):
+	case <-time.After(6 * time.Second):
 		cancel()
-		t.Fatal("execCommandRunner did not return within four seconds after its timeout")
+		t.Fatal("execCommandRunner did not return within six seconds after its timeout")
 	}
 	if elapsed := time.Since(started); elapsed > 4*time.Second {
 		t.Fatalf("command remained blocked by grandchild output handles for %s", elapsed)
@@ -74,15 +101,50 @@ func TestExecCommandRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
 	if result.Err == nil && result.ExitCode == 0 {
 		t.Fatalf("timed-out command unexpectedly succeeded: %#v", result)
 	}
-	pidData, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("read grandchild PID: %v", err)
+	for role, pid := range map[string]int{"parent": parentPID, "grandchild": grandchildPID} {
+		if err := owner.awaitExit(pid, 2*time.Second); err != nil {
+			t.Fatalf("%s process %d survived hook cancellation: %v", role, pid, err)
+		}
 	}
-	pid, err := strconv.Atoi(string(pidData))
-	if err != nil {
-		t.Fatalf("parse grandchild PID %q: %v", pidData, err)
+}
+
+func waitForHookTreeStop(stopFile string, lifetime time.Duration) {
+	deadline := time.Now().Add(lifetime)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(stopFile); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	awaitHookProcessExit(t, pid)
+}
+
+func awaitHookTreeReady(t *testing.T, owner *hookTestProcessOwner, readyFile string, pidFiles ...string) (int, int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			pids := make([]int, 0, len(pidFiles))
+			for _, path := range pidFiles {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read helper PID handoff %q: %v", path, err)
+				}
+				pid, err := strconv.Atoi(string(data))
+				if err != nil {
+					t.Fatalf("parse helper PID handoff %q: %v", data, err)
+				}
+				if err := owner.retain(pid); err != nil {
+					t.Fatalf("retain helper process %d: %v", pid, err)
+				}
+				pids = append(pids, pid)
+			}
+			return pids[0], pids[1]
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("process-tree helper did not hand off parent and grandchild identities")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestDispatchRunsMatchingHooksAndRecordsAudit(t *testing.T) {

@@ -19,46 +19,58 @@ func TestRunCommandFailsBeforeDescendantCanEscapeWhenJobAssignmentFails(t *testi
 	switch os.Getenv("ZERO_ASSIGNMENT_FAILURE_TREE_HELPER") {
 	case "root":
 		child := exec.Command(os.Args[0], "-test.run=^TestRunCommandFailsBeforeDescendantCanEscapeWhenJobAssignmentFails$")
-		child.Env = append(os.Environ(), "ZERO_ASSIGNMENT_FAILURE_TREE_HELPER=child")
+		child.Env = append(os.Environ(),
+			"ZERO_ASSIGNMENT_FAILURE_TREE_HELPER=child",
+			"ZERO_ASSIGNMENT_FAILURE_TREE_STOP_FILE="+os.Getenv("ZERO_ASSIGNMENT_FAILURE_TREE_STOP_FILE"),
+		)
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
 		if err := os.WriteFile(os.Getenv("ZERO_ASSIGNMENT_FAILURE_TREE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_ = os.WriteFile(os.Getenv("ZERO_ASSIGNMENT_FAILURE_TREE_STOP_FILE"), nil, 0o600)
+			_ = child.Wait()
 			os.Exit(3)
 		}
 		return
 	case "child":
-		time.Sleep(30 * time.Second)
+		waitForCommandTreeStop(os.Getenv("ZERO_ASSIGNMENT_FAILURE_TREE_STOP_FILE"), 30*time.Second)
 		return
 	}
 
+	root := t.TempDir()
+	stopFile := filepath.Join(root, "stop")
 	originalAssign := assignCommandProcessToJob
-	assignCommandProcessToJob = func(windows.Handle, windows.Handle) error {
+	commandOwner := ownHelperHandle(t, stopFile)
+	assignCommandProcessToJob = func(_ windows.Handle, process windows.Handle) error {
+		if err := commandOwner.retain(process); err != nil {
+			return err
+		}
 		return windows.ERROR_ACCESS_DENIED
 	}
 	t.Cleanup(func() { assignCommandProcessToJob = originalAssign })
 
-	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	ctx := context.Background()
+	pidFile := filepath.Join(root, "child.pid")
+	escapedChild := ownHelperProcess(t, pidFile, stopFile)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunCommandFailsBeforeDescendantCanEscapeWhenJobAssignmentFails$")
 	command.Env = append(os.Environ(),
 		"ZERO_ASSIGNMENT_FAILURE_TREE_HELPER=root",
 		"ZERO_ASSIGNMENT_FAILURE_TREE_PID_FILE="+pidFile,
+		"ZERO_ASSIGNMENT_FAILURE_TREE_STOP_FILE="+stopFile,
 	)
-	started := time.Now()
-	err := RunCommand(ctx, command)
-	if elapsed := time.Since(started); elapsed > 4*time.Second {
-		t.Fatalf("RunCommand took %s after job assignment failed", elapsed)
-	}
+	err := waitForRunCommand(t, runCommandAsync(ctx, command), 4*time.Second)
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("RunCommand error = %v, want ERROR_ACCESS_DENIED", err)
 	}
 	if command.ProcessState == nil || !command.ProcessState.Exited() {
 		t.Fatalf("suspended command was not killed and reaped: state = %v", command.ProcessState)
 	}
-	if _, statErr := os.Stat(pidFile); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("suspended command spawned a descendant after job assignment failed: PID file error = %v", statErr)
+	observed, observeErr := escapedChild.observeReady()
+	_, statErr := os.Stat(pidFile)
+	if observeErr != nil || observed || !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("suspended command spawned a descendant after job assignment failed: observed = %t, observation error = %v, PID file error = %v", observed, observeErr, statErr)
 	}
 }
