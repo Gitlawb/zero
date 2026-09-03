@@ -17,6 +17,15 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 			return 1
 		}
+		// The marker attests to a PLAN. This attests to the OBJECT that plan was
+		// applied to, which cleanup can reclaim and an ordinary run then recreates
+		// without the capability ACE. Checked before the token is minted, so the
+		// operator is told to rerun setup instead of watching every sandboxed write
+		// fail with a bare access-denied.
+		if err := verifyWindowsRuntimeRootCapability(config); err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+			return 1
+		}
 	case WindowsSandboxLevelUnelevated:
 		if err := ensureWindowsUnelevatedSetup(config); err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
