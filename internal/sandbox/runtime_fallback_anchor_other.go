@@ -23,5 +23,11 @@ import (
 // EvalSymlinks is the correct resolver off Windows, where the only reparse
 // shape is a symlink and it traverses them.
 func physicalTempDir() (string, error) {
-	return filepath.EvalSymlinks(os.TempDir())
+	return physicalDir(os.TempDir())
+}
+
+// physicalDir resolves any directory the same way, for the other places that
+// have to hand EnsurePrivateDir a physical parent.
+func physicalDir(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
 }
