@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"net"
 	"os"
@@ -262,24 +263,57 @@ type extractLock struct {
 // lockExtract blocks until dest is free and returns its release func. Entries
 // are refcounted so the map cannot grow with every link id ever uploaded.
 func lockExtract(dest string) func() {
+	entry := holdExtractRef(dest)
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		dropExtractRef(dest)
+	}
+}
+
+// tryLockExtract takes the in-process lock without waiting, reporting held when
+// a goroutine in this daemon owns dest. Recovery cannot use lockExtract: an
+// extract holds its destination across the whole clone, so a recovering pass
+// that blocked here would wait out that clone before deciding anything about a
+// destination it was going to skip either way.
+func tryLockExtract(dest string) (release func(), held bool) {
+	entry := holdExtractRef(dest)
+	if !entry.mu.TryLock() {
+		dropExtractRef(dest)
+		return nil, true
+	}
+	return func() {
+		entry.mu.Unlock()
+		dropExtractRef(dest)
+	}, false
+}
+
+// holdExtractRef returns dest's lock entry with a reference taken, so the entry
+// cannot be dropped from the map while a caller is waiting on it.
+func holdExtractRef(dest string) *extractLock {
 	extractLocks.mu.Lock()
+	defer extractLocks.mu.Unlock()
 	entry := extractLocks.locks[dest]
 	if entry == nil {
 		entry = &extractLock{}
 		extractLocks.locks[dest] = entry
 	}
 	entry.refs++
-	extractLocks.mu.Unlock()
+	return entry
+}
 
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
-		extractLocks.mu.Lock()
-		entry.refs--
-		if entry.refs == 0 {
-			delete(extractLocks.locks, dest)
-		}
-		extractLocks.mu.Unlock()
+// dropExtractRef releases one reference and forgets the entry once nothing holds
+// it, which is what keeps the map from growing with every link id ever seen.
+func dropExtractRef(dest string) {
+	extractLocks.mu.Lock()
+	defer extractLocks.mu.Unlock()
+	entry := extractLocks.locks[dest]
+	if entry == nil {
+		return
+	}
+	entry.refs--
+	if entry.refs == 0 {
+		delete(extractLocks.locks, dest)
 	}
 }
 
@@ -325,82 +359,419 @@ func tryLockExtractFile(bundleDir, dest string) (release func(), held bool, err 
 	return func() { _ = lock.Release() }, false, nil
 }
 
-// recoverBundleDir repairs what a crash left behind in dir. A staging dir whose
-// backup belongs to a link with no live tree is put back; one that no extract
-// can still own is removed. It is called once at bridge construction, before any
-// upload is served, and never removes a staging dir a live extract may hold.
+// recoverBundleDir repairs what a crash left behind in dir. It runs in two
+// halves: a scan that discovers and classifies every candidate without touching
+// anything, and a reconcile per destination that takes that destination's locks,
+// re-validates everything it is about to act on, and only then acts. Splitting
+// them is what keeps a decision from being made against state nobody was
+// holding, and what keeps one destination's fault from reaching another's.
+//
+// Nothing here reads a clock, and nothing here remembers the previous pass. Both
+// were sources of deletes the on-disk state did not license: an mtime says when
+// a directory was written, not who owns it, and a per-pass map makes the second
+// pass over the same directory reach a different answer from the first.
+//
+// It is called once at bridge construction, before any upload is served, and
+// never removes a staging dir a live extract may hold.
 func recoverBundleDir(dir string, logf func(string, ...any)) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	byDest := scanBundleDir(dir, logf)
+	// Sorted, so two passes over one directory visit destinations in the same
+	// order and a failure is reproducible rather than a function of readDir.
+	for _, id := range slices.Sorted(maps.Keys(byDest)) {
+		reconcileLink(dir, id, byDest[id], logf)
+	}
+}
+
+// bundleCandidate is a staging directory the scan attributed to a destination:
+// its name passed the strict grammar, it holds no work tree at its root, and its
+// marker agrees with both the name and a link id the write path would accept.
+type bundleCandidate struct {
+	path string
+	seq  int64
+	dest string
+}
+
+// scanBundleDir reads dir once and groups every attributable staging directory
+// by the destination its marker names. It mutates nothing: a directory that is
+// going to be deleted is decided on under the destination's lock, and this runs
+// before any lock is held. Entries it cannot attribute are reported here, once
+// per pass, because a copy nothing names is one an operator cannot find.
+func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCandidate {
 	entries, err := stagingFS.readDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logf("remote: could not scan bundle dir %s: %v", dir, err)
 		}
-		return
+		return nil
 	}
-	// One link can have several staged backups: a cleanup that could not finish
-	// leaves one behind, and a later crash adds another. Newest first, so the
-	// tree that comes back is the most recent one rather than whichever the
-	// directory happened to list first. The order comes from the sequence the
-	// extract allocated against the entries already in the directory, not from a
-	// wall clock and not from a directory mtime. A clock can move backward and
-	// invert two stamps; an extract that read an existing entry always numbers
-	// above it. Mtimes stay rejected for their own reasons: they track a tree's
-	// contents, and a coarse filesystem gives two of them the same value anyway.
-	staged := make([]stagedExtract, 0, len(entries))
+	byDest := map[string][]bundleCandidate{}
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), stagingPrefix) {
 			continue
 		}
-		stamp, stamped := stagingStamp(entry.Name())
-		staged = append(staged, stagedExtract{path: filepath.Join(dir, entry.Name()), stamp: stamp, stamped: stamped})
+		staging := filepath.Join(dir, entry.Name())
+		seq, ok := stagingStamp(entry.Name())
+		if !ok {
+			logf("remote: %s does not carry a name this code writes; leaving it in place", staging)
+			continue
+		}
+		id, ok := attributeStagingDir(dir, staging, seq, logf)
+		if !ok {
+			continue
+		}
+		byDest[id] = append(byDest[id], bundleCandidate{path: staging, seq: seq, dest: id})
 	}
-	slices.SortStableFunc(staged, func(a, b stagedExtract) int {
-		if a.stamped != b.stamped {
-			if a.stamped {
-				return -1
-			}
-			return 1
-		}
-		return cmp.Compare(b.stamp, a.stamp)
-	})
+	return byDest
+}
 
-	// Which links this pass put a tree back on, and the staging it came from.
-	restored := map[string]stagedExtract{}
-	for _, s := range staged {
-		staging := s.path
-		if restoreStagedBackup(dir, s, restored, logf) {
+// attributeStagingDir decides whether staging is this code's to act on. The
+// order is load-bearing: the work-tree veto runs before the marker is read,
+// because link ids starting with '.' used to be accepted, so a published work
+// tree can sit under the exact generated name AND carry a file called txn at its
+// root. Reading the marker first would let that file license a delete.
+func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...any)) (string, bool) {
+	if _, err := stagingFS.stat(filepath.Join(staging, ".git")); err == nil {
+		logf("remote: %s holds a work tree, not a staged extract; leaving it in place", staging)
+		return "", false
+	}
+	m, err := readMarker(staging)
+	if err != nil {
+		logf("remote: %s has no usable transaction marker (%v); leaving it in place", staging, err)
+		return "", false
+	}
+	if m.Kind != txnKindBundleExtract {
+		logf("remote: %s carries a %q transaction marker, which no extract wrote; leaving it in place", staging, m.Kind)
+		return "", false
+	}
+	if m.Seq != seq {
+		// The name is the authority: createSequencedStagingDir walks up from the
+		// number it asked for, and it reads the name back before using it. A
+		// marker that disagrees with the name proves nothing about who wrote
+		// either of them.
+		logf("remote: %s carries a marker for sequence %d but is named %d; leaving it in place", staging, m.Seq, seq)
+		return "", false
+	}
+	// Everything read off disk goes back through the write path's own checks. A
+	// marker is a file, and a file can be edited by anything that can reach the
+	// bundle dir.
+	id, err := sanitizeLinkID(m.Dest)
+	if err != nil {
+		logf("remote: staged tree in %s names an invalid link (%v); leaving it in place", staging, err)
+		return "", false
+	}
+	if !withinDir(dir, filepath.Join(dir, id)) {
+		logf("remote: staged tree in %s names a link outside the bundle dir; leaving it in place", staging)
+		return "", false
+	}
+	return id, true
+}
+
+// candidateState is one candidate classified per the recovery design. empty,
+// committed and usable are three independent facts, and the disposition is a
+// function of them plus the destination's own state; nothing else.
+type candidateState struct {
+	bundleCandidate
+	empty     bool
+	committed bool
+	usable    bool
+}
+
+// candidateVerdict separates the two ways a candidate leaves the reconcile
+// without being acted on. Dropped means it is no longer attributable, which is
+// this candidate's business alone. Unreadable means a filesystem fault, which
+// says nothing about the candidate and stops the whole destination: acting on
+// the rest would be deciding against a directory that could not be read.
+type candidateVerdict int
+
+const (
+	verdictOwned candidateVerdict = iota
+	verdictDropped
+	verdictUnreadable
+)
+
+// reconcileLink classifies and then acts on every candidate for one destination,
+// with that destination's in-process and cross-process locks held across both.
+// The lock covers the check and the action together: a live extract mid-swap is
+// indistinguishable on disk from a crashed one, and the lock is the only thing
+// that tells them apart.
+func reconcileLink(dir, id string, cands []bundleCandidate, logf func(string, ...any)) {
+	dest := filepath.Join(dir, id)
+	unlock, held := tryLockExtract(dest)
+	if held {
+		logf("remote: an extract in this process holds %s; leaving its staged copies alone", id)
+		return
+	}
+	defer unlock()
+	unlockFile, heldFile, err := tryLockExtractFile(dir, dest)
+	if err != nil {
+		logf("remote: could not lock %s while recovering it: %v", id, err)
+		return
+	}
+	if heldFile {
+		logf("remote: another process holds %s; leaving its staged copies alone", id)
+		return
+	}
+	defer unlockFile()
+
+	states, ok := classifyCandidates(dir, id, cands, logf)
+	if !ok {
+		return
+	}
+	present, usable, ok := classifyDest(dest, logf)
+	if !ok {
+		return
+	}
+	if present && usable {
+		reconcileAgainstUsableDest(dir, id, states, logf)
+		return
+	}
+	restoreForDest(dir, id, dest, present, states, logf)
+}
+
+// classifyCandidates re-validates every candidate under the lock and returns
+// them newest first. The scan's reading is deliberately not trusted: it ran
+// before the lock, so anything it saw could have been changed by the process the
+// lock now excludes.
+func classifyCandidates(dir, id string, cands []bundleCandidate, logf func(string, ...any)) ([]candidateState, bool) {
+	states := make([]candidateState, 0, len(cands))
+	for _, c := range cands {
+		st, verdict := classifyCandidate(dir, c, logf)
+		switch verdict {
+		case verdictOwned:
+			states = append(states, st)
+		case verdictDropped:
 			continue
+		case verdictUnreadable:
+			logf("remote: leaving every staged copy for %s in place until %s can be read", id, c.path)
+			return nil, false
 		}
-		// No backup to attribute. A dir with a .git at its root is not staging at
-		// all: link ids starting with '.' used to be accepted, so this may be a
-		// work tree someone published under a name that now looks reserved.
-		// Never reap that.
-		if _, err := stagingFS.stat(filepath.Join(staging, ".git")); err == nil {
-			logf("remote: %s holds a work tree, not a staged extract; leaving it in place", staging)
-			continue
-		}
-		// Only reap once no clone can still be running: gitTimeout bounds a
-		// clone, so anything older than that is abandoned.
-		info, err := stagingFS.stat(staging)
-		if err != nil || time.Since(info.ModTime()) < 2*gitTimeout {
-			continue
-		}
-		if err := stagingFS.removeAll(staging); err != nil {
-			logf("remote: could not remove abandoned staging dir %s: %v", staging, err)
+	}
+	// Sequence order is transaction order: an extract that reads an existing
+	// entry always numbers above it, so a higher sequence is a later
+	// transaction whatever the clock did in between.
+	slices.SortStableFunc(states, func(a, b candidateState) int { return cmp.Compare(b.seq, a.seq) })
+	return states, true
+}
+
+func classifyCandidate(dir string, c bundleCandidate, logf func(string, ...any)) (candidateState, candidateVerdict) {
+	st := candidateState{bundleCandidate: c}
+	id, ok := attributeStagingDir(dir, c.path, c.seq, logf)
+	if !ok || id != c.dest {
+		return st, verdictDropped
+	}
+	backup := filepath.Join(c.path, "backup")
+	switch _, err := stagingFS.stat(backup); {
+	case err == nil:
+	case os.IsNotExist(err):
+		// A readable marker with no set-aside content is the one shape that
+		// proves the directory holds nothing: owned, and empty.
+		st.empty = true
+		return st, verdictOwned
+	default:
+		logf("remote: could not read the staged tree in %s: %v", c.path, err)
+		return st, verdictUnreadable
+	}
+	switch _, err := stagingFS.stat(filepath.Join(c.path, committedFile)); {
+	case err == nil:
+		st.committed = true
+	case os.IsNotExist(err):
+	default:
+		logf("remote: could not read the commit flag in %s: %v", c.path, err)
+		return st, verdictUnreadable
+	}
+	switch _, err := stagingFS.stat(filepath.Join(backup, ".git")); {
+	case err == nil:
+		st.usable = true
+	case os.IsNotExist(err):
+		// Durable: this copy will never pass the predicate, so it is skipped in
+		// selection and kept. That is a different fact from the error below.
+	default:
+		logf("remote: could not tell whether the staged tree in %s is usable: %v", c.path, err)
+		return st, verdictUnreadable
+	}
+	return st, verdictOwned
+}
+
+// classifyDest reports whether dest exists and whether it can serve. Usability
+// is dest/.git present, checked structurally. isGitWorktree shells out to git
+// rev-parse, which discovers upward, so a bundle dir under any enclosing
+// checkout would answer "usable" for an empty destination and license deleting
+// every copy beside it.
+func classifyDest(dest string, logf func(string, ...any)) (present, usable, ok bool) {
+	switch _, err := stagingFS.stat(dest); {
+	case err == nil:
+	case os.IsNotExist(err):
+		return false, false, true
+	default:
+		logf("remote: could not read %s: %v; leaving its staged copies in place", dest, err)
+		return false, false, false
+	}
+	switch _, err := stagingFS.stat(filepath.Join(dest, ".git")); {
+	case err == nil:
+		return true, true, true
+	case os.IsNotExist(err):
+		return true, false, true
+	default:
+		logf("remote: could not tell whether %s is usable: %v; leaving its staged copies in place", dest, err)
+		return true, false, false
+	}
+}
+
+// reconcileAgainstUsableDest handles the destination that is present and can
+// serve. Only a commit flag licenses a delete here: the flag is written by the
+// transaction that published over that exact copy, so it is evidence about this
+// copy. "The destination exists" is not, and deleting on it is what loses the
+// last copy of a tree when the destination came from anywhere else.
+func reconcileAgainstUsableDest(dir, id string, states []candidateState, logf func(string, ...any)) {
+	for _, c := range states {
+		switch {
+		case c.empty:
+			reapOwnedEmpty(c.path, logf)
+		case c.committed:
+			// The upload that published dest reported success to its client
+			// while this whole copy of the prior tree was still on disk. Say
+			// what is being reclaimed, so a bridge running without a logger is
+			// not the difference between the space being accounted for and not.
+			logf("remote: reclaiming the staged tree in %s that %s's live tree superseded", c.path, id)
+			if err := stagingFS.removeAll(c.path); err != nil {
+				logf("remote: could not remove superseded staging dir %s: %v", c.path, err)
+			}
+		default:
+			logf("remote: keeping the staged tree in %s: nothing proves %s published over it", c.path, id)
+			parkKeptBackup(dir, c.path, id, logf)
 		}
 	}
 }
 
-// stagedExtract is a staging dir plus the creation order recorded in its name.
-// stamped is false for a name this package did not write, which is an ordering
-// it must not claim to know.
-type stagedExtract struct {
-	path    string
-	stamp   int64
-	stamped bool
+// restoreForDest handles the destination that is absent or cannot serve. It
+// selects before it moves anything: a destination with no usable candidate is
+// left exactly as it was found, because taking its husk apart with nothing to
+// put in its place leaves the operator with strictly less than they had.
+func restoreForDest(dir, id, dest string, present bool, states []candidateState, logf func(string, ...any)) {
+	winner := selectCandidate(states)
+	if winner < 0 {
+		logf("remote: %s has no usable staged copy to restore; leaving it as it is", id)
+		parkRemaining(dir, id, states, -1, logf)
+		return
+	}
+	husk := ""
+	if present {
+		var err error
+		husk, err = setAsideHusk(dir, id, dest, logf)
+		if err != nil {
+			logf("remote: could not set the unusable tree at %s aside: %v; leaving %s alone", dest, err, id)
+			return
+		}
+	}
+	sel := states[winner]
+	if err := fsutil.RenameWithRetry(filepath.Join(sel.path, "backup"), dest, stagingFS.rename); err != nil {
+		logf("remote: could not restore the staged tree for %s from %s: %v", id, sel.path, err)
+		// No fallback to an older copy: installing one would put a tree at dest
+		// that the next pass reads as having published over the newer copy,
+		// which is how a retained copy turns into a deleted one.
+		if husk != "" {
+			putHuskBack(dest, husk, logf)
+		}
+		return
+	}
+	logf("remote: restored the work tree for %s from %s after an interrupted extract", id, sel.path)
+	// The winner's directory is now owned and empty, which is the one delete
+	// that needs no flag.
+	reapOwnedEmpty(sel.path, logf)
+	if husk != "" {
+		logf("remote: keeping the tree that could not serve at %s", dest)
+		parkKeptBackup(dir, husk, id, logf)
+	}
+	parkRemaining(dir, id, states, winner, logf)
+}
+
+// selectCandidate is the whole selection rule: the newest uncommitted usable
+// copy, and only when there is none, the newest committed usable one. A
+// committed copy is second because the transaction that flagged it published
+// something over it; an uncommitted one is the copy no publish is known to have
+// replaced.
+func selectCandidate(states []candidateState) int {
+	for i, c := range states {
+		if !c.empty && !c.committed && c.usable {
+			return i
+		}
+	}
+	for i, c := range states {
+		if !c.empty && c.committed && c.usable {
+			return i
+		}
+	}
+	return -1
+}
+
+// parkRemaining keeps every candidate selection did not restore. Nothing here is
+// deleted: without a commit flag beside a usable destination there is no
+// evidence any of these was superseded, and a copy with no evidence against it
+// may be the last one.
+func parkRemaining(dir, id string, states []candidateState, winner int, logf func(string, ...any)) {
+	for i, c := range states {
+		if i == winner {
+			continue
+		}
+		if c.empty {
+			reapOwnedEmpty(c.path, logf)
+			continue
+		}
+		logf("remote: keeping the staged tree in %s that %s was not restored from", c.path, id)
+		parkKeptBackup(dir, c.path, id, logf)
+	}
+}
+
+// reapOwnedEmpty removes a staging dir that carries a valid marker and holds no
+// set-aside content. The marker is what makes this safe: a directory with none
+// names no destination, so no lock excludes the live allocation that may be
+// sitting between its Mkdir and its marker write right now.
+func reapOwnedEmpty(staging string, logf func(string, ...any)) {
+	if err := stagingFS.removeAll(staging); err != nil {
+		logf("remote: could not remove the empty staging dir %s: %v", staging, err)
+	}
+}
+
+// setAsideHusk moves a destination that cannot serve into a fresh sequenced
+// staging dir, so the restore has somewhere to land. It allocates and attributes
+// before it moves anything, so a failure never leaves a copy of a tree in a
+// directory no marker names.
+func setAsideHusk(dir, id, dest string, logf func(string, ...any)) (string, error) {
+	seq, err := nextStagingSeq(dir)
+	if err != nil {
+		return "", err
+	}
+	staging, err := createSequencedStagingDir(dir, seq)
+	if err != nil {
+		return "", err
+	}
+	claimed, _ := stagingStamp(filepath.Base(staging))
+	if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: id, Seq: claimed}); err != nil {
+		// Nothing has moved yet, so the directory holds nothing and removing it
+		// loses nothing. Leaving it would be residue no marker attributes.
+		reapOwnedEmpty(staging, logf)
+		return "", err
+	}
+	if err := fsutil.RenameWithRetry(dest, filepath.Join(staging, "backup"), stagingFS.rename); err != nil {
+		reapOwnedEmpty(staging, logf)
+		return "", err
+	}
+	return staging, nil
+}
+
+// putHuskBack undoes a set-aside whose restore then failed, so the destination
+// is left exactly as recovery found it. If the move back fails too, the husk
+// stays where it is as an owned candidate of its own and both failures are
+// named: the copy is still on disk, which is the property that matters.
+func putHuskBack(dest, husk string, logf func(string, ...any)) {
+	if err := fsutil.RenameWithRetry(filepath.Join(husk, "backup"), dest, stagingFS.rename); err != nil {
+		logf("remote: and could not put the tree at %s back from %s: %v", dest, husk, err)
+		return
+	}
+	reapOwnedEmpty(husk, logf)
 }
 
 // stagingStamp reads back the per-directory sequence createSequencedStagingDir
@@ -541,80 +912,6 @@ func createSequencedStagingDir(dir string, n int64) (string, error) {
 		n++
 	}
 	return "", fmt.Errorf("remote: could not claim a staging name in %s after %d attempts", dir, stagingSeqAttempts)
-}
-
-// restoreStagedBackup puts a staged backup back if its link has no live tree.
-// It reports whether staging was dealt with and needs no further handling.
-// restored carries the links this recovery pass has already put a tree back on.
-func restoreStagedBackup(dir string, s stagedExtract, restored map[string]stagedExtract, logf func(string, ...any)) bool {
-	staging := s.path
-	backup := filepath.Join(staging, "backup")
-	if _, err := stagingFS.stat(backup); err != nil {
-		return false
-	}
-	m, err := readMarker(staging)
-	if err != nil {
-		logf("remote: staged tree in %s has no usable transaction marker (%v); leaving it in place", staging, err)
-		return true
-	}
-	id, err := sanitizeLinkID(m.Dest)
-	if err != nil {
-		logf("remote: staged tree in %s names an invalid link (%v); leaving it in place", staging, err)
-		return true
-	}
-	dest := filepath.Join(dir, id)
-	if !withinDir(dir, dest) {
-		logf("remote: staged tree in %s names a link outside the bundle dir; leaving it in place", staging)
-		return true
-	}
-	// A live extract mid-swap looks exactly like a crashed one: its backup is
-	// aside and dest is briefly absent. Only the lock tells them apart, so skip
-	// any link something still owns rather than taking its tree.
-	release, held, err := tryLockExtractFile(dir, dest)
-	if err != nil {
-		logf("remote: could not lock %s while recovering %s: %v", id, staging, err)
-		return true
-	}
-	if held {
-		return true
-	}
-	defer release()
-	if _, err := stagingFS.stat(dest); err == nil {
-		// The link already has a tree, and a backup only ever holds the tree that
-		// was live BEFORE it: backup is filled by renaming dest aside, so dest
-		// holding anything at all means a later extract published over it. That
-		// is what makes the backup superseded -- not a timestamp comparison,
-		// which two directories can tie on and which tracks a tree's contents
-		// rather than when it was promoted.
-		if from, ours := restored[dest]; ours && (!s.stamped || !from.stamped || s.stamp >= from.stamp) {
-			// dest is a tree THIS pass put back, so nothing published over this
-			// backup and the reasoning above does not apply. Without an order
-			// both names agree on, which of the two is current is unknown.
-			logf("remote: staged tree in %s cannot be ordered against the tree just restored for %s; keeping it", staging, id)
-			parkKeptBackup(dir, staging, id, logf)
-			return true
-		}
-		// The upload that published dest reported success to its client while
-		// this whole copy of the prior tree was still on disk, and
-		// extractBundle's own cleanup failure is only logged. Say what is being
-		// reclaimed, so a bridge that ran without a logger configured is not the
-		// difference between the space being accounted for and not.
-		logf("remote: reclaiming the staged tree in %s that %s's live tree superseded", staging, id)
-		if err := stagingFS.removeAll(staging); err != nil {
-			logf("remote: could not remove superseded staging dir %s: %v", staging, err)
-		}
-		return true
-	}
-	if err := stagingFS.rename(backup, dest); err != nil {
-		logf("remote: could not restore the staged tree for %s from %s: %v", id, staging, err)
-		return true
-	}
-	restored[dest] = s
-	logf("remote: restored the work tree for %s from %s after an interrupted extract", id, staging)
-	if err := stagingFS.removeAll(staging); err != nil {
-		logf("remote: could not remove staging dir %s after restoring %s: %v", staging, id, err)
-	}
-	return true
 }
 
 // parkKeptBackup moves a staging dir out of the prefix recovery scans, so the

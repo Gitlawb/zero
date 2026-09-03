@@ -704,7 +704,11 @@ func TestRecoverBundleDirRefusesAMarkerThatEscapesTheBundleDir(t *testing.T) {
 	for _, marker := range []string{"../evil", "/etc/evil", "..", "a/b", ".hidden"} {
 		dir := t.TempDir()
 		staging := plantInterruptedExtract(t, dir, "proj-1", "v0")
-		if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: marker}); err != nil {
+		// Only the destination is hostile: a marker whose sequence disagrees
+		// with its own name is dropped before the escape check ever runs, and
+		// the test would then prove nothing about that check.
+		seq, _ := stagingStamp(filepath.Base(staging))
+		if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: marker, Seq: seq}); err != nil {
 			t.Fatal(err)
 		}
 		outside := filepath.Join(filepath.Dir(dir), "evil")
@@ -728,18 +732,14 @@ func TestRecoverBundleDirRefusesAMarkerThatEscapesTheBundleDir(t *testing.T) {
 // renames leaves behind: the link's only tree sitting in a staging dir.
 func plantInterruptedExtract(t *testing.T, bundleDir, linkID, content string) string {
 	t.Helper()
-	staging := filepath.Join(bundleDir, stagingPrefix+"crashed")
-	backup := filepath.Join(staging, "backup")
-	if err := os.MkdirAll(filepath.Join(backup, ".git"), 0o700); err != nil {
+	// The name has to pass the strict grammar and the marker has to agree with
+	// it, or recovery reads the fixture as unowned and every assertion built on
+	// it passes for the wrong reason.
+	seq, err := nextStagingSeq(bundleDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(backup, "a.txt"), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: linkID}); err != nil {
-		t.Fatal(err)
-	}
-	return staging
+	return stageBackup(t, bundleDir, "", linkID, content, seq)
 }
 
 func TestRecoverBundleDirRestoresInterruptedExtract(t *testing.T) {
@@ -764,16 +764,15 @@ func TestRecoverBundleDirRestoresInterruptedExtract(t *testing.T) {
 	}
 }
 
+// A copy the live tree provably published over is reclaimed. "Provably" is the
+// commit flag inside that copy and a destination that can actually serve, not
+// the destination merely existing: that reading deletes the last copy of a tree
+// whenever the destination came from anywhere else.
 func TestRecoverBundleDirDropsBackupWhenTheLinkAlreadyHasATree(t *testing.T) {
 	dir := t.TempDir()
+	live := plantUsableDest(t, dir, "proj-1", "live")
 	staging := plantInterruptedExtract(t, dir, "proj-1", "stale")
-	live := filepath.Join(dir, "proj-1")
-	if err := os.MkdirAll(live, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	markCommitted(t, staging)
 
 	recoverBundleDir(dir, nil)
 
@@ -815,30 +814,6 @@ func TestRecoverBundleDirLeavesAStagingDirAnExtractCouldStillOwn(t *testing.T) {
 
 	if _, err := os.Stat(staging); err != nil {
 		t.Errorf("a fresh staging dir may belong to a running clone: %v", err)
-	}
-}
-
-func TestRecoverBundleDirReapsAbandonedStaging(t *testing.T) {
-	// Both name shapes: the stamped one is what extractBundle writes now, the
-	// bare one is any staging dir whose name the reaper cannot read.
-	for _, name := range []string{"old", "00000000000000000100-old"} {
-		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			staging := filepath.Join(dir, stagingPrefix+name)
-			if err := os.MkdirAll(filepath.Join(staging, "repo"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			old := time.Now().Add(-3 * gitTimeout)
-			if err := os.Chtimes(staging, old, old); err != nil {
-				t.Fatal(err)
-			}
-
-			recoverBundleDir(dir, nil)
-
-			if _, err := os.Stat(staging); !os.IsNotExist(err) {
-				t.Errorf("a staging dir older than any clone should be reaped, got %v", err)
-			}
-		})
 	}
 }
 
@@ -1082,6 +1057,9 @@ func parkedStaging(staging string) string {
 	return filepath.Join(filepath.Dir(staging), keptPrefix+strings.TrimPrefix(base, stagingPrefix))
 }
 
+// A name this code never wrote carries no order at all, so it is not a candidate
+// for anything: not restored, not parked, not deleted. Moving it would be acting
+// on a directory nothing attributes to this code.
 func TestRecoverBundleDirKeepsAnUnorderableBackupAgainstATreeItRestored(t *testing.T) {
 	dir := t.TempDir()
 	stamped := stageBackup(t, dir, "current", "proj-1", "v1", 200)
@@ -1097,14 +1075,11 @@ func TestRecoverBundleDirKeepsAnUnorderableBackupAgainstATreeItRestored(t *testi
 	if _, err := os.Stat(filepath.Join(stamped, "backup")); !os.IsNotExist(err) {
 		t.Errorf("the restored staging dir should be cleared, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(parkedStaging(unordered), "backup", "a.txt")); err != nil {
-		t.Errorf("a backup that cannot be ordered against the restore must be kept: %v", err)
+	if _, err := os.Stat(filepath.Join(unordered, "backup", "a.txt")); err != nil {
+		t.Errorf("a backup under a name this code never wrote must stay where it is: %v", err)
 	}
-	if _, err := os.Stat(unordered); !os.IsNotExist(err) {
-		t.Errorf("the kept backup should be parked out of the scanned prefix, got %v", err)
-	}
-	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "cannot be ordered") }) {
-		t.Errorf("keeping an unorderable backup should be reported, got %v", logged)
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "does not carry a name this code writes") }) {
+		t.Errorf("an unowned backup should be reported, got %v", logged)
 	}
 }
 
@@ -1117,7 +1092,7 @@ func TestRecoverBundleDirKeepsAnUnorderableBackupAcrossRestarts(t *testing.T) {
 	unordered := stageBackup(t, dir, "leftover", "proj-1", "v2", 0)
 
 	recoverBundleDir(dir, nil)
-	if _, err := os.Stat(filepath.Join(parkedStaging(unordered), "backup", "a.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(unordered, "backup", "a.txt")); err != nil {
 		t.Fatalf("the first pass should keep the unorderable backup: %v", err)
 	}
 
@@ -1165,10 +1140,10 @@ func keptBackupSurvives(t *testing.T, dir, content string) bool {
 // where it is, which is still a copy, and never eats the occupant.
 func TestRecoverBundleDirDoesNotClobberAnOccupiedParkedName(t *testing.T) {
 	dir := t.TempDir()
-	stageBackup(t, dir, "current", "proj-1", "v1", 200)
-	unordered := stageBackup(t, dir, "leftover", "proj-1", "v2", 0)
+	plantUsableDest(t, dir, "proj-1", "live")
+	keepable := stageBackup(t, dir, "", "proj-1", "v2", 200)
 
-	occupied := parkedStaging(unordered)
+	occupied := parkedStaging(keepable)
 	if err := os.MkdirAll(occupied, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1183,16 +1158,26 @@ func TestRecoverBundleDirDoesNotClobberAnOccupiedParkedName(t *testing.T) {
 	if err != nil || string(got) != "not mine" {
 		t.Errorf("the occupant of the parked name must be untouched: got %q err %v", got, err)
 	}
-	if _, err := os.Stat(filepath.Join(unordered, "backup", "a.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(keepable, "backup", "a.txt")); err != nil {
 		t.Errorf("a backup that could not be parked must stay where it is: %v", err)
 	}
 	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "could not park") }) {
 		t.Errorf("a failed park should be reported, got %v", logged)
 	}
+
+	// The next pass finds it under the scanned prefix again. It still carries no
+	// commit flag, so it is parked again rather than reclaimed: a park that
+	// failed must never turn into a delete one pass later.
+	recoverBundleDir(dir, nil)
+	if _, err := os.Stat(filepath.Join(keepable, "backup", "a.txt")); err != nil {
+		t.Errorf("a copy that could not be parked must survive the next pass: %v", err)
+	}
 }
 
-// An older backup IS dropped once the tree restored over it is provably newer,
-// so the fail-safe above does not turn into a leak of every leftover.
+// An older backup is moved out of the scanned prefix once a newer one has been
+// restored, so the next pass does not reconsider it. It is not deleted: being
+// older than the restored copy is not evidence that anything published over it,
+// and only that evidence licenses a delete.
 func TestRecoverBundleDirDropsAnOlderBackupAfterRestoringANewerOne(t *testing.T) {
 	dir := t.TempDir()
 	stale := stageBackup(t, dir, "stale", "proj-1", "v0", 100)
@@ -1205,7 +1190,10 @@ func TestRecoverBundleDirDropsAnOlderBackupAfterRestoringANewerOne(t *testing.T)
 		t.Fatalf("the newest backup should be restored: got %q err %v", got, err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Errorf("the superseded backup should be removed, got %v", err)
+		t.Errorf("the older backup should leave the scanned prefix, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parkedStaging(stale), "backup", "a.txt")); err != nil {
+		t.Errorf("the older backup must be kept, not deleted: %v", err)
 	}
 }
 
@@ -1239,14 +1227,9 @@ func TestRecoverBundleDirKeepsAWorkTreePublishedUnderAReservedName(t *testing.T)
 // one at dest, so a link that has a tree supersedes it either way.
 func TestRecoverBundleDirDropsBackupWhenMtimesAreEqual(t *testing.T) {
 	dir := t.TempDir()
+	live := plantUsableDest(t, dir, "proj-1", "live")
 	staging := plantInterruptedExtract(t, dir, "proj-1", "stale")
-	live := filepath.Join(dir, "proj-1")
-	if err := os.MkdirAll(live, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	markCommitted(t, staging)
 	// What a one-second-granularity filesystem produces for a backup and a
 	// publish that happen in the same second.
 	tie := time.Unix(1700000000, 0)
@@ -1403,7 +1386,10 @@ func TestExtractBundleOutOrdersALeftoverStampedInTheFuture(t *testing.T) {
 		}
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Errorf("the genuinely older backup should be superseded once the newer one is restored, got %v", err)
+		t.Errorf("the genuinely older backup should leave the scanned prefix once the newer one is restored, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parkedStaging(stale), "backup", "a.txt")); err != nil {
+		t.Errorf("it must be kept, not deleted: %v", err)
 	}
 }
 
@@ -1605,8 +1591,10 @@ func TestRecoverBundleDirReportsReclaimingASupersededTree(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dest, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// The cleanup did not, so the old tree is still staged beside it.
+	// The cleanup did not, so the old tree is still staged beside it, carrying
+	// the flag that proves the publish landed over it.
 	staging := stageBackup(t, dir, "leftover", "proj-1", "v-old", 100)
+	markCommitted(t, staging)
 
 	var logged []string
 	recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
@@ -1813,15 +1801,11 @@ func TestRecoverBundleDirHandlesLinksIndependently(t *testing.T) {
 	dir := t.TempDir()
 	// proj-1 has no tree, so its backup is restored.
 	restorable := stageBackup(t, dir, "one", "proj-1", "v1", 100)
-	// proj-2 has a live tree, so its backup was published over and is dropped.
+	// proj-2 has a usable live tree and a copy whose flag proves that tree
+	// published over it, so that copy is dropped.
+	live := plantUsableDest(t, dir, "proj-2", "live")
 	superseded := stageBackup(t, dir, "two", "proj-2", "old", 200)
-	live := filepath.Join(dir, "proj-2")
-	if err := os.MkdirAll(live, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(live, "a.txt"), []byte("live"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	markCommitted(t, superseded)
 
 	recoverBundleDir(dir, nil)
 
@@ -1872,31 +1856,27 @@ func TestRecoverBundleDirIsIdempotent(t *testing.T) {
 	}
 }
 
-// Two backups can both carry names recovery cannot order: v0.8.0 residue, or a
-// crash before the marker. Recovery restores one of them and must then keep the
-// other rather than deleting it as superseded, because no order exists to say
-// which came first.
+// Two backups can both carry names this code never wrote: v0.8.0 residue, or a
+// crash before the marker. Neither is a candidate, so neither is restored and
+// neither is touched. Restoring one would be picking between two copies with
+// nothing on disk to order them by, and the loser is then a copy sitting beside
+// a destination the next pass reads as having superseded it.
 func TestRecoverBundleDirKeepsABackupItCannotTellApartFromTheRestore(t *testing.T) {
 	dir := t.TempDir()
 	first := stageBackup(t, dir, "one", "proj-1", "v1", 0)
 	second := stageBackup(t, dir, "two", "proj-1", "v2", 0)
 
-	recoverBundleDir(dir, nil)
+	for pass := 1; pass <= 2; pass++ {
+		recoverBundleDir(dir, nil)
 
-	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
-	if err != nil {
-		t.Fatalf("nothing was restored: %v", err)
-	}
-	kept := 0
-	for _, staging := range []string{first, second} {
-		for _, at := range []string{staging, parkedStaging(staging)} {
-			if _, err := os.Stat(filepath.Join(at, "backup", "a.txt")); err == nil {
-				kept++
+		if _, err := os.Stat(filepath.Join(dir, "proj-1")); !os.IsNotExist(err) {
+			t.Fatalf("pass %d: nothing may be restored from a name this code never wrote: %v", pass, err)
+		}
+		for _, staging := range []string{first, second} {
+			if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+				t.Errorf("pass %d: %s must be retained in place: %v", pass, staging, err)
 			}
 		}
-	}
-	if kept != 1 {
-		t.Fatalf("restored %q and kept %d of the two tied backups, want exactly 1 kept", got, kept)
 	}
 }
 
@@ -2238,5 +2218,711 @@ func TestBlockStepHoldsTheCallUntilRelease(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("the released call did not run: %v", err)
+	}
+}
+
+// ---- recovery: reconcile per destination -----------------------------------
+
+// markCommitted writes the flag extractBundle writes after a publish lands. It
+// is the only evidence a staged copy was superseded, so a fixture that omits it
+// is a copy recovery is not allowed to delete.
+func markCommitted(t *testing.T, staging string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(staging, committedFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stageScratch plants an owned staging dir that holds no copy of any tree: the
+// state a crash between the marker and the set-aside leaves. It is the one shape
+// besides a committed copy that recovery may delete.
+func stageScratch(t *testing.T, dir, linkID string, stamp int64) string {
+	t.Helper()
+	staging := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, stamp, stagingSeqSuffix))
+	if err := os.MkdirAll(filepath.Join(staging, "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: linkID, Seq: stamp}); err != nil {
+		t.Fatal(err)
+	}
+	return staging
+}
+
+// plantUsableDest writes the shape the bundle site's usability predicate looks
+// for: a work tree, which is dest/.git present. Nothing here shells out to git,
+// because the predicate does not either.
+func plantUsableDest(t *testing.T, dir, id, content string) string {
+	t.Helper()
+	dest := filepath.Join(dir, id)
+	if err := os.MkdirAll(filepath.Join(dest, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "a.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dest
+}
+
+// plantUnusableDest writes a destination that exists and cannot serve: a husk
+// with no .git, which is what a partial restore or a half-finished swap leaves.
+func plantUnusableDest(t *testing.T, dir, id, content string) string {
+	t.Helper()
+	dest := filepath.Join(dir, id)
+	if err := os.MkdirAll(dest, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "husk.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dest
+}
+
+func recoverAndLog(t *testing.T, dir string) []string {
+	t.Helper()
+	var logged []string
+	recoverBundleDir(dir, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	return logged
+}
+
+func logged(logs []string, want string) bool {
+	return slices.ContainsFunc(logs, func(m string) bool { return strings.Contains(m, want) })
+}
+
+// The commit flag is the only evidence a staged copy was published over. The
+// predicate this replaces was "the destination exists", which is not evidence of
+// anything: a destination can exist because an outside hand put it there, or
+// because a crash left a husk, and deleting the last copy of a tree on that
+// reading is the central defect of the old pass.
+func TestRecoverBundleDirDeletesOnlyWithACommitFlag(t *testing.T) {
+	t.Run("beside a usable dest only the flagged copy goes", func(t *testing.T) {
+		dir := t.TempDir()
+		plantUsableDest(t, dir, "proj-1", "live")
+		committed := stageBackup(t, dir, "", "proj-1", "superseded", 100)
+		markCommitted(t, committed)
+		uncommitted := stageBackup(t, dir, "", "proj-1", "unproven", 200)
+
+		logs := recoverAndLog(t, dir)
+
+		if _, err := os.Stat(committed); !os.IsNotExist(err) {
+			t.Errorf("a copy the destination provably published over should be reclaimed, got %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(parkedStaging(uncommitted), "backup", "a.txt"))
+		if err != nil || string(got) != "unproven" {
+			t.Errorf("a copy with no commit flag must be kept: got %q err %v", got, err)
+		}
+		if _, err := os.Stat(uncommitted); !os.IsNotExist(err) {
+			t.Errorf("the kept copy should be parked out of the scanned prefix, got %v", err)
+		}
+		if !logged(logs, uncommitted) {
+			t.Errorf("the retained copy should be named in the report, got %v", logs)
+		}
+	})
+
+	t.Run("beside an unusable dest the flagged copy is restored", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := plantUnusableDest(t, dir, "proj-1", "husk")
+		committed := stageBackup(t, dir, "", "proj-1", "last-copy", 100)
+		markCommitted(t, committed)
+
+		recoverAndLog(t, dir)
+
+		got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+		if err != nil || string(got) != "last-copy" {
+			t.Errorf("the only usable copy should be restored over a husk: got %q err %v", got, err)
+		}
+		if _, err := os.Stat(committed); !os.IsNotExist(err) {
+			t.Errorf("the restored copy's directory should be gone, got %v", err)
+		}
+		if !keptHuskSurvives(t, dir, "husk") {
+			t.Error("the husk that was at the destination must be kept, not deleted")
+		}
+	})
+}
+
+// keptHuskSurvives reports whether the husk a set-aside moved out of dest is
+// still under a Kept name. keptBackupSurvives reads a.txt; a husk has none.
+func keptHuskSurvives(t *testing.T, dir, content string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), keptPrefix) {
+			continue
+		}
+		got, err := os.ReadFile(filepath.Join(dir, entry.Name(), "backup", "husk.txt"))
+		if err == nil && string(got) == content {
+			return true
+		}
+	}
+	return false
+}
+
+// A copy recovery parked is retained permanently. A later successful publish is
+// not evidence about it: the commit flag is written into the copy the publishing
+// transaction set aside, and a Kept backup is never that copy.
+func TestRecoverBundleDirKeepsAnUncommittedCopyAcrossALaterPublish(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(context.Background(), testBundle(t, "a.txt", "v1"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+	kept := parkedStaging(stageBackup(t, dir, "", "proj-1", "unproven", 500))
+
+	recoverAndLog(t, dir)
+	if _, err := os.Stat(filepath.Join(kept, "backup", "a.txt")); err != nil {
+		t.Fatalf("the uncommitted copy should have been parked: %v", err)
+	}
+
+	// A real publish over the same destination, then another pass.
+	if err := extractBundle(context.Background(), testBundle(t, "a.txt", "v2"), dest, nil); err != nil {
+		t.Fatalf("second extract: %v", err)
+	}
+	recoverAndLog(t, dir)
+
+	got, err := os.ReadFile(filepath.Join(kept, "backup", "a.txt"))
+	if err != nil || string(got) != "unproven" {
+		t.Errorf("a Kept backup must survive a later publish: got %q err %v", got, err)
+	}
+}
+
+// If the newest usable copy cannot be put back, recovery stops for that
+// destination. Falling through to an older copy is what manufactures the
+// provenance the next pass then reads as supersession of the newer one.
+func TestRecoverBundleDirStopsWhenTheNewestRestoreFails(t *testing.T) {
+	dir := t.TempDir()
+	older := stageBackup(t, dir, "", "proj-1", "v1", 100)
+	newest := stageBackup(t, dir, "", "proj-1", "v2", 200)
+	dest := filepath.Join(dir, "proj-1")
+
+	fail := func() {
+		injected := errors.New("injected restore failure")
+		injectFault(t, "rename", func(args ...string) bool {
+			return args[0] == filepath.Join(newest, "backup")
+		}, injected)
+	}
+
+	for pass := 1; pass <= 2; pass++ {
+		var logs []string
+		func() {
+			saved := stagingFS
+			defer func() { stagingFS = saved }()
+			fail()
+			logs = recoverAndLog(t, dir)
+		}()
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Fatalf("pass %d: nothing may be installed when the newest copy cannot be: %v", pass, err)
+		}
+		for _, staging := range []string{older, newest} {
+			if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+				t.Fatalf("pass %d: %s must be retained in place: %v", pass, staging, err)
+			}
+		}
+		if !logged(logs, newest) {
+			t.Errorf("pass %d: the failed restore should be reported, got %v", pass, logs)
+		}
+	}
+
+	// Once the fault is gone the newest comes back and the older is parked.
+	recoverAndLog(t, dir)
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil || string(got) != "v2" {
+		t.Fatalf("the newest copy should be restored once the fault is gone: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(parkedStaging(older), "backup", "a.txt")); err != nil {
+		t.Errorf("the older copy should be parked, not deleted: %v", err)
+	}
+}
+
+// Selection is by sequence, and the loser is a copy of a tree like any other, so
+// it is parked rather than deleted.
+func TestRecoverBundleDirRestoresTheNewestUsableAndParksTheOlder(t *testing.T) {
+	dir := t.TempDir()
+	older := stageBackup(t, dir, "", "proj-1", "v1", 100)
+	newest := stageBackup(t, dir, "", "proj-1", "v2", 200)
+
+	recoverAndLog(t, dir)
+
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v2" {
+		t.Fatalf("restored a.txt = %q err %v, want the newest %q", got, err, "v2")
+	}
+	if _, err := os.Stat(newest); !os.IsNotExist(err) {
+		t.Errorf("the restored copy's directory should be gone, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parkedStaging(older), "backup", "a.txt")); err != nil {
+		t.Errorf("the older copy must be parked, not deleted: %v", err)
+	}
+}
+
+// A copy that cannot serve is skipped in selection rather than installed. The
+// old pass selected on "a backup directory exists", which installs a partial
+// tree over an absent destination and calls it recovery.
+func TestRecoverBundleDirSkipsAnUnusableNewestCandidate(t *testing.T) {
+	dir := t.TempDir()
+	older := stageBackup(t, dir, "", "proj-1", "v1", 100)
+	newest := stageBackup(t, dir, "", "proj-1", "v2", 200)
+	if err := os.RemoveAll(filepath.Join(newest, "backup", ".git")); err != nil {
+		t.Fatal(err)
+	}
+
+	recoverAndLog(t, dir)
+
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("restored a.txt = %q err %v, want the newest USABLE %q", got, err, "v1")
+	}
+	if _, err := os.Stat(older); !os.IsNotExist(err) {
+		t.Errorf("the restored copy's directory should be gone, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parkedStaging(newest), "backup", "a.txt")); err != nil {
+		t.Errorf("the unusable copy must be parked, not deleted: %v", err)
+	}
+}
+
+// Unusable and unreadable are different facts. A durable "this copy will never
+// pass the predicate" is a selection decision; a filesystem error is not a fact
+// about the copy at all, and acting on it turns a fault into a delete.
+func TestRecoverBundleDirStopsOnAnUnreadableCandidate(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions")
+	}
+	for _, tc := range []struct {
+		name string
+		// break makes one stat under the staging dir fail with EACCES without
+		// making the marker unreadable: a candidate whose marker cannot be read
+		// lands in the unowned branch, where every mutation below passes.
+		breakIt func(t *testing.T, staging string)
+	}{
+		{
+			name: "the set-aside copy cannot be stat'd",
+			breakIt: func(t *testing.T, staging string) {
+				locked := filepath.Join(staging, "locked")
+				if err := os.Rename(filepath.Join(staging, "backup"), filepath.Join(staging, "locked-backup")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(locked, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(staging, "locked-backup"), filepath.Join(locked, "backup")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(locked, "backup"), filepath.Join(staging, "backup")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(locked, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+			},
+		},
+		{
+			name: "the usability probe cannot run",
+			breakIt: func(t *testing.T, staging string) {
+				backup := filepath.Join(staging, "backup")
+				if err := os.Chmod(backup, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(backup, 0o700) })
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			older := stageBackup(t, dir, "", "proj-1", "v1", 100)
+			newest := stageBackup(t, dir, "", "proj-1", "v2", 200)
+			tc.breakIt(t, newest)
+
+			logs := recoverAndLog(t, dir)
+
+			if _, err := os.Stat(filepath.Join(dir, "proj-1")); !os.IsNotExist(err) {
+				t.Errorf("recovery must stop for a destination it cannot read, got %v", err)
+			}
+			if _, err := os.Lstat(newest); err != nil {
+				t.Errorf("the unreadable copy must be retained: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(older, "backup", "a.txt")); err != nil {
+				t.Errorf("every copy for that destination must be retained: %v", err)
+			}
+			if !logged(logs, newest) {
+				t.Errorf("the unreadable copy should be reported, got %v", logs)
+			}
+		})
+	}
+}
+
+// The reap is licensed by ownership plus the destination's lock, never by a
+// prefix and a clock. A live extract sits between its marker write and its
+// set-aside with exactly this shape, and the lock is the only thing that tells
+// the two apart.
+func TestRecoverBundleDirReapsOwnedScratchOnlyUnderTheLock(t *testing.T) {
+	t.Run("another process holds the destination", func(t *testing.T) {
+		dir := t.TempDir()
+		scratch := stageScratch(t, dir, "proj-1", 100)
+		lockDir := filepath.Join(dir, lockDirName)
+		if err := os.MkdirAll(lockDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		held, err := lockutil.TryAcquireFileLockAt(dir, filepath.Join(lockDir, "proj-1.lock"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		logs := recoverAndLog(t, dir)
+		if _, err := os.Stat(scratch); err != nil {
+			t.Errorf("a destination another process owns must be left alone: %v", err)
+		}
+		if !logged(logs, "proj-1") {
+			t.Errorf("the skipped destination should be reported, got %v", logs)
+		}
+
+		if err := held.Release(); err != nil {
+			t.Fatal(err)
+		}
+		recoverAndLog(t, dir)
+		if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+			t.Errorf("owned scratch should be reaped once the lock is free, got %v", err)
+		}
+	})
+
+	t.Run("a goroutine in this process holds the destination", func(t *testing.T) {
+		dir := t.TempDir()
+		scratch := stageScratch(t, dir, "proj-1", 100)
+		release := lockExtract(filepath.Join(dir, "proj-1"))
+		defer release()
+
+		done := make(chan []string, 1)
+		go func() { done <- recoverAndLog(t, dir) }()
+		select {
+		case logs := <-done:
+			if !logged(logs, "proj-1") {
+				t.Errorf("the skipped destination should be reported, got %v", logs)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("recovery blocked on a destination a live extract holds; it must skip it")
+		}
+		if _, err := os.Stat(scratch); err != nil {
+			t.Errorf("a destination a live extract holds must be left alone: %v", err)
+		}
+	})
+}
+
+// A directory with no marker names no destination, so no lock excludes the live
+// allocation that may be sitting inside it right now. It is retained and named,
+// and the cost of that is one empty directory per crash between the mkdir and
+// the marker write.
+func TestRecoverBundleDirRetainsAnUnmarkedStagingDir(t *testing.T) {
+	dir := t.TempDir()
+	unmarked := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, 3, stagingSeqSuffix))
+	if err := os.MkdirAll(unmarked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The v0.8.0 shape: os.MkdirTemp's decimal suffix, which carries no marker
+	// and may hold a partial clone.
+	legacy := filepath.Join(dir, stagingPrefix+"1234567890")
+	if err := os.MkdirAll(filepath.Join(legacy, "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for pass := 1; pass <= 2; pass++ {
+		logs := recoverAndLog(t, dir)
+		for _, path := range []string{unmarked, legacy} {
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("pass %d: %s must be retained: %v", pass, path, err)
+			}
+			if !logged(logs, path) {
+				t.Errorf("pass %d: %s should be reported, got %v", pass, path, logs)
+			}
+		}
+	}
+}
+
+// No decision reads a clock. The old pass reaped on mtime age, which makes the
+// outcome depend on a forward clock jump or a suspended host rather than on what
+// is on disk.
+func TestRecoverBundleDirUsesNoClock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		when time.Time
+	}{
+		{name: "fresh", when: time.Now()},
+		{name: "a year old", when: time.Now().Add(-365 * 24 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			scratch := stageScratch(t, dir, "proj-1", 100)
+			kept := stageBackup(t, dir, "", "proj-1", "v1", 200)
+			plantUsableDest(t, dir, "proj-1", "live")
+			for _, path := range []string{scratch, kept} {
+				if err := os.Chtimes(path, tc.when, tc.when); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			recoverAndLog(t, dir)
+
+			if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+				t.Errorf("owned scratch is reaped whatever its age, got %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(parkedStaging(kept), "backup", "a.txt")); err != nil {
+				t.Errorf("an uncommitted copy is kept whatever its age: %v", err)
+			}
+		})
+	}
+}
+
+// A destination that exists and cannot serve is a stuck state: the old pass saw
+// "dest exists" and deleted the copy that could have replaced it. The husk moves
+// only once a candidate has been selected, so a destination nothing can replace
+// is never taken apart.
+func TestRecoverBundleDirSetsAnUnusableDestinationAside(t *testing.T) {
+	dir := t.TempDir()
+	// Inside an enclosing checkout, which is what makes the predicate's shape
+	// falsifiable: git rev-parse --is-inside-work-tree discovers upward and
+	// answers true for a husk with no .git of its own, so a predicate that
+	// shells out reads this destination as usable and parks the copy that could
+	// have replaced it. The structural check does not discover upward.
+	if out, err := exec.Command("git", "init", filepath.Dir(dir)).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	dest := plantUnusableDest(t, dir, "proj-1", "partial")
+	candidate := stageBackup(t, dir, "", "proj-1", "v1", 100)
+
+	logs := recoverAndLog(t, dir)
+
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("the usable copy should be live at the destination: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+		t.Errorf("the restored copy's directory should be gone, got %v", err)
+	}
+	if !keptHuskSurvives(t, dir, "partial") {
+		t.Error("the husk must be kept under the Kept prefix, not deleted")
+	}
+	if !logged(logs, candidate) || !logged(logs, dest) {
+		t.Errorf("both the restore and the set-aside should be reported, got %v", logs)
+	}
+}
+
+// A legacy work tree can carry the exact generated name AND a file called txn at
+// its root, so the .git veto sits ahead of the marker read and ahead of every
+// delete.
+func TestRecoverBundleDirNeverTrustsAMarkerInsideAWorkTree(t *testing.T) {
+	dir := t.TempDir()
+	tree := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, 5, stagingSeqSuffix))
+	if err := os.MkdirAll(filepath.Join(tree, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "a.txt"), []byte("someones repo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(tree, txnMarker{Kind: txnKindBundleExtract, Dest: "proj-1", Seq: 5}); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := recoverAndLog(t, dir)
+
+	if got, err := os.ReadFile(filepath.Join(tree, "a.txt")); err != nil || string(got) != "someones repo" {
+		t.Errorf("a published work tree must be left exactly as it is: got %q err %v", got, err)
+	}
+	if !logged(logs, "work tree") {
+		t.Errorf("a work tree under a reserved name should be reported, got %v", logs)
+	}
+}
+
+// The scan runs before the lock is held, so everything it saw could have changed
+// by the time the lock is taken. Classifying from the scan is a read of state
+// nobody was holding.
+func TestRecoverBundleDirRevalidatesUnderTheLock(t *testing.T) {
+	dir := t.TempDir()
+	scratch := stageScratch(t, dir, "proj-1", 100)
+	marker := filepath.Join(scratch, stagingMarkerFile)
+
+	// The marker is there for the scan and gone by the time the lock is held,
+	// which is what a concurrent hand between the two produces. Under the lock
+	// the directory is unowned, and an unowned directory is never deleted.
+	real := stagingFS
+	var reads atomic.Int64
+	stagingFS.readFile = func(name string) ([]byte, error) {
+		out, err := real.readFile(name)
+		if name == marker && reads.Add(1) == 1 {
+			if rmErr := os.Remove(name); rmErr != nil {
+				t.Error(rmErr)
+			}
+		}
+		return out, err
+	}
+	t.Cleanup(func() { stagingFS = real })
+
+	logs := recoverAndLog(t, dir)
+
+	if _, err := os.Stat(scratch); err != nil {
+		t.Errorf("a directory that is unowned under the lock must be retained: %v", err)
+	}
+	if !logged(logs, scratch) {
+		t.Errorf("the retained directory should be reported, got %v", logs)
+	}
+}
+
+// With no uncommitted copy to prefer, a committed one is still the last usable
+// copy of the tree, so an absent destination gets it back. The commit flag
+// licenses a delete only when a usable destination is there to supersede it.
+func TestRecoverBundleDirRestoresACommittedCopyWhoseDestIsGone(t *testing.T) {
+	dir := t.TempDir()
+	committed := stageBackup(t, dir, "", "proj-1", "v1", 100)
+	markCommitted(t, committed)
+
+	recoverAndLog(t, dir)
+
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("a committed copy beside an absent destination should be restored: got %q err %v", got, err)
+	}
+	if _, err := os.Stat(committed); !os.IsNotExist(err) {
+		t.Errorf("the restored copy's directory should be gone, got %v", err)
+	}
+}
+
+// The husk moves only after a candidate is selected. With nothing to put in its
+// place, taking it apart would leave the destination absent and the operator
+// with strictly less than they started with.
+func TestRecoverBundleDirLeavesAnUnusableDestinationWithNoCandidateAlone(t *testing.T) {
+	dir := t.TempDir()
+	dest := plantUnusableDest(t, dir, "proj-1", "partial")
+	unusable := stageBackup(t, dir, "", "proj-1", "v1", 100)
+	if err := os.RemoveAll(filepath.Join(unusable, "backup", ".git")); err != nil {
+		t.Fatal(err)
+	}
+	unowned := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, 200, stagingSeqSuffix))
+	if err := os.MkdirAll(unowned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for pass := 1; pass <= 2; pass++ {
+		logs := recoverAndLog(t, dir)
+		got, err := os.ReadFile(filepath.Join(dest, "husk.txt"))
+		if err != nil || string(got) != "partial" {
+			t.Fatalf("pass %d: the destination must be left exactly as planted: got %q err %v", pass, got, err)
+		}
+		if _, err := os.Stat(filepath.Join(dest, "a.txt")); !os.IsNotExist(err) {
+			t.Errorf("pass %d: nothing may be installed over the husk: %v", pass, err)
+		}
+		if _, err := os.Stat(filepath.Join(parkedStaging(unusable), "backup", "a.txt")); err != nil {
+			t.Errorf("pass %d: the unusable copy must be kept: %v", pass, err)
+		}
+		if _, err := os.Stat(unowned); err != nil {
+			t.Errorf("pass %d: the unowned directory must stay in place: %v", pass, err)
+		}
+		if pass == 1 && (!logged(logs, unusable) || !logged(logs, unowned) || !logged(logs, "proj-1")) {
+			t.Errorf("pass %d: all three should be reported, got %v", pass, logs)
+		}
+	}
+}
+
+// A failed restore after the husk was set aside must leave the destination
+// exactly as it was found. Anything else is recovery that made the state worse
+// than the crash did.
+func TestRecoverBundleDirPutsTheHuskBackWhenTheRestoreFails(t *testing.T) {
+	dir := t.TempDir()
+	dest := plantUnusableDest(t, dir, "proj-1", "partial")
+	candidate := stageBackup(t, dir, "", "proj-1", "v1", 100)
+
+	for pass := 1; pass <= 2; pass++ {
+		var logs []string
+		func() {
+			saved := stagingFS
+			defer func() { stagingFS = saved }()
+			injectFault(t, "rename", func(args ...string) bool {
+				return args[0] == filepath.Join(candidate, "backup")
+			}, errors.New("injected restore failure"))
+			logs = recoverAndLog(t, dir)
+		}()
+
+		got, err := os.ReadFile(filepath.Join(dest, "husk.txt"))
+		if err != nil || string(got) != "partial" {
+			t.Fatalf("pass %d: the husk must be back at the destination: got %q err %v", pass, got, err)
+		}
+		if _, err := os.Stat(filepath.Join(candidate, "backup", "a.txt")); err != nil {
+			t.Errorf("pass %d: the candidate must be retained at its staging name: %v", pass, err)
+		}
+		if keptHuskSurvives(t, dir, "partial") {
+			t.Errorf("pass %d: no Kept entry may exist while the restore has not landed", pass)
+		}
+		if !logged(logs, candidate) {
+			t.Errorf("pass %d: the failed restore should be reported, got %v", pass, logs)
+		}
+	}
+
+	recoverAndLog(t, dir)
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("once the fault is gone the candidate should be restored: got %q err %v", got, err)
+	}
+	if !keptHuskSurvives(t, dir, "partial") {
+		t.Error("the husk should be parked once the restore lands")
+	}
+}
+
+// The reap boundary of a live extract: between its marker write and its
+// set-aside a staging dir is owned and holds nothing, which is exactly the shape
+// the reap deletes. Only the destination's lock separates that from a crash, so
+// a recovering pass must find the destination held and leave the whole thing
+// alone. blockStep gates every call to a step, and the marker write is a rename
+// too, so this gates the set-aside by its arguments instead.
+func TestRecoverBundleDirLeavesALiveExtractsScratchAlone(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	if err := extractBundle(context.Background(), testBundle(t, "a.txt", "v0"), dest, nil); err != nil {
+		t.Fatalf("seed extract: %v", err)
+	}
+
+	inSetAside := make(chan struct{})
+	gate := make(chan struct{})
+	real := stagingFS
+	var once sync.Once
+	stagingFS.rename = func(from, to string) error {
+		if filepath.Base(to) == "backup" {
+			once.Do(func() { close(inSetAside) })
+			<-gate
+		}
+		return real.rename(from, to)
+	}
+	t.Cleanup(func() { stagingFS = real })
+
+	var wg sync.WaitGroup
+	var extractErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		extractErr = extractBundle(context.Background(), testBundle(t, "a.txt", "v1"), dest, nil)
+	}()
+
+	<-inSetAside
+	staging := soleStaging(t, dir)
+	if _, err := os.Stat(filepath.Join(staging, "backup")); !os.IsNotExist(err) {
+		t.Fatalf("the fixture must be an owned staging dir with no set-aside copy yet, got %v", err)
+	}
+	recoverBundleDir(dir, nil)
+	if _, err := os.Stat(filepath.Join(staging, stagingMarkerFile)); err != nil {
+		t.Errorf("a live extract's scratch must survive a recovering pass: %v", err)
+	}
+	close(gate)
+	wg.Wait()
+
+	if extractErr != nil {
+		t.Errorf("recovery interfered with a live extract: %v", extractErr)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("a.txt = %q err %v, want the published %q", got, err, "v1")
 	}
 }
