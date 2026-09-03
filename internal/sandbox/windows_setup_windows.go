@@ -10,22 +10,54 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Seams for the identity gate above. The gate refuses a setup whose carried
+// consumer is not the account doing the installing, and both halves of that are
+// otherwise unobservable from a test: an unelevated box never reaches the gate,
+// and one process cannot hold two user SIDs. Production values by default.
+var (
+	windowsSetupProcessIsElevated = windowsProcessIsElevated
+	windowsSetupInstallerSID      = currentProcessSID
+)
+
 func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) int {
 	// Applying the WFP network filters and workspace ACLs requires Administrator
 	// rights; without them WFP fails deep inside with a raw ACCESS_DENIED (0x5).
 	// Check up front and return an actionable message instead.
-	if !windowsProcessIsElevated() {
+	if !windowsSetupProcessIsElevated() {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": Administrator rights are required. Re-run `zero sandbox setup` from an elevated (Run as administrator) terminal.")
 		return 1
 	}
-	// CARRY THE CONSUMER ACROSS THE ELEVATION BOUNDARY, before anything is
-	// provisioned. The unelevated caller resolved who will read the stamp and
-	// passed it in; this process cannot observe that, because it is the installer
-	// and it creates the runtime leaf the old code derived the reader from.
+	// THE CONSUMER IS CARRIED, AND VALIDATED BEFORE ANYTHING IS PROVISIONED.
+	//
+	// Zero does not elevate. runSandboxSetupHelper launches this with a plain
+	// exec.Command, and the check above requires the caller to have elevated the
+	// terminal already, so the SID that arrives here was resolved in a process that
+	// was ALREADY elevated. The only model that actually works is the documented
+	// one: an elevated terminal belonging to the account that will run Zero
+	// afterwards. Same-account UAC satisfies it, because both tokens carry the same
+	// user SID.
+	//
+	// Alternate-administrator setup does not. The SID would describe the admin, the
+	// stamp would get its allow ACE for the wrong token, and every restricted
+	// command would stop before launch on a setup that had just reported success.
+	// That case cannot be detected from inside an already-elevated process, so it is
+	// EXCLUDED rather than silently mis-provisioned: the carried identity must match
+	// this token. That holds today, and it makes the unsupported model fail loudly
+	// the moment a real elevation step is introduced between the two.
 	if trimmed := strings.TrimSpace(config.ConsumerSID); trimmed != "" {
 		consumer, sidErr := windows.StringToSid(trimmed)
 		if sidErr != nil {
 			fmt.Fprintln(stderr, WindowsSandboxSetupName+": the calling user SID could not be parsed: "+sidErr.Error())
+			return 1
+		}
+		installer, installerErr := windowsSetupInstallerSID()
+		if installerErr != nil {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+installerErr.Error())
+			return 1
+		}
+		if !strings.EqualFold(strings.TrimSpace(installer), trimmed) {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": setup is running as "+installer+" but the stamp would be provisioned for "+trimmed+
+				". Alternate-account setup is not supported: run `zero sandbox setup` from a terminal elevated as the account that will use Zero.")
 			return 1
 		}
 		restore := setWindowsSetupConsumerSID(consumer)

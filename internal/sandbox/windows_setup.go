@@ -140,9 +140,16 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	if err != nil {
 		return nil, fmt.Errorf("marshal windows sandbox setup permission profile: %w", err)
 	}
-	// RESOLVED HERE, in the operator's shell, for the same reason the runtime
-	// root is selected here: the elevated helper cannot observe who will run the
-	// commands afterwards. It creates the runtime leaf when it is missing, so a
+	// RESOLVED HERE, IN THE SAME PROCESS, and that is the whole supported model.
+	//
+	// Zero never elevates: the operator elevates the terminal, and runSandboxSetup
+	// launches the helper with a plain exec.Command. So this runs in a process that
+	// is already elevated and this SID is the installer's. It is also the consumer's
+	// only because the documented contract is an elevated terminal belonging to the
+	// account that will run Zero, which same-account UAC satisfies. The helper
+	// re-checks that the carried identity matches its own token and refuses
+	// otherwise, so the unsupported alternate-account shape fails loudly instead of
+	// provisioning a stamp for a token that can never read it. It creates the runtime leaf when it is missing, so a
 	// reader derived from that leaf is BUILTINAdministrators, and a later
 	// UAC-filtered administrator carries that group deny-only while a standard
 	// user given alternate admin credentials is not in it at all. Either way the
@@ -889,46 +896,43 @@ func createRuntimeDirRecording(root string) ([]windowsCreatedRuntimeDir, error) 
 	if err := refuseReparsedRuntimeAncestors(root); err != nil {
 		return nil, err
 	}
-	// Find the deepest ancestor that already exists, then create downwards from
-	// there, so the record contains exactly the new components.
-	var missing []string
-	current := filepath.Clean(root)
-	for {
-		// os.Stat, which FOLLOWS links, deliberately. os.Lstat reports a junction
-		// as ModeIrregular rather than as a directory, so using it here refused a
-		// redirected LOCALAPPDATA -- an ordinary Windows configuration -- with
-		// "exists and is not a directory". Whether a link is acceptable is a
-		// different question, answered by refuseReparsedRuntimeAncestors for the
-		// components Zero actually owns.
-		if info, err := os.Stat(current); err == nil {
-			if !info.IsDir() {
-				return nil, fmt.Errorf("sandbox runtime path %s exists and is not a directory", current)
-			}
-			break
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("inspect sandbox runtime path %s: %w", current, err)
-		}
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
+	// THE BASE IS FIXED, NOT DISCOVERED. This used to os.Stat its way to the
+	// deepest component that already existed and open THAT by name. Existence then
+	// chose the trust boundary: on the ordinary second-workspace shape
+	// <base>\zero\runtime\v1 is already there and only the digest is missing, so
+	// the single by-name open was v1, one of the predictable components this
+	// traversal exists to protect. A local owner could replace it with a junction
+	// between the pre-check and that open, let elevated setup create the digest
+	// beneath the redirected target, and put the original back before the
+	// post-check; the creation record then held the redirected object under the
+	// original pathname, so compensation found a mismatch and left a privileged
+	// creation as residue.
+	//
+	// So the split comes from the same inventory that built the root. Only the
+	// cache or TEMP directory above the owned tail is opened by name, and every
+	// owned component below it, existing or missing, is reached from the retained
+	// parent handle.
+	base, components, owned := windowsSandboxRuntimeOwnedTail(root)
+	if !owned {
+		// Refused rather than walked by name. Falling back to the pathname walk is
+		// exactly the unprotected path this replaced, and both production builders
+		// derive a root from windowsSandboxRuntimeOwnedNames, so a root that does
+		// not have the shape is a bug rather than a configuration.
+		return nil, fmt.Errorf("sandbox runtime root %s does not have the owned shape %v/<workspace>, so its trust boundary cannot be established", root, windowsSandboxRuntimeOwnedNames)
 	}
-	// HANDLE-RELATIVE FROM HERE DOWN. The walk above found the deepest ancestor
-	// that already exists, and that is the only thing opened by name. Every
-	// missing component beneath it is created relative to its parent's handle,
-	// no-follow, so a junction swapped into an owned component between the
-	// pre-check and the create is seen as the link it is rather than descended
-	// into. The old loop reopened each parent by name, which is exactly the
-	// interval a swap needs; the pre and post checks below are now belt and
-	// braces rather than the authorization. Outermost first, so each parent
-	// exists before its child.
-	tail := make([]string, 0, len(missing))
-	for index := len(missing) - 1; index >= 0; index-- {
-		tail = append(tail, missing[index])
+	// The base itself is the operator's: a redirected LOCALAPPDATA or TMP is an
+	// ordinary configuration, and setup has always created it when absent. Only
+	// what Zero owns below it is handle-relative.
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return nil, fmt.Errorf("create sandbox runtime base %s: %w", base, err)
 	}
-	created, err := createRuntimeTailHandleRelative(current, tail)
+	tail := make([]string, 0, len(components))
+	current := base
+	for _, component := range components {
+		current = filepath.Join(current, component)
+		tail = append(tail, current)
+	}
+	created, err := createRuntimeTailHandleRelative(base, tail)
 	if err != nil {
 		return created, err
 	}

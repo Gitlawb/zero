@@ -136,3 +136,58 @@ func TestDoctorReportsAnEvictedRuntimeTree(t *testing.T) {
 		t.Errorf("the warning does not point at setup: %s", result.Message)
 	}
 }
+
+// UNKNOWN IS NOT CURRENT.
+//
+// WindowsSandboxRecordedRuntimeRootIsCurrent answers three ways: the recorded
+// root is still one a command would select, it is not, or the inputs a command
+// selects from cannot be resolved at all. The third used to fall through to the
+// pinned branch, so a valid old marker and stamp made doctor report healthy
+// while selectSandboxRuntimeRoot — reached by BuildCommandPlan — propagated the
+// same resolution failure and stopped every command from launching. Doctor and
+// the command disagreed about the same machine.
+//
+// Stale and unknown are different states, so this is deliberately separate from
+// the cache-A-to-cache-B test rather than another assertion on the same boolean.
+func TestDoctorWarnsWhenTheRuntimeRootCannotBeResolved(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", home)
+	redirectUserCache(t)
+
+	runtimeRoot := doctorRuntimeCandidate(t, workspace)
+	if !strings.HasPrefix(runtimeRoot, os.TempDir()) && !strings.Contains(runtimeRoot, t.Name()) {
+		t.Fatalf("the runtime candidate %q is outside test-owned storage", runtimeRoot)
+	}
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		t.Fatalf("create the runtime root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeRoot) })
+	writeDoctorSetupMarker(t, home, workspace, runtimeRoot)
+
+	backend := sandbox.Backend{Name: sandbox.BackendWindowsRestrictedToken}
+
+	// Healthy first, so the assertion below cannot be satisfied by a check that
+	// warns unconditionally.
+	if result := windowsSandboxSetupCheck("windows", backend, workspace, config.SandboxConfig{}); result != nil {
+		t.Fatalf("SETUP INVALID: a freshly set-up machine was reported unhealthy: %s", result.Message)
+	}
+
+	// Now take away the inputs the selection is derived from, leaving the marker
+	// and the provisioned tree exactly as they were. os.UserCacheDir fails with no
+	// location to read, which is the same error a command would hit.
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("HOME", "")
+
+	result := windowsSandboxSetupCheck("windows", backend, workspace, config.SandboxConfig{})
+	if result == nil {
+		t.Fatal("doctor reported a healthy sandbox while the runtime root a command selects could not be resolved; every command would fail to launch with doctor saying nothing")
+	}
+	if status, _ := result.Details["setupStatus"].(string); status != "runtime-root-unresolved" {
+		t.Errorf("setupStatus = %q, want runtime-root-unresolved so the unknown state is not reported as staleness: %s", status, result.Message)
+	}
+	if _, ok := result.Details["error"]; !ok {
+		t.Errorf("the warning does not carry the resolver cause, so an operator cannot act on it: %+v", result.Details)
+	}
+}

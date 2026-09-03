@@ -62,7 +62,7 @@ func TestRuntimeRootProvisioningRecordsOnlyWhatItCreated(t *testing.T) {
 // Provisioning that finds everything already there records nothing, so a failed
 // setup on a machine that was already set up removes none of it.
 func TestRuntimeRootProvisioningRecordsNothingWhenAlreadyPresent(t *testing.T) {
-	target := filepath.Join(t.TempDir(), "runtime", "v1", "abc123")
+	target := filepath.Join(t.TempDir(), "zero", "runtime", "v1", "abc123")
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestRuntimeRootProvisioningRecordsNothingWhenAlreadyPresent(t *testing.T) {
 // holding something this run did not create, and RemoveAll there would turn a
 // failed setup into data loss.
 func TestRuntimeRootRollbackRefusesToRemoveANonEmptyDirectory(t *testing.T) {
-	target := filepath.Join(t.TempDir(), "runtime", "v1", "abc123")
+	target := filepath.Join(t.TempDir(), "zero", "runtime", "v1", "abc123")
 	created, err := createRuntimeDirRecording(target)
 	if err != nil {
 		t.Fatalf("createRuntimeDirRecording: %v", err)
