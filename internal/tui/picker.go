@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -1067,24 +1068,31 @@ func (m model) newThemePicker() *commandPicker {
 	return &commandPicker{kind: pickerTheme, title: "Choose a theme", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
 }
 
-// newNotifyPicker lists the four (mode, focus) pairs from notifyChoices. Each
+// newNotifyPicker lists the FULL (mode, focus) space from notifyPickerChoices
+// (every valid pair has a row, so a stored setting like (off, always) is always
+// preselectable and Enter can never silently commit a different pair). Each
 // row's Value is the same synthetic string the text /notify handler accepts
 // ("<mode> <focus>"), so /notify with no arg and the picker share one commit
-// path through handleNotifyCommand. The currently active pair is preselected so
-// the user can press Enter to keep it. There is no live preview — notify
-// affects the next permission prompt, not the current view — so the picker
-// does not call a preview function on move.
+// path through handleNotifyCommand. A blank stored field resolves to its
+// effective default for preselection only (both / unfocused — what actually
+// fires today); committing any row writes an explicit pair. There is no live
+// preview — notify affects the next permission prompt, not the current view.
 func (m model) newNotifyPicker() *commandPicker {
-	items := make([]pickerItem, 0, len(notifyChoices))
+	choices := notifyPickerChoices()
+	items := make([]pickerItem, 0, len(choices))
 	selected := 0
-	activeMode := m.notifyCurrentMode()
-	activeFocus := m.notifyCurrentFocusMode()
-	for _, c := range notifyChoices {
+	stored, _ := m.storedNotify()
+	activeMode := string(effectiveTUINotifyMode(stored.Mode))
+	activeFocus := stored.FocusMode
+	if strings.TrimSpace(activeFocus) == "" {
+		activeFocus = string(notify.FocusUnfocused)
+	}
+	for _, c := range choices {
 		items = append(items, pickerItem{
 			Group: "When Zero needs your input",
 			Label: c.label,
 			Value: c.mode + " " + c.focusMode,
-			Meta:  c.subtitle,
+			Meta:  c.subtitle(),
 		})
 		if c.mode == activeMode && c.focusMode == activeFocus {
 			selected = len(items) - 1

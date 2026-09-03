@@ -592,12 +592,41 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 	return cfg, nil
 }
 
+// UserNotify returns the notify block stored in the user's own config file at
+// path, trimmed. A missing file or missing/empty block returns the zero value:
+// callers that need to preserve "whatever the user already chose" on a partial
+// update must seed from THIS value, not from the resolved view — the resolver
+// merges project config and the TUI applies its own defaults, so seeding from
+// resolved copies choices the user never made into their global file (a
+// project's mode: off, or a pinned default) and across every other project.
+func UserNotify(path string) (NotifyConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return NotifyConfig{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NotifyConfig{}, nil
+		}
+		return NotifyConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return NotifyConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	cfg.Notify.Mode = strings.TrimSpace(cfg.Notify.Mode)
+	cfg.Notify.FocusMode = strings.TrimSpace(cfg.Notify.FocusMode)
+	return cfg.Notify, nil
+}
+
 // SetNotify persists the TUI notification preference. Both fields are trimmed
 // and validated against the accepted vocab (mode in {off,bell,notify,both};
 // focusMode in {unfocused,always,focused}) so a bad caller cannot write a value
 // the resolver would later reject at startup. An empty Mode or FocusMode is
-// stored as-is — the resolver applies the built-in defaults at read time, so a
-// blank value means "use defaults" rather than "no notify" or "no focus rule".
+// stored as-is — blank means "use the built-in defaults" (the TUI's
+// effectiveTUINotifyMode maps an empty mode to both; the notify package treats
+// an empty focusMode as unfocused), not "off".
 func SetNotify(path string, value NotifyConfig) (FileConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {

@@ -34,13 +34,18 @@ func runConfigNotify(args []string, stdout io.Writer, stderr io.Writer, deps app
 		if err != nil {
 			return writeAppError(stderr, err.Error(), exitCrash)
 		}
-		// Omitted flags preserve the current value — a full replace would let
-		// `--mode bell` silently wipe a configured focusMode. --reset is the
-		// only path that clears both fields.
-		notify := config.NotifyConfig{
-			Mode:      resolved.Notify.Mode,
-			FocusMode: resolved.Notify.FocusMode,
+		// Seed omitted fields from the USER'S OWN file, never from the
+		// resolved view: resolved merges project config (so a repo's
+		// mode:off would be copied into the user's global settings) and
+		// carries no defaults here, but seeding from it would also pin
+		// defaults as explicit choices. Blank stays blank — blank means
+		// "use the built-in defaults". --reset is the only path that
+		// clears both fields.
+		current, err := config.UserNotify(configPath)
+		if err != nil {
+			return writeAppError(stderr, err.Error(), exitUsage)
 		}
+		notify := current
 		if options.reset {
 			notify = config.NotifyConfig{}
 		} else {
@@ -141,8 +146,11 @@ func writeConfigNotifyHelp(w io.Writer) error {
 		"\n"+
 		"Print or update the permission-prompt notify preference.\n"+
 		"\n"+
-		"When run with no flag, prints the current mode and focusMode (the resolver\n"+
-		"defaults to \"both\" and \"unfocused\" when the config block is empty).\n"+
+		"When run with no flag, prints the current mode and focusMode; a field you\n"+
+		"never set shows as (default) — the TUI alerts with bell + notification,\n"+
+		"firing only when the terminal is unfocused. Omitted flags preserve the\n"+
+		"values stored in YOUR config file; --reset clears both so the defaults\n"+
+		"apply again.\n"+
 		"\n"+
 		"Examples:\n"+
 		"  zero config notify\n"+

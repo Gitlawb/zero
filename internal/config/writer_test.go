@@ -417,9 +417,9 @@ func TestSetNotifyRejectsEmptyConfigPath(t *testing.T) {
 }
 
 func TestSetNotifyBlankValuesPreservedAsDefaults(t *testing.T) {
-	// An empty mode/focusMode stored on disk is a valid "use the resolver
+	// An empty mode/focusMode stored on disk is a valid "use the built-in
 	// defaults" signal — SetNotify must not reject blanks, and they must round
-	// trip unchanged so the resolver can apply its built-in fallback.
+	// trip unchanged.
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
 	if _, err := SetNotify(path, NotifyConfig{}); err != nil {
@@ -428,6 +428,39 @@ func TestSetNotifyBlankValuesPreservedAsDefaults(t *testing.T) {
 	persisted := readConfigFixture(t, path)
 	if persisted.Notify.Mode != "" || persisted.Notify.FocusMode != "" {
 		t.Fatalf("blank notify values should round-trip, got %+v", persisted.Notify)
+	}
+}
+
+// UserNotify reads the notify block from the user's own file. Partial updates
+// seed from this value so they preserve what the USER chose (blank included)
+// instead of copying a project config's setting or a pinned default into the
+// global file (maintainer review, PR #1001).
+func TestUserNotify(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing file: zero value, no error.
+	got, err := UserNotify(filepath.Join(dir, "missing.json"))
+	if err != nil {
+		t.Fatalf("missing file should not error: %v", err)
+	}
+	if got.Mode != "" || got.FocusMode != "" {
+		t.Fatalf("missing file = %+v, want zero value", got)
+	}
+
+	// Present block: trimmed values returned.
+	path := filepath.Join(dir, "zero.json")
+	writeConfigFixture(t, path, FileConfig{Notify: NotifyConfig{Mode: "  bell  ", FocusMode: " always "}}, 0o600)
+	got, err = UserNotify(path)
+	if err != nil {
+		t.Fatalf("UserNotify: %v", err)
+	}
+	if got.Mode != "bell" || got.FocusMode != "always" {
+		t.Fatalf("UserNotify = %+v, want bell/always (trimmed)", got)
+	}
+
+	// Blank path: zero value, no error.
+	if got, err = UserNotify(""); err != nil || got.Mode != "" || got.FocusMode != "" {
+		t.Fatalf("blank path = %+v err=%v, want zero value", got, err)
 	}
 }
 

@@ -11,13 +11,11 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 )
 
-// `zero config notify` with no flag and a fresh config: the resolver applies
-// the built-in defaults (mode=both, focusMode=unfocused) and the command
-// reports them. This is the "just works" case a new user lands in. We use a
-// real on-disk config (not the synthetic commandCenterDeps fixture, which
-// returns an empty Notify field) because the resolver-default behavior is the
-// whole point of this test.
-func TestRunConfigNotifyPrintsResolverDefaults(t *testing.T) {
+// `zero config notify` with no flag and a fresh config: nothing is configured,
+// the resolver leaves the fields blank (defaults deliberately live in the TUI,
+// not the resolver — maintainer review, PR #1001), and the command reports
+// "(default)" for both.
+func TestRunConfigNotifyPrintsUnconfiguredAsDefault(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	// A valid openai profile so the resolver does not error with
 	// ErrNoActiveProvider. The notify defaults are applied independently of
@@ -47,19 +45,60 @@ func TestRunConfigNotifyPrintsResolverDefaults(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "mode:      both") {
-		t.Errorf("stdout should show the default mode, got: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "mode:      (default)") {
+		t.Errorf("stdout should show unconfigured mode as (default), got: %s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "focusMode: unfocused") {
-		t.Errorf("stdout should show the default focus, got: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "focusMode: (default)") {
+		t.Errorf("stdout should show unconfigured focus as (default), got: %s", stdout.String())
 	}
 }
 
-// `zero config notify --json` emits a machine-readable payload so scripts can
-// read the resolved preference without parsing prose. Same real-resolver
-// fixture as the print-defaults test, since the JSON path reads the same
-// `resolved.Notify` that the print path does.
+// `zero config notify --json` emits a machine-readable payload. A configured
+// pair round-trips; unconfigured fields are empty strings (never defaults
+// filled in), so scripts can distinguish "user chose" from "default".
 func TestRunConfigNotifyPrintsJSON(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := `{
+		"activeProvider": "openai",
+		"providers": [{
+			"name": "openai",
+			"providerKind": "openai",
+			"baseUrl": "https://api.openai.com/v1",
+			"model": "gpt-4.1",
+			"apiKeyEnv": "OPENAI_API_KEY"
+		}],
+		"notify": {"mode": "bell", "focusMode": "always"}
+	}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{"OPENAI_API_KEY": "sk-test"}})
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"config", "notify", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if payload["mode"] != "bell" {
+		t.Errorf("mode = %v, want bell", payload["mode"])
+	}
+	if payload["focusMode"] != "always" {
+		t.Errorf("focusMode = %v, want always", payload["focusMode"])
+	}
+}
+
+// The unconfigured JSON shape: fields are empty strings, never defaults
+// filled in, so scripts can tell "user chose" from "default".
+func TestRunConfigNotifyPrintsJSONUnconfigured(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	seed := `{
 		"activeProvider": "openai",
@@ -90,11 +129,11 @@ func TestRunConfigNotifyPrintsJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, stdout.String())
 	}
-	if payload["mode"] != "both" {
-		t.Errorf("mode = %v, want both", payload["mode"])
+	if payload["mode"] != "" {
+		t.Errorf("mode = %v, want empty (unconfigured)", payload["mode"])
 	}
-	if payload["focusMode"] != "unfocused" {
-		t.Errorf("focusMode = %v, want unfocused", payload["focusMode"])
+	if payload["focusMode"] != "" {
+		t.Errorf("focusMode = %v, want empty (unconfigured)", payload["focusMode"])
 	}
 }
 
@@ -176,6 +215,82 @@ func TestRunConfigNotifyFocusOnlyPreservesMode(t *testing.T) {
 	}
 	if cfg.Notify.FocusMode != "always" {
 		t.Errorf("Notify.FocusMode = %q, want always", cfg.Notify.FocusMode)
+	}
+}
+
+// Maintainer regression (PR #1001): a partial update must seed from the USER'S
+// OWN file, never from the resolved view. A project .zero/config.json setting
+// mode=off resolves into the session, but `--focus always` inside that repo
+// must NOT copy the project's off into the user's global config.
+func TestRunConfigNotifyDoesNotCopyProjectNotifyIntoUserConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "user.json")
+	projectPath := filepath.Join(t.TempDir(), "project.json")
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider": "openai"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(`{"notify": {"mode": "off"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	// Resolve EXACTLY the way production does: user config + project config
+	// merged, so resolved.Notify.Mode is the project's "off".
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{
+			UserConfigPath:    configPath,
+			ProjectConfigPath: projectPath,
+			Env:               map[string]string{"OPENAI_API_KEY": "sk-test"},
+		})
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"config", "notify", "--focus", "always"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	// The user's file must keep an unspecified mode unspecified — the
+	// project's "off" stays in the project file where it belongs.
+	if cfg.Notify.Mode != "" {
+		t.Errorf("user Notify.Mode = %q, want blank (project's off must not leak into the user file)", cfg.Notify.Mode)
+	}
+	if cfg.Notify.FocusMode != "always" {
+		t.Errorf("Notify.FocusMode = %q, want always", cfg.Notify.FocusMode)
+	}
+	// The project file is untouched.
+	project := readFileConfig(t, projectPath)
+	if project.Notify.Mode != "off" {
+		t.Errorf("project Notify.Mode = %q, want untouched off", project.Notify.Mode)
+	}
+}
+
+// Maintainer regression (PR #1001): with a clean config, `--mode off` must not
+// also pin focusMode as an explicit choice — blank means "use the built-in
+// default", and a partial update keeps it that way.
+func TestRunConfigNotifyDoesNotPinDefaultsAsExplicitChoices(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider": "openai"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{"OPENAI_API_KEY": "sk-test"}})
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"config", "notify", "--mode", "off"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if cfg.Notify.Mode != "off" {
+		t.Errorf("Notify.Mode = %q, want off", cfg.Notify.Mode)
+	}
+	if cfg.Notify.FocusMode != "" {
+		t.Errorf("Notify.FocusMode = %q, want blank (unspecified stays unspecified; the default must not be pinned)", cfg.Notify.FocusMode)
 	}
 }
 
