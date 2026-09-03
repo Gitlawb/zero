@@ -175,3 +175,23 @@ func TestKeptBackupsUsageNamesTheCostOfEachSite(t *testing.T) {
 		}
 	}
 }
+
+// The reclaim command is the only path a retained copy has off the disk, so a
+// command that never appears in help or completions is a reclaim path that
+// exists but cannot be found.
+func TestKeptBackupsIsDiscoverable(t *testing.T) {
+	var out bytes.Buffer
+	if code := Run([]string{"--help"}, &out, &out); code != 0 {
+		t.Fatalf("--help exit = %d", code)
+	}
+	if !strings.Contains(out.String(), "kept-backups") {
+		t.Error("kept-backups is missing from the command list")
+	}
+	var comp bytes.Buffer
+	if code := Run([]string{"completions", "bash"}, &comp, &comp); code != 0 {
+		t.Fatalf("completions exit = %d", code)
+	}
+	if !strings.Contains(comp.String(), "kept-backups") {
+		t.Error("kept-backups is missing from the completion tree")
+	}
+}

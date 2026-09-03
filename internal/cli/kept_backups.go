@@ -204,8 +204,9 @@ Recovery never deletes a copy it cannot prove was superseded; it moves that copy
 under a kept- name and leaves it there. Nothing reclaims one on its own, so this
 command is how retained copies leave the disk.
 
-Without --bundle-dir both subcommands work on the dictation install root; with
-it they work on that daemon bundle dir instead. Weigh the two differently: a
+Without --bundle-dir both subcommands work on the dictation install root. With
+it, remove works on that daemon bundle dir instead, and list adds the bundle dir
+to the dictation listing, so each line names the site it came from. Weigh the two differently: a
 dictation kept backup is the only offline copy of an engine or a model, while a
 bundle kept backup is a work tree the client that sent it can upload again.
 
