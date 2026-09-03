@@ -94,17 +94,21 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 
 	// Capture the prior content (before we replace it) so an overwrite can show a
-	// real diff; a fresh create stays "" and previews as all-additions.
+	// real diff, and so the bytes read_file normalizes away — a BOM, CRLF endings —
+	// survive the rewrite. A fresh create stays "" and previews as all-additions.
+	//
+	// Fail CLOSED when an existing target cannot be read: those bytes are the only
+	// evidence of the convention to restore, so overwriting without them would
+	// write the model's normalized content over a CRLF/BOM file and silently
+	// destroy exactly what this read exists to preserve.
 	priorContent := ""
-	var priorBytes []byte
 	if existed {
-		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
-			priorBytes = prev
-			priorContent = string(prev)
+		prev, rerr := os.ReadFile(absolutePath)
+		if rerr != nil {
+			return errorResult("Error writing file " + relativePath + ": cannot read the existing file to preserve its line endings and BOM: " + rerr.Error())
 		}
-	}
-	if priorBytes != nil {
-		content = preserveWriteFileEncoding(priorBytes, content)
+		priorContent = string(prev)
+		content = preserveWriteFileEncoding(prev, content)
 	}
 	modelEquivalentContent := content
 
