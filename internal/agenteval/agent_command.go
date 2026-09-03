@@ -3,7 +3,6 @@ package agenteval
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os/exec"
 	"strings"
 
@@ -83,8 +82,7 @@ func (runner CommandAgentRunner) Run(ctx context.Context, input AgentRunInput) A
 		result.Error = ctxErr.Error()
 		return result
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := execution.AsPureExitError(err); ok {
 		result.ExitCode = exitErr.ExitCode()
 		return result
 	}

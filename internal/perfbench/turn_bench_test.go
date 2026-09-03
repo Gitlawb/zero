@@ -657,6 +657,53 @@ exit 0
 	}
 }
 
+func TestNewTurnExecRunnerRunEndCannotHideContextFailure(t *testing.T) {
+	task := BenchTask{ID: "context-failure", Prompt: "p", WorkspaceFixture: t.TempDir()}
+	stub := writeBlockingExecStub(t)
+	tests := []struct {
+		name    string
+		context func(t *testing.T) context.Context
+		wantErr error
+	}{
+		{
+			name: "cancellation",
+			context: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				timer := time.AfterFunc(time.Second, cancel)
+				t.Cleanup(func() { timer.Stop() })
+				return ctx
+			},
+			wantErr: context.Canceled,
+		},
+		{
+			name: "deadline",
+			context: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ready := filepath.Join(t.TempDir(), "ready")
+			t.Setenv("PERFBENCH_BLOCKING_STUB_READY", ready)
+			outcome := NewTurnExecRunner(stub)(test.context(t), task, RunContext{Model: "m"})
+			if _, err := os.Stat(ready); err != nil {
+				t.Fatalf("stub did not emit run_end before the context failed: %v", err)
+			}
+			if outcome.Err == nil || !errors.Is(outcome.Err, test.wantErr) {
+				t.Fatalf("run_end must not hide %v, got %#v", test.wantErr, outcome)
+			}
+			if outcome.Passed || outcome.VerifyErr != "" {
+				t.Fatalf("context failure must precede oracle accounting, got %#v", outcome)
+			}
+		})
+	}
+}
+
 // assertVerifyFailed asserts an outcome failed specifically because the oracle
 // rejected the work — Passed is false, there is no harness error (Err nil), and
 // VerifyErr carries the surfaced failure detail. This is stronger than merely
@@ -810,6 +857,7 @@ func TestOracleAuthoritativeOnIncompleteExit(t *testing.T) {
 	task := loadBaselineTask(t, "edit-01")
 	outcome := runTurnStub(t, task, `sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
 echo '{"type":"run_end","exitCode":4}'
+exit 4
 `)
 	if outcome.Err != nil {
 		t.Fatalf("incomplete-exit with a correct edit should pass, got harness error: %v", outcome.Err)
@@ -836,7 +884,8 @@ func TestNonIncompleteExitStaysAuthoritative(t *testing.T) {
 			task := loadBaselineTask(t, "edit-01")
 			outcome := runTurnStub(t, task, fmt.Sprintf(`sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
 echo '{"type":"run_end","exitCode":%d}'
-`, code))
+exit %d
+`, code, code))
 			if outcome.Err != nil {
 				t.Fatalf("a nonzero exit should be a task fail, not a harness error: %v", outcome.Err)
 			}
@@ -860,6 +909,7 @@ echo '{"type":"run_end","exitCode":%d}'
 func TestIncompleteExitStillFailsWhenOracleFails(t *testing.T) {
 	task := loadBaselineTask(t, "edit-01")
 	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":4}'
+exit 4
 `)
 	assertVerifyFailed(t, "incomplete exit with no edit applied", outcome)
 }
@@ -872,6 +922,7 @@ func TestIncompleteExitStillFailsWhenOracleFails(t *testing.T) {
 func TestNonzeroExitStillFailsLatencyOnly(t *testing.T) {
 	task := loadBaselineTask(t, "longproc-01")
 	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":4}'
+exit 4
 `)
 	if outcome.Err != nil {
 		t.Fatalf("latency-only nonzero exit should be a verify fail, not a harness error: %v", outcome.Err)

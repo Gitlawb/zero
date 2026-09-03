@@ -669,12 +669,18 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		runErr := execution.RunCommand(ctx, cmd)
 		wallMs := float64(time.Since(start).Microseconds()) / 1000
 
-		exitCode, haveExit := streamJSONExitCode(outBuf.Bytes())
 		outcome := TurnTaskOutcome{WallMs: wallMs}
-		if errors.Is(runErr, exec.ErrWaitDelay) {
-			outcome.Err = fmt.Errorf("zero exec output cleanup failed: %w", runErr)
+		if !runEndCanReconcile(runErr) {
+			if errors.Is(runErr, exec.ErrWaitDelay) {
+				outcome.Err = fmt.Errorf("zero exec output cleanup failed: %w", runErr)
+			} else {
+				outcome.Err = fmt.Errorf("zero exec command failed: %w", runErr)
+			}
 			return outcome
-		} else if haveExit && exitCode != 0 {
+		}
+
+		exitCode, haveExit := streamJSONExitCode(outBuf.Bytes())
+		if haveExit && exitCode != 0 {
 			outcome.VerifyErr = fmt.Sprintf("agent run_end exit code %d", exitCode)
 		} else if !haveExit {
 			detail := strings.TrimSpace(errBuf.String())

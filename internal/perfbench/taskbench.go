@@ -338,8 +338,11 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 		runErr := execution.RunCommand(ctx, cmd)
-		if errors.Is(runErr, exec.ErrWaitDelay) {
-			return TaskOutcome{Err: fmt.Errorf("zero exec output cleanup failed: %w", runErr)}
+		if !runEndCanReconcile(runErr) {
+			if errors.Is(runErr, exec.ErrWaitDelay) {
+				return TaskOutcome{Err: fmt.Errorf("zero exec output cleanup failed: %w", runErr)}
+			}
+			return TaskOutcome{Err: fmt.Errorf("zero exec command failed: %w", runErr)}
 		}
 
 		// The terminal run_end exit code is authoritative for pass/fail: a non-zero
@@ -368,6 +371,17 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 		}
 		return TaskOutcome{Passed: true}
 	}
+}
+
+// runEndCanReconcile reports whether a command result contains only an ordinary
+// process exit status. A run_end may explain success or an *exec.ExitError, but
+// it must not hide cancellation, startup, process-tree, or output-cleanup errors.
+func runEndCanReconcile(err error) bool {
+	if err == nil {
+		return true
+	}
+	_, ok := execution.AsPureExitError(err)
+	return ok
 }
 
 func buildExecArgs(task BenchTask, rc RunContext, extraArgs []string) []string {

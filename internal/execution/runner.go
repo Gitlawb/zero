@@ -174,8 +174,7 @@ func commandExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := AsPureExitError(err); ok {
 		return exitErr.ExitCode()
 	}
 	return -1

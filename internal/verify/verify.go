@@ -3,7 +3,6 @@ package verify
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -310,8 +309,7 @@ func defaultRunner(ctx context.Context, dir string, command []string, timeout ti
 	exitCode := 0
 	if err != nil {
 		exitCode = -1
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+		if exitError, ok := execution.AsPureExitError(err); ok {
 			exitCode = exitError.ExitCode()
 			err = nil
 		}

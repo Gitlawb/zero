@@ -153,8 +153,7 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 		result.ExitCode = 0
 		return result
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := execution.AsPureExitError(err); ok {
 		result.ExitCode = exitErr.ExitCode()
 		return result
 	}
