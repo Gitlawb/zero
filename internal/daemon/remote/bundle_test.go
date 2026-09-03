@@ -3160,3 +3160,25 @@ func TestRemoveKeptBackupNeverTouchesTheScannedPrefix(t *testing.T) {
 		t.Errorf("the copy must be left intact: %v", err)
 	}
 }
+
+// A stat error on the work-tree probe is not proof there is no work tree. R1
+// puts the veto ahead of the marker precisely because a published tree can
+// carry a file named txn at its root, so an unreadable probe has to retain
+// rather than fall through to a marker the tree itself may have supplied.
+func TestAttributeStagingDirRetainsWhenTheWorkTreeProbeFails(t *testing.T) {
+	dir := t.TempDir()
+	staging := filepath.Join(dir, ".staging-00000000000000000001-seq")
+	if err := os.MkdirAll(filepath.Join(staging, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(staging, txnMarker{Kind: txnKindBundleExtract, Dest: "proj-1", Seq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	injectFault(t, "stat", func(args ...string) bool {
+		return filepath.Base(args[0]) == ".git"
+	}, errors.New("injected work-tree probe failure"))
+
+	if _, ok := attributeStagingDir(dir, staging, 1, func(string, ...any) {}); ok {
+		t.Fatal("a directory whose work-tree probe could not be read must not be attributed")
+	}
+}
