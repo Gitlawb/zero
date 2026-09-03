@@ -30,10 +30,10 @@ func TestTheStrictTokenCarriesTheReadCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("windowsRestrictedTokenSIDsForProfile: %v", err)
 	}
-	if !containsSID(got, want) {
+	if !carriesSID(got, want) {
 		t.Fatalf("the strict token's restricted SIDs %v omit the read capability %s, so the command cannot open its own executable", got, want)
 	}
-	if !containsSID(got, base[0]) {
+	if !carriesSID(got, base[0]) {
 		t.Fatalf("the workspace capability was dropped: %v", got)
 	}
 }
@@ -50,12 +50,14 @@ func TestTheWriteRestrictedTokenDoesNotCarryTheReadCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("windowsRestrictedTokenSIDsForProfile: %v", err)
 	}
-	if containsSID(got, readSID) {
+	if carriesSID(got, readSID) {
 		t.Fatalf("the WRITE_RESTRICTED token carries the read capability %s, widening the write jail to every read root", readSID)
 	}
 }
 
-func containsSID(values []string, want string) bool {
+// Not containsSID: #886 adds a package-level helper by that name, and the two
+// branches would stop compiling the moment both land.
+func carriesSID(values []string, want string) bool {
 	for _, value := range values {
 		if strings.EqualFold(value, want) {
 			return true
@@ -113,7 +115,7 @@ func TestThePlanAndTheTokenAgreeOnTheReadCapability(t *testing.T) {
 			if inPlan != inToken {
 				t.Fatalf("the plan grants the read capability = %t but the token carries it = %t; one side confines reads the other side never checks", inPlan, inToken)
 			}
-			if inPlan && !containsSID(tokenSIDs, planned) {
+			if inPlan && !carriesSID(tokenSIDs, planned) {
 				t.Fatalf("the plan grants %s but the token carries %v, so the command cannot read what setup allowed", planned, tokenSIDs)
 			}
 		})
