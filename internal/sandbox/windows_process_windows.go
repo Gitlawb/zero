@@ -56,6 +56,16 @@ func runWindowsCommandAsUser(token windows.Token, config WindowsSandboxCommandCo
 	startup.StdErr = stderr
 	var process windows.ProcessInformation
 	envPtr := &envBlock[0]
+	// Claim the report side channel BEFORE the launch. Publishing can fail, and
+	// after CreateProcessAsUser succeeds a running child exists whether or not the
+	// fact can be recorded; taking the file first moves that failure to a point
+	// where there is still nothing to own.
+	report, err := openWindowsExecutionReport(config.ExecutionReportPath)
+	if err != nil {
+		return 1, err
+	}
+	published := false
+	defer func() { report.close(published) }()
 	if err := windows.CreateProcessAsUser(
 		token,
 		nil,
@@ -76,12 +86,19 @@ func runWindowsCommandAsUser(token windows.Token, config WindowsSandboxCommandCo
 	// THE TRANSITION ONLY THIS PROCESS CAN SEE. Everything above can fail with the
 	// helper already running, and the parent's exec.Cmd.Process cannot tell those
 	// failures apart from a real sandboxed launch. The restricted child exists as
-	// of this line, so this is where the fact is published. A write failure is
-	// reported rather than swallowed: the parent fails closed on a missing report,
-	// so silence must not be mistaken for a launch that did happen.
-	if err := writeWindowsExecutionReport(config.ExecutionReportPath, true); err != nil {
+	// of this line, so this is where the fact is published.
+	//
+	// OWNERSHIP OUTLIVES REPORTING. The child is runnable and may already be
+	// making external side effects, so a failure to publish must not return from
+	// here and leave it running with nobody waiting on it: the parent would read a
+	// missing report, correctly conclude that no child launched, and be free to
+	// start a second one alongside the first. Take it down and reap it, then
+	// report the failure.
+	if err := report.publish(true); err != nil {
+		terminateAndReapWindowsChild(process.Process)
 		return 1, fmt.Errorf("record sandboxed child launch: %w", err)
 	}
+	published = true
 	if _, err := windows.WaitForSingleObject(process.Process, windows.INFINITE); err != nil {
 		return 1, fmt.Errorf("wait for sandboxed process: %w", err)
 	}

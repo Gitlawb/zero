@@ -172,6 +172,14 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	launched := command.Process != nil
 	exitCode := commandExitCode(err)
 	adapterReport, reportErr := plan.ExecutionReport()
+	// AND FOR A WRAPPED PLAN THAT OBSERVATION IS OF THE WRAPPER. On Windows the
+	// command started here is the sandbox helper; it creates the requested child
+	// only after marker, ACL, network, SID and token setup, any of which can fail
+	// with the helper already running. Reading the report was not enough on its
+	// own: the launch decision has to consume it, or bash promotes the planned
+	// DenyRead notice for a command that never ran under that enforcement. Same
+	// resolution the captured runner uses, so the two cannot drift.
+	launched = execution.ResolveChildLaunched(launched, plan.ChildLaunchOwnedByAdapter(), adapterReport)
 	meta["exit_code"] = strconv.Itoa(exitCode)
 	stdoutText := stdout.retained()
 	stderrRetained := stderr.retained()
