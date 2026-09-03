@@ -1414,10 +1414,20 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 
 	// beforeTool hooks may veto the call before it runs (a non-zero exit blocks).
+	//
+	// A SUCCESSFUL beforeTool HOOK STILL HAS SOMETHING TO SAY. Its Messages carry
+	// the enforcement notice for the process it ran, and reading the outcome only
+	// when Blocked left that notice in the audit record and nowhere the model or
+	// the operator could see it: a hook could run under the weakened DenyRead
+	// token and say so to nobody. Carried to the tool result below, which is the
+	// same surface afterTool feedback already uses.
+	var beforeToolMessages []string
 	if toolFound {
-		if outcome, blocked := dispatchBeforeTool(ctx, options, call, args); blocked {
+		outcome, blocked := dispatchBeforeTool(ctx, options, call, args)
+		if blocked {
 			return blockedByHookResult(call, outcome), nil
 		}
+		beforeToolMessages = outcome.Messages
 	}
 	args = shellExecutionArgsForApproval(call.Name, args, decisionAction, options)
 
@@ -1489,7 +1499,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// afterTool hooks run once the tool has executed; their output (e.g. a
 	// formatter or vet result) is surfaced back to the model on the result.
 	if toolFound {
-		if feedback := dispatchAfterTool(ctx, options, call, args, result); feedback != "" {
+		if feedback := joinHookMessages(beforeToolMessages, dispatchAfterTool(ctx, options, call, args, result)); feedback != "" {
 			var didRedact bool
 			result.Output, didRedact = appendHookFeedback(result.Output, feedback)
 			if didRedact {
@@ -2012,6 +2022,22 @@ func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResul
 // scrubbed for secrets like every other string crossing the tool boundary. The
 // returned bool reports whether scrubbing changed the feedback, so the caller can
 // set ToolResult.Redacted to match the registry's redaction contract.
+// joinHookMessages folds a successful beforeTool hook's output in with the
+// afterTool feedback so both reach the model through the one delivery path,
+// rather than beforeTool's being produced and then dropped.
+func joinHookMessages(before []string, after string) string {
+	parts := make([]string, 0, len(before)+1)
+	for _, message := range before {
+		if strings.TrimSpace(message) != "" {
+			parts = append(parts, message)
+		}
+	}
+	if strings.TrimSpace(after) != "" {
+		parts = append(parts, after)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func appendHookFeedback(output string, feedback string) (string, bool) {
 	scrubbed := redaction.RedactString(feedback, redaction.Options{})
 	redacted := scrubbed != feedback
