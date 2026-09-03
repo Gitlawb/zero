@@ -2185,6 +2185,65 @@ func TestPromoteStagedDirWritesTheMarkerBeforeSettingAside(t *testing.T) {
 	}
 }
 
+// The same ordering on recovery's own set-aside. Only promoteStagedDir's copy of
+// this window was pinned, and the recovery path writes its own: a husk moved
+// into a holder before the marker lands is the only copy of whatever was at the
+// destination, sitting in a directory nothing on disk attributes, which recovery
+// can then neither restore from nor ever reclaim.
+func TestSetAsideUnusableDestWritesTheMarkerBeforeMovingTheHusk(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	// A destination that exists and holds no usable install, plus a usable copy
+	// beside it: the one state that reaches the set-aside, since the husk moves
+	// only after a candidate has been selected.
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "husk"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := plantHolder(t, dest, 1, "the copy", false)
+
+	injectFault(t, "rename", func(args ...string) bool {
+		return args[0] == dest
+	}, errors.New("injected set-aside failure"))
+	// The holder is removed on this failure path, which is right and would also
+	// erase what this test is asserting on.
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	restoreInterruptedPromotion(lockFor(t, dest), dest, testPublished, nil)
+
+	var husk string
+	for _, h := range holdersFor(t, dest) {
+		if h != candidate {
+			if husk != "" {
+				t.Fatalf("want one holder beside the candidate, got %v", holdersFor(t, dest))
+			}
+			husk = h
+		}
+	}
+	if husk == "" {
+		t.Fatal("the set-aside allocated no holder, so this test proves nothing about the order")
+	}
+	m, err := readHolderMarker(husk)
+	if err != nil {
+		t.Fatalf("the holder was moved into before it carried a marker: %v", err)
+	}
+	seq, ok := holderStamp(dest, husk)
+	if !ok {
+		t.Fatalf("the allocator wrote a name the grammar rejects: %q", filepath.Base(husk))
+	}
+	if m.Kind != holderMarkerKind || m.Dest != filepath.Base(dest) || m.Seq != seq {
+		t.Errorf("marker = %+v, want kind %q dest %q seq %d", m, holderMarkerKind, filepath.Base(dest), seq)
+	}
+	if hasFile(t, filepath.Join(husk, "install")) {
+		t.Error("the set-aside failed, so nothing should have moved into the holder")
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "husk")); err != nil || string(got) != "partial" {
+		t.Errorf("the destination must be left exactly as found: %q err %v", got, err)
+	}
+}
+
 // A torn marker write must leave no marker at all: the atomic rename is what
 // makes "missing" and "ours" the only two answers a crash can produce, so a
 // partial file can never be read as ownership.
@@ -2649,12 +2708,6 @@ func TestRestoreInterruptedPromotionIgnoresAPrefixCollidingSibling(t *testing.T)
 // anything on it would turn a transient error into a permanent ruling. So a
 // candidate that cannot be read stops the destination with everything intact.
 func TestRestoreInterruptedPromotionStopsOnAnUnreadableHolder(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the directory permissions this test relies on")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX directory permissions")
-	}
 	for _, tc := range []struct {
 		name string
 		// seed makes the holder's install unreadable without touching the holder
@@ -2662,7 +2715,20 @@ func TestRestoreInterruptedPromotionStopsOnAnUnreadableHolder(t *testing.T) {
 		// directory is classified unowned, and the branch under test is never
 		// reached.
 		seed func(t *testing.T, holder string)
+		// portable rows run everywhere. The chmod rows do not, and this
+		// distinction is the axis the no-fallback rule rests on, so at least one
+		// row has to hold on the Windows leg and under root.
+		portable bool
 	}{
+		{
+			name:     "the install cannot be listed at the seam",
+			portable: true,
+			seed: func(t *testing.T, holder string) {
+				injectFault(t, "readDir", func(args ...string) bool {
+					return args[0] == filepath.Join(holder, "install")
+				}, os.ErrPermission)
+			},
+		},
 		{
 			name: "install is a symlink through an unreadable directory",
 			seed: func(t *testing.T, holder string) {
@@ -2693,9 +2759,24 @@ func TestRestoreInterruptedPromotionStopsOnAnUnreadableHolder(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if !tc.portable {
+				if os.Geteuid() == 0 {
+					t.Skip("root ignores the directory permissions this row relies on")
+				}
+				if runtime.GOOS == "windows" {
+					t.Skip("POSIX directory permissions")
+				}
+			}
 			root := t.TempDir()
 			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
-			holder := plantHolder(t, dest, 1, "the only copy", false)
+			// A second usable owned holder sits below the unreadable one, and it
+			// is what makes "stopped" distinguishable from "ran out of
+			// candidates": with the unreadable holder as the only candidate,
+			// turning the stop into a continue leaves every assertion below
+			// true, because there is nothing left for the pass to publish or
+			// park either way.
+			older := plantHolder(t, dest, 1, "the older copy", false)
+			holder := plantHolder(t, dest, 2, "the only copy", false)
 			tc.seed(t, holder)
 
 			var reported []string
@@ -2716,7 +2797,16 @@ func TestRestoreInterruptedPromotionStopsOnAnUnreadableHolder(t *testing.T) {
 			if slices.Contains(*removed, holder) {
 				t.Errorf("a copy that could not be read must never be handed to a delete: %v", *removed)
 			}
-			assertNoOtherEntries(t, root, filepath.Base(holder), installLockDir)
+			// The older copy is the claim the fixture exists for: a pass that
+			// carried on past the unreadable holder would publish this one, or
+			// park it on the way, and either is a ruling made on a fault.
+			if got, err := os.ReadFile(filepath.Join(older, "install", "engine")); err != nil || string(got) != "the older copy" {
+				t.Errorf("the older copy must be left exactly as found: %q err %v", got, err)
+			}
+			if slices.Contains(*removed, older) {
+				t.Errorf("the older copy must never be handed to a delete: %v", *removed)
+			}
+			assertNoOtherEntries(t, root, filepath.Base(older), filepath.Base(holder), installLockDir)
 			assertReports(t, reported, holder)
 		})
 	}
@@ -2957,6 +3047,64 @@ func TestRemoveKeptBackupRefusesWhileTheDestinationIsLocked(t *testing.T) {
 	if _, err := os.Stat(kept); !os.IsNotExist(err) {
 		t.Errorf("the copy should be gone, got %v", err)
 	}
+}
+
+// The attribution runs twice: once before the lock and once under it. The first
+// check happens with nothing excluding a live promotion, so a directory that
+// stopped being this install's in between must not be deleted on the strength of
+// that reading. Both halves of the second check are driven here, because
+// deleting the whole block leaves the package green.
+func TestRemoveKeptBackupRefusesWhenAttributionChangesUnderTheLock(t *testing.T) {
+	t.Run("the marker goes unreadable", func(t *testing.T) {
+		root := t.TempDir()
+		kept := plantKeptHolder(t, filepath.Join(root, "engine-a"), 1, "engine")
+		marker := filepath.Join(kept, holderMarkerFile)
+
+		var read atomic.Bool
+		injectFault(t, "readFile", func(args ...string) bool {
+			// The pre-lock check reads the marker first; the re-read under the
+			// lock is the one this fault is for.
+			return args[0] == marker && !read.CompareAndSwap(false, true)
+		}, errors.New("injected marker read failure"))
+
+		err := RemoveKeptBackup(root, filepath.Base(kept))
+		if err == nil || !strings.Contains(err.Error(), "no longer attributable") {
+			t.Fatalf("RemoveKeptBackup = %v, want a refusal naming the attribution that changed", err)
+		}
+		if _, err := os.Stat(filepath.Join(kept, "install", "engine")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
+	t.Run("the marker names another install", func(t *testing.T) {
+		root := t.TempDir()
+		kept := plantKeptHolder(t, filepath.Join(root, "engine-a"), 1, "engine")
+		marker := filepath.Join(kept, holderMarkerFile)
+		// A readable marker for a different install is the other half: the
+		// re-read succeeds and answers with a destination the first one did not,
+		// which is what a directory reused by another promotion looks like from
+		// here.
+		other, err := json.Marshal(txnMarker{Kind: holderMarkerKind, Dest: "engine-z", Seq: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		real := holderFS
+		t.Cleanup(func() { holderFS = real })
+		var read atomic.Bool
+		holderFS.readFile = func(name string) ([]byte, error) {
+			if name != marker || read.CompareAndSwap(false, true) {
+				return real.readFile(name)
+			}
+			return other, nil
+		}
+
+		if err := RemoveKeptBackup(root, filepath.Base(kept)); err == nil || !strings.Contains(err.Error(), "no longer attributable") {
+			t.Fatalf("RemoveKeptBackup = %v, want a refusal naming the attribution that changed", err)
+		}
+		if _, err := os.Stat(filepath.Join(kept, "install", "engine")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
 }
 
 // The command takes a name, never a path. The Kept grammar here is a

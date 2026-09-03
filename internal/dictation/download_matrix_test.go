@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -527,43 +528,60 @@ func keptNamed(destDir string, seq int64) string {
 // a change in how many times recovery stats a holder cannot silently move which
 // call the row is failing.
 type recoveryStep struct {
-	name   string
-	inject func(t *testing.T, newest string)
+	name string
+	// inject installs the row's fault and returns whether that fault was ever
+	// actually called. The return is not bookkeeping: a row that injects a
+	// failure into a step the pass never reaches asserts only that a clean run
+	// works, which every other row already proves.
+	inject func(t *testing.T, newest string) (fired func() bool)
+}
+
+// firedFault wraps a row's match so the row can report whether its fault was
+// reached. A nil match means every call of the step, matching injectFault's own
+// contract.
+func firedFault(match func(args ...string) bool) (wrapped func(args ...string) bool, fired func() bool) {
+	var hit atomic.Bool
+	return func(args ...string) bool {
+		if match != nil && !match(args...) {
+			return false
+		}
+		hit.Store(true)
+		return true
+	}, func() bool { return hit.Load() }
 }
 
 func dictationRecoverySteps() []recoveryStep {
 	failed := errors.New("injected recovery failure")
+	simple := func(step string) func(*testing.T, string) func() bool {
+		return func(t *testing.T, _ string) func() bool {
+			match, fired := firedFault(nil)
+			injectFault(t, step, match, failed)
+			return fired
+		}
+	}
 	return []recoveryStep{
-		{
-			name:   "readDir",
-			inject: func(t *testing.T, _ string) { injectFault(t, "readDir", nil, failed) },
-		},
-		{
-			name:   "stat",
-			inject: func(t *testing.T, _ string) { injectFault(t, "stat", nil, failed) },
-		},
-		{
-			name:   "marker read",
-			inject: func(t *testing.T, _ string) { injectFault(t, "readFile", nil, failed) },
-		},
+		{name: "readDir", inject: simple("readDir")},
+		{name: "stat", inject: simple("stat")},
+		{name: "marker read", inject: simple("readFile")},
 		{
 			name: "restore rename",
-			inject: func(t *testing.T, newest string) {
-				injectFault(t, "rename", func(args ...string) bool {
+			inject: func(t *testing.T, newest string) func() bool {
+				match, fired := firedFault(func(args ...string) bool {
 					return args[0] == filepath.Join(newest, "install")
-				}, failed)
+				})
+				injectFault(t, "rename", match, failed)
+				return fired
 			},
 		},
-		{
-			name:   "removeAll",
-			inject: func(t *testing.T, _ string) { injectFault(t, "removeAll", nil, failed) },
-		},
+		{name: "removeAll", inject: simple("removeAll")},
 		{
 			name: "park rename",
-			inject: func(t *testing.T, _ string) {
-				injectFault(t, "rename", func(args ...string) bool {
+			inject: func(t *testing.T, _ string) func() bool {
+				match, fired := firedFault(func(args ...string) bool {
 					return strings.Contains(filepath.Base(args[1]), keptSuffix)
-				}, failed)
+				})
+				injectFault(t, "rename", match, failed)
+				return fired
 			},
 		},
 	}
@@ -578,12 +596,17 @@ func dictationRecoverySteps() []recoveryStep {
 // about.
 func TestDictationRecoveryStepFailures(t *testing.T) {
 	for _, step := range dictationRecoverySteps() {
+		// A standalone "pass two" variant used to sit between these two. It ran
+		// pass one clean, which reaches the terminal state, so pass two had no
+		// candidate left and the fault it injected was never called: the row
+		// asserted a clean run and nothing else. The both-passes row is the one
+		// that exercises a fault on pass two, because pass one fails first and
+		// leaves work behind for it.
 		for _, when := range []struct {
 			name   string
 			faulty [2]bool
 		}{
 			{name: "pass one", faulty: [2]bool{true, false}},
-			{name: "pass two", faulty: [2]bool{false, true}},
 			{name: "both passes", faulty: [2]bool{true, true}},
 		} {
 			t.Run(step.name+"/"+when.name, func(t *testing.T) {
@@ -601,25 +624,38 @@ func TestDictationRecoveryStepFailures(t *testing.T) {
 				txn := lockFor(t, dest)
 
 				var watch deleteWatch
-				pass := func(faulty bool) {
+				pass := func(faulty bool) func() bool {
 					saved := holderFS
 					defer func() { holderFS = saved }()
+					fired := func() bool { return true }
 					if faulty {
-						step.inject(t, newest)
+						fired = step.inject(t, newest)
 					}
 					// After the fault, so the watch sees the calls the fault is
 					// failing rather than only the ones it lets through.
 					watch.install(t)
 					restoreInterruptedPromotion(txn, dest, testPublished, nil)
+					return fired
 				}
-				pass(when.faulty[0])
-				if when.faulty[0] && dictationStepTerminal(dest, older, newest, scratch) {
-					// The row would pass without the code being tested doing
-					// anything: a fault that changes nothing is a fault that was
-					// never reached, and every assertion below it is vacuous.
-					t.Errorf("the injected %s failure left the pass free to finish, so this row proves nothing", step.name)
+				firedOne := pass(when.faulty[0])
+				if when.faulty[0] {
+					if !firedOne() {
+						// The pass never called the step this row fails, so the
+						// row ran a clean recovery under a fault that does not
+						// exist and every assertion below it is vacuous.
+						t.Fatalf("the injected %s failure was never called on pass one, so this row proves nothing", step.name)
+					}
+					if dictationStepTerminal(dest, older, newest, scratch) {
+						// Same defect from the other side: a fault that was
+						// called and changed nothing left the pass free to
+						// finish.
+						t.Errorf("the injected %s failure left the pass free to finish, so this row proves nothing", step.name)
+					}
 				}
-				pass(when.faulty[1])
+				firedTwo := pass(when.faulty[1])
+				if when.faulty[1] && !firedTwo() {
+					t.Fatalf("the injected %s failure was never called on pass two, so this row proves nothing", step.name)
+				}
 				// The fault is gone, and recovery has to be able to finish from
 				// wherever the failed passes left the destination.
 				pass(false)

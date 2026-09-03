@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -642,10 +643,19 @@ func TestExtractBundleRenamesRetryOnTransientErrors(t *testing.T) {
 		t.Fatalf("seed extract: %v", err)
 	}
 
-	// The third rename of the second extract is the publish: the marker, then
-	// the set-aside, then the swap into dest.
+	// The publish is matched by its arguments, not by a call ordinal: the marker
+	// write and the set-aside also rename, and an ordinal leaves the test equally
+	// green when it lands on one of those instead, so nothing would pin the step.
+	// Only the first attempt fails, because the Windows retry needs a later one
+	// to succeed on.
 	injected := &os.LinkError{Op: "rename", Old: "repo", New: dest, Err: syscall.Errno(32)}
-	injectFault(t, "rename", nthCall(3), injected)
+	var fired atomic.Bool
+	injectFault(t, "rename", func(args ...string) bool {
+		if args[1] != dest || filepath.Base(args[0]) != "repo" {
+			return false
+		}
+		return fired.CompareAndSwap(false, true)
+	}, injected)
 
 	err := extractBundle(ctx, testBundle(t, "a.txt", "v1"), dest, nil)
 	want := "v0"
@@ -660,6 +670,9 @@ func TestExtractBundleRenamesRetryOnTransientErrors(t *testing.T) {
 	got, readErr := os.ReadFile(filepath.Join(dest, "a.txt"))
 	if readErr != nil || string(got) != want {
 		t.Fatalf("dest a.txt = %q, err %v, want %q", got, readErr, want)
+	}
+	if !fired.Load() {
+		t.Fatal("the publish rename was never reached, so this row proves nothing about the retry")
 	}
 }
 
@@ -2489,19 +2502,26 @@ func TestRecoverBundleDirSkipsAnUnusableNewestCandidate(t *testing.T) {
 // pass the predicate" is a selection decision; a filesystem error is not a fact
 // about the copy at all, and acting on it turns a fault into a delete.
 func TestRecoverBundleDirStopsOnAnUnreadableCandidate(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the directory permissions this test relies on")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX directory permissions")
-	}
 	for _, tc := range []struct {
 		name string
 		// break makes one stat under the staging dir fail with EACCES without
 		// making the marker unreadable: a candidate whose marker cannot be read
 		// lands in the unowned branch, where every mutation below passes.
 		breakIt func(t *testing.T, staging string)
+		// portable rows run everywhere. The chmod rows do not, and this
+		// distinction is the axis the no-fallback rule rests on, so at least one
+		// row has to hold on the Windows leg and under root.
+		portable bool
 	}{
+		{
+			name:     "the usability probe fails at the seam",
+			portable: true,
+			breakIt: func(t *testing.T, staging string) {
+				injectFault(t, "stat", func(args ...string) bool {
+					return args[0] == filepath.Join(staging, "backup", ".git")
+				}, os.ErrPermission)
+			},
+		},
 		{
 			name: "the set-aside copy cannot be stat'd",
 			breakIt: func(t *testing.T, staging string) {
@@ -2536,6 +2556,14 @@ func TestRecoverBundleDirStopsOnAnUnreadableCandidate(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if !tc.portable {
+				if os.Geteuid() == 0 {
+					t.Skip("root ignores the directory permissions this row relies on")
+				}
+				if runtime.GOOS == "windows" {
+					t.Skip("POSIX directory permissions")
+				}
+			}
 			dir := t.TempDir()
 			older := stageBackup(t, dir, "", "proj-1", "v1", 100)
 			newest := stageBackup(t, dir, "", "proj-1", "v2", 200)
@@ -2825,6 +2853,65 @@ func TestRecoverBundleDirLeavesAnUnusableDestinationWithNoCandidateAlone(t *test
 		if pass == 1 && (!logged(logs, unusable) || !logged(logs, unowned) || !logged(logs, "proj-1")) {
 			t.Errorf("pass %d: all three should be reported, got %v", pass, logs)
 		}
+	}
+}
+
+// The marker goes in before the first destructive rename on recovery's own
+// set-aside too. Only extractBundle's copy of this window was pinned; a husk
+// moved into a staging dir before the marker lands is the only copy of whatever
+// was at the destination, sitting in a directory nothing on disk attributes,
+// which recovery can then neither restore from nor ever reclaim.
+func TestSetAsideHuskWritesTheMarkerBeforeMovingTheDestination(t *testing.T) {
+	dir := t.TempDir()
+	// A destination that exists and cannot serve, plus a usable copy beside it:
+	// the one state that reaches the set-aside, since the husk moves only after
+	// a candidate has been selected.
+	dest := plantUnusableDest(t, dir, "proj-1", "partial")
+	candidate := stageBackup(t, dir, "", "proj-1", "v1", 100)
+
+	injectFault(t, "rename", func(args ...string) bool {
+		return args[0] == dest
+	}, errors.New("injected set-aside failure"))
+	// The staging dir is reaped on this failure path, which is right and would
+	// also erase what this test is asserting on.
+	injectFault(t, "removeAll", nil, errors.New("injected cleanup failure"))
+
+	recoverBundleDir(dir, discardLog)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	husk := ""
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if !strings.HasPrefix(entry.Name(), stagingPrefix) || path == candidate {
+			continue
+		}
+		if husk != "" {
+			t.Fatalf("want one staging dir beside the candidate, got %s and %s", husk, path)
+		}
+		husk = path
+	}
+	if husk == "" {
+		t.Fatal("the set-aside allocated no staging dir, so this test proves nothing about the order")
+	}
+	m, err := readMarker(husk)
+	if err != nil {
+		t.Fatalf("the staging dir was moved into before it carried a marker: %v", err)
+	}
+	seq, ok := stagingStamp(filepath.Base(husk))
+	if !ok {
+		t.Fatalf("the allocator wrote a name the grammar rejects: %q", filepath.Base(husk))
+	}
+	if m.Kind != txnKindBundleExtract || m.Dest != "proj-1" || m.Seq != seq {
+		t.Errorf("marker = %+v, want kind %q dest %q seq %d", m, txnKindBundleExtract, "proj-1", seq)
+	}
+	if _, err := os.Lstat(filepath.Join(husk, "backup")); !os.IsNotExist(err) {
+		t.Errorf("the set-aside failed, so nothing should have moved into the staging dir: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "husk.txt")); err != nil || string(got) != "partial" {
+		t.Errorf("the destination must be left exactly as found: %q err %v", got, err)
 	}
 }
 
@@ -3119,6 +3206,63 @@ func TestRemoveKeptBackupRefusesWhileTheDestinationIsLocked(t *testing.T) {
 		}
 		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err != nil {
 			t.Fatalf("the same removal must go through once the lock is free: %v", err)
+		}
+	})
+}
+
+// The attribution runs twice: once before the lock and once under it. The first
+// read happens with nothing excluding a live extract, so a directory that
+// stopped being this link's in between must not be deleted on the strength of
+// that reading. Both halves of the second check are driven here, because
+// deleting the whole block leaves the package green.
+func TestRemoveKeptBackupRefusesWhenAttributionChangesUnderTheLock(t *testing.T) {
+	t.Run("the marker goes unreadable", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "one", 1)
+		marker := filepath.Join(kept, stagingMarkerFile)
+
+		var read atomic.Bool
+		injectFault(t, "readFile", func(args ...string) bool {
+			// The pre-lock attribution reads the marker first; the re-read under
+			// the lock is the one this fault is for.
+			return args[0] == marker && !read.CompareAndSwap(false, true)
+		}, errors.New("injected marker read failure"))
+
+		err := RemoveKeptBackup(dir, filepath.Base(kept))
+		if err == nil || !strings.Contains(err.Error(), "no longer attributable") {
+			t.Fatalf("RemoveKeptBackup = %v, want a refusal naming the attribution that changed", err)
+		}
+		if _, err := os.Stat(filepath.Join(kept, "backup", "a.txt")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
+		}
+	})
+	t.Run("the marker names another link", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "one", 1)
+		marker := filepath.Join(kept, stagingMarkerFile)
+		// A readable marker for a different link is the other half: the re-read
+		// succeeds and answers with an id the first one did not, which is what a
+		// directory reused by another extract looks like from here.
+		other, err := json.Marshal(txnMarker{Kind: txnKindBundleExtract, Dest: "proj-2", Seq: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		real := stagingFS
+		t.Cleanup(func() { stagingFS = real })
+		var read atomic.Bool
+		stagingFS.readFile = func(name string) ([]byte, error) {
+			if name != marker || read.CompareAndSwap(false, true) {
+				return real.readFile(name)
+			}
+			return other, nil
+		}
+
+		if err := RemoveKeptBackup(dir, filepath.Base(kept)); err == nil || !strings.Contains(err.Error(), "no longer attributable") {
+			t.Fatalf("RemoveKeptBackup = %v, want a refusal naming the attribution that changed", err)
+		}
+		if _, err := os.Stat(filepath.Join(kept, "backup", "a.txt")); err != nil {
+			t.Errorf("the copy must be left intact: %v", err)
 		}
 	})
 }
