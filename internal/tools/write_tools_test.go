@@ -246,6 +246,46 @@ func TestWriteFileToolNewFileRetainsCallerBytes(t *testing.T) {
 	}
 }
 
+// TestWriteFileToolFailsClosedWhenExistingTargetIsUnreadable covers the gap the
+// encoding-preservation change opens: the overwrite path has already proven the
+// target exists, so a failed read of its bytes leaves no evidence of the BOM and
+// CRLF endings to restore. Writing anyway would push the model's normalized
+// content over the file and destroy the very convention this change preserves,
+// so an unreadable existing target has to be a write error, not a silent
+// fallback to the unpreserved bytes.
+func TestWriteFileToolFailsClosedWhenExistingTargetIsUnreadable(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example.txt")
+	existing := []byte("\xef\xbb\xbfold\r\ntext\r\n")
+	if err := os.WriteFile(path, existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore := makeFileWriteOnly(t, path)
+	if _, err := os.ReadFile(path); err == nil {
+		restore()
+		t.Skip("this environment still allows reading a write-only file")
+	}
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "example.txt", "content": "new\ntext\n", "overwrite": true,
+	})
+	restore()
+
+	if result.Status != StatusError {
+		t.Fatalf("overwrite of an unreadable existing file reported %v, want an error: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "cannot read the existing file") {
+		t.Fatalf("error = %q, want the fail-closed encoding-preservation message", result.Output)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, existing) {
+		t.Fatalf("file bytes = %q, want the original %q left untouched", got, existing)
+	}
+}
+
 func TestWriteFileToolRecordsCreatedFileButNotOverwrite(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
