@@ -11,7 +11,16 @@ import (
 // runConfigNotify implements `zero config notify`: with no flags it prints the
 // current mode/focusMode; --mode/--focus update them via the same
 // config.SetNotify writer the TUI /notify command uses, so all surfaces stay
-// in lockstep; --reset blanks both fields so the resolver defaults apply.
+// in lockstep; --reset blanks both fields so the built-in defaults apply.
+//
+// The command manages a user preference, so it talks ONLY to the user's own
+// config file (config.UserNotify / config.SetNotify) and never runs the full
+// config resolution: resolving providers would fail with ErrNoActiveProvider
+// for a brand-new user, locking them out of setting notifications before they
+// have even configured a provider (CodeRabbit review, PR #1001). The display
+// therefore reports the USER'S stored values — a project config that
+// overrides notify for one repo is not shown here, by the same logic the
+// maintainer applied to the write path.
 func runConfigNotify(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseConfigNotifyArgs(args)
 	if err != nil {
@@ -24,23 +33,15 @@ func runConfigNotify(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return exitSuccess
 	}
 
-	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
-	if exitCode != exitSuccess {
-		return exitCode
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 
 	if options.mode != "" || options.focus != "" || options.reset {
-		configPath, err := deps.userConfigPath()
-		if err != nil {
-			return writeAppError(stderr, err.Error(), exitCrash)
-		}
-		// Seed omitted fields from the USER'S OWN file, never from the
-		// resolved view: resolved merges project config (so a repo's
-		// mode:off would be copied into the user's global settings) and
-		// carries no defaults here, but seeding from it would also pin
-		// defaults as explicit choices. Blank stays blank — blank means
-		// "use the built-in defaults". --reset is the only path that
-		// clears both fields.
+		// Seed omitted fields from the USER'S OWN file. Blank stays blank —
+		// blank means "use the built-in defaults"; --reset is the only path
+		// that clears both fields.
 		current, err := config.UserNotify(configPath)
 		if err != nil {
 			return writeAppError(stderr, err.Error(), exitUsage)
@@ -59,18 +60,17 @@ func runConfigNotify(args []string, stdout io.Writer, stderr io.Writer, deps app
 		if _, err := config.SetNotify(configPath, notify); err != nil {
 			return writeAppError(stderr, err.Error(), exitUsage)
 		}
-		// Re-resolve so the printed value reflects what the next launch will
-		// actually use (e.g. a reset shows the built-in defaults).
-		resolved, exitCode = resolveCommandCenterConfig(stderr, deps)
-		if exitCode != exitSuccess {
-			return exitCode
-		}
 	}
 
+	// Report the stored values (blank renders as "(default)").
+	current, err := config.UserNotify(configPath)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitUsage)
+	}
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{
-			"mode":      resolved.Notify.Mode,
-			"focusMode": resolved.Notify.FocusMode,
+			"mode":      current.Mode,
+			"focusMode": current.FocusMode,
 		}); err != nil {
 			return exitCrash
 		}
@@ -78,8 +78,8 @@ func runConfigNotify(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 	lines := []string{
 		"Notify",
-		"mode:      " + displayCLIValue(resolved.Notify.Mode, "(default)"),
-		"focusMode: " + displayCLIValue(resolved.Notify.FocusMode, "(default)"),
+		"mode:      " + displayCLIValue(current.Mode, "(default)"),
+		"focusMode: " + displayCLIValue(current.FocusMode, "(default)"),
 	}
 	if _, err := fmt.Fprintln(stdout, strings.Join(lines, "\n")); err != nil {
 		return exitCrash
