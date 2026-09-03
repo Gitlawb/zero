@@ -727,6 +727,31 @@ func randomWindowsCapabilitySID() string {
 	return fmt.Sprintf("S-1-5-21-%d-%d-%d-%d", words[0], words[1], words[2], words[3])
 }
 
+// windowsRestrictedTokenSIDsForProfile adds the read capability to a restricted
+// token's SID list when the profile selected the strict token.
+//
+// WRITE_RESTRICTED scopes the restricted-SID check to writes. Without it the
+// check applies to reads as well, so the token needs a restricted SID that the
+// read roots' DACLs name or the command cannot open its own executable. It used
+// to be Everyone, which is a key to every object whose DACL grants Everyone
+// write and so handed back the write jail (#869). BuildWindowsACLPlan grants
+// this capability on every read root and denies it on every DenyRead path, so
+// the read allowance and the restriction are the same decision.
+//
+// Only elevated setup can grant it on the volume root the production profile
+// seeds; the unelevated tier refuses a DenyRead profile up front for that
+// reason, so nothing reaches here expecting a grant nobody applied.
+func windowsRestrictedTokenSIDsForProfile(tokenSIDs []string, sandboxHome string, writeRestricted bool) ([]string, error) {
+	if writeRestricted {
+		return tokenSIDs, nil
+	}
+	readSID, err := WindowsReadAllowSID(sandboxHome)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the sandbox read capability: %w", err)
+	}
+	return append(tokenSIDs, readSID), nil
+}
+
 // WindowsReadAllowSID returns the sandbox home's read-capability SID, minting and
 // persisting it on first use. Both halves of the setup protocol ask for it: the
 // capability ACL plan grants it on every read root, and the principal's strict

@@ -71,7 +71,7 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// granting only the user, Administrators, and SYSTEM (msys2-runtime
 	// sigproc.cc sigproc_init -> sec_user_nih -> __sec_user), and a
 	// WRITE_RESTRICTED write check must ALSO match one of the token's
-	// restricted SIDs (logon SID, Everyone, capability SIDs). None of the
+	// restricted SIDs (logon SID and capability SIDs). None of the
 	// granted SIDs can be added to the restricted list without collapsing the
 	// write jail (each has write access nearly everywhere), so MSYS startup
 	// dies with "couldn't create signal pipe" or "CreateFileMapping <SID>.1",
@@ -87,6 +87,15 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// reads under that flag (#612). Profiles with DenyRead keep the fully
 	// restricted token, trading spawn capability for read-deny enforcement.
 	writeRestricted := len(config.PermissionProfile.FileSystem.DenyRead) == 0
+
+	// That strict token then needs the read capability in its SID list, because
+	// the restricted-SID check covers reads once WRITE_RESTRICTED is gone. See
+	// windowsRestrictedTokenSIDsForProfile.
+	tokenSIDs, err = windowsRestrictedTokenSIDsForProfile(tokenSIDs, config.SandboxHome, writeRestricted)
+	if err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+		return 1
+	}
 
 	// A provisioned sandbox principal replaces the restricted token entirely: it
 	// is a separate account, so reads outside its granted roots are denied by the

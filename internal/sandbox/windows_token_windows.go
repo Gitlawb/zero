@@ -142,50 +142,35 @@ func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []w
 	}
 	entries = append(entries, windows.SIDAndAttributes{Sid: sidFromBytes(logonSID)})
 
-	// The World SID (S-1-1-0, Everyone) is added ONLY to the token that does not
-	// carry WRITE_RESTRICTED, and putting it back unconditionally would reopen a
-	// write-jail bypass.
+	// NO UNIVERSAL GROUP IS EVER A RESTRICTED SID HERE (#869).
 	//
-	// A restricted SID is a key to every object whose DACL names it. That is why
-	// the runner refuses to add the user SID, Administrators or SYSTEM — "each
-	// has write access nearly everywhere". Everyone is the broadest of the lot:
-	// every principal carries it, so under WRITE_RESTRICTED the second
-	// (restricted-SID) check passes for free on any path whose DACL grants
-	// Everyone write, and confinement falls back to the ordinary user's own
-	// permissions — the exact boundary this token exists to be stricter than. It
-	// needs no privilege, no symlink and no race: an Everyone-writable directory
-	// is enough, and share roots opened with Everyone:F and loose installer ACLs
-	// supply them. It was present from the original sandbox baseline,
-	// uncommented, and under WRITE_RESTRICTED nothing depends on it, because that
-	// flag already exempts reads from the restricted-SID check.
+	// A restricted SID is a key to every object whose DACL names it, which is why
+	// the runner refuses to add the user SID, Administrators or SYSTEM: each has
+	// write access nearly everywhere. The World SID (S-1-1-0, Everyone) was the
+	// broadest of the lot and used to be added to the token that does NOT carry
+	// WRITE_RESTRICTED. Every principal carries Everyone, so the restricted-SID
+	// check passed for free on any path whose DACL grants Everyone write, and the
+	// workspace write jail fell back to the ordinary user's own permissions. No
+	// privilege, no symlink and no race was needed: an Everyone-writable directory
+	// was enough, and share roots opened with Everyone:F and loose installer ACLs
+	// supply them.
 	//
-	// Without the flag it IS load-bearing and cannot simply be dropped. The
-	// restricted-SID check then applies to READS too, and default Windows DACLs
-	// grant BUILTIN\Users rather than anything in this list, so a token without
-	// Everyone cannot open cmd.exe — the process dies at launch with
-	// STATUS_ACCESS_DENIED (0xC0000022) before it runs anything. That path is
-	// only taken when the profile configures DenyRead, which is already the
-	// posture that trades capability for read-deny enforcement (#612).
-	//
-	// So the bypass survives for DenyRead profiles, deliberately and narrowly,
-	// rather than being traded for a sandbox that cannot start a command. Closing
-	// it there needs a different mechanism (a read-side grant that is not a
-	// universal group), tracked separately.
+	// It could not simply be dropped while it was load-bearing. Without
+	// WRITE_RESTRICTED the restricted-SID check applies to reads as well, and
+	// default Windows DACLs grant BUILTIN\Users rather than anything in this
+	// list, so a token without Everyone could not open cmd.exe and died at launch
+	// with STATUS_ACCESS_DENIED. The caller now supplies the read capability for
+	// exactly that case, which names only the roots setup granted, so the read
+	// side is satisfied without handing out a key to every Everyone-writable
+	// object on the machine.
 	//
 	// The logon SID above stays in both modes: it is this token's own rather than
 	// a broad group, and broadenWindowsRestrictedTokenDefaultDacl depends on it so
 	// the process can use pipes and events it creates for itself.
 	//
-	// Anything added here needs the same scrutiny — Authenticated Users, Users,
-	// INTERACTIVE and BATCH would each produce this bypass on a DACL naming them.
-	if !writeRestricted {
-		worldSID, err := windows.CreateWellKnownSid(windows.WinWorldSid)
-		if err != nil {
-			return 0, fmt.Errorf("create world SID: %w", err)
-		}
-		entries = append(entries, windows.SIDAndAttributes{Sid: worldSID})
-	}
-
+	// Anything added here needs the same scrutiny. Authenticated Users, Users,
+	// INTERACTIVE and BATCH would each reintroduce this bypass on a DACL naming
+	// them.
 	// WRITE_RESTRICTED scopes the restricted-SID check to write-type accesses:
 	// reads use only the normal token identity, so the sandboxed process can
 	// open executables, DLLs, and per-user config the user can read, while
