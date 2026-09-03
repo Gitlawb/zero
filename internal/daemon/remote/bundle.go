@@ -436,6 +436,13 @@ func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...an
 	if _, err := stagingFS.stat(filepath.Join(staging, ".git")); err == nil {
 		logf("remote: %s holds a work tree, not a staged extract; leaving it in place", staging)
 		return "", false
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// Not knowing whether this is a work tree is not the same as knowing it
+		// is not one. The veto sits ahead of the marker because a published tree
+		// can carry a file named txn at its own root, so falling through on an
+		// unreadable probe would let the tree answer for itself.
+		logf("remote: %s could not be checked for a work tree (%v); leaving it in place", staging, err)
+		return "", false
 	}
 	m, err := readMarker(staging)
 	if err != nil {
