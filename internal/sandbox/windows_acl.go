@@ -106,6 +106,15 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 			Path:       capability.Root,
 			Capability: capability.SID,
 		})
+		// The grant above carries DELETE, so the same object guard the principal
+		// plan has must come with it: not DenyWrite (git writes index, objects and
+		// refs), not materialized (git creates .git, and an empty one breaks
+		// git init), and not inherited, so everything underneath stays writable.
+		entries = append(entries, WindowsACLEntry{
+			Action:     WindowsACLDenyDelete,
+			Path:       windowsRenameProtectedObject(capability.Root),
+			Capability: capability.SID,
+		})
 		for _, path := range capability.ProtectedWriteDenyPaths {
 			entries = append(entries, WindowsACLEntry{
 				Action:     WindowsACLDenyWrite,
@@ -168,6 +177,39 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 		}
 	}
 	return WindowsACLPlan{Entries: dedupeWindowsACLEntries(entries)}, nil
+}
+
+// windowsPlanVolumeRootGrant returns the first volume root the plan would have
+// to change permissions on, or empty when it needs none.
+//
+// Only elevated setup can write a volume-root DACL, so this is the one entry
+// that decides whether a plan is applicable by the unelevated tier at all. The
+// check is on the PLAN rather than on the profile because the plan is what gets
+// applied: a future entry that lands at a volume root for some other reason is
+// caught by the same test.
+func windowsPlanVolumeRootGrant(plan WindowsACLPlan) string {
+	for _, entry := range plan.Entries {
+		if isWindowsVolumeRoot(normalizeProfilePath(entry.Path)) {
+			return entry.Path
+		}
+	}
+	return ""
+}
+
+// windowsRenameProtectedObject names the object whose DELETE must be denied on
+// a write root, whatever trustee holds the grant.
+//
+// ONE DERIVATION, BECAUSE TWO PLANNERS CONSUME IT. The allow-write mask both
+// backends share includes DELETE, and it inherits from the write root onto .git.
+// The carveouts that actually protect git live on .git/config and .git/hooks as
+// OBJECTS, so renaming .git aside and recreating it discards them: the fresh
+// config and hooks inherit the workspace allow with no deny of their own, which
+// hands back credential.helper and core.hooksPath. The principal planner denied
+// DELETE here and the capability planner did not, so the default restricted-token
+// backend was missing the guard entirely. Deriving it in one place is what stops
+// a change to the shared mask from updating one consumer and not the other.
+func windowsRenameProtectedObject(root string) string {
+	return filepath.Join(root, sandboxRenameProtectedMetadataName)
 }
 
 type windowsWriteRootCapability struct {

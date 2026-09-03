@@ -223,6 +223,28 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	if marker.contains(applied) {
 		return nil
 	}
+	// THE TIER BOUNDARY, STATED BEFORE ANY MUTATION IS ATTEMPTED.
+	//
+	// One plan is consumed by two tiers with different authority. A profile that
+	// carries DenyRead runs on a strict token, and the strict token applies the
+	// restricted-SID check to READS, so the read capability has to be granted
+	// wherever the command reads from -- including the volume root that
+	// permissionProfileReadRoots seeds. Elevated setup can write that DACL. An
+	// ordinary user cannot, and the common opener asks for WRITE_DAC on every
+	// entry, so this tier fails on that one root every time.
+	//
+	// Dropping the root ACE instead is not an option: the strict token would then
+	// fail its own read check for the executable and every ambient read. So the
+	// tier is refused explicitly, naming the root and the reason, rather than
+	// discovered as an ACCESS_DENIED after the fact. The real smoke test misses
+	// this because it substitutes a user-owned temporary directory for the
+	// production read root.
+	if root := windowsPlanVolumeRootGrant(plan); root != "" {
+		return fmt.Errorf("unelevated sandbox setup cannot grant the read capability at the volume root %s, which this profile needs because it configures denyRead and therefore runs on a fully restricted token: "+
+			"changing that directory's permissions requires Administrator rights. "+
+			"Run `zero sandbox setup` from an elevated (Administrator) terminal, "+
+			"or remove denyRead from the sandbox configuration so the command can run on a write-restricted token instead", root)
+	}
 	if _, err := applyWindowsACLPlan(plan); err != nil {
 		// Refusing to run is right: without these ACEs the write jail does not
 		// exist, so continuing would run the command believing it is sandboxed
