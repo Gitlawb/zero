@@ -247,3 +247,57 @@ func TestRunResumePassesTheParentModelThroughToTheChild(t *testing.T) {
 		t.Fatalf("the resumed child was launched with --model %q, want the parent's %q", model, "claude-opus-4.1")
 	}
 }
+
+// THE FRESH CALL SITE NEEDS THE SAME GUARD, FOR THE SAME REASON.
+//
+// runFresh and runResume both construct their builder input by hand, and both
+// have a byte-identical ParentModel line. Deleting either one compiles. The
+// resume half is what this change repairs; this covers the other half so the
+// pair cannot drift again in the direction nobody was looking.
+func TestRunFreshPassesTheParentModelThroughToTheChild(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	zero := 0
+	var captured []string
+	executor := Executor{
+		BinaryPath:   "/usr/local/bin/zero",
+		SessionStore: store,
+		NewSessionID: func() (string, error) { return "child_task", nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{pinnedManifest("", "")}}, nil
+		},
+		RunChild: func(_ context.Context, _ string, args []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+			captured = append([]string(nil), args...)
+			return ChildRunResult{
+				Events: []streamjson.Event{
+					{Type: streamjson.EventRunStart, RunID: "run_1", SessionID: "child_task"},
+					{Type: streamjson.EventFinal, RunID: "run_1", Text: "done"},
+					{Type: streamjson.EventRunEnd, RunID: "run_1", Status: "success", ExitCode: &zero},
+				},
+			}, nil
+		},
+	}
+
+	if _, err := executor.Run(context.Background(), TaskParameters{
+		Name:   "skim",
+		Prompt: "find the thing",
+	}, TaskRunOptions{
+		ParentSessionID: parent.SessionID,
+		ParentModel:     "claude-opus-4.1",
+	}); err != nil {
+		t.Fatalf("Run(fresh): %v", err)
+	}
+
+	// SETUP: a fresh spawn, not a resume, or this covers the wrong site.
+	if indexOf(captured, "--resume") >= 0 {
+		t.Fatalf("SETUP INVALID: the child was resumed rather than freshly spawned: %v", captured)
+	}
+	model, ok := argValue(captured, "--model")
+	if !ok || model != "claude-opus-4.1" {
+		t.Fatalf("the fresh child was launched with --model %q (present=%t), want the parent's", model, ok)
+	}
+}
