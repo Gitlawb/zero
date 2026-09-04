@@ -157,9 +157,50 @@ func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
 	if info, err := os.Lstat(gitPath); err == nil && !info.IsDir() {
 		return []gitMetadataCarveout{{Path: gitPath, IsFile: true}}
 	}
+	// A MISSING .git IS NOT THE SAME AS "THIS WILL BECOME A REPOSITORY".
+	//
+	// The directory-shaped carveouts below are materialized by the Windows plan so
+	// the deny ACE is in place before git first runs. That is right for a
+	// standalone directory somebody may later git init. It is wrong when this
+	// workspace already sits inside a repository: creating .git/config and
+	// .git/hooks synthesizes a control directory that competes with the ancestor's
+	// for git's discovery walk, in a repository Zero does not own.
+	//
+	// The same argument the linked-worktree branch above makes applies here. This
+	// workspace's git metadata belongs to the ancestor, it lives outside this write
+	// root, and the sandboxed principal has no inherited access to it, so it needs
+	// no carveout here. The non-materialized deny-delete on <root>/.git is emitted
+	// separately and still guards the name if a repository is ever created here.
+	if gitMetadataGovernedByAncestor(root) {
+		return nil
+	}
 	return []gitMetadataCarveout{
 		{Path: filepath.Join(root, ".git", "hooks")},
 		{Path: filepath.Join(root, ".git", "config"), IsFile: true},
+	}
+}
+
+// gitMetadataGovernedByAncestor reports whether an ancestor of root carries git
+// metadata, which is git's own discovery rule: the nearest ancestor with a .git
+// entry owns this directory.
+//
+// Lstat rather than a resolved walk, because a .git of either shape answers the
+// question: a directory is an ordinary repository root and a file is a linked
+// worktree or submodule pointer. Both mean the metadata is not ours to create.
+func gitMetadataGovernedByAncestor(root string) bool {
+	current := filepath.Clean(strings.TrimSpace(root))
+	if current == "" || current == "." {
+		return false
+	}
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		if _, err := os.Lstat(filepath.Join(parent, ".git")); err == nil {
+			return true
+		}
+		current = parent
 	}
 }
 
