@@ -1415,19 +1415,27 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 
 	// beforeTool hooks may veto the call before it runs (a non-zero exit blocks).
 	//
-	// A SUCCESSFUL beforeTool HOOK STILL HAS SOMETHING TO SAY. Its Messages carry
-	// the enforcement notice for the process it ran, and reading the outcome only
-	// when Blocked left that notice in the audit record and nowhere the model or
-	// the operator could see it: a hook could run under the weakened DenyRead
-	// token and say so to nobody. Carried to the tool result below, which is the
-	// same surface afterTool feedback already uses.
-	var beforeToolMessages []string
+	// A SUCCESSFUL beforeTool HOOK STILL HAS SOMETHING TO SAY, BUT ONLY ITS NOTICE.
+	//
+	// Reading the outcome only when Blocked left the enforcement disclosure in the
+	// audit record and nowhere the model or the operator could see it: a hook could
+	// run under the weakened DenyRead token and say so to nobody.
+	//
+	// Notices, NOT Messages. Messages is presentation text that hookMessage builds
+	// by folding the notice together with the hook's ordinary stdout, so delivering
+	// it would put every successful hook's routine logging, large diagnostics, and
+	// whatever text a hook happened to process into the next model request. That is
+	// a behaviour change nobody asked for and a standing input channel. main is
+	// silent for successful hooks and stays silent here for everything except the
+	// disclosure. Carried to the tool result below, the same surface afterTool
+	// feedback already uses.
+	var beforeToolNotices []string
 	if toolFound {
 		outcome, blocked := dispatchBeforeTool(ctx, options, call, args)
 		if blocked {
 			return blockedByHookResult(call, outcome), nil
 		}
-		beforeToolMessages = outcome.Messages
+		beforeToolNotices = outcome.Notices
 	}
 	args = shellExecutionArgsForApproval(call.Name, args, decisionAction, options)
 
@@ -1473,7 +1481,10 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	})
 	if retryResult, directResult, retried, action, reason, prefix, abortErr := maybeRetryUnsandboxedAfterSandboxRestriction(ctx, registry, call, tool, args, result, permissionMode, options, progressCallback); retried || directResult != nil || abortErr != nil {
 		if directResult != nil {
-			return *directResult, abortErr
+			// A denied, cancelled, or ungrantable retry still returns a result for a
+			// call whose beforeTool hook already ran. Without this the disclosure is
+			// produced and then dropped on the floor.
+			return withBeforeToolNotices(*directResult, beforeToolNotices), abortErr
 		}
 		result = retryResult
 		permissionGranted = true
@@ -1499,7 +1510,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// afterTool hooks run once the tool has executed; their output (e.g. a
 	// formatter or vet result) is surfaced back to the model on the result.
 	if toolFound {
-		if feedback := joinHookMessages(beforeToolMessages, dispatchAfterTool(ctx, options, call, args, result)); feedback != "" {
+		if feedback := joinHookMessages(beforeToolNotices, dispatchAfterTool(ctx, options, call, args, result)); feedback != "" {
 			var didRedact bool
 			result.Output, didRedact = appendHookFeedback(result.Output, feedback)
 			if didRedact {
@@ -2008,7 +2019,7 @@ func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResul
 		reason = "blocked by a beforeTool hook"
 	}
 	message := fmt.Sprintf("Error: %q was blocked by hook %q: %s", call.Name, outcome.BlockedBy, reason)
-	return ToolResult{
+	result := ToolResult{
 		ToolCallID:   call.ID,
 		Name:         call.Name,
 		Status:       tools.StatusError,
@@ -2016,15 +2027,61 @@ func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResul
 		Redacted:     redacted,
 		DenialReason: DenialHookBlocked,
 	}
+	// Dispatch runs hooks in order and stops at the first veto, so an earlier hook
+	// may already have run under a weakened token before this one said no. Its
+	// notice describes something that happened and has to survive the veto.
+	//
+	// blockReason has already folded the BLOCKING hook's own notices into Reason,
+	// which is inside message above, so those are dropped here rather than said
+	// twice.
+	return withBeforeToolNotices(result, noticesBefore(outcome))
+}
+
+// noticesBefore returns the accumulated notices minus the blocking hook's own,
+// which blockReason has already put in the veto message.
+func noticesBefore(outcome hooks.DispatchOutcome) []string {
+	if !outcome.Blocked {
+		return outcome.Notices
+	}
+	kept := make([]string, 0, len(outcome.Notices))
+	for _, notice := range outcome.Notices {
+		if strings.Contains(outcome.Reason, strings.TrimSpace(notice)) {
+			continue
+		}
+		kept = append(kept, notice)
+	}
+	return kept
+}
+
+// withBeforeToolNotices is the single place a beforeTool enforcement notice
+// reaches a tool result on a path that does NOT run afterTool.
+//
+// The normal tail joins the notices with the afterTool feedback and delivers
+// both at once. Two other exits return a result for a call whose hook already
+// ran: a later hook's veto, and a denied, cancelled, or ungrantable unsandboxed
+// retry. Routing all three through one function is what keeps "the hook ran
+// under this token" from depending on which exit the call happened to take.
+func withBeforeToolNotices(result ToolResult, notices []string) ToolResult {
+	feedback := joinHookMessages(notices, "")
+	if strings.TrimSpace(feedback) == "" {
+		return result
+	}
+	output, didRedact := appendHookFeedback(result.Output, feedback)
+	result.Output = output
+	if didRedact {
+		result.Redacted = true
+	}
+	return result
 }
 
 // appendHookFeedback appends afterTool hook output to a tool result's output,
 // scrubbed for secrets like every other string crossing the tool boundary. The
 // returned bool reports whether scrubbing changed the feedback, so the caller can
 // set ToolResult.Redacted to match the registry's redaction contract.
-// joinHookMessages folds a successful beforeTool hook's output in with the
-// afterTool feedback so both reach the model through the one delivery path,
-// rather than beforeTool's being produced and then dropped.
+// joinHookMessages folds a successful beforeTool hook's enforcement notices in
+// with the afterTool feedback so both reach the model through the one delivery
+// path, rather than the notices being produced and then dropped. It takes the
+// notices, never DispatchOutcome.Messages: see the capture site above.
 func joinHookMessages(before []string, after string) string {
 	parts := make([]string, 0, len(before)+1)
 	for _, message := range before {

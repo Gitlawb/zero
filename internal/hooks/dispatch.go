@@ -36,7 +36,23 @@ type DispatchOutcome struct {
 	// Messages collects the output (stdout, else stderr) of each hook that
 	// produced any, in run order. afterTool validators use this to feed results
 	// (e.g. a formatter diff or vet warning) back to the model on the tool result.
+	//
+	// PRESENTATION TEXT, NOT A NOTICE CHANNEL. hookMessage composes the hook's
+	// ordinary stdout (or stderr) together with any enforcement notices, because
+	// afterTool wants both on one line. A caller that only wants to know what the
+	// sandbox did must read Notices instead: delivering this slice would put every
+	// successful hook's routine logging into the model's context.
 	Messages []string
+	// Notices carries only the enforcement disclosures, one entry per notice, in
+	// run order across every hook that ran.
+	//
+	// Separate from Messages because they answer different questions and have
+	// different audiences. A notice says the hook ran under a weakened token,
+	// which the model and the operator both need; the hook's own output is for
+	// afterTool validators that asked to be heard. Accumulated BEFORE the veto
+	// short-circuit, so a notice from a hook that already ran survives a later
+	// hook's veto.
+	Notices []string
 }
 
 type commandResult struct {
@@ -192,6 +208,13 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 
 		if message := hookMessage(result); message != "" {
 			outcome.Messages = append(outcome.Messages, message)
+		}
+		// Before the veto check below, so hook A's disclosure is not lost when hook
+		// B stops the chain. A notice describes something that ALREADY happened.
+		for _, notice := range result.Notices {
+			if strings.TrimSpace(notice) != "" {
+				outcome.Notices = append(outcome.Notices, notice)
+			}
 		}
 
 		if blocked {
