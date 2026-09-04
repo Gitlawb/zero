@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 )
 
@@ -29,6 +30,7 @@ Nothing from this side conversation will be merged into the main session.`
 type btwState struct {
 	active           bool
 	parent           *model
+	parentPlanItems  []tools.PlanItem
 	sideRunIDBase    int
 	parentNeedsInput bool
 }
@@ -143,7 +145,21 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	side.activeLoopID = ""
 	side.loopTicking = false
 	side.specialists.clear()
-	side.plan.clear()
+	// Plan mode (and the in-memory plan) belongs to the parent session. A
+	// side surface that inherited it would stay read-only, or leak the
+	// parent's draft into a conversation that never drafted it. Match
+	// /new and /resume: exit plan mode and clear plan state on the side
+	// only. Capture the parent's current in-memory plan snapshot before
+	// resetting so returnFromBTW can restore it even if durable persistence
+	// was unavailable or reload encounters an error.
+	var parentPlanItems []tools.PlanItem
+	if reader, ok := parent.registry.Get("update_plan"); ok {
+		if r, ok := reader.(currentPlanReader); ok {
+			parentPlanItems = r.CurrentPlan()
+		}
+	}
+	side = side.exitPlanMode()
+	side = side.resetPlanForSessionSwitch()
 	side.planDetailGen++
 	side.streamingText = nil
 	side.streamingReasoning = ""
@@ -151,9 +167,10 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	side.clearStreamingToolCall()
 	side.resetStreamingFade()
 	side.btw = btwState{
-		active:        true,
-		parent:        &parent,
-		sideRunIDBase: side.runID,
+		active:          true,
+		parent:          &parent,
+		parentPlanItems: parentPlanItems,
+		sideRunIDBase:   side.runID,
 	}
 
 	if question == "" {
@@ -177,6 +194,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	}
 	m, _ = m.clearLoopsForSessionSwitch()
 	parent := *m.btw.parent
+	savedParentPlan := m.btw.parentPlanItems
 	parent.goalContinuationsSuspended = false
 	parent.btwRunIDSeq = maxInt(parent.btwRunIDSeq, m.runID)
 	parent.btw = btwState{}
@@ -198,7 +216,47 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		kind: actionAppendSystem,
 		text: "Returned from the isolated BTW conversation. Its messages were not added to this session.",
 	})
+	// Entering BTW clears (or the side conversation may replace) the shared
+	// update_plan tool state. Re-sync from the parent session's plan file the
+	// same way /resume does after a session switch, so the restored surface
+	// matches the durable plan and not whatever the side conversation left.
+	// Surface I/O/parse failures so the restored panel and shared update_plan
+	// state are not silently left out of sync with the durable file, while
+	// restoring the captured parent plan snapshot if reload fails or is missing.
+	if items, ok, err := parent.reloadPlanFromFile(); err != nil {
+		// Durable reload failed: surface the error, but restore the saved
+		// parent plan snapshot into both the update_plan tool and the panel so
+		// an existing usable plan is not destroyed.
+		if reloader, ok := parent.registry.Get("update_plan"); ok {
+			if r, ok := reloader.(planFileReloader); ok {
+				r.SetPlan(savedParentPlan)
+			}
+		}
+		if len(savedParentPlan) > 0 {
+			parent.plan.updateFromItems(savedParentPlan, parent.now())
+		}
+		parent.transcript = reduceTranscript(parent.transcript, transcriptAction{
+			kind: actionAppendError,
+			text: "plan reload error: " + err.Error(),
+		})
+	} else if ok {
+		parent.plan.updateFromItems(items, parent.now())
+	} else {
+		// Missing durable plan (ok=false, err=nil): restore the parent's
+		// captured in-memory plan draft and sticky panel.
+		if reloader, ok := parent.registry.Get("update_plan"); ok {
+			if r, ok := reloader.(planFileReloader); ok {
+				r.SetPlan(savedParentPlan)
+			}
+		}
+		if len(savedParentPlan) > 0 {
+			parent.plan.updateFromItems(savedParentPlan, parent.now())
+		} else {
+			parent.plan.clear()
+		}
+	}
 	parent.resetFlushFrontier("· returned from btw ·")
+	parent = parent.syncPeerIdentity()
 	var goalCmd tea.Cmd
 	parent, goalCmd = parent.launchGoalContinuationIfReady()
 	return parent, batchCommands(sweepCmd, spinnerCmd, goalCmd)
@@ -207,7 +265,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 func btwCommandUnavailable(command parsedCommand) bool {
 	arg := strings.ToLower(strings.TrimSpace(command.text))
 	switch command.kind {
-	case commandNew, commandResume, commandRename, commandSpec, commandLoop, commandGoal,
+	case commandNew, commandResume, commandRename, commandSpec, commandPlan, commandLoop, commandGoal,
 		commandRewind, commandCompact, commandSTTModel, commandMCP:
 		return true
 	case commandModel:
@@ -280,7 +338,9 @@ func (m model) routeBTWMessageToParent(msg tea.Msg) (model, tea.Cmd, bool) {
 	}
 	parent.btw = btwState{}
 	m.btw.parent = &parent
-	switch msg.(type) {
+	switch typed := msg.(type) {
+	case planUpdateMsg:
+		m.btw.parentPlanItems = append([]tools.PlanItem{}, typed.items...)
 	case permissionRequestMsg, askUserRequestMsg:
 		if !m.btw.parentNeedsInput {
 			m.btw.parentNeedsInput = true
