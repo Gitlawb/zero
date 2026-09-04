@@ -257,12 +257,37 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 	// adapter confirms the requested child was created. Called on both ways this
 	// attempt can end, which is also where an attempt abandoned at the connect
 	// timeout eventually arrives, so a late disclosure is still delivered once.
-	publishAdapterLaunch := func() {
-		if !ownedLaunch || adapterReport == nil {
-			return
+	// ONE ANSWER, READ WHILE THE EVIDENCE STILL EXISTS, USED BY EVERY OUTCOME.
+	//
+	// The adapter's report is a file the plan's cleanup deletes. client.Close runs
+	// that cleanup, so a decision made after Close reads an absent report and
+	// answers "no child" about a server that really did run. Resolving once and
+	// memoizing removes the ordering hazard rather than documenting it.
+	//
+	// It also gives the success, late and failed paths the same input. The failure
+	// path used to carry client.StartupNotices() unconditionally while the sink was
+	// gated on the adapter, which is two competing definitions of applied
+	// enforcement: an operator was told a server ran without write confinement when
+	// only the sandbox helper ran and the requested server never existed.
+	launchedOnce := sync.OnceValue(func() bool {
+		if !ownedLaunch {
+			return true
+		}
+		if adapterReport == nil {
+			return false
 		}
 		report, err := adapterReport()
-		if err != nil || report.ChildLaunched == nil || !*report.ChildLaunched {
+		if err != nil {
+			return false
+		}
+		return execution.ResolveChildLaunched(true, ownedLaunch, report)
+	})
+	// publishAdapterLaunch announces a wrapped plan's launch, but only if the
+	// adapter confirms the requested child was created. Called on both ways this
+	// attempt can end, which is also where an attempt abandoned at the connect
+	// timeout eventually arrives, so a late disclosure is still delivered once.
+	publishAdapterLaunch := func() {
+		if !ownedLaunch || !launchedOnce() {
 			return
 		}
 		publishLaunch(ctx, plannedEnforcement.Notices)
@@ -290,6 +315,8 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		// bare error discards the client, and with it the only carrier the notices
 		// had, so the operator was told the server was unavailable and not that it
 		// had already run without the write jail.
+		// BEFORE Close, which runs the cleanup that deletes the report.
+		launched := launchedOnce()
 		_ = client.Close()
 		publishAdapterLaunch()
 		message := strings.TrimSpace(stderr.String())
@@ -297,7 +324,14 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		if message != "" {
 			failure = fmt.Errorf("initialize MCP server %s: %w: %s", server.Name, err, message)
 		}
-		return nil, &startupDisclosureError{err: failure, notices: client.StartupNotices()}
+		// Same decision as the sink above. For a wrapped plan whose helper started
+		// and then failed before creating the requested server, there is nothing to
+		// disclose: no server ran, confined or otherwise.
+		var carried []string
+		if launched {
+			carried = client.StartupNotices()
+		}
+		return nil, &startupDisclosureError{err: failure, notices: carried}
 	}
 	publishAdapterLaunch()
 	return client, nil
