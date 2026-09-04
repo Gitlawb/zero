@@ -182,16 +182,19 @@ func prepareSandboxRuntime(workspaceRoot string, sandboxHome string) (SandboxRun
 }
 
 func prepareSandboxRuntimeLease(root string) (*sandboxRuntimeLease, error) {
-	// Before the parent is created, because MkdirAll walks and creates through
-	// whatever the owned components resolve to and the lease file is opened
-	// without O_NOFOLLOW.
-	if err := refuseAliasedRuntimeComponents(root); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
-		return nil, fmt.Errorf("create sandbox runtime parent: %w", err)
-	}
-	return acquireSandboxRuntimeLease(root)
+	lease, _, err := prepareSandboxRuntimeLeaseRecording(root)
+	return lease, err
+}
+
+// prepareSandboxRuntimeLeaseRecording also reports the owned directories it
+// created, so a caller that can roll back knows what it owns.
+//
+// Nothing recorded here is created by the leaf's owner. Provisioning creates and
+// records the leaf itself; these are the components above it, which used to be
+// produced by an os.MkdirAll that nobody accounted for. Setup could therefore
+// fail after the lease and leave a tree behind with no record that it made it.
+func prepareSandboxRuntimeLeaseRecording(root string) (*sandboxRuntimeLease, []windowsCreatedRuntimeDir, error) {
+	return acquireRuntimeLeaseForPlatform(root)
 }
 
 // cleanupSandboxRuntimeRoots applies a conservative age/count policy. Cleanup

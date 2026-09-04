@@ -48,14 +48,29 @@ var runtimeBaseOpenedByName func(string)
 // they are part of base, which is the operator's business. The restriction is
 // on the zero/runtime/v1/<hash> components Zero itself owns.
 func createRuntimeTailHandleRelative(base string, tail []string) ([]windowsCreatedRuntimeDir, error) {
+	created, parent, err := createRuntimeTailRetainingHandle(base, tail)
+	if parent != 0 {
+		_ = windows.CloseHandle(parent)
+	}
+	return created, err
+}
+
+// createRuntimeTailRetainingHandle is the same descent, but it hands the caller
+// the retained handle to the deepest component instead of closing it.
+//
+// Lease acquisition needs that handle: the lease file is a sibling of the
+// runtime root, so creating it by pathname would re-resolve the owned components
+// the descent just verified, which is the whole interval this design removes.
+// The caller owns the returned handle and must close it, including when an error
+// is returned alongside a non-zero handle.
+func createRuntimeTailRetainingHandle(base string, tail []string) ([]windowsCreatedRuntimeDir, windows.Handle, error) {
 	if runtimeBaseOpenedByName != nil {
 		runtimeBaseOpenedByName(base)
 	}
 	parent, err := openWindowsDirectoryByName(base)
 	if err != nil {
-		return nil, fmt.Errorf("open sandbox runtime base %s: %w", base, err)
+		return nil, 0, fmt.Errorf("open sandbox runtime base %s: %w", base, err)
 	}
-	defer func() { _ = windows.CloseHandle(parent) }()
 
 	if runtimeDescentBarrier != nil {
 		runtimeDescentBarrier()
@@ -75,7 +90,7 @@ func createRuntimeTailHandleRelative(base string, tail []string) ([]windowsCreat
 			continue
 		}
 		if !isWindowsNotFound(openErr) {
-			return created, fmt.Errorf("inspect sandbox runtime component %s: %w", path, openErr)
+			return created, parent, fmt.Errorf("inspect sandbox runtime component %s: %w", path, openErr)
 		}
 		handle, createErr := createWindowsChildDirectory(parent, name)
 		if createErr != nil {
@@ -87,22 +102,22 @@ func createRuntimeTailHandleRelative(base string, tail []string) ([]windowsCreat
 				existing, reopenErr := openWindowsChildNoFollow(parent, name,
 					windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE, windows.FILE_DIRECTORY_FILE)
 				if reopenErr != nil {
-					return created, fmt.Errorf("inspect sandbox runtime component %s after a concurrent create: %w", path, reopenErr)
+					return created, parent, fmt.Errorf("inspect sandbox runtime component %s after a concurrent create: %w", path, reopenErr)
 				}
 				_ = windows.CloseHandle(parent)
 				parent = existing
 				continue
 			}
-			return created, fmt.Errorf("create sandbox runtime root %s: %w", path, createErr)
+			return created, parent, fmt.Errorf("create sandbox runtime root %s: %w", path, createErr)
 		}
 		identity, idErr := handleRuntimeIdentity(handle)
 		if idErr != nil {
 			_ = windows.CloseHandle(handle)
-			return created, fmt.Errorf("identify the sandbox runtime directory created at %s: %w", path, idErr)
+			return created, parent, fmt.Errorf("identify the sandbox runtime directory created at %s: %w", path, idErr)
 		}
 		created = append(created, windowsCreatedRuntimeDir{path: path, identity: identity, identified: true})
 		_ = windows.CloseHandle(parent)
 		parent = handle
 	}
-	return created, nil
+	return created, parent, nil
 }
