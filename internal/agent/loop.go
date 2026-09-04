@@ -2061,6 +2061,19 @@ func noticesBefore(outcome hooks.DispatchOutcome) []string {
 // ran: a later hook's veto, and a denied, cancelled, or ungrantable unsandboxed
 // retry. Routing all three through one function is what keeps "the hook ran
 // under this token" from depending on which exit the call happened to take.
+//
+// NO REBUDGET HERE, AND THAT IS LOAD-BEARING ON WHAT MAY PASS THROUGH. The
+// normal tail appends and then calls Registry.RebudgetAfterHook, because what it
+// appends is afterTool feedback: hook stdout, which a hook can make arbitrarily
+// large. These notices cannot be. Their one producer is
+// sandbox.windowsDenyReadWarnings, which returns a single fixed sentence, and
+// nothing hook-authored reaches this slice: DispatchOutcome.Messages is where
+// hook output lives, and the capture site deliberately does not read it.
+//
+// So if anything ever widens what is delivered here to include text a hook or a
+// tool can size, this needs the rebudget step as well, which means converting
+// through tools.Result the way the tail does rather than editing Output in
+// place. Do not widen it without that.
 func withBeforeToolNotices(result ToolResult, notices []string) ToolResult {
 	feedback := joinHookMessages(notices, "")
 	if strings.TrimSpace(feedback) == "" {
