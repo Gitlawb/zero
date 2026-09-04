@@ -69,19 +69,20 @@ func TestAbortRestoresALeafARacerCreated(t *testing.T) {
 	parent := filepath.Join(workspace, "materialized")
 	leaf := filepath.Join(parent, "config")
 
-	previous := windowsACLMaterializeSwapHook
-	t.Cleanup(func() { windowsACLMaterializeSwapHook = previous })
-	windowsACLMaterializeSwapHook = func(string) {
-		// The racer wins the leaf, inside the parent this run is about to create.
-		if err := os.MkdirAll(parent, 0o700); err != nil {
+	previous := windowsACLRacedLeafHook
+	t.Cleanup(func() { windowsACLRacedLeafHook = previous })
+	raced := false
+	windowsACLRacedLeafHook = func(string) {
+		// The chain above already belongs to this run; the racer wins only the
+		// file. That mixed ownership is the whole case.
+		if raced {
 			return
 		}
+		raced = true
 		_ = os.WriteFile(leaf, []byte("pre-existing content"), 0o600)
 	}
 
 	sid := testPrincipalSID
-	before := racedLeafDenyMask(t, workspace, sid)
-	_ = before
 
 	plan := WindowsACLPlan{Entries: []WindowsACLEntry{{
 		Action:          WindowsACLDenyWrite,
@@ -95,6 +96,9 @@ func TestAbortRestoresALeafARacerCreated(t *testing.T) {
 		t.Skipf("cannot apply an ACL plan here: %v", err)
 	}
 
+	if !raced {
+		t.Fatal("SETUP INVALID: the leaf hook never fired, so the mixed-ownership case was not reproduced")
+	}
 	// SETUP: the racer really won, and the apply really landed on its file.
 	if _, statErr := os.Stat(leaf); statErr != nil {
 		t.Skipf("SETUP: the racer's leaf is not present, so this is not the mixed-ownership case: %v", statErr)

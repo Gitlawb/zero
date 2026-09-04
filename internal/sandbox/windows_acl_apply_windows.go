@@ -516,6 +516,14 @@ func materializeWindowsACLTarget(path string, asFile bool) (windowsACLMaterializ
 	if !asFile {
 		return created, nil
 	}
+	// windowsACLRacedLeafHook fires at the ONE instant a racer can win the leaf
+	// while this run already owns the chain above it: the directories exist and
+	// the file does not yet. That mixed ownership is what made the old rollback
+	// skip its restore, and it is unreachable from the anchor-stage hook, which
+	// fires before the chain exists at all. Always nil in production.
+	if windowsACLRacedLeafHook != nil {
+		windowsACLRacedLeafHook(path)
+	}
 	// A racing creator winning is still fine: the target exists, which is all
 	// materialization needed. createWindowsACLChildFile reports that as
 	// created=false, so rollback will not delete a file the sandbox did not make.
@@ -655,6 +663,10 @@ func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization
 // yet. A race reproducible only by luck is not a regression test, so the instant
 // is made addressable rather than hoped for. Always nil in production.
 var windowsACLMaterializeSwapHook func(anchor string)
+
+// windowsACLRacedLeafHook fires after the directory chain is created and before
+// the file leaf is. See materializeWindowsACLTarget. Always nil in production.
+var windowsACLRacedLeafHook func(path string)
 
 // makeWindowsACLDirChainNoFollow is an os.MkdirAll that never resolves a
 // pathname below its anchor.
