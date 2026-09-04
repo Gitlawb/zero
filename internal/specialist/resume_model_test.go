@@ -1,8 +1,12 @@
 package specialist
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 // argValue returns the value following flag in argv, and whether it was present.
@@ -169,4 +173,77 @@ func indexOf(args []string, want string) int {
 		}
 	}
 	return -1
+}
+
+// AND THE CALL SITE PASSES IT, WHICH THE BUILDER TESTS ABOVE CANNOT SEE.
+//
+// Every test above calls BuildResumeArgs directly. Dropping the ParentModel
+// field from the runResume call site still compiles and still passes all of
+// them, because the builder is doing its job with whatever it is handed. The
+// defect this fix repairs lived at the call site, not in the builder, so it
+// needs a test that goes through Run.
+//
+// Driven through the real Run dispatch with the RunChild seam capturing argv.
+func TestRunResumePassesTheParentModelThroughToTheChild(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if _, err := store.Create(sessions.CreateInput{
+		SessionID:       "child_task",
+		SessionKind:     sessions.SessionKindChild,
+		Tag:             SessionTagSpecialist,
+		Depth:           1,
+		ParentSessionID: parent.SessionID,
+		AgentName:       "skim",
+		TaskID:          "child_task",
+	}); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	zero := 0
+	var captured []string
+	executor := Executor{
+		BinaryPath:   "/usr/local/bin/zero",
+		SessionStore: store,
+		NewSessionID: func() (string, error) { return "child_task", nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			// No pinned model, so the parent's is the only thing that can supply one.
+			return LoadResult{Specialists: []Manifest{pinnedManifest("", "")}}, nil
+		},
+		RunChild: func(_ context.Context, _ string, args []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+			captured = append([]string(nil), args...)
+			return ChildRunResult{
+				Events: []streamjson.Event{
+					{Type: streamjson.EventRunStart, RunID: "run_1", SessionID: "child_task"},
+					{Type: streamjson.EventFinal, RunID: "run_1", Text: "done"},
+					{Type: streamjson.EventRunEnd, RunID: "run_1", Status: "success", ExitCode: &zero},
+				},
+			}, nil
+		},
+	}
+
+	if _, err := executor.Run(context.Background(), TaskParameters{
+		Name:   "skim",
+		Prompt: "keep going",
+		Resume: "child_task",
+	}, TaskRunOptions{
+		ParentSessionID: parent.SessionID,
+		ParentModel:     "claude-opus-4.1",
+	}); err != nil {
+		t.Fatalf("Run(resume): %v", err)
+	}
+
+	// SETUP: this really was the resume path, not a fresh spawn.
+	if index := indexOf(captured, "--resume"); index < 0 {
+		t.Fatalf("SETUP INVALID: the child was not resumed: %v", captured)
+	}
+	model, ok := argValue(captured, "--model")
+	if !ok {
+		t.Fatalf("the resumed child was launched with no --model, so it runs on whatever the config default resolves to: %v", captured)
+	}
+	if model != "claude-opus-4.1" {
+		t.Fatalf("the resumed child was launched with --model %q, want the parent's %q", model, "claude-opus-4.1")
+	}
 }
