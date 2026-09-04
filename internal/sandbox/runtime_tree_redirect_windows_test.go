@@ -25,7 +25,7 @@ import (
 // A junction needs no privilege, so the previous command's half runs here on an
 // ordinary unelevated box.
 func TestRuntimeTreePreparationRefusesARedirectedDescendant(t *testing.T) {
-	base := t.TempDir()
+	base := runtimeTreeTestBase(t)
 	target := t.TempDir()
 	root := filepath.Join(base, "zero", "runtime", "v1", "abcdef0123456789")
 	cache := filepath.Join(root, "cache")
@@ -69,7 +69,7 @@ func TestRuntimeTreePreparationRefusesARedirectedDescendant(t *testing.T) {
 // And an ordinary tree is still created, or the refusal above would be satisfied
 // by a preparation that refuses everything.
 func TestRuntimeTreePreparationStillCreatesAnOrdinaryTree(t *testing.T) {
-	base := t.TempDir()
+	base := runtimeTreeTestBase(t)
 	root := filepath.Join(base, "zero", "runtime", "v1", "abcdef0123456789")
 	cache := filepath.Join(root, "cache")
 	npm := filepath.Join(cache, "npm")
@@ -87,7 +87,7 @@ func TestRuntimeTreePreparationStillCreatesAnOrdinaryTree(t *testing.T) {
 
 // Reusing an existing tree is the common case and must not be refused.
 func TestRuntimeTreePreparationIsIdempotent(t *testing.T) {
-	base := t.TempDir()
+	base := runtimeTreeTestBase(t)
 	root := filepath.Join(base, "zero", "runtime", "v1", "abcdef0123456789")
 	dirs := []string{root, filepath.Join(root, "cache"), filepath.Join(root, "cache", "npm")}
 	if err := ensureRuntimeTreeDirs(root, dirs); err != nil {
@@ -172,4 +172,20 @@ func TestPrepareSandboxRuntimeStillPreparesAnOrdinaryTree(t *testing.T) {
 			t.Fatalf("%s was not created: err=%v", dir, statErr)
 		}
 	}
+}
+
+// runtimeTreeTestBase makes the operator-owned base deterministic.
+//
+// runtimeCandidateBase answers by containment against the user cache directory,
+// so a bare t.TempDir() only works where temp happens to sit under it. On a CI
+// runner it does not, or its 8.3 short name compares unequal to the long form,
+// and the tree is reported as having no owned base. Stubbing the cache root is
+// what makes these tests about the descent rather than about where temp lives.
+func runtimeTreeTestBase(t *testing.T) string {
+	t.Helper()
+	base := canonicalSandboxWorkspaceRoot(t.TempDir())
+	previous := sandboxUserCacheDir
+	t.Cleanup(func() { sandboxUserCacheDir = previous })
+	sandboxUserCacheDir = func() (string, error) { return base, nil }
+	return base
 }

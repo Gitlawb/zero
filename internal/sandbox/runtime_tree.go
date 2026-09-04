@@ -28,6 +28,14 @@ import (
 // the grant exists to prevent. This descent validates and creates; it does not
 // re-secure.
 func ensureRuntimeTreeDirs(root string, directories []string) error {
+	// Canonicalized the same way the rest of the runtime state is, because
+	// runtimeCandidateBase decides ownership with a containment test and that
+	// test runs on spellings. An 8.3 short name (C:UsersRUNNER~1) or a
+	// symlinked temp compares unequal to the long form of the same directory,
+	// which reads as "no operator-owned base" for a perfectly ordinary tree.
+	if canonical := canonicalSandboxWorkspaceRoot(root); canonical != "" {
+		root = canonical
+	}
 	base, ok := runtimeCandidateBase(root)
 	if !ok || strings.TrimSpace(base) == "" {
 		return fmt.Errorf("sandbox runtime root %s has no operator-owned base to descend from", root)
