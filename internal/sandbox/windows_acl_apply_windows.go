@@ -283,8 +283,10 @@ func windowsFilterDACL(oldDACL *windows.ACL, removeSID *windows.SID) (*windows.A
 		}
 		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
 			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceType == windowsAccessDeniedObjectAceType {
-				if sid, ok := windowsAceSID(ace); ok && sid.Equals(removeSID) && windowsIsExperimentalWriteDenyMask(ace.Mask) {
-					continue
+				if sid, ok := windowsAceSID(ace); ok && sid.Equals(removeSID) {
+					if windowsIsExperimentalWriteDenyMask(ace.Mask) {
+						continue
+					}
 				}
 			}
 		}
@@ -305,14 +307,28 @@ func windowsFilterDACL(oldDACL *windows.ACL, removeSID *windows.SID) (*windows.A
 		if err := windows.GetAce(oldDACL, i, &ace); err != nil {
 			return nil, fmt.Errorf("read ACE %d for copy: %w", i, err)
 		}
+		aceSize := uintptr(ace.Header.AceSize)
 		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
 			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceType == windowsAccessDeniedObjectAceType {
-				if sid, ok := windowsAceSID(ace); ok && sid.Equals(removeSID) && windowsIsExperimentalWriteDenyMask(ace.Mask) {
-					continue
+				if sid, ok := windowsAceSID(ace); ok && sid.Equals(removeSID) {
+					if windowsIsExperimentalWriteDenyMask(ace.Mask) {
+						continue
+					}
+					// If this is a combined read/write deny ACE, preserve its DenyRead
+					// bits by stripping the write-denial bits rather than dropping the ACE.
+					if ace.Mask&windowsReadContentBits != 0 && windowsHasWriteDenyBits(ace.Mask) {
+						dest := buf[offset : offset+aceSize]
+						srcSlice := unsafe.Slice((*byte)(unsafe.Pointer(ace)), aceSize)
+						copy(dest, srcSlice)
+						migratedAce := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(&dest[0]))
+						const legacyWriteMask = windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER
+						migratedAce.Mask &^= legacyWriteMask
+						offset += aceSize
+						continue
+					}
 				}
 			}
 		}
-		aceSize := uintptr(ace.Header.AceSize)
 		srcSlice := unsafe.Slice((*byte)(unsafe.Pointer(ace)), aceSize)
 		copy(buf[offset:offset+aceSize], srcSlice)
 		offset += aceSize
@@ -347,7 +363,7 @@ func windowsMigrateDenyWriteInDACL(oldDACL *windows.ACL, targetSID *windows.SID,
 		}
 		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 &&
 			(ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceType == windowsAccessDeniedObjectAceType) {
-			if sid, ok := windowsAceSID(ace); ok && sid.Equals(targetSID) && windowsIsExperimentalWriteDenyMask(ace.Mask) {
+			if sid, ok := windowsAceSID(ace); ok && sid.Equals(targetSID) && windowsHasWriteDenyBits(ace.Mask) {
 				if shouldDropInheritOnly && (ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0) {
 					// Drop inherit-only ACE when no inheritance is requested on the target
 					continue
@@ -374,7 +390,7 @@ func windowsMigrateDenyWriteInDACL(oldDACL *windows.ACL, targetSID *windows.SID,
 		aceSize := uintptr(ace.Header.AceSize)
 		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 &&
 			(ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceType == windowsAccessDeniedObjectAceType) {
-			if sid, ok := windowsAceSID(ace); ok && sid.Equals(targetSID) && windowsIsExperimentalWriteDenyMask(ace.Mask) {
+			if sid, ok := windowsAceSID(ace); ok && sid.Equals(targetSID) && windowsHasWriteDenyBits(ace.Mask) {
 				if shouldDropInheritOnly && (ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0) {
 					continue
 				}
@@ -383,6 +399,12 @@ func windowsMigrateDenyWriteInDACL(oldDACL *windows.ACL, targetSID *windows.SID,
 				copy(dest, srcSlice)
 				migratedAce := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(&dest[0]))
 				migratedAce.Mask = narrowMask
+				if ace.Mask&windowsReadContentBits != 0 {
+					_, readMask, _ := windowsACLAccess(WindowsACLDenyRead)
+					migratedAce.Mask |= (ace.Mask & readMask)
+				}
+				const legacyWriteMask = windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER
+				migratedAce.Mask |= (ace.Mask &^ legacyWriteMask)
 				if noInherit || !isDir {
 					migratedAce.Header.AceFlags &^= inheritFlags
 				} else if isDir {
@@ -420,7 +442,7 @@ func windowsHasExplicitDenyWriteForSID(oldDACL *windows.ACL, wantSID *windows.SI
 		if !ok || !sid.Equals(wantSID) {
 			continue
 		}
-		if windowsIsExperimentalWriteDenyMask(ace.Mask) {
+		if windowsHasWriteDenyBits(ace.Mask) {
 			return true
 		}
 	}
@@ -466,8 +488,11 @@ func windowsPreservedReadDenyAccessEntries(oldDACL *windows.ACL, wantSID *window
 				windows.NO_PROPAGATE_INHERIT_ACE |
 				windows.INHERIT_ONLY_ACE)
 		}
+		mask := ace.Mask
+		const legacyWriteMask = windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER
+		mask &^= legacyWriteMask
 		out = append(out, windows.EXPLICIT_ACCESS{
-			AccessPermissions: ace.Mask,
+			AccessPermissions: mask,
 			AccessMode:        windows.DENY_ACCESS,
 			Inheritance:       inheritance,
 			Trustee: windows.TRUSTEE{
@@ -480,12 +505,17 @@ func windowsPreservedReadDenyAccessEntries(oldDACL *windows.ACL, wantSID *window
 	return out, nil
 }
 
-// windowsIsExperimentalWriteDenyMask reports whether mask is a synthetic
-// DenyWrite (or partial write deny) from earlier broadening builds — the only
-// ACEs migration revoke may drop for the stable ReadOnly SID. Pure DenyRead
-// masks share some STANDARD_RIGHTS bits with FILE_GENERIC_WRITE, so this keys
-// off content-write / delete / DAC bits that DenyRead never carries.
-func windowsIsExperimentalWriteDenyMask(mask windows.ACCESS_MASK) bool {
+const (
+	windowsWriteContentBits = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
+		windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES |
+		windowsFileDeleteChild | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER
+	windowsReadContentBits = windows.FILE_READ_DATA | windows.FILE_READ_EA | windows.FILE_EXECUTE
+)
+
+// windowsHasWriteDenyBits reports whether mask contains content-write, delete,
+// or ownership deny bits that indicate write denial (whether pure or combined
+// with read denial).
+func windowsHasWriteDenyBits(mask windows.ACCESS_MASK) bool {
 	_, writeMask, err := windowsACLAccess(WindowsACLDenyWrite)
 	if err != nil {
 		return false
@@ -493,12 +523,19 @@ func windowsIsExperimentalWriteDenyMask(mask windows.ACCESS_MASK) bool {
 	if mask&writeMask == writeMask {
 		return true
 	}
-	// Content-write / ownership bits unique to write denies (not in DenyRead's
-	// FILE_GENERIC_READ|FILE_GENERIC_EXECUTE mask alone).
-	const writeContent = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
-		windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES |
-		windowsFileDeleteChild | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER
-	return mask&writeContent != 0
+	return mask&windowsWriteContentBits != 0
+}
+
+// windowsIsExperimentalWriteDenyMask reports whether mask is a synthetic
+// DenyWrite (or partial write deny) from earlier broadening builds without any
+// co-resident DenyRead bits — the only ACEs migration revoke may drop for the
+// stable ReadOnly SID. If the mask also denies read-content bits, it is a combined
+// read/write deny rather than a pure experimental write deny.
+func windowsIsExperimentalWriteDenyMask(mask windows.ACCESS_MASK) bool {
+	if !windowsHasWriteDenyBits(mask) {
+		return false
+	}
+	return mask&windowsReadContentBits == 0
 }
 
 func windowsAceSID(ace *windows.ACCESS_ALLOWED_ACE) (sid *windows.SID, ok bool) {

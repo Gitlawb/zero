@@ -433,3 +433,131 @@ func TestWindowsACLDenyWriteMigratesLegacyNoInherit(t *testing.T) {
 		}
 	}
 }
+
+// TestWindowsACLDenyWriteMigratesCombinedLegacyReadWriteDeny regression tests
+// that migrating a pre-existing DACL with a single combined legacy read/write
+// deny ACE preserves the DenyRead bits while narrowing only the write denial bits.
+func TestWindowsACLDenyWriteMigratesCombinedLegacyReadWriteDeny(t *testing.T) {
+	dir := t.TempDir()
+	probeFile := filepath.Join(dir, "probe.txt")
+	if err := os.WriteFile(probeFile, []byte("content"), 0o644); err != nil {
+		t.Fatalf("write probeFile: %v", err)
+	}
+
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	sidStr := caps.ReadOnly
+	sid, err := windows.StringToSid(sidStr)
+	if err != nil {
+		t.Fatalf("StringToSid: %v", err)
+	}
+
+	_, readMask, err := windowsACLAccess(WindowsACLDenyRead)
+	if err != nil {
+		t.Fatalf("windowsACLAccess DenyRead: %v", err)
+	}
+	_, narrowWriteMask, err := windowsACLAccess(WindowsACLDenyWrite)
+	if err != nil {
+		t.Fatalf("windowsACLAccess DenyWrite: %v", err)
+	}
+
+	// 1. Seed a single combined legacy read/write deny ACE.
+	legacyWriteMask := windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.SYNCHRONIZE
+	combinedMask := readMask | legacyWriteMask
+	seedEntries := []windows.EXPLICIT_ACCESS{
+		{
+			AccessPermissions: combinedMask,
+			AccessMode:        windows.DENY_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		},
+	}
+	handle, _, err := openWindowsACLTarget(dir)
+	if err != nil {
+		t.Fatalf("openWindowsACLTarget: %v", err)
+	}
+	seededDACL, err := windows.ACLFromEntries(seedEntries, nil)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("ACLFromEntries: %v", err)
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, seededDACL, nil); err != nil {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("SetSecurityInfo: %v", err)
+	}
+	_ = windows.CloseHandle(handle)
+
+	// 2. Apply WindowsACLPlan with WindowsACLDenyWrite.
+	plan := WindowsACLPlan{
+		Entries: []WindowsACLEntry{{
+			Action:     WindowsACLDenyWrite,
+			Path:       dir,
+			Capability: sidStr,
+		}},
+	}
+	rollback, err := applyWindowsACLPlan(plan)
+	if err != nil {
+		t.Fatalf("applyWindowsACLPlan: %v", err)
+	}
+	t.Cleanup(func() { _ = rollback() })
+
+	// 3. Inspect DACL on dir.
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo: %v", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+
+	foundCombinedMigrated := false
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			t.Fatalf("GetAce: %v", err)
+		}
+		if ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE && ace.Header.AceType != windowsAccessDeniedObjectAceType {
+			continue
+		}
+		aceSID, ok := windowsAceSID(ace)
+		if !ok || !aceSID.Equals(sid) {
+			continue
+		}
+		// The migrated ACE must retain read denial bits and have narrowed write denial bits.
+		if ace.Mask&readMask == readMask && ace.Mask&narrowWriteMask == narrowWriteMask {
+			foundCombinedMigrated = true
+		}
+	}
+
+	if !foundCombinedMigrated {
+		t.Fatal("resulting DACL lost DenyRead bits or failed to narrow DenyWrite in combined ACE")
+	}
+
+	// 4. Verify dirDeniesReadSID recognizes the DenyRead on the migrated combined ACE.
+	if !dirDeniesReadSID(t, dir, sidStr) {
+		t.Fatal("dirDeniesReadSID failed to recognize DenyRead on migrated combined ACE")
+	}
+
+	// 5. Verify idempotency on second apply.
+	if _, err := applyWindowsACLPlan(plan); err != nil {
+		t.Fatalf("second applyWindowsACLPlan failed: %v", err)
+	}
+	sd2, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo 2: %v", err)
+	}
+	dacl2, _, err := sd2.DACL()
+	if err != nil {
+		t.Fatalf("DACL 2: %v", err)
+	}
+	if dacl2.AceCount != dacl.AceCount {
+		t.Fatalf("second apply changed ACE count: %d vs %d", dacl2.AceCount, dacl.AceCount)
+	}
+}
