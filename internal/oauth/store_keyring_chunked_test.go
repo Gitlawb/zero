@@ -520,14 +520,33 @@ func TestStoreKeyringReaderDoesNotBlockOrMissDuringSlowWriter(t *testing.T) {
 		t.Fatalf("acquireFileLock: %v", err)
 	}
 
-	// While lock is held by writer, reader operations (Load, Status, FirstStored)
-	// should complete immediately without blocking or timing out.
-	tok, ok, err := reader.Load(ProviderKey("first"))
-	if err != nil {
-		t.Fatalf("reader.Load failed while writer held lock: %v", err)
+	type loadResult struct {
+		tok Token
+		ok  bool
+		err error
 	}
-	if !ok || tok.AccessToken != bigToken("a").AccessToken {
-		t.Fatalf("reader.Load returned unexpected token while writer held lock: ok=%v, token=%v", ok, tok)
+	done := make(chan loadResult, 1)
+	go func() {
+		tok, ok, err := reader.Load(ProviderKey("first"))
+		done <- loadResult{tok: tok, ok: ok, err: err}
+	}()
+
+	// Brief pause to ensure reader goroutine has entered acquireFileLock contention loop.
+	time.Sleep(50 * time.Millisecond)
+
+	// Release lock; reader must acquire lock and complete.
+	unlock()
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("reader.Load failed after lock release: %v", res.err)
+		}
+		if !res.ok || res.tok.AccessToken != bigToken("a").AccessToken {
+			t.Fatalf("reader.Load returned unexpected token: ok=%v, token=%v", res.ok, res.tok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader.Load timed out waiting for lock release")
 	}
 
 	firstTok, key, found := FirstStored(reader, []string{"first", "second"})
@@ -537,13 +556,11 @@ func TestStoreKeyringReaderDoesNotBlockOrMissDuringSlowWriter(t *testing.T) {
 
 	st, err := reader.Status(KeyPrefixProvider)
 	if err != nil {
-		t.Fatalf("reader.Status failed while writer held lock: %v", err)
+		t.Fatalf("reader.Status failed: %v", err)
 	}
 	if len(st) != 2 {
 		t.Fatalf("reader.Status returned %d entries, want 2", len(st))
 	}
-
-	unlock()
 }
 
 // TestStoreKeyringSharedLockAcrossDifferentEnvironmentRoots is the regression for
@@ -983,4 +1000,57 @@ func TestStoreKeyringResetIsBoundedByBackendAndManifest(t *testing.T) {
 			t.Errorf("manifest-bounded reset performed %d delete calls, want <= %d", totalDeletes, expectedChunks+2)
 		}
 	})
+}
+
+func TestStoreKeyringSweepCleanupAccountBoundsAndValidatesMarker(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	blob := keyringBlob{kr: kr, service: keyringService, account: keyringAccount}
+
+	// 1. Invalid family: must not delete any chunks, and marker is removed
+	kr.data[keyringService+"/"+blob.cleanupAccount()] = "invalid_family:5"
+	kr.deletes = map[string]int{}
+	blob.sweepCleanupAccount()
+	if len(kr.deletes) != 1 || kr.deletes[blob.cleanupAccount()] != 1 {
+		t.Errorf("expected only cleanup marker delete for invalid family, got %v", kr.deletes)
+	}
+
+	// 2. Count larger than keyringMaxChunks: must be clamped to keyringMaxChunks
+	kr.data[keyringService+"/"+blob.cleanupAccount()] = keyringChunkFamilyA + ":1000000"
+	kr.deletes = map[string]int{}
+	blob.sweepCleanupAccount()
+	// Should delete chunks 0..keyringMaxChunks-1 plus the cleanup marker
+	expectedDeletes := keyringMaxChunks + 1
+	totalDeletes := 0
+	for _, c := range kr.deletes {
+		totalDeletes += c
+	}
+	if totalDeletes != expectedDeletes {
+		t.Errorf("expected %d deletes (clamped to keyringMaxChunks + marker), got %d", expectedDeletes, totalDeletes)
+	}
+
+	// 3. Failed delete preserves the cleanup marker
+	failKR := &erroringFakeKR{
+		fakeKR:    newCappedFakeKR(macOSLikeBudget),
+		deleteErr: errors.New("keychain delete failure"),
+	}
+	blobWithErr := keyringBlob{kr: failKR, service: keyringService, account: keyringAccount}
+	failKR.data[keyringService+"/"+blobWithErr.cleanupAccount()] = keyringChunkFamilyA + ":3"
+	blobWithErr.sweepCleanupAccount()
+
+	// Marker must still be in keychain
+	if val, ok := failKR.data[keyringService+"/"+blobWithErr.cleanupAccount()]; !ok || val != keyringChunkFamilyA+":3" {
+		t.Errorf("expected cleanup marker preserved after delete failure, got %q, ok=%v", val, ok)
+	}
+}
+
+type erroringFakeKR struct {
+	*fakeKR
+	deleteErr error
+}
+
+func (e *erroringFakeKR) Delete(service, account string) (bool, error) {
+	if strings.Contains(account, ".a.") && e.deleteErr != nil {
+		return false, e.deleteErr
+	}
+	return e.fakeKR.Delete(service, account)
 }

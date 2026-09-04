@@ -262,9 +262,11 @@ func NewStore(options StoreOptions) (*Store, error) {
 		// home location resolves, fall back to in-process serialization only.
 		lockPath := strings.TrimSpace(options.KeyringLockPath)
 		if lockPath == "" {
-			if lp, perr := ResolveKeyringLockPath(options.Env); perr == nil {
-				lockPath = lp
+			lp, perr := ResolveKeyringLockPath(options.Env)
+			if perr != nil {
+				return nil, perr
 			}
+			lockPath = lp
 		}
 		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount, lockPath: lockPath}, now: now}, nil
 	default:
@@ -478,12 +480,16 @@ func (b fileBlob) reset() error {
 	}
 	for _, dir := range []string{b.path + ".publish", b.path + ".secret.publish"} {
 		entries, err := os.ReadDir(dir)
-		if err == nil {
-			for _, entry := range entries {
-				if strings.HasPrefix(entry.Name(), "publish-") {
-					if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-						errs = append(errs, err)
-					}
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "publish-") {
+				if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+					errs = append(errs, err)
 				}
 			}
 		}
@@ -866,8 +872,15 @@ func (b keyringBlob) sweepCleanupAccount() {
 		parts := strings.Split(raw, ":")
 		if len(parts) == 2 {
 			family := parts[0]
-			if count, err := strconv.Atoi(parts[1]); err == nil && count > 0 {
-				_ = b.deleteChunkRange(family, 0, count, nil)
+			if family == keyringChunkFamilyA || family == keyringChunkFamilyB {
+				if count, err := strconv.Atoi(parts[1]); err == nil && count > 0 {
+					if count > keyringMaxChunks {
+						count = keyringMaxChunks
+					}
+					if err := b.deleteChunkRange(family, 0, count, nil); err != nil {
+						return
+					}
+				}
 			}
 		}
 	}
