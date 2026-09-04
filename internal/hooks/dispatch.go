@@ -49,9 +49,9 @@ type DispatchOutcome struct {
 	// Separate from Messages because they answer different questions and have
 	// different audiences. A notice says the hook ran under a weakened token,
 	// which the model and the operator both need; the hook's own output is for
-	// afterTool validators that asked to be heard. Accumulated BEFORE the veto
-	// short-circuit, so a notice from a hook that already ran survives a later
-	// hook's veto.
+	// afterTool validators that asked to be heard. Appended as each hook runs,
+	// rather than read off the final result, so a disclosure from a hook that
+	// already ran survives a later hook's veto ending the chain.
 	Notices []string
 }
 
@@ -209,8 +209,9 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 		if message := hookMessage(result); message != "" {
 			outcome.Messages = append(outcome.Messages, message)
 		}
-		// Before the veto check below, so hook A's disclosure is not lost when hook
-		// B stops the chain. A notice describes something that ALREADY happened.
+		// Appended per hook rather than read off the final result, so hook A's
+		// disclosure is not lost when hook B stops the chain. A notice describes
+		// something that ALREADY happened.
 		for _, notice := range result.Notices {
 			if strings.TrimSpace(notice) != "" {
 				outcome.Notices = append(outcome.Notices, notice)
