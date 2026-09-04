@@ -1,14 +1,17 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -109,11 +112,43 @@ func runSandboxExec(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		fmt.Fprintf(stderr, "sandbox: DOWNGRADED: %s\n", plan.DowngradeReason)
 	}
 
-	return runSandboxPlannedCommand(plan, stdout, stderr)
+	// The CLI's shared shutdown context, so Ctrl+C and a directed SIGTERM both
+	// arrive here rather than only at whatever the terminal happens to signal.
+	runCtx, stopSignals := signalContext()
+	defer stopSignals()
+	return runSandboxPlannedCommand(runCtx, plan, stdout, stderr)
 }
 
-func runSandboxPlannedCommand(plan zeroSandbox.CommandPlan, stdout io.Writer, stderr io.Writer) int {
-	process := exec.Command(plan.Name, plan.Args...)
+// sandboxExecShutdownGrace bounds how long a cancelled child may take to exit
+// before it is killed outright, so cleanup still runs.
+const sandboxExecShutdownGrace = 5 * time.Second
+
+func runSandboxPlannedCommand(ctx context.Context, plan zeroSandbox.CommandPlan, stdout io.Writer, stderr io.Writer) int {
+	// CANCELLING THE WRAPPER HAS TO REACH THE COMMAND.
+	//
+	// This started the backend wrapper with a bare exec.Command().Run(): no
+	// context, no forwarding, no shutdown path. A terminal masks it, because
+	// terminals signal the whole foreground process group, but a supervisor or
+	// task runner that sends SIGTERM to the zero sandbox exec PID killed only
+	// Zero. The wrapper and everything under it kept running, doing filesystem
+	// and network work after the caller considered the task cancelled, and the
+	// deferred plan cleanup never ran because the process was gone.
+	//
+	// DELIBERATELY NOT execution.ConfigureProcessGroup. Putting the child in its
+	// own process group closes this hole and opens a worse one: it severs every
+	// kernel-delivered group signal, so a supervisor escalating to a group kill,
+	// and a terminal delivering Ctrl+C to its foreground group, would stop
+	// reaching the child. That trades a path that works today for one that does
+	// not. Keeping the child in Zero's group leaves group delivery unchanged,
+	// while the directed-signal case, which reached nothing at all before, now
+	// reaches the child.
+	process := exec.CommandContext(ctx, plan.Name, plan.Args...)
+	// Kill the tree rather than the root: on Windows that is taskkill /T, and on
+	// Unix the child plus its group when it leads one.
+	process.Cancel = func() error { return execution.KillProcessTree(process.Process.Pid) }
+	// Bounded, so a child ignoring the first signal cannot hold the wrapper open
+	// forever and skip cleanup anyway.
+	process.WaitDelay = sandboxExecShutdownGrace
 	process.Dir = plan.Dir
 	if process.Dir == "" {
 		process.Dir = plan.WorkspaceRoot
