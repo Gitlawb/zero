@@ -74,6 +74,8 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return runAuthStatus(args[1:], stdout, stderr, deps)
 	case "refresh":
 		return runAuthRefresh(args[1:], stdout, stderr, deps)
+	case "reset":
+		return runAuthReset(args[1:], stdout, stderr, deps)
 	case "openrouter":
 		return runAuthOpenRouter(args[1:], stdout, stderr, deps)
 	case "chatgpt":
@@ -321,6 +323,7 @@ func validateAuthFlags(sub string, a authArgs) error {
 		"logout":  {"json": true},
 		"status":  {"json": true},
 		"refresh": {"watch": true},
+		"reset":   {"json": true},
 	}[sub]
 	bad := func(name string) error { return fmt.Errorf("zero auth %s does not accept %s", sub, name) }
 	if a.json && !allowed["json"] {
@@ -569,6 +572,40 @@ func runAuthRefreshWatch(manager *oauth.Manager, key, provider string, stdout io
 	return exitSuccess
 }
 
+func runAuthReset(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	parsed, err := parseAuthArgs("reset", args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if parsed.help {
+		_ = writeAuthHelp(stdout)
+		return exitSuccess
+	}
+	if len(parsed.positional) > 0 {
+		return writeExecUsageError(stderr, fmt.Sprintf("zero auth reset takes no arguments (got %q)", parsed.positional[0]))
+	}
+	manager, err := newAuthManager(deps, stdout)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := manager.Reset(); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if parsed.json {
+		payload := struct {
+			Reset bool `json:"reset"`
+		}{Reset: true}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, "Reset OAuth token store."); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
 func filterAuthStatuses(statuses []oauth.Status, provider string) []oauth.Status {
 	want := oauth.ProviderKey(provider)
 	filtered := make([]oauth.Status, 0, 1)
@@ -589,6 +626,7 @@ Commands:
   logout <provider>                               Delete a provider's stored login
   status [provider]                               Show login presence/expiry (never the token)
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
+  reset                                           Reset the OAuth token store (clears corrupted entries and tokens)
   openrouter                                      Log in to OpenRouter in the browser; mints an API key
   chatgpt                                         Log in to ChatGPT in the browser (Codex backend, ChatGPT Plus/Pro)
 
@@ -615,7 +653,7 @@ Flags:
       --device   Use the device-code flow (headless/SSH; no browser)
       --scope    Add an OAuth scope (repeatable)
       --watch    Keep the token fresh in the foreground (refresh only)
-      --json     Print result as JSON (status/logout)
+      --json     Print result as JSON (status/logout/reset)
   -h, --help     Show this help
 `)
 	return err
