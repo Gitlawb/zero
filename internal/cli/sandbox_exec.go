@@ -118,7 +118,21 @@ func runSandboxPlannedCommand(plan zeroSandbox.CommandPlan, stdout io.Writer, st
 	if process.Dir == "" {
 		process.Dir = plan.WorkspaceRoot
 	}
-	if len(plan.Env) > 0 {
+	// SPECIFIED-EMPTY IS NOT UNSPECIFIED.
+	//
+	// exec.Cmd treats a nil Env as "inherit this process's entire environment",
+	// which is a different statement from "run with no variables". The plan owns
+	// its environment: directCommandEnv and scrubSensitiveEnv return a slice they
+	// built, and that slice is non-nil with length zero when every entry was
+	// sensitive. Testing length collapsed those two states and turned the strictest
+	// possible answer into the loosest one.
+	//
+	// Not reachable through `zero sandbox exec` today, because the child
+	// environment is os.Environ() and an environment holding only sensitive keys
+	// has no %AppData%, so config resolution fails before the planner runs. Fixed
+	// anyway: the guard is one assignment, and the next caller that hands the plan
+	// a deliberately narrow environment would inherit everything instead, silently.
+	if plan.Env != nil {
 		process.Env = plan.Env
 	}
 	process.Stdin = os.Stdin
