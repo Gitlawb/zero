@@ -264,7 +264,7 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	// discovered as an ACCESS_DENIED after the fact. The real smoke test misses
 	// this because it substitutes a user-owned temporary directory for the
 	// production read root.
-	if refusal := WindowsACLPlanVolumeRootRefusal(plan); refusal != "" {
+	if refusal := WindowsACLPlanReadGrantRefusal(plan); refusal != "" {
 		return errors.New("unelevated sandbox setup cannot apply this plan: " + refusal)
 	}
 	if _, err := applyWindowsACLPlan(plan); err != nil {
