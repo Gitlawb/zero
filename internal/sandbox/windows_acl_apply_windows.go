@@ -204,7 +204,9 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 		if handle != 0 {
 			_ = windows.CloseHandle(handle)
 		}
-		if unwindErr := rollbackWindowsACLMaterialization(created); unwindErr != nil {
+		// The apply itself is failing, so nothing has been left with a DACL to
+		// restore; only the removal outcome matters here.
+		if _, unwindErr := rollbackWindowsACLMaterialization(created); unwindErr != nil {
 			return windowsACLSnapshot{}, false, fmt.Errorf("%w; cleanup failed: %v", err, unwindErr)
 		}
 		return windowsACLSnapshot{}, false, err
@@ -435,10 +437,20 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 	for index := len(snapshots) - 1; index >= 0; index-- {
 		snapshot := snapshots[index]
 		if snapshot.Created.createdAnything() {
-			if err := rollbackWindowsACLMaterialization(snapshot.Created); err != nil {
+			removed, err := rollbackWindowsACLMaterialization(snapshot.Created)
+			if err != nil {
 				errs = append(errs, err)
 			}
-			continue
+			// Only skip the restore when the object carrying the DACL is actually
+			// gone. A racer can win the leaf while this run made its parent, and
+			// then the aggregate says "ours" about a file that is not: the parent
+			// cannot be removed because it is non-empty, and skipping here left a
+			// pre-existing file wearing an aborted setup's ACL. Falling through
+			// reaches the same no-follow, TargetID-guarded restore as any other
+			// snapshot, which refuses on a mismatch rather than forcing.
+			if removed {
+				continue
+			}
 		}
 		dacl, _, err := snapshot.Descriptor.DACL()
 		if err != nil {
@@ -531,18 +543,32 @@ func materializeWindowsACLTarget(path string, asFile bool) (windowsACLMaterializ
 // Residue is preferable to over-deletion throughout. When something cannot be
 // removed safely this reports it and leaves it, and never falls back to a
 // pathname delete.
-func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization) error {
+// rollbackWindowsACLMaterialization removes what this run created and reports
+// whether the ACL-BEARING TARGET is among what it removed.
+//
+// AGGREGATE OWNERSHIP IS NOT THE TARGET'S DISPOSITION. The caller used to treat
+// createdAnything() as "this run owns the object it applied a DACL to", which is
+// an OR across the whole materialization record. When this run creates the
+// parent chain and a racer wins the leaf, that is true while the ACL-bearing
+// file belongs to somebody else. The caller then skipped the identity-validated
+// restore and left a pre-existing file carrying an aborted setup's ACL.
+//
+// The target is the file leaf when FileMade is set, and the deepest chain entry
+// otherwise. Anything this cannot prove it removed reports false, which routes
+// the caller to a restore that is already no-follow and TargetID-guarded, so the
+// conservative direction is the default.
+func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization) (targetRemoved bool, err error) {
 	if !materialization.createdAnything() {
-		return nil
+		return false, nil
 	}
-	anchor, err := reopenWindowsACLDirectoryAsIdentity(materialization.AnchorPath, materialization.AnchorID)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// The anchor is gone, so everything created beneath it is gone too.
-			// Nothing to undo, and no way to undo it if there were.
-			return nil
+	anchor, anchorErr := reopenWindowsACLDirectoryAsIdentity(materialization.AnchorPath, materialization.AnchorID)
+	if anchorErr != nil {
+		if errors.Is(anchorErr, os.ErrNotExist) {
+			// The anchor is gone, so everything created beneath it is gone too,
+			// the target included. Nothing to undo, and no way to undo it.
+			return true, nil
 		}
-		return fmt.Errorf("unwind windows ACL materialization under %s: %w", materialization.AnchorPath, err)
+		return false, fmt.Errorf("unwind windows ACL materialization under %s: %w", materialization.AnchorPath, anchorErr)
 	}
 
 	// One handle per level: handles[i] is the parent of Chain[i], which is what
@@ -568,24 +594,28 @@ func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization
 	}
 	depth := 0
 	for ; depth < needed; depth++ {
-		child, err := openWindowsACLChildDirectory(handles[depth], materialization.Chain[depth].Name)
-		if err != nil {
+		child, openErr := openWindowsACLChildDirectory(handles[depth], materialization.Chain[depth].Name)
+		if openErr != nil {
 			// Already removed by something else. Stop descending; whatever is
 			// below it is gone with it.
-			if isWindowsNotExist(err) {
+			if isWindowsNotExist(openErr) {
 				break
 			}
-			return fmt.Errorf("unwind windows ACL materialization under %s: %w", materialization.AnchorPath, err)
+			return false, fmt.Errorf("unwind windows ACL materialization under %s: %w", materialization.AnchorPath, openErr)
 		}
 		handles = append(handles, child)
 	}
 
 	var errs []error
+	// An ancestor vanished mid-descent, so the target went with it.
+	targetRemoved = depth < needed
 	// The file leaf lives inside the deepest chain directory, so it goes first
 	// and only if the descent actually reached that far.
 	if materialization.FileMade && depth == needed {
 		if err := deleteWindowsACLChildFile(handles[len(handles)-1], materialization.File); err != nil {
 			errs = append(errs, fmt.Errorf("remove materialized windows ACL file %s: %w", materialization.File, err))
+		} else {
+			targetRemoved = true
 		}
 	}
 	// Chain[i] is removed through handles[i], so the deepest one that can be
@@ -607,9 +637,16 @@ func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization
 		}
 		if err := deleteWindowsACLChildDirectory(handles[index], materialization.Chain[index].Name); err != nil {
 			errs = append(errs, fmt.Errorf("remove materialized windows ACL directory %s: %w", materialization.Chain[index].Name, err))
+			continue
+		}
+		// The deepest chain entry IS the ACL target for a directory
+		// materialization, and it is the leaf's parent when a racer made the leaf,
+		// so removing it means the target is gone either way.
+		if !materialization.FileMade && index == len(materialization.Chain)-1 {
+			targetRemoved = true
 		}
 	}
-	return errors.Join(errs...)
+	return targetRemoved, errors.Join(errs...)
 }
 
 // windowsACLMaterializeSwapHook is a test seam and nothing else. It fires inside

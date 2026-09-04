@@ -217,7 +217,7 @@ func TestRollbackDoesNotFollowAnAncestorSwappedAfterCreation(t *testing.T) {
 
 	// The anchor pathname now names the decoy, and the decoy is a junction, so
 	// the unwind must refuse rather than proceed. Either way it must not delete.
-	err = rollbackWindowsACLMaterialization(created)
+	_, err = rollbackWindowsACLMaterialization(created)
 
 	if _, statErr := os.Stat(witness); statErr != nil {
 		t.Fatalf("DESTRUCTIVE: rollback followed the junction and deleted a tree outside the approved directory: %v", statErr)
@@ -261,7 +261,7 @@ func TestRollbackRefusesAnAnchorReplacedByARealDirectory(t *testing.T) {
 		t.Fatalf("plant the decoy child: %v", err)
 	}
 
-	err = rollbackWindowsACLMaterialization(created)
+	_, err = rollbackWindowsACLMaterialization(created)
 	if err == nil {
 		t.Error("rollback accepted a different directory wearing the anchor's name")
 	} else if !strings.Contains(err.Error(), "no longer the directory") {
@@ -289,7 +289,7 @@ func TestRollbackLeavesDirectoriesItDidNotCreate(t *testing.T) {
 	if created.AnchorPath != existing {
 		t.Fatalf("anchor = %q, want the deepest pre-existing directory %q", created.AnchorPath, existing)
 	}
-	if err := rollbackWindowsACLMaterialization(created); err != nil {
+	if _, err := rollbackWindowsACLMaterialization(created); err != nil {
 		t.Fatalf("rollbackWindowsACLMaterialization: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(existing, "made")); !errors.Is(err, os.ErrNotExist) {
@@ -354,7 +354,7 @@ func TestRollbackReportsWhatItCouldNotRemove(t *testing.T) {
 		t.Fatalf("populate: %v", err)
 	}
 
-	err = rollbackWindowsACLMaterialization(created)
+	_, err = rollbackWindowsACLMaterialization(created)
 	if err == nil {
 		t.Fatal("rollback reported success on a directory it could not empty, so callers cannot tell teardown failed")
 	}
