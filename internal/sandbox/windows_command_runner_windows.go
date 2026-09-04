@@ -229,7 +229,23 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	if err != nil {
 		return err
 	}
-	if marker.contains(applied) {
+	// THE MARKER ATTESTS TO A PLAN. THE COMMAND CONSUMES AN OBJECT.
+	//
+	// The marker fingerprints pathnames and actions, and cleanup is allowed to
+	// reclaim the deterministic runtime directory that plan was realized on. An
+	// ordinary later run recreates the same pathname with the caller-private DACL
+	// and no capability ACE, and the serialized plan is unchanged, so this fast
+	// path returned before anything looked at the directory. The restricted child
+	// still carried the capability SID; the new object simply did not grant it, and
+	// every temp, package-cache and build-cache write failed after launch with a
+	// bare ACCESS_DENIED and nothing pointing at setup.
+	//
+	// This tier owns its plan and needs no elevation, so the answer here is to
+	// reapply rather than to refuse. Refusing would print advice to run elevated
+	// setup, which is unnecessary on this tier and unfollowable for a user with no
+	// Administrator account. The restricted-token tier keeps its refusal, because
+	// an ordinary user cannot restore principal provisioning.
+	if marker.contains(applied) && verifyWindowsRuntimeRootCapability(config) == nil {
 		return nil
 	}
 	// THE TIER BOUNDARY, STATED BEFORE ANY MUTATION IS ATTEMPTED.
