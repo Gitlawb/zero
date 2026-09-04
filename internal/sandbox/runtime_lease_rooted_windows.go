@@ -48,6 +48,9 @@ func acquireRuntimeLeaseRooted(root string) (*sandboxRuntimeLease, []windowsCrea
 	// The base is the operator's, and may legitimately be a redirected cache or
 	// TEMP location, so it is created and opened by name exactly as provisioning
 	// does. Everything below it is Zero's and is addressed by handle.
+	if runtimeLeasePreCreateBarrier != nil {
+		runtimeLeasePreCreateBarrier()
+	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create sandbox runtime base: %w", err)
 	}

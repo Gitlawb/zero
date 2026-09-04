@@ -15,6 +15,9 @@ func acquireRuntimeLeaseForPlatform(root string) (*sandboxRuntimeLease, []window
 	if err := refuseAliasedRuntimeComponents(root); err != nil {
 		return nil, nil, err
 	}
+	if runtimeLeasePreCreateBarrier != nil {
+		runtimeLeasePreCreateBarrier()
+	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create sandbox runtime parent: %w", err)
 	}

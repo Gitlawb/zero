@@ -33,11 +33,9 @@ func leaseRootUnder(t *testing.T, cacheRoot string) string {
 // provisioning working on the legitimate tree, so no post-check ever saw it, and
 // the rollback could not compensate what it had no record of.
 //
-// A junction needs no privilege on Windows, so the caller's half of this races
-// on an ordinary unelevated box. Here the junction is simply left in place,
-// which is the strictly easier case to detect: if the redirected target receives
-// anything at all, the pathname walk is still live.
-func TestRuntimeLeaseRefusesAJunctionedOwnedComponent(t *testing.T) {
+// A junction needs no privilege on Windows, so the caller's half of this runs on
+// an ordinary unelevated box.
+func TestRuntimeLeaseRefusesAJunctionPlantedAfterTheCheck(t *testing.T) {
 	cacheRoot := t.TempDir()
 	target := t.TempDir()
 	root := leaseRootUnder(t, cacheRoot)
@@ -46,28 +44,36 @@ func TestRuntimeLeaseRefusesAJunctionedOwnedComponent(t *testing.T) {
 	if !strings.HasPrefix(strings.ToLower(root), strings.ToLower(owned)) {
 		t.Fatalf("SETUP INVALID: %s does not sit under the owned component %s", root, owned)
 	}
-	if out, err := exec.Command("cmd", "/c", "mklink", "/J", owned, target).CombinedOutput(); err != nil {
-		t.Skipf("mklink /J unavailable here: %v\n%s", err, out)
-	}
 
-	// SETUP: the junction really redirects, or a clean target below proves nothing.
-	probe := filepath.Join(owned, "probe.txt")
-	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
-		t.Skipf("the junction does not accept writes here: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(target, "probe.txt")); err != nil {
-		t.Skipf("SETUP: the junction does not redirect on this filesystem: %v", err)
-	}
-	if err := os.Remove(probe); err != nil {
-		t.Fatal(err)
+	// THE JUNCTION ARRIVES IN THE WINDOW, WHICH IS THE WHOLE POINT.
+	//
+	// One that is already there when acquisition starts was refused by the old
+	// alias pre-check too, so a test that plants it up front passes against the
+	// defective implementation and proves nothing. This one lands after the
+	// decision and before the first create, which is exactly where os.MkdirAll and
+	// the pathname lease open used to follow it.
+	previous := runtimeLeasePreCreateBarrier
+	t.Cleanup(func() { runtimeLeasePreCreateBarrier = previous })
+	planted := false
+	runtimeLeasePreCreateBarrier = func() {
+		if planted {
+			return
+		}
+		planted = true
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", owned, target).CombinedOutput(); err != nil {
+			t.Logf("mklink /J unavailable: %v: %s", err, out)
+		}
 	}
 
 	lease, _, err := prepareSandboxRuntimeLeaseRecording(root)
 	if lease != nil {
 		lease.release()
 	}
-	if err == nil {
-		t.Fatal("lease acquisition descended through a junction the caller planted")
+	if !planted {
+		t.Skip("the pre-create barrier never ran, so the race was not reproduced")
+	}
+	if _, statErr := os.Lstat(owned); statErr != nil {
+		t.Skipf("the junction could not be created here: %v", statErr)
 	}
 
 	entries, readErr := os.ReadDir(target)
@@ -79,7 +85,10 @@ func TestRuntimeLeaseRefusesAJunctionedOwnedComponent(t *testing.T) {
 		for _, entry := range entries {
 			names = append(names, entry.Name())
 		}
-		t.Fatalf("lease acquisition created %v beneath the redirected target", names)
+		t.Fatalf("lease acquisition wrote %v beneath a junction planted after its own check; err=%v", names, err)
+	}
+	if err == nil {
+		t.Fatal("lease acquisition reported success through a junction planted after its check")
 	}
 }
 
