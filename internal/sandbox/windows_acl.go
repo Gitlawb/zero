@@ -115,11 +115,32 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 			Path:       windowsRenameProtectedObject(capability.Root),
 			Capability: capability.SID,
 		})
+		// MATERIALIZED, LIKE THE PRINCIPAL PLAN'S, AND FOR TWO REASONS.
+		//
+		// First, a guard attached to an object that does not exist is not applied.
+		// On a workspace that had no .git when setup ran, the first pass skipped all
+		// three of these as missing and the deferred pass skipped them again,
+		// because nothing else in this plan created them. Setup still recorded
+		// success. A later git init then created .git, config and hooks beneath the
+		// already-granted workspace, where they inherit the allow, DELETE included,
+		// with no object-specific deny of their own: the sandboxed command could
+		// rename .git aside, recreate it, and get credential.helper and
+		// core.hooksPath back.
+		//
+		// Second, materializing these is what lets the applier's deferred pass land
+		// the deny-delete on .git above, since creating .gitconfig and .githooks
+		// creates .git as their parent.
+		//
+		// The principal planner has done this from the start. Sharing the shape
+		// rather than only the pathname is the point: this tier is the DEFAULT
+		// backend, so the weaker of the two rules was the one almost everyone got.
 		for _, path := range capability.ProtectedWriteDenyPaths {
 			entries = append(entries, WindowsACLEntry{
-				Action:     WindowsACLDenyWrite,
-				Path:       path,
-				Capability: capability.SID,
+				Action:          WindowsACLDenyWrite,
+				Path:            path,
+				Capability:      capability.SID,
+				Materialize:     true,
+				MaterializeFile: gitMetadataCarveoutIsFile(path),
 			})
 		}
 	}
