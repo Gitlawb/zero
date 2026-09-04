@@ -153,6 +153,27 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 	// purpose, so every read failed it — including opening the executable. The
 	// principal plan still grants the account SID; this is the other half of the
 	// same grant, so the allow-list and the restriction now come from one place.
+	// AND IT REFUSES TO EXPRESS "READ EVERYWHERE" AS AN ACE ON THE VOLUME ROOT.
+	//
+	// Production profiles seed ReadRoots with the bare filesystem root, so this
+	// loop used to add an inheritable allow-read for the synthetic read SID at
+	// "C:\". SetSecurityInfo propagates inheritable ACEs onto existing children,
+	// so that is not one sandbox-owned object being changed: it walks and rewrites
+	// DACL inheritance across unrelated system, application and user trees on the
+	// drive, and a locked or exclusively opened descendant makes the result depend
+	// on ambient filesystem state.
+	//
+	// It is not even complete after paying that price. A bare root resolves on one
+	// volume, while the executables, DLLs and tool installations a command needs
+	// can sit on another without appearing as their own read roots, so the strict
+	// token still fails before its executable starts. Measured: with the read SID
+	// granted nowhere the strict token cannot open C:WindowsSystem32cmd.exe.
+	//
+	// So the profile that needs this is refused, at both setup tiers, rather than
+	// half-served by a persistent volume-wide ACL edit. That leaves denyRead
+	// unavailable on Windows until there is a bounded authorization model covering
+	// the real platform, runtime and executable dependencies on every relevant
+	// volume, which is what #869 tracks.
 	readSID, err := windowsReadAllowCapabilitySID(config)
 	if err != nil {
 		return WindowsACLPlan{}, err
@@ -198,6 +219,31 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 		}
 	}
 	return WindowsACLPlan{Entries: dedupeWindowsACLEntries(entries)}, nil
+}
+
+// WindowsACLPlanVolumeRootRefusal reports why a plan must not be applied, or "".
+//
+// ONE ANSWER FOR EVERY TIER THAT APPLIES A PLAN. This started inside the
+// unelevated tier, because that is where it was first observed: an ordinary user
+// cannot write the volume root's DACL, so every command failed there with a
+// generic diagnosis. Elevated setup CAN write it, and that is worse rather than
+// better. SetSecurityInfo propagates inheritable ACEs to existing children, so
+// applying it rewrites DACL inheritance across unrelated system, application and
+// user trees on the drive, and it still does not cover a second volume, so the
+// strict token can fail to open its own executable after all that.
+//
+// Refusing in the planner's own vocabulary keeps the two tiers from drifting: a
+// new caller that applies a plan inherits the refusal instead of having to
+// remember to copy it.
+func WindowsACLPlanVolumeRootRefusal(plan WindowsACLPlan) string {
+	root := windowsPlanVolumeRootGrant(plan)
+	if root == "" {
+		return ""
+	}
+	return "this sandbox profile configures denyRead, which selects a fully restricted token, and that token applies its restricted-SID check to reads as well as writes. " +
+		"Serving it needs the read capability granted at the volume root " + root + ", which cannot be done safely: the grant is inheritable, so applying it rewrites permissions across unrelated system, application and user directories on that drive, " +
+		"and it still would not cover executables or libraries on another volume. " +
+		"denyRead is therefore not available on Windows yet (see #869). Remove denyRead from the sandbox configuration to run on a write-restricted token, which keeps the workspace write jail intact"
 }
 
 // windowsPlanVolumeRootGrant returns the first volume root the plan would have

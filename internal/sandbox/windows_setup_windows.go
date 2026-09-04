@@ -97,6 +97,14 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
+	// Before the first mutation, and on this tier too. Elevated setup CAN write a
+	// volume root's DACL, which is exactly why it must not: the grant is
+	// inheritable, so applying it rewrites permissions across the drive rather than
+	// changing one sandbox-owned object.
+	if refusal := WindowsACLPlanVolumeRootRefusal(plan); refusal != "" {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+refusal)
+		return 1
+	}
 	rollback, err := applyWindowsACLPlanFn(plan)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())

@@ -264,11 +264,8 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	// discovered as an ACCESS_DENIED after the fact. The real smoke test misses
 	// this because it substitutes a user-owned temporary directory for the
 	// production read root.
-	if root := windowsPlanVolumeRootGrant(plan); root != "" {
-		return fmt.Errorf("unelevated sandbox setup cannot grant the read capability at the volume root %s, which this profile needs because it configures denyRead and therefore runs on a fully restricted token: "+
-			"changing that directory's permissions requires Administrator rights. "+
-			"Run `zero sandbox setup` from an elevated (Administrator) terminal, "+
-			"or remove denyRead from the sandbox configuration so the command can run on a write-restricted token instead", root)
+	if refusal := WindowsACLPlanVolumeRootRefusal(plan); refusal != "" {
+		return errors.New("unelevated sandbox setup cannot apply this plan: " + refusal)
 	}
 	if _, err := applyWindowsACLPlan(plan); err != nil {
 		// Refusing to run is right: without these ACEs the write jail does not
