@@ -88,7 +88,8 @@ func TestElevatedSetupRefusesAVolumeRootReadGrant(t *testing.T) {
 		t.Fatal("the plan was applied before the refusal, so the volume-wide edit already happened")
 	}
 	message := stderr.String()
-	for _, want := range []string{"denyRead", "volume root", "#869"} {
+	volumeRoot := filepath.VolumeName(config.WorkspaceRoots[0]) + string(filepath.Separator)
+	for _, want := range []string{"denyRead", volumeRoot, "#869"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("the refusal does not mention %q, so the reader cannot act on it:\n%s", want, message)
 		}
@@ -114,7 +115,47 @@ func TestElevatedSetupStillAcceptsAWriteJailOnlyProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsACLPlan: %v", err)
 	}
-	if refusal := WindowsACLPlanVolumeRootRefusal(plan); refusal != "" {
+	if refusal := WindowsACLPlanReadGrantRefusal(plan); refusal != "" {
 		t.Fatalf("a write-jail-only profile was refused: %s", refusal)
+	}
+}
+
+// AND A NARROWED READ LIST IS REFUSED TOO.
+//
+// The first version of this guard looked for a volume root, which is a symptom
+// of the production profile rather than the thing that is unsafe.
+// permissionProfileReadRoots happens to seed the bare filesystem root, so that
+// check covered production by coincidence. A denyRead profile with a narrowed
+// read list still put an inheritable ACE on C:\Windows and sailed through.
+func TestSetupRefusesAReadGrantOnANarrowedReadList(t *testing.T) {
+	workspace := t.TempDir()
+	config := WindowsSandboxCommandConfig{
+		SandboxHome:    t.TempDir(),
+		CommandCWD:     workspace,
+		WorkspaceRoots: []string{workspace},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: workspace}},
+				// No volume root anywhere in this list.
+				ReadRoots: []string{workspace, `C:\Windows`},
+				DenyRead:  []string{filepath.Join(workspace, "secrets")},
+			},
+		},
+	}
+	plan, err := BuildWindowsACLPlan(config)
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+	// SETUP: no volume root, or this is the case the old guard already caught.
+	if got := windowsPlanVolumeRootGrant(plan); got != "" {
+		t.Fatalf("SETUP INVALID: the plan reaches the volume root at %q", got)
+	}
+	refusal := WindowsACLPlanReadGrantRefusal(plan)
+	if refusal == "" {
+		t.Fatal("a denyRead profile with a narrowed read list was accepted; elevated setup would put an inheritable read ACE on the Windows directory")
+	}
+	if !strings.Contains(refusal, `C:\Windows`) {
+		t.Errorf("the refusal does not name the directory at fault: %s", refusal)
 	}
 }

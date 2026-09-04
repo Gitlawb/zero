@@ -101,7 +101,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// volume root's DACL, which is exactly why it must not: the grant is
 	// inheritable, so applying it rewrites permissions across the drive rather than
 	// changing one sandbox-owned object.
-	if refusal := WindowsACLPlanVolumeRootRefusal(plan); refusal != "" {
+	if refusal := WindowsACLPlanReadGrantRefusal(plan); refusal != "" {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+refusal)
 		return 1
 	}

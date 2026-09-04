@@ -221,29 +221,67 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 	return WindowsACLPlan{Entries: dedupeWindowsACLEntries(entries)}, nil
 }
 
-// WindowsACLPlanVolumeRootRefusal reports why a plan must not be applied, or "".
+// WindowsACLPlanReadGrantRefusal reports why a plan must not be applied, or "".
 //
 // ONE ANSWER FOR EVERY TIER THAT APPLIES A PLAN. This started inside the
 // unelevated tier, because that is where it was first observed: an ordinary user
 // cannot write the volume root's DACL, so every command failed there with a
 // generic diagnosis. Elevated setup CAN write it, and that is worse rather than
 // better. SetSecurityInfo propagates inheritable ACEs to existing children, so
-// applying it rewrites DACL inheritance across unrelated system, application and
-// user trees on the drive, and it still does not cover a second volume, so the
-// strict token can fail to open its own executable after all that.
+// applying it rewrites DACL inheritance across unrelated trees, and it still does
+// not cover a second volume, so the strict token can fail to open its own
+// executable after all that.
 //
-// Refusing in the planner's own vocabulary keeps the two tiers from drifting: a
-// new caller that applies a plan inherits the refusal instead of having to
-// remember to copy it.
-func WindowsACLPlanVolumeRootRefusal(plan WindowsACLPlan) string {
-	root := windowsPlanVolumeRootGrant(plan)
+// KEYED ON THE READ GRANT, NOT ON THE VOLUME ROOT. Checking for a volume root
+// tested a symptom of the production profile rather than the thing that is
+// unsafe. permissionProfileReadRoots happens to seed the bare filesystem root, so
+// that check covered production by coincidence; a profile with a narrowed read
+// list and a denyRead still put an inheritable ACE on C:Windows and passed. The
+// grant itself is what cannot be applied safely to a directory Zero does not own,
+// and the grant exists only for a denyRead profile, so that is what is refused.
+func WindowsACLPlanReadGrantRefusal(plan WindowsACLPlan) string {
+	root := windowsPlanReadGrantTarget(plan)
 	if root == "" {
 		return ""
 	}
 	return "this sandbox profile configures denyRead, which selects a fully restricted token, and that token applies its restricted-SID check to reads as well as writes. " +
-		"Serving it needs the read capability granted at the volume root " + root + ", which cannot be done safely: the grant is inheritable, so applying it rewrites permissions across unrelated system, application and user directories on that drive, " +
+		"Serving it needs the read capability granted on directories Zero does not own, starting at " + root + ", which cannot be done safely: the grant is inheritable, so applying it rewrites permissions across unrelated system, application and user directories, " +
 		"and it still would not cover executables or libraries on another volume. " +
 		"denyRead is therefore not available on Windows yet (see #869). Remove denyRead from the sandbox configuration to run on a write-restricted token, which keeps the workspace write jail intact"
+}
+
+// windowsPlanReadGrantTarget returns the broadest path the plan would grant the
+// read capability on that Zero does not already own, preferring a volume root so
+// the diagnostic names the worst of them.
+//
+// A read grant on a write root is Zero's own directory and is not the problem;
+// the objection is to writing an inheritable ACE onto somebody else's tree. So
+// the write roots are excluded, and an empty answer means every read grant lands
+// on a directory this sandbox already governs, which needs no refusal.
+func windowsPlanReadGrantTarget(plan WindowsACLPlan) string {
+	owned := make(map[string]struct{})
+	for _, entry := range plan.Entries {
+		if entry.Action == WindowsACLAllowWrite {
+			owned[strings.ToLower(normalizeProfilePath(entry.Path))] = struct{}{}
+		}
+	}
+	first := ""
+	for _, entry := range plan.Entries {
+		if entry.Action != WindowsACLAllowRead {
+			continue
+		}
+		normalized := normalizeProfilePath(entry.Path)
+		if _, ours := owned[strings.ToLower(normalized)]; ours {
+			continue
+		}
+		if isWindowsVolumeRoot(normalized) {
+			return entry.Path
+		}
+		if first == "" {
+			first = entry.Path
+		}
+	}
+	return first
 }
 
 // windowsPlanVolumeRootGrant returns the first volume root the plan would have
