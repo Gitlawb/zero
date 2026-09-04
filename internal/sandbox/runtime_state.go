@@ -134,13 +134,13 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 		filepath.Join(runtimeState.Data, "go-mod"),
 		filepath.Join(runtimeState.Data, "cargo"),
 	}
-	for _, directory := range directories {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return SandboxRuntime{}, nil, fmt.Errorf("create sandbox runtime directory %s: %w", directory, err)
-		}
-		if err := os.Chmod(directory, 0o700); err != nil {
-			return SandboxRuntime{}, nil, fmt.Errorf("secure sandbox runtime directory %s: %w", directory, err)
-		}
+	// Handle-relative and no-follow below the operator-owned base. The tree is
+	// persistent input from the previous sandboxed command, which is granted write
+	// access to cache, data and tmp and can leave a link in place of one of them.
+	// os.MkdirAll and os.Chmod both follow, so the host process created package
+	// caches wherever that command pointed them. See ensureRuntimeTreeDirs.
+	if err := ensureRuntimeTreeDirs(runtimeState.Root, directories); err != nil {
+		return SandboxRuntime{}, nil, err
 	}
 	now := sandboxRuntimeNow()
 	if err := os.Chtimes(runtimeState.Root, now, now); err != nil {
