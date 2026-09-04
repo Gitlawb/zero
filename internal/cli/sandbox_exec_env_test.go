@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"runtime"
 	"strings"
@@ -44,7 +45,7 @@ func TestAnEmptyPlannedEnvironmentDoesNotInherit(t *testing.T) {
 
 	var out strings.Builder
 	// Specified, and deliberately empty.
-	code := runSandboxPlannedCommand(envPrinterPlan(t, []string{}), &out, os.Stderr)
+	code := runSandboxPlannedCommand(context.Background(), envPrinterPlan(t, []string{}), &out, os.Stderr)
 	if code != 0 {
 		t.Fatalf("child exited %d: %s", code, out.String())
 	}
@@ -61,7 +62,7 @@ func TestANilPlannedEnvironmentStillInherits(t *testing.T) {
 	t.Setenv(marker, "inherited-value")
 
 	var out strings.Builder
-	code := runSandboxPlannedCommand(envPrinterPlan(t, nil), &out, os.Stderr)
+	code := runSandboxPlannedCommand(context.Background(), envPrinterPlan(t, nil), &out, os.Stderr)
 	if code != 0 {
 		t.Fatalf("child exited %d: %s", code, out.String())
 	}
