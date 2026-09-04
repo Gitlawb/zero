@@ -97,3 +97,79 @@ func TestRuntimeTreePreparationIsIdempotent(t *testing.T) {
 		t.Fatalf("second preparation over an existing tree was refused: %v", err)
 	}
 }
+
+// AND THE PRODUCTION ENTRY POINT USES IT, WHICH THE HELPER TESTS CANNOT SEE.
+//
+// The three tests above call ensureRuntimeTreeDirs directly, so reverting
+// prepareSandboxRuntime to the old pathname loop leaves every one of them green.
+// The defect was in what the entry point called, so this drives the entry point.
+func TestPrepareSandboxRuntimeRefusesARedirectedDescendant(t *testing.T) {
+	cacheRoot := t.TempDir()
+	target := t.TempDir()
+	previous := sandboxUserCacheDir
+	t.Cleanup(func() { sandboxUserCacheDir = previous })
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+
+	workspace := t.TempDir()
+	root, ok := deterministicSandboxRuntimeRoot(canonicalSandboxWorkspaceRoot(workspace), canonicalSandboxWorkspaceRoot(cacheRoot))
+	if !ok {
+		t.Fatalf("SETUP INVALID: no deterministic runtime root for %s", workspace)
+	}
+	cache := filepath.Join(root, "cache")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", cache, target).CombinedOutput(); err != nil {
+		t.Skipf("mklink /J unavailable here: %v\n%s", err, out)
+	}
+	probe := filepath.Join(cache, "probe.txt")
+	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
+		t.Skipf("the junction does not accept writes here: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "probe.txt")); err != nil {
+		t.Skipf("SETUP: the junction does not redirect on this filesystem: %v", err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	_, release, err := prepareSandboxRuntime(workspace)
+	if release != nil {
+		release()
+	}
+	if err == nil {
+		t.Fatal("prepareSandboxRuntime descended through a junction the previous sandboxed command planted")
+	}
+
+	entries, readErr := os.ReadDir(target)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("prepareSandboxRuntime created %v beneath the redirected target", names)
+	}
+}
+
+// And an ordinary workspace still prepares through the entry point.
+func TestPrepareSandboxRuntimeStillPreparesAnOrdinaryTree(t *testing.T) {
+	cacheRoot := t.TempDir()
+	previous := sandboxUserCacheDir
+	t.Cleanup(func() { sandboxUserCacheDir = previous })
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+
+	runtimeState, release, err := prepareSandboxRuntime(t.TempDir())
+	if err != nil {
+		t.Fatalf("an ordinary workspace was refused: %v", err)
+	}
+	defer release()
+	for _, dir := range []string{runtimeState.Root, runtimeState.Cache, runtimeState.Data, runtimeState.Temp} {
+		info, statErr := os.Stat(dir)
+		if statErr != nil || !info.IsDir() {
+			t.Fatalf("%s was not created: err=%v", dir, statErr)
+		}
+	}
+}
