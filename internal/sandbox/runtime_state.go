@@ -445,7 +445,7 @@ func canonicalSandboxWorkspaceRoot(root string) string {
 //
 // Empty means no command context, so the ambient environment is the only
 // authority there is and resolving it here is correct.
-func pinnedSandboxRuntimeRoot(preferred, fallback, sandboxHome string) string {
+func pinnedSandboxRuntimeRoot(workspaceRoot, preferred, fallback, sandboxHome string) string {
 	// No GOOS gate. The marker only exists where setup wrote one, so this is
 	// already Windows-only in practice, and keeping the code path platform-neutral
 	// means the setup-to-command contract is exercised on every CI runner instead
@@ -467,7 +467,49 @@ func pinnedSandboxRuntimeRoot(preferred, fallback, sandboxHome string) string {
 			return candidate
 		}
 	}
+	// A RECORD IS HISTORY, NOT SOMETHING TO RE-DERIVE.
+	//
+	// The candidates above are both computed from THIS process's environment, and
+	// the fallback one is computed from its TEMP. Setup can legitimately land on
+	// the fallback when the preferred cache root cannot be leased, and it records
+	// that concrete root. If a later IDE, service or terminal runs with a
+	// different TEMP, the recorded root matches neither of today's candidates, the
+	// record is ignored, and selection picks a tree setup never provisioned. The
+	// runner then rejects the marker as out of date, and re-running setup from the
+	// original environment does not make the other environment converge.
+	//
+	// So the recorded root is recognised by its OWN shape instead: it must be a
+	// runtime root Zero owns, its first component must be the fallback's, and its
+	// leaf must be this workspace's fallback digest. That answers "does this
+	// record belong to this workspace and home" without asking "what would I
+	// choose from scratch right now", which is the question that reintroduced the
+	// second selection.
+	//
+	// The cache-derived digest is deliberately NOT accepted here. A moved user
+	// cache stays stale, which is a different failure with a different remedy.
+	if ownedFallbackRuntimeRecord(workspaceRoot, recorded) {
+		return recorded
+	}
 	return ""
+}
+
+// ownedFallbackRuntimeRecord reports whether recorded is a fallback runtime root
+// this workspace would own, judged on the record's own shape.
+func ownedFallbackRuntimeRecord(workspaceRoot, recorded string) bool {
+	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
+	if workspaceRoot == "" || strings.TrimSpace(recorded) == "" {
+		return false
+	}
+	base, components, owned := windowsSandboxRuntimeOwnedTail(recorded)
+	if !owned || base == "" || len(components) == 0 {
+		return false
+	}
+	names := sandboxRuntimeFallbackOwnedNames()
+	if len(names) == 0 || !strings.EqualFold(components[0], names[0]) {
+		return false
+	}
+	digest := sha256.Sum256([]byte(workspaceRoot + "\x00" + sandboxRuntimeUserScope()))
+	return strings.EqualFold(components[len(components)-1], hex.EncodeToString(digest[:8]))
 }
 
 // selectSandboxRuntimeRoot picks the root for a command. honorRecorded is true
@@ -507,7 +549,7 @@ func WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot strin
 		return recorded, false, err
 	}
 	fallback, _ := fallbackSandboxRuntimeRoot(workspaceRoot)
-	return recorded, pinnedSandboxRuntimeRoot(preferred, fallback, sandboxHome) != "", nil
+	return recorded, pinnedSandboxRuntimeRoot(workspaceRoot, preferred, fallback, sandboxHome) != "", nil
 }
 
 func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxHome string) (string, *sandboxRuntimeLease, error) {
@@ -535,7 +577,7 @@ func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxH
 	// setup fixes it.
 	if honorRecorded {
 		fallbackRoot, _ := fallbackSandboxRuntimeRoot(workspaceRoot)
-		if pinned := pinnedSandboxRuntimeRoot(root, fallbackRoot, sandboxHome); pinned != "" {
+		if pinned := pinnedSandboxRuntimeRoot(workspaceRoot, root, fallbackRoot, sandboxHome); pinned != "" {
 			lease, leaseErr := prepareSandboxRuntimeLease(pinned)
 			if leaseErr != nil {
 				// NOT relocated. Relocating is what produced the permanent brick:

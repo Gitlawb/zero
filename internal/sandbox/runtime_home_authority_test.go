@@ -43,10 +43,10 @@ func TestThePinnedRootComesFromTheCommandsOwnSandboxHome(t *testing.T) {
 	writeRecordedRoot(t, homeA, preferred)
 	writeRecordedRoot(t, homeB, fallback)
 
-	if got := pinnedSandboxRuntimeRoot(preferred, fallback, homeB); got != fallback {
+	if got := pinnedSandboxRuntimeRoot(t.TempDir(), preferred, fallback, homeB); got != fallback {
 		t.Errorf("pinned %q for a command that selected home B, want %q: the ambient home decided instead of the command's", got, fallback)
 	}
-	if got := pinnedSandboxRuntimeRoot(preferred, fallback, homeA); got != preferred {
+	if got := pinnedSandboxRuntimeRoot(t.TempDir(), preferred, fallback, homeA); got != preferred {
 		t.Errorf("pinned %q for home A, want %q", got, preferred)
 	}
 }
@@ -56,7 +56,7 @@ func TestThePinnedRootComesFromTheCommandsOwnSandboxHome(t *testing.T) {
 func TestARecordedRootFromAnotherWorkspaceIsStillRefused(t *testing.T) {
 	home := t.TempDir()
 	writeRecordedRoot(t, home, filepath.Join(t.TempDir(), "someone-elses-tree"))
-	if got := pinnedSandboxRuntimeRoot(filepath.Join(t.TempDir(), "preferred"), filepath.Join(t.TempDir(), "fallback"), home); got != "" {
+	if got := pinnedSandboxRuntimeRoot(t.TempDir(), filepath.Join(t.TempDir(), "preferred"), filepath.Join(t.TempDir(), "fallback"), home); got != "" {
 		t.Errorf("pinned %q, want none: it matches neither candidate this workspace derives", got)
 	}
 }
@@ -68,7 +68,7 @@ func TestAnEmptyCommandHomeFallsBackToTheAmbientEnvironment(t *testing.T) {
 	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", home)
 	preferred := filepath.Join(t.TempDir(), "preferred")
 	writeRecordedRoot(t, home, preferred)
-	if got := pinnedSandboxRuntimeRoot(preferred, filepath.Join(t.TempDir(), "fallback"), ""); got != preferred {
+	if got := pinnedSandboxRuntimeRoot(t.TempDir(), preferred, filepath.Join(t.TempDir(), "fallback"), ""); got != preferred {
 		t.Errorf("pinned %q with no command home, want the ambient one to decide (%q)", got, preferred)
 	}
 }
