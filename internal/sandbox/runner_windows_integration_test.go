@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -573,7 +574,7 @@ const deniedWriteExitCode = 77
 // deniedWriteCommand attempts a write and reports deniedWriteExitCode when the
 // redirect is refused, so the exit code also proves cmd.exe actually ran.
 func deniedWriteCommand(marker string) []string {
-	return []string{"cmd.exe", "/d", "/s", "/c", "echo leaked>" + cmdQuote(marker) + " || exit " + strconv.Itoa(deniedWriteExitCode)}
+	return []string{"cmd.exe", "/d", "/c", "echo leaked>" + cmdQuote(marker) + " || exit " + strconv.Itoa(deniedWriteExitCode)}
 }
 
 func cmdQuote(path string) string {
@@ -613,8 +614,13 @@ func (p *sharedDirectoryProbe) Path() string {
 
 func (p *sharedDirectoryProbe) cleanup(t testing.TB) {
 	t.Helper()
-	if _, err := os.Lstat(p.path); err == nil {
-		_ = os.Remove(p.path)
+	data, err := os.ReadFile(p.path)
+	if err == nil {
+		if strings.HasPrefix(string(data), "leaked") {
+			if err := os.Remove(p.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("cleanup probe %s: %v", p.path, err)
+			}
+		}
 	}
 }
 
