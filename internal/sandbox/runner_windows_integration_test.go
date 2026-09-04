@@ -84,7 +84,7 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 		t.Log("PUBLIC is not set; skipping C:\\Users\\Public write-jail probe")
 	} else {
 		publicProbe := allocateSharedDirectoryProbe(t, publicDir, "elevated-public")
-		runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(publicProbe.Path()), deniedWriteExitCode)
+		runWindowsRealSmokeCommand(t, runnerExe, config, publicProbe.DeniedWriteCommand(), deniedWriteExitCode)
 		if _, err := os.Stat(publicProbe.Path()); err == nil {
 			t.Fatalf("Windows sandbox allowed a write to the shared C:\\Users\\Public directory")
 		} else if !os.IsNotExist(err) {
@@ -238,7 +238,7 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 	programData := os.Getenv("ProgramData")
 	if programData != "" {
 		programDataProbe := allocateSharedDirectoryProbe(t, programData, "unelevated-programdata")
-		runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(programDataProbe.Path()), deniedWriteExitCode)
+		runWindowsRealSmokeCommand(t, runnerExe, config, programDataProbe.DeniedWriteCommand(), deniedWriteExitCode)
 		if _, err := os.Stat(programDataProbe.Path()); err == nil {
 			t.Fatalf("unelevated sandbox allowed a write to ProgramData shared directory")
 		} else if !os.IsNotExist(err) {
@@ -582,7 +582,8 @@ func cmdQuote(path string) string {
 }
 
 type sharedDirectoryProbe struct {
-	path string
+	path   string
+	marker string
 }
 
 func allocateSharedDirectoryProbe(t testing.TB, dir, prefix string) *sharedDirectoryProbe {
@@ -601,7 +602,8 @@ func allocateSharedDirectoryProbe(t testing.TB, dir, prefix string) *sharedDirec
 	if probePath == "" {
 		t.Fatalf("allocate shared directory probe in %s: failed to find unused filename", dir)
 	}
-	p := &sharedDirectoryProbe{path: probePath}
+	marker := fmt.Sprintf("leaked-%s-%d-%d", prefix, os.Getpid(), time.Now().UnixNano())
+	p := &sharedDirectoryProbe{path: probePath, marker: marker}
 	t.Cleanup(func() {
 		p.cleanup(t)
 	})
@@ -612,14 +614,26 @@ func (p *sharedDirectoryProbe) Path() string {
 	return p.path
 }
 
+func (p *sharedDirectoryProbe) Marker() string {
+	return p.marker
+}
+
+func (p *sharedDirectoryProbe) DeniedWriteCommand() []string {
+	return []string{"cmd.exe", "/d", "/c", "echo " + p.marker + ">" + cmdQuote(p.path) + " || exit " + strconv.Itoa(deniedWriteExitCode)}
+}
+
 func (p *sharedDirectoryProbe) cleanup(t testing.TB) {
 	t.Helper()
 	data, err := os.ReadFile(p.path)
-	if err == nil {
-		if strings.HasPrefix(string(data), "leaked") {
-			if err := os.Remove(p.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("cleanup probe %s: %v", p.path, err)
-			}
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cleanup probe read %s: %v", p.path, err)
+		}
+		return
+	}
+	if strings.TrimSpace(string(data)) == p.marker {
+		if err := os.Remove(p.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cleanup probe remove %s: %v", p.path, err)
 		}
 	}
 }
@@ -639,11 +653,14 @@ func powershellSingleQuote(value string) string {
 func TestSharedDirectoryProbeLifecycle(t *testing.T) {
 	dir := t.TempDir()
 
-	// 1. Two simultaneous allocations produce distinct non-colliding paths.
+	// 1. Two simultaneous allocations produce distinct non-colliding paths and markers.
 	probe1 := allocateSharedDirectoryProbe(t, dir, "p1")
 	probe2 := allocateSharedDirectoryProbe(t, dir, "p2")
 	if probe1.Path() == probe2.Path() {
 		t.Fatalf("expected distinct probe paths, got %q and %q", probe1.Path(), probe2.Path())
+	}
+	if probe1.Marker() == probe2.Marker() {
+		t.Fatalf("expected distinct probe markers, got %q and %q", probe1.Marker(), probe2.Marker())
 	}
 
 	// 2. Pre-existing unrelated file is never selected or deleted.
@@ -661,13 +678,24 @@ func TestSharedDirectoryProbeLifecycle(t *testing.T) {
 	probe4 := allocateSharedDirectoryProbe(t, dir, "p4")
 	probe4.cleanup(t)
 
-	// 4. Unexpected write created during test is cleaned up.
+	// 4. Unexpected write created during test with matching marker is cleaned up.
 	probe5 := allocateSharedDirectoryProbe(t, dir, "p5")
-	if err := os.WriteFile(probe5.Path(), []byte("leaked"), 0o600); err != nil {
+	if err := os.WriteFile(probe5.Path(), []byte(probe5.Marker()), 0o600); err != nil {
 		t.Fatalf("write probe5 file: %v", err)
 	}
 	probe5.cleanup(t)
 	if _, err := os.Lstat(probe5.Path()); !os.IsNotExist(err) {
 		t.Fatalf("expected probe5 to be cleaned up after creation, stat err=%v", err)
 	}
+
+	// 5. File at probe path with foreign/unmatched content is NOT removed.
+	probe6 := allocateSharedDirectoryProbe(t, dir, "p6")
+	if err := os.WriteFile(probe6.Path(), []byte("unrelated-foreign-content"), 0o600); err != nil {
+		t.Fatalf("write probe6 file: %v", err)
+	}
+	probe6.cleanup(t)
+	if _, err := os.Lstat(probe6.Path()); err != nil {
+		t.Fatalf("expected probe6 with foreign content to be preserved, stat err=%v", err)
+	}
+	_ = os.Remove(probe6.Path())
 }

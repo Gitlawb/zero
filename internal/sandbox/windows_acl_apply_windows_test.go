@@ -335,3 +335,101 @@ func TestWindowsACLDenyWriteMigratesLegacySynchronizeMask(t *testing.T) {
 		t.Fatalf("second apply changed ACE count: %d vs %d", dacl2.AceCount, dacl.AceCount)
 	}
 }
+
+// TestWindowsACLDenyWriteMigratesLegacyNoInherit regression tests that when an
+// existing directory carries a legacy inheritable deny-write ACE, migrating it
+// with NoInherit: true removes any inherit-only ACEs and clears inheritance flags
+// on the direct ACE so child files/directories do not inherit the deny.
+func TestWindowsACLDenyWriteMigratesLegacyNoInherit(t *testing.T) {
+	dir := t.TempDir()
+	childDir := filepath.Join(dir, "sub")
+	if err := os.Mkdir(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir childDir: %v", err)
+	}
+	childFile := filepath.Join(childDir, "child.txt")
+	if err := os.WriteFile(childFile, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write childFile: %v", err)
+	}
+
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	sidStr := caps.ReadOnly
+	sid, err := windows.StringToSid(sidStr)
+	if err != nil {
+		t.Fatalf("StringToSid: %v", err)
+	}
+
+	// 1. Seed legacy inheritable DenyWrite ACEs: direct + inherit-only.
+	legacyWriteMask := (windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.SYNCHRONIZE)
+	seedEntries := []windows.EXPLICIT_ACCESS{
+		{
+			AccessPermissions: legacyWriteMask,
+			AccessMode:        windows.DENY_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		},
+	}
+	handle, _, err := openWindowsACLTarget(dir)
+	if err != nil {
+		t.Fatalf("openWindowsACLTarget: %v", err)
+	}
+	seededDACL, err := windows.ACLFromEntries(seedEntries, nil)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("ACLFromEntries: %v", err)
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, seededDACL, nil); err != nil {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("SetSecurityInfo: %v", err)
+	}
+	_ = windows.CloseHandle(handle)
+
+	// 2. Apply WindowsACLPlan with NoInherit: true.
+	plan := WindowsACLPlan{
+		Entries: []WindowsACLEntry{{
+			Action:     WindowsACLDenyWrite,
+			Path:       dir,
+			Capability: sidStr,
+			NoInherit:  true,
+		}},
+	}
+	rollback, err := applyWindowsACLPlan(plan)
+	if err != nil {
+		t.Fatalf("applyWindowsACLPlan: %v", err)
+	}
+	t.Cleanup(func() { _ = rollback() })
+
+	// 3. Verify effective DACL on dir: must have NO inheritance flags and no inherit-only ACE.
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo: %v", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+
+	const inheritFlags = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE | windows.INHERIT_ONLY_ACE
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			t.Fatalf("GetAce: %v", err)
+		}
+		if ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE && ace.Header.AceType != windowsAccessDeniedObjectAceType {
+			continue
+		}
+		aceSID, ok := windowsAceSID(ace)
+		if !ok || !aceSID.Equals(sid) {
+			continue
+		}
+		if ace.Header.AceFlags&inheritFlags != 0 {
+			t.Fatalf("migrated ACE for NoInherit entry retained inheritance flags: 0x%x", ace.Header.AceFlags)
+		}
+	}
+}

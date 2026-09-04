@@ -232,7 +232,7 @@ func prepareWindowsACLPathGroupEntries(entries []WindowsACLEntry, isDir bool, ol
 			// SID — which would combine the new DenyWrite with any
 			// co-resident DenyRead into a single deny-all ACE.
 			if baseDACL != nil && windowsHasExplicitDenyWriteForSID(baseDACL, sid) {
-				migrated, err := windowsMigrateDenyWriteInDACL(baseDACL, sid)
+				migrated, err := windowsMigrateDenyWriteInDACL(baseDACL, sid, isDir, entry.NoInherit)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -322,11 +322,11 @@ func windowsFilterDACL(oldDACL *windows.ACL, removeSID *windows.SID) (*windows.A
 }
 
 // windowsMigrateDenyWriteInDACL copies oldDACL and narrows any explicit
-// deny-write ACE for targetSID to the current narrow mask, preserving all
-// other ACEs (including DenyRead) in their original positions. This avoids
-// SetEntriesInAcl's merging behavior that would combine separate deny ACEs
-// for the same SID into a single full-deny ACE.
-func windowsMigrateDenyWriteInDACL(oldDACL *windows.ACL, targetSID *windows.SID) (*windows.ACL, error) {
+// deny-write ACE for targetSID to the current narrow mask, carrying requested
+// inheritance (isDir, noInherit) into the migrated ACE. It drops inherit-only
+// ACEs when no inheritance is requested, avoiding propagation to children.
+// All other ACEs (including DenyRead) are preserved in their original positions.
+func windowsMigrateDenyWriteInDACL(oldDACL *windows.ACL, targetSID *windows.SID, isDir bool, noInherit bool) (*windows.ACL, error) {
 	if oldDACL == nil || targetSID == nil {
 		return oldDACL, nil
 	}
@@ -335,33 +335,70 @@ func windowsMigrateDenyWriteInDACL(oldDACL *windows.ACL, targetSID *windows.SID)
 		return nil, err
 	}
 
-	oldHdr := (*windowsACLHeader)(unsafe.Pointer(oldDACL))
-	buf := make([]byte, oldHdr.AclSize)
-	src := unsafe.Slice((*byte)(unsafe.Pointer(oldDACL)), oldHdr.AclSize)
-	copy(buf, src)
+	const inheritFlags = byte(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE | windows.INHERIT_ONLY_ACE | windows.NO_PROPAGATE_INHERIT_ACE)
+	shouldDropInheritOnly := noInherit || !isDir
 
-	newDACL := (*windows.ACL)(unsafe.Pointer(&buf[0]))
-	for i := uint32(0); i < uint32(newDACL.AceCount); i++ {
+	var keepBytes uint32 = uint32(unsafe.Sizeof(windowsACLHeader{}))
+	var keepCount uint16 = 0
+	for i := uint32(0); i < uint32(oldDACL.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(newDACL, i, &ace); err != nil {
-			return nil, fmt.Errorf("read ACE %d for migration: %w", i, err)
+		if err := windows.GetAce(oldDACL, i, &ace); err != nil {
+			return nil, fmt.Errorf("read ACE %d for migration size: %w", i, err)
 		}
-		if ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
-			continue
+		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 &&
+			(ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceType == windowsAccessDeniedObjectAceType) {
+			if sid, ok := windowsAceSID(ace); ok && sid.Equals(targetSID) && windowsIsExperimentalWriteDenyMask(ace.Mask) {
+				if shouldDropInheritOnly && (ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0) {
+					// Drop inherit-only ACE when no inheritance is requested on the target
+					continue
+				}
+			}
 		}
-		if ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE && ace.Header.AceType != windowsAccessDeniedObjectAceType {
-			continue
-		}
-		sid, ok := windowsAceSID(ace)
-		if !ok || !sid.Equals(targetSID) {
-			continue
-		}
-		if windowsIsExperimentalWriteDenyMask(ace.Mask) {
-			ace.Mask = narrowMask
-		}
+		keepBytes += uint32(ace.Header.AceSize)
+		keepCount++
 	}
 
-	return newDACL, nil
+	buf := make([]byte, keepBytes)
+	hdr := (*windowsACLHeader)(unsafe.Pointer(&buf[0]))
+	oldHdr := (*windowsACLHeader)(unsafe.Pointer(oldDACL))
+	*hdr = *oldHdr
+	hdr.AclSize = uint16(keepBytes)
+	hdr.AceCount = keepCount
+
+	offset := unsafe.Sizeof(windowsACLHeader{})
+	for i := uint32(0); i < uint32(oldDACL.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(oldDACL, i, &ace); err != nil {
+			return nil, fmt.Errorf("read ACE %d for migration copy: %w", i, err)
+		}
+		aceSize := uintptr(ace.Header.AceSize)
+		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 &&
+			(ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceType == windowsAccessDeniedObjectAceType) {
+			if sid, ok := windowsAceSID(ace); ok && sid.Equals(targetSID) && windowsIsExperimentalWriteDenyMask(ace.Mask) {
+				if shouldDropInheritOnly && (ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0) {
+					continue
+				}
+				dest := buf[offset : offset+aceSize]
+				srcSlice := unsafe.Slice((*byte)(unsafe.Pointer(ace)), aceSize)
+				copy(dest, srcSlice)
+				migratedAce := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(&dest[0]))
+				migratedAce.Mask = narrowMask
+				if noInherit || !isDir {
+					migratedAce.Header.AceFlags &^= inheritFlags
+				} else if isDir {
+					migratedAce.Header.AceFlags |= byte(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
+				}
+				offset += aceSize
+				continue
+			}
+		}
+
+		srcSlice := unsafe.Slice((*byte)(unsafe.Pointer(ace)), aceSize)
+		copy(buf[offset:offset+aceSize], srcSlice)
+		offset += aceSize
+	}
+
+	return (*windows.ACL)(unsafe.Pointer(hdr)), nil
 }
 
 func windowsHasExplicitDenyWriteForSID(oldDACL *windows.ACL, wantSID *windows.SID) bool {
