@@ -225,6 +225,24 @@ func gitMetadataCarveoutIsFile(path string) bool {
 	if candidate == "" {
 		return false
 	}
+	// A BARE .git CARVEOUT IS THE LINKED-WORKTREE POINTER, AND ONLY THAT.
+	//
+	// The suffix derivation below runs specs against a sentinel root whose .git
+	// never exists, so it always takes the directory branch and yields exactly one
+	// file-shaped suffix, .gitconfig. A bare <root>.git could therefore never
+	// match, and both planners emitted MaterializeFile:false for a path the profile
+	// stage had already typed correctly as a file. With the pointer absent at apply
+	// time, the plan then created a DIRECTORY at the pointer path and broke the
+	// worktree.
+	//
+	// The carveout SET already carries the answer. gitMetadataWriteCarveoutSpecs is
+	// the only producer of ReadOnlySubpaths, and it emits a bare .git in exactly one
+	// case: the linked-worktree or submodule pointer. The directory case emits
+	// .githooks and .gitconfig and never the parent. So the shape is not being
+	// guessed from a pathname here, it is being read off which carveout this is.
+	if strings.EqualFold(filepath.Base(candidate), ".git") {
+		return true
+	}
 	for _, spec := range gitMetadataWriteCarveoutSpecs(gitMetadataCarveoutSuffixBase) {
 		if !spec.IsFile {
 			continue
