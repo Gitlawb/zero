@@ -145,6 +145,10 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 			return failed(snapshotErr)
 		}
 		runtimeRollback.stamp = snapshot
+		// Carried to the apply so the two stages are provably about one object,
+		// rather than about one pathname resolved twice.
+		stamp.RootIdentity = snapshot.rootIdentity
+		stamp.RootIdentified = snapshot.rootIdentified
 	}
 	rollback, err := applyWindowsACLPlanWithStamp(plan, stamp)
 	if err != nil {

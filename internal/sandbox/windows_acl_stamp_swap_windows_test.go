@@ -40,7 +40,7 @@ func TestTheStampSkipsADirectorySwappedInAfterTheACE(t *testing.T) {
 	plan := WindowsACLPlan{Entries: []WindowsACLEntry{
 		{Action: WindowsACLAllowWrite, Path: root, Capability: "S-1-5-32-546"},
 	}}
-	rollback, err := applyWindowsACLPlanWithStamp(plan, &windowsACLStampRequest{Root: root, PlanHash: "planhash"})
+	rollback, err := applyWindowsACLPlanWithStamp(plan, stampRequestFor(t, root, "planhash"))
 	if err != nil {
 		t.Fatalf("applyWindowsACLPlanWithStamp: %v", err)
 	}
@@ -55,5 +55,23 @@ func TestTheStampSkipsADirectorySwappedInAfterTheACE(t *testing.T) {
 	}
 	if string(recorded) != "planhash" {
 		t.Errorf("stamp contents = %q, want the plan hash", recorded)
+	}
+}
+
+// stampRequestFor builds the request the way runWindowsSandboxSetup does, with
+// the snapshot's identity carried on it. Building one by hand without that
+// identity is refused now, and rightly: the apply cannot prove it holds the
+// object the snapshot read.
+func stampRequestFor(t *testing.T, root string, planHash string) *windowsACLStampRequest {
+	t.Helper()
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	if err != nil {
+		t.Fatalf("snapshot the runtime stamp for %s: %v", root, err)
+	}
+	return &windowsACLStampRequest{
+		Root:           root,
+		PlanHash:       planHash,
+		RootIdentity:   snapshot.rootIdentity,
+		RootIdentified: snapshot.rootIdentified,
 	}
 }

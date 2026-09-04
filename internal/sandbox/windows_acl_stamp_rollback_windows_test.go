@@ -71,7 +71,7 @@ func TestAStampFailureRestoresTheCommittedACL(t *testing.T) {
 	plan := WindowsACLPlan{Entries: []WindowsACLEntry{
 		{Action: WindowsACLAllowWrite, Path: root, Capability: "S-1-5-32-546"},
 	}}
-	rollback, err := applyWindowsACLPlanWithStamp(plan, &windowsACLStampRequest{Root: root, PlanHash: "planhash"})
+	rollback, err := applyWindowsACLPlanWithStamp(plan, stampRequestFor(t, root, "planhash"))
 	if err == nil {
 		if rollback != nil {
 			_ = rollback()

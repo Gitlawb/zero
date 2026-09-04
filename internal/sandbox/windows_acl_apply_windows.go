@@ -80,6 +80,24 @@ func (id windowsObjectIdentity) matches(other windowsObjectIdentity) bool {
 type windowsACLStampRequest struct {
 	Root     string
 	PlanHash string
+	// RootIdentity is the file identity of the runtime directory the SNAPSHOT
+	// read, and RootIdentified says whether that capture actually succeeded.
+	//
+	// TWO OPENS OF ONE NAME ARE NOT ONE OBJECT. The snapshot proved "these prior
+	// bytes belong to B" through its own handle and then closed it; the apply
+	// resolved the same pathname again and mutated whatever answered, without
+	// either of them ever proving B and that object are the same. The root owner
+	// can rename the prior root aside, put an ordinary directory at the
+	// predictable name for the snapshot, and restore the original before the
+	// apply. The setup lease is a sibling and does not bind the root entry.
+	//
+	// The consequence was not merely a wrong ACL. On a later failure, stamp
+	// compensation compared the object it found against the snapshot's identity,
+	// refused to restore, and left this run's stamp on a directory whose marker
+	// still described the previous successful setup: a failed setup invalidating a
+	// good one.
+	RootIdentity   string
+	RootIdentified bool
 }
 
 // windowsACLStampSwapHook fires in the exact window this design closes: after
@@ -92,6 +110,31 @@ var windowsACLStampSwapHook func(path string)
 // production; a test uses it to reach the post-commit failure path, which no
 // ordinary input produces once the bound handle is already open.
 var windowsACLStampWriteHook func(path string) error
+
+// verifyStampRootIdentity refuses when the object this apply holds is not the one
+// the snapshot read.
+//
+// windowsACLStampIdentitySwapHook exists so a test can substitute the directory
+// in exactly the interval between the two opens, which is otherwise unreachable
+// from any ordinary input.
+func verifyStampRootIdentity(handle windows.Handle, path string, stamp *windowsACLStampRequest) error {
+	if !stamp.RootIdentified {
+		return fmt.Errorf("the sandbox runtime root %s could not be identified when its prior state was recorded, so this setup cannot prove it is about to change the same directory", path)
+	}
+	identity, err := handleRuntimeIdentity(handle)
+	if err != nil {
+		return fmt.Errorf("identify the sandbox runtime root %s before applying its ACL: %w", path, err)
+	}
+	if identity != stamp.RootIdentity {
+		return fmt.Errorf("the sandbox runtime root %s is no longer the directory this run recorded the prior state of, so applying the ACL and stamp here would attest to an object nobody inspected", path)
+	}
+	return nil
+}
+
+// windowsACLStampIdentitySwapHook fires in the interval between the snapshot's
+// close and the apply's open, which is where a substitution can actually land.
+// Nil in production.
+var windowsACLStampIdentitySwapHook func(path string)
 
 // writeRidingStamp writes the stamp through the handle the capability ACE was
 // applied on, or through the test hook when one is installed.
@@ -179,6 +222,13 @@ func applyWindowsACLPathGroupWithStamp(group windowsACLPathGroup, stamp *windows
 	// elevated setup a lower-privileged local user could swap the target for a
 	// symlink/junction between operations and redirect the ACL change onto a
 	// system object it never validated (issue #728, a TOCTOU privilege boundary).
+	// THE INTERVAL IS HERE, BEFORE THIS OPEN. The snapshot read its object through
+	// its own handle and closed it; a handle already open cannot be renamed out
+	// from under itself, so the only place a substitution can land is between that
+	// close and this open. The hook exists so a test can put it exactly there.
+	if windowsACLStampIdentitySwapHook != nil && stamp != nil && windowsSameRuntimeRootPath(stamp.Root, path) {
+		windowsACLStampIdentitySwapHook(path)
+	}
 	materialized := false
 	handle, isDir, err := openWindowsACLTarget(path)
 	if err != nil {
@@ -225,6 +275,18 @@ func applyWindowsACLPathGroupWithStamp(group windowsACLPathGroup, stamp *windows
 	nextDACL, err := windows.ACLFromEntries(accessEntries, oldDACL)
 	if err != nil {
 		return fail(fmt.Errorf("build windows ACL for %s: %w", path, err))
+	}
+	// BEFORE THE FIRST MUTATION, NOT BEFORE THE STAMP. Checking later would leave
+	// the ACL already applied to the wrong object, which is the change that
+	// matters most.
+	//
+	// Fails CLOSED. An unestablished identity refuses rather than passing, because
+	// "we could not tell" is exactly the case this exists for; treating it as
+	// permission would make the guard a no-op precisely when it is needed.
+	if stamp != nil && windowsSameRuntimeRootPath(stamp.Root, path) {
+		if err := verifyStampRootIdentity(handle, path, stamp); err != nil {
+			return fail(err)
+		}
 	}
 	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, nextDACL, nil); err != nil {
 		return fail(fmt.Errorf("apply windows ACL for %s: %w", path, err))
