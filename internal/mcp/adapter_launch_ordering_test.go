@@ -217,6 +217,19 @@ func TestADisclosureSurvivesAReportPublishedAfterAFailedHandshake(t *testing.T) 
 	if len(disclosures) != 1 {
 		t.Fatalf("a helper that published its launch on the way out produced %d disclosures, want exactly one: %v", len(disclosures), disclosures)
 	}
+
+	// THROUGH THE ERROR, not only through the sink. Registration merges the two,
+	// so asserting the sink alone passes while the failure the operator actually
+	// reads carries nothing. This is the carrier that exists because the client
+	// holding the notices has already been closed and discarded by then.
+	skipped := runtime.Skipped()
+	if len(skipped) != 1 {
+		t.Fatalf("skipped = %v, want exactly the one server", skipped)
+	}
+	carried := startupNoticesFromError(skipped[0].Err)
+	if len(carried) != 1 || carried[0] != adapterLaunchNotice {
+		t.Fatalf("the initialize failure carries %v, want the planned notice; the decision was taken before the adapter settled", carried)
+	}
 }
 
 // AND AN ADAPTER THAT NEVER PUBLISHED STILL DISCLOSES NOTHING.
