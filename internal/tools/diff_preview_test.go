@@ -134,10 +134,12 @@ func TestStructuredPatchFileDiffsKeepEligibleSameBasenameSibling(t *testing.T) {
 func TestBoundedDiffPreservesOrdinaryUnicodeButRejectsObfuscatedSecrets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "unicode.txt")
 	for name, content := range map[string]string{
-		"family emoji":      "family: 👨‍👩‍👧‍👦\n",
-		"nonbreaking space": "ordinary\u00a0prose\n",
-		"byte order mark":   "\ufeffdocument\n",
-		"soft hyphen":       "co\u00adoperate\n",
+		"family emoji":              "family: 👨‍👩‍👧‍👦\n",
+		"emoji variation selector":  "heart: ❤️\n",
+		"combining grapheme joiner": "ordinary\u034fprose\n",
+		"nonbreaking space":         "ordinary\u00a0prose\n",
+		"byte order mark":           "\ufeffdocument\n",
+		"soft hyphen":               "co\u00adoperate\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, ok := boundedFileDiff(path, "before\n", content, true, true); !ok {
@@ -151,11 +153,13 @@ func TestBoundedDiffPreservesOrdinaryUnicodeButRejectsObfuscatedSecrets(t *testi
 
 	secret := "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG"
 	for name, separator := range map[string]string{
-		"zero width space":  "\u200b",
-		"zero width joiner": "\u200d",
-		"byte order mark":   "\ufeff",
-		"soft hyphen":       "\u00ad",
-		"nonbreaking space": "\u00a0",
+		"zero width space":          "\u200b",
+		"zero width joiner":         "\u200d",
+		"byte order mark":           "\ufeff",
+		"soft hyphen":               "\u00ad",
+		"nonbreaking space":         "\u00a0",
+		"combining grapheme joiner": "\u034f",
+		"variation selector":        "\ufe0f",
 	} {
 		t.Run("split "+name, func(t *testing.T) {
 			obfuscated := secret[:20] + separator + secret[20:]

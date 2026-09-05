@@ -124,10 +124,13 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	content, finalContentKnown := maybeFormatWrittenFile(ctx, absolutePath, content)
+	content, formattedInfo, finalContentKnown := maybeFormatWrittenFile(ctx, tool.workspaceRoot, tool.scope, absolutePath, content)
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
-	newInfo, _ := os.Stat(absolutePath)
+	newInfo := formattedInfo
+	if newInfo == nil {
+		newInfo, _ = os.Stat(absolutePath)
+	}
 	if finalContentKnown {
 		options.FileTracker.Record(absolutePath, []byte(content), newInfo)
 	} else {
@@ -151,7 +154,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		lines++
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
-	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	if finalContentKnown {
+		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	}
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Do not pretend an unreadable overwrite was a creation. The write may be

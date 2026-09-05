@@ -97,7 +97,8 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 
 func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
-	content, known := maybeFormatWrittenFile(context.Background(), filepath.Join(t.TempDir(), "notes.xyz"), "raw   text")
+	root := t.TempDir()
+	content, _, known := maybeFormatWrittenFile(context.Background(), root, nil, filepath.Join(root, "notes.xyz"), "raw   text")
 	if content != "raw   text" || !known {
 		t.Fatalf("unknown extension must pass through: %q", content)
 	}
@@ -111,7 +112,7 @@ func TestFormatOnWriteFormatterLookupFailure(t *testing.T) {
 	if err := os.WriteFile(targetPath, []byte(uglyContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	content, known := maybeFormatWrittenFile(context.Background(), targetPath, uglyContent)
+	content, _, known := maybeFormatWrittenFile(context.Background(), filepath.Dir(targetPath), nil, targetPath, uglyContent)
 	if content != uglyContent || !known {
 		t.Fatalf("missing formatter must return written content, got %q", content)
 	}
@@ -133,7 +134,7 @@ func TestFormatOnWriteReadsMutatedFileAfterFormatterFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
 
-	content, known := maybeFormatWrittenFile(context.Background(), targetPath, "requested")
+	content, _, known := maybeFormatWrittenFile(context.Background(), filepath.Dir(targetPath), nil, targetPath, "requested")
 	if !known || content != "formatter-mutated" {
 		t.Fatalf("formatter failure content = %q, known=%t", content, known)
 	}
@@ -149,13 +150,13 @@ func TestFormatOnWriteMarksUnreadableFinalStateUnknown(t *testing.T) {
 	priorRunner := runFormatOnWriteCommand
 	priorReader := readFormattedFile
 	runFormatOnWriteCommand = func(context.Context, string, []string, string) error { return nil }
-	readFormattedFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	readFormattedFile = func(*os.Root, string) ([]byte, os.FileInfo, error) { return nil, nil, os.ErrPermission }
 	t.Cleanup(func() {
 		runFormatOnWriteCommand = priorRunner
 		readFormattedFile = priorReader
 	})
 
-	content, known := maybeFormatWrittenFile(context.Background(), targetPath, "requested")
+	content, _, known := maybeFormatWrittenFile(context.Background(), filepath.Dir(targetPath), nil, targetPath, "requested")
 	if known || content != "requested" {
 		t.Fatalf("unreadable formatter result = %q, known=%t", content, known)
 	}
@@ -221,7 +222,7 @@ func TestWriteFileOmitsRichDiffWhenFormatterFinalReadFails(t *testing.T) {
 	priorRunner := runFormatOnWriteCommand
 	priorReader := readFormattedFile
 	runFormatOnWriteCommand = func(context.Context, string, []string, string) error { return exec.ErrNotFound }
-	readFormattedFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	readFormattedFile = func(*os.Root, string) ([]byte, os.FileInfo, error) { return nil, nil, os.ErrPermission }
 	t.Cleanup(func() {
 		runFormatOnWriteCommand = priorRunner
 		readFormattedFile = priorReader
@@ -249,7 +250,7 @@ func TestEditFileOmitsPreviewWhenFormatterFinalReadFails(t *testing.T) {
 	priorRunner := runFormatOnWriteCommand
 	priorReader := readFormattedFile
 	runFormatOnWriteCommand = func(context.Context, string, []string, string) error { return nil }
-	readFormattedFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	readFormattedFile = func(*os.Root, string) ([]byte, os.FileInfo, error) { return nil, nil, os.ErrPermission }
 	t.Cleanup(func() {
 		runFormatOnWriteCommand = priorRunner
 		readFormattedFile = priorReader
@@ -263,5 +264,181 @@ func TestEditFileOmitsPreviewWhenFormatterFinalReadFails(t *testing.T) {
 	}
 	if result.Display.Preview != "" {
 		t.Fatalf("unverified formatter result exposed stale preview: %q", result.Display.Preview)
+	}
+}
+
+func TestWriteFileOmitsRichEvidenceWhenFormatterReplacesTargetWithOutOfRootSymlink(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "a.go")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackedPath := filepath.Join(resolvedRoot, "a.go")
+	outsidePath := filepath.Join(t.TempDir(), "outside.go")
+	outsideContent := "package external\n\nconst Secret = \"outside\"\n"
+	if err := os.WriteFile(outsidePath, []byte(outsideContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(context.Context, string, []string, string) error {
+		if err := os.Remove(targetPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsidePath, targetPath); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return nil
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+	tracker := NewFileTracker()
+
+	diagnosticsCalled := false
+	result := NewScopedWriteFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go", "content": "package requested\n",
+	}, RunOptions{FileTracker: tracker, Diagnostics: func(context.Context, string) string {
+		diagnosticsCalled = true
+		return "must not run"
+	}})
+	if result.Status != StatusOK || len(result.ChangedFiles) != 1 || len(result.FileDiffs) != 0 || result.Display.Preview != "" {
+		t.Fatalf("out-of-root formatter result = status=%s changed=%#v diffs=%#v preview=%q output=%q", result.Status, result.ChangedFiles, result.FileDiffs, result.Display.Preview, result.Output)
+	}
+	if diagnosticsCalled {
+		t.Fatal("diagnostics must not inspect an unverified formatter target")
+	}
+	if _, tracked := tracker.Version(trackedPath); tracked {
+		t.Fatal("out-of-root formatter target must not be recorded in the tracker")
+	}
+}
+
+func TestEditFileOmitsRichEvidenceWhenFormatterReplacesTargetWithOutOfRootSymlink(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "a.go")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackedPath := filepath.Join(resolvedRoot, "a.go")
+	if err := os.WriteFile(targetPath, []byte("package before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.go")
+	outsideContent := "package external\n\nconst Secret = \"outside\"\n"
+	if err := os.WriteFile(outsidePath, []byte(outsideContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(context.Context, string, []string, string) error {
+		if err := os.Remove(targetPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsidePath, targetPath); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return nil
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+	tracker := NewFileTracker()
+	read := NewScopedReadFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go",
+	}, RunOptions{FileTracker: tracker})
+	if read.Status != StatusOK {
+		t.Fatalf("read before edit failed: %s", read.Output)
+	}
+
+	diagnosticsCalled := false
+	result := NewScopedEditFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go", "old_string": "before", "new_string": "requested",
+	}, RunOptions{FileTracker: tracker, Diagnostics: func(context.Context, string) string {
+		diagnosticsCalled = true
+		return "must not run"
+	}})
+	if result.Status != StatusOK || len(result.ChangedFiles) != 1 || len(result.FileDiffs) != 0 || result.Display.Preview != "" {
+		t.Fatalf("out-of-root formatter result = status=%s changed=%#v diffs=%#v preview=%q output=%q", result.Status, result.ChangedFiles, result.FileDiffs, result.Display.Preview, result.Output)
+	}
+	if diagnosticsCalled {
+		t.Fatal("diagnostics must not inspect an unverified formatter target")
+	}
+	if _, tracked := tracker.Version(trackedPath); tracked {
+		t.Fatal("out-of-root formatter target must not be recorded in the tracker")
+	}
+}
+
+func TestWriteFileAcceptsInRootAtomicFormatterReplacement(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "a.go")
+	formatted := "package formatted\n"
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(context.Context, string, []string, string) error {
+		tempPath := filepath.Join(root, "formatter.tmp")
+		if err := os.WriteFile(tempPath, []byte(formatted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return os.Rename(tempPath, targetPath)
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+	tracker := NewFileTracker()
+
+	result := NewScopedWriteFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go", "content": "package requested\n",
+	}, RunOptions{FileTracker: tracker})
+	if result.Status != StatusOK || len(result.FileDiffs) != 1 || result.FileDiffs[0].NewText != formatted {
+		t.Fatalf("atomic formatter write = status=%s diffs=%#v output=%q", result.Status, result.FileDiffs, result.Output)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, tracked := tracker.Version(filepath.Join(resolvedRoot, "a.go"))
+	if !tracked || version.Hash != HashContent([]byte(formatted)) {
+		t.Fatalf("atomic formatter tracker = %#v, tracked=%t", version, tracked)
+	}
+}
+
+func TestEditFileAcceptsInRootAtomicFormatterReplacement(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "a.go")
+	if err := os.WriteFile(targetPath, []byte("package before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	formatted := "package formatted\n"
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(context.Context, string, []string, string) error {
+		tempPath := filepath.Join(root, "formatter.tmp")
+		if err := os.WriteFile(tempPath, []byte(formatted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return os.Rename(tempPath, targetPath)
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+	tracker := NewFileTracker()
+	read := NewScopedReadFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go",
+	}, RunOptions{FileTracker: tracker})
+	if read.Status != StatusOK {
+		t.Fatalf("read before edit failed: %s", read.Output)
+	}
+
+	result := NewScopedEditFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go", "old_string": "before", "new_string": "requested",
+	}, RunOptions{FileTracker: tracker})
+	if result.Status != StatusOK || len(result.FileDiffs) != 1 || result.FileDiffs[0].NewText != formatted {
+		t.Fatalf("atomic formatter edit = status=%s diffs=%#v output=%q", result.Status, result.FileDiffs, result.Output)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, tracked := tracker.Version(filepath.Join(resolvedRoot, "a.go"))
+	if !tracked || version.Hash != HashContent([]byte(formatted)) {
+		t.Fatalf("atomic formatter tracker = %#v, tracked=%t", version, tracked)
 	}
 }

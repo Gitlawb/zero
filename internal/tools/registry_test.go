@@ -474,6 +474,33 @@ func TestScrubResultSecretsDropsControlSplitFileDiff(t *testing.T) {
 	}
 }
 
+func TestScrubResultSecretsDropsDefaultIgnorableSplitFileDiffOnEitherSide(t *testing.T) {
+	secret := "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG"
+	for name, separator := range map[string]string{
+		"combining grapheme joiner": "\u034f",
+		"variation selector":        "\ufe0f",
+	} {
+		for _, side := range []string{"old", "new"} {
+			t.Run(name+" "+side, func(t *testing.T) {
+				obfuscated := secret[:20] + separator + secret[20:]
+				diff := FileDiff{
+					Path: filepath.Join(t.TempDir(), "x"), OldExists: true, NewExists: true,
+					OldText: "safe old", NewText: "safe new",
+				}
+				if side == "old" {
+					diff.OldText = obfuscated
+				} else {
+					diff.NewText = obfuscated
+				}
+				res := scrubResultSecrets(Result{FileDiffs: []FileDiff{diff}})
+				if len(res.FileDiffs) != 0 || !res.Redacted {
+					t.Fatalf("unsafe FileDiff = %#v, redacted = %t", res.FileDiffs, res.Redacted)
+				}
+			})
+		}
+	}
+}
+
 func TestScrubResultSecretsDoesNotMutateCallerFileDiffSlice(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x")
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

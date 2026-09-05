@@ -962,6 +962,59 @@ func TestStructuredPatchMoveWithMissingSourceIsRefusedBeforePublishing(t *testin
 	}
 }
 
+func TestStructuredPatchUpdatePreservesCompetingWriteBeforeRename(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		competing       string
+		replaceIdentity bool
+	}{
+		{name: "content changed", competing: "competing writer\n"},
+		{name: "identity changed with same content", competing: "planned\n", replaceIdentity: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			targetPath := filepath.Join(root, "file.txt")
+			writeTestFile(t, targetPath, "planned\n")
+			patch := "*** Begin Patch\n*** Update File: file.txt\n@@\n-planned\n+patched\n*** End Patch\n"
+			hookRan := false
+			var competingInfo os.FileInfo
+			structuredPatchBeforeRename = func(change structuredPatchChange) {
+				if tc.replaceIdentity {
+					tempPath := filepath.Join(root, "competing.tmp")
+					writeTestFile(t, tempPath, tc.competing)
+					if err := os.Rename(tempPath, targetPath); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(targetPath, []byte(tc.competing), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				competingInfo, err = os.Stat(targetPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				hookRan = true
+			}
+			t.Cleanup(func() { structuredPatchBeforeRename = nil })
+
+			result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+			if !hookRan {
+				t.Fatal("pre-rename hook did not run")
+			}
+			if result.Status != StatusError || len(result.ChangedFiles) != 0 || len(result.FileDiffs) != 0 {
+				t.Fatalf("raced update = status=%s changed=%#v diffs=%#v output=%q", result.Status, result.ChangedFiles, result.FileDiffs, result.Output)
+			}
+			if got := mustReadTestFile(t, targetPath); got != tc.competing {
+				t.Fatalf("raced update overwrote competing content: %q", got)
+			}
+			finalInfo, err := os.Stat(targetPath)
+			if err != nil || !os.SameFile(competingInfo, finalInfo) {
+				t.Fatalf("raced update replaced the competing file identity: %v", err)
+			}
+		})
+	}
+}
+
 func TestStructuredPatchCreateOnlyFallsBackWhenHardLinksUnsupported(t *testing.T) {
 	root := t.TempDir()
 	workspace, err := os.OpenRoot(root)

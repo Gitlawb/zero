@@ -225,6 +225,37 @@ func TestToolCallResultEmitsOnlyRedactedFileDiffs(t *testing.T) {
 	}
 }
 
+func TestToolCallResultOmitsDefaultIgnorableSplitSecretsOnEitherSide(t *testing.T) {
+	secret := "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG"
+	for name, separator := range map[string]string{
+		"combining grapheme joiner": "\u034f",
+		"variation selector":        "\ufe0f",
+	} {
+		for _, side := range []string{"old", "new"} {
+			t.Run(name+" "+side, func(t *testing.T) {
+				obfuscated := secret[:20] + separator + secret[20:]
+				diff := tools.FileDiff{
+					Path: filepath.Join(t.TempDir(), "secret.txt"), OldExists: true, NewExists: true,
+					OldText: "safe old", NewText: "safe new",
+				}
+				if side == "old" {
+					diff.OldText = obfuscated
+				} else {
+					diff.NewText = obfuscated
+				}
+				scrubbed := tools.ScrubResultSecrets(tools.Result{FileDiffs: []tools.FileDiff{diff}})
+				if !scrubbed.Redacted || len(scrubbed.FileDiffs) != 0 {
+					t.Fatalf("registry boundary retained an obfuscated secret: %#v", scrubbed)
+				}
+				update := toolCallResult(agent.ToolResult{ToolCallID: "call", Status: tools.StatusOK, FileDiffs: scrubbed.FileDiffs})
+				if len(update.Content) != 0 {
+					t.Fatalf("ACP content retained an obfuscated secret: %#v", update.Content)
+				}
+			})
+		}
+	}
+}
+
 func TestPlanUpdateAndStatus(t *testing.T) {
 	upd := planUpdate([]tools.PlanItem{
 		{Content: "step a", Status: "completed"},
