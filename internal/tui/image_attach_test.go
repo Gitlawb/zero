@@ -619,8 +619,9 @@ func TestRunAgentWithOptions_DiscoverySnapshotRace(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		localM := m
 		for i := 0; i < 200; i++ {
-			m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+			localM = localM.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
 				providerID: fmt.Sprintf("provider-%d", i%10),
 				models: []providermodeldiscovery.Model{
 					{ID: "discovered-model", InputModalities: []string{"image"}},
