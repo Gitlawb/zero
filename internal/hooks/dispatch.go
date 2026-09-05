@@ -36,7 +36,23 @@ type DispatchOutcome struct {
 	// Messages collects the output (stdout, else stderr) of each hook that
 	// produced any, in run order. afterTool validators use this to feed results
 	// (e.g. a formatter diff or vet warning) back to the model on the tool result.
+	//
+	// PRESENTATION TEXT, NOT A NOTICE CHANNEL. hookMessage composes the hook's
+	// ordinary stdout (or stderr) together with any enforcement notices, because
+	// afterTool wants both on one line. A caller that only wants to know what the
+	// sandbox did must read Notices instead: delivering this slice would put every
+	// successful hook's routine logging into the model's context.
 	Messages []string
+	// Notices carries only the enforcement disclosures, one entry per notice, in
+	// run order across every hook that ran.
+	//
+	// Separate from Messages because they answer different questions and have
+	// different audiences. A notice says the hook ran under a weakened token,
+	// which the model and the operator both need; the hook's own output is for
+	// afterTool validators that asked to be heard. Appended as each hook runs,
+	// rather than read off the final result, so a disclosure from a hook that
+	// already ran survives a later hook's veto ending the chain.
+	Notices []string
 }
 
 type commandResult struct {
@@ -45,6 +61,13 @@ type commandResult struct {
 	Stderr   string
 	Err      error // set when the command could not be executed (not a non-zero exit)
 	TimedOut bool  // the hook started but its deadline/cancellation fired before it returned
+	// Notices carries the enforcement disclosures the execution runner attached.
+	//
+	// Same reason as the plugin path: the generic execution contract is not
+	// transport-only. Enforcement.Notices says what the sandbox actually did, and
+	// a projection that keeps only stdout, stderr and an exit code drops it, so a
+	// hook ran under a weakened token with nothing said about it.
+	Notices []string
 }
 
 // commandRunner executes one hook command. It is injectable so the dispatch
@@ -139,6 +162,10 @@ func executionCommandRunner(runner *execution.Runner) commandRunner {
 			Stderr:   stderr,
 			Err:      commandErr,
 			TimedOut: result.Outcome.Kind == execution.OutcomeTimedOut,
+			// One shared decision: see Outcome.AppliedEnforcementNotices. A setup
+			// failure or a missing executable launched no hook child, so the notice
+			// would describe a token trade nobody made.
+			Notices: result.Outcome.AppliedEnforcementNotices(),
 		}
 	}
 }
@@ -181,6 +208,14 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 
 		if message := hookMessage(result); message != "" {
 			outcome.Messages = append(outcome.Messages, message)
+		}
+		// Appended per hook rather than read off the final result, so hook A's
+		// disclosure is not lost when hook B stops the chain. A notice describes
+		// something that ALREADY happened.
+		for _, notice := range result.Notices {
+			if strings.TrimSpace(notice) != "" {
+				outcome.Notices = append(outcome.Notices, notice)
+			}
 		}
 
 		if blocked {
@@ -244,13 +279,39 @@ func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 // hookMessage returns the output worth surfacing from a hook run: stdout when
 // present, else stderr. Empty when the hook produced no output.
 func hookMessage(result commandResult) string {
-	if trimmed := strings.TrimSpace(result.Stdout); trimmed != "" {
-		return trimmed
+	message := strings.TrimSpace(result.Stdout)
+	if message == "" {
+		message = strings.TrimSpace(result.Stderr)
 	}
-	return strings.TrimSpace(result.Stderr)
+	// PREPENDED, and present even when the hook itself said nothing. A hook that
+	// runs silently under a weakened token is exactly the case where the only
+	// thing worth surfacing IS the disclosure.
+	return withHookEnforcementNotices(message, result.Notices)
 }
 
+func withHookEnforcementNotices(message string, notices []string) string {
+	joined := strings.TrimSpace(strings.Join(notices, "\n"))
+	if joined == "" {
+		return message
+	}
+	if strings.TrimSpace(message) == "" {
+		return joined
+	}
+	return joined + "\n\n" + message
+}
+
+// blockReason explains a veto, and carries the enforcement disclosure with it.
+//
+// THE BLOCKING BRANCH IS THE ONE A USER ALWAYS SEES. hookMessage composes the
+// notices into DispatchOutcome.Messages, but a vetoing beforeTool hook builds
+// Reason separately and returns immediately, so a hook that blocked an action
+// while running without write confinement reported only the veto. Both fields
+// reach a person, so both have to carry it.
 func blockReason(result commandResult) string {
+	return withHookEnforcementNotices(blockCause(result), result.Notices)
+}
+
+func blockCause(result commandResult) string {
 	if result.TimedOut {
 		if trimmed := strings.TrimSpace(result.Stderr); trimmed != "" {
 			return "hook timed out: " + trimmed
@@ -288,7 +349,14 @@ func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInp
 		Matcher:    hook.Matcher,
 		ToolCallID: input.ToolCallID,
 		Status:     status,
-		Results:    []AuditResult{{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}},
+		Results: []AuditResult{{
+			ExitCode: result.ExitCode,
+			Stdout:   result.Stdout,
+			Stderr:   result.Stderr,
+			// The notice is not in stdout or stderr by design, so the durable record
+			// has to carry it or the fact ends with the dispatch result.
+			EnforcementNotices: append([]string(nil), result.Notices...),
+		}},
 		DurationMs: durationMs,
 	})
 }
