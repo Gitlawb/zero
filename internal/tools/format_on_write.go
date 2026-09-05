@@ -2,11 +2,14 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // Format-on-write for the mutating file tools. When enabled, a successful
@@ -65,35 +68,86 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
+var runFormatOnWriteCommand = func(ctx context.Context, binaryPath string, arguments []string, directory string) error {
+	formatter := exec.CommandContext(ctx, binaryPath, arguments...)
+	formatter.Dir = directory
+	formatter.Stdin = strings.NewReader("")
+	return formatter.Run()
+}
+
+var readFormattedFile = readRootedFile
+
 // maybeFormatWrittenFile runs the configured formatter for absolutePath (when
-// enabled and on PATH) and returns the file's content afterwards. Best-effort
-// throughout: any failure — no formatter, formatter error, timeout, unreadable
-// result — returns writtenContent so the caller's state matches the last write
-// it performed itself.
-func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) string {
+// enabled and on PATH) and returns the verified file content afterwards. A
+// formatter may mutate the file and then fail or time out, so its process error
+// never substitutes the originally requested bytes for a final read. The bool
+// is false only when a formatter ran and the resulting file could not be read;
+// callers keep ChangedFiles but omit exact rich evidence in that case.
+func maybeFormatWrittenFile(ctx context.Context, workspaceRoot string, scope PathScope, absolutePath string, writtenContent string) (string, os.FileInfo, bool) {
 	if !formatOnWriteEnabled() {
-		return writtenContent
+		return writtenContent, nil, true
 	}
 	command, ok := formatterCommands[strings.ToLower(filepath.Ext(absolutePath))]
 	if !ok {
-		return writtenContent
+		return writtenContent, nil, true
 	}
 	binaryPath, err := exec.LookPath(command[0])
 	if err != nil {
-		return writtenContent
+		return writtenContent, nil, true
 	}
+	root, relativePath, err := openFormattedFileRoot(workspaceRoot, scope, absolutePath)
+	if err != nil {
+		return writtenContent, nil, false
+	}
+	defer root.Close()
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
 	arguments := append(append([]string(nil), command[1:]...), absolutePath)
-	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
-	formatter.Dir = filepath.Dir(absolutePath)
-	formatter.Stdin = strings.NewReader("")
-	if err := formatter.Run(); err != nil {
-		return writtenContent
-	}
-	formatted, err := os.ReadFile(absolutePath)
+	_ = runFormatOnWriteCommand(formatCtx, binaryPath, arguments, filepath.Dir(absolutePath))
+	formatted, info, err := readFormattedFile(root, relativePath)
 	if err != nil {
-		return writtenContent
+		return writtenContent, nil, false
 	}
-	return string(formatted)
+	return string(formatted), info, true
+}
+
+// openFormattedFileRoot opens the write root before the formatter runs and
+// computes the target relative to that descriptor-bound root. Atomic in-root
+// replacement remains valid; a formatter that swaps the target to an escaping
+// symlink is rejected when readFormattedFile opens it through the root.
+func openFormattedFileRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	var firstErr error
+	for _, configuredRoot := range roots {
+		resolvedRoot, err := filepath.Abs(configuredRoot)
+		if err == nil {
+			resolvedRoot, err = filepath.EvalSymlinks(resolvedRoot)
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
+		relativePath, err := filepath.Rel(resolvedRoot, candidate)
+		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+			continue
+		}
+		root, err := os.OpenRoot(resolvedRoot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return root, relativePath, nil
+	}
+	if firstErr != nil {
+		return nil, "", firstErr
+	}
+	return nil, "", fmt.Errorf("%s must stay inside the configured write roots", absolutePath)
 }
