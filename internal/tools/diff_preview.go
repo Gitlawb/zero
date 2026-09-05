@@ -66,7 +66,7 @@ func unsafeDiffText(text string) bool {
 		if unicode.IsControl(r) {
 			return true
 		}
-		if unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+		if isDiffCredentialIgnorable(r) {
 			hasCanonicalizableSeparator = true
 		}
 	}
@@ -85,12 +85,26 @@ func diffTextRevealsObfuscatedSecret(text string) bool {
 		case '\n', '\r', '\t', ' ':
 			return r
 		}
-		if unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+		if isDiffCredentialIgnorable(r) {
 			return -1
 		}
 		return r
 	}, text)
 	return canonical != text && redaction.RedactString(canonical, redaction.Options{}) != canonical
+}
+
+// isDiffCredentialIgnorable mirrors Unicode's Default_Ignorable_Code_Point
+// derived property using the tables exposed by the Go standard library. Cf
+// catches format controls, while the other two tables cover non-Cf default
+// ignorables such as U+034F COMBINING GRAPHEME JOINER and variation selectors.
+// Unicode whitespace is also removable because it can split a credential that
+// the boundary redactor would otherwise recognize. The caller preserves normal
+// ASCII layout whitespace before consulting this helper.
+func isDiffCredentialIgnorable(r rune) bool {
+	return unicode.Is(unicode.Cf, r) ||
+		unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
+		unicode.Is(unicode.Variation_Selector, r) ||
+		unicode.IsSpace(r)
 }
 
 // boundedUnifiedDiff returns a unified diff of oldContent -> newContent labelled
