@@ -720,3 +720,35 @@ func TestApplyPatchOperationsReportsCommittedPrefixOnFailure(t *testing.T) {
 		t.Fatalf("partial patch FileDiffs = %#v", got)
 	}
 }
+
+func TestApplyPatchOperationsReportsWorkspaceRelativeCommittedPrefixUnderCwd(t *testing.T) {
+	root := t.TempDir()
+	applyRoot := filepath.Join(root, "sub", "dir")
+	if err := os.MkdirAll(applyRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(applyRoot, "first.txt"), "one\n")
+	writeTestFile(t, filepath.Join(applyRoot, "second.txt"), "two\n")
+	structuredPatchBeforeCommit = func(change structuredPatchChange) {
+		if change.to.relative == "second.txt" {
+			writeTestFile(t, filepath.Join(applyRoot, "second.txt"), "changed\n")
+		}
+	}
+	t.Cleanup(func() { structuredPatchBeforeCommit = nil })
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: first.txt", "@@", "-one", "+ONE",
+		"*** Update File: second.txt", "@@", "-two", "+TWO",
+		"*** End Patch", "",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{
+		"cwd": "sub/dir", "patch": patch,
+	})
+	if result.Status != StatusError || !strings.Contains(result.Output, "already committed: sub/dir/first.txt") {
+		t.Fatalf("nested partial failure = status=%s output=%q", result.Status, result.Output)
+	}
+	if got := result.ChangedFiles; len(got) != 1 || got[0] != "sub/dir/first.txt" {
+		t.Fatalf("nested partial ChangedFiles = %#v", got)
+	}
+}
