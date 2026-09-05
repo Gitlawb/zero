@@ -191,7 +191,7 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 	var plannedEnforcement execution.Enforcement
 	// Retained from the prepared plan rather than dropped: for a wrapped plan the
 	// adapter, not cmd.Start, owns whether the requested server process exists.
-	var adapterReport func() (execution.AdapterReport, error)
+	var launchTracker *execution.ChildLaunchTracker
 	var ownedLaunch bool
 	cleanupTransferred := false
 	defer func() {
@@ -216,10 +216,11 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 			return nil, fmt.Errorf("start MCP server %s: %w", server.Name, err)
 		}
 		cmd = prepared.Command
-		cleanup = prepared.Cleanup
 		plannedEnforcement = prepared.Enforcement
-		adapterReport = prepared.Report
 		ownedLaunch = prepared.ChildLaunchOwnedByAdapter
+		// The tracker's cleanup, not the plan's: it settles the launch decision
+		// before the report file it was read from is deleted.
+		launchTracker, cleanup = execution.NewChildLaunchTracker(prepared)
 	} else {
 		cmd = exec.CommandContext(ctx, server.Command, server.Args...)
 		cmd.Env = mergeProcessEnv(server.Env)
@@ -257,31 +258,29 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 	// adapter confirms the requested child was created. Called on both ways this
 	// attempt can end, which is also where an attempt abandoned at the connect
 	// timeout eventually arrives, so a late disclosure is still delivered once.
-	// ONE ANSWER, READ WHILE THE EVIDENCE STILL EXISTS, USED BY EVERY OUTCOME.
+	// ONE ANSWER, AND IT IS ONLY CACHED ONCE IT CANNOT CHANGE.
 	//
-	// The adapter's report is a file the plan's cleanup deletes. client.Close runs
-	// that cleanup, so a decision made after Close reads an absent report and
-	// answers "no child" about a server that really did run. Resolving once and
-	// memoizing removes the ordering hazard rather than documenting it.
+	// The adapter's report is a file the plan's cleanup deletes, so a decision made
+	// after cleanup used to read an absent report and answer "no child" about a
+	// server that really did run. Memoizing the first read fixed that ordering and
+	// introduced another: the read can land while the adapter has created the child
+	// and not yet recorded it, and "not yet" got frozen as "never".
+	//
+	// ChildLaunchTracker holds the three states apart. It caches a launch, never an
+	// absence, until the adapter is terminal, and it settles from cleanup with the
+	// report still on disk. See internal/execution/child_launch.go.
 	//
 	// It also gives the success, late and failed paths the same input. The failure
 	// path used to carry client.StartupNotices() unconditionally while the sink was
 	// gated on the adapter, which is two competing definitions of applied
 	// enforcement: an operator was told a server ran without write confinement when
 	// only the sandbox helper ran and the requested server never existed.
-	launchedOnce := sync.OnceValue(func() bool {
+	launchedOnce := func() bool {
 		if !ownedLaunch {
 			return true
 		}
-		if adapterReport == nil {
-			return false
-		}
-		report, err := adapterReport()
-		if err != nil {
-			return false
-		}
-		return execution.ResolveChildLaunched(true, ownedLaunch, report)
-	})
+		return launchTracker.Launched()
+	}
 	// publishAdapterLaunch announces a wrapped plan's launch, but only if the
 	// adapter confirms the requested child was created. Called on both ways this
 	// attempt can end, which is also where an attempt abandoned at the connect
@@ -315,9 +314,13 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		// bare error discards the client, and with it the only carrier the notices
 		// had, so the operator was told the server was unavailable and not that it
 		// had already run without the write jail.
-		// BEFORE Close, which runs the cleanup that deletes the report.
-		launched := launchedOnce()
+		// AFTER Close, which waits out the adapter and then settles the decision
+		// with the report still on disk. Asking first would ask an adapter that may
+		// be between creating the child and recording it, and read "not yet" as
+		// "never": the connect timeout ends the attempt here while the helper is
+		// still working.
 		_ = client.Close()
+		launched := launchedOnce()
 		publishAdapterLaunch()
 		message := strings.TrimSpace(stderr.String())
 		failure := fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
@@ -333,6 +336,13 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		}
 		return nil, &startupDisclosureError{err: failure, notices: carried}
 	}
+	// THE HANDSHAKE IS THE OBSERVATION. A wrapped plan's adapter speaks no MCP and
+	// creates the child suspended, so a well-formed initialize response can only
+	// have come from the requested server, already running. That is terminal
+	// evidence and does not depend on the report having been read yet, which is
+	// what keeps a long-lived session from having to wait for an adapter that will
+	// not exit until the session ends.
+	launchTracker.Confirm()
 	publishAdapterLaunch()
 	return client, nil
 }
