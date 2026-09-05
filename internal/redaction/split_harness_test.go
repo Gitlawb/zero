@@ -320,6 +320,26 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("Anthropic repeated gaps scaling and correct redaction", func(t *testing.T) {
+		for _, size := range sizes {
+			var b strings.Builder
+			b.WriteString("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+			for b.Len() < size {
+				b.WriteString("\x00a")
+			}
+			input := b.String()
+			start := time.Now()
+			got := RedactString(input, Options{})
+			elapsed := time.Since(start)
+			if got != RedactedSecret {
+				t.Fatalf("Anthropic at size %d failed to redact: got %q, want %q", size, got, RedactedSecret)
+			}
+			if elapsed > time.Second {
+				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
+			}
+		}
+	})
 }
 
 func BenchmarkRedactJWTGaps800KB(b *testing.B) {

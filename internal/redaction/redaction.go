@@ -266,65 +266,6 @@ func keyLooksSensitive(normalized string) bool {
 	return false
 }
 
-// stripControlBytes removes C0/C1 controls (Cc other than tab, LF, and CR).
-// Used to normalize an already-matched secret so prefix/digit checks see the
-// rejoined shape. It is matching-time only and must not be applied to
-// RedactString's input or return value. Tab/LF/CR stay. Lone Latin-1 C1 bytes
-// (0x80–0x9F, invalid UTF-8) are stripped too; UTF-8 continuation bytes are
-// not, because they are not controls.
-func stripControlBytes(s string) string {
-	for i := 0; i < len(s); {
-		c := s[i]
-		if c < 0x80 {
-			if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c == 0x7F) {
-				return stripControlBytesFrom(s, i)
-			}
-			i++
-			continue
-		}
-		if c <= 0x9F {
-			// 0x80–0x9F at a rune boundary is a lone C1 byte, not UTF-8.
-			return stripControlBytesFrom(s, i)
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if unicode.IsControl(r) {
-			return stripControlBytesFrom(s, i)
-		}
-		i += size
-	}
-	return s
-}
-
-func stripControlBytesFrom(s string, start int) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	b.WriteString(s[:start])
-	for i := start; i < len(s); {
-		c := s[i]
-		if c < 0x80 {
-			if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c == 0x7F) {
-				i++
-				continue
-			}
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		if c <= 0x9F {
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if unicode.IsControl(r) {
-			i += size
-			continue
-		}
-		b.WriteString(s[i : i+size])
-		i += size
-	}
-	return b.String()
-}
-
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
 	// Match on the original string. Shape patterns allow C0/C1 gaps between
@@ -554,6 +495,21 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 	hasInteriorHyphen := false
 	hasKnownPrefix := isOpenAI && knownOpenAIKeyPrefix(logicalStr)
 	lastValidEnd := 0
+	plainPatternMatched := false
+
+	checkPlainPattern := func(logLen int) bool {
+		if plainPatternMatched {
+			return true
+		}
+		if shape.plainPattern == nil {
+			return true
+		}
+		if shape.plainPattern.MatchString(logicalStr[:logLen]) {
+			plainPatternMatched = true
+			return true
+		}
+		return false
+	}
 
 	for i, span := range cand.spans {
 		if span.start == 0 {
@@ -576,33 +532,28 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 		}
 		logLen := logCursor
 		logPreValid := !isOpenAI || hasKnownPrefix || hasDigit || !hasInteriorHyphen
+		validateLogPre := func() bool {
+			if !logPreValid {
+				return false
+			}
+			if isOpenAI {
+				return true
+			}
+			return checkPlainPattern(logLen)
+		}
 
 		// If text in src after span starts a new credential, this span is a delimiter between credentials.
 		tailInSrc := src[matchStart+span.end:]
 		if startsNewCredential(tailInSrc, shape.requireDots) {
-			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-				valid := logPreValid
-				if valid && !isOpenAI && shape.plainPattern != nil {
-					logPre := logicalStr[:logLen]
-					valid = shape.plainPattern.MatchString(logPre)
-				}
-				if valid {
-					return span.start, true
-				}
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+				return span.start, true
 			}
 			return span.start, false
 		}
 
 		if !span.validGap {
-			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-				valid := logPreValid
-				if valid && !isOpenAI && shape.plainPattern != nil {
-					logPre := logicalStr[:logLen]
-					valid = shape.plainPattern.MatchString(logPre)
-				}
-				if valid {
-					return span.start, true
-				}
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+				return span.start, true
 			}
 			return span.start, false
 		}
@@ -610,27 +561,13 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 		// If match is followed by a path separator in source and this span precedes the trailing path,
 		// the span is a terminal delimiter if the prefix is already a valid credential.
 		if hasTrailingPath && i == len(cand.spans)-1 {
-			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-				valid := logPreValid
-				if valid && !isOpenAI && shape.plainPattern != nil {
-					logPre := logicalStr[:logLen]
-					valid = shape.plainPattern.MatchString(logPre)
-				}
-				if valid {
-					return span.start, true
-				}
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+				return span.start, true
 			}
 			return span.start, false
 		}
-		if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-			valid := logPreValid
-			if valid && !isOpenAI && shape.plainPattern != nil {
-				logPre := logicalStr[:logLen]
-				valid = shape.plainPattern.MatchString(logPre)
-			}
-			if valid {
-				lastValidEnd = span.start
-			}
+		if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+			lastValidEnd = span.start
 		}
 	}
 
@@ -670,7 +607,7 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 			}
 			return len(match), false
 		}
-	} else if !shape.plainPattern.MatchString(logicalStr) {
+	} else if !checkPlainPattern(len(logicalStr)) {
 		if lastValidEnd > 0 {
 			return lastValidEnd, true
 		}
