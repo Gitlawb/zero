@@ -41,18 +41,21 @@ var sshWellKnownPrivateKeyNames = []string{
 	"id_ed25519_sk",
 }
 
-// sshPathValuedDirectives are ssh_config keywords whose values name files or
-// sockets. IdentityFile is the important one for relocated keys; the rest are
-// collected so a CertificateFile or RevokedHostKeys path outside ~/.ssh is not
-// left readable. UserKnownHostsFile / GlobalKnownHostsFile values that resolve
-// to known_hosts are dropped later so option 2 keeps host resolution working.
-var sshPathValuedDirectives = map[string]bool{
-	"certificatefile":      true,
+// sshKeyMaterialDirectives are directives whose values name key material:
+// denied unless an explicit exemption applies.
+var sshKeyMaterialDirectives = map[string]bool{
+	"certificatefile": true,
+	"identityfile":    true,
+	"revokedhostkeys": true,
+}
+
+// sshSupportDirectives are directives whose values name support files and sockets:
+// denied only when content-sniffing identifies a private key payload, so custom
+// known-hosts names, control sockets, and agent sockets keep working.
+var sshSupportDirectives = map[string]bool{
 	"controlpath":          true,
 	"globalknownhostsfile": true,
 	"identityagent":        true,
-	"identityfile":         true,
-	"revokedhostkeys":      true,
 	"userknownhostsfile":   true,
 }
 
@@ -280,11 +283,21 @@ func collectSSHConfigPaths(path, home, sshDir string, seen map[string]bool, dept
 			}
 			continue
 		}
-		if !sshPathValuedDirectives[key] {
+		keyMaterial := sshKeyMaterialDirectives[key]
+		if !keyMaterial && !sshSupportDirectives[key] {
 			continue
 		}
 		for _, raw := range values {
 			expanded := expandSSHConfigPath(raw, home, sshDir)
+			if expanded == "" {
+				continue
+			}
+			if !keyMaterial {
+				if sshFileLooksLikePrivateKey(expanded) {
+					out = append(out, expanded)
+				}
+				continue
+			}
 			if !sshShouldDenyReferencedPath(expanded, home, sshDir) {
 				continue
 			}

@@ -638,9 +638,6 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 				carveouts = append(carveouts, nested)
 			}
 		}
-		if credentialDirDenyHidesNestedAllow(allowRoots, path) {
-			continue
-		}
 		out = append(out, path)
 	}
 	out = appendLexicalCredentialDenyPaths(out, allowRoots, lexicalCandidates)
@@ -679,9 +676,6 @@ func appendLexicalCredentialDenyPaths(out, allowRoots, candidates []string) []st
 			continue
 		}
 		if credentialPathReincluded(allowRoots, lexical) {
-			continue
-		}
-		if credentialDirDenyHidesNestedAllow(allowRoots, lexical) {
 			continue
 		}
 		resolved := normalizeProfilePath(path)
@@ -806,22 +800,6 @@ func credentialNestedAllowReads(allowRoots []string, path string) []string {
 		}
 	}
 	return out
-}
-
-// credentialDirDenyHidesNestedAllow reports that some allowRead sits under
-// path and cannot be expressed as a directory DenyReadCarveout. Existing
-// carveouts only re-bind directories (Zero's plugins/specialists/commands).
-// A nested file grant such as $HOME/.gnupg/private-keys-v1.d/keygrip.key
-// would stay unreadable if path were still emitted as a directory deny:
-// bubblewrap masks the dir and Seatbelt denies the subtree after the read
-// rule. In that case the parent dir deny is omitted.
-func credentialDirDenyHidesNestedAllow(allowRoots []string, path string) bool {
-	for _, allow := range credentialNestedAllowReads(allowRoots, path) {
-		if normalizeCredentialCarveoutPath(allow) == "" {
-			return true
-		}
-	}
-	return false
 }
 
 // pathWithinRootCanonical compares after EvalSymlinks so a lexical /var/...

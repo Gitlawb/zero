@@ -411,7 +411,7 @@ func appendUnreadableLinuxPaths(args []string, paths []string, carveouts []strin
 	for _, dir := range classified.dirs {
 		args = appendUnreadableLinuxDirArgs(args, dir, carveouts)
 	}
-	omits := linuxDeniedBasenamesByParent(classified.files, classified.links)
+	omits := linuxDeniedBasenamesByParent(classified.files, classified.links, classified.dirs)
 	seenParents := make(map[string]struct{})
 	for _, link := range classified.links {
 		args = appendUnreadableLinuxResolvedSymlinkArgs(args, link, carveouts)
@@ -582,7 +582,7 @@ func linuxParentOverlaid(seen map[string]struct{}, parent string) bool {
 	return false
 }
 
-func linuxDeniedBasenamesByParent(files, links []string) map[string]map[string]struct{} {
+func linuxDeniedBasenamesByParent(groups ...[]string) map[string]map[string]struct{} {
 	out := make(map[string]map[string]struct{})
 	add := func(path string) {
 		parent := linuxCanonicalDest(filepath.Dir(path))
@@ -594,11 +594,10 @@ func linuxDeniedBasenamesByParent(files, links []string) map[string]map[string]s
 		}
 		m[base] = struct{}{}
 	}
-	for _, path := range files {
-		add(path)
-	}
-	for _, path := range links {
-		add(path)
+	for _, group := range groups {
+		for _, path := range group {
+			add(path)
+		}
 	}
 	return out
 }
