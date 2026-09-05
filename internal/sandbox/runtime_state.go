@@ -120,7 +120,12 @@ func runtimeRootWithinWorkspace(workspaceRoot string, root string) bool {
 
 func prepareSandboxRuntime(workspaceRoot string, sandboxHome string) (SandboxRuntime, func(), error) {
 	// One selection function, shared with setup. See selectSandboxRuntimeRoot.
-	root, lease, err := selectSandboxRuntimeRoot(workspaceRoot, true, sandboxHome)
+	//
+	// The ledger is deliberately unused here. A COMMAND is not a transaction: it
+	// does not publish a marker and has nothing to roll back to, and a component
+	// created on this path is the runtime tree the command is about to use. Only
+	// setup owns an undo.
+	root, lease, _, err := selectSandboxRuntimeRoot(workspaceRoot, true, sandboxHome)
 	if err != nil {
 		return SandboxRuntime{}, nil, err
 	}
@@ -552,22 +557,32 @@ func WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot strin
 	return recorded, pinnedSandboxRuntimeRoot(workspaceRoot, preferred, fallback, sandboxHome) != "", nil
 }
 
-func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxHome string) (string, *sandboxRuntimeLease, error) {
+// selectSandboxRuntimeRoot picks the runtime root and returns the lease on it
+// together with the directories acquiring that lease had to create.
+//
+// THE LEDGER IS PART OF THE ANSWER, NOT A DETAIL OF IT. Acquiring the lease
+// creates zero/runtime/v1 when they are not there, and this was the two-result
+// wrapper that dropped that fact on the floor. Setup then provisioned the leaf,
+// recorded only the leaf for rollback, and any failure before the marker left
+// the parents behind with nothing that knew it had made them. An error carries
+// the partial ledger out for the same reason: acquisition can create one
+// component and fail on the next.
+func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxHome string) (string, *sandboxRuntimeLease, []windowsCreatedRuntimeDir, error) {
 	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
 	if workspaceRoot == "" || workspaceRoot == "." {
-		return "", nil, errors.New("sandbox runtime requires a workspace root")
+		return "", nil, nil, errors.New("sandbox runtime requires a workspace root")
 	}
 	cacheRoot, err := sandboxUserCacheDir()
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve user cache directory: %w", err)
+		return "", nil, nil, fmt.Errorf("resolve user cache directory: %w", err)
 	}
 	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
 	if cacheRoot == "" || cacheRoot == "." {
-		return "", nil, errors.New("user cache directory is unavailable")
+		return "", nil, nil, errors.New("user cache directory is unavailable")
 	}
 	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	// CONSUME SETUP'S CHOICE, do not re-make it. Everything below is a fresh
 	// selection whose answer depends on whether a lease can be taken right now,
@@ -578,38 +593,41 @@ func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxH
 	if honorRecorded {
 		fallbackRoot, _ := fallbackSandboxRuntimeRoot(workspaceRoot)
 		if pinned := pinnedSandboxRuntimeRoot(workspaceRoot, root, fallbackRoot, sandboxHome); pinned != "" {
-			lease, leaseErr := prepareSandboxRuntimeLease(pinned)
+			lease, pinnedCreated, leaseErr := prepareSandboxRuntimeLeaseRecording(pinned)
 			if leaseErr != nil {
 				// NOT relocated. Relocating is what produced the permanent brick:
 				// the other root has no capability ACL, so the command would be
 				// rejected anyway, with a message about permissions. Failing here
 				// says the true thing and points at the action that fixes it.
-				return "", nil, fmt.Errorf("sandbox runtime root %s was provisioned by setup but cannot be used now (%w); "+
+				return "", nil, pinnedCreated, fmt.Errorf("sandbox runtime root %s was provisioned by setup but cannot be used now (%w); "+
 					"re-run `zero sandbox setup` from an elevated (Administrator) terminal", pinned, leaseErr)
 			}
-			return pinned, lease, nil
+			return pinned, lease, pinnedCreated, nil
 		}
 	}
-	lease, err := prepareSandboxRuntimeLease(root)
+	lease, created, err := prepareSandboxRuntimeLeaseRecording(root)
 	if err == nil {
-		return root, lease, nil
+		return root, lease, created, nil
 	}
 	// AN ALIASED COMPONENT IS NOT A REASON TO RELOCATE. Falling back here would
 	// leave the link in place, report nothing, and move to the next predictable
 	// name, which the same attacker can take as well. Relocating is for a root
 	// that is merely unusable.
 	if errors.Is(err, errRuntimeComponentAliased) {
-		return "", nil, err
+		return "", nil, created, err
 	}
 	// The preferred root could not be leased. Relocating is right, and it is what
 	// commands already did; the defect was that setup never learned about it.
 	root, err = fallbackSandboxRuntimeRoot(workspaceRoot)
 	if err != nil {
-		return "", nil, err
+		return "", nil, created, err
 	}
-	lease, err = prepareSandboxRuntimeLease(root)
+	// APPENDED, not replaced. The preferred attempt may have created components
+	// before it failed to lease, and those are this invocation's too.
+	fallbackLease, fallbackCreated, err := prepareSandboxRuntimeLeaseRecording(root)
+	created = append(created, fallbackCreated...)
 	if err != nil {
-		return "", nil, err
+		return "", nil, created, err
 	}
-	return root, lease, nil
+	return root, fallbackLease, created, nil
 }

@@ -132,7 +132,7 @@ func TestBuildWindowsSandboxSetupArgsCarriesEveryRuntimeCandidate(t *testing.T) 
 		}
 	}
 
-	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+	setupPlan, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		SandboxHome: t.TempDir(),
 		CommandCWD:  workspaceRoot,
 		// Deliberately NOT pre-augmented: the builder folds the runtime roots in
@@ -143,6 +143,7 @@ func TestBuildWindowsSandboxSetupArgsCarriesEveryRuntimeCandidate(t *testing.T) 
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
 	}
+	args := setupPlan.Args
 
 	encoded := ""
 	for i, arg := range args {

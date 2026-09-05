@@ -53,25 +53,25 @@ func acquireRuntimeLeaseRootedUnix(root string) (*sandboxRuntimeLease, []windows
 	}
 	defer func() { _ = unix.Close(parent) }()
 
-	handle, err := acquireSharedRuntimeLeaseAtFD(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
+	handle, madeLease, err := acquireSharedRuntimeLeaseAtFD(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
 	if err != nil {
 		return nil, created, fmt.Errorf("acquire sandbox runtime lease: %w", err)
 	}
-	return &sandboxRuntimeLease{handle: handle}, created, nil
+	return &sandboxRuntimeLease{handle: handle, root: root, createdFile: madeLease}, created, nil
 }
 
 // acquireSharedRuntimeLeaseAtFD opens the lease relative to a verified parent and
 // takes the shared lock on it.
-func acquireSharedRuntimeLeaseAtFD(parent int, name string) (runtimeLeaseHandle, error) {
-	file, err := openRuntimeLeaseAtFD(parent, name)
+func acquireSharedRuntimeLeaseAtFD(parent int, name string) (runtimeLeaseHandle, bool, error) {
+	file, created, err := openRuntimeLeaseAtFD(parent, name)
 	if err != nil {
-		return runtimeLeaseHandle{}, err
+		return runtimeLeaseHandle{}, false, err
 	}
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_SH); err != nil {
 		_ = file.Close()
-		return runtimeLeaseHandle{}, err
+		return runtimeLeaseHandle{}, false, err
 	}
-	return runtimeLeaseHandle{file: file}, nil
+	return runtimeLeaseHandle{file: file}, created, nil
 }
 
 // openRuntimeLeaseAtFD opens or creates the lease under parent and proves it is
@@ -81,33 +81,42 @@ func acquireSharedRuntimeLeaseAtFD(parent int, name string) (runtimeLeaseHandle,
 // open of its target, and a regular-file check besides, because O_NOFOLLOW says
 // nothing about a fifo or a device a local user can also create there. Both
 // holders have to end up on the same object or the lock protects nothing.
-func openRuntimeLeaseAtFD(parent int, name string) (*os.File, error) {
-	fd, err := unix.Openat(parent, name, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+func openRuntimeLeaseAtFD(parent int, name string) (*os.File, bool, error) {
+	const flags = unix.O_RDWR | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	// O_EXCL FIRST, so the create is what reports the create. A Stat beforehand
+	// answers about a moment that has passed by the time the open runs, and
+	// compensation would then delete a lease another process had just made.
+	created := true
+	fd, err := unix.Openat(parent, name, flags|unix.O_CREAT|unix.O_EXCL, 0o600)
+	if errors.Is(err, unix.EEXIST) {
+		created = false
+		fd, err = unix.Openat(parent, name, flags, 0)
+	}
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
-			return nil, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is a link, so the holders would lock different objects: %w", name, err)
+			return nil, false, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is a link, so the holders would lock different objects: %w", name, err)
 		}
-		return nil, err
+		return nil, false, err
 	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("inspect the sandbox runtime lease %s: %w", name, err)
+		return nil, false, fmt.Errorf("inspect the sandbox runtime lease %s: %w", name, err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is not an ordinary file (mode %#o)", name, stat.Mode&unix.S_IFMT)
+		return nil, false, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is not an ordinary file (mode %#o)", name, stat.Mode&unix.S_IFMT)
 	}
 	if uid := unix.Getuid(); uid >= 0 && stat.Uid != uint32(uid) {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is owned by uid %d, not %d", name, stat.Uid, uid)
+		return nil, false, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is owned by uid %d, not %d", name, stat.Uid, uid)
 	}
 	file := os.NewFile(uintptr(fd), name)
 	if file == nil {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
+		return nil, false, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
 	}
-	return file, nil
+	return file, created, nil
 }
 
 // tryAcquireExclusiveRuntimeLeaseRootedUnix is cleanup's acquisition, resolved
@@ -143,7 +152,7 @@ func tryAcquireExclusiveRuntimeLeaseRootedUnix(root string) (runtimeLeaseHandle,
 	}
 	defer func() { _ = unix.Close(parent) }()
 
-	file, err := openRuntimeLeaseAtFD(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
+	file, _, err := openRuntimeLeaseAtFD(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
 	if err != nil {
 		return runtimeLeaseHandle{}, false, err
 	}

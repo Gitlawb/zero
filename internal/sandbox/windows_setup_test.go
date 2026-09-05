@@ -11,7 +11,7 @@ import (
 
 func TestBuildAndParseWindowsSandboxSetupArgs(t *testing.T) {
 	home := t.TempDir()
-	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+	setupPlan, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		SandboxHome:    home,
 		CommandCWD:     `C:\workspace\src`,
 		WorkspaceRoots: []string{`C:\workspace`},
@@ -29,6 +29,7 @@ func TestBuildAndParseWindowsSandboxSetupArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
 	}
+	args := setupPlan.Args
 	config, err := ParseWindowsSandboxSetupArgs(args)
 	if err != nil {
 		t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)

@@ -83,17 +83,51 @@ func WindowsSandboxSetupMarkerPath(sandboxHome string) string {
 	return filepath.Join(sandboxHome, "windows-setup.json")
 }
 
-func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]string, error) {
+// setupConsumerSID is the process SID lookup, behind a variable because the
+// interval between creating the runtime tree and returning the args is the whole
+// reason the rollback exists, and this is the only failure that can happen in it.
+// Without a seam here that interval is unreachable from a test, and an untestable
+// compensation path is one nobody finds out is broken.
+var setupConsumerSID = currentProcessSID
+
+// WindowsSandboxSetupPlan is the helper invocation plus the undo for what
+// building it created.
+//
+// THE TRANSACTION STARTS AT THE FIRST MUTATING LEASE OPERATION, not when the
+// helper starts. Selecting the runtime root takes a lease, and taking a lease
+// creates zero/runtime/v1 and the lease file when they are not there. Those are
+// this invocation's writes, made in this process, before the helper exists. The
+// helper reacquires an already-existing tree and records no creation, and
+// provisioning records only the leaf, so nothing downstream could undo them.
+//
+// Rollback is safe to call once the caller knows setup did not complete, and
+// must not be called after it did: the tree it removes is the tree the marker
+// now attests to.
+type WindowsSandboxSetupPlan struct {
+	Args []string
+	// Rollback removes all and only what building these args created, in reverse
+	// creation order, and reports what it could not remove rather than claiming a
+	// clean undo. Never nil.
+	Rollback func() error
+}
+
+// BuildWindowsSandboxSetupArgs prepares the elevated helper invocation.
+//
+// It returns a plan rather than bare args so the creation ledger cannot be
+// dropped by a caller that only wanted the command line. That is exactly what
+// happened while the lease helper had a recording form nobody in production
+// called.
+func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) (WindowsSandboxSetupPlan, error) {
 	commandCWD := strings.TrimSpace(options.CommandCWD)
 	if commandCWD == "" {
-		return nil, errors.New("windows sandbox setup requires command cwd")
+		return WindowsSandboxSetupPlan{}, errors.New("windows sandbox setup requires command cwd")
 	}
 	sandboxHome := strings.TrimSpace(options.SandboxHome)
 	if sandboxHome == "" {
 		var err error
 		sandboxHome, err = ResolveWindowsSandboxHome(nil)
 		if err != nil {
-			return nil, err
+			return WindowsSandboxSetupPlan{}, err
 		}
 	}
 	workspaceRoots := trimNonEmptyStrings(options.WorkspaceRoots)
@@ -129,16 +163,39 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	// Failing now is failing before any ACL or marker state is persisted, so the
 	// operator is left in a state a retry can get out of, and the message names
 	// the step that actually failed.
-	selected, lease, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...), false, sandboxHome)
+	selected, lease, created, selectErr := selectSandboxRuntimeRoot(firstNonEmpty(workspaceRoots...), false, sandboxHome)
+	// UNDO BEFORE RETURNING, because a selection that failed part-way still made
+	// the components it got through. The old shape returned the error and left
+	// them, and nothing later had a record they existed.
 	if selectErr != nil {
-		return nil, fmt.Errorf("select the sandbox runtime root for setup: %w", selectErr)
+		undo := windowsRuntimeRootRollback{created: created}.run()
+		selectErr = fmt.Errorf("select the sandbox runtime root for setup: %w", selectErr)
+		if undo != nil {
+			selectErr = fmt.Errorf("%w; and the partial runtime tree could not be removed: %w", selectErr, undo)
+		}
+		return WindowsSandboxSetupPlan{}, selectErr
 	}
+	// The lease file is one of this invocation's artifacts when this acquisition
+	// created it, and rollback refuses a non-empty directory, so the undo has to
+	// own it or v1 can never be removed. It is released first: compensation
+	// retakes it exclusively, which is what proves no other process is using the
+	// tree it is about to delete.
+	leasePath, ownsLease := lease.createdLeaseFile()
 	lease.release()
+	rollback := func() error {
+		return undoWindowsSetupRuntimeCreation(selected, created, leasePath, ownsLease)
+	}
+	failed := func(err error) (WindowsSandboxSetupPlan, error) {
+		if undo := rollback(); undo != nil {
+			return WindowsSandboxSetupPlan{}, fmt.Errorf("%w; and the partial runtime tree could not be removed: %w", err, undo)
+		}
+		return WindowsSandboxSetupPlan{}, err
+	}
 	options.PermissionProfile = permissionProfileWithRuntime(options.PermissionProfile, SandboxRuntime{Root: selected})
 	options.PermissionProfile = WindowsSandboxProfileWithRuntimeRoots(options.PermissionProfile, workspaceRoots)
 	profileJSON, err := json.Marshal(options.PermissionProfile)
 	if err != nil {
-		return nil, fmt.Errorf("marshal windows sandbox setup permission profile: %w", err)
+		return failed(fmt.Errorf("marshal windows sandbox setup permission profile: %w", err))
 	}
 	// RESOLVED HERE, IN THE SAME PROCESS, and that is the whole supported model.
 	//
@@ -155,9 +212,9 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	// user given alternate admin credentials is not in it at all. Either way the
 	// protected stamp ends up with no enabled allow ACE for the token that has to
 	// validate it, and every restricted command stops before launch.
-	consumerSID, sidErr := currentProcessSID()
+	consumerSID, sidErr := setupConsumerSID()
 	if sidErr != nil {
-		return nil, sidErr
+		return failed(sidErr)
 	}
 	args := []string{
 		"--sandbox-home", sandboxHome,
@@ -170,7 +227,38 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) ([]str
 	for _, root := range workspaceRoots {
 		args = append(args, "--workspace-root", root)
 	}
-	return args, nil
+	return WindowsSandboxSetupPlan{Args: args, Rollback: rollback}, nil
+}
+
+// undoWindowsSetupRuntimeCreation removes what building the setup args created.
+//
+// The lease goes first and only under an EXCLUSIVE acquisition. That is not
+// tidiness: taking it exclusively is the proof that no other process is holding
+// the runtime root this is about to delete. If somebody is, the lease and the
+// tree both stay and the caller is told, which is the honest answer rather than
+// a rollback that reports success while removing a live tree.
+func undoWindowsSetupRuntimeCreation(root string, created []windowsCreatedRuntimeDir, leasePath string, ownsLease bool) error {
+	var errs []error
+	if ownsLease {
+		lease, inUse, err := tryAcquireSandboxRuntimeCleanupLease(root)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("take the sandbox runtime lease before removing it: %w", err))
+		case inUse:
+			errs = append(errs, fmt.Errorf("the sandbox runtime root %s is in use by another process, so %s and the tree it protects were left in place", root, leasePath))
+		default:
+			// Released before the remove: a file cannot be deleted on Windows while
+			// this process still holds it open.
+			lease.release()
+			if err := os.Remove(leasePath); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove the sandbox runtime lease %s: %w", leasePath, err))
+			}
+		}
+	}
+	if err := (windowsRuntimeRootRollback{created: created}).run(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func ParseWindowsSandboxSetupArgs(args []string) (WindowsSandboxSetupConfig, error) {

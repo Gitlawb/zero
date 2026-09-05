@@ -75,19 +75,19 @@ func acquireRuntimeLeaseRooted(root string) (*sandboxRuntimeLease, []windowsCrea
 	}
 	defer func() { _ = windows.CloseHandle(parent) }()
 
-	handle, err := acquireSharedRuntimeLeaseAt(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
+	handle, madeLease, err := acquireSharedRuntimeLeaseAt(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
 	if err != nil {
 		return nil, created, fmt.Errorf("acquire sandbox runtime lease: %w", err)
 	}
-	return &sandboxRuntimeLease{handle: handle}, created, nil
+	return &sandboxRuntimeLease{handle: handle, root: root, createdFile: madeLease}, created, nil
 }
 
 // acquireSharedRuntimeLeaseAt is acquireSharedRuntimeLease with the file named
 // relative to a directory handle instead of by full path.
-func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLeaseHandle, error) {
+func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLeaseHandle, bool, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
-		return runtimeLeaseHandle{}, fmt.Errorf("encode sandbox runtime lease name %s: %w", name, err)
+		return runtimeLeaseHandle{}, false, fmt.Errorf("encode sandbox runtime lease name %s: %w", name, err)
 	}
 	attributes := windows.OBJECT_ATTRIBUTES{
 		RootDirectory: parent,
@@ -121,23 +121,27 @@ func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLea
 		0,
 	)
 	if err != nil {
-		return runtimeLeaseHandle{}, err
+		return runtimeLeaseHandle{}, false, err
 	}
+	// FILE_CREATED here, rather than a Stat before the call, because only the
+	// create itself can distinguish the file it made from one that arrived a
+	// moment earlier.
+	created := iosb.Information == windowsFileCreatedDisposition
 	if err := refuseReparseRuntimeLeaseHandle(handle, name); err != nil {
 		_ = windows.CloseHandle(handle)
-		return runtimeLeaseHandle{}, err
+		return runtimeLeaseHandle{}, false, err
 	}
 	file := os.NewFile(uintptr(handle), name)
 	if file == nil {
 		_ = windows.CloseHandle(handle)
-		return runtimeLeaseHandle{}, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
+		return runtimeLeaseHandle{}, false, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
 	}
 	lease := runtimeLeaseHandle{file: file}
 	if err := windows.LockFileEx(windows.Handle(file.Fd()), 0, 0, 1, 0, &lease.overlapped); err != nil {
 		_ = file.Close()
-		return runtimeLeaseHandle{}, err
+		return runtimeLeaseHandle{}, false, err
 	}
-	return lease, nil
+	return lease, created, nil
 }
 
 // refuseReparseRuntimeLeaseHandle proves the opened lease is an ordinary file.
@@ -253,3 +257,8 @@ func tryAcquireExclusiveRuntimeLeaseRooted(root string) (runtimeLeaseHandle, boo
 	}
 	return lease, false, nil
 }
+
+// windowsFileCreatedDisposition is the IO_STATUS_BLOCK Information value that
+// says NtCreateFile made the file rather than opening one that was there.
+// x/sys/windows does not export it.
+const windowsFileCreatedDisposition = 2

@@ -20,12 +20,12 @@ func TestSetupArgsFailWhenNoRuntimeRootCanBeSelected(t *testing.T) {
 	sandboxUserCacheDir = func() (string, error) { return "", errors.New("no cache directory on this machine") }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
-	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+	setupPlan, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		CommandCWD:  t.TempDir(),
 		SandboxHome: t.TempDir(),
 	})
 	if err == nil {
-		t.Fatalf("setup args were built without a runtime root; the marker they produce attests nothing: %v", args)
+		t.Fatalf("setup args were built without a runtime root; the marker they produce attests nothing: %v", setupPlan.Args)
 	}
 	if !strings.Contains(err.Error(), "runtime root") {
 		t.Errorf("the failure does not name the step that failed: %v", err)
@@ -46,13 +46,14 @@ func TestSetupArgsRecordTheSelectedRuntimeRoot(t *testing.T) {
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
-	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+	setupPlan, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		CommandCWD:  workspace,
 		SandboxHome: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
 	}
+	args := setupPlan.Args
 	profile := ""
 	for index, arg := range args {
 		if arg == "--permission-profile" && index+1 < len(args) {
