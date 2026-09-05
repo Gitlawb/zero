@@ -135,6 +135,33 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 		if analysis.Destructive {
 			add("destructive", RiskCritical)
 		}
+		// A REPOSITORY CREATED INSIDE SOMEBODY ELSE'S IS NOT PROTECTABLE LATER.
+		//
+		// gitMetadataWriteCarveoutSpecs returns NOTHING for a workspace governed by
+		// an ancestor repository, on every backend. That is deliberate: naming
+		// <root>/.git/config and <root>/.git/hooks makes the Windows plan create a
+		// control directory, and the bubblewrap helper mount one, that competes with
+		// the ancestor's for git's discovery walk inside a repository Zero does not
+		// own. So the workspace carries no config or hooks protection at all.
+		//
+		// A repository created here DURING the command therefore lands under the
+		// plain workspace write grant with nothing denying credential.helper or
+		// core.hooksPath, and on Windows nothing denying DELETE on .git either. The
+		// serialized plan never changed, so the cached setup marker stays valid and
+		// the next run will not notice.
+		//
+		// Refused rather than protected, because the protection would have to be
+		// established at a moment the sandbox is no longer at.
+		//
+		// The condition is the WORKSPACE, not the directory the command names.
+		// Resolving that directory would mean tracking -C and cwd through the
+		// script, which is precisely the option-parsing surface that let
+		// "git -C sub clone" past the network gate. Refusing a git init outside the
+		// workspace too is the conservative side of that trade, and the reason text
+		// says so.
+		if analysis.GitInit && workspaceGovernedByAncestorRepository(request.WorkspaceRoot) {
+			add("nested_git_init", RiskCritical)
+		}
 		if analysis.TooComplex {
 			add("unparseable_command", RiskHigh)
 		}
