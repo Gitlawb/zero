@@ -708,7 +708,15 @@ func modelPickerTitleWord(word string) string {
 }
 
 func (m model) activeProviderDescriptor() (providercatalog.Descriptor, bool) {
-	return m.descriptorForProfile(m.providerProfile)
+	if descriptor, ok := m.descriptorForProfile(m.providerProfile); ok {
+		return descriptor, true
+	}
+	if name := strings.TrimSpace(m.providerName); name != "" {
+		if descriptor, ok := providercatalog.Get(name); ok {
+			return descriptor, true
+		}
+	}
+	return providercatalog.Descriptor{}, false
 }
 
 func customProviderDescriptorForProfile(profile config.ProviderProfile) (providercatalog.Descriptor, bool) {
@@ -873,10 +881,12 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 	if msg.err != nil || len(msg.models) == 0 {
 		return m
 	}
-	if m.modelPickerLiveByProvider == nil {
-		m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{}
+	newMap := make(map[string][]providermodeldiscovery.Model, len(m.modelPickerLiveByProvider)+1)
+	for k, v := range m.modelPickerLiveByProvider {
+		newMap[k] = v
 	}
-	m.modelPickerLiveByProvider[msg.providerID] = append([]providermodeldiscovery.Model{}, msg.models...)
+	newMap[msg.providerID] = append([]providermodeldiscovery.Model{}, msg.models...)
+	m.modelPickerLiveByProvider = newMap
 	// Rebuild the open picker so this provider's section shows its live models,
 	// preserving the current query + selection.
 	if m.picker != nil && m.picker.kind == pickerModel {

@@ -686,6 +686,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ContextWindowFor: func(modelID string) int {
 			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
 		},
+		SupportsVision: func(modelID string) bool {
+			return modelregistry.SupportsVision(modelRegistry, modelID)
+		},
 		ReasoningEffort: forwardEffort,
 		Trace:           traceRecorder,
 		Cwd:             workspaceRoot,

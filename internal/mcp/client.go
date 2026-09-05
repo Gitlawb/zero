@@ -3,10 +3,12 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,6 +17,8 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Gitlawb/zero/internal/imageinput"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type RemoteTool struct {
@@ -26,10 +30,16 @@ type RemoteTool struct {
 type Content struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	// MimeType names what a non-text block holds. Decoded but not yet forwarded:
-	// it is what lets a dropped block be described to the model instead of
-	// vanishing (#823). Servers that omit it still decode fine.
+	// MimeType names what a non-text block holds. Additive and omitempty, so
+	// servers that never send it decode exactly as before. Image blocks with
+	// valid data are forwarded on Result.Images; MimeType is what lets a
+	// remaining dropped block (audio, resource, failed decode) be described
+	// instead of vanishing (#823).
 	MimeType string `json:"mimeType,omitempty"`
+	// Data is the MCP image block's base64 payload. Additive and omitempty so a
+	// result that never sent it still unmarshals. Decoded only for type
+	// "image"; other types leave it unread.
+	Data string `json:"data,omitempty"`
 }
 
 type CallToolResult struct {
@@ -500,24 +510,98 @@ func TextContent(content []Content) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-// DroppedContentSummary describes the blocks TextContent discards, e.g.
-// "1 image/png block" or "2 resource blocks, 1 audio/wav block". It returns ""
-// when a result is entirely text, so a caller adds nothing to the ordinary case.
+// DroppedContentSummary describes the blocks that were not forwarded, e.g.
+// "1 audio/wav block" or "2 resource blocks, 1 image/png block". It returns ""
+// when every block is text or an image that ImageBlocks successfully
+// forwarded, so a caller adds nothing to the ordinary case.
 //
-// This exists because dropping silently is the worst available behaviour. A
-// screenshot server returns a valid image, TextContent keeps nothing, and the
-// call is reported as "(empty MCP tool result)" — so the model concludes the
-// tool produced nothing and usually retries, burning another call on the same
-// empty answer. Naming what came back costs nothing and ends that loop even
-// though the payload still cannot be forwarded.
+// Image payloads ride Result.Images. Audio, embedded resources, structured
+// content, and image blocks whose data cannot be decoded still have nowhere
+// to go. Images skipped because they would exceed the aggregate byte budget
+// are also named so the model hears that a valid screenshot was dropped.
+//
+// Only images actually kept by ImageBlocks are omitted from the note. An
+// image that would decode in isolation but was skipped by the aggregate cap
+// is still named, otherwise the model would not hear that a valid screenshot
+// was dropped.
 //
 // Counts are grouped by mime type and ordered by first appearance, so the same
 // result always produces the same sentence.
 func DroppedContentSummary(content []Content) string {
+	_, disp := forwardImages(content)
+	return droppedContentNote(content, disp, dispDropped, dispBudgetExceeded, dispUninspected)
+}
+
+// ImageBlocks converts MCP image content into the same ImageBlock channel
+// capture tools already use. Blocks that cannot be decoded, exceed
+// imageinput.MaxImageBytes individually, sniff to a type outside the provider
+// allow-list, or would push the result over an aggregate
+// imageinput.MaxImageBytes budget, are left for DroppedContentSummary to name.
+//
+// The aggregate cap is the same 10 MiB as the per-image cap: a server that
+// returns many individually valid images must not retain all of them in
+// Result.Images. Once the next valid image would exceed the remaining
+// budget it is skipped; a later smaller image may still fit. Later image
+// payloads are not decoded only once remaining is zero; a leftover residue
+// still fully decodes the next candidate before the length check rejects it.
+func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
+	images, _ := forwardImages(content)
+	return images
+}
+
+// itemDisp is the per-item forwarding/drop disposition produced by the
+// single-pass conversion. DroppedContentSummary is built from this so a
+// valid image is never base64-decoded a second time just to name what was
+// kept versus dropped.
+type itemDisp uint8
+
+const (
+	dispText itemDisp = iota
+	dispForwarded
+	dispDropped
+	dispBudgetExceeded
+	dispUninspected
+)
+
+// decodeImageBase64 is the MCP image payload decoder. Tests replace it to
+// count decode attempts; production uses standard base64.
+var decodeImageBase64 = base64.StdEncoding.DecodeString
+
+func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
+	disp := make([]itemDisp, len(content))
+	var images []zeroruntime.ImageBlock
+	remaining := imageinput.MaxImageBytes
+	for i, item := range content {
+		if item.Type == "text" {
+			disp[i] = dispText
+			continue
+		}
+		if item.Type == "image" {
+			if remaining == 0 {
+				disp[i] = dispUninspected
+				continue
+			}
+			if image, ok := imageBlockFromContent(item); ok {
+				if len(image.Data) <= remaining {
+					images = append(images, image)
+					remaining -= len(image.Data)
+					disp[i] = dispForwarded
+					continue
+				}
+				disp[i] = dispBudgetExceeded
+				continue
+			}
+		}
+		disp[i] = dispDropped
+	}
+	return images, disp
+}
+
+func droppedContentNote(content []Content, disp []itemDisp, kinds ...itemDisp) string {
 	labels := make([]string, 0, len(content))
 	counts := make(map[string]int, len(content))
-	for _, item := range content {
-		if item.Type == "text" {
+	for i, item := range content {
+		if i >= len(disp) || !dispKind(disp[i], kinds) {
 			continue
 		}
 		// Prefer the mime type: "image/png" tells the reader more than "image".
@@ -547,4 +631,47 @@ func DroppedContentSummary(content []Content) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func dispKind(got itemDisp, kinds []itemDisp) bool {
+	for _, kind := range kinds {
+		if got == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {
+	if item.Type != "image" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	raw := strings.TrimSpace(item.Data)
+	if raw == "" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	// EncodedLen(MaxImageBytes) is the encoded size of an image that decodes
+	// to exactly the inclusive cap, including "==" padding. DecodedLen is an
+	// upper bound and reports cap+2 for that input, so using it here would
+	// reject a valid at-limit PNG. The post-decode len(data) check is the
+	// exact backstop.
+	if len(raw) > base64.StdEncoding.EncodedLen(imageinput.MaxImageBytes) {
+		return zeroruntime.ImageBlock{}, false
+	}
+	data, err := decodeImageBase64(raw)
+	if err != nil {
+		return zeroruntime.ImageBlock{}, false
+	}
+	if len(data) == 0 || len(data) > imageinput.MaxImageBytes {
+		return zeroruntime.ImageBlock{}, false
+	}
+	sniffLen := len(data)
+	if sniffLen > 512 {
+		sniffLen = 512
+	}
+	mediaType := zeroruntime.NormalizeImageMediaType(http.DetectContentType(data[:sniffLen]))
+	if mediaType == "" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	return zeroruntime.ImageBlock{MediaType: mediaType, Data: data}, true
 }
