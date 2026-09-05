@@ -1320,10 +1320,6 @@ func (a *Agent) modelSupportsVision(ctx context.Context, profile config.Provider
 	if trimmed == "" {
 		return false
 	}
-	reg, _ := modelregistry.DefaultRegistry()
-	if entry, known := reg.Resolve(trimmed); known {
-		return entry.Supports(modelregistry.ModelCapabilityVision)
-	}
 	if a.deps.DiscoverModels != nil {
 		if discovered, err := a.deps.DiscoverModels(ctx, profile); err == nil {
 			for _, dm := range discovered {
@@ -1340,6 +1336,10 @@ func (a *Agent) modelSupportsVision(ctx context.Context, profile config.Provider
 				}
 			}
 		}
+	}
+	reg, _ := modelregistry.DefaultRegistry()
+	if entry, known := reg.Resolve(trimmed); known {
+		return entry.Supports(modelregistry.ModelCapabilityVision)
 	}
 	return modelregistry.SupportsVision(reg, trimmed)
 }

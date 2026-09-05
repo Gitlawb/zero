@@ -5481,6 +5481,29 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
+	var activeDescriptorID string
+	if descriptor, ok := m.activeProviderDescriptor(); ok {
+		activeDescriptorID = descriptor.ID
+	} else if len(m.modelPickerLiveByProvider) == 1 {
+		for id := range m.modelPickerLiveByProvider {
+			activeDescriptorID = id
+			break
+		}
+	}
+	discoveredSnapshot := make(map[string][]providermodeldiscovery.Model, len(m.modelPickerLiveByProvider))
+	for pID, list := range m.modelPickerLiveByProvider {
+		copiedList := make([]providermodeldiscovery.Model, len(list))
+		for i, dm := range list {
+			copied := dm
+			if len(dm.InputModalities) > 0 {
+				copied.InputModalities = append([]string{}, dm.InputModalities...)
+			}
+			copiedList[i] = copied
+		}
+		discoveredSnapshot[pID] = copiedList
+	}
+	catalog := m.modelCatalog
+
 	return func() tea.Msg {
 		started := m.now()
 		if m.turnTimer != nil {
@@ -5584,30 +5607,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				func(modelID string) { usageModelID = modelID },
 			)
 		}
-		var activeDescriptorID string
-		if descriptor, ok := m.activeProviderDescriptor(); ok {
-			activeDescriptorID = descriptor.ID
-		}
-		discoveredSnapshot := make(map[string][]providermodeldiscovery.Model, len(m.modelPickerLiveByProvider))
-		for pID, list := range m.modelPickerLiveByProvider {
-			copiedList := make([]providermodeldiscovery.Model, len(list))
-			for i, dm := range list {
-				copied := dm
-				if len(dm.InputModalities) > 0 {
-					copied.InputModalities = append([]string{}, dm.InputModalities...)
-				}
-				copiedList[i] = copied
-			}
-			discoveredSnapshot[pID] = copiedList
-		}
-		catalog := m.modelCatalog
 		options.SupportsVision = func(modelID string) bool {
 			trimmed := strings.TrimSpace(modelID)
 			if trimmed == "" {
 				return false
-			}
-			if entry, known := catalog.Resolve(trimmed); known {
-				return entry.Supports(modelregistry.ModelCapabilityVision)
 			}
 			if activeDescriptorID != "" {
 				if models, ok := discoveredSnapshot[activeDescriptorID]; ok {
@@ -5616,10 +5619,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					}
 				}
 			}
-			for _, models := range discoveredSnapshot {
-				if supported, ok := discoveredVisionSupport(models, trimmed); ok {
-					return supported
-				}
+			if entry, known := catalog.Resolve(trimmed); known {
+				return entry.Supports(modelregistry.ModelCapabilityVision)
 			}
 			return modelregistry.SupportsVision(catalog, trimmed)
 		}
