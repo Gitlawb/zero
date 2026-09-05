@@ -277,8 +277,47 @@ func packageManagerOffline(words []string) bool {
 	return false
 }
 
+// gitGlobalOptionsTakingValue are git's own options that consume the NEXT word.
+//
+// firstSubcommand skips words beginning with "-" but not the value that follows
+// one, so "git -C sub clone <url>" made it answer "sub" and the command was
+// classified as touching no network at all. The "--opt=value" spelling is one
+// token and needs no entry here.
+//
+// Keys are lowercase because the analyzer lowercases every word before it gets
+// here, which also means -C and -c arrive identically. That is fine: both
+// consume a value, and nothing below needs to tell them apart.
+var gitGlobalOptionsTakingValue = map[string]bool{
+	"-c": true, "-C": true,
+	"--git-dir": true, "--work-tree": true, "--namespace": true,
+	"--exec-path": true, "--config-env": true, "--super-prefix": true,
+	"--attr-source": true,
+}
+
+// gitSubcommand returns git's subcommand, skipping global options AND the values
+// they consume. Returns "" when the words carry no subcommand.
+func gitSubcommand(words []string) string {
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		if word == "" {
+			continue
+		}
+		if !strings.HasPrefix(word, "-") {
+			return word
+		}
+		// "--opt=value" is one token and carries its own value.
+		if strings.HasPrefix(word, "--") && strings.Contains(word, "=") {
+			continue
+		}
+		if gitGlobalOptionsTakingValue[word] {
+			index++
+		}
+	}
+	return ""
+}
+
 func gitUsesNetwork(words []string) bool {
-	switch firstSubcommand(words, nil) {
+	switch gitSubcommand(words) {
 	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
 		return true
 	default:
