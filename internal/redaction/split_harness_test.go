@@ -221,14 +221,40 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 	t.Run("Control immediately after complete credential", func(t *testing.T) {
 		secret := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
 		for _, ctrl := range controls {
-			input := secret + ctrl + "suffix"
+			input := secret + ctrl + "path/file"
 			got := RedactString(input, Options{})
-			want := RedactedSecret + ctrl + "suffix"
+			want := RedactedSecret + ctrl + "path/file"
 			if got != want {
 				t.Fatalf("control after secret mutated delimiter: got %q, want %q", got, want)
 			}
 		}
 	})
+}
+
+func TestSplitRedactionNoCredentialSuffixRemains(t *testing.T) {
+	// Regression test for splits before and after minimum length:
+	// ensure no credential suffix is leaked in either case.
+	key := "sk-abcdefghijklmnopqrstuvwxyz12345678" // minOpenAILen = 23, total = 37
+	splitBeforeMin := key[:10] + "\x00" + key[10:] // pos = 10 (< 23)
+	splitAfterMin := key[:28] + "\x00" + key[28:]  // pos = 28 (> 23)
+
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"split before minimum length", splitBeforeMin},
+		{"split after minimum length", splitAfterMin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactString(tc.input, Options{})
+			if got != RedactedSecret {
+				t.Fatalf("%s leaked: got %q, want %q", tc.name, got, RedactedSecret)
+			}
+			if strings.Contains(got, key[28:]) {
+				t.Fatalf("%s leaked suffix %q in %q", tc.name, key[28:], got)
+			}
+		})
+	}
 }
 
 func TestSplitRedactionLinearScaling(t *testing.T) {

@@ -498,7 +498,33 @@ func extractLogicalCandidate(s string) logicalCandidate {
 	}
 }
 
-func findCredentialBoundary(match string, shape secretShape, isOpenAI bool, isValid func(string) bool) (int, bool) {
+func startsNewCredential(s string, isJWT bool) bool {
+	if strings.HasPrefix(s, "sk-") ||
+		strings.HasPrefix(s, "ghp_") ||
+		strings.HasPrefix(s, "gho_") ||
+		strings.HasPrefix(s, "ghu_") ||
+		strings.HasPrefix(s, "ghs_") ||
+		strings.HasPrefix(s, "ghr_") ||
+		strings.HasPrefix(s, "github_pat_") ||
+		strings.HasPrefix(s, "glpat-") ||
+		strings.HasPrefix(s, "AIza") ||
+		strings.HasPrefix(s, "xoxb-") ||
+		strings.HasPrefix(s, "xoxa-") ||
+		strings.HasPrefix(s, "xoxp-") ||
+		strings.HasPrefix(s, "xoxr-") ||
+		strings.HasPrefix(s, "xoxs-") ||
+		strings.HasPrefix(s, "AKIA") ||
+		strings.HasPrefix(s, "ASIA") {
+		return true
+	}
+	if !isJWT && strings.HasPrefix(s, "eyJ") {
+		return true
+	}
+	return false
+}
+
+func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretShape, isOpenAI bool, hasTrailingPath bool, isValid func(string) bool) (int, bool) {
+	match := src[matchStart:matchEnd]
 	cand := extractLogicalCandidate(match)
 	if len(cand.spans) == 0 {
 		if isValid != nil && !isValid(match) {
@@ -524,8 +550,9 @@ func findCredentialBoundary(match string, shape secretShape, isOpenAI bool, isVa
 
 	runningDots := 0
 	logCursor := 0
+	lastValidEnd := 0
 
-	for _, span := range cand.spans {
+	for i, span := range cand.spans {
 		if span.start == 0 {
 			continue
 		}
@@ -537,9 +564,9 @@ func findCredentialBoundary(match string, shape secretShape, isOpenAI bool, isVa
 		}
 		logLen := logCursor
 
-		// If scanning OpenAI keys and text after span starts with "sk-",
-		// this span is a delimiter before a new key.
-		if isOpenAI && strings.HasPrefix(match[span.end:], "sk-") {
+		// If text in src after span starts a new credential, this span is a delimiter between credentials.
+		tailInSrc := src[matchStart+span.end:]
+		if startsNewCredential(tailInSrc, shape.requireDots) {
 			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
 				logPre := logicalStr[:logLen]
 				if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
@@ -549,26 +576,35 @@ func findCredentialBoundary(match string, shape secretShape, isOpenAI bool, isVa
 			return span.start, false
 		}
 
-		if !isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-			if !span.validGap {
-				return span.start, false
-			}
-			continue
-		}
-		logPre := logicalStr[:logLen]
-		if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
-			return span.start, true
-		}
 		if !span.validGap {
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
+				logPre := logicalStr[:logLen]
+				if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
+					return span.start, true
+				}
+			}
 			return span.start, false
 		}
-		// If logPre is a kebab false positive, check if the remaining suffix in match
-		// has fewer than 4 characters. If so, logPre was an independent kebab token
-		// followed by a delimiter (e.g. "sk-my-kebab\x00v2/file.go").
-		if isValid != nil && !isValid(logPre) {
-			suffixLen := len(logicalStr) - logLen
-			if suffixLen < 4 {
-				return span.start, false
+
+		// If match is followed by a path separator in source and this span precedes the trailing path,
+		// the span is a terminal delimiter if the prefix is already a valid credential.
+		if hasTrailingPath && i == len(cand.spans)-1 {
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
+				logPre := logicalStr[:logLen]
+				if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
+					return span.start, true
+				}
+			}
+			return span.start, false
+		}
+
+		// Continue consuming control-separated credential bytes across valid gaps.
+		// Track the last valid boundary for fail-closed fallback if subsequent
+		// bytes invalidate the full candidate.
+		if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
+			logPre := logicalStr[:logLen]
+			if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
+				lastValidEnd = span.start
 			}
 		}
 	}
@@ -587,14 +623,23 @@ func findCredentialBoundary(match string, shape secretShape, isOpenAI bool, isVa
 	}
 
 	if !isCandidateLength(len(logicalStr), shape.minLen, shape.requireDots, runningDots) {
+		if lastValidEnd > 0 {
+			return lastValidEnd, true
+		}
 		return len(match), false
 	}
 
 	if !shape.plainPattern.MatchString(logicalStr) {
+		if lastValidEnd > 0 {
+			return lastValidEnd, true
+		}
 		return len(match), false
 	}
 
 	if isValid != nil && !isValid(logicalStr) {
+		if lastValidEnd > 0 {
+			return lastValidEnd, true
+		}
 		return len(match), false
 	}
 
@@ -624,9 +669,9 @@ func replaceAllSecretMatches(src string, shape secretShape, replacement string, 
 
 		matchStart := lastIndex + loc[0]
 		matchEnd := lastIndex + loc[1]
-		match := src[matchStart:matchEnd]
+		hasTrailingPath := matchEnd < len(src) && (src[matchEnd] == '/' || src[matchEnd] == '\\')
 
-		advanceLen, shouldRedact := findCredentialBoundary(match, shape, isOpenAI, isValid)
+		advanceLen, shouldRedact := findCredentialBoundary(src, matchStart, matchEnd, shape, isOpenAI, hasTrailingPath, isValid)
 
 		b.WriteString(src[lastIndex:matchStart])
 		if shouldRedact {
