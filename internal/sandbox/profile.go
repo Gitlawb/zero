@@ -439,6 +439,7 @@ func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) crede
 	}
 	return credentialPathOptions{
 		Homes:              homes,
+		GPGHomes:           resolveCredentialOverridePaths(credentialEnvValue(env, "GNUPGHOME"), baseDirs),
 		ConfigDirs:         dedupeStrings(configDirs),
 		CloudSDKConfigDirs: dedupeStrings(cloudSDKConfigDirs),
 		GoogleCredentials:  resolveCredentialOverridePaths(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDirs),
@@ -466,6 +467,7 @@ func credentialEnvValue(env []string, key string) string {
 
 type credentialPathOptions struct {
 	Homes              []string
+	GPGHomes           []string
 	ConfigDirs         []string
 	CloudSDKConfigDirs []string
 	GoogleCredentials  []string
@@ -500,25 +502,55 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	var carveouts []string
 	var ensureDirs []string
 	var dirs []string
+	var lexicalCandidates []string
+	var lexicalDirs []string
 	for _, home := range options.Homes {
 		if strings.TrimSpace(home) == "" {
 			continue
 		}
+		gnupg := filepath.Join(home, ".gnupg")
 		homeDirs := []string{
 			filepath.Join(home, ".aws"),
 			filepath.Join(home, ".azure"),
+			// GPG secret keyring (secring.gpg, private-keys-v1.d). Directory-
+			// shaped like ~/.aws so a mount-based backend masks the whole
+			// store, including files created later in the session (#815).
+			gnupg,
 		}
 		candidates = append(candidates, homeDirs...)
 		dirs = append(dirs, homeDirs...)
 		// git's credential store backend, which holds host passwords and
-		// personal access tokens in cleartext. Denied rather than the whole
-		// of ~/.ssh, because these cost nothing functionally: git reads them
-		// through a credential helper for authentication, not for identity,
-		// so a sandboxed git still works and simply cannot authenticate as
-		// the user. SSH key material is a harder trade and is tracked
-		// separately (#815). A file, so it joins candidates only — dirs
-		// drives directory-shaped handling (bwrap binds, carveouts).
-		candidates = append(candidates, filepath.Join(home, ".git-credentials"))
+		// personal access tokens in cleartext (#816). A file, so it joins
+		// candidates only — dirs drives directory-shaped handling (bwrap
+		// binds, carveouts). SSH private keys are denied separately as key
+		// material (id_*, *.pem, IdentityFile paths) rather than the whole
+		// of ~/.ssh, so config and known_hosts stay readable for git host
+		// resolution (#815).
+		gitCredentials := filepath.Join(home, ".git-credentials")
+		sshKeys := sshPrivateKeyDenyCandidates(home)
+		candidates = append(candidates, gitCredentials)
+		candidates = append(candidates, sshKeys...)
+		// Keep the lexical candidate as well as any EvalSymlinks target so a
+		// same-user atomic symlink retarget after profile construction still
+		// hits a deny on ~/.gnupg, ~/.git-credentials, and SSH private keys.
+		// Use-time handle-relative / openat enforcement is a pre-existing
+		// backend gap, not introduced here.
+		lexicalCandidates = append(lexicalCandidates, gnupg, gitCredentials)
+		lexicalCandidates = append(lexicalCandidates, sshKeys...)
+		lexicalDirs = append(lexicalDirs, gnupg)
+	}
+	for _, gnupg := range options.GPGHomes {
+		gnupg = strings.TrimSpace(gnupg)
+		if gnupg == "" {
+			continue
+		}
+		// GnuPG's effective home is GNUPGHOME when set, not only ~/.gnupg.
+		// Treat it as the same directory-shaped secret store so inherited and
+		// command-supplied values reach DenyReadIfExists.
+		candidates = append(candidates, gnupg)
+		dirs = append(dirs, gnupg)
+		lexicalCandidates = append(lexicalCandidates, gnupg)
+		lexicalDirs = append(lexicalDirs, gnupg)
 	}
 	candidates = append(candidates, options.GoogleCredentials...)
 	candidates = append(candidates, options.NPMUserConfigs...)
@@ -596,19 +628,67 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		candidates = append(candidates, tokenPath, tokenPath+".migrated")
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
-	out := make([]string, 0, len(candidates))
+	out := make([]string, 0, len(candidates)+len(lexicalCandidates))
 	for _, path := range normalizeProfilePaths(candidates) {
 		if credentialPathReincluded(allowRoots, path) {
 			continue
 		}
+		for _, nested := range credentialNestedAllowReads(allowRoots, path) {
+			if normalizeCredentialCarveoutPath(nested) != "" {
+				carveouts = append(carveouts, nested)
+			}
+		}
 		out = append(out, path)
 	}
+	out = appendLexicalCredentialDenyPaths(out, allowRoots, lexicalCandidates)
+	dirList := normalizeProfilePaths(dirs)
+	dirList = appendLexicalCredentialDenyPaths(dirList, nil, lexicalDirs)
 	return credentialDenyPaths{
 		Paths:      out,
 		Carveouts:  credentialCarveoutPaths(out, carveouts),
 		EnsureDirs: credentialRetainedDirs(out, normalizeProfilePaths(ensureDirs)),
-		Dirs:       credentialRetainedDirs(out, normalizeProfilePaths(dirs)),
+		Dirs:       credentialRetainedDirs(out, dirList),
 	}
+}
+
+// appendLexicalCredentialDenyPaths adds the pre-EvalSymlinks spelling of each
+// candidate when a symlink is in the resolution chain. normalizeProfilePath
+// replaces a symlink with its target, so omitting the lexical path would let
+// a later atomic retarget of the same pathname escape the deny list.
+// String inequality alone is not enough: Windows EvalSymlinks rewrites
+// regular files to 8.3 short names (RUNNER~1 vs runneradmin) even when no
+// symlink is involved, and dual-adding those spellings breaks exact bwrap
+// dest sequences.
+func appendLexicalCredentialDenyPaths(out, allowRoots, candidates []string) []string {
+	if len(candidates) == 0 {
+		return out
+	}
+	seen := make(map[string]struct{}, len(out))
+	for _, path := range out {
+		seen[path] = struct{}{}
+	}
+	for _, path := range candidates {
+		lexical := normalizeProfilePathLexically(path)
+		if lexical == "" {
+			continue
+		}
+		if _, ok := seen[lexical]; ok {
+			continue
+		}
+		if credentialPathReincluded(allowRoots, lexical) {
+			continue
+		}
+		resolved := normalizeProfilePath(path)
+		if resolved != "" && credentialPathReincluded(allowRoots, resolved) {
+			continue
+		}
+		if resolved != "" && resolved != lexical && !pathResolutionInvolvesSymlink(path) {
+			continue
+		}
+		seen[lexical] = struct{}{}
+		out = append(out, lexical)
+	}
+	return out
 }
 
 // credentialTokenStorePaths returns the deny entries for one token-store path:
@@ -660,7 +740,7 @@ func pathsOutsideRoots(paths []string, roots []string) []string {
 	}
 	out := make([]string, 0, len(paths))
 	for _, path := range paths {
-		if credentialPathReincluded(roots, path) {
+		if credentialPathCoveredByCanonicalRoots(roots, path) {
 			continue
 		}
 		out = append(out, path)
@@ -679,7 +759,7 @@ func pathsOutsideOverlappingRoots(paths []string, roots []string) []string {
 	for _, path := range paths {
 		overlaps := false
 		for _, root := range roots {
-			if pathWithinRoot(root, path) || pathWithinRoot(path, root) {
+			if pathWithinRootCanonical(root, path) || pathWithinRootCanonical(path, root) {
 				overlaps = true
 				break
 			}
@@ -694,6 +774,53 @@ func pathsOutsideOverlappingRoots(paths []string, roots []string) []string {
 func credentialPathReincluded(allowRoots []string, path string) bool {
 	for _, allow := range allowRoots {
 		if pathWithinRoot(allow, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialNestedAllowReads returns allowRead paths that sit strictly inside
+// path — a nested grant under a credential directory. Containment is canonical
+// so a lexical ~/.gnupg symlink is recognized as the parent of a nested
+// allowRead that lives under the symlink target. pathWithinRoot on the lexical
+// spelling would miss that pair, keep the lexical dir deny, and let Seatbelt
+// and bwrap expand it onto the canonical store.
+func credentialNestedAllowReads(allowRoots []string, path string) []string {
+	if path == "" || len(allowRoots) == 0 {
+		return nil
+	}
+	var out []string
+	for _, allow := range allowRoots {
+		if allow == path {
+			continue
+		}
+		if pathWithinRootCanonical(path, allow) && !pathWithinRootCanonical(allow, path) {
+			out = append(out, allow)
+		}
+	}
+	return out
+}
+
+// pathWithinRootCanonical compares after EvalSymlinks so a lexical /var/...
+// candidate is recognized as lying under a canonical /private/var/... root.
+// Overlap and allow checks use this identity; backends emit lexical symlink
+// dests separately via unreadableEnforcementPath.
+func pathWithinRootCanonical(root, candidate string) bool {
+	nr := normalizeProfilePath(root)
+	if nr == "" {
+		nr = root
+	}
+	nc := normalizeProfilePath(candidate)
+	if nc == "" {
+		nc = candidate
+	}
+	return pathWithinRoot(nr, nc)
+}
+
+func credentialPathCoveredByCanonicalRoots(roots []string, path string) bool {
+	for _, root := range roots {
+		if pathWithinRootCanonical(root, path) {
 			return true
 		}
 	}
@@ -734,10 +861,10 @@ func normalizeCredentialCarveoutPath(entry string) string {
 		return ""
 	}
 	// A missing fixed subtree may be installed later by trusted host code, but
-	// an existing entry must be a real directory. In particular, never turn a
-	// plugins symlink into an allow rule for its credential-file target.
+	// an existing entry must be a real directory or regular file. Never turn a
+	// symlink into an allow rule for its credential target.
 	if info, err := os.Lstat(carveout); err == nil {
-		if !info.IsDir() {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return ""
 		}
 	} else if !os.IsNotExist(err) {
@@ -969,6 +1096,9 @@ func normalizeProfilePath(entry string) string {
 	if absolute == "" {
 		return ""
 	}
+	if canonical, _, ok := lookupTestCredentialPathAlias(absolute); ok {
+		return canonical
+	}
 	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
 		return resolved
 	}
@@ -1004,6 +1134,107 @@ func normalizeCredentialFinalPath(path string) string {
 		return ""
 	}
 	return filepath.Join(parent, filepath.Base(filepath.Clean(path)))
+}
+
+// unreadableEnforcementPath is the dest a bwrap bind or Seatbelt rule should
+// use for path. Dual-emitting the pre-EvalSymlinks spelling is only useful
+// when a symlink is in the resolution chain (a leaf symlink, an intermediate
+// directory symlink such as ~/.ssh, or macOS /var -> /private/var). In that
+// case keep the lexical pathname so a later atomic retarget still hits the
+// same dest. Other paths keep EvalSymlinks so Windows 8.3 rewrites of regular
+// files are not treated as a second dest. Overlap and allow checks use
+// canonical identity via pathWithinRootCanonical, not this.
+func unreadableEnforcementPath(path string) string {
+	lexical := normalizeProfilePathLexically(path)
+	if lexical == "" {
+		return ""
+	}
+	resolved := normalizeProfilePath(path)
+	if resolved == "" {
+		return lexical
+	}
+	if resolved == lexical || !pathResolutionInvolvesSymlink(path) {
+		return resolved
+	}
+	return lexical
+}
+
+// unreadableEnforcementPaths preserves lexical identity only when a symlink
+// is in the resolution chain, including intermediate directory symlinks
+// (for example ~/.ssh -> elsewhere with a regular key file inside). A later
+// retarget of that directory would otherwise expose the key through the
+// original pathname. Non-symlink paths stay canonical, even when EvalSymlinks
+// rewrites the spelling (Windows 8.3 short names).
+func unreadableEnforcementPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths)*2)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	for _, path := range paths {
+		lexical := normalizeProfilePathLexically(path)
+		if lexical == "" {
+			continue
+		}
+		canonical := normalizeProfilePath(path)
+		if canonical == "" {
+			add(lexical)
+			continue
+		}
+		if lexical != canonical && pathResolutionInvolvesSymlink(path) {
+			add(lexical)
+		}
+		add(canonical)
+	}
+	return out
+}
+
+// testCredentialPathAlias remaps a lexically normalized path for tests so
+// both the EvalSymlinks (canonical) deny entry and the lexical extra can be
+// pinned without creating OS symlinks. Production leaves it nil.
+var testCredentialPathAlias func(lexical string) (canonical string, involvesSymlink bool, ok bool)
+
+func lookupTestCredentialPathAlias(lexical string) (canonical string, involvesSymlink bool, ok bool) {
+	if testCredentialPathAlias == nil || lexical == "" {
+		return "", false, false
+	}
+	return testCredentialPathAlias(lexical)
+}
+
+// pathResolutionInvolvesSymlink reports whether Lstat of path or an ancestor
+// is a symlink. Dual-adding lexical + EvalSymlinks target is only valid in
+// that case: macOS /var -> /private/var and a real ~/.ssh directory symlink
+// need both spellings, but Windows EvalSymlinks 8.3 short names of regular
+// files must not dual-add.
+func pathResolutionInvolvesSymlink(path string) bool {
+	current := normalizeProfilePathLexically(path)
+	if current == "" {
+		return false
+	}
+	if _, involves, ok := lookupTestCredentialPathAlias(current); ok {
+		return involves
+	}
+	for {
+		info, err := os.Lstat(current)
+		if err == nil && info.Mode().Type() == os.ModeSymlink {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 // normalizeProfilePathLexically expands and absolutizes a profile path without

@@ -1,0 +1,1484 @@
+package sandbox
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+func denyCovered(denied []string, target string) bool {
+	norm := normalizeProfilePath(target)
+	for _, entry := range denied {
+		if entry == norm || pathWithinRoot(entry, norm) {
+			return true
+		}
+	}
+	return false
+}
+
+func denyListedExact(denied []string, target string) bool {
+	for _, entry := range denied {
+		if entry == target {
+			return true
+		}
+	}
+	return false
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks not supported or permitted in this environment: %v", err)
+	}
+}
+
+func sshPrivateKeyFixture() string {
+	return strings.Join([]string{"-----BEGIN OPENSSH", " PRIVATE KEY-----\nfixture\n"}, "")
+}
+
+func puttyPrivateKeyFixture() string {
+	return strings.Join([]string{"PuTTY-User-Key", "-File-2: ssh-rsa\nEncryption: none\n"}, "")
+}
+
+func sshGPGDenied(t *testing.T, home string, allowRead []string) []string {
+	t.Helper()
+	return credentialDenyReadPathsIn(credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}, allowRead).Paths
+}
+
+func sshGPGNormalizationHome() (home, sshDir string) {
+	if runtime.GOOS == "windows" {
+		home = `C:\Users\zero-sandbox`
+	} else {
+		home = "/home/zero-sandbox"
+	}
+	return home, filepath.Join(home, ".ssh")
+}
+
+// Option 2 of #815: deny SSH private key material and the GPG keyring, not
+// the whole of ~/.ssh. git credential files from #816 must stay denied.
+func TestCredentialDenyReadPathsDeniesSSHKeyMaterialNotDirectory(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	idPub := filepath.Join(sshDir, "id_ed25519.pub")
+	config := filepath.Join(sshDir, "config")
+	knownHosts := filepath.Join(sshDir, "known_hosts")
+	fooPEM := filepath.Join(sshDir, "foo.pem")
+	rsaPEM := filepath.Join(sshDir, "id_rsa.pem")
+	secring := filepath.Join(home, ".gnupg", "secring.gpg")
+	privateKey := filepath.Join(home, ".gnupg", "private-keys-v1.d", "keygrip.key")
+	gitCredentials := filepath.Join(home, ".git-credentials")
+	xdgCredentials := filepath.Join(home, ".config", "git", "credentials")
+
+	// Path-based denials (id_*, *.pem, ~/.gnupg, credential stores). Empty or
+	// obviously-fake bodies so scanners do not treat fixtures as live keys.
+	mustWriteFile(t, idEd, "")
+	mustWriteFile(t, idPub, "ssh-ed25519 AAAA public\n")
+	mustWriteFile(t, config, "Host *\n")
+	mustWriteFile(t, knownHosts, "github.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, fooPEM, "")
+	mustWriteFile(t, rsaPEM, "")
+	mustWriteFile(t, secring, "fake-secring")
+	mustWriteFile(t, privateKey, "fake-keygrip")
+	mustWriteFile(t, gitCredentials, "https://user:token@github.com")
+	mustWriteFile(t, xdgCredentials, "https://user:token@github.com")
+
+	denied := sshGPGDenied(t, home, nil)
+
+	if !denyCovered(denied, idEd) {
+		t.Fatalf("~/.ssh/id_ed25519 is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, idPub) {
+		t.Fatalf("~/.ssh/id_ed25519.pub was denied; public keys must stay readable")
+	}
+	if denyCovered(denied, config) {
+		t.Fatalf("~/.ssh/config was denied; git host resolution would break")
+	}
+	if denyCovered(denied, knownHosts) {
+		t.Fatalf("~/.ssh/known_hosts was denied; git host resolution would break")
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale; option 2 keeps the directory readable")
+	}
+	if !denyCovered(denied, fooPEM) {
+		t.Fatalf("~/.ssh/foo.pem is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, rsaPEM) {
+		t.Fatalf("~/.ssh/id_rsa.pem is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, secring) {
+		t.Fatalf("~/.gnupg/secring.gpg is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, privateKey) {
+		t.Fatalf("~/.gnupg/private-keys-v1.d file is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, gitCredentials) {
+		t.Fatalf("~/.git-credentials is readable after #815 SSH work; deny list = %v", denied)
+	}
+	if !denyCovered(denied, xdgCredentials) {
+		t.Fatalf("~/.config/git/credentials is readable after #815 SSH work; deny list = %v", denied)
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileOutsideSSH(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	workKey := filepath.Join(home, "keys", "work_ed25519")
+	mustWriteFile(t, workKey, "")
+	mustWriteFile(t, workKey+".pub", "ssh-ed25519 AAAA work\n")
+	mustWriteFile(t, filepath.Join(sshDir, "config"), `Host work
+    IdentityFile ~/keys/work_ed25519
+    CertificateFile ~/keys/work_ed25519.pub
+    UserKnownHostsFile ~/.ssh/known_hosts
+`)
+	mustWriteFile(t, filepath.Join(sshDir, "known_hosts"), "example.com ssh-ed25519 AAAA\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile ~/keys/work_ed25519 is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(sshDir, "known_hosts")) {
+		t.Fatalf("known_hosts was denied because a path-valued directive pointed at it")
+	}
+	if denyCovered(denied, workKey+".pub") {
+		t.Fatalf("CertificateFile *.pub was denied; option 2 keeps public keys readable")
+	}
+	if denyCovered(denied, filepath.Join(sshDir, "config")) {
+		t.Fatalf("~/.ssh/config was denied")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFilePercentD(t *testing.T) {
+	home := t.TempDir()
+	workKey := filepath.Join(home, "keys", "work_ed25519")
+	mustWriteFile(t, workKey, "")
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile %d/keys/work_ed25519\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile %%d/keys/work_ed25519 is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsFollowsSSHConfigIncludeAndStopsCycles(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	includedKey := filepath.Join(home, "keys", "included_ed25519")
+	cycleKey := filepath.Join(home, "keys", "cycle_ed25519")
+	mustWriteFile(t, includedKey, "")
+	mustWriteFile(t, cycleKey, "")
+	mustWriteFile(t, filepath.Join(sshDir, "config"), "Include extra_config\nInclude cycle_a\nInclude missing_include\n")
+	mustWriteFile(t, filepath.Join(sshDir, "extra_config"), "IdentityFile ~/keys/included_ed25519\n")
+	mustWriteFile(t, filepath.Join(sshDir, "cycle_a"), "Include cycle_b\n")
+	mustWriteFile(t, filepath.Join(sshDir, "cycle_b"), "Include cycle_a\nIdentityFile ~/keys/cycle_ed25519\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, includedKey) {
+		t.Fatalf("Include IdentityFile is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, cycleKey) {
+		t.Fatalf("cyclic Include IdentityFile is readable; deny list = %v", denied)
+	}
+}
+
+func TestSSHKeyDenyYieldsToExplicitAllowRead(t *testing.T) {
+	home := t.TempDir()
+	idEd := filepath.Join(home, ".ssh", "id_ed25519")
+	mustWriteFile(t, idEd, "")
+	target := normalizeProfilePath(idEd)
+	listed := func(entries []string) bool {
+		for _, entry := range entries {
+			if entry == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !listed(sshGPGDenied(t, home, nil)) {
+		t.Fatalf("~/.ssh/id_ed25519 is not denied without an allowRead; nothing for the grant to override")
+	}
+	if listed(sshGPGDenied(t, home, []string{home})) {
+		t.Fatalf("explicit allowRead %q did not re-include the SSH private key", home)
+	}
+}
+
+// Path-sensitive SSH/GPG handling needs a non-Linux case (or a hermetic fake
+// of the same normalization). Token expansion is GOOS-independent, so a
+// Windows home spelling exercises %d without touching the host filesystem.
+func TestExpandSSHConfigPathTokensWindowsStyleHome(t *testing.T) {
+	home := `C:\Users\zero-sandbox`
+	got, ok := expandSSHConfigPathTokens(`%d\keys\work_ed25519`, home)
+	if !ok {
+		t.Fatalf("supported %%d token was rejected")
+	}
+	want := `C:\Users\zero-sandbox\keys\work_ed25519`
+	if got != want {
+		t.Fatalf("Windows-style %%d expansion = %q, want %q", got, want)
+	}
+	got, ok = expandSSHConfigPathTokens("%d/keys/work_ed25519", home)
+	if !ok {
+		t.Fatalf("supported %%d token with slash was rejected")
+	}
+	want = `C:\Users\zero-sandbox/keys/work_ed25519`
+	if got != want {
+		t.Fatalf("Windows-style %%d with slash = %q, want %q", got, want)
+	}
+	if _, ok := expandSSHConfigPathTokens("%h/keys/work_ed25519", home); ok {
+		t.Fatalf("unsupported %%h token must be rejected")
+	}
+	got, ok = expandSSHConfigPathTokens("id%%ed25519", home)
+	if !ok || got != "id%ed25519" {
+		t.Fatalf("%% -> %% expansion = %q ok=%v, want %q", got, ok, "id%ed25519")
+	}
+}
+
+func TestExpandSSHConfigPathPercentDUsesSuppliedHome(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	got := expandSSHConfigPath("%d/keys/work_ed25519", home, sshDir)
+	want := filepath.Join(home, "keys", "work_ed25519")
+	if got != want {
+		t.Fatalf("expandSSHConfigPath(%%d) = %q, want %q", got, want)
+	}
+	if expandSSHConfigPath("%h/keys/work_ed25519", home, sshDir) != "" {
+		t.Fatalf("unsupported %%h token must be dropped")
+	}
+	if expandSSHConfigPath("%d/%h/keys", home, sshDir) != "" {
+		t.Fatalf("remaining unsupported token after %%d must be dropped")
+	}
+	got = expandSSHConfigPath("id%%ed25519", home, sshDir)
+	want = filepath.Join(sshDir, "id%ed25519")
+	if got != want {
+		t.Fatalf("literal %% expansion = %q, want %q", got, want)
+	}
+	if sshShouldDenyReferencedPath(sshDir, home, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale under the fake home")
+	}
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	if !sshShouldDenyReferencedPath(idEd, home, sshDir) {
+		t.Fatalf("well-known SSH key under fake home was not a deny candidate")
+	}
+	gnupg := filepath.Join(home, ".gnupg")
+	gitCredentials := filepath.Join(home, ".git-credentials")
+	if filepath.Base(gnupg) != ".gnupg" || filepath.Base(gitCredentials) != ".git-credentials" {
+		t.Fatalf("GPG/git credential join lost the host separator; gnupg=%q git=%q", gnupg, gitCredentials)
+	}
+}
+
+func TestCredentialDenyReadPathsKeepsLexicalSymlinkCandidates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	realDir := t.TempDir()
+
+	gnupgLink := filepath.Join(home, ".gnupg")
+	gnupgTarget := filepath.Join(realDir, "gnupg-store")
+	if err := os.MkdirAll(gnupgTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, gnupgTarget, gnupgLink)
+
+	gitLink := filepath.Join(home, ".git-credentials")
+	gitTarget := filepath.Join(realDir, "git-credentials")
+	mustWriteFile(t, gitTarget, "x")
+	mustSymlink(t, gitTarget, gitLink)
+
+	sshLink := filepath.Join(home, ".ssh", "id_ed25519")
+	sshTarget := filepath.Join(realDir, "id_ed25519")
+	mustWriteFile(t, sshTarget, "")
+	mustSymlink(t, sshTarget, sshLink)
+
+	denied := sshGPGDenied(t, home, nil)
+	for _, candidate := range []string{gnupgLink, gitLink, sshLink} {
+		lexical := normalizeProfilePathLexically(candidate)
+		if !denyListedExact(denied, lexical) {
+			t.Fatalf("lexical candidate %q missing from deny list %v", lexical, denied)
+		}
+		resolved := normalizeProfilePath(candidate)
+		if resolved != "" && resolved != lexical && !denyListedExact(denied, resolved) {
+			t.Fatalf("resolved target %q missing from deny list %v", resolved, denied)
+		}
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesNestedSSHPrivateKeys(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	nestedKey := filepath.Join(sshDir, "keys", "work")
+	nestedID := filepath.Join(sshDir, "work", "id_rsa")
+	nestedPub := filepath.Join(sshDir, "keys", "work.pub")
+	nestedConfig := filepath.Join(sshDir, "keys", "config")
+	nestedKnown := filepath.Join(sshDir, "keys", "known_hosts")
+	mustWriteFile(t, nestedKey, sshPrivateKeyFixture())
+	mustWriteFile(t, nestedID, "")
+	mustWriteFile(t, nestedPub, "ssh-ed25519 AAAA nested\n")
+	mustWriteFile(t, nestedConfig, "Host *\n")
+	mustWriteFile(t, nestedKnown, "example.com ssh-ed25519 AAAA\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, nestedKey) {
+		t.Fatalf("~/.ssh/keys/work is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, nestedID) {
+		t.Fatalf("~/.ssh/work/id_rsa is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, nestedPub) {
+		t.Fatalf("nested *.pub was denied; option 2 keeps public keys readable")
+	}
+	if denyCovered(denied, nestedConfig) {
+		t.Fatalf("nested config was denied")
+	}
+	if denyCovered(denied, nestedKnown) {
+		t.Fatalf("nested known_hosts was denied")
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapAndSeatbeltKeepLexicalCredentialSymlinkPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	realDir := t.TempDir()
+
+	gnupgLink := filepath.Join(home, ".gnupg")
+	gnupgTarget := filepath.Join(realDir, "gnupg-store")
+	if err := os.MkdirAll(gnupgTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, gnupgTarget, gnupgLink)
+
+	gitLink := filepath.Join(home, ".git-credentials")
+	gitTarget := filepath.Join(realDir, "git-credentials")
+	mustWriteFile(t, gitTarget, "x")
+	mustSymlink(t, gitTarget, gitLink)
+
+	sshLink := filepath.Join(home, ".ssh", "id_ed25519")
+	sshTarget := filepath.Join(realDir, "id_ed25519")
+	mustWriteFile(t, sshTarget, "")
+	mustSymlink(t, sshTarget, sshLink)
+
+	denied := sshGPGDenied(t, home, nil)
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	sbpl := strings.Join(denyReadRules(profile.FileSystem), "\n")
+	for _, candidate := range []string{gnupgLink, gitLink, sshLink} {
+		lexical := normalizeProfilePathLexically(candidate)
+		assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexical)
+		if !strings.Contains(sbpl, sandboxProfileString(lexical)) {
+			t.Fatalf("Seatbelt rules missing lexical pathname %q:\n%s", lexical, sbpl)
+		}
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(gitTarget))
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(sshTarget))
+	sshDir := normalizeProfilePath(filepath.Join(home, ".ssh"))
+	if !argsContainSequence(args, "--tmpfs", sshDir) {
+		t.Fatalf("expected tmpfs overlay of ~/.ssh to hide lexical key symlink: %#v", args)
+	}
+	gnupgTargetNorm := normalizeProfilePath(gnupgTarget)
+	if !argsContainSequence(args, "--tmpfs", gnupgTargetNorm) {
+		t.Fatalf("expected tmpfs mask of resolved ~/.gnupg target: %#v", args)
+	}
+
+	newGit := filepath.Join(realDir, "other-credentials")
+	mustWriteFile(t, newGit, "retargeted")
+	if err := os.Remove(gitLink); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, newGit, gitLink)
+
+	lexicalGit := normalizeProfilePathLexically(gitLink)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalGit)
+	reemitted := linuxBwrapFilesystemArgs(profile)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, reemitted, lexicalGit)
+	assertArgsContainSequence(t, reemitted, "--ro-bind", "/dev/null", normalizeProfilePath(newGit))
+
+	deniedAfter := sshGPGDenied(t, home, nil)
+	if !denyListedExact(deniedAfter, lexicalGit) {
+		t.Fatalf("lexical git-credentials path missing after retarget: %v", deniedAfter)
+	}
+	newResolved := normalizeProfilePath(gitLink)
+	if newResolved != "" && newResolved != lexicalGit && !denyListedExact(deniedAfter, newResolved) {
+		t.Fatalf("retargeted git-credentials target %q missing from deny list %v", newResolved, deniedAfter)
+	}
+	if denyCovered(deniedAfter, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestSSHConfigDiscoveryBoundsOversizedConfig(t *testing.T) {
+	home := t.TempDir()
+	workKey := filepath.Join(home, "keys", "work_ed25519")
+	mustWriteFile(t, workKey, "")
+	padding := strings.Repeat("#", sshConfigMaxBytes+64*1024)
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile ~/keys/work_ed25519\n"+padding)
+
+	start := time.Now()
+	denied := sshGPGDenied(t, home, nil)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("oversized config discovery took %s", elapsed)
+	}
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile in the first 1 MiB of an oversized config is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsFollowsSymlinkedSSHConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	workKey := filepath.Join(home, "keys", "work_ed25519")
+	mustWriteFile(t, workKey, "")
+	realConfig := filepath.Join(t.TempDir(), "root-config")
+	mustWriteFile(t, realConfig, "IdentityFile ~/keys/work_ed25519\n")
+	mustSymlink(t, realConfig, filepath.Join(home, ".ssh", "config"))
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile via symlinked ~/.ssh/config is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh", "config")) {
+		t.Fatalf("~/.ssh/config was denied")
+	}
+}
+
+func TestCredentialDenyReadPathsFollowsSymlinkedSSHConfigInclude(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	includedKey := filepath.Join(home, "keys", "included_ed25519")
+	mustWriteFile(t, includedKey, "")
+	realInclude := filepath.Join(t.TempDir(), "extra_config")
+	mustWriteFile(t, realInclude, "IdentityFile ~/keys/included_ed25519\n")
+	mustWriteFile(t, filepath.Join(sshDir, "config"), "Include extra_config\n")
+	mustSymlink(t, realInclude, filepath.Join(sshDir, "extra_config"))
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, includedKey) {
+		t.Fatalf("IdentityFile via symlinked Include target is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestUnreadableEnforcementPreservesLexicalWhenSSHDirIsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	realSSH := filepath.Join(t.TempDir(), "ssh-store")
+	idEd := filepath.Join(realSSH, "id_ed25519")
+	mustWriteFile(t, idEd, "")
+	mustSymlink(t, realSSH, filepath.Join(home, ".ssh"))
+
+	lexicalKey := filepath.Join(home, ".ssh", "id_ed25519")
+	lexical := normalizeProfilePathLexically(lexicalKey)
+	if info, err := os.Lstat(lexical); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Type() == os.ModeSymlink {
+		t.Fatalf("expected regular leaf under a symlinked ~/.ssh, got symlink")
+	}
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyListedExact(denied, lexical) {
+		t.Fatalf("lexical candidate %q missing from deny list %v", lexical, denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+
+	enforced := unreadableEnforcementPaths(denied)
+	if !denyListedExact(enforced, lexical) {
+		t.Fatalf("lexical path %q missing from enforcement list %v", lexical, enforced)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	sbpl := strings.Join(denyReadRules(profile.FileSystem), "\n")
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", lexical)
+	if !strings.Contains(sbpl, sandboxProfileString(lexical)) {
+		t.Fatalf("Seatbelt rules missing lexical pathname %q:\n%s", lexical, sbpl)
+	}
+}
+
+func TestSSHShouldDenyReferencedPathExemptsKnownHostsFamilyAndDevNull(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	keepReadable := []string{
+		filepath.Join(sshDir, "known_hosts"),
+		filepath.Join(sshDir, "known_hosts2"),
+		filepath.Join(sshDir, "known_hosts.old"),
+		filepath.Join(sshDir, "ssh_known_hosts"),
+		filepath.Join(sshDir, "ssh_known_hosts2"),
+		"/dev/null",
+		os.DevNull,
+	}
+	for _, path := range keepReadable {
+		if sshShouldDenyReferencedPath(path, home, sshDir) {
+			t.Fatalf("%q must stay readable (known-hosts family or /dev/null)", path)
+		}
+	}
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	if !sshShouldDenyReferencedPath(idEd, home, sshDir) {
+		t.Fatalf("well-known SSH key under fake home was not a deny candidate")
+	}
+	if !sshShouldDenyReferencedPath(filepath.Join(sshDir, "custom-key"), home, sshDir) {
+		t.Fatalf("non-exempt referenced path was not a deny candidate")
+	}
+	if !sshShouldDenyReferencedPath(filepath.Join(sshDir, "known_hosts.private"), home, sshDir) {
+		t.Fatalf("known_hosts.private must not be treated as a known-hosts family name")
+	}
+}
+
+func TestCredentialDenyReadPathsKeepsKnownHostsFamilyFromConfig(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	known2 := filepath.Join(sshDir, "known_hosts2")
+	sshKnown := filepath.Join(home, "ssh_known_hosts")
+	mustWriteFile(t, known2, "example.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, sshKnown, "example.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, filepath.Join(sshDir, "config"), "UserKnownHostsFile ~/.ssh/known_hosts2 /dev/null\nGlobalKnownHostsFile "+sshKnown+"\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if denyCovered(denied, known2) {
+		t.Fatalf("known_hosts2 was denied because UserKnownHostsFile pointed at it: %v", denied)
+	}
+	if denyCovered(denied, sshKnown) {
+		t.Fatalf("ssh_known_hosts was denied because GlobalKnownHostsFile pointed at it: %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(sshDir, "config")) {
+		t.Fatalf("~/.ssh/config was denied")
+	}
+	if denyListedExact(denied, filepath.Clean("/dev/null")) || denyListedExact(denied, "/dev/null") {
+		t.Fatalf("/dev/null was denied from UserKnownHostsFile: %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestWalkSSHPrivateKeyFilesFindsKeyAfterCrowdedSiblingDir(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	junkDir := filepath.Join(sshDir, "aaa_known_hosts.d")
+	if err := os.MkdirAll(junkDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < sshPrivateKeyWalkMaxEntries+32; i++ {
+		mustWriteFile(t, filepath.Join(junkDir, fmt.Sprintf("host-%04d", i)), "ssh-ed25519 AAAA\n")
+	}
+	nestedKey := filepath.Join(sshDir, "keys", "work_ed25519")
+	mustWriteFile(t, nestedKey, sshPrivateKeyFixture())
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, nestedKey) {
+		t.Fatalf("private key in a sibling of a crowded directory was not found; deny list = %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesPuttyPPK(t *testing.T) {
+	home := t.TempDir()
+	ppk := filepath.Join(home, ".ssh", "putty-key.ppk")
+	custom := filepath.Join(home, ".ssh", "custom-putty")
+	mustWriteFile(t, ppk, "")
+	mustWriteFile(t, custom, puttyPrivateKeyFixture())
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, ppk) {
+		t.Fatalf(".ppk is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, custom) {
+		t.Fatalf("PuTTY-User-Key-File sniff missed custom-putty; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsPinsResolvedTargetWithoutOSSymlink(t *testing.T) {
+	home := t.TempDir()
+	lexicalKey := normalizeProfilePathLexically(filepath.Join(home, ".ssh", "id_ed25519"))
+	resolvedKey := filepath.Join(t.TempDir(), "resolved-id_ed25519-target")
+	testCredentialPathAlias = func(lexical string) (string, bool, bool) {
+		if lexical == lexicalKey {
+			return resolvedKey, true, true
+		}
+		return "", false, false
+	}
+	t.Cleanup(func() { testCredentialPathAlias = nil })
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyListedExact(denied, resolvedKey) {
+		t.Fatalf("resolved-target half missing; removing the sshKeys candidates append would cause this: %v", denied)
+	}
+	if !denyListedExact(denied, lexicalKey) {
+		t.Fatalf("lexical symlink extra missing: %v", denied)
+	}
+
+	enforced := unreadableEnforcementPaths([]string{lexicalKey})
+	if !denyListedExact(enforced, resolvedKey) {
+		t.Fatalf("enforcement list missing resolved target %q: %v", resolvedKey, enforced)
+	}
+	if !denyListedExact(enforced, lexicalKey) {
+		t.Fatalf("enforcement list missing lexical extra %q: %v", lexicalKey, enforced)
+	}
+}
+
+func TestUnreadableEnforcementPathsSkipsNonSymlinkSpellingRewrite(t *testing.T) {
+	home := t.TempDir()
+	lexicalKey := normalizeProfilePathLexically(filepath.Join(home, ".ssh", "id_ed25519"))
+	shortName := filepath.Join(t.TempDir(), "RUNNER~1", "id_ed25519")
+	testCredentialPathAlias = func(lexical string) (string, bool, bool) {
+		if lexical == lexicalKey {
+			return shortName, false, true
+		}
+		return "", false, false
+	}
+	t.Cleanup(func() { testCredentialPathAlias = nil })
+
+	if pathResolutionInvolvesSymlink(lexicalKey) {
+		t.Fatalf("8.3-style rewrite must not count as a symlink")
+	}
+	enforced := unreadableEnforcementPaths([]string{lexicalKey})
+	if denyListedExact(enforced, lexicalKey) {
+		t.Fatalf("non-symlink spelling rewrite dual-added lexical dest %q: %v", lexicalKey, enforced)
+	}
+	if !denyListedExact(enforced, shortName) {
+		t.Fatalf("canonical 8.3-style dest missing: %v", enforced)
+	}
+	if got := unreadableEnforcementPath(lexicalKey); got != shortName {
+		t.Fatalf("bwrap dest = %q, want canonical %q", got, shortName)
+	}
+
+	denied := sshGPGDenied(t, home, nil)
+	if denyListedExact(denied, lexicalKey) && lexicalKey != shortName {
+		t.Fatalf("lexical 8.3 extra was dual-added: %v", denied)
+	}
+	if !denyListedExact(denied, shortName) {
+		t.Fatalf("canonical ssh key missing after 8.3-style rewrite: %v", denied)
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesKnownHostsPrivateNamedKey(t *testing.T) {
+	home := t.TempDir()
+	key := filepath.Join(home, ".ssh", "known_hosts.private")
+	mustWriteFile(t, key, sshPrivateKeyFixture())
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, key) {
+		t.Fatalf("known_hosts.private with a private-key payload is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh", "known_hosts")) {
+		t.Fatalf("supported known_hosts was denied")
+	}
+}
+
+func TestWalkSSHPrivateKeyFilesDeniesCustomNamedSymlinkToPrivateKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	target := filepath.Join(t.TempDir(), "real-key")
+	mustWriteFile(t, target, sshPrivateKeyFixture())
+	link := filepath.Join(home, ".ssh", "work")
+	mustSymlink(t, target, link)
+
+	denied := sshGPGDenied(t, home, nil)
+	lexical := normalizeProfilePathLexically(link)
+	if !denyListedExact(denied, lexical) && !denyListedExact(denied, link) {
+		t.Fatalf("custom-named symlink lost its lexical deny entry; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsNestedGPGAllowReadKeepsParentDirAndCarvesOut(t *testing.T) {
+	home := t.TempDir()
+	key := filepath.Join(home, ".gnupg", "private-keys-v1.d", "keygrip.key")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, filepath.Join(home, ".gnupg", "secring.gpg"), "fake-secring")
+	mustWriteFile(t, filepath.Join(home, ".git-credentials"), "https://user:token@github.com")
+
+	allow := []string{key}
+	denied := sshGPGDenied(t, home, allow)
+	gnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	if !denyListedExact(denied, gnupg) {
+		t.Fatalf("nested allowRead must keep parent ~/.gnupg in DenyReadIfExists: %v", denied)
+	}
+	if !denyCovered(denied, filepath.Join(home, ".git-credentials")) {
+		t.Fatalf("git-credentials must stay denied when only a nested GPG key is allowed: %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowRead(t *testing.T) {
+	home := t.TempDir()
+	key := filepath.Join(home, ".gnupg", "private-keys-v1.d", "keygrip.key")
+	secring := filepath.Join(home, ".gnupg", "secring.gpg")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, secring, "fake-secring")
+
+	allow := []string{key}
+	creds := credentialDenyReadPathsIn(credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}, allow)
+	gnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	if !denyListedExact(creds.Paths, gnupg) {
+		t.Fatalf("nested allowRead must keep parent ~/.gnupg in DenyReadIfExists: %v", creds.Paths)
+	}
+	if !denyListedExact(creds.Carveouts, normalizeProfilePath(key)) {
+		t.Fatalf("nested allowRead key must be in DenyReadCarveouts: %v", creds.Carveouts)
+	}
+	if denyCovered(creds.Carveouts, secring) {
+		t.Fatalf("secring.gpg was unexpectedly carved out: %v", creds.Carveouts)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator), normalizeProfilePath(key)},
+			DenyReadIfExists:  creds.Paths,
+			DenyReadCarveouts: creds.Carveouts,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	if !argsContainSequence(args, "--perms", "111", "--tmpfs", gnupg) {
+		t.Fatalf("bwrap should tmpfs-mask ~/.gnupg to protect sibling secrets: %#v", args)
+	}
+	normKey := normalizeProfilePath(key)
+	if !argsContainSequence(args, "--ro-bind", normKey, normKey) {
+		t.Fatalf("bwrap should --ro-bind the carved-out key: %#v", args)
+	}
+	normSecring := normalizeProfilePath(secring)
+	if argsContainSequence(args, "--ro-bind", normSecring, normSecring) {
+		t.Fatalf("bwrap unexpectedly rebound secring: %#v", args)
+	}
+
+	full := seatbeltProfileFromPermissionProfile(profile, Policy{}, "")
+	denyIdx := strings.LastIndex(full, `(deny file-read* (subpath "`+sandboxProfileString(gnupg)+`"))`)
+	if denyIdx < 0 {
+		t.Fatalf("full Seatbelt profile must deny ~/.gnupg subtree to protect sibling secrets:\n%s", full)
+	}
+	keyLit := sandboxProfileString(normalizeProfilePath(key))
+	allowIdx := strings.LastIndex(full, `(allow file-read* file-test-existence (literal "`+keyLit+`"))`)
+	if allowIdx < 0 || allowIdx < denyIdx {
+		t.Fatalf("Seatbelt profile must allow the carved-out key AFTER the parent deny rule:\n%s", full)
+	}
+	if strings.Contains(full, `(allow file-read* file-test-existence (literal "`+sandboxProfileString(secring)+`"))`) {
+		t.Fatalf("Seatbelt profile must not allow sibling secring.gpg:\n%s", full)
+	}
+}
+
+func assertBwrapDoesNotFollowBindSymlinkDest(t *testing.T, args []string, lexical string) {
+	t.Helper()
+	if argsContainSequence(args, "--ro-bind", "/dev/null", lexical) {
+		t.Fatalf("bwrap --ro-bind /dev/null used symlink dest %q (follows / ENOENTs): %#v", lexical, args)
+	}
+}
+
+func TestExpandSSHConfigPathHomeEnvFromSuppliedHome(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	got := expandSSHConfigPath("${HOME}/keys/work_ed25519", home, sshDir)
+	want := filepath.Join(home, "keys", "work_ed25519")
+	if got != want {
+		t.Fatalf("expandSSHConfigPath(${HOME}) = %q, want %q", got, want)
+	}
+	got = expandSSHConfigPath("$HOME/keys/work_ed25519", home, sshDir)
+	if got != want {
+		t.Fatalf("expandSSHConfigPath($HOME) = %q, want %q", got, want)
+	}
+	if expandSSHConfigPath("${NOTHOME}/keys/x", home, sshDir) != "" {
+		t.Fatalf("unknown ${NOTHOME} must be dropped, not joined under ~/.ssh")
+	}
+	if expandSSHConfigPath("$NOTHOME/keys/x", home, sshDir) != "" {
+		t.Fatalf("unknown $NOTHOME must be dropped, not joined under ~/.ssh")
+	}
+	nonsense := filepath.Join(sshDir, "${NOTHOME}", "keys", "x")
+	if expandSSHConfigPath("${NOTHOME}/keys/x", home, sshDir) == nonsense {
+		t.Fatalf("unknown ${NOTHOME} was joined under ~/.ssh as %q", nonsense)
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileHomeEnv(t *testing.T) {
+	home := t.TempDir()
+	workKey := filepath.Join(home, "keys", "work_ed25519")
+	mustWriteFile(t, workKey, "")
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile ${HOME}/keys/work_ed25519\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile ${HOME}/keys/work_ed25519 is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile $HOME/keys/work_ed25519\nIdentityFile ${NOTHOME}/keys/x\n")
+	denied = sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workKey) {
+		t.Fatalf("IdentityFile $HOME/keys/work_ed25519 is readable; deny list = %v", denied)
+	}
+	nonsense := filepath.Join(home, ".ssh", "${NOTHOME}", "keys", "x")
+	if denyListedExact(denied, nonsense) || denyCovered(denied, nonsense) {
+		t.Fatalf("unknown ${NOTHOME} was joined under ~/.ssh: %v", denied)
+	}
+}
+
+func TestWalkSSHPrivateKeyFilesDeniesPrivateKeyPayloadNamedPub(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	fakePub := filepath.Join(sshDir, "work.pub")
+	realPub := filepath.Join(sshDir, "id_ed25519.pub")
+	mustWriteFile(t, fakePub, sshPrivateKeyFixture())
+	mustWriteFile(t, realPub, "ssh-ed25519 AAAA public\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakePub) {
+		t.Fatalf("private-key payload at ~/.ssh/work.pub is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realPub) {
+		t.Fatalf("real ssh-ed25519 .pub was denied; public keys must stay readable")
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFilePubWithPrivateKeyPayload(t *testing.T) {
+	home := t.TempDir()
+	fakePub := filepath.Join(home, "keys", "work.pub")
+	realPub := filepath.Join(home, "keys", "id_ed25519.pub")
+	mustWriteFile(t, fakePub, sshPrivateKeyFixture())
+	mustWriteFile(t, realPub, "ssh-ed25519 AAAA public\n")
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile ~/keys/work.pub\nIdentityFile ~/keys/id_ed25519.pub\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakePub) {
+		t.Fatalf("IdentityFile ~/keys/work.pub with private-key payload is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realPub) {
+		t.Fatalf("real ssh-ed25519 .pub at IdentityFile path was denied; public keys must stay readable")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileNamedKnownHosts(t *testing.T) {
+	home := t.TempDir()
+	fakeKnown := filepath.Join(home, "keys", "known_hosts")
+	realKnown := filepath.Join(home, "other", "known_hosts")
+	mustWriteFile(t, fakeKnown, sshPrivateKeyFixture())
+	mustWriteFile(t, realKnown, "example.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile ~/keys/known_hosts\nUserKnownHostsFile ~/other/known_hosts\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakeKnown) {
+		t.Fatalf("IdentityFile of a private-key file named known_hosts is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realKnown) {
+		t.Fatalf("real known_hosts file was denied")
+	}
+	if denyCovered(denied, filepath.Join(home, ".ssh")) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowReadThroughDirSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	gnupgTarget := filepath.Join(t.TempDir(), "gnupg-store")
+	key := filepath.Join(gnupgTarget, "private-keys-v1.d", "keygrip.key")
+	secring := filepath.Join(gnupgTarget, "secring.gpg")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, secring, "fake-secring")
+	mustSymlink(t, gnupgTarget, filepath.Join(home, ".gnupg"))
+
+	allow := []string{key}
+	creds := credentialDenyReadPathsIn(credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}, allow)
+	canonicalGnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	if canonicalGnupg == "" || !denyListedExact(creds.Paths, canonicalGnupg) {
+		t.Fatalf("canonical ~/.gnupg dir deny must be retained: %v", creds.Paths)
+	}
+	if !denyListedExact(creds.Carveouts, normalizeProfilePath(key)) {
+		t.Fatalf("nested allowRead key must be in DenyReadCarveouts: %v", creds.Carveouts)
+	}
+	if denyCovered(creds.Carveouts, secring) {
+		t.Fatalf("secring.gpg must not be carved out: %v", creds.Carveouts)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator), normalizeProfilePath(key)},
+			DenyReadIfExists:  creds.Paths,
+			DenyReadCarveouts: creds.Carveouts,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	if !argsContainSequence(args, "--perms", "111", "--tmpfs", canonicalGnupg) {
+		t.Fatalf("bwrap should tmpfs-mask canonical gnupg to protect sibling secrets: %#v", args)
+	}
+	normKey := normalizeProfilePath(key)
+	if !argsContainSequence(args, "--ro-bind", normKey, normKey) {
+		t.Fatalf("bwrap should --ro-bind carved-out key: %#v", args)
+	}
+	normSecring := normalizeProfilePath(secring)
+	if argsContainSequence(args, "--ro-bind", normSecring, normSecring) {
+		t.Fatalf("bwrap unexpectedly rebound secring: %#v", args)
+	}
+
+	full := seatbeltProfileFromPermissionProfile(profile, Policy{}, "")
+	denyIdx := strings.LastIndex(full, `(deny file-read* (subpath "`+sandboxProfileString(canonicalGnupg)+`"))`)
+	if denyIdx < 0 {
+		t.Fatalf("full Seatbelt profile must deny canonical ~/.gnupg subtree:\n%s", full)
+	}
+	keyLit := sandboxProfileString(normalizeProfilePath(key))
+	allowIdx := strings.LastIndex(full, `(allow file-read* file-test-existence (literal "`+keyLit+`"))`)
+	if allowIdx < 0 || allowIdx < denyIdx {
+		t.Fatalf("Seatbelt profile must allow the carved-out key AFTER the parent deny rule:\n%s", full)
+	}
+	if strings.Contains(full, `(allow file-read* file-test-existence (literal "`+sandboxProfileString(secring)+`"))`) {
+		t.Fatalf("Seatbelt profile must not allow sibling secring.gpg:\n%s", full)
+	}
+}
+
+func TestLinuxBwrapAndSeatbeltHonorNestedGPGDirAllowReadThroughDirSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	gnupgTarget := filepath.Join(t.TempDir(), "gnupg-store")
+	keyDir := filepath.Join(gnupgTarget, "private-keys-v1.d")
+	key := filepath.Join(keyDir, "keygrip.key")
+	mustWriteFile(t, key, "fake-keygrip")
+	mustWriteFile(t, filepath.Join(gnupgTarget, "secring.gpg"), "fake-secring")
+	mustSymlink(t, gnupgTarget, filepath.Join(home, ".gnupg"))
+
+	allow := []string{filepath.Join(home, ".gnupg", "private-keys-v1.d")}
+	creds := credentialDenyReadPathsIn(credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}, allow)
+	canonicalGnupg := normalizeProfilePath(filepath.Join(home, ".gnupg"))
+	canonicalKeyDir := normalizeCredentialCarveoutPath(filepath.Join(home, ".gnupg", "private-keys-v1.d"))
+	if canonicalKeyDir == "" {
+		t.Fatalf("nested directory grant did not produce a credential carveout")
+	}
+	if canonicalGnupg == "" || !denyListedExact(creds.Paths, canonicalGnupg) {
+		t.Fatalf("canonical ~/.gnupg must stay denied so the directory carveout can re-bind: %v", creds.Paths)
+	}
+	if !denyListedExact(creds.Carveouts, canonicalKeyDir) {
+		t.Fatalf("canonical private-keys-v1.d carveout missing: %v", creds.Carveouts)
+	}
+	if denyListedExact(creds.Paths, canonicalKeyDir) || denyListedExact(creds.Paths, keyDir) {
+		t.Fatalf("nested directory grant itself was emitted as a deny path: %v", creds.Paths)
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator), canonicalKeyDir},
+			DenyReadIfExists:  creds.Paths,
+			DenyReadCarveouts: creds.Carveouts,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	assertArgsContainSequence(t, args, "--perms", "111", "--tmpfs", canonicalGnupg)
+	assertArgsContainSequence(t, args, "--ro-bind", canonicalKeyDir, canonicalKeyDir)
+	assertArgsContainSequence(t, args, "--remount-ro", canonicalGnupg)
+	bindIdx := argsSequenceIndex(args, "--ro-bind", canonicalKeyDir, canonicalKeyDir)
+	remountIdx := argsSequenceIndex(args, "--remount-ro", canonicalGnupg)
+	if bindIdx < 0 || remountIdx < 0 || bindIdx > remountIdx {
+		t.Fatalf("canonical carveout bind (%d) must precede tmpfs remount-ro (%d): %#v", bindIdx, remountIdx, args)
+	}
+
+	sbpl := strings.Join(denyReadCarveoutRules(profile.FileSystem), "\n")
+	keyDirLit := sandboxProfileString(canonicalKeyDir)
+	if !strings.Contains(sbpl, `(allow file-read* file-test-existence (subpath "`+keyDirLit+`"))`) {
+		t.Fatalf("Seatbelt carveout rules missing canonical private-keys-v1.d:\n%s", sbpl)
+	}
+	full := seatbeltProfileFromPermissionProfile(profile, Policy{}, "")
+	if !strings.Contains(full, `(allow file-read* file-test-existence (subpath "`+keyDirLit+`"))`) {
+		t.Fatalf("full Seatbelt profile missing canonical directory carveout:\n%s", full)
+	}
+}
+
+func TestLinuxBwrapMasksLiveAndDanglingCredentialSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	realDir := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	config := filepath.Join(sshDir, "config")
+	knownHosts := filepath.Join(sshDir, "known_hosts")
+	pub := filepath.Join(sshDir, "id_ed25519.pub")
+	mustWriteFile(t, config, "Host *\n")
+	mustWriteFile(t, knownHosts, "github.com ssh-ed25519 AAAA\n")
+	mustWriteFile(t, pub, "ssh-ed25519 AAAA public\n")
+
+	liveTarget := filepath.Join(realDir, "id_ed25519")
+	mustWriteFile(t, liveTarget, sshPrivateKeyFixture())
+	liveLink := filepath.Join(sshDir, "id_ed25519")
+	mustSymlink(t, liveTarget, liveLink)
+
+	danglingTarget := filepath.Join(realDir, "missing-id_rsa")
+	danglingLink := filepath.Join(sshDir, "id_rsa")
+	mustSymlink(t, danglingTarget, danglingLink)
+
+	gitTarget := filepath.Join(realDir, "git-credentials")
+	mustWriteFile(t, gitTarget, "x")
+	gitLink := filepath.Join(home, ".git-credentials")
+	mustSymlink(t, gitTarget, gitLink)
+
+	denied := sshGPGDenied(t, home, nil)
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+
+	lexicalLive := normalizeProfilePathLexically(liveLink)
+	lexicalDangling := normalizeProfilePathLexically(danglingLink)
+	lexicalGit := normalizeProfilePathLexically(gitLink)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalLive)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalDangling)
+	assertBwrapDoesNotFollowBindSymlinkDest(t, args, lexicalGit)
+
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(liveTarget))
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(gitTarget))
+	if argsContainSequence(args, "--ro-bind", "/dev/null", danglingTarget) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", normalizeProfilePath(danglingTarget)) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", lexicalDangling) {
+		t.Fatalf("dangling symlink must not be a hard --ro-bind dest: %#v", args)
+	}
+
+	sshDirNorm := normalizeProfilePath(sshDir)
+	if !argsContainSequence(args, "--tmpfs", sshDirNorm) {
+		t.Fatalf("expected tmpfs overlay of ~/.ssh for live/dangling key symlinks: %#v", args)
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(config), normalizeProfilePath(config))
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(knownHosts), normalizeProfilePath(knownHosts))
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(pub), normalizeProfilePath(pub))
+	if argsContainSequence(args, "--ro-bind", liveLink, liveLink) ||
+		argsContainSequence(args, "--ro-bind", danglingLink, danglingLink) {
+		t.Fatalf("denied symlink basenames were rebound into ~/.ssh overlay: %#v", args)
+	}
+	if argsContainSequence(args, "--tmpfs", home) || argsContainSequence(args, "--tmpfs", filepath.Clean(home)) {
+		t.Fatalf("HOME must never be tmpfs-overlaid: %#v", args)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapSkipsFileBindsUnderOverlaidCredentialParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	realDir := t.TempDir()
+	workTarget := filepath.Join(realDir, "work")
+	mustWriteFile(t, workTarget, sshPrivateKeyFixture())
+	workLink := filepath.Join(sshDir, "work")
+	mustSymlink(t, workTarget, workLink)
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	mustWriteFile(t, idEd, sshPrivateKeyFixture())
+	config := filepath.Join(sshDir, "config")
+	mustWriteFile(t, config, "Host *\n")
+	danglingSibling := filepath.Join(sshDir, "config.local")
+	mustSymlink(t, filepath.Join(realDir, "missing-config.local"), danglingSibling)
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workLink) {
+		t.Fatalf("denied symlink ~/.ssh/work missing from deny list: %v", denied)
+	}
+	if !denyCovered(denied, idEd) {
+		t.Fatalf("denied regular ~/.ssh/id_ed25519 missing from deny list: %v", denied)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	sshDirNorm := normalizeProfilePath(sshDir)
+	if !argsContainSequence(args, "--tmpfs", sshDirNorm) {
+		t.Fatalf("expected tmpfs overlay of ~/.ssh once a denied symlink is present: %#v", args)
+	}
+	if argsContainSequence(args, "--ro-bind", "/dev/null", idEd) ||
+		argsContainSequence(args, "--ro-bind", "/dev/null", normalizeProfilePath(idEd)) {
+		t.Fatalf("--ro-bind /dev/null onto regular file whose parent was tmpfs-overlaid: %#v", args)
+	}
+	if argsContainSequence(args, "--ro-bind", idEd, idEd) {
+		t.Fatalf("denied regular key was rebound into ~/.ssh overlay: %#v", args)
+	}
+	if argsContainSequence(args, "--ro-bind", danglingSibling, danglingSibling) {
+		t.Fatalf("dangling sibling used as --ro-bind source: %#v", args)
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(config), normalizeProfilePath(config))
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestLinuxBwrapBindsDeniedFileWhenParentOverlayFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	realDir := t.TempDir()
+	workTarget := filepath.Join(realDir, "work")
+	mustWriteFile(t, workTarget, sshPrivateKeyFixture())
+	workLink := filepath.Join(sshDir, "work")
+	mustSymlink(t, workTarget, workLink)
+	idEd := filepath.Join(sshDir, "id_ed25519")
+	mustWriteFile(t, idEd, sshPrivateKeyFixture())
+	config := filepath.Join(sshDir, "config")
+	mustWriteFile(t, config, "Host *\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, workLink) {
+		t.Fatalf("denied symlink ~/.ssh/work missing from deny list: %v", denied)
+	}
+	if !denyCovered(denied, idEd) {
+		t.Fatalf("denied regular ~/.ssh/id_ed25519 missing from deny list: %v", denied)
+	}
+
+	// Execute-only: Lstat of children still classifies the symlink+file, but
+	// ReadDir fails so the tmpfs overlay is not applied. Build the deny list
+	// first while the directory is readable.
+	if err := os.Chmod(sshDir, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sshDir, 0o700) })
+	if _, err := os.ReadDir(sshDir); err == nil {
+		t.Skip("parent ReadDir succeeded after chmod 0111 (likely running as root)")
+	}
+
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			DenyReadIfExists: denied,
+		},
+	}
+	args := linuxBwrapFilesystemArgs(profile)
+	sshDirNorm := normalizeProfilePath(sshDir)
+	if argsContainSequence(args, "--tmpfs", sshDirNorm) {
+		t.Fatalf("overlay must not apply when parent ReadDir fails: %#v", args)
+	}
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(idEd))
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesSSHConfigIdentityFileNamedConfigOrAuthorizedKeys(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	fakeConfig := filepath.Join(home, "keys", "config")
+	fakeAuthorized := filepath.Join(home, "keys", "authorized_keys")
+	realConfig := filepath.Join(sshDir, "config")
+	realAuthorized := filepath.Join(sshDir, "authorized_keys")
+	mustWriteFile(t, fakeConfig, sshPrivateKeyFixture())
+	mustWriteFile(t, fakeAuthorized, sshPrivateKeyFixture())
+	mustWriteFile(t, realAuthorized, "ssh-ed25519 AAAA user@host\n")
+	mustWriteFile(t, realConfig, "IdentityFile ~/keys/config\nIdentityFile ~/keys/authorized_keys\nUserKnownHostsFile /dev/null\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if !denyCovered(denied, fakeConfig) {
+		t.Fatalf("IdentityFile ~/keys/config with private-key payload is readable; deny list = %v", denied)
+	}
+	if !denyCovered(denied, fakeAuthorized) {
+		t.Fatalf("IdentityFile ~/keys/authorized_keys with private-key payload is readable; deny list = %v", denied)
+	}
+	if denyCovered(denied, realConfig) {
+		t.Fatalf("real ~/.ssh/config was denied")
+	}
+	if denyCovered(denied, realAuthorized) {
+		t.Fatalf("real ~/.ssh/authorized_keys was denied")
+	}
+	if denyListedExact(denied, filepath.Clean("/dev/null")) || denyListedExact(denied, "/dev/null") {
+		t.Fatalf("/dev/null was denied from UserKnownHostsFile: %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale")
+	}
+}
+
+func TestCredentialDenyReadPathsDeniesGNUPGHOME(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read is not applied on Windows")
+	}
+	home := t.TempDir()
+	alt := t.TempDir()
+	secring := filepath.Join(alt, "secring.gpg")
+	key := filepath.Join(alt, "private-keys-v1.d", "keygrip.key")
+	mustWriteFile(t, secring, "fake-secring")
+	mustWriteFile(t, key, "fake-keygrip")
+	env := []string{"HOME=" + home, "GNUPGHOME=" + alt}
+
+	t.Run("inherited environment", func(t *testing.T) {
+		options := credentialPathOptionsFromEnvironment([]string{home}, env)
+		denied := credentialDenyReadPathsIn(options, nil).Paths
+		if !denyCovered(denied, alt) {
+			t.Fatalf("inherited GNUPGHOME is readable; deny list = %v", denied)
+		}
+		if !denyCovered(denied, secring) {
+			t.Fatalf("GNUPGHOME secring is readable; deny list = %v", denied)
+		}
+		if !denyCovered(denied, key) {
+			t.Fatalf("GNUPGHOME private-keys-v1.d is readable; deny list = %v", denied)
+		}
+	})
+
+	t.Run("command-supplied environment", func(t *testing.T) {
+		creds := credentialDenyReadPaths(Policy{}, "", env, nil)
+		if !denyCovered(creds.Paths, alt) {
+			t.Fatalf("command-supplied GNUPGHOME is readable; deny list = %v", creds.Paths)
+		}
+		if !denyCovered(creds.Paths, key) {
+			t.Fatalf("command-supplied GNUPGHOME subtree is readable; deny list = %v", creds.Paths)
+		}
+	})
+
+	t.Run("allowRead reincludes", func(t *testing.T) {
+		options := credentialPathOptionsFromEnvironment([]string{home}, env)
+		denied := credentialDenyReadPathsIn(options, []string{alt}).Paths
+		if denyCovered(denied, alt) {
+			t.Fatalf("allowRead GNUPGHOME is still denied: %v", denied)
+		}
+		if denyCovered(denied, key) {
+			t.Fatalf("allowRead GNUPGHOME subtree is still denied: %v", denied)
+		}
+	})
+}
+
+func TestCredentialDenyReadPathsTraversesNestedDirectorySymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read is not applied on Windows")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	keyStore := t.TempDir()
+	workKey := filepath.Join(keyStore, "work")
+	mustWriteFile(t, workKey, sshPrivateKeyFixture())
+
+	// Symlink ~/.ssh/keys -> keyStore
+	mustSymlink(t, keyStore, filepath.Join(sshDir, "keys"))
+	mustWriteFile(t, filepath.Join(sshDir, "config"), "Host *\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	lexicalTarget := filepath.Join(sshDir, "keys", "work")
+	if !denyCovered(denied, lexicalTarget) && !denyCovered(denied, workKey) {
+		t.Fatalf("key reachable through directory symlink was not denied; deny list = %v", denied)
+	}
+	if denyCovered(denied, filepath.Join(sshDir, "config")) {
+		t.Fatalf("~/.ssh/config was unexpectedly denied: %v", denied)
+	}
+	if denyCovered(denied, sshDir) {
+		t.Fatalf("~/.ssh was denied wholesale: %v", denied)
+	}
+}
+
+func TestOpenSSHPathParsingEscapesAndEnv(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	t.Setenv("SSH_KEY_DIR", filepath.Join(home, "secret-keys"))
+
+	t.Run("unquoted escaped spaces", func(t *testing.T) {
+		tokens := splitSSHTokens(`IdentityFile ~/My\ Keys/work`)
+		if len(tokens) != 2 || tokens[0] != "IdentityFile" || tokens[1] != "~/My Keys/work" {
+			t.Fatalf("splitSSHTokens unexpected tokens: %#v", tokens)
+		}
+	})
+
+	t.Run("environment variable expansion", func(t *testing.T) {
+		got := expandSSHConfigPath("${SSH_KEY_DIR}/work", home, sshDir)
+		want := filepath.Join(home, "secret-keys", "work")
+		if got != want {
+			t.Fatalf("expandSSHConfigPath(${SSH_KEY_DIR}) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("unresolvable variable dropped", func(t *testing.T) {
+		got := expandSSHConfigPath("${DEFINITELY_UNSET_VAR_XYZ}/work", home, sshDir)
+		if got != "" {
+			t.Fatalf("expected unset variable to be dropped, got %q", got)
+		}
+	})
+}
+
+func TestAllowReadSingleFileInsideGNUPGPreservesSiblingDenies(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read is not applied on Windows")
+	}
+	home := t.TempDir()
+	gnupgDir := filepath.Join(home, ".gnupg")
+	publicFile := filepath.Join(gnupgDir, "public.txt")
+	secringFile := filepath.Join(gnupgDir, "secring.gpg")
+	keyFile := filepath.Join(gnupgDir, "private-keys-v1.d", "keygrip.key")
+
+	mustWriteFile(t, publicFile, "public info")
+	mustWriteFile(t, secringFile, "secret keyring")
+	mustWriteFile(t, keyFile, "secret keygrip")
+
+	options := credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}
+	creds := credentialDenyReadPathsIn(options, []string{publicFile})
+
+	// 1. .gnupg must remain denied as a directory root
+	if !denyCovered(creds.Paths, gnupgDir) {
+		t.Fatalf("expected .gnupg directory to remain in deny list, got %v", creds.Paths)
+	}
+
+	// 2. publicFile must be present in Carveouts
+	normPublic := normalizeProfilePath(publicFile)
+	if !denyListedExact(creds.Carveouts, normPublic) && !denyCovered(creds.Carveouts, normPublic) {
+		t.Fatalf("expected publicFile in Carveouts, got %v", creds.Carveouts)
+	}
+
+	// 3. Sibling secrets must NOT be in Carveouts
+	if denyCovered(creds.Carveouts, secringFile) || denyCovered(creds.Carveouts, keyFile) {
+		t.Fatalf("sibling secrets unexpectedly carved out: %v", creds.Carveouts)
+	}
+
+	// 4. In Seatbelt profile: verify public.txt has allow rule, while secring stays denied
+	fs := FileSystemPolicy{
+		DenyReadIfExists:  creds.Paths,
+		DenyReadCarveouts: creds.Carveouts,
+	}
+	sbRules := strings.Join(denyReadCarveoutRules(fs), "\n")
+	if !strings.Contains(sbRules, normPublic) && !strings.Contains(sbRules, publicFile) {
+		t.Fatalf("seatbelt rules missing allow for public file: %s", sbRules)
+	}
+	if strings.Contains(sbRules, secringFile) {
+		t.Fatalf("seatbelt rules allow sibling secret: %s", sbRules)
+	}
+}
+
+func TestLinuxHelperCredentialParentTmpfsRejectsNestedWriteRoots(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRoots := []WritableRoot{
+		{Root: filepath.Join(sshDir, "project")},
+	}
+	if linuxCredentialParentSafeToTmpfs(sshDir, writeRoots) {
+		t.Fatal("expected linuxCredentialParentSafeToTmpfs to reject parent containing nested write root")
+	}
+}
+
+func TestSSHSupportDirectivesCustomKnownHostsAndSocketPreserved(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	customHosts := filepath.Join(sshDir, "known_hosts_work")
+	agentSock := filepath.Join(home, "agent.sock")
+	mustWriteFile(t, customHosts, "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...\n")
+	mustWriteFile(t, agentSock, "not-a-private-key")
+	config := filepath.Join(sshDir, "config")
+	mustWriteFile(t, config, "UserKnownHostsFile ~/.ssh/known_hosts_work\nIdentityAgent ~/agent.sock\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if denyCovered(denied, customHosts) {
+		t.Fatalf("custom UserKnownHostsFile %q was denied: %v", customHosts, denied)
+	}
+	if denyCovered(denied, agentSock) {
+		t.Fatalf("IdentityAgent socket %q was denied: %v", agentSock, denied)
+	}
+}
+
+func TestUnexpressibleNestedAllowReadPreservesParentCredentialDeny(t *testing.T) {
+	home := t.TempDir()
+	gnupgDir := filepath.Join(home, ".gnupg")
+	mustWriteFile(t, filepath.Join(gnupgDir, "secring.gpg"), "secret")
+	// An unexpressible nested path: for example, a nonexistent path whose parent fails or symlink
+	unexpressible := filepath.Join(gnupgDir, "nonexistent\x00path")
+
+	options := credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}
+	creds := credentialDenyReadPathsIn(options, []string{unexpressible})
+	gnupgNorm := normalizeProfilePath(gnupgDir)
+	if !denyListedExact(creds.Paths, gnupgNorm) {
+		t.Fatalf("unexpressible nested allowRead must preserve parent credential dir deny %q: got %v", gnupgNorm, creds.Paths)
+	}
+}

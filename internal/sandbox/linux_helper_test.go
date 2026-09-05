@@ -454,6 +454,25 @@ func TestLinuxHelperSandboxEnvironmentPreservesCallerEnv(t *testing.T) {
 	}
 }
 
+func TestLinuxDeniedBasenamesByParentIncludesDirectories(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), ".ssh")
+	deniedDir := filepath.Join(parent, "certificates")
+	deniedFile := filepath.Join(parent, "id_rsa")
+	deniedLink := filepath.Join(parent, "id_ed25519")
+
+	omits := linuxDeniedBasenamesByParent([]string{deniedFile}, []string{deniedLink}, []string{deniedDir})
+	parentCanonical := linuxCanonicalDest(parent)
+	parentOmits, ok := omits[parentCanonical]
+	if !ok {
+		t.Fatalf("expected omits map to contain canonical parent %q: %#v", parentCanonical, omits)
+	}
+	for _, name := range []string{"certificates", "id_rsa", "id_ed25519"} {
+		if _, exists := parentOmits[name]; !exists {
+			t.Fatalf("expected parent omits to include %q: %#v", name, parentOmits)
+		}
+	}
+}
+
 func indexString(values []string, want string) int {
 	for index, value := range values {
 		if value == want {

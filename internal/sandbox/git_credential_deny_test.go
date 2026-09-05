@@ -16,12 +16,10 @@ import (
 // git's credential store holds host passwords and personal access tokens in
 // cleartext, in one of two locations depending on whether the user is on the
 // XDG layout. Neither was denied, so a sandboxed command could read them
-// (#815).
-//
-// Scoped to the credential files on purpose. Denying ~/.ssh as well would stop
-// a sandboxed git push over SSH from working, which is a functional trade that
-// issue tracks separately; these two cost nothing, because git reads them for
-// authentication rather than identity.
+// (#815). #816 closed this half: the stores are denied as files, not the
+// surrounding git config directory. SSH private keys and the GPG keyring are
+// the remaining #815 scope and are covered in ssh_gpg_deny_test.go (key
+// material, not the whole of ~/.ssh).
 func TestCredentialDenyReadPathsCoversGitCredentialStores(t *testing.T) {
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config")
