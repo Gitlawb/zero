@@ -325,7 +325,6 @@ func stripControlBytesFrom(s string, start int) string {
 	return b.String()
 }
 
-
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
 	// Match on the original string. Shape patterns allow C0/C1 gaps between
