@@ -1864,14 +1864,43 @@ func TestResolveNotifyInvalidFocusMode(t *testing.T) {
 	}
 }
 
-func TestResolveNotifyDefaultEmpty(t *testing.T) {
-	path := writeConfig(t, `{}`)
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+// An unconfigured notify block must resolve EMPTY. Defaults live in the TUI
+// (effectiveTUINotifyMode) and in `zero config notify`'s display, not in the
+// resolver: a filled-in default here leaks into headless `zero exec` (BEL +
+// OSC-9 bytes on stderr under -o json) and into the CLI/TUI preserve paths,
+// which must treat "user never chose" differently from "user chose both"
+// (maintainer review, PR #1001).
+func TestResolveNotifyUnconfiguredStaysEmpty(t *testing.T) {
+	// No config file at all.
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if resolved.Notify.Mode != "" || resolved.Notify.FocusMode != "" {
-		t.Fatalf("unset notify should be empty, got %+v", resolved.Notify)
+		t.Fatalf("no config file: notify = %+v, want empty (resolver must not default)", resolved.Notify)
+	}
+
+	for name, body := range map[string]string{
+		"empty config": `{}`,
+		"empty block":  `{"notify":{}}`,
+		"mode only":    `{"notify":{"mode":"off"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolved, err := Resolve(ResolveOptions{UserConfigPath: writeConfig(t, body), Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if name == "mode only" {
+				if resolved.Notify.Mode != "off" {
+					t.Errorf("notify.mode = %q, want preserved off", resolved.Notify.Mode)
+				}
+			} else if resolved.Notify.Mode != "" {
+				t.Errorf("notify.mode = %q, want empty (resolver must not default)", resolved.Notify.Mode)
+			}
+			if resolved.Notify.FocusMode != "" {
+				t.Errorf("notify.focusMode = %q, want empty (resolver must not default)", resolved.Notify.FocusMode)
+			}
+		})
 	}
 }
 

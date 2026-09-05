@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -585,6 +586,77 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	cfg.Preferences.Theme = strings.TrimSpace(theme)
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
+// UserNotify returns the notify block stored in the user's own config file at
+// path, trimmed. A missing file or missing/empty block returns the zero value:
+// callers that need to preserve "whatever the user already chose" on a partial
+// update must seed from THIS value, not from the resolved view — the resolver
+// merges project config and the TUI applies its own defaults, so seeding from
+// resolved copies choices the user never made into their global file (a
+// project's mode: off, or a pinned default) and across every other project.
+func UserNotify(path string) (NotifyConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return NotifyConfig{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NotifyConfig{}, nil
+		}
+		return NotifyConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return NotifyConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	cfg.Notify.Mode = strings.TrimSpace(cfg.Notify.Mode)
+	cfg.Notify.FocusMode = strings.TrimSpace(cfg.Notify.FocusMode)
+	return cfg.Notify, nil
+}
+
+// SetNotify persists the TUI notification preference. Both fields are trimmed
+// and validated against the accepted vocab (mode in {off,bell,notify,both};
+// focusMode in {unfocused,always,focused}) so a bad caller cannot write a value
+// the resolver would later reject at startup. An empty Mode or FocusMode is
+// stored as-is — blank means "use the built-in defaults" (the TUI's
+// effectiveTUINotifyMode maps an empty mode to both; the notify package treats
+// an empty focusMode as unfocused), not "off".
+func SetNotify(path string, value NotifyConfig) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	value.Mode = strings.TrimSpace(value.Mode)
+	value.FocusMode = strings.TrimSpace(value.FocusMode)
+	if mode := value.Mode; mode != "" {
+		switch notify.Mode(mode) {
+		case notify.ModeOff, notify.ModeBell, notify.ModeNotify, notify.ModeBoth:
+		default:
+			return FileConfig{}, fmt.Errorf("invalid notify.mode %q: expected off, bell, notify, or both", mode)
+		}
+	}
+	if focus := value.FocusMode; focus != "" {
+		switch notify.FocusMode(focus) {
+		case notify.FocusUnfocused, notify.FocusAlways, notify.FocusFocused:
+		default:
+			return FileConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focus)
+		}
+	}
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg.Notify = value
 	if err := writeConfigFile(path, cfg); err != nil {
 		return FileConfig{}, err
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -29,6 +30,7 @@ const (
 	pickerSTTModel
 	pickerSTTDownload
 	pickerPet
+	pickerNotify
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
@@ -1064,6 +1066,44 @@ func (m model) newThemePicker() *commandPicker {
 	// allItems lets the query filter restore rows on Backspace (one-way narrowing
 	// otherwise, since applyQuery falls back to the current items without it).
 	return &commandPicker{kind: pickerTheme, title: "Choose a theme", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
+}
+
+// newNotifyPicker lists the FULL (mode, focus) space from notifyPickerChoices
+// (every valid pair has a row, so a setting like (off, always) is always
+// preselectable and Enter can never silently commit a different pair). Each
+// row's Value is the same synthetic string the text /notify handler accepts
+// ("<mode> <focus>"), so /notify with no arg and the picker share one commit
+// path through handleNotifyCommand. Preselection uses the LIVE session pair
+// (m.notifyMode/m.notifyFocusMode, initialized from the resolved config) — not
+// the stored file, which can disagree when a project config overrides notify
+// for this session. Blank live fields resolve to their effective defaults for
+// preselection only; committing a row is an explicit choice and persists that
+// pair. There is no live preview — notify affects the next notification, not
+// the current view.
+func (m model) newNotifyPicker() *commandPicker {
+	choices := notifyPickerChoices()
+	items := make([]pickerItem, 0, len(choices))
+	selected := 0
+	activeMode := m.notifyMode
+	if strings.TrimSpace(activeMode) == "" {
+		activeMode = string(notify.ModeBoth)
+	}
+	activeFocus := m.notifyFocusMode
+	if strings.TrimSpace(activeFocus) == "" {
+		activeFocus = string(notify.FocusUnfocused)
+	}
+	for _, c := range choices {
+		items = append(items, pickerItem{
+			Group: "When Zero needs your input",
+			Label: c.label,
+			Value: c.mode + " " + c.focusMode,
+			Meta:  c.subtitle(),
+		})
+		if c.mode == activeMode && c.focusMode == activeFocus {
+			selected = len(items) - 1
+		}
+	}
+	return &commandPicker{kind: pickerNotify, title: "select notify mode", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
 }
 
 // pickerMoved advances the open picker's cursor by delta. Theme candidates render

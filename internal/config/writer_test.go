@@ -369,6 +369,101 @@ func TestSetThemePersistsUserPreference(t *testing.T) {
 	}
 }
 
+func TestSetNotifyPersistsValidValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	cfg, err := SetNotify(path, NotifyConfig{Mode: "  both  ", FocusMode: "  unfocused  "})
+	if err != nil {
+		t.Fatalf("SetNotify() error = %v", err)
+	}
+	if cfg.Notify.Mode != "both" || cfg.Notify.FocusMode != "unfocused" {
+		t.Fatalf("Notify = %+v, want mode=both focusMode=unfocused (trimmed)", cfg.Notify)
+	}
+	persisted := readConfigFixture(t, path)
+	if persisted.Notify.Mode != "both" || persisted.Notify.FocusMode != "unfocused" {
+		t.Fatalf("persisted Notify = %+v, want mode=both focusMode=unfocused", persisted.Notify)
+	}
+	if persisted.ActiveProvider != "openai" || len(persisted.Providers) != 1 {
+		t.Fatalf("provider config was not preserved by SetNotify: %#v", persisted)
+	}
+}
+
+func TestSetNotifyRejectsInvalidMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
+	if _, err := SetNotify(path, NotifyConfig{Mode: "loud", FocusMode: "unfocused"}); err == nil {
+		t.Fatal("expected error for invalid notify.mode")
+	}
+}
+
+func TestSetNotifyRejectsInvalidFocusMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
+	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "sideways"}); err == nil {
+		t.Fatal("expected error for invalid notify.focusMode")
+	}
+}
+
+func TestSetNotifyRejectsEmptyConfigPath(t *testing.T) {
+	if _, err := SetNotify("", NotifyConfig{Mode: "off"}); err == nil {
+		t.Fatal("expected error for empty config path")
+	}
+}
+
+func TestSetNotifyBlankValuesPreservedAsDefaults(t *testing.T) {
+	// An empty mode/focusMode stored on disk is a valid "use the built-in
+	// defaults" signal — SetNotify must not reject blanks, and they must round
+	// trip unchanged.
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
+	if _, err := SetNotify(path, NotifyConfig{}); err != nil {
+		t.Fatalf("SetNotify({}) should accept blank values, got error: %v", err)
+	}
+	persisted := readConfigFixture(t, path)
+	if persisted.Notify.Mode != "" || persisted.Notify.FocusMode != "" {
+		t.Fatalf("blank notify values should round-trip, got %+v", persisted.Notify)
+	}
+}
+
+// UserNotify reads the notify block from the user's own file. Partial updates
+// seed from this value so they preserve what the USER chose (blank included)
+// instead of copying a project config's setting or a pinned default into the
+// global file (maintainer review, PR #1001).
+func TestUserNotify(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing file: zero value, no error.
+	got, err := UserNotify(filepath.Join(dir, "missing.json"))
+	if err != nil {
+		t.Fatalf("missing file should not error: %v", err)
+	}
+	if got.Mode != "" || got.FocusMode != "" {
+		t.Fatalf("missing file = %+v, want zero value", got)
+	}
+
+	// Present block: trimmed values returned.
+	path := filepath.Join(dir, "zero.json")
+	writeConfigFixture(t, path, FileConfig{Notify: NotifyConfig{Mode: "  bell  ", FocusMode: " always "}}, 0o600)
+	got, err = UserNotify(path)
+	if err != nil {
+		t.Fatalf("UserNotify: %v", err)
+	}
+	if got.Mode != "bell" || got.FocusMode != "always" {
+		t.Fatalf("UserNotify = %+v, want bell/always (trimmed)", got)
+	}
+
+	// Blank path: zero value, no error.
+	if got, err = UserNotify(""); err != nil || got.Mode != "" || got.FocusMode != "" {
+		t.Fatalf("blank path = %+v err=%v, want zero value", got, err)
+	}
+}
+
 func TestRecapsPreferenceRoundTrips(t *testing.T) {
 	// Default (unset) is ON.
 	if !(PreferencesConfig{}).RecapsEnabled() {
