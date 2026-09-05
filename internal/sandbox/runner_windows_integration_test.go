@@ -352,10 +352,11 @@ func realSmokeExecutable(t *testing.T, envKey string, fallbackName string) strin
 
 func runWindowsRealSmokeSetup(t *testing.T, setupExe string, options WindowsSandboxSetupArgsOptions) {
 	t.Helper()
-	args, err := BuildWindowsSandboxSetupArgs(options)
+	setupPlan, err := BuildWindowsSandboxSetupArgs(options)
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
 	}
+	args := setupPlan.Args
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, setupExe, args...)
