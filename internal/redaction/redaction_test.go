@@ -174,13 +174,7 @@ func TestRedactStringCatchesSecretsSplitByControlBytes(t *testing.T) {
 			for _, input := range inputs {
 				t.Run(input.placement, func(t *testing.T) {
 					got := RedactString(input.input, Options{})
-					if strings.Contains(got, body) {
-						t.Fatalf("secret split by %s %s leaked in %q", tc.name, input.placement, got)
-					}
-					if strings.Contains(got, prefix) {
-						t.Fatalf("secret prefix split by %s %s leaked in %q", tc.name, input.placement, got)
-					}
-					if !strings.Contains(got, RedactedSecret) {
+					if got != RedactedSecret {
 						t.Fatalf("expected %q after %s %s split, got %q", RedactedSecret, tc.name, input.placement, got)
 					}
 				})

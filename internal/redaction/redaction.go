@@ -550,6 +550,9 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 
 	runningDots := 0
 	logCursor := 0
+	hasDigit := false
+	hasInteriorHyphen := false
+	hasKnownPrefix := isOpenAI && knownOpenAIKeyPrefix(logicalStr)
 	lastValidEnd := 0
 
 	for i, span := range cand.spans {
@@ -557,19 +560,33 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 			continue
 		}
 		for logCursor < len(cand.origEnds) && cand.origEnds[logCursor] <= span.start {
-			if shape.requireDots && logicalStr[logCursor] == '.' {
+			c := logicalStr[logCursor]
+			if shape.requireDots && c == '.' {
 				runningDots++
+			}
+			if isOpenAI {
+				if c >= '0' && c <= '9' {
+					hasDigit = true
+				}
+				if c == '-' && logCursor >= 3 {
+					hasInteriorHyphen = true
+				}
 			}
 			logCursor++
 		}
 		logLen := logCursor
+		logPreValid := !isOpenAI || hasKnownPrefix || hasDigit || !hasInteriorHyphen
 
 		// If text in src after span starts a new credential, this span is a delimiter between credentials.
 		tailInSrc := src[matchStart+span.end:]
 		if startsNewCredential(tailInSrc, shape.requireDots) {
 			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-				logPre := logicalStr[:logLen]
-				if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
+				valid := logPreValid
+				if valid && !isOpenAI && shape.plainPattern != nil {
+					logPre := logicalStr[:logLen]
+					valid = shape.plainPattern.MatchString(logPre)
+				}
+				if valid {
 					return span.start, true
 				}
 			}
@@ -578,8 +595,12 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 
 		if !span.validGap {
 			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-				logPre := logicalStr[:logLen]
-				if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
+				valid := logPreValid
+				if valid && !isOpenAI && shape.plainPattern != nil {
+					logPre := logicalStr[:logLen]
+					valid = shape.plainPattern.MatchString(logPre)
+				}
+				if valid {
 					return span.start, true
 				}
 			}
@@ -590,20 +611,24 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 		// the span is a terminal delimiter if the prefix is already a valid credential.
 		if hasTrailingPath && i == len(cand.spans)-1 {
 			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-				logPre := logicalStr[:logLen]
-				if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
+				valid := logPreValid
+				if valid && !isOpenAI && shape.plainPattern != nil {
+					logPre := logicalStr[:logLen]
+					valid = shape.plainPattern.MatchString(logPre)
+				}
+				if valid {
 					return span.start, true
 				}
 			}
 			return span.start, false
 		}
-
-		// Continue consuming control-separated credential bytes across valid gaps.
-		// Track the last valid boundary for fail-closed fallback if subsequent
-		// bytes invalidate the full candidate.
 		if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) {
-			logPre := logicalStr[:logLen]
-			if shape.plainPattern.MatchString(logPre) && (isValid == nil || isValid(logPre)) {
+			valid := logPreValid
+			if valid && !isOpenAI && shape.plainPattern != nil {
+				logPre := logicalStr[:logLen]
+				valid = shape.plainPattern.MatchString(logPre)
+			}
+			if valid {
 				lastValidEnd = span.start
 			}
 		}
@@ -616,8 +641,17 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 	}
 
 	for logCursor < len(cand.origEnds) {
-		if shape.requireDots && logicalStr[logCursor] == '.' {
+		c := logicalStr[logCursor]
+		if shape.requireDots && c == '.' {
 			runningDots++
+		}
+		if isOpenAI {
+			if c >= '0' && c <= '9' {
+				hasDigit = true
+			}
+			if c == '-' && logCursor >= 3 {
+				hasInteriorHyphen = true
+			}
 		}
 		logCursor++
 	}
@@ -629,7 +663,14 @@ func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretSh
 		return len(match), false
 	}
 
-	if !shape.plainPattern.MatchString(logicalStr) {
+	if isOpenAI {
+		if !hasKnownPrefix && !hasDigit && hasInteriorHyphen {
+			if lastValidEnd > 0 {
+				return lastValidEnd, true
+			}
+			return len(match), false
+		}
+	} else if !shape.plainPattern.MatchString(logicalStr) {
 		if lastValidEnd > 0 {
 			return lastValidEnd, true
 		}

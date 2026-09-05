@@ -49,13 +49,8 @@ func TestSplitRedactionHarness(t *testing.T) {
 					splitSecret := s.secret[:pos] + ctrl.char + s.secret[pos:]
 					got := RedactString(splitSecret, Options{})
 
-					// Strip controls from output and assert original secret cannot be recovered
-					strippedOutput := stripControlBytes(got)
-					if strings.Contains(strippedOutput, s.secret) {
-						t.Fatalf("split at pos %d with %s leaked secret!\n split input=%q\n got=%q\n stripped=%q", pos, ctrl.name, splitSecret, got, strippedOutput)
-					}
-					if !strings.Contains(got, RedactedSecret) {
-						t.Fatalf("split at pos %d with %s did not contain RedactedSecret!\n got=%q", pos, ctrl.name, got)
+					if got != RedactedSecret {
+						t.Fatalf("split at pos %d with %s did not equal RedactedSecret: got %q, want %q", pos, ctrl.name, got, RedactedSecret)
 					}
 				}
 			}
@@ -273,6 +268,26 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 			elapsed := time.Since(start)
 			if got != input {
 				t.Fatalf("kebab false positive was falsely redacted at size %d", size)
+			}
+			if elapsed > time.Second {
+				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
+			}
+		}
+	})
+
+	t.Run("OpenAI kebab starting with bare sk- and repeated gaps scaling", func(t *testing.T) {
+		for _, size := range sizes {
+			var b strings.Builder
+			b.WriteString("sk-")
+			for b.Len() < size {
+				b.WriteString("\x00a-b")
+			}
+			input := b.String()
+			start := time.Now()
+			got := RedactString(input, Options{})
+			elapsed := time.Since(start)
+			if got != input {
+				t.Fatalf("kebab false positive with bare sk- prefix was falsely redacted at size %d", size)
 			}
 			if elapsed > time.Second {
 				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
