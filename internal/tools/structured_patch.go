@@ -157,7 +157,7 @@ func applyPatchOperations(applyRoot, relativeRoot string, operations []structure
 			}
 		}
 	}
-	applyOutcome, err := applyStructuredPatchChanges(workspace, changes, options.FileTracker)
+	applyOutcome, err := applyStructuredPatchChanges(workspace, relativeRoot, changes, options.FileTracker)
 	if err != nil {
 		result := errorResult("Error applying patch: " + err.Error())
 		result.ChangedFiles = changedFilesFromStructuredPatch(relativeRoot, applyOutcome.committed)
@@ -750,7 +750,7 @@ type structuredPatchApplyOutcome struct {
 	incompletePaths []string
 }
 
-func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange, tracker *FileTracker) (structuredPatchApplyOutcome, error) {
+func applyStructuredPatchChanges(root *os.Root, relativeRoot string, changes []structuredPatchChange, tracker *FileTracker) (structuredPatchApplyOutcome, error) {
 	// committed lists, in order, the paths whose change reached disk before a
 	// later change failed, so the caller (and the model) knows exactly which
 	// files now hold the patched content and which were never touched.
@@ -762,8 +762,8 @@ func applyStructuredPatchChanges(root *os.Root, changes []structuredPatchChange,
 				outcome.incompletePaths = append(outcome.incompletePaths, change.to.relative)
 			}
 			forgetStructuredPatchFiles(tracker, changes)
-			committedPaths := changedFilesFromStructuredPatch(".", outcome.committed)
-			committedPaths = appendUniqueStructuredPatchPaths(committedPaths, ".", outcome.incompletePaths)
+			committedPaths := changedFilesFromStructuredPatch(relativeRoot, outcome.committed)
+			committedPaths = appendUniqueStructuredPatchPaths(committedPaths, relativeRoot, outcome.incompletePaths)
 			if len(committedPaths) > 0 {
 				return outcome, fmt.Errorf("%w; patch was partially applied — already committed: %s; the remaining files are unchanged; re-read the committed files before retrying", err, strings.Join(committedPaths, ", "))
 			}
