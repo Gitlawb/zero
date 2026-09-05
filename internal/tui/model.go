@@ -1362,6 +1362,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	switch msg := msg.(type) {
+	case fileViewLoadedMsg:
+		return m.handleFileViewLoaded(msg)
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
@@ -1424,6 +1426,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasDarkBg = msg.IsDark()
 		if m.themeMode != themeSystem {
 			applyTheme(m.themeMode, m.hasDarkBg)
+			if m.fileView.active && m.fileView.mode == fileViewFull {
+				return m.startFileViewLoadCmd(m.chatColumnWidth())
+			}
 		}
 		return m, nil
 	case tea.MouseMsg:
@@ -1650,6 +1655,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.runDetailsOpen:
 			if keyIs(msg, tea.KeyEsc) || m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) {
 				m.runDetailsOpen = false
+				return m, nil
+			}
+			if keyIs(msg, tea.KeyEnter) && m.selectedFile != "" {
+				overlayWidth := minInt(72, maxInt(40, m.width-8))
+				inner := maxInt(12, overlayWidth-4)
+				layout := m.runDetailsLayout(inner)
+				for _, h := range layout.fileHits {
+					if h.path == m.selectedFile {
+						return m.selectFile(m.selectedFile)
+					}
+				}
+				return m, nil
 			}
 			return m, nil
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
@@ -1659,9 +1676,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a
 			// permission prompt / ask-user / wizard keeps its own key handling).
 			if keyText(msg) == "f" {
-				return m.setFileViewMode(fileViewFull), nil
+				return m.setFileViewMode(fileViewFull)
 			}
-			return m.setFileViewMode(fileViewDiff), nil
+			return m.setFileViewMode(fileViewDiff)
 		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && canFireComposerGatedToggle(m.keyBindings.toggleMouse, defaultToggleMouseChord, m.composerValue() == ""):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection). The
@@ -2445,6 +2462,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A resumed/idle session may already hold agents; keep their short lifecycle
 		// fade alive. No-op when the loop is already running or nothing animates.
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+			return m, tea.Batch(m.ensureSpinnerTick(), cmd)
+		}
 		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
@@ -2914,10 +2936,51 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A finished command tool may have mutated files git can see but no
 		// changedFiles reports (npm create, heredoc writes, subagent edits) —
 		// re-sweep so the FILES sidebar picks them up mid-turn.
-		if msg.row.kind == rowToolResult && isPlanCommandTool(msg.row.tool) {
-			var sweep tea.Cmd
-			m, sweep = m.maybeGitSweep()
-			return m, sweep
+		if msg.row.kind == rowToolResult {
+			if isPlanCommandTool(msg.row.tool) {
+				var sweep tea.Cmd
+				m, sweep = m.maybeGitSweep()
+				defaultFileViewCache.invalidateUnknownScope()
+				if m.fileView.active {
+					target := m.fileView.path
+					if !filepath.IsAbs(target) {
+						target = filepath.Join(m.cwd, target)
+					}
+					defaultFileViewCache.invalidatePath(target)
+					m.fileView.requiredSourceRev++
+					if m.fileView.mode == fileViewFull {
+						var loadCmd tea.Cmd
+						m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+						return m, tea.Batch(sweep, loadCmd)
+					}
+				}
+				return m, sweep
+			}
+			var loadCmds []tea.Cmd
+			for _, p := range msg.row.changedFiles {
+				target := p
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(m.cwd, target)
+				}
+				rev := defaultFileViewCache.invalidatePath(target)
+				if m.fileView.active && (p == m.fileView.path || target == m.fileView.path) {
+					if rev > m.fileView.requiredSourceRev {
+						m.fileView.requiredSourceRev = rev
+					} else {
+						m.fileView.requiredSourceRev++
+					}
+					if m.fileView.mode == fileViewFull {
+						var cmd tea.Cmd
+						m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+						if cmd != nil {
+							loadCmds = append(loadCmds, cmd)
+						}
+					}
+				}
+			}
+			if len(loadCmds) > 0 {
+				return m, tea.Batch(loadCmds...)
+			}
 		}
 		return m, nil
 	case swarmSessionsMsg:
@@ -2950,7 +3013,22 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prState = msg.state
 		return m, nil
 	case gitSweepMsg:
-		return m.handleGitSweepMsg(msg), nil
+		m = m.handleGitSweepMsg(msg)
+		if msg.ok && !msg.baseline {
+			for _, f := range msg.files {
+				p := f.path
+				if !filepath.IsAbs(p) {
+					p = filepath.Join(m.cwd, p)
+				}
+				defaultFileViewCache.invalidatePath(p)
+			}
+		}
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+			return m, cmd
+		}
+		return m, nil
 	case prWatcherStartedMsg:
 		if msg.stop == nil {
 			return m, nil
@@ -2962,6 +3040,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
+		defaultFileViewCache.invalidateUnknownScope()
+		if m.fileView.active {
+			m.fileView.requiredSourceRev++
+			if m.fileView.mode == fileViewFull {
+				return m.startFileViewRefreshCmd(m.chatColumnWidth())
+			}
+		}
 		return m, nil
 	case providerModelsDiscoveredMsg:
 		return m.applyProviderModelsDiscovered(msg), nil
@@ -4520,10 +4605,21 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// local preview and never changes the active palette.
 		text := ""
 		m, text = m.handleThemeCommand(item.Value)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
 		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
 	}
 	return m, cmd
 }
@@ -4837,9 +4933,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.toggleDetailedTranscript(), nil
 	case commandRewind:
 		text := ""
-		m, text = m.handleRewindCommand(command.text)
+		var rewindCmd tea.Cmd
+		m, text, rewindCmd = m.handleRewindCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
+		return m, rewindCmd
 	case commandEffort:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
@@ -4927,10 +5024,21 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
 		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)
