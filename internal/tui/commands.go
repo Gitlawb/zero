@@ -403,9 +403,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/notify",
-		usage:       "/notify [list|off|bell|notify|both [unfocused|always]]",
+		usage:       "/notify [list|off|bell|notify|both [unfocused|always|focused]]",
 		group:       commandGroupSession,
-		description: "Pick when Zero alerts you it needs input. No arg opens the picker.",
+		description: "Pick when Zero alerts you (completion and needs-input). No arg opens the picker.",
 		kind:        commandNotify,
 	},
 	{

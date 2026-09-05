@@ -1069,21 +1069,26 @@ func (m model) newThemePicker() *commandPicker {
 }
 
 // newNotifyPicker lists the FULL (mode, focus) space from notifyPickerChoices
-// (every valid pair has a row, so a stored setting like (off, always) is always
+// (every valid pair has a row, so a setting like (off, always) is always
 // preselectable and Enter can never silently commit a different pair). Each
 // row's Value is the same synthetic string the text /notify handler accepts
 // ("<mode> <focus>"), so /notify with no arg and the picker share one commit
-// path through handleNotifyCommand. A blank stored field resolves to its
-// effective default for preselection only (both / unfocused — what actually
-// fires today); committing any row writes an explicit pair. There is no live
-// preview — notify affects the next permission prompt, not the current view.
+// path through handleNotifyCommand. Preselection uses the LIVE session pair
+// (m.notifyMode/m.notifyFocusMode, initialized from the resolved config) — not
+// the stored file, which can disagree when a project config overrides notify
+// for this session. Blank live fields resolve to their effective defaults for
+// preselection only; committing a row is an explicit choice and persists that
+// pair. There is no live preview — notify affects the next notification, not
+// the current view.
 func (m model) newNotifyPicker() *commandPicker {
 	choices := notifyPickerChoices()
 	items := make([]pickerItem, 0, len(choices))
 	selected := 0
-	stored, _ := m.storedNotify()
-	activeMode := string(effectiveTUINotifyMode(stored.Mode))
-	activeFocus := stored.FocusMode
+	activeMode := m.notifyMode
+	if strings.TrimSpace(activeMode) == "" {
+		activeMode = string(notify.ModeBoth)
+	}
+	activeFocus := m.notifyFocusMode
 	if strings.TrimSpace(activeFocus) == "" {
 		activeFocus = string(notify.FocusUnfocused)
 	}

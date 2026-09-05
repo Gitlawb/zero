@@ -52,43 +52,154 @@ func TestNotifyChoicePersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// `/notify bell` (mode-only) preserves the focusMode stored in the USER'S OWN
-// file — not the resolved view. A project config's choice must not be copied
-// into the user's global file, and a blank focus must stay blank (blank means
-// "use the built-in default"), so nothing is pinned as an explicit choice the
-// user never made. Maintainer review, PR #1001.
-func TestNotifyModeOnlyPreservesStoredFocusNotResolved(t *testing.T) {
+// Mode-only `/notify <mode>` keeps the LIVE and PERSISTED policies separate
+// (maintainer review, PR #1001): the live session preserves its in-session
+// focus (initialized from the resolved pair, so a project's focus rule keeps
+// applying), while the global write seeds from the USER'S OWN file — blank
+// stays blank, and a project-derived value is never copied into the global
+// config. The three states here deliberately disagree:
+//
+//	user file:   focusMode=focused, no mode
+//	resolved:    both/unfocused (as a project override would produce)
+//	live start:  both/unfocused
+func TestNotifyModeOnlySplitsLiveAndPersistedFocus(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(cfgPath, []byte(`{"notify":{"focusMode":"focused"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	// The in-session (resolved) focus disagrees with the user's file; the
-	// write must take the user's file.
 	m := newModel(context.Background(), Options{
 		UserConfigPath: cfgPath,
 		Notify:         config.NotifyConfig{Mode: "both", FocusMode: "unfocused"},
 	})
+
 	m, _ = m.handleNotifyCommand("bell")
+
+	// LIVE: mode changes, focus keeps the in-session (resolved) value — the
+	// user-file focus must NOT bleed into the session.
+	if m.notifyMode != "bell" {
+		t.Errorf("live mode = %q, want bell", m.notifyMode)
+	}
+	if m.notifyFocusMode != "unfocused" {
+		t.Errorf("live focus = %q, want the in-session unfocused (not the user-file focused)", m.notifyFocusMode)
+	}
+	// PERSISTED: the mode is written; the focus seeded from the user's file
+	// (their explicit focused), never the resolved/live value.
 	persisted := readNotifyBlock(t, cfgPath)
 	if persisted.Mode != "bell" {
 		t.Errorf("persisted mode = %q, want bell", persisted.Mode)
 	}
 	if persisted.FocusMode != "focused" {
-		t.Errorf("persisted focusMode = %q, want the user-file value focused (not the resolved unfocused)", persisted.FocusMode)
+		t.Errorf("persisted focusMode = %q, want the user-file value focused", persisted.FocusMode)
 	}
 
 	// Blank stays blank: with nothing stored, a mode-only change must not pin
-	// the default focus as an explicit choice.
+	// the default focus as an explicit choice, and live still keeps its value.
 	blankPath := filepath.Join(t.TempDir(), "config.json")
-	m = newModel(context.Background(), Options{UserConfigPath: blankPath})
+	m = newModel(context.Background(), Options{
+		UserConfigPath: blankPath,
+		Notify:         config.NotifyConfig{Mode: "off", FocusMode: "focused"},
+	})
 	m, _ = m.handleNotifyCommand("off")
+	if m.notifyFocusMode != "focused" {
+		t.Errorf("live focus = %q, want the in-session focused preserved", m.notifyFocusMode)
+	}
 	persisted = readNotifyBlock(t, blankPath)
 	if persisted.Mode != "off" {
 		t.Errorf("persisted mode = %q, want off", persisted.Mode)
 	}
 	if persisted.FocusMode != "" {
 		t.Errorf("persisted focusMode = %q, want blank (unspecified stays unspecified)", persisted.FocusMode)
+	}
+}
+
+// The full contract matrix when the three notify states disagree (blank/different
+// user file + project-resolved pair), per the maintainer review: display and
+// preselection report the LIVE policy; partial updates change live and persist
+// independently; restart precedence never copies project values into the
+// global file.
+func TestNotifyLivePolicyContractMatrix(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	// User file: nothing stored at all.
+	if err := os.WriteFile(cfgPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Project-resolved pair: off/focused (a project override shape).
+	m := newModel(context.Background(), Options{
+		UserConfigPath: cfgPath,
+		Notify:         config.NotifyConfig{Mode: "off", FocusMode: "focused"},
+	})
+
+	// `/notify list` reports the live resolved pair, not the (blank) file.
+	state := m.notifyStateText()
+	if !strings.Contains(state, "active mode: off") || !strings.Contains(state, "active focus: focused") {
+		t.Errorf("list should report the live off/focused pair, got:\n%s", state)
+	}
+
+	// The picker preselects the live pair; Enter without navigation does not
+	// change it.
+	m.input.SetValue("/notify")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	if cmd != nil {
+		t.Fatalf("opening the picker should not emit a cmd, got %T", cmd)
+	}
+	m = updated.(model)
+	if sel := m.picker.items[m.picker.selected]; sel.Value != "off focused" {
+		t.Fatalf("preselected = %q, want the live pair %q", sel.Value, "off focused")
+	}
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.notifyMode != "off" || m.notifyFocusMode != "focused" {
+		t.Errorf("Enter on preselected live pair changed live state: %q/%q", m.notifyMode, m.notifyFocusMode)
+	}
+	persisted := readNotifyBlock(t, cfgPath)
+	if persisted.Mode != "off" || persisted.FocusMode != "focused" {
+		t.Errorf("Enter on the live pair persisted %q/%q, want off/focused (explicit row commit)", persisted.Mode, persisted.FocusMode)
+	}
+
+	// Reset the file to blank and re-seed the session for the partial-update
+	// checks (fresh states: blank file, live off/focused).
+	if err := os.WriteFile(cfgPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = newModel(context.Background(), Options{
+		UserConfigPath: cfgPath,
+		Notify:         config.NotifyConfig{Mode: "off", FocusMode: "focused"},
+	})
+
+	// `/notify bell` (mode-only): live becomes bell/focused; the file gets
+	// mode bell and keeps its focus BLANK — the project's focused is not
+	// copied into the global file.
+	m, _ = m.handleNotifyCommand("bell")
+	if m.notifyMode != "bell" || m.notifyFocusMode != "focused" {
+		t.Errorf("after mode-only: live = %q/%q, want bell/focused", m.notifyMode, m.notifyFocusMode)
+	}
+	persisted = readNotifyBlock(t, cfgPath)
+	if persisted.Mode != "bell" {
+		t.Errorf("after mode-only: persisted mode = %q, want bell", persisted.Mode)
+	}
+	if persisted.FocusMode != "" {
+		t.Errorf("after mode-only: persisted focusMode = %q, want blank (project value must not leak)", persisted.FocusMode)
+	}
+
+	// `/notify bell always` (explicit pair): both live fields change and both
+	// explicit values persist.
+	m, _ = m.handleNotifyCommand("bell always")
+	if m.notifyMode != "bell" || m.notifyFocusMode != "always" {
+		t.Errorf("after explicit pair: live = %q/%q, want bell/always", m.notifyMode, m.notifyFocusMode)
+	}
+	persisted = readNotifyBlock(t, cfgPath)
+	if persisted.Mode != "bell" || persisted.FocusMode != "always" {
+		t.Errorf("after explicit pair: persisted = %q/%q, want bell/always", persisted.Mode, persisted.FocusMode)
+	}
+
+	// Restart precedence: a fresh resolve of the user file (now bell/always,
+	// no project) yields exactly the stored pair — nothing else leaked in.
+	resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: cfgPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved.Notify.Mode != "bell" || resolved.Notify.FocusMode != "always" {
+		t.Errorf("restart resolve = %q/%q, want bell/always", resolved.Notify.Mode, resolved.Notify.FocusMode)
 	}
 }
 
@@ -136,6 +247,28 @@ func TestNotifyCommandRejectsTrailingArguments(t *testing.T) {
 	}
 	if !strings.Contains(out, "Too many arguments") {
 		t.Errorf("output should explain the rejection, got: %s", out)
+	}
+}
+
+// `/notify list junk` is a usage error, not a successful list — matching
+// /theme, /effort, and /style, which recognize only an exact `list`
+// (maintainer review, PR #1001). Exact `/notify list` still shows state.
+func TestNotifyCommandListRequiresExactlyOneToken(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.notifyMode = "off"
+	m.notifyFocusMode = "focused"
+
+	m, out := m.handleNotifyCommand("list junk")
+	if !strings.Contains(out, "Too many arguments") {
+		t.Errorf("`list junk` should be a usage error, got: %s", out)
+	}
+	if m.notifyMode != "off" || m.notifyFocusMode != "focused" {
+		t.Errorf("`list junk` should not mutate state, got %q/%q", m.notifyMode, m.notifyFocusMode)
+	}
+
+	_, out = m.handleNotifyCommand("list")
+	if !strings.Contains(out, "active mode: off") || !strings.Contains(out, "active focus: focused") {
+		t.Errorf("exact `/notify list` should still show the live state, got: %s", out)
 	}
 }
 
@@ -260,20 +393,25 @@ func TestNotifyPickerValuesAreValidCommandArgs(t *testing.T) {
 	}
 }
 
-// The /notify state view shows the stored mode and focus (and labels a blank
-// focus as the default) so users see the real value before opening the picker.
-func TestNotifyStateTextShowsStoredPair(t *testing.T) {
-	cfgPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"notify":{"mode":"bell","focusMode":"always"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m := newModel(context.Background(), Options{UserConfigPath: cfgPath})
+// The /notify state view reports the LIVE session policy (initialized from the
+// resolved pair), not the stored file — the two can legitimately disagree when
+// a project config overrides notify (maintainer review, PR #1001). A blank
+// live focus renders as the unfocused default.
+func TestNotifyStateTextShowsLivePair(t *testing.T) {
+	m := newModel(context.Background(), Options{Notify: config.NotifyConfig{Mode: "bell", FocusMode: "always"}})
 	state := m.notifyStateText()
 	if !strings.Contains(state, "active mode: bell") {
-		t.Errorf("state should show stored mode, got: %s", state)
+		t.Errorf("state should show the live mode, got: %s", state)
 	}
 	if !strings.Contains(state, "active focus: always") {
-		t.Errorf("state should show stored focus, got: %s", state)
+		t.Errorf("state should show the live focus, got: %s", state)
+	}
+
+	// Blank live focus renders as the default, never an empty string.
+	m = newModel(context.Background(), Options{Notify: config.NotifyConfig{Mode: "bell"}})
+	state = m.notifyStateText()
+	if !strings.Contains(state, "active focus: unfocused (default)") {
+		t.Errorf("state should label a blank live focus as the default, got: %s", state)
 	}
 }
 

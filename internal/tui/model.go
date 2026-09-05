@@ -882,11 +882,13 @@ type tuiAgentRunOptions struct {
 }
 
 // effectiveTUINotifyMode returns the notification mode the TUI should use. An
-// empty/unconfigured mode falls back to the resolver default ("both": terminal
-// bell + OSC-9 desktop notification) so the permission-prompt alert works for
-// new users without requiring them to hand-edit config.json. The /notify
-// command persists explicit choices; the resolver applies the same default at
-// read time, so this function and the resolver always agree.
+// empty/unconfigured mode falls back to the TUI's own effective default
+// ("both": terminal bell + OSC-9 desktop notification) so the needs-input
+// alert works for new users without requiring them to hand-edit config.json.
+// The default lives HERE, deliberately not in config.Resolve: the resolver is
+// shared with headless `zero exec`, which must stay byte-silent when
+// unconfigured (maintainer review, PR #1001). The /notify command persists
+// explicit choices; blank stays blank on disk.
 func effectiveTUINotifyMode(mode string) notify.Mode {
 	m := notify.Mode(strings.TrimSpace(mode))
 	if m == "" {
