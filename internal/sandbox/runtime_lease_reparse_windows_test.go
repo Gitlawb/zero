@@ -239,6 +239,14 @@ const windowsFSCTLSetReparsePoint = 0x000900A4
 // makes the shared holder and cleanup lock the same thing. Keying on the link
 // shape instead would leave every other reparse tag accepted, and it would leave
 // this untested on any machine without the symbolic-link privilege.
+//
+// WHAT THIS CASE CANNOT SHOW, so nobody reads a local pass as more than it is:
+// an unknown third-party tag is unresolvable, so the OLD pathname cleanup fails
+// on it too, with ERROR_CANT_ACCESS_FILE rather than by classifying anything. It
+// therefore pins that both sites refuse, and the reason check below is what
+// separates a refusal from an accident. Only the symbolic-link cases above show
+// the half that matters most, a pathname open SUCCEEDING on the target, and those
+// need the privilege. Read their result in CI, not here.
 func TestLeaseRefusesAnyReparseObjectAtTheLeaseName(t *testing.T) {
 	for name, acquire := range map[string]func(string) error{
 		"shared": func(root string) error {
