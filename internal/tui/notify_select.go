@@ -56,14 +56,31 @@ func notifyPickerChoices() []notifyChoice {
 }
 
 // handleNotifyCommand implements /notify [list|off|bell|notify|both [focus]].
-// Bare `/notify` opens the picker at the dispatch layer. A mode-only argument
-// preserves the focusMode stored in the USER'S OWN config (blank stays blank);
-// seeding from the model's in-session value would copy a project config's
-// choice, or a pinned default, into the user's global file. Mirrors
-// handleThemeCommand.
+// Bare `/notify` opens the picker at the dispatch layer.
+//
+// Two contracts share this handler and must stay separate (maintainer review,
+// PR #1001):
+//
+//   - LIVE policy (m.notifyMode/m.notifyFocusMode, m.notifier): what the
+//     current session uses, initialized by newModel from the RESOLVED pair
+//     (user config after project precedence). A mode-only change preserves the
+//     live focus so a project's focus rule keeps applying to the session, and
+//     the change reaches the notifier immediately.
+//   - PERSISTED policy (the user's own config file): a partial write seeds
+//     omitted fields from config.UserNotify — the user's global choice —
+//     never from the resolved view, so a project's value cannot leak into the
+//     global file and a blank stays blank.
+//
+// Mirrors handleThemeCommand.
 func (m model) handleNotifyCommand(args string) (model, string) {
 	tokens := strings.Fields(strings.TrimSpace(args))
-	if len(tokens) == 0 || tokens[0] == "list" {
+	if len(tokens) == 0 {
+		return m, m.notifyStateText()
+	}
+	if tokens[0] == "list" {
+		if len(tokens) != 1 {
+			return m, "Notify\nToo many arguments: " + args + " (usage: /notify list)"
+		}
 		return m, m.notifyStateText()
 	}
 	if len(tokens) > 2 {
@@ -73,33 +90,38 @@ func (m model) handleNotifyCommand(args string) (model, string) {
 	if !isValidNotifyMode(mode) {
 		return m, "Notify\nUnknown mode: " + tokens[0] + " (expected off, bell, notify, or both; run /notify with no argument to pick from the list)"
 	}
-	focus := ""
+	// LIVE focus: an explicit token wins; otherwise preserve the in-session
+	// value (which started as the resolved pair, project precedence included).
+	liveFocus := m.notifyFocusMode
+	persistFocus := m.notifyFocusMode
 	if len(tokens) > 1 {
-		focus = strings.ToLower(strings.TrimSpace(tokens[1]))
+		focus := strings.ToLower(strings.TrimSpace(tokens[1]))
 		if !isValidNotifyFocusMode(focus) {
 			return m, "Notify\nUnknown focus mode: " + tokens[1] + " (expected unfocused, always, or focused)"
 		}
+		liveFocus = focus
+		persistFocus = focus
 	} else if stored, err := m.storedNotify(); err == nil {
-		// Preserve what the USER chose (blank included); never the resolved
-		// view, which merges project config and in-session defaults.
-		focus = stored.FocusMode
+		// PERSISTED focus only: what the USER's global file holds (blank stays
+		// blank). The live session keeps its resolved focus above.
+		persistFocus = stored.FocusMode
 	}
 	m.notifyMode = mode
-	m.notifyFocusMode = focus
+	m.notifyFocusMode = liveFocus
 	// Apply to the live notifier so the change takes effect on the next
-	// permission prompt in this session, not just after a restart. A blank
+	// notification in this session, not just after a restart. A blank
 	// focusMode is fine here: the notifier treats blank as "unfocused".
 	if m.notifier != nil {
 		m.notifier.Configure(notify.Config{
 			Mode:      notify.Mode(mode),
-			FocusMode: notify.FocusMode(focus),
+			FocusMode: notify.FocusMode(liveFocus),
 		})
 	}
 	lines := []string{
 		"Notify",
-		"active mode: " + mode + ", focus: " + effectiveFocusLabel(focus),
+		"active mode: " + mode + ", focus: " + effectiveFocusLabel(liveFocus),
 	}
-	if note := m.persistNotifyPreference(mode, focus); note != "" {
+	if note := m.persistNotifyPreference(mode, persistFocus); note != "" {
 		lines = append(lines, note)
 	}
 	return m, strings.Join(lines, "\n")
@@ -140,20 +162,16 @@ func (m model) persistNotifyPreference(mode string, focus string) string {
 	return ""
 }
 
-// notifyStateText renders the /notify state view: the stored preference plus
-// every valid pair, so the user has the same information whether they ran
-// `/notify list` or just opened the picker.
+// notifyStateText renders the /notify state view: the LIVE session policy
+// (model fields, initialized from the resolved pair and updated by /notify) —
+// not the stored file, which can legitimately disagree when a project config
+// overrides notify for this session (maintainer review, PR #1001).
 func (m model) notifyStateText() string {
-	stored, _ := m.storedNotify()
-	mode := stored.Mode
-	if strings.TrimSpace(mode) == "" {
-		mode = string(effectiveTUINotifyMode(mode))
-	}
 	sections := []commandSection{{
 		Title: "State",
 		Lines: []string{
-			"active mode: " + mode,
-			"active focus: " + effectiveFocusLabel(stored.FocusMode),
+			"active mode: " + m.notifyMode,
+			"active focus: " + effectiveFocusLabel(m.notifyFocusMode),
 		},
 	}}
 	rows := make([]string, 0, 12)

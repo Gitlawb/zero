@@ -9,9 +9,10 @@ import (
 )
 
 // runConfigNotify implements `zero config notify`: with no flags it prints the
-// current mode/focusMode; --mode/--focus update them via the same
+// stored mode/focusMode; --mode/--focus update them via the same
 // config.SetNotify writer the TUI /notify command uses, so all surfaces stay
-// in lockstep; --reset blanks both fields so the built-in defaults apply.
+// in lockstep; --reset blanks both fields so the TUI's effective default
+// applies again (an unconfigured headless run stays silent).
 //
 // The command manages a user preference, so it talks ONLY to the user's own
 // config file (config.UserNotify / config.SetNotify) and never runs the full
@@ -144,25 +145,30 @@ func writeConfigNotifyHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, "Usage:\n"+
 		"  zero config notify [flags]\n"+
 		"\n"+
-		"Print or update the permission-prompt notify preference.\n"+
+		"Print or update the stored global notification preference.\n"+
 		"\n"+
-		"When run with no flag, prints the current mode and focusMode; a field you\n"+
+		"The preference controls BOTH notification kinds: the turn-completion\n"+
+		"(\"Zero: ready\") alert and the needs-input alert. mode off silences both;\n"+
+		"the focus mode (unfocused, always, focused) applies to both.\n"+
+		"\n"+
+		"When run with no flag, prints the stored mode and focusMode; a field you\n"+
 		"never set shows as (default) — the TUI alerts with bell + notification,\n"+
-		"firing only when the terminal is unfocused. Omitted flags preserve the\n"+
-		"values stored in YOUR config file; --reset clears both so the defaults\n"+
-		"apply again.\n"+
+		"firing only when the terminal is unfocused, while an unconfigured\n"+
+		"headless run stays silent. Omitted flags preserve the values stored in\n"+
+		"YOUR config file; --reset clears both so the TUI's effective default\n"+
+		"applies again.\n"+
 		"\n"+
 		"Examples:\n"+
 		"  zero config notify\n"+
 		"  zero config notify --json\n"+
 		"  zero config notify --mode both --focus unfocused\n"+
 		"  zero config notify --mode off\n"+
-		"  zero config notify --reset         # clear config so the resolver defaults apply\n"+
+		"  zero config notify --reset         # clear the stored preference\n"+
 		"\n"+
 		"Flags:\n"+
-		"      --mode <off|bell|notify|both>       Notification mechanism\n"+
+		"      --mode <off|bell|notify|both>       Notification mechanism (both kinds)\n"+
 		"      --focus <unfocused|always|focused>  When the alert fires\n"+
-		"      --reset                             Clear both fields so the resolver defaults apply\n"+
+		"      --reset                             Clear the stored preference so the TUI effective default applies\n"+
 		"      --json                              Machine-readable output\n"+
 		"  -h, --help                              Show this help\n")
 	return err
