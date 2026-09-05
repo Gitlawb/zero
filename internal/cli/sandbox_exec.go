@@ -119,9 +119,14 @@ func runSandboxExec(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	return runSandboxPlannedCommand(runCtx, plan, stdout, stderr)
 }
 
-// sandboxExecShutdownGrace bounds how long a cancelled child may take to exit
-// before it is killed outright, so cleanup still runs.
-const sandboxExecShutdownGrace = 5 * time.Second
+const (
+	// sandboxExecShutdownGrace is how long a cancelled child has to exit on its
+	// own after the graceful request, before it is killed outright.
+	sandboxExecShutdownGrace = 5 * time.Second
+	// sandboxExecShutdownPoll is how often that wait re-checks, matching the
+	// background package's termination policy.
+	sandboxExecShutdownPoll = 50 * time.Millisecond
+)
 
 func runSandboxPlannedCommand(ctx context.Context, plan zeroSandbox.CommandPlan, stdout io.Writer, stderr io.Writer) int {
 	// CANCELLING THE WRAPPER HAS TO REACH THE COMMAND.
@@ -143,12 +148,26 @@ func runSandboxPlannedCommand(ctx context.Context, plan zeroSandbox.CommandPlan,
 	// while the directed-signal case, which reached nothing at all before, now
 	// reaches the child.
 	process := exec.CommandContext(ctx, plan.Name, plan.Args...)
-	// Kill the tree rather than the root: on Windows that is taskkill /T, and on
-	// Unix the child plus its group when it leads one.
-	process.Cancel = func() error { return execution.KillProcessTree(process.Process.Pid) }
-	// Bounded, so a child ignoring the first signal cannot hold the wrapper open
-	// forever and skip cleanup anyway.
-	process.WaitDelay = sandboxExecShutdownGrace
+	// TWO PHASES, AND THE FIRST ONE HAS TO EXIST.
+	//
+	// The comments here used to describe a graceful signal followed by escalation
+	// while the code did neither: Cancel called KillProcessTree, which is SIGKILL
+	// on Unix and taskkill /T /F on Windows, and WaitDelay only starts counting
+	// AFTER Cancel returns, so it could never postpone a kill that had already
+	// happened. A directed SIGTERM reached the child as 137 rather than 143, with
+	// no chance to flush output, drop a lock file, or run a shutdown handler.
+	//
+	// TerminateProcessTree is the two-phase policy the background package already
+	// uses: SIGTERM, poll for the grace, then SIGKILL what is still alive. On
+	// Windows it is the single-phase kill, which is correct rather than lazy,
+	// because there is no signal to send a child that owns no console.
+	process.Cancel = func() error {
+		return execution.TerminateProcessTree(process.Process.Pid, sandboxExecShutdownGrace, sandboxExecShutdownPoll)
+	}
+	// A backstop only. Cancel above already waits out the grace and escalates, so
+	// this bounds the case where the tree is gone but Wait is still blocked on an
+	// inherited pipe a grandchild holds open.
+	process.WaitDelay = sandboxExecShutdownGrace + sandboxExecShutdownPoll
 	process.Dir = plan.Dir
 	if process.Dir == "" {
 		process.Dir = plan.WorkspaceRoot
