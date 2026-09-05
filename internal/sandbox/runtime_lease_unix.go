@@ -25,8 +25,8 @@ func acquireSharedRuntimeLease(path string) (runtimeLeaseHandle, error) {
 	return runtimeLeaseHandle{file: file}, nil
 }
 
-func tryAcquireExclusiveRuntimeLease(path string) (runtimeLeaseHandle, bool, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+func tryAcquireExclusiveRuntimeLease(root string) (runtimeLeaseHandle, bool, error) {
+	file, err := os.OpenFile(sandboxRuntimeLeasePath(root), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return runtimeLeaseHandle{}, false, err
 	}

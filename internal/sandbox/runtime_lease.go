@@ -25,7 +25,7 @@ func acquireSandboxRuntimeLease(root string) (*sandboxRuntimeLease, error) {
 }
 
 func tryAcquireSandboxRuntimeCleanupLease(root string) (*sandboxRuntimeLease, bool, error) {
-	handle, inUse, err := tryAcquireExclusiveRuntimeLease(sandboxRuntimeLeasePath(root))
+	handle, inUse, err := tryAcquireExclusiveRuntimeLease(root)
 	if err != nil || inUse {
 		return nil, inUse, err
 	}

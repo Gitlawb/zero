@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,8 +99,14 @@ func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLea
 	var handle windows.Handle
 	var iosb windows.IO_STATUS_BLOCK
 	// FILE_OPEN_IF because the lease is shared: whoever gets there first creates
-	// it. FILE_NON_DIRECTORY_FILE and FILE_OPEN_REPARSE_POINT so a directory or a
-	// link planted under that name is refused rather than opened through.
+	// it. FILE_NON_DIRECTORY_FILE so a directory under that name is refused.
+	//
+	// FILE_OPEN_REPARSE_POINT IS NOT A REFUSAL. It says do not follow, so the call
+	// returns a handle to the LINK, and FILE_NON_DIRECTORY_FILE excludes
+	// directories rather than non-directory reparse objects. A file symbolic link
+	// planted at <digest>.lease was therefore opened and locked as if it were the
+	// lease. No-follow and classification are two requirements; the flag is only
+	// the first, and the handle is asked for the second below.
 	err = windows.NtCreateFile(
 		&handle,
 		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
@@ -116,6 +123,10 @@ func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLea
 	if err != nil {
 		return runtimeLeaseHandle{}, err
 	}
+	if err := refuseReparseRuntimeLeaseHandle(handle, name); err != nil {
+		_ = windows.CloseHandle(handle)
+		return runtimeLeaseHandle{}, err
+	}
 	file := os.NewFile(uintptr(handle), name)
 	if file == nil {
 		_ = windows.CloseHandle(handle)
@@ -127,4 +138,118 @@ func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLea
 		return runtimeLeaseHandle{}, err
 	}
 	return lease, nil
+}
+
+// refuseReparseRuntimeLeaseHandle proves the opened lease is an ordinary file.
+//
+// Asked of the HANDLE, not the name, so there is no second resolution for a
+// substitution to land in. This is the check the directory descent already makes
+// in openWindowsChildNoFollow; the lease carried the no-follow flag and not the
+// classification that has to go with it.
+func refuseReparseRuntimeLeaseHandle(handle windows.Handle, name string) error {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect the sandbox runtime lease %s: %w", name, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("refusing to use the sandbox runtime lease at %s: a reparse point here means the shared and exclusive holders would lock different objects", name)
+	}
+	return nil
+}
+
+// openRuntimeLeaseParentRooted opens, and never creates, the directory holding
+// the lease for root.
+//
+// Cleanup's side of the contract. It descends the same owned components from the
+// same base with the same no-follow opens acquisition uses, so both sides resolve
+// the lease name relative to a verified directory rather than by pathname.
+//
+// It creates nothing. A runtime tree that is not there has no lease to take, and
+// cleanup rebuilding the tree in order to lock it would be inventing the thing it
+// is about to remove.
+func openRuntimeLeaseParentRooted(root string) (windows.Handle, error) {
+	base, components, owned := windowsSandboxRuntimeOwnedTail(root)
+	if !owned || len(components) == 0 {
+		return 0, fmt.Errorf("open the sandbox runtime lease parent for %s: %w", root, errRuntimeTailNotOwned)
+	}
+	parent, err := openWindowsDirectoryByName(base)
+	if err != nil {
+		return 0, fmt.Errorf("open sandbox runtime base %s: %w", base, err)
+	}
+	// The lease is a SIBLING of the leaf, so the deepest directory needed here is
+	// the leaf's parent, exactly as in acquisition.
+	for _, name := range components[:len(components)-1] {
+		child, openErr := openWindowsChildNoFollow(parent, name,
+			windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE, windows.FILE_DIRECTORY_FILE)
+		if openErr != nil {
+			_ = windows.CloseHandle(parent)
+			return 0, openErr
+		}
+		_ = windows.CloseHandle(parent)
+		parent = child
+	}
+	return parent, nil
+}
+
+// tryAcquireExclusiveRuntimeLeaseRooted is cleanup's acquisition, resolved the
+// way acquisition resolves it.
+func tryAcquireExclusiveRuntimeLeaseRooted(root string) (runtimeLeaseHandle, bool, error) {
+	parent, err := openRuntimeLeaseParentRooted(root)
+	if err != nil {
+		return runtimeLeaseHandle{}, false, err
+	}
+	defer func() { _ = windows.CloseHandle(parent) }()
+
+	name := filepath.Base(sandboxRuntimeLeasePath(root))
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return runtimeLeaseHandle{}, false, fmt.Errorf("encode sandbox runtime lease name %s: %w", name, err)
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		RootDirectory: parent,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE,
+	}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+
+	var handle windows.Handle
+	var iosb windows.IO_STATUS_BLOCK
+	// FILE_OPEN_IF matches what cleanup did by pathname with O_CREATE: a runtime
+	// root whose lease file is gone is held by nobody, and creating the empty lease
+	// is how that is expressed.
+	err = windows.NtCreateFile(
+		&handle,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+		&attributes,
+		&iosb,
+		nil,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN_IF,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+		0,
+		0,
+	)
+	if err != nil {
+		return runtimeLeaseHandle{}, false, err
+	}
+	if err := refuseReparseRuntimeLeaseHandle(handle, name); err != nil {
+		_ = windows.CloseHandle(handle)
+		return runtimeLeaseHandle{}, false, err
+	}
+	file := os.NewFile(uintptr(handle), name)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return runtimeLeaseHandle{}, false, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
+	}
+	lease := runtimeLeaseHandle{file: file}
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
+	if err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &lease.overlapped); err != nil {
+		_ = file.Close()
+		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return runtimeLeaseHandle{}, true, nil
+		}
+		return runtimeLeaseHandle{}, false, err
+	}
+	return lease, false, nil
 }
