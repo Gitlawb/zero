@@ -108,22 +108,26 @@ func (m model) modelSupportsVisionFor(modelID string) bool {
 	if trimmed == "" {
 		return false
 	}
-	// The curated catalog is authoritative only when it knows the model.
-	if entry, known := m.modelCatalog.Resolve(trimmed); known {
-		return entry.Supports(modelregistry.ModelCapabilityVision)
-	}
-	// Check the discovered model list, preferring the ACTIVE provider's models.
+	// Check the discovered model list for the ACTIVE provider first.
+	activeID := ""
 	if descriptor, ok := m.activeProviderDescriptor(); ok && descriptor.ID != "" {
-		if models, ok := m.modelPickerLiveByProvider[descriptor.ID]; ok {
+		activeID = descriptor.ID
+	} else if len(m.modelPickerLiveByProvider) == 1 {
+		for id := range m.modelPickerLiveByProvider {
+			activeID = id
+			break
+		}
+	}
+	if activeID != "" {
+		if models, ok := m.modelPickerLiveByProvider[activeID]; ok {
 			if supported, ok := discoveredVisionSupport(models, trimmed); ok {
 				return supported
 			}
 		}
 	}
-	for _, models := range m.modelPickerLiveByProvider {
-		if supported, ok := discoveredVisionSupport(models, trimmed); ok {
-			return supported
-		}
+	// The curated catalog is authoritative when active-provider discovery is absent or inconclusive.
+	if entry, known := m.modelCatalog.Resolve(trimmed); known {
+		return entry.Supports(modelregistry.ModelCapabilityVision)
 	}
 	// Fall back to curated catalog or the name heuristic.
 	return modelregistry.SupportsVision(m.modelCatalog, trimmed)
