@@ -75,8 +75,19 @@ type startupDisclosing interface {
 }
 
 // StartupNotices reports the disclosures that applied to this server's launch.
+//
+// GATED ON THE SAME DECISION AS EVERY OTHER CARRIER. connectAndList reads this on
+// the success path and hands the result straight to the disclosure sources, so
+// for a while a successfully connected wrapped server disclosed on the strength
+// of cmd.Start returning: the HELPER starting, which is the one thing the report
+// exists because it does not prove. It happened to be right, since a completed
+// handshake does imply the child ran, but by coincidence rather than by rule, and
+// the failure path next to it was already asking the adapter.
 func (client *Client) StartupNotices() []string {
 	if client == nil || len(client.startupNotices) == 0 {
+		return nil
+	}
+	if client.launched != nil && !client.launched() {
 		return nil
 	}
 	return append([]string(nil), client.startupNotices...)
@@ -102,6 +113,10 @@ type Client struct {
 	// reduced write confinement. Kept typed here and rendered exactly once at
 	// registration rather than pasted onto every later tool result.
 	startupNotices []string
+	// launched is the launch decision this server's disclosures are gated on, nil
+	// for a plan whose started process IS the server and where there is nothing to
+	// decide. See internal/execution/child_launch.go.
+	launched func() bool
 
 	// dispatchMu guards the response-dispatch state shared with the single
 	// reader goroutine. It is never held across a blocking read.
@@ -305,6 +320,7 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		// nothing: same launch-state rule hooks and plugins use, expressed by where
 		// this assignment sits rather than by another outcome-kind switch.
 		startupNotices: append([]string(nil), plannedEnforcement.Notices...),
+		launched:       launchedOnce,
 	}
 	cleanupTransferred = true
 	if err := client.initialize(ctx); err != nil {
