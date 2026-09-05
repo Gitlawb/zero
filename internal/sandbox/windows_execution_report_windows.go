@@ -75,15 +75,16 @@ func (report *windowsExecutionReport) close(published bool) {
 	report.file = nil
 }
 
-// terminateAndReapWindowsChild takes down a child this helper has launched and
-// waits for it to actually exit.
+// terminateSuspendedWindowsChild takes down a child that was created suspended
+// and never resumed, and waits for it to actually leave.
 //
-// Used on the paths where the helper cannot continue after CreateProcessAsUser
-// has already succeeded. Returning there without this would leave the requested
-// command or MCP server running with nobody waiting on it, cancelling it, or
-// cleaning up after it, while the parent reads a missing report, concludes no
-// child launched, and is free to start a second one.
-func terminateAndReapWindowsChild(process windows.Handle) {
+// Used on the paths between CreateProcessAsUser and ResumeThread. The process
+// exists and holds the inherited pipes, so it has to be closed out rather than
+// abandoned, but it has executed no instructions: there is no work to undo and
+// nothing for the parent to be told about. That is what makes returning an error
+// here honest, since the report was never published and "no child launched" is
+// exactly what happened.
+func terminateSuspendedWindowsChild(process windows.Handle) {
 	if process == 0 {
 		return
 	}
