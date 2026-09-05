@@ -7,8 +7,10 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -68,12 +70,59 @@ var sensitiveKeys = map[string]struct{}{
 	"zero_api_key":          {},
 }
 
+// ctrlGap matches C0/C1 bytes (Cc other than tab/LF/CR, plus lone Latin-1 C1)
+// between characters of a secret shape. Matching stays on the original string:
+// a deleted control is never a join, so \b still treats wordchar+control as a
+// boundary and tokens that were never adjacent stay that way. Tab/LF/CR are
+// excluded so log line structure is unchanged. \x{FFFD} lets the regexp locate
+// a lone invalid UTF-8 byte; validSecretControlGaps subsequently accepts only
+// raw C1 bytes and rejects a real, valid UTF-8 U+FFFD rune.
+const ctrlGap = `[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f\x{FFFD}]*`
+
+// ctrlLit quotes s as a regexp literal with ctrlGap strictly between runes, so
+// a NUL/ESC/C1 may split the literal without letting a match end on a gap.
+func ctrlLit(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) * (1 + len(ctrlGap)))
+	first := true
+	for _, r := range s {
+		if !first {
+			b.WriteString(ctrlGap)
+		}
+		b.WriteString(regexp.QuoteMeta(string(r)))
+		first = false
+	}
+	return b.String()
+}
+
+func ctrlJoin(parts ...string) string {
+	return strings.Join(parts, ctrlGap)
+}
+
+// secretBody generates a regex matching at least minimum body characters,
+// allowing C0/C1 control gaps between any characters. It always starts and ends
+// on a class character (never on a gap).
+func secretBody(class string, minimum int, unbounded bool) string {
+	if minimum <= 0 {
+		return ""
+	}
+	quantifier := strconv.Itoa(minimum - 1)
+	if unbounded {
+		return class + `(?:` + ctrlGap + class + `){` + quantifier + `,}`
+	}
+	return class + `(?:` + ctrlGap + class + `){` + quantifier + `}`
+}
+
 // openaiKeyPattern mirrors secrets.Scan's broad sk- body. Known OpenAI
 // prefixes (sk-proj-/sk-svcacct-/sk-admin-) are always redacted; other sk-
 // digit-free matches with an interior hyphen are left alone (kebab-case false
 // positives), while digit-free legacy sk- credentials are still redacted.
 // Applied via ReplaceAllStringFunc rather than the plain list below.
-var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
+var openaiKeyPattern = regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("sk-"), secretBody(`[A-Za-z0-9_-]`, 20, true)))
+
+// plainOpenaiKeyPattern is the non-gap-aware counterpart of openaiKeyPattern,
+// used for boundary resolution on logical (control-stripped) candidates.
+var plainOpenaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 
 // textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
 // shared high-confidence shapes. A leading \b keeps each pattern from firing
@@ -84,16 +133,63 @@ var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 // (not in secrets.Scan); ASIA temporary access keys are kept alongside AKIA.
 // openai keys are handled separately (digit filter). JWT has a strict form
 // (both segments start with eyJ) and a looser three-segment form.
-var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
-	regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`),
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+// ctrlGap between shape characters keeps NUL/ESC/C1 split secrets matching
+// without stripping those bytes out of the subject first.
+type secretShape struct {
+	textPattern  *regexp.Regexp
+	plainPattern *regexp.Regexp
+	minLen       int
+	requireDots  bool
+}
+
+var secretShapes = []secretShape{
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlLit("sk-ant-") + ctrlGap + `(?:` + ctrlJoin(ctrlLit("api"), `\d`, `\d`, `-`) + ctrlGap + `)?` + secretBody(`[A-Za-z0-9_-]`, 20, true)),
+		plainPattern: regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
+		minLen:       27, // sk-ant- (7) + 20
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("github_pat_"), secretBody(`[A-Za-z0-9_]`, 22, true))),
+		plainPattern: regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
+		minLen:       33, // github_pat_ (11) + 22
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("gh"), `[pousr]`, `_`, secretBody(`[A-Za-z0-9]`, 36, true))),
+		plainPattern: regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
+		minLen:       40, // gh[pousr]_ (4) + 36
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("glpat-"), secretBody(`[A-Za-z0-9_-]`, 12, true))),
+		plainPattern: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
+		minLen:       18, // glpat- (6) + 12
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("AIza"), secretBody(`[0-9A-Za-z\-_]`, 35, true))),
+		plainPattern: regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`),
+		minLen:       39, // AIza (4) + 35
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("xox"), `[baprs]`, `-`, secretBody(`[A-Za-z0-9-]`, 10, true))),
+		plainPattern: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
+		minLen:       15, // xox[baprs]- (5) + 10
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(`(?:`+ctrlLit("AKIA")+`|`+ctrlLit("ASIA")+`)`, secretBody(`[A-Z0-9]`, 16, false))),
+		plainPattern: regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
+		minLen:       20, // AKIA/ASIA (4) + 16
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("eyJ"), secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, ctrlLit("eyJ"), secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, secretBody(`[A-Za-z0-9_-]`, 10, true))),
+		plainPattern: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+		minLen:       38, // JWT (3 + 10 + 1 + 3 + 10 + 1 + 10)
+		requireDots:  true,
+	},
+	{
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("eyJ"), secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, secretBody(`[A-Za-z0-9_-]`, 10, true), `\.`, secretBody(`[A-Za-z0-9_-]`, 10, true))),
+		plainPattern: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+		minLen:       34, // JWT (3 + 10 + 1 + 10 + 1 + 10)
+		requireDots:  true,
+	},
 }
 
 var (
@@ -172,6 +268,9 @@ func keyLooksSensitive(normalized string) bool {
 
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
+	// Match on the original string. Shape patterns allow C0/C1 gaps between
+	// characters so a split secret still matches; stripping first would join
+	// tokens that were never adjacent and make \b miss a leading wordchar.
 	redacted := value
 	if len(options.ExtraSecretValues) > 0 {
 		secrets := append([]string{}, options.ExtraSecretValues...)
@@ -224,19 +323,353 @@ func RedactString(value string, options Options) string {
 		}
 		return parts[1] + parts[2] + "=" + replacement
 	})
-	// openai keys first so the filter can drop kebab-case false positives
-	// before any other pattern rewrites nearby text.
-	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) &&
-			strings.Contains(strings.TrimPrefix(match, "sk-"), "-") {
-			return match
-		}
-		return replacement
-	})
-	for _, pattern := range textSecretPatterns {
-		redacted = pattern.ReplaceAllString(redacted, replacement)
+	// Match high-confidence specialized shapes first. In particular, the broad
+	// sk- pattern may reach its minimum before a control inside a longer
+	// Anthropic key; letting the Anthropic shape consume that split first avoids
+	// leaving a recognizable credential suffix behind.
+	for _, shape := range secretShapes {
+		redacted = replaceAllSecretMatches(redacted, shape, replacement, false, nil)
 	}
+	// Apply the broad OpenAI shape after specialized keys so its kebab-case
+	// false-positive filter considers only the matched key, never suffix text.
+	openaiShape := secretShape{
+		textPattern:  openaiKeyPattern,
+		plainPattern: plainOpenaiKeyPattern,
+		minLen:       minOpenAILen,
+		requireDots:  false,
+	}
+	redacted = replaceAllSecretMatches(redacted, openaiShape, replacement, true, func(m string) bool {
+		// m is the logical (control-stripped) candidate.
+		if !knownOpenAIKeyPrefix(m) && !secretMatchHasDigit(m) &&
+			strings.Contains(strings.TrimPrefix(m, "sk-"), "-") {
+			return false
+		}
+		return true
+	})
 	return redacted
+}
+
+const minOpenAILen = 23 // sk- (3) + 20
+
+func isCandidateLength(logLen int, minLen int, requireDots bool, runningDots int) bool {
+	if logLen < minLen {
+		return false
+	}
+	if requireDots {
+		return runningDots >= 2
+	}
+	return true
+}
+
+type controlSpan struct {
+	start    int
+	end      int
+	validGap bool
+}
+
+type logicalCandidate struct {
+	logical  string
+	origEnds []int
+	spans    []controlSpan
+}
+
+func extractLogicalCandidate(s string) logicalCandidate {
+	var logical strings.Builder
+	logical.Grow(len(s))
+	var origEnds []int
+	origEnds = make([]int, 0, len(s))
+	var spans []controlSpan
+
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < 0x80 {
+			if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c == 0x7F) {
+				start := i
+				for i < len(s) && s[i] < 0x80 && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' && (s[i] < 0x20 || s[i] == 0x7F) {
+					i++
+				}
+				spans = append(spans, controlSpan{start: start, end: i, validGap: true})
+				continue
+			}
+			logical.WriteByte(c)
+			i++
+			origEnds = append(origEnds, i)
+			continue
+		}
+		if c >= 0x80 && c <= 0x9F {
+			start := i
+			for i < len(s) && s[i] >= 0x80 && s[i] <= 0x9F {
+				i++
+			}
+			spans = append(spans, controlSpan{start: start, end: i, validGap: true})
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError {
+			start := i
+			i += size
+			spans = append(spans, controlSpan{start: start, end: i, validGap: false})
+			continue
+		}
+		if unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r' {
+			start := i
+			i += size
+			for i < len(s) {
+				nr, nsize := utf8.DecodeRuneInString(s[i:])
+				if unicode.IsControl(nr) && nr != '\t' && nr != '\n' && nr != '\r' {
+					i += nsize
+				} else {
+					break
+				}
+			}
+			spans = append(spans, controlSpan{start: start, end: i, validGap: true})
+			continue
+		}
+		logical.WriteRune(r)
+		i += size
+		runeLen := len(string(r))
+		for b := 0; b < runeLen; b++ {
+			origEnds = append(origEnds, i)
+		}
+	}
+	return logicalCandidate{
+		logical:  logical.String(),
+		origEnds: origEnds,
+		spans:    spans,
+	}
+}
+
+func startsNewCredential(s string, isJWT bool) bool {
+	if strings.HasPrefix(s, "sk-") ||
+		strings.HasPrefix(s, "ghp_") ||
+		strings.HasPrefix(s, "gho_") ||
+		strings.HasPrefix(s, "ghu_") ||
+		strings.HasPrefix(s, "ghs_") ||
+		strings.HasPrefix(s, "ghr_") ||
+		strings.HasPrefix(s, "github_pat_") ||
+		strings.HasPrefix(s, "glpat-") ||
+		strings.HasPrefix(s, "AIza") ||
+		strings.HasPrefix(s, "xoxb-") ||
+		strings.HasPrefix(s, "xoxa-") ||
+		strings.HasPrefix(s, "xoxp-") ||
+		strings.HasPrefix(s, "xoxr-") ||
+		strings.HasPrefix(s, "xoxs-") ||
+		strings.HasPrefix(s, "AKIA") ||
+		strings.HasPrefix(s, "ASIA") {
+		return true
+	}
+	if !isJWT && strings.HasPrefix(s, "eyJ") {
+		return true
+	}
+	return false
+}
+
+func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretShape, isOpenAI bool, hasTrailingPath bool, isValid func(string) bool) (int, bool) {
+	match := src[matchStart:matchEnd]
+	cand := extractLogicalCandidate(match)
+	if len(cand.spans) == 0 {
+		if isValid != nil && !isValid(match) {
+			return len(match), false
+		}
+		return len(match), true
+	}
+
+	logicalStr := cand.logical
+
+	// Fast path for OpenAI kebab false positives: if the logical string has no digits,
+	// is not a known prefix, and the token before the first control span already contains
+	// an interior hyphen, no sub-span can ever be valid.
+	if isOpenAI && isValid != nil && len(cand.spans) > 0 && cand.spans[0].start > 0 {
+		if !knownOpenAIKeyPrefix(logicalStr) && !secretMatchHasDigit(logicalStr) {
+			firstLogLen := sort.SearchInts(cand.origEnds, cand.spans[0].start+1)
+			firstPre := logicalStr[:firstLogLen]
+			if strings.Contains(strings.TrimPrefix(firstPre, "sk-"), "-") {
+				return len(match), false
+			}
+		}
+	}
+
+	runningDots := 0
+	logCursor := 0
+	hasDigit := false
+	hasInteriorHyphen := false
+	hasKnownPrefix := isOpenAI && knownOpenAIKeyPrefix(logicalStr)
+	lastValidEnd := 0
+	plainPatternMatched := false
+
+	checkPlainPattern := func(logLen int) bool {
+		if plainPatternMatched {
+			return true
+		}
+		if shape.plainPattern == nil {
+			return true
+		}
+		if shape.plainPattern.MatchString(logicalStr[:logLen]) {
+			plainPatternMatched = true
+			return true
+		}
+		return false
+	}
+
+	for i, span := range cand.spans {
+		if span.start == 0 {
+			continue
+		}
+		for logCursor < len(cand.origEnds) && cand.origEnds[logCursor] <= span.start {
+			c := logicalStr[logCursor]
+			if shape.requireDots && c == '.' {
+				runningDots++
+			}
+			if isOpenAI {
+				if c >= '0' && c <= '9' {
+					hasDigit = true
+				}
+				if c == '-' && logCursor >= 3 {
+					hasInteriorHyphen = true
+				}
+			}
+			logCursor++
+		}
+		logLen := logCursor
+		logPreValid := !isOpenAI || hasKnownPrefix || hasDigit || !hasInteriorHyphen
+		validateLogPre := func() bool {
+			if !logPreValid {
+				return false
+			}
+			if isOpenAI {
+				return true
+			}
+			return checkPlainPattern(logLen)
+		}
+
+		// If text in src after span starts a new credential, this span is a delimiter between credentials.
+		tailInSrc := src[matchStart+span.end:]
+		if startsNewCredential(tailInSrc, shape.requireDots) {
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+				return span.start, true
+			}
+			return span.start, false
+		}
+
+		if !span.validGap {
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+				return span.start, true
+			}
+			return span.start, false
+		}
+
+		// If match is followed by a path separator in source and this span precedes the trailing path,
+		// the span is a terminal delimiter if the prefix is already a valid credential.
+		if hasTrailingPath && i == len(cand.spans)-1 {
+			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+				return span.start, true
+			}
+			return span.start, false
+		}
+		if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
+			lastValidEnd = span.start
+		}
+	}
+
+	for _, span := range cand.spans {
+		if !span.validGap {
+			return span.start, false
+		}
+	}
+
+	for logCursor < len(cand.origEnds) {
+		c := logicalStr[logCursor]
+		if shape.requireDots && c == '.' {
+			runningDots++
+		}
+		if isOpenAI {
+			if c >= '0' && c <= '9' {
+				hasDigit = true
+			}
+			if c == '-' && logCursor >= 3 {
+				hasInteriorHyphen = true
+			}
+		}
+		logCursor++
+	}
+
+	if !isCandidateLength(len(logicalStr), shape.minLen, shape.requireDots, runningDots) {
+		if lastValidEnd > 0 {
+			return lastValidEnd, true
+		}
+		return len(match), false
+	}
+
+	if isOpenAI {
+		if !hasKnownPrefix && !hasDigit && hasInteriorHyphen {
+			if lastValidEnd > 0 {
+				return lastValidEnd, true
+			}
+			return len(match), false
+		}
+	} else if !checkPlainPattern(len(logicalStr)) {
+		if lastValidEnd > 0 {
+			return lastValidEnd, true
+		}
+		return len(match), false
+	}
+
+	if isValid != nil && !isValid(logicalStr) {
+		if lastValidEnd > 0 {
+			return lastValidEnd, true
+		}
+		return len(match), false
+	}
+
+	if len(cand.origEnds) > 0 {
+		lastEnd := cand.origEnds[len(cand.origEnds)-1]
+		return lastEnd, true
+	}
+	return len(match), true
+}
+
+func replaceAllSecretMatches(src string, shape secretShape, replacement string, isOpenAI bool, isValid func(string) bool) string {
+	loc := shape.textPattern.FindStringIndex(src)
+	if loc == nil {
+		return src
+	}
+
+	var b strings.Builder
+	b.Grow(len(src))
+
+	lastIndex := 0
+	for {
+		loc := shape.textPattern.FindStringIndex(src[lastIndex:])
+		if loc == nil {
+			b.WriteString(src[lastIndex:])
+			break
+		}
+
+		matchStart := lastIndex + loc[0]
+		matchEnd := lastIndex + loc[1]
+		hasTrailingPath := matchEnd < len(src) && (src[matchEnd] == '/' || src[matchEnd] == '\\')
+
+		advanceLen, shouldRedact := findCredentialBoundary(src, matchStart, matchEnd, shape, isOpenAI, hasTrailingPath, isValid)
+
+		b.WriteString(src[lastIndex:matchStart])
+		if shouldRedact {
+			b.WriteString(replacement)
+			lastIndex = matchStart + advanceLen
+		} else {
+			if advanceLen <= 0 {
+				advanceLen = 1
+			}
+			b.WriteString(src[matchStart : matchStart+advanceLen])
+			lastIndex = matchStart + advanceLen
+		}
+		if lastIndex <= matchStart {
+			lastIndex = matchStart + 1
+		}
+		if lastIndex >= len(src) {
+			break
+		}
+	}
+	return b.String()
 }
 
 // knownOpenAIKeyPrefix is the redaction-side twin of secrets.knownOpenAIKeyPrefix:
