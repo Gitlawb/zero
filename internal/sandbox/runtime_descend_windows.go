@@ -10,20 +10,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// runtimeDescentBarrier, when set, runs after the base directory has been
-// opened and before the first owned component is touched. It exists so a test
-// can swap an owned component for a junction at exactly the point the old
-// pathname walk was vulnerable, and prove the redirected target is never
-// created or granted. Nil in production.
-var runtimeDescentBarrier func()
-
-// runtimeBaseOpenedByName, when set, receives the ONE path this descent opens by
-// name. The whole security property is which path that is: the fixed cache or
-// TEMP directory above the owned tail, never a predictable component Zero owns.
-// A test can assert it directly instead of inferring it from whether a swap
-// happened to be caught, which is not discriminating. Nil in production.
-var runtimeBaseOpenedByName func(string)
-
 // createRuntimeTailHandleRelative creates the owned tail of the runtime root
 // beneath base, one component at a time, from retained handles.
 //

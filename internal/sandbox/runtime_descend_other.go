@@ -2,31 +2,23 @@
 
 package sandbox
 
-import (
-	"fmt"
-	"os"
-)
+import "golang.org/x/sys/unix"
 
-// runtimeDescentBarrier is the Windows test seam; nothing consults it here, but
-// the name exists on every platform so a test that sets it compiles everywhere.
-var runtimeDescentBarrier func()
-
-// createRuntimeTailHandleRelative keeps the pathname form off Windows. The
-// elevated-installer-versus-unelevated-renamer split the handle-relative
-// descent closes does not apply here, so this is the mkdir loop it replaced,
-// creating outermost-first and recording each component it made.
+// createRuntimeTailHandleRelative creates the owned tail through the same
+// no-follow boundary the lease uses.
+//
+// This was an os.Mkdir loop over full pathnames, on the reasoning that the
+// elevated-installer-versus-unelevated-renamer split the Windows descent closes
+// does not apply here. That is true of the elevation asymmetry and false of the
+// substitution: the fallback root is a predictable name under a temp directory
+// every local account can write to, so another user can put a link at an owned
+// component and have this loop create the rest of the tree inside it. Same
+// descent, same refusal, one implementation per platform rather than one
+// protected platform.
 func createRuntimeTailHandleRelative(base string, tail []string) ([]windowsCreatedRuntimeDir, error) {
-	_ = base
-	var created []windowsCreatedRuntimeDir
-	for _, path := range tail {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			if os.IsExist(err) {
-				continue
-			}
-			return created, fmt.Errorf("create sandbox runtime root %s: %w", path, err)
-		}
-		identity, ok := runtimeIdentityAfterCreate(path)
-		created = append(created, windowsCreatedRuntimeDir{path: path, identity: identity, identified: ok})
+	created, parent, err := createRuntimeTailRetainingFD(base, tail)
+	if parent >= 0 {
+		_ = unix.Close(parent)
 	}
-	return created, nil
+	return created, err
 }
