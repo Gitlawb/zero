@@ -406,7 +406,7 @@ func TestLinuxBwrapAndSeatbeltKeepLexicalCredentialSymlinkPaths(t *testing.T) {
 	}
 	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(gitTarget))
 	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(sshTarget))
-	sshDir := normalizeProfilePathLexically(filepath.Join(home, ".ssh"))
+	sshDir := normalizeProfilePath(filepath.Join(home, ".ssh"))
 	if !argsContainSequence(args, "--tmpfs", sshDir) {
 		t.Fatalf("expected tmpfs overlay of ~/.ssh to hide lexical key symlink: %#v", args)
 	}
@@ -805,10 +805,12 @@ func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowRead(t *testing.T) {
 	if !argsContainSequence(args, "--perms", "111", "--tmpfs", gnupg) {
 		t.Fatalf("bwrap should tmpfs-mask ~/.gnupg to protect sibling secrets: %#v", args)
 	}
-	if !argsContainSequence(args, "--ro-bind", key, key) {
+	normKey := normalizeProfilePath(key)
+	if !argsContainSequence(args, "--ro-bind", normKey, normKey) {
 		t.Fatalf("bwrap should --ro-bind the carved-out key: %#v", args)
 	}
-	if argsContainSequence(args, "--ro-bind", secring, secring) {
+	normSecring := normalizeProfilePath(secring)
+	if argsContainSequence(args, "--ro-bind", normSecring, normSecring) {
 		t.Fatalf("bwrap unexpectedly rebound secring: %#v", args)
 	}
 
@@ -982,10 +984,12 @@ func TestLinuxBwrapAndSeatbeltHonorNestedGPGAllowReadThroughDirSymlink(t *testin
 	if !argsContainSequence(args, "--perms", "111", "--tmpfs", canonicalGnupg) {
 		t.Fatalf("bwrap should tmpfs-mask canonical gnupg to protect sibling secrets: %#v", args)
 	}
-	if !argsContainSequence(args, "--ro-bind", key, key) {
+	normKey := normalizeProfilePath(key)
+	if !argsContainSequence(args, "--ro-bind", normKey, normKey) {
 		t.Fatalf("bwrap should --ro-bind carved-out key: %#v", args)
 	}
-	if argsContainSequence(args, "--ro-bind", secring, secring) {
+	normSecring := normalizeProfilePath(secring)
+	if argsContainSequence(args, "--ro-bind", normSecring, normSecring) {
 		t.Fatalf("bwrap unexpectedly rebound secring: %#v", args)
 	}
 
@@ -1118,13 +1122,13 @@ func TestLinuxBwrapMasksLiveAndDanglingCredentialSymlinks(t *testing.T) {
 		t.Fatalf("dangling symlink must not be a hard --ro-bind dest: %#v", args)
 	}
 
-	sshDirLex := normalizeProfilePathLexically(sshDir)
-	if !argsContainSequence(args, "--tmpfs", sshDirLex) {
+	sshDirNorm := normalizeProfilePath(sshDir)
+	if !argsContainSequence(args, "--tmpfs", sshDirNorm) {
 		t.Fatalf("expected tmpfs overlay of ~/.ssh for live/dangling key symlinks: %#v", args)
 	}
-	assertArgsContainSequence(t, args, "--ro-bind", config, config)
-	assertArgsContainSequence(t, args, "--ro-bind", knownHosts, knownHosts)
-	assertArgsContainSequence(t, args, "--ro-bind", pub, pub)
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(config), normalizeProfilePath(config))
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(knownHosts), normalizeProfilePath(knownHosts))
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(pub), normalizeProfilePath(pub))
 	if argsContainSequence(args, "--ro-bind", liveLink, liveLink) ||
 		argsContainSequence(args, "--ro-bind", danglingLink, danglingLink) {
 		t.Fatalf("denied symlink basenames were rebound into ~/.ssh overlay: %#v", args)
@@ -1170,8 +1174,8 @@ func TestLinuxBwrapSkipsFileBindsUnderOverlaidCredentialParent(t *testing.T) {
 		},
 	}
 	args := linuxBwrapFilesystemArgs(profile)
-	sshDirLex := normalizeProfilePathLexically(sshDir)
-	if !argsContainSequence(args, "--tmpfs", sshDirLex) {
+	sshDirNorm := normalizeProfilePath(sshDir)
+	if !argsContainSequence(args, "--tmpfs", sshDirNorm) {
 		t.Fatalf("expected tmpfs overlay of ~/.ssh once a denied symlink is present: %#v", args)
 	}
 	if argsContainSequence(args, "--ro-bind", "/dev/null", idEd) ||
@@ -1184,7 +1188,7 @@ func TestLinuxBwrapSkipsFileBindsUnderOverlaidCredentialParent(t *testing.T) {
 	if argsContainSequence(args, "--ro-bind", danglingSibling, danglingSibling) {
 		t.Fatalf("dangling sibling used as --ro-bind source: %#v", args)
 	}
-	assertArgsContainSequence(t, args, "--ro-bind", config, config)
+	assertArgsContainSequence(t, args, "--ro-bind", normalizeProfilePath(config), normalizeProfilePath(config))
 	if denyCovered(denied, sshDir) {
 		t.Fatalf("~/.ssh was denied wholesale")
 	}
@@ -1233,11 +1237,11 @@ func TestLinuxBwrapBindsDeniedFileWhenParentOverlayFails(t *testing.T) {
 		},
 	}
 	args := linuxBwrapFilesystemArgs(profile)
-	sshDirLex := normalizeProfilePathLexically(sshDir)
-	if argsContainSequence(args, "--tmpfs", sshDirLex) {
+	sshDirNorm := normalizeProfilePath(sshDir)
+	if argsContainSequence(args, "--tmpfs", sshDirNorm) {
 		t.Fatalf("overlay must not apply when parent ReadDir fails: %#v", args)
 	}
-	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", idEd)
+	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", normalizeProfilePath(idEd))
 	if denyCovered(denied, sshDir) {
 		t.Fatalf("~/.ssh was denied wholesale")
 	}
@@ -1404,7 +1408,8 @@ func TestAllowReadSingleFileInsideGNUPGPreservesSiblingDenies(t *testing.T) {
 	}
 
 	// 2. publicFile must be present in Carveouts
-	if !denyListedExact(creds.Carveouts, publicFile) && !denyCovered(creds.Carveouts, publicFile) {
+	normPublic := normalizeProfilePath(publicFile)
+	if !denyListedExact(creds.Carveouts, normPublic) && !denyCovered(creds.Carveouts, normPublic) {
 		t.Fatalf("expected publicFile in Carveouts, got %v", creds.Carveouts)
 	}
 
@@ -1419,7 +1424,7 @@ func TestAllowReadSingleFileInsideGNUPGPreservesSiblingDenies(t *testing.T) {
 		DenyReadCarveouts: creds.Carveouts,
 	}
 	sbRules := strings.Join(denyReadCarveoutRules(fs), "\n")
-	if !strings.Contains(sbRules, publicFile) {
+	if !strings.Contains(sbRules, normPublic) && !strings.Contains(sbRules, publicFile) {
 		t.Fatalf("seatbelt rules missing allow for public file: %s", sbRules)
 	}
 	if strings.Contains(sbRules, secringFile) {
@@ -1438,5 +1443,42 @@ func TestLinuxHelperCredentialParentTmpfsRejectsNestedWriteRoots(t *testing.T) {
 	}
 	if linuxCredentialParentSafeToTmpfs(sshDir, writeRoots) {
 		t.Fatal("expected linuxCredentialParentSafeToTmpfs to reject parent containing nested write root")
+	}
+}
+
+func TestSSHSupportDirectivesCustomKnownHostsAndSocketPreserved(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	customHosts := filepath.Join(sshDir, "known_hosts_work")
+	agentSock := filepath.Join(home, "agent.sock")
+	mustWriteFile(t, customHosts, "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...\n")
+	mustWriteFile(t, agentSock, "not-a-private-key")
+	config := filepath.Join(sshDir, "config")
+	mustWriteFile(t, config, "UserKnownHostsFile ~/.ssh/known_hosts_work\nIdentityAgent ~/agent.sock\n")
+
+	denied := sshGPGDenied(t, home, nil)
+	if denyCovered(denied, customHosts) {
+		t.Fatalf("custom UserKnownHostsFile %q was denied: %v", customHosts, denied)
+	}
+	if denyCovered(denied, agentSock) {
+		t.Fatalf("IdentityAgent socket %q was denied: %v", agentSock, denied)
+	}
+}
+
+func TestUnexpressibleNestedAllowReadPreservesParentCredentialDeny(t *testing.T) {
+	home := t.TempDir()
+	gnupgDir := filepath.Join(home, ".gnupg")
+	mustWriteFile(t, filepath.Join(gnupgDir, "secring.gpg"), "secret")
+	// An unexpressible nested path: for example, a nonexistent path whose parent fails or symlink
+	unexpressible := filepath.Join(gnupgDir, "nonexistent\x00path")
+
+	options := credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+	}
+	creds := credentialDenyReadPathsIn(options, []string{unexpressible})
+	gnupgNorm := normalizeProfilePath(gnupgDir)
+	if !denyListedExact(creds.Paths, gnupgNorm) {
+		t.Fatalf("unexpressible nested allowRead must preserve parent credential dir deny %q: got %v", gnupgNorm, creds.Paths)
 	}
 }
