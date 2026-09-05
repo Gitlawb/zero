@@ -2996,6 +2996,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if isPlanCommandTool(msg.row.tool) {
 				var sweep tea.Cmd
 				m, sweep = m.maybeGitSweep()
+				defaultFileViewCache.invalidateUnknownScope()
 				if m.fileView.active {
 					target := m.fileView.path
 					if !filepath.IsAbs(target) {
@@ -3069,6 +3070,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case gitSweepMsg:
 		m = m.handleGitSweepMsg(msg)
+		if msg.ok && !msg.baseline {
+			for _, f := range msg.files {
+				p := f.path
+				if !filepath.IsAbs(p) {
+					p = filepath.Join(m.cwd, p)
+				}
+				defaultFileViewCache.invalidatePath(p)
+			}
+		}
 		if m.fileView.active && m.fileView.mode == fileViewFull {
 			var cmd tea.Cmd
 			m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
@@ -3086,8 +3096,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
-		if m.fileView.active && m.fileView.mode == fileViewFull {
-			return m.startFileViewRefreshCmd(m.chatColumnWidth())
+		defaultFileViewCache.invalidateUnknownScope()
+		if m.fileView.active {
+			m.fileView.requiredSourceRev++
+			if m.fileView.mode == fileViewFull {
+				return m.startFileViewRefreshCmd(m.chatColumnWidth())
+			}
 		}
 		return m, nil
 	case providerModelsDiscoveredMsg:
@@ -4993,9 +5007,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.toggleDetailedTranscript(), nil
 	case commandRewind:
 		text := ""
-		m, text = m.handleRewindCommand(command.text)
+		var rewindCmd tea.Cmd
+		m, text, rewindCmd = m.handleRewindCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
+		return m, rewindCmd
 	case commandEffort:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -190,16 +191,26 @@ func (c *fileViewRenderCache) requiredRevision(targetPath string) uint64 {
 	return c.pathRevisions[targetPath]
 }
 
-func (c *fileViewRenderCache) clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *fileViewRenderCache) purgeLocked() {
 	c.gen++
 	c.items = make(map[string]*list.Element)
 	c.lru.Init()
 	for k := range c.pathRevisions {
 		c.pathRevisions[k]++
 	}
+}
+
+func (c *fileViewRenderCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.purgeLocked()
 	c.statsData.ThemeClears++
+}
+
+func (c *fileViewRenderCache) invalidateUnknownScope() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.purgeLocked()
 }
 
 func (c *fileViewRenderCache) generation() int {
@@ -222,6 +233,8 @@ func (c *fileViewRenderCache) stats() fileViewCacheStats {
 
 type fileViewReadResult struct {
 	lines        []string
+	modTime      time.Time
+	size         int64
 	truncated    bool
 	omittedLines bool
 	err          error
@@ -257,11 +270,30 @@ func stripFileViewLineEnding(b []byte) []byte {
 }
 
 func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBytes int) fileViewReadResult {
-	file, err := os.Open(path)
+	return readFileViewBoundedCancellable(path, maxLines, maxLineBytes, maxTotalBytes, nil, 0)
+}
+
+func readFileViewBoundedCancellable(path string, maxLines int, maxLineBytes int, maxTotalBytes int, liveSeq *atomic.Uint64, seq uint64) fileViewReadResult {
+	if fileViewSuperseded(liveSeq, seq) {
+		return fileViewReadResult{err: errFileViewSuperseded}
+	}
+
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return fileViewReadResult{err: err}
 	}
 	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return fileViewReadResult{err: err}
+	}
+	if !stat.Mode().IsRegular() {
+		return fileViewReadResult{err: fmt.Errorf("cannot read non-regular file (mode %s)", stat.Mode().String())}
+	}
+	if fileViewSuperseded(liveSeq, seq) {
+		return fileViewReadResult{err: errFileViewSuperseded}
+	}
 
 	var lines []string
 	truncated := false
@@ -278,6 +310,15 @@ func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBy
 	}
 
 	for len(lines) < maxLines {
+		if fileViewSuperseded(liveSeq, seq) {
+			return fileViewReadResult{err: errFileViewSuperseded}
+		}
+		if fileViewInsideDiskRead != nil {
+			fileViewInsideDiskRead()
+			if fileViewSuperseded(liveSeq, seq) {
+				return fileViewReadResult{err: errFileViewSuperseded}
+			}
+		}
 		start := counter.delivered(reader)
 		if start >= maxTotalBytes {
 			if moreSource() {
@@ -289,6 +330,9 @@ func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBy
 
 		var raw []byte
 		for {
+			if fileViewSuperseded(liveSeq, seq) {
+				return fileViewReadResult{err: errFileViewSuperseded}
+			}
 			frag, err := reader.ReadSlice('\n')
 			raw = append(raw, frag...)
 			if errors.Is(err, bufio.ErrBufferFull) {
@@ -354,6 +398,8 @@ func readFileViewBounded(path string, maxLines int, maxLineBytes int, maxTotalBy
 
 	return fileViewReadResult{
 		lines:        lines,
+		modTime:      stat.ModTime(),
+		size:         stat.Size(),
 		truncated:    truncated,
 		omittedLines: omittedLines,
 	}
@@ -461,9 +507,12 @@ var (
 	fileViewInsideLoad           func()
 	fileViewBeforeCacheHitFormat func()
 	fileViewBeforeDiskRead       func()
+	fileViewInsideDiskRead       func()
 	fileViewBeforeHighlight      func()
+	fileViewInsideHighlight      func()
 	fileViewBeforeFormat         func()
 	fileViewBeforeCacheCommit    func()
+	fileViewHighlightMu          sync.Mutex
 )
 
 func fileViewSuperseded(liveSeq *atomic.Uint64, seq uint64) bool {
@@ -480,6 +529,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	if fileViewSuperseded(liveSeq, seq) {
 		return "", errFileViewSuperseded
 	}
+
 	stat, err := os.Stat(targetPath)
 	if err != nil {
 		c.mu.Lock()
@@ -490,6 +540,17 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		c.mu.Unlock()
 		rendered := theme.faint.Render("Could not read file: " + err.Error())
 		return rendered, err
+	}
+	if !stat.Mode().IsRegular() {
+		c.mu.Lock()
+		if elem, ok := c.items[targetPath]; ok {
+			c.lru.Remove(elem)
+			delete(c.items, targetPath)
+		}
+		c.mu.Unlock()
+		readErr := fmt.Errorf("cannot display non-regular file %s (mode %s)", displayPath, stat.Mode().String())
+		rendered := theme.faint.Render("Could not read file: " + readErr.Error())
+		return rendered, readErr
 	}
 
 	modTime := stat.ModTime()
@@ -510,8 +571,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	if elem, ok := c.items[targetPath]; ok {
 		entry := elem.Value.(*fileViewCachedEntry)
 		forceReload := (entry.sourceRev < reqSourceRev)
-		refreshSource := forceReload
-		if !refreshSource && entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
+		if !forceReload && entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
 			if fileViewSuperseded(liveSeq, seq) {
 				c.mu.Unlock()
 				return "", errFileViewSuperseded
@@ -560,7 +620,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return "", errFileViewSuperseded
 	}
 
-	readRes := readFileViewBounded(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes)
+	readRes := readFileViewBoundedCancellable(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes, liveSeq, seq)
 	if readRes.err != nil && len(readRes.lines) == 0 {
 		c.mu.Lock()
 		if elem, ok := c.items[targetPath]; ok {
@@ -572,6 +632,11 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return rendered, readRes.err
 	}
 
+	cleanLines := make([]string, len(readRes.lines))
+	for i, l := range readRes.lines {
+		cleanLines[i] = sanitizeRawFileLine(l)
+	}
+
 	if fileViewBeforeHighlight != nil {
 		fileViewBeforeHighlight()
 	}
@@ -579,16 +644,26 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return "", errFileViewSuperseded
 	}
 
-	c.mu.Lock()
-	c.statsData.HighlightCalls++
-	c.mu.Unlock()
-
-	cleanLines := make([]string, len(readRes.lines))
-	for i, l := range readRes.lines {
-		cleanLines[i] = sanitizeRawFileLine(l)
+	display, ok := func() ([]string, bool) {
+		fileViewHighlightMu.Lock()
+		defer fileViewHighlightMu.Unlock()
+		if fileViewSuperseded(liveSeq, seq) {
+			return nil, false
+		}
+		if fileViewInsideHighlight != nil {
+			fileViewInsideHighlight()
+			if fileViewSuperseded(liveSeq, seq) {
+				return nil, false
+			}
+		}
+		c.mu.Lock()
+		c.statsData.HighlightCalls++
+		c.mu.Unlock()
+		return highlightCodeForPathWithTheme(cleanLines, displayPath, 1<<20, nil, theme)
+	}()
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
 	}
-
-	display, ok := highlightCodeForPathWithTheme(cleanLines, displayPath, 1<<20, nil, theme)
 	if !ok || len(display) != len(cleanLines) {
 		display = cleanLines
 	}
@@ -612,8 +687,8 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	entry := &fileViewCachedEntry{
 		targetPath:   targetPath,
 		displayPath:  displayPath,
-		modTime:      modTime,
-		size:         size,
+		modTime:      readRes.modTime,
+		size:         readRes.size,
 		sourceRev:    reqSourceRev,
 		lines:        cleanLines,
 		display:      display,
@@ -635,7 +710,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	if elem, ok := c.items[targetPath]; ok {
 		existing := elem.Value.(*fileViewCachedEntry)
-		if existing.modTime.After(modTime) && existing.sourceRev > reqSourceRev {
+		if existing.modTime.After(readRes.modTime) && existing.sourceRev > reqSourceRev {
 			c.mu.Unlock()
 			return rendered, nil
 		}

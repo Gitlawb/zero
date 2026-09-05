@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -2461,5 +2465,464 @@ func TestRunDetails_KeyboardActivationStrictRowTargets(t *testing.T) {
 	res = updated.(model)
 	if res.fileView.active {
 		t.Fatalf("overflow hidden file (file_0.go) must not be activated on Enter from run details modal")
+	}
+}
+
+func TestFileView_RewindReturnsAsyncCommandAndDoesNotBlockUpdate(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "target.go")
+	if err := os.WriteFile(filePath, []byte("package before_rewind\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "RewindTest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendTestEvent(t, store, session.SessionID, sessions.EventSessionCheckpoint, map[string]any{"tool": "write_file", "files": []any{}})
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.sessionStore = store
+	m.activeSession = session
+	m.activeRunID = 1
+
+	// Open file in full view
+	m = testOpenFile(m, "target.go")
+	m = testSetMode(m, fileViewFull)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package before_rewind") {
+		t.Fatal("expected initial view to show before_rewind")
+	}
+
+	// Overwrite on disk to simulate restored file
+	if err := os.WriteFile(filePath, []byte("package after_rewind\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, summary, rewindCmd := m.handleRewindCommand("latest")
+	if !strings.Contains(summary, "Rewound") {
+		t.Fatalf("expected summary to indicate rewound, got %q", summary)
+	}
+	if rewindCmd == nil {
+		t.Fatal("handleRewindCommand must return an async tea.Cmd when fileView is active in full mode")
+	}
+
+	// Model in Update must NOT have synchronously rendered the new file yet:
+	// it must NOT display package after_rewind until Bubble Tea delivers fileViewLoadedMsg.
+	if strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package after_rewind") {
+		t.Fatal("expected view to not synchronously show after_rewind before async tea.Cmd is executed")
+	}
+
+	// Now execute rewindCmd as Bubble Tea runtime would
+	msg := rewindCmd()
+	loadedMsg, ok := msg.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("expected fileViewLoadedMsg, got %T", msg)
+	}
+	updated, _ := m.Update(loadedMsg)
+	m = updated.(model)
+
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package after_rewind") {
+		t.Fatalf("rewind reload must render after_rewind, got: %s", got)
+	}
+}
+
+func TestFileView_RewindPartialFailure_ActiveAndClosedView(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "partial_fail.go")
+	if err := os.WriteFile(filePath, []byte("package before_partial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "PartialFailRewind"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendTestEvent(t, store, session.SessionID, sessions.EventSessionCheckpoint, map[string]any{"tool": "write_file", "files": []any{}})
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.sessionStore = store
+	m.activeSession = session
+	m.activeRunID = 1
+
+	// 1. Active view: open and cache
+	m = testOpenFile(m, "partial_fail.go")
+	m = testSetMode(m, fileViewFull)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package before_partial") {
+		t.Fatal("expected before_partial")
+	}
+
+	// Restored file written to disk
+	if err := os.WriteFile(filePath, []byte("package after_partial_restored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalidate session ID so ApplyRewind fails after disk mutation
+	m.activeSession.SessionID = "non_existent_session"
+
+	// Invoke handleRewindCommand directly: ApplyRewind will fail!
+	m, summary, refreshCmd := m.handleRewindCommand("0")
+	if !strings.Contains(summary, "Rewind\n") {
+		t.Fatalf("expected error summary, got: %s", summary)
+	}
+	if refreshCmd == nil {
+		t.Fatal("expected refreshCmd on ApplyRewind error")
+	}
+
+	msg := refreshCmd()
+	loaded, ok := msg.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("expected fileViewLoadedMsg, got %T", msg)
+	}
+	updated, _ := m.Update(loaded)
+	m = updated.(model)
+
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package after_partial_restored") {
+		t.Fatalf("expected after_partial_restored, got: %s", got)
+	}
+
+	// 2. Closed view: close view, write v3, trigger another failed rewind, reopen
+	m = m.exitFileView()
+	if err := os.WriteFile(filePath, []byte("package after_partial_v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, _, _ = m.handleRewindCommand("0")
+
+	m = testOpenFile(m, "partial_fail.go")
+	m = testSetMode(m, fileViewFull)
+	got = plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package after_partial_v3") {
+		t.Fatalf("expected after_partial_v3 on reopen, got: %s", got)
+	}
+}
+
+func TestFileView_UnknownScopeCommandMutationClosedView(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "equal_len.go"
+	filePath := filepath.Join(dir, name)
+
+	// Seed file with "package old\n" (12 bytes)
+	if err := os.WriteFile(filePath, []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+
+	// Open and cache
+	m = testOpenFile(m, name)
+	m = testSetMode(m, fileViewFull)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package old") {
+		t.Fatal("expected initial render of package old")
+	}
+
+	// Close view
+	m = m.exitFileView()
+
+	// Mutate on disk with identical size (12 bytes) and restored mtime
+	fi, _ := os.Stat(filePath)
+	oldModTime := fi.ModTime()
+	if err := os.WriteFile(filePath, []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(filePath, oldModTime, oldModTime)
+
+	// Deliver an unknown-scope tool result (bash command) while view is closed
+	updated, _ := m.Update(agentRowMsg{
+		runID: 1,
+		row: transcriptRow{
+			kind:   rowToolResult,
+			tool:   "bash",
+			status: tools.StatusOK,
+			detail: "sed -i 's/old/new/g' equal_len.go",
+		},
+	})
+	m = updated.(model)
+
+	// Reopen view: must NOT serve cached package old
+	m = testOpenFile(m, name)
+	m = testSetMode(m, fileViewFull)
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("reopening after closed unknown-scope mutation must render package new, got: %s", got)
+	}
+}
+
+func TestFileView_NoTOCTOUFileOpenInTUI(t *testing.T) {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "file_view.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify that inside readFileViewBoundedCancellable, os.Stat is NOT called before os.OpenFile
+	ast.Inspect(node, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "readFileViewBoundedCancellable" {
+			return true
+		}
+
+		var sawOpenFile bool
+		var sawPreStat bool
+
+		ast.Inspect(fn.Body, func(inner ast.Node) bool {
+			call, ok := inner.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if ident.Name == "os" && sel.Sel.Name == "Stat" && !sawOpenFile {
+				sawPreStat = true
+			}
+			if ident.Name == "os" && sel.Sel.Name == "OpenFile" {
+				sawOpenFile = true
+			}
+			return true
+		})
+
+		if sawPreStat {
+			t.Fatal("TOCTOU vulnerability detected: os.Stat called before os.OpenFile in readFileViewBoundedCancellable")
+		}
+		if !sawOpenFile {
+			t.Fatal("expected os.OpenFile with O_NONBLOCK in readFileViewBoundedCancellable")
+		}
+		return false
+	})
+}
+
+func TestFileView_SupersededInsideDiskReadAndHighlight(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "cancel_test.go")
+	if err := os.WriteFile(filePath, []byte("package cancel\nfunc Foo() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := newFileViewRenderCache(10)
+	theme := zeroTheme
+	var liveSeq atomic.Uint64
+	liveSeq.Store(1)
+
+	// 1. Superseded during disk read loop
+	fileViewInsideDiskRead = func() {
+		liveSeq.Store(2) // supersede request 1
+	}
+	defer func() { fileViewInsideDiskRead = nil }()
+
+	_, err := cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 1)
+	if !errors.Is(err, errFileViewSuperseded) {
+		t.Fatalf("expected errFileViewSuperseded on inside-disk-read supersession, got: %v", err)
+	}
+	fileViewInsideDiskRead = nil
+
+	// 2. Superseded before highlight
+	liveSeq.Store(10)
+	fileViewBeforeHighlight = func() {
+		liveSeq.Store(11) // supersede request 10
+	}
+	defer func() { fileViewBeforeHighlight = nil }()
+
+	_, err = cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 10)
+	if !errors.Is(err, errFileViewSuperseded) {
+		t.Fatalf("expected errFileViewSuperseded on before-highlight supersession, got: %v", err)
+	}
+	fileViewBeforeHighlight = nil
+
+	// 3. Superseded inside highlight (under fileViewHighlightMu)
+	liveSeq.Store(20)
+	fileViewInsideHighlight = func() {
+		liveSeq.Store(21) // supersede request 20
+	}
+	defer func() { fileViewInsideHighlight = nil }()
+
+	_, err = cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 20)
+	if !errors.Is(err, errFileViewSuperseded) {
+		t.Fatalf("expected errFileViewSuperseded on inside-highlight supersession, got: %v", err)
+	}
+	if cache.stats().HighlightCalls != 0 {
+		t.Fatalf("expected 0 HighlightCalls on superseded request, got: %d", cache.stats().HighlightCalls)
+	}
+	fileViewInsideHighlight = nil
+}
+
+func TestFileView_DispatchCommandRewindReturnsPromptlyWithCmd(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "prompt_test.go")
+	if err := os.WriteFile(filePath, []byte("package before_dispatch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "DispatchRewind"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendTestEvent(t, store, session.SessionID, sessions.EventSessionCheckpoint, map[string]any{"tool": "write_file", "files": []any{}})
+
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.cwd = dir
+	m.activeSession = session
+	m.activeRunID = 1
+
+	// Open in full view
+	m = testOpenFile(m, "prompt_test.go")
+	m = testSetMode(m, fileViewFull)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package before_dispatch") {
+		t.Fatal("expected view to display before_dispatch")
+	}
+
+	// Restored file content on disk
+	if err := os.WriteFile(filePath, []byte("package after_dispatch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Type /rewind and press enter
+	m.input.SetValue("/rewind latest")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+
+	if cmd == nil {
+		t.Fatal("expected /rewind via dispatchCommand to return a non-nil async tea.Cmd")
+	}
+
+	// Before executing cmd, full view must NOT have synchronously loaded the new content:
+	if strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package after_dispatch") {
+		t.Fatal("expected view to not show after_dispatch before async command is delivered")
+	}
+
+	// Now execute cmd and deliver
+	msg := cmd()
+	loadedMsg, ok := msg.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("expected fileViewLoadedMsg from rewind tea.Cmd, got %T", msg)
+	}
+	updated, _ = m.Update(loadedMsg)
+	m = updated.(model)
+
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package after_dispatch") {
+		t.Fatalf("expected view to update to after_dispatch after delivery, got: %s", got)
+	}
+}
+
+func TestFileView_CommandAndSweepCompletionOrders(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "order_test.go"
+	filePath := filepath.Join(dir, name)
+
+	// Order 1: Command tool result arrives -> Git sweep arrives later
+	if err := os.WriteFile(filePath, []byte("package v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+
+	m = testOpenFile(m, name)
+	m = testSetMode(m, fileViewFull)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package v1") {
+		t.Fatal("expected v1")
+	}
+
+	// Mutate on disk to v2
+	if err := os.WriteFile(filePath, []byte("package v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: command tool result
+	updated, cmd1 := m.Update(agentRowMsg{
+		runID: 1,
+		row: transcriptRow{
+			kind:   rowToolResult,
+			tool:   "bash",
+			status: tools.StatusOK,
+			detail: "echo 'package v2' > order_test.go",
+		},
+	})
+	m = updated.(model)
+	if cmd1 != nil {
+		msg := cmd1()
+		if loaded, ok := msg.(fileViewLoadedMsg); ok {
+			updated, _ = m.Update(loaded)
+			m = updated.(model)
+		}
+	}
+
+	// Step 2: git sweep arrives later
+	updated, cmd2 := m.Update(gitSweepMsg{
+		ok:    true,
+		files: []gitSweepFile{{path: name, adds: 1}},
+	})
+	m = updated.(model)
+	if cmd2 != nil {
+		msg := cmd2()
+		if loaded, ok := msg.(fileViewLoadedMsg); ok {
+			updated, _ = m.Update(loaded)
+			m = updated.(model)
+		}
+	}
+
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package v2") {
+		t.Fatalf("expected package v2 after command->sweep order, got: %s", got)
+	}
+
+	// Order 2: Git sweep arrives first -> Command tool result arrives second
+	if err := os.WriteFile(filePath, []byte("package v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, cmdA := m.Update(gitSweepMsg{
+		ok:    true,
+		files: []gitSweepFile{{path: name, adds: 1}},
+	})
+	m = updated.(model)
+	if cmdA != nil {
+		msg := cmdA()
+		if loaded, ok := msg.(fileViewLoadedMsg); ok {
+			updated, _ = m.Update(loaded)
+			m = updated.(model)
+		}
+	}
+
+	updated, cmdB := m.Update(agentRowMsg{
+		runID: 1,
+		row: transcriptRow{
+			kind:   rowToolResult,
+			tool:   "bash",
+			status: tools.StatusOK,
+			detail: "echo 'package v3' > order_test.go",
+		},
+	})
+	m = updated.(model)
+	if cmdB != nil {
+		msg := cmdB()
+		if loaded, ok := msg.(fileViewLoadedMsg); ok {
+			updated, _ = m.Update(loaded)
+			m = updated.(model)
+		}
+	}
+
+	got = plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package v3") {
+		t.Fatalf("expected package v3 after sweep->command order, got: %s", got)
 	}
 }
