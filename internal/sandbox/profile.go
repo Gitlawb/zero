@@ -180,6 +180,23 @@ func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
 	}
 }
 
+// workspaceGovernedByAncestorRepository is the same question the carveouts ask,
+// named for the caller that asks it about a whole workspace rather than about
+// one write root. Sharing the rule is the point: the reason a workspace gets no
+// carveouts is exactly the reason it may not create a repository.
+func workspaceGovernedByAncestorRepository(workspaceRoot string) bool {
+	cleaned := strings.TrimSpace(workspaceRoot)
+	if cleaned == "" {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(cleaned, ".git")); err == nil {
+		// It already owns git metadata, so setup protected it and nothing here is
+		// being created inside a repository that is not this workspace's.
+		return false
+	}
+	return gitMetadataGovernedByAncestor(cleaned)
+}
+
 // gitMetadataGovernedByAncestor reports whether an ancestor of root carries git
 // metadata, which is git's own discovery rule: the nearest ancestor with a .git
 // entry owns this directory.

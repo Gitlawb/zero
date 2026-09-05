@@ -20,6 +20,10 @@ type AnalysisResult struct {
 	TooComplex bool
 	// Programs lists the distinct top-level command names found, for diagnostics.
 	Programs []string
+	// GitInit is set when the script would create a git repository. It is a
+	// separate signal from Destructive and Network because the decision it feeds
+	// depends on WHERE the workspace sits, which the analyzer cannot see.
+	GitInit bool
 }
 
 // destructivePrograms are commands that can irrecoverably destroy data.
@@ -183,6 +187,9 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if commandUsesNetwork(prog, rest) {
 			result.Network = true
 		}
+		if commandCreatesGitRepository(prog, rest) {
+			result.GitInit = true
+		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
 			(powerShellRemoveItemPrograms[prog] && hasPowerShellRecursiveForce(rest)) ||
@@ -314,6 +321,24 @@ func gitSubcommand(words []string) string {
 		}
 	}
 	return ""
+}
+
+// commandCreatesGitRepository reports whether this call would create a git
+// repository. It shares gitSubcommand with the network gate deliberately, so the
+// global options that already bypassed that gate cannot bypass this one either:
+// "git -C sub init" and "git -c k=v init" both resolve to init.
+//
+// init-db is git's original spelling and still works today.
+func commandCreatesGitRepository(prog string, args []*syntax.Word) bool {
+	if prog != "git" {
+		return false
+	}
+	switch gitSubcommand(literalWordTexts(args)) {
+	case "init", "init-db":
+		return true
+	default:
+		return false
+	}
 }
 
 func gitUsesNetwork(words []string) bool {
