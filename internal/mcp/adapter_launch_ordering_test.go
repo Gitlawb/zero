@@ -247,3 +247,35 @@ func TestNoDisclosureWhenTheAdapterExitsWithoutPublishing(t *testing.T) {
 		t.Fatalf("a helper that published nothing announced %v; no server is known to have run", got)
 	}
 }
+
+// THE CARRIER ENFORCES THE RULE ITSELF, NOT ONLY ITS CALLERS.
+//
+// connectAndList reads StartupNotices on the success path and passes the result
+// straight through to the disclosure sources, so this method is a carrier of the
+// launch fact in its own right. Today the handshake confirmation makes the gate
+// redundant: every route that reaches here has already settled the decision
+// positive. It is kept because the redundancy is on the safe side. An edit that
+// moves or loses the confirmation makes this return nothing rather than announce
+// a confinement on the strength of the helper having started, which is the claim
+// this whole mechanism exists to stop making.
+//
+// Driven directly, because no path through connectStdio can reach it with a
+// negative decision, and a test that cannot construct the state it is about would
+// be asserting nothing.
+func TestStartupNoticesAreEmptyWhileTheLaunchIsUnknown(t *testing.T) {
+	client := &Client{startupNotices: []string{adapterLaunchNotice}}
+
+	// SETUP: ungated, this client discloses, or the assertion below is vacuous.
+	if len(client.StartupNotices()) != 1 {
+		t.Fatal("SETUP INVALID: the client discloses nothing even before the gate, so the gate cannot be what is under test")
+	}
+
+	client.launched = func() bool { return false }
+	if got := client.StartupNotices(); len(got) != 0 {
+		t.Fatalf("a client whose launch is not established carries %v", got)
+	}
+	client.launched = func() bool { return true }
+	if got := client.StartupNotices(); len(got) != 1 || got[0] != adapterLaunchNotice {
+		t.Fatalf("an established launch carries %v, want the planned notice", got)
+	}
+}
