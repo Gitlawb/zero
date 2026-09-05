@@ -137,6 +137,14 @@ func TestSetupArgsRollbackLeavesAPreExistingTreeAlone(t *testing.T) {
 	if err := os.WriteFile(keep, []byte("not ours\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// AND A LEASE FILE THAT WAS ALREADY THERE. Removing one this invocation did
+	// not create takes the coordination object out from under whoever made it,
+	// which is why createdness is recorded by the create rather than guessed at
+	// afterwards.
+	preExistingLease := sandboxRuntimeLeasePath(root)
+	if err := os.WriteFile(preExistingLease, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	plan, err := buildSetupPlan(t, workspace)
 	if err != nil {
@@ -154,6 +162,9 @@ func TestSetupArgsRollbackLeavesAPreExistingTreeAlone(t *testing.T) {
 	}
 	if _, err := os.Lstat(root); err != nil {
 		t.Fatalf("rollback removed a pre-existing runtime root: %v", err)
+	}
+	if _, err := os.Lstat(preExistingLease); err != nil {
+		t.Fatalf("rollback removed a lease file that was there before this invocation: %v", err)
 	}
 }
 
