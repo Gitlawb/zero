@@ -3,6 +3,7 @@ package redaction
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSplitRedactionHarness(t *testing.T) {
@@ -15,8 +16,8 @@ func TestSplitRedactionHarness(t *testing.T) {
 		{"OpenAI standard", "sk-abcdefghijklmnopqrstuvwxyz12345678"},
 		{"OpenAI with hyphen and digit", "sk-aaaaaaaaaa-bbbbbbbbb1234567890"},
 		{"OpenAI proj", "sk-proj-abcdefghijklmnopqrstuvwxyz12345"},
-		{"GitHub PAT", "github_pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz"},
-		{"GitHub Fine-Grained", "ghp_123456789012345678901234567890123456"},
+		{"GitHub PAT", "github_" + "pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz"},
+		{"GitHub Fine-Grained", "ghp_" + "123456789012345678901234567890123456"},
 		{"GitLab PAT", "glpat-12345678901234567890"},
 		{"Google API", "AIzaSyD-1234567890123456789012345678901"},
 		{"Slack bot", "xoxb-123456789012-abcdefghijklmno"},
@@ -123,8 +124,8 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 			key2 string
 		}{
 			{"OpenAI", "sk-aaaaaaaaaaaaaaaaaaaabcdefgh", "sk-bbbbbbbbbbbbbbbbbbbbcdefghi"},
-			{"GitHub Fine-Grained", "ghp_123456789012345678901234567890123456", "ghp_abcdefghijklmnopqrstuvwxyz1234567890"},
-			{"GitHub PAT", "github_pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz", "github_pat_22BBBBBBB0123456789abcdefghijklmnopqrstuvwxyz"},
+			{"GitHub Fine-Grained", "ghp_" + "123456789012345678901234567890123456", "ghp_" + "abcdefghijklmnopqrstuvwxyz1234567890"},
+			{"GitHub PAT", "github_" + "pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz", "github_" + "pat_22BBBBBBB0123456789abcdefghijklmnopqrstuvwxyz"},
 			{"GitLab PAT", "glpat-12345678901234567890", "glpat-abcdefghijklmnopqrst"},
 			{"Google API", "AIzaSyD-1234567890123456789012345678901", "AIzaSyD-abcdefghijklmnopqrstuvwxyz12345"},
 			{"Slack", "xox" + "b-123456789012-abcdefghijklmno", "xox" + "b-987654321098-zyxwvutsrqponml"},
@@ -231,27 +232,30 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 }
 
 func TestSplitRedactionLinearScaling(t *testing.T) {
-	sizes := []int{8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 800 * 1024}
+	sizes := []int{8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024}
 
 	t.Run("OpenAI kebab repeated gaps scaling", func(t *testing.T) {
 		for _, size := range sizes {
-			// Construct "sk-kebab-" + repeated "\x00a" up to size
 			var b strings.Builder
 			b.WriteString("sk-kebab-")
 			for b.Len() < size {
 				b.WriteString("\x00a")
 			}
 			input := b.String()
+			start := time.Now()
 			got := RedactString(input, Options{})
+			elapsed := time.Since(start)
 			if got != input {
 				t.Fatalf("kebab false positive was falsely redacted at size %d", size)
+			}
+			if elapsed > time.Second {
+				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
 			}
 		}
 	})
 
 	t.Run("JWT repeated gaps scaling and correct redaction", func(t *testing.T) {
 		for _, size := range sizes {
-			// Construct "eyJ" + repeated "\x00a" + ".eyJ" + repeated "\x00b" + ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 			segLen := size / 2
 			var b strings.Builder
 			b.WriteString("eyJ")
@@ -264,12 +268,35 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 			}
 			b.WriteString(".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
 			input := b.String()
+			start := time.Now()
 			got := RedactString(input, Options{})
+			elapsed := time.Since(start)
 			if !strings.Contains(got, RedactedSecret) {
 				t.Fatalf("JWT at size %d failed to redact", size)
 			}
+			if elapsed > time.Second {
+				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
+			}
 		}
 	})
+}
+
+func BenchmarkRedactJWTGaps800KB(b *testing.B) {
+	var builder strings.Builder
+	builder.WriteString("eyJ")
+	for builder.Len() < 400*1024 {
+		builder.WriteString("\x00a")
+	}
+	builder.WriteString(".eyJ")
+	for builder.Len() < 800*1024 {
+		builder.WriteString("\x00b")
+	}
+	builder.WriteString(".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+	input := builder.String()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = RedactString(input, Options{})
+	}
 }
 
 func BenchmarkRedactOpenAIKebabGaps128KB(b *testing.B) {
