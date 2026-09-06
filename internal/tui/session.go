@@ -67,6 +67,7 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 // clean conversation, not a clean configuration.
 func (m model) startNewSession() model {
 	previousID := m.activeSession.SessionID
+	wasPlan := m.permissionMode == agent.PermissionModePlan
 
 	// Plan mode (and the mode /plan off would restore) belongs to the session
 	// that entered it — carrying it into a fresh session would silently make
@@ -121,6 +122,9 @@ func (m model) startNewSession() model {
 	}
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: note})
+	if wasPlan {
+		m = m.appendSystemNotice("Plan mode ended for the previous session. Permission mode restored to " + string(m.permissionMode) + ".")
+	}
 	// Scrollback above can't be un-printed; a faint divider marks the boundary and
 	// the flush frontier restarts for the fresh transcript (mirrors /clear, /resume).
 	m.resetFlushFrontier("· new session ·")
@@ -241,6 +245,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// on a real change — `/resume latest` or `/resume <currentID>` can resolve to
 	// the already-active session, whose loops belong to it, not a "previous" one.
 	previousID := m.activeSession.SessionID
+	wasPlan := m.permissionMode == agent.PermissionModePlan
 	if session.SessionID != previousID {
 		// Plan mode (and the mode /plan off would restore) belongs to the
 		// session that entered it, not to whatever session becomes active —
@@ -277,6 +282,9 @@ func (m model) handleResumeCommand(args string) (model, string) {
 
 	rows := initialTranscript()
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
+	if wasPlan && session.SessionID != previousID {
+		rows = appendRow(rows, rowSystem, "Plan mode ended for the previous session. Permission mode restored to "+string(m.permissionMode)+".")
+	}
 	if loopsCleared > 0 {
 		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
 	}

@@ -1460,6 +1460,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan editor error: " + msg.err.Error()})
 			return m, nil
 		}
+		if msg.outcome != nil && !msg.outcome.Reload {
+			return m, nil
+		}
 		// Capture what the editor started from, before reloadPlanFromFile
 		// replaces it, so an editor session that changed nothing (open, read,
 		// quit) can be told apart from a real edit below.
@@ -1484,10 +1487,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// happened. The session event below is written as the user's own words,
 		// so recording it unchanged would put a false statement into the next
 		// turn's context, and repeated opens would each restate the whole plan.
-		if planItemsEqual(beforeEdit, items) {
+		if msg.outcome == nil && planItemsEqual(beforeEdit, items) {
 			return m, nil
 		}
 		m.plan.updateFromItems(items, m.now())
+		if msg.outcome != nil && !msg.outcome.Edited {
+			return m, nil
+		}
 		// The sticky-panel refresh above is the only visible sign the edit was
 		// taken up; a /plan open with no other output would otherwise look like
 		// nothing happened. Confirm the reload (or a clear) in the transcript.
@@ -5464,6 +5470,7 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
+	planBaseline, _, planBaselineErr := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
 	return func() tea.Msg {
 		started := m.now()
 		if m.turnTimer != nil {
@@ -5891,8 +5898,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					// workspace keeps the tool's read-only / auto-allow
 					// contract honest: no workspace write grant is required.
 					if m.activeSession.SessionID != "" {
-						if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+						content := formatPlanItems(items)
+						err := planBaselineErr
+						if err == nil {
+							_, err = planmode.WritePlanIfUnchanged(runCtx, m.cwd, m.activeSession.SessionID, content, planBaseline)
+						}
+						if err != nil {
 							m.sendAgentRow(runID, transcriptRow{kind: rowError, text: "plan file write error: " + err.Error()})
+						} else {
+							planBaseline = content
 						}
 					}
 				}

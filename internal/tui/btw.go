@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -160,6 +161,9 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	}
 	side = side.exitPlanMode()
 	side = side.resetPlanForSessionSwitch()
+	if parent.permissionMode == agent.PermissionModePlan {
+		side = side.appendSystemNotice("Plan mode remains active in the parent session. This BTW session uses " + string(side.permissionMode) + " permission mode.")
+	}
 	side.planDetailGen++
 	side.streamingText = nil
 	side.streamingReasoning = ""
@@ -254,6 +258,9 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		} else {
 			parent.plan.clear()
 		}
+	}
+	if parent.permissionMode == agent.PermissionModePlan {
+		parent = parent.appendSystemNotice("Returned to the parent session. Plan mode is active again.")
 	}
 	parent.resetFlushFrontier("· returned from btw ·")
 	parent = parent.syncPeerIdentity()
