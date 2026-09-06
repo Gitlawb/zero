@@ -203,6 +203,23 @@ func TestRunAuthHelp(t *testing.T) {
 	}
 }
 
+func TestRunAuthResetJSON(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "reset", "--json"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Reset bool `json:"reset"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v (stdout=%q)", err, stdout.String())
+	}
+	if !payload.Reset {
+		t.Fatalf("payload = %+v, want reset=true", payload)
+	}
+}
+
 func TestRunAuthReset(t *testing.T) {
 	path := withAuthStore(t)
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
