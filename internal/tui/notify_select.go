@@ -93,18 +93,14 @@ func (m model) handleNotifyCommand(args string) (model, string) {
 	// LIVE focus: an explicit token wins; otherwise preserve the in-session
 	// value (which started as the resolved pair, project precedence included).
 	liveFocus := m.notifyFocusMode
-	persistFocus := m.notifyFocusMode
+	focusExplicit := false
 	if len(tokens) > 1 {
 		focus := strings.ToLower(strings.TrimSpace(tokens[1]))
 		if !isValidNotifyFocusMode(focus) {
 			return m, "Notify\nUnknown focus mode: " + tokens[1] + " (expected unfocused, always, or focused)"
 		}
 		liveFocus = focus
-		persistFocus = focus
-	} else if stored, err := m.storedNotify(); err == nil {
-		// PERSISTED focus only: what the USER's global file holds (blank stays
-		// blank). The live session keeps its resolved focus above.
-		persistFocus = stored.FocusMode
+		focusExplicit = true
 	}
 	m.notifyMode = mode
 	m.notifyFocusMode = liveFocus
@@ -121,20 +117,10 @@ func (m model) handleNotifyCommand(args string) (model, string) {
 		"Notify",
 		"active mode: " + mode + ", focus: " + effectiveFocusLabel(liveFocus),
 	}
-	if note := m.persistNotifyPreference(mode, persistFocus); note != "" {
+	if note := m.persistNotifyPreference(mode, liveFocus, focusExplicit); note != "" {
 		lines = append(lines, note)
 	}
 	return m, strings.Join(lines, "\n")
-}
-
-// storedNotify reads the notify block from the user's own config file. Missing
-// file or read error returns the zero value (best-effort, like the rest of the
-// preference persistence).
-func (m model) storedNotify() (config.NotifyConfig, error) {
-	if strings.TrimSpace(m.userConfigPath) == "" {
-		return config.NotifyConfig{}, nil
-	}
-	return config.UserNotify(m.userConfigPath)
 }
 
 // effectiveFocusLabel renders a focus value for the state line: blank means the
@@ -147,16 +133,28 @@ func effectiveFocusLabel(focus string) string {
 }
 
 // persistNotifyPreference writes the choice to user config so it survives a
-// restart. Best-effort: returns a short note to surface on failure, or "" on
-// success / when there is no config path (e.g. tests).
-func (m model) persistNotifyPreference(mode string, focus string) string {
+// restart, as ONE serialized read-merge-write (config.UpdateNotify): the lock
+// covers reading the stored block and replacing the file, so a concurrent
+// partial update cannot interleave (maintainer review, PR #1001).
+//
+// Persist contract: an explicit pair replaces both fields. A mode-only change
+// preserves the focus stored in the USER'S OWN file (blank stays blank) — the
+// merge leaves current.FocusMode untouched rather than pre-reading it, which
+// would reopen the stale-preservation window the lock is there to close. Best-
+// effort: returns a short note to surface on failure, or "" on success / when
+// there is no config path (e.g. tests).
+func (m model) persistNotifyPreference(mode string, focus string, focusExplicit bool) string {
 	if strings.TrimSpace(m.userConfigPath) == "" {
 		return ""
 	}
-	if _, err := config.SetNotify(m.userConfigPath, config.NotifyConfig{
-		Mode:      mode,
-		FocusMode: focus,
-	}); err != nil {
+	_, err := config.UpdateNotify(m.userConfigPath, func(current config.NotifyConfig) config.NotifyConfig {
+		current.Mode = mode
+		if focusExplicit {
+			current.FocusMode = focus
+		}
+		return current
+	})
+	if err != nil {
 		return "note: could not save notify preference (" + err.Error() + ")"
 	}
 	return ""

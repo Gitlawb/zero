@@ -1151,8 +1151,13 @@ func TestResolveRejectsActiveProviderWithoutConfiguredProfiles(t *testing.T) {
 	if HasProviderProfile(resolved.Provider) {
 		t.Fatalf("Provider = %#v, want zero value", resolved.Provider)
 	}
-	if resolved.MaxTurns != 0 {
-		t.Fatalf("MaxTurns = %d, want zero on failed resolve", resolved.MaxTurns)
+	// The error path now carries the parsed non-provider fields through
+	// (maintainer review, PR #1001): the TUI's provider-recovery startup
+	// forwards this partial config, and a zero MaxTurns there would silently
+	// discard the user's turn budget. Matches the no-providers SUCCESS path,
+	// which has always defaulted MaxTurns.
+	if resolved.MaxTurns != defaultMaxTurns {
+		t.Fatalf("MaxTurns = %d, want default %d carried through the partial resolve", resolved.MaxTurns, defaultMaxTurns)
 	}
 }
 
