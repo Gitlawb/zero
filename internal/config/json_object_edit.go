@@ -244,6 +244,39 @@ func petJSONObject(encodedPet []byte) []byte {
 	return append(result, '}')
 }
 
+// setNotifyJSONObject replaces only the notify member's value, keeping the
+// original bytes of every unrelated member so a notification save cannot
+// reorder, reformat, or drop the user's other settings — including values whose
+// EXPLICIT presence matters (tools.deferThreshold: 0, mcp servers'
+// disabled: false) and keys the typed FileConfig does not model at all. The
+// typed serializer cannot round-trip explicit zeros (omitempty drops them), so
+// notification writes go through this byte-preserving editor instead
+// (maintainer review, PR #1001). An empty notify block removes the member
+// entirely so a reset leaves no `"notify": {}` husk behind.
+func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
+	encoded, err := json.Marshal(notify)
+	if err != nil {
+		return nil, fmt.Errorf("encode notify preference: %w", err)
+	}
+
+	rootStart := skipJSONSpace(data, 0)
+	root, err := parseJSONObject(data, rootStart)
+	if err != nil {
+		return nil, err
+	}
+	notifyIndex := lastJSONMember(root.members, "notify")
+	if string(encoded) == "{}" {
+		if notifyIndex < 0 {
+			return data, nil
+		}
+		return removeJSONMember(data, root, notifyIndex), nil
+	}
+	if notifyIndex < 0 {
+		return insertJSONMember(data, root, "notify", encoded), nil
+	}
+	return replaceJSONRange(data, root.members[notifyIndex].valueStart, root.members[notifyIndex].valueEnd, encoded), nil
+}
+
 func replaceJSONRange(data []byte, start, end int, replacement []byte) []byte {
 	result := make([]byte, 0, len(data)-(end-start)+len(replacement))
 	result = append(result, data[:start]...)
