@@ -428,8 +428,8 @@ func TestRunDoesNotRetryProviderErrorWithSocketPhrase(t *testing.T) {
 	if notices != "" {
 		t.Fatalf("expected no reconnect notices, got %q", notices)
 	}
-	if !strings.Contains(err.Error(), "unexpected EOF") {
-		t.Fatalf("expected original error preserved, got %v", err)
+	if got := err.Error(); got != p.abortError {
+		t.Fatalf("error = %q, want original provider error %q", got, p.abortError)
 	}
 }
 
