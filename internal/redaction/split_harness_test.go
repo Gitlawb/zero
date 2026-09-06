@@ -224,6 +224,78 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("Kebab project before OpenAI key separated by control", func(t *testing.T) {
+		// Finding 1: kebab before OpenAI key separated by control
+		input := "sk-my-awesome-kebab-project\x00sk-abcdefghijklmnopqrstuv123456"
+		got := RedactString(input, Options{})
+		want := "sk-my-awesome-kebab-project\x00" + RedactedSecret
+		if got != want {
+			t.Fatalf("kebab before key mismatch: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("Neighboring complete JWTs separated by control", func(t *testing.T) {
+		// Finding 2: neighboring complete JWTs separated by control
+		jwt1 := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+		jwt2 := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.4peTcaNQZNs4FcW3Usagee0"
+		for _, ctrl := range controls {
+			input := jwt1 + ctrl + jwt2
+			got := RedactString(input, Options{})
+			want := RedactedSecret + ctrl + RedactedSecret
+			if got != want {
+				t.Fatalf("neighboring JWTs with %q mismatch: got %q, want %q", ctrl, got, want)
+			}
+		}
+	})
+
+	t.Run("Split key before minimum followed by slash in path", func(t *testing.T) {
+		// Finding 4: split key before minimum followed by slash
+		input := "ghp_1234567890\x0012345678901234567890123456/file"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + "/file"
+		if got != want {
+			t.Fatalf("split before min then slash mismatch: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("Split key with incidental incomplete prefix", func(t *testing.T) {
+		// Finding 5: split key with incidental incomplete prefix glpat-1234\x00AKIA56789012
+		input := "glpat-1234\x00AKIA56789012"
+		got := RedactString(input, Options{})
+		if got != input {
+			t.Fatalf("incomplete glpat with control and incomplete AKIA falsely redacted: got %q, want %q", got, input)
+		}
+	})
+
+	t.Run("Enclosing OpenAI key containing inner ghp suffix", func(t *testing.T) {
+		// Finding 6: enclosing OpenAI key containing inner ghp_
+		input := "sk-abcdefghijklmnop-ghp_123456789012345678901234567890123456"
+		got := RedactString(input, Options{})
+		if got != RedactedSecret {
+			t.Fatalf("enclosing key mismatch: got %q, want %q", got, RedactedSecret)
+		}
+	})
+
+	t.Run("Retain left context across boundaries", func(t *testing.T) {
+		// Finding 7: adjacent AKIA keys
+		input := "AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + RedactedSecret
+		if got != want {
+			t.Fatalf("adjacent AKIA keys mismatch: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("Preserve entire terminal control run across encodings", func(t *testing.T) {
+		// Finding 8: terminal control run \x00\x1b[path/file
+		input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz\x00\x1b[path/file"
+		got := RedactString(input, Options{})
+		want := RedactedSecret + "\x00\x1b[path/file"
+		if got != want {
+			t.Fatalf("terminal control run mismatch: got %q, want %q", got, want)
+		}
+	})
 }
 
 func TestSplitRedactionNoCredentialSuffixRemains(t *testing.T) {

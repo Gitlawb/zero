@@ -159,9 +159,9 @@ var secretShapes = []secretShape{
 		minLen:       40, // gh[pousr]_ (4) + 36
 	},
 	{
-		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("glpat-"), secretBody(`[A-Za-z0-9_-]`, 12, true))),
-		plainPattern: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
-		minLen:       18, // glpat- (6) + 12
+		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("glpat-"), secretBody(`[A-Za-z0-9_-]`, 20, true))),
+		plainPattern: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`),
+		minLen:       26, // glpat- (6) + 20
 	},
 	{
 		textPattern:  regexp.MustCompile(`\b` + ctrlJoin(ctrlLit("AIza"), secretBody(`[0-9A-Za-z\-_]`, 35, true))),
@@ -327,39 +327,30 @@ func RedactString(value string, options Options) string {
 	// sk- pattern may reach its minimum before a control inside a longer
 	// Anthropic key; letting the Anthropic shape consume that split first avoids
 	// leaving a recognizable credential suffix behind.
+	var allSpans []span
 	for _, shape := range secretShapes {
-		redacted = replaceAllSecretMatches(redacted, shape, replacement, false, nil)
+		allSpans = append(allSpans, findSpansForShape(redacted, shape, false, nil)...)
 	}
-	// Apply the broad OpenAI shape after specialized keys so its kebab-case
-	// false-positive filter considers only the matched key, never suffix text.
 	openaiShape := secretShape{
 		textPattern:  openaiKeyPattern,
 		plainPattern: plainOpenaiKeyPattern,
 		minLen:       minOpenAILen,
 		requireDots:  false,
 	}
-	redacted = replaceAllSecretMatches(redacted, openaiShape, replacement, true, func(m string) bool {
+	allSpans = append(allSpans, findSpansForShape(redacted, openaiShape, true, func(m string) bool {
 		// m is the logical (control-stripped) candidate.
 		if !knownOpenAIKeyPrefix(m) && !secretMatchHasDigit(m) &&
 			strings.Contains(strings.TrimPrefix(m, "sk-"), "-") {
 			return false
 		}
 		return true
-	})
+	})...)
+	redacted = applySpans(redacted, allSpans, replacement)
 	return redacted
 }
 
 const minOpenAILen = 23 // sk- (3) + 20
 
-func isCandidateLength(logLen int, minLen int, requireDots bool, runningDots int) bool {
-	if logLen < minLen {
-		return false
-	}
-	if requireDots {
-		return runningDots >= 2
-	}
-	return true
-}
 
 type controlSpan struct {
 	start    int
@@ -439,235 +430,345 @@ func extractLogicalCandidate(s string) logicalCandidate {
 	}
 }
 
-func startsNewCredential(s string, isJWT bool) bool {
-	if strings.HasPrefix(s, "sk-") ||
-		strings.HasPrefix(s, "ghp_") ||
-		strings.HasPrefix(s, "gho_") ||
-		strings.HasPrefix(s, "ghu_") ||
-		strings.HasPrefix(s, "ghs_") ||
-		strings.HasPrefix(s, "ghr_") ||
-		strings.HasPrefix(s, "github_pat_") ||
-		strings.HasPrefix(s, "glpat-") ||
-		strings.HasPrefix(s, "AIza") ||
-		strings.HasPrefix(s, "xoxb-") ||
-		strings.HasPrefix(s, "xoxa-") ||
-		strings.HasPrefix(s, "xoxp-") ||
-		strings.HasPrefix(s, "xoxr-") ||
-		strings.HasPrefix(s, "xoxs-") ||
-		strings.HasPrefix(s, "AKIA") ||
-		strings.HasPrefix(s, "ASIA") {
-		return true
+type span struct {
+	start int
+	end   int
+}
+
+func isWordByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+var (
+	anchoredAnthropicKeyPattern  = regexp.MustCompile(`^sk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`)
+	anchoredGitHubPatPattern     = regexp.MustCompile(`^github_pat_[A-Za-z0-9_]{22,}`)
+	anchoredGitHubClassicPattern = regexp.MustCompile(`^gh[pousr]_[A-Za-z0-9]{36,}`)
+	anchoredGitLabPatPattern     = regexp.MustCompile(`^glpat-[A-Za-z0-9_-]{20,}`)
+	anchoredGoogleApiKeyPattern  = regexp.MustCompile(`^AIza[0-9A-Za-z\-_]{35,}`)
+	anchoredSlackTokenPattern    = regexp.MustCompile(`^xox[baprs]-[A-Za-z0-9-]{10,}`)
+	anchoredAwsKeyPattern        = regexp.MustCompile(`^(?:AKIA|ASIA)[A-Z0-9]{16}`)
+	anchoredJwtStrictPattern     = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)
+	anchoredJwtLoosePattern      = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)
+	anchoredOpenaiKeyPattern     = regexp.MustCompile(`^sk-[A-Za-z0-9_-]{20,}`)
+)
+
+func startsIndependentCredential(s string) bool {
+	if len(s) < 15 {
+		return false
 	}
-	if !isJWT && strings.HasPrefix(s, "eyJ") {
+	tokenEnd := len(s)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7F || c >= 0x80 || c == '/' || c == '\\' || c == ' ' {
+			tokenEnd = i
+			break
+		}
+	}
+	token := s[:tokenEnd]
+	if len(token) >= 15 {
+		if strings.HasPrefix(token, "sk-ant-") && anchoredAnthropicKeyPattern.MatchString(token) {
+			return true
+		}
+		if strings.HasPrefix(token, "github_pat_") && anchoredGitHubPatPattern.MatchString(token) {
+			return true
+		}
+		if len(token) >= 4 && token[0] == 'g' && token[1] == 'h' && (token[2] == 'p' || token[2] == 'o' || token[2] == 'u' || token[2] == 's' || token[2] == 'r') && token[3] == '_' && anchoredGitHubClassicPattern.MatchString(token) {
+			return true
+		}
+		if strings.HasPrefix(token, "glpat-") && anchoredGitLabPatPattern.MatchString(token) {
+			return true
+		}
+		if strings.HasPrefix(token, "AIza") && anchoredGoogleApiKeyPattern.MatchString(token) {
+			return true
+		}
+		if len(token) >= 5 && strings.HasPrefix(token, "xox") && (token[3] == 'b' || token[3] == 'a' || token[3] == 'p' || token[3] == 'r' || token[3] == 's') && token[4] == '-' && anchoredSlackTokenPattern.MatchString(token) {
+			return true
+		}
+		if (strings.HasPrefix(token, "AKIA") || strings.HasPrefix(token, "ASIA")) && anchoredAwsKeyPattern.MatchString(token) {
+			return true
+		}
+		if strings.HasPrefix(token, "eyJ") && (anchoredJwtStrictPattern.MatchString(token) || anchoredJwtLoosePattern.MatchString(token)) {
+			return true
+		}
+		if strings.HasPrefix(token, "sk-") {
+			loc := anchoredOpenaiKeyPattern.FindStringIndex(token)
+			if loc != nil {
+				candStr := token[:loc[1]]
+				if knownOpenAIKeyPrefix(candStr) || secretMatchHasDigit(candStr) || !strings.Contains(strings.TrimPrefix(candStr, "sk-"), "-") {
+					return true
+				}
+			}
+		}
+	}
+	if strings.HasPrefix(s, "sk-proj-") || strings.HasPrefix(s, "sk-ant-") || strings.HasPrefix(s, "github_pat_") ||
+		strings.HasPrefix(s, "glpat-") || strings.HasPrefix(s, "AIza") {
 		return true
 	}
 	return false
 }
 
-func findCredentialBoundary(src string, matchStart, matchEnd int, shape secretShape, isOpenAI bool, hasTrailingPath bool, isValid func(string) bool) (int, bool) {
+func isCandidateValid(logPre string, shape secretShape, isOpenAI bool, dots, digits int, hasInteriorHyphen bool, isValid func(string) bool) bool {
+	if len(logPre) < shape.minLen {
+		return false
+	}
+	if shape.requireDots && dots < 2 {
+		return false
+	}
+	if isOpenAI {
+		if !strings.HasPrefix(logPre, "sk-") {
+			return false
+		}
+		if knownOpenAIKeyPrefix(logPre) {
+			return true
+		}
+		if digits > 0 {
+			return true
+		}
+		if hasInteriorHyphen {
+			return false
+		}
+		return true
+	}
+	if shape.plainPattern != nil && !shape.plainPattern.MatchString(logPre) {
+		return false
+	}
+	if isValid != nil && !isValid(logPre) {
+		return false
+	}
+	return true
+}
+
+func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretShape, isOpenAI bool, isValid func(string) bool) ([]span, int) {
 	match := src[matchStart:matchEnd]
 	cand := extractLogicalCandidate(match)
-	if len(cand.spans) == 0 {
-		if isValid != nil && !isValid(match) {
-			return len(match), false
-		}
-		return len(match), true
+	if len(cand.logical) == 0 {
+		return nil, 0
 	}
 
-	logicalStr := cand.logical
-
-	// Fast path for OpenAI kebab false positives: if the logical string has no digits,
-	// is not a known prefix, and the token before the first control span already contains
-	// an interior hyphen, no sub-span can ever be valid.
-	if isOpenAI && isValid != nil && len(cand.spans) > 0 && cand.spans[0].start > 0 {
-		if !knownOpenAIKeyPrefix(logicalStr) && !secretMatchHasDigit(logicalStr) {
-			firstLogLen := sort.SearchInts(cand.origEnds, cand.spans[0].start+1)
-			firstPre := logicalStr[:firstLogLen]
-			if strings.Contains(strings.TrimPrefix(firstPre, "sk-"), "-") {
-				return len(match), false
-			}
-		}
-	}
-
-	runningDots := 0
+	var spans []span
+	candStartOrig := 0
+	candStartLog := 0
 	logCursor := 0
-	hasDigit := false
+	runningDots := 0
+	runningDigits := 0
 	hasInteriorHyphen := false
-	hasKnownPrefix := isOpenAI && knownOpenAIKeyPrefix(logicalStr)
-	lastValidEnd := 0
-	plainPatternMatched := false
+	lastConsumedEnd := 0
 
-	checkPlainPattern := func(logLen int) bool {
-		if plainPatternMatched {
-			return true
+	checkCandidate := func(logEnd int) bool {
+		if logEnd <= candStartLog {
+			return false
 		}
-		if shape.plainPattern == nil {
-			return true
-		}
-		if shape.plainPattern.MatchString(logicalStr[:logLen]) {
-			plainPatternMatched = true
+		logPre := cand.logical[candStartLog:logEnd]
+		valid := isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen, isValid)
+		if valid {
+			origEnd := cand.origEnds[logEnd-1]
+			spans = append(spans, span{
+				start: matchStart + candStartOrig,
+				end:   matchStart + origEnd,
+			})
+			lastConsumedEnd = origEnd
 			return true
 		}
 		return false
 	}
 
-	for i, span := range cand.spans {
-		if span.start == 0 {
+	for _, cSpan := range cand.spans {
+		if cSpan.start < candStartOrig {
 			continue
 		}
-		for logCursor < len(cand.origEnds) && cand.origEnds[logCursor] <= span.start {
-			c := logicalStr[logCursor]
+		for logCursor < len(cand.origEnds) && cand.origEnds[logCursor] <= cSpan.start {
+			c := cand.logical[logCursor]
 			if shape.requireDots && c == '.' {
 				runningDots++
 			}
 			if isOpenAI {
 				if c >= '0' && c <= '9' {
-					hasDigit = true
+					runningDigits++
 				}
-				if c == '-' && logCursor >= 3 {
+				if c == '-' && (logCursor-candStartLog) >= 3 {
 					hasInteriorHyphen = true
 				}
 			}
 			logCursor++
 		}
-		logLen := logCursor
-		logPreValid := !isOpenAI || hasKnownPrefix || hasDigit || !hasInteriorHyphen
-		validateLogPre := func() bool {
-			if !logPreValid {
-				return false
-			}
-			if isOpenAI {
-				return true
-			}
-			return checkPlainPattern(logLen)
+
+		tailInSrc := src[matchStart+cSpan.end:]
+		tailWindow := tailInSrc
+		if len(tailWindow) > 64 {
+			tailWindow = tailWindow[:64]
+		}
+		startsNew := startsIndependentCredential(tailWindow)
+		if startsNew {
+			checkCandidate(logCursor)
+			candStartOrig = cSpan.end
+			candStartLog = logCursor
+			runningDots = 0
+			runningDigits = 0
+			hasInteriorHyphen = false
+			lastConsumedEnd = cSpan.end
+			continue
 		}
 
-		// If text in src after span starts a new credential, this span is a delimiter between credentials.
-		tailInSrc := src[matchStart+span.end:]
-		if startsNewCredential(tailInSrc, shape.requireDots) {
-			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
-				return span.start, true
+		logPre := cand.logical[candStartLog:logCursor]
+		if isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen, isValid) {
+			if idx := strings.IndexAny(tailWindow, "/\\"); idx >= 0 {
+				segment := tailWindow[:idx]
+				if len(segment) < 15 && !strings.Contains(segment, "\n") {
+					if !isOpenAI || !strings.Contains(strings.TrimPrefix(logPre, "sk-"), "-") || knownOpenAIKeyPrefix(logPre) || runningDigits > 0 {
+						checkCandidate(logCursor)
+					}
+					if lastConsumedEnd <= 0 {
+						lastConsumedEnd = cSpan.start
+					}
+					return spans, lastConsumedEnd
+				}
 			}
-			return span.start, false
+			firstWord := tailWindow
+			if spaceIdx := strings.IndexAny(firstWord, " \t\n\r"); spaceIdx >= 0 {
+				firstWord = firstWord[:spaceIdx]
+			}
+			if isOpenAI && strings.Contains(firstWord, "-") && !secretMatchHasDigit(firstWord) && !startsIndependentCredential(firstWord) {
+				checkCandidate(logCursor)
+				if lastConsumedEnd <= 0 {
+					lastConsumedEnd = cSpan.start
+				}
+				return spans, lastConsumedEnd
+			}
+		} else if idx := strings.IndexAny(tailWindow, "/\\"); idx >= 0 {
+			segment := tailWindow[:idx]
+			if len(segment) < 15 && !strings.Contains(segment, "\n") {
+				if lastConsumedEnd <= 0 {
+					lastConsumedEnd = cSpan.start
+				}
+				return spans, lastConsumedEnd
+			}
 		}
 
-		if !span.validGap {
-			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
-				return span.start, true
-			}
-			return span.start, false
-		}
-
-		// If match is followed by a path separator in source and this span precedes the trailing path,
-		// the span is a terminal delimiter if the prefix is already a valid credential.
-		if hasTrailingPath && i == len(cand.spans)-1 {
-			if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
-				return span.start, true
-			}
-			return span.start, false
-		}
-		if isCandidateLength(logLen, shape.minLen, shape.requireDots, runningDots) && validateLogPre() {
-			lastValidEnd = span.start
-		}
-	}
-
-	for _, span := range cand.spans {
-		if !span.validGap {
-			return span.start, false
+		if !cSpan.validGap {
+			checkCandidate(logCursor)
+			candStartOrig = cSpan.end
+			candStartLog = logCursor
+			runningDots = 0
+			runningDigits = 0
+			hasInteriorHyphen = false
+			lastConsumedEnd = cSpan.end
+			continue
 		}
 	}
 
 	for logCursor < len(cand.origEnds) {
-		c := logicalStr[logCursor]
+		c := cand.logical[logCursor]
 		if shape.requireDots && c == '.' {
 			runningDots++
 		}
 		if isOpenAI {
 			if c >= '0' && c <= '9' {
-				hasDigit = true
+				runningDigits++
 			}
-			if c == '-' && logCursor >= 3 {
+			if c == '-' && (logCursor-candStartLog) >= 3 {
 				hasInteriorHyphen = true
 			}
 		}
 		logCursor++
 	}
-
-	if !isCandidateLength(len(logicalStr), shape.minLen, shape.requireDots, runningDots) {
-		if lastValidEnd > 0 {
-			return lastValidEnd, true
-		}
-		return len(match), false
+	if checkCandidate(logCursor) {
+		lastConsumedEnd = len(match)
 	}
 
-	if isOpenAI {
-		if !hasKnownPrefix && !hasDigit && hasInteriorHyphen {
-			if lastValidEnd > 0 {
-				return lastValidEnd, true
-			}
-			return len(match), false
-		}
-	} else if !checkPlainPattern(len(logicalStr)) {
-		if lastValidEnd > 0 {
-			return lastValidEnd, true
-		}
-		return len(match), false
+	if lastConsumedEnd <= 0 {
+		lastConsumedEnd = candStartOrig
 	}
-
-	if isValid != nil && !isValid(logicalStr) {
-		if lastValidEnd > 0 {
-			return lastValidEnd, true
-		}
-		return len(match), false
+	if lastConsumedEnd <= 0 {
+		lastConsumedEnd = len(match)
 	}
-
-	if len(cand.origEnds) > 0 {
-		lastEnd := cand.origEnds[len(cand.origEnds)-1]
-		return lastEnd, true
-	}
-	return len(match), true
+	return spans, lastConsumedEnd
 }
 
-func replaceAllSecretMatches(src string, shape secretShape, replacement string, isOpenAI bool, isValid func(string) bool) string {
-	loc := shape.textPattern.FindStringIndex(src)
-	if loc == nil {
-		return src
-	}
-
-	var b strings.Builder
-	b.Grow(len(src))
-
+func findSpansForShape(src string, shape secretShape, isOpenAI bool, isValid func(string) bool) []span {
+	var spans []span
 	lastIndex := 0
-	for {
+	for lastIndex < len(src) {
 		loc := shape.textPattern.FindStringIndex(src[lastIndex:])
 		if loc == nil {
-			b.WriteString(src[lastIndex:])
 			break
 		}
-
 		matchStart := lastIndex + loc[0]
 		matchEnd := lastIndex + loc[1]
-		hasTrailingPath := matchEnd < len(src) && (src[matchEnd] == '/' || src[matchEnd] == '\\')
 
-		advanceLen, shouldRedact := findCredentialBoundary(src, matchStart, matchEnd, shape, isOpenAI, hasTrailingPath, isValid)
-
-		b.WriteString(src[lastIndex:matchStart])
-		if shouldRedact {
-			b.WriteString(replacement)
-			lastIndex = matchStart + advanceLen
-		} else {
-			if advanceLen <= 0 {
-				advanceLen = 1
+		if matchStart > 0 && isWordByte(src[matchStart-1]) {
+			// If matchStart directly abuts the end of an already matched span,
+			// allow it so adjacent credentials like AKIA...AKIA... both match.
+			abuts := false
+			for _, s := range spans {
+				if s.end == matchStart {
+					abuts = true
+					break
+				}
 			}
-			b.WriteString(src[matchStart : matchStart+advanceLen])
-			lastIndex = matchStart + advanceLen
+			if !abuts {
+				lastIndex = matchStart + 1
+				continue
+			}
 		}
-		if lastIndex <= matchStart {
+
+		matchSpans, consumedEnd := extractSpansFromMatch(src, matchStart, matchEnd, shape, isOpenAI, isValid)
+		spans = append(spans, matchSpans...)
+
+		if consumedEnd > 0 {
+			lastIndex = matchStart + consumedEnd
+		} else if matchEnd > matchStart {
+			lastIndex = matchEnd
+		} else {
 			lastIndex = matchStart + 1
 		}
-		if lastIndex >= len(src) {
-			break
+	}
+	return spans
+}
+
+func mergeSpans(spans []span) []span {
+	if len(spans) <= 1 {
+		return spans
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start != spans[j].start {
+			return spans[i].start < spans[j].start
 		}
+		return spans[i].end > spans[j].end
+	})
+	merged := make([]span, 0, len(spans))
+	cur := spans[0]
+	for i := 1; i < len(spans); i++ {
+		s := spans[i]
+		if s.start < cur.end {
+			if s.end > cur.end {
+				cur.end = s.end
+			}
+		} else {
+			merged = append(merged, cur)
+			cur = s
+		}
+	}
+	merged = append(merged, cur)
+	return merged
+}
+
+func applySpans(src string, spans []span, replacement string) string {
+	if len(spans) == 0 {
+		return src
+	}
+	merged := mergeSpans(spans)
+	var b strings.Builder
+	b.Grow(len(src))
+	lastIndex := 0
+	for _, s := range merged {
+		if s.start > lastIndex {
+			b.WriteString(src[lastIndex:s.start])
+		}
+		b.WriteString(replacement)
+		lastIndex = s.end
+	}
+	if lastIndex < len(src) {
+		b.WriteString(src[lastIndex:])
 	}
 	return b.String()
 }
