@@ -172,11 +172,13 @@ var midStreamAbortNeedles = []string{
 	"server closed",
 	"wsarecv",
 	"connection was aborted",
+	"software caused connection abort",
 	"forcibly closed",
 }
 
 var classifiedNonTransportPrefixes = []string{
 	"provider request error:",
+	"provider error:",
 	"auth error:",
 	"rate limit error:",
 }

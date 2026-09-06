@@ -347,6 +347,7 @@ func TestIsMidStreamTransportAbort(t *testing.T) {
 		"provider stream error: read: connection closed",
 		"write: broken pipe",
 		"provider stream error: server closed the connection",
+		"provider stream error: software caused connection abort",
 	}
 	for _, m := range aborts {
 		if !isMidStreamTransportAbort(m) {
@@ -361,9 +362,16 @@ func TestIsMidStreamTransportAbort(t *testing.T) {
 		"net/http: timeout awaiting response headers",
 		"dial tcp 10.0.0.1:443: connect: connection refused",
 		"i/o timeout",
+		"500 Internal Server Error",
+		"502 Bad Gateway",
+		"503 Service Unavailable",
 		"504 Gateway Timeout",
 		"provider request error: request does not satisfy oneOf schema",
 		"provider request error: connection closed is not a supported finish reason",
+		"provider error: connection closed is not a supported finish reason",
+		"provider error: upstream connection reset by peer",
+		"provider error: unexpected EOF while reading upstream response",
+		"provider error: 502 Bad Gateway",
 		"auth error: connection reset by peer",
 		"rate limit error: server closed",
 		"schema error: property oneOf is invalid",
@@ -396,6 +404,31 @@ func TestRunDoesNotRetryClassifiedProviderErrorWithSocketPhrase(t *testing.T) {
 		t.Fatalf("expected no reconnect notices, got %q", notices)
 	}
 	if !strings.Contains(err.Error(), "connection closed") {
+		t.Fatalf("expected original error preserved, got %v", err)
+	}
+}
+
+func TestRunDoesNotRetryProviderErrorWithSocketPhrase(t *testing.T) {
+	p := &midStreamAbortProvider{
+		abortBefore: 1,
+		abortError:  "provider error: unexpected EOF while reading upstream response",
+	}
+	var notices string
+	opts := Options{
+		Registry:    tools.NewRegistry(),
+		OnReasoning: func(s string) { notices += s },
+	}
+	_, err := Run(context.Background(), "go", p, opts)
+	if err == nil {
+		t.Fatal("expected application error, got nil")
+	}
+	if got := atomic.LoadInt32(&p.calls); got != 1 {
+		t.Fatalf("provider error with 'unexpected EOF' must not retry (got %d calls, want 1)", got)
+	}
+	if notices != "" {
+		t.Fatalf("expected no reconnect notices, got %q", notices)
+	}
+	if !strings.Contains(err.Error(), "unexpected EOF") {
 		t.Fatalf("expected original error preserved, got %v", err)
 	}
 }
