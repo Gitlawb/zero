@@ -509,10 +509,26 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	}
 	queue(messageEvent("user", userText))
 
+	visionCache := make(map[string]bool)
+	var visionCacheMu sync.Mutex
 	supportsVision := func(modelID string) bool {
-		return a.modelSupportsVision(ctx, resolved.Provider, modelID)
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			return false
+		}
+		visionCacheMu.Lock()
+		defer visionCacheMu.Unlock()
+		if cached, ok := visionCache[modelID]; ok {
+			return cached
+		}
+		supported := a.modelSupportsVision(ctx, resolved.Provider, modelID)
+		visionCache[modelID] = supported
+		return supported
 	}
 	if len(images) > 0 && !supportsVision(resolved.Provider.Model) {
+		msg := fmt.Sprintf("Model %s does not support image input; ignoring %d prompt image(s).", resolved.Provider.Model, len(images))
+		note.text("[zero] " + msg + "\n\n")
+		userText = fmt.Sprintf("[Note: %s]\n\n%s", msg, userText)
 		images = nil
 	}
 
