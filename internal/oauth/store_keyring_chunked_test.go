@@ -947,6 +947,77 @@ func TestStoreKeyringFirstMigrationRollbackFailurePreservesReclaimableCleanup(t 
 	}
 }
 
+func TestStoreKeyringCleanupPreservesLiveMigrationAfterFailedWrite(t *testing.T) {
+	for _, failMarkerDelete := range []bool{false, true} {
+		t.Run(strconv.FormatBool(failMarkerDelete), func(t *testing.T) {
+			kr := newCappedFakeKR(macOSLikeBudget)
+			s := newCappedKeyringStore(t, kr)
+			mustSave(t, s, "first", bigToken("a"))
+			writeErr := errors.New("keychain full")
+			deleteErr := errors.New("keychain busy")
+			kr.failSet = func(account string) error {
+				if account == keyringAccount+".a.1" {
+					return writeErr
+				}
+				return nil
+			}
+			kr.failDelete = func(account string) error {
+				if account == keyringAccount+".a.0" || (failMarkerDelete && account == keyringAccount+".cleanup") {
+					return deleteErr
+				}
+				return nil
+			}
+			if err := s.Save(ProviderKey("second"), bigToken("b")); !errors.Is(err, writeErr) || !errors.Is(err, deleteErr) {
+				t.Fatalf("migration error = %v, want write and rollback failures", err)
+			}
+			if marker, ok, _ := kr.Get(keyringService, keyringAccount+".cleanup"); !ok || marker != "a:1" {
+				t.Fatalf("cleanup marker = %q, present = %v", marker, ok)
+			}
+
+			kr.failSet = nil
+			mustSave(t, s, "second", bigToken("b"))
+			if live := manifestOf(t, kr).live; live != keyringChunkFamilyA {
+				t.Fatalf("live family = %q, want a", live)
+			}
+			kr.failDelete = func(account string) error {
+				if failMarkerDelete && account == keyringAccount+".cleanup" {
+					return deleteErr
+				}
+				return nil
+			}
+			kr.failSet = func(account string) error {
+				if account == keyringAccount+".b.0" {
+					return writeErr
+				}
+				return nil
+			}
+			if err := s.Save(ProviderKey("third"), bigToken("c")); !errors.Is(err, writeErr) {
+				t.Fatalf("replacement error = %v, want write failure", err)
+			}
+			for name, seed := range map[string]string{"first": "a", "second": "b"} {
+				if got := mustLoad(t, s, name); got.AccessToken != bigToken(seed).AccessToken {
+					t.Errorf("%s token changed after failed replacement", name)
+				}
+			}
+			if _, ok, _ := kr.Get(keyringService, keyringAccount+".cleanup"); ok != failMarkerDelete {
+				t.Errorf("cleanup marker present = %v, want %v", ok, failMarkerDelete)
+			}
+		})
+	}
+}
+
+func TestStoreKeyringCleanupPreservesChunksWithMalformedManifest(t *testing.T) {
+	kr := newCappedFakeKR(macOSLikeBudget)
+	blob := keyringBlob{kr: kr, service: keyringService, account: keyringAccount}
+	kr.data[keyringService+"/"+keyringAccount] = keyringManifestPrefix + "invalid"
+	kr.data[keyringService+"/"+blob.cleanupAccount()] = "a:1"
+	kr.data[keyringService+"/"+blob.chunkAccount(keyringChunkFamilyA, 0)] = "credential fragment"
+	blob.sweepCleanupAccount()
+	if len(kr.deletes) != 0 {
+		t.Fatalf("cleanup deleted entries without establishing manifest ownership: %v", kr.deletes)
+	}
+}
+
 // TestStoreKeyringResetIsBoundedByBackendAndManifest verifies that Reset only
 // issues the necessary delete operations according to backend capabilities and
 // known manifest layout.

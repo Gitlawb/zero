@@ -874,6 +874,16 @@ func (b keyringBlob) sweepCleanupAccount() {
 			family := parts[0]
 			if family == keyringChunkFamilyA || family == keyringChunkFamilyB {
 				if count, err := strconv.Atoi(parts[1]); err == nil && count > 0 {
+					manifest, err := b.readManifest()
+					if err != nil {
+						return
+					}
+					// A successful migration can adopt chunks whose cleanup failed.
+					// The manifest owns them even if removing the stale marker fails.
+					if manifest.live == family {
+						_, _ = b.kr.Delete(b.service, b.cleanupAccount())
+						return
+					}
 					if count > keyringMaxChunks {
 						count = keyringMaxChunks
 					}
