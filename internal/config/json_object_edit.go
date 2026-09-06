@@ -253,6 +253,14 @@ func petJSONObject(encodedPet []byte) []byte {
 // notification writes go through this byte-preserving editor instead
 // (maintainer review, PR #1001). An empty notify block removes the member
 // entirely so a reset leaves no `"notify": {}` husk behind.
+//
+// A hand-edited file may contain DUPLICATE notify members (tolerated by JSON
+// decoders, where the last occurrence wins). The reset path therefore removes
+// every notify member — deleting only the last would leave an earlier block
+// behind, and that survivor becomes the effective preference on the next
+// decode, so the reset would silently fail. Mirrors setPetPreferenceJSON's
+// duplicate handling. The replace path edits the LAST member, which is the one
+// a decoder treats as effective, so an earlier duplicate stays inert.
 func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
 	encoded, err := json.Marshal(notify)
 	if err != nil {
@@ -266,10 +274,16 @@ func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
 	}
 	notifyIndex := lastJSONMember(root.members, "notify")
 	if string(encoded) == "{}" {
-		if notifyIndex < 0 {
-			return data, nil
+		for notifyIndex >= 0 {
+			data = removeJSONMember(data, root, notifyIndex)
+			rootStart = skipJSONSpace(data, 0)
+			root, err = parseJSONObject(data, rootStart)
+			if err != nil {
+				return nil, err
+			}
+			notifyIndex = lastJSONMember(root.members, "notify")
 		}
-		return removeJSONMember(data, root, notifyIndex), nil
+		return data, nil
 	}
 	if notifyIndex < 0 {
 		return insertJSONMember(data, root, "notify", encoded), nil
