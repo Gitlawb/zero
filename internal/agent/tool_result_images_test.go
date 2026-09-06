@@ -87,10 +87,15 @@ func TestRunDeliversToolResultImagesToTheModel(t *testing.T) {
 
 	// The tool-result pairing must be untouched: one tool result per tool call.
 	toolResults := 0
+	var toolText string
 	for _, message := range result.Messages {
 		if message.Role == zeroruntime.MessageRoleTool {
 			toolResults++
+			toolText = message.Content
 		}
+	}
+	if toolText != "Captured a screenshot." {
+		t.Fatalf("tool text = %q, want preserved", toolText)
 	}
 	if toolResults != 1 {
 		t.Errorf("got %d tool-result messages for 1 tool call", toolResults)
@@ -205,45 +210,6 @@ func messageShape(messages []zeroruntime.Message) string {
 		parts = append(parts, part)
 	}
 	return "[" + strings.Join(parts, " ") + "]"
-}
-
-func TestRunDeliversToolResultImagesToAVisionModel(t *testing.T) {
-	registry := tools.NewRegistry()
-	registry.Register(imageTool{media: "image/png", data: []byte("\x89PNG\r\n\x1a\nfake")})
-	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
-		{
-			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "capture"},
-			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
-			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
-			{Type: zeroruntime.StreamEventDone},
-		},
-		{{Type: zeroruntime.StreamEventText, Content: "I can see it."}, {Type: zeroruntime.StreamEventDone}},
-	}}
-
-	result, err := Run(context.Background(), "screenshot please", provider, Options{
-		Registry: registry,
-		MaxTurns: 2,
-		Model:    "gpt-4o",
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	var carrier *zeroruntime.Message
-	var toolText string
-	for index := range result.Messages {
-		if result.Messages[index].Role == zeroruntime.MessageRoleTool {
-			toolText = result.Messages[index].Content
-		}
-		if len(result.Messages[index].Images) > 0 {
-			carrier = &result.Messages[index]
-		}
-	}
-	if toolText != "Captured a screenshot." {
-		t.Fatalf("tool text = %q, want preserved", toolText)
-	}
-	if carrier == nil {
-		t.Fatal("vision model must receive the tool image")
-	}
 }
 
 func TestRunDropsToolResultImagesForANonVisionModel(t *testing.T) {
@@ -398,6 +364,7 @@ func TestRunToolImagesRespectsModelSwitch(t *testing.T) {
 		}
 
 		var noticed bool
+		var toolOutputSeen bool
 		for _, m := range result.Messages {
 			if len(m.Images) > 0 {
 				t.Fatalf("image delivered to non-vision destination model: %v", m)
@@ -405,12 +372,15 @@ func TestRunToolImagesRespectsModelSwitch(t *testing.T) {
 			if strings.Contains(m.Content, "does not support image input") {
 				noticed = true
 			}
-			if strings.Contains(m.Content, "[image forwarded]") {
-				t.Fatalf("contradictory forwarded text found in message: %v", m)
+			if strings.Contains(m.Content, "[image returned by tool]") {
+				toolOutputSeen = true
 			}
 		}
 		if !noticed {
 			t.Fatal("expected drop notice when switching to non-vision model")
+		}
+		if !toolOutputSeen {
+			t.Fatal("expected tool output preserved in message history")
 		}
 	})
 }

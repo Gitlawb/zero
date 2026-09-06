@@ -372,6 +372,14 @@ func TestScanSSEEventsLargeImagePayload(t *testing.T) {
 		if !rpcIDMatches(msg.ID, 1) {
 			t.Fatalf("expected id 1, got %#v", msg.ID)
 		}
+		var decoded CallToolResult
+		if err := json.Unmarshal(msg.Result, &decoded); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(decoded.Content) != 2 || len(decoded.Content[1].Data) != len(imgB64) {
+			t.Fatalf("image payload did not survive the SSE round trip: got %d bytes, want %d",
+				len(decoded.Content[1].Data), len(imgB64))
+		}
 	})
 
 	t.Run("Multi data lines with 10 MiB image", func(t *testing.T) {
@@ -382,6 +390,14 @@ func TestScanSSEEventsLargeImagePayload(t *testing.T) {
 		}
 		if !rpcIDMatches(msg.ID, 1) {
 			t.Fatalf("expected id 1, got %#v", msg.ID)
+		}
+		var decoded CallToolResult
+		if err := json.Unmarshal(msg.Result, &decoded); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(decoded.Content) != 2 || len(decoded.Content[1].Data) != len(imgB64) {
+			t.Fatalf("image payload did not survive the SSE round trip: got %d bytes, want %d",
+				len(decoded.Content[1].Data), len(imgB64))
 		}
 	})
 

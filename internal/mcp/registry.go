@@ -355,29 +355,20 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 		output = "[image returned by tool]"
 	}
 	if exceeded := droppedContentNote(result.Content, disp, dispBudgetExceeded); exceeded != "" {
-		note := "[zero] this server also returned " + exceeded + ", which exceeded this result's remaining image budget. Retrying with fewer images can recover this payload."
-		if output == "" {
-			note = "[zero] this server returned " + exceeded + ", which exceeded this result's remaining image budget. Retrying with fewer images can recover this payload."
-		}
-		output = strings.TrimSpace(output + "\n\n" + note)
+		output = appendServerNote(output, exceeded,
+			", which exceeded this result's remaining image budget. Retrying with fewer images can recover this payload.")
 	}
 	if uninspected := droppedContentNote(result.Content, disp, dispUninspected); uninspected != "" {
-		verb := "which was not inspected"
-		if !strings.HasPrefix(uninspected, "1 ") {
-			verb = "which were not inspected"
+		verb := ", which were not inspected"
+		if dispCount(disp, dispUninspected) == 1 {
+			verb = ", which was not inspected"
 		}
-		note := "[zero] this server also returned " + uninspected + ", " + verb + " because the aggregate image budget was reached."
-		if output == "" {
-			note = "[zero] this server returned " + uninspected + ", " + verb + " because the aggregate image budget was reached."
-		}
-		output = strings.TrimSpace(output + "\n\n" + note)
+		output = appendServerNote(output, uninspected,
+			verb+" because the aggregate image budget was reached.")
 	}
 	if dropped := droppedContentNote(result.Content, disp, dispDropped); dropped != "" {
-		note := "[zero] this server also returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
-		if output == "" {
-			note = "[zero] this server returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
-		}
-		output = strings.TrimSpace(output + "\n\n" + note)
+		output = appendServerNote(output, dropped,
+			", which Zero cannot forward yet. Retrying cannot recover this payload.")
 	}
 	if output == "" {
 		output = "(empty MCP tool result)"
@@ -429,4 +420,14 @@ func isPersistentlyApproved(store *PermissionStore, server Server, toolName stri
 		RequestedAutonomy: autonomy,
 	})
 	return err == nil && approved
+}
+
+// appendServerNote joins a [zero] note to output, choosing "returned" or
+// "also returned" based on whether anything precedes it.
+func appendServerNote(output, subject, tail string) string {
+	verb := "this server also returned "
+	if output == "" {
+		verb = "this server returned "
+	}
+	return strings.TrimSpace(output + "\n\n[zero] " + verb + subject + tail)
 }

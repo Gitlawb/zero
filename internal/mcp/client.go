@@ -642,6 +642,16 @@ func dispKind(got itemDisp, kinds []itemDisp) bool {
 	return false
 }
 
+func dispCount(disp []itemDisp, kinds ...itemDisp) int {
+	count := 0
+	for _, d := range disp {
+		if dispKind(d, kinds) {
+			count++
+		}
+	}
+	return count
+}
+
 func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {
 	if item.Type != "image" {
 		return zeroruntime.ImageBlock{}, false
