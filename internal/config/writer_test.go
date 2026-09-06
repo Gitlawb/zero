@@ -491,6 +491,63 @@ func TestSetNotifyPreservesExplicitUnrelatedValues(t *testing.T) {
 	}
 }
 
+// Maintainer regression (PR #1001, CodeRabbit follow-up): a hand-edited config
+// may contain DUPLICATE notify members (JSON decoders tolerate them and the
+// last occurrence wins). A reset must remove EVERY notify member — removing
+// only the last leaves the earlier block as the new effective preference, so
+// `zero config notify --reset` would report success while the old value still
+// applies.
+func TestSetNotifyResetRemovesEveryDuplicateNotifyMember(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	duplicated := `{"notify":{"mode":"off"},"activeProvider":"openai","notify":{"mode":"bell"}}`
+	if err := os.WriteFile(path, []byte(duplicated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetNotify(path, NotifyConfig{}); err != nil {
+		t.Fatalf("SetNotify({}) reset: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, still := obj["notify"]; still {
+		t.Fatalf("reset left a notify member behind: %s", string(raw))
+	}
+	if obj["activeProvider"] == nil || string(obj["activeProvider"]) != `"openai"` {
+		t.Errorf("unrelated member lost through the reset: %s", string(raw))
+	}
+
+	// A reset on a file with NO notify member is a no-op, and a partial update
+	// against duplicates replaces the LAST member (the effective one under
+	// last-occurrence-wins decoding).
+	if err := os.WriteFile(path, []byte(duplicated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+		t.Fatalf("SetNotify replace: %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := UserNotify(path)
+	if err != nil {
+		t.Fatalf("UserNotify: %v", err)
+	}
+	if stored.Mode != "off" || stored.FocusMode != "always" {
+		t.Fatalf("after replace, effective notify = %+v, want off/always (last member replaced)", stored)
+	}
+	if !strings.Contains(string(raw), `"activeProvider"`) {
+		t.Errorf("unrelated member lost through the replace: %s", string(raw))
+	}
+}
+
 // Maintainer regression (PR #1001): concurrent partial updates must not lose
 // each other's explicit change. Two `zero config notify` calls (--mode off and
 // --focus always) racing from both/unfocused previously interleaved their
