@@ -329,7 +329,7 @@ func RedactString(value string, options Options) string {
 	// leaving a recognizable credential suffix behind.
 	var allSpans []span
 	for _, shape := range secretShapes {
-		allSpans = append(allSpans, findSpansForShape(redacted, shape, false, nil)...)
+		allSpans = append(allSpans, findSpansForShape(redacted, shape, false)...)
 	}
 	openaiShape := secretShape{
 		textPattern:  openaiKeyPattern,
@@ -337,20 +337,12 @@ func RedactString(value string, options Options) string {
 		minLen:       minOpenAILen,
 		requireDots:  false,
 	}
-	allSpans = append(allSpans, findSpansForShape(redacted, openaiShape, true, func(m string) bool {
-		// m is the logical (control-stripped) candidate.
-		if !knownOpenAIKeyPrefix(m) && !secretMatchHasDigit(m) &&
-			strings.Contains(strings.TrimPrefix(m, "sk-"), "-") {
-			return false
-		}
-		return true
-	})...)
+	allSpans = append(allSpans, findSpansForShape(redacted, openaiShape, true)...)
 	redacted = applySpans(redacted, allSpans, replacement)
 	return redacted
 }
 
 const minOpenAILen = 23 // sk- (3) + 20
-
 
 type controlSpan struct {
 	start    int
@@ -507,7 +499,7 @@ func startsIndependentCredential(s string) bool {
 	return false
 }
 
-func isCandidateValid(logPre string, shape secretShape, isOpenAI bool, dots, digits int, hasInteriorHyphen bool, isValid func(string) bool) bool {
+func isCandidateValid(logPre string, shape secretShape, isOpenAI bool, dots, digits int, hasInteriorHyphen bool) bool {
 	if len(logPre) < shape.minLen {
 		return false
 	}
@@ -532,13 +524,10 @@ func isCandidateValid(logPre string, shape secretShape, isOpenAI bool, dots, dig
 	if shape.plainPattern != nil && !shape.plainPattern.MatchString(logPre) {
 		return false
 	}
-	if isValid != nil && !isValid(logPre) {
-		return false
-	}
 	return true
 }
 
-func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretShape, isOpenAI bool, isValid func(string) bool) ([]span, int) {
+func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretShape, isOpenAI bool) ([]span, int) {
 	match := src[matchStart:matchEnd]
 	cand := extractLogicalCandidate(match)
 	if len(cand.logical) == 0 {
@@ -559,7 +548,7 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 			return false
 		}
 		logPre := cand.logical[candStartLog:logEnd]
-		valid := isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen, isValid)
+		valid := isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen)
 		if valid {
 			origEnd := cand.origEnds[logEnd-1]
 			spans = append(spans, span{
@@ -610,7 +599,7 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 		}
 
 		logPre := cand.logical[candStartLog:logCursor]
-		if isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen, isValid) {
+		if isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen) {
 			if idx := strings.IndexAny(tailWindow, "/\\"); idx >= 0 {
 				segment := tailWindow[:idx]
 				if len(segment) < 15 && !strings.Contains(segment, "\n") {
@@ -684,7 +673,7 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 	return spans, lastConsumedEnd
 }
 
-func findSpansForShape(src string, shape secretShape, isOpenAI bool, isValid func(string) bool) []span {
+func findSpansForShape(src string, shape secretShape, isOpenAI bool) []span {
 	var spans []span
 	lastIndex := 0
 	for lastIndex < len(src) {
@@ -711,7 +700,7 @@ func findSpansForShape(src string, shape secretShape, isOpenAI bool, isValid fun
 			}
 		}
 
-		matchSpans, consumedEnd := extractSpansFromMatch(src, matchStart, matchEnd, shape, isOpenAI, isValid)
+		matchSpans, consumedEnd := extractSpansFromMatch(src, matchStart, matchEnd, shape, isOpenAI)
 		spans = append(spans, matchSpans...)
 
 		if consumedEnd > 0 {
