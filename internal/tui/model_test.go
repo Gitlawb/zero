@@ -2940,9 +2940,11 @@ func TestEffectiveTUINotifyMode(t *testing.T) {
 		in   string
 		want notify.Mode
 	}{
-		// Empty input falls through to the resolver default ("both": bell +
-		// OSC-9 desktop notification) so the permission-prompt alert works
-		// for users who never configured notify.
+		// Empty input falls through to the TUI's own effective default
+		// ("both": bell + OSC-9 desktop notification) so the needs-input
+		// alert works for users who never configured notify. The default
+		// lives here, NOT in config.Resolve — headless runs stay silent
+		// when unconfigured (maintainer review, PR #1001).
 		{"", notify.ModeBoth},
 		{"   ", notify.ModeBoth},
 		{"off", notify.ModeOff},

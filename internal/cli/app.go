@@ -734,7 +734,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			resolved.Provider = usable
 			resolved.ActiveProvider = usable.Name
 		} else {
-			resolved = config.ResolvedConfig{}
+			// Fresh-onboarding reset, but the user's notification preference is
+			// NOT config-to-redo: clearing it here would surface as an empty
+			// Options.Notify, and the TUI's unconfigured default (both/unfocused)
+			// would then resurrect alerts a user explicitly turned off while the
+			// setup wizard runs (maintainer review, PR #1001). Carry the stored
+			// block through; other wizard-visible state starts clean as before.
+			resolved = config.ResolvedConfig{Notify: resolved.Notify}
 			forceSetup = true
 		}
 	}

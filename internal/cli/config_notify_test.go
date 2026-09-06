@@ -363,8 +363,9 @@ func TestRunConfigNotifyRejectsInvalidMode(t *testing.T) {
 	}
 }
 
-// `--reset` blanks both fields so the resolver defaults apply on the next
-// resolve. Useful for "go back to the recommended setup" after a custom value.
+// `--reset` blanks both fields so the TUI's effective default applies again
+// (an unconfigured headless run stays silent). Useful for "go back to the
+// recommended setup" after a custom value.
 func TestRunConfigNotifyResetClearsStoredValues(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	seed := `{

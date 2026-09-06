@@ -489,7 +489,8 @@ func writeConfigHelp(w io.Writer) error {
   zero config notify [flags]
 
 Inspects resolved Go configuration without printing secrets. The notify
-subcommand reads or updates the permission-prompt alert preference —
+subcommand reads or updates the stored global notification preference,
+which controls both the completion and needs-input alerts —
 run "zero config notify --help" for details.
 
 Flags:

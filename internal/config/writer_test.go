@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -428,6 +430,117 @@ func TestSetNotifyBlankValuesPreservedAsDefaults(t *testing.T) {
 	persisted := readConfigFixture(t, path)
 	if persisted.Notify.Mode != "" || persisted.Notify.FocusMode != "" {
 		t.Fatalf("blank notify values should round-trip, got %+v", persisted.Notify)
+	}
+}
+
+// Maintainer regression (PR #1001): a notification save must preserve unrelated
+// values whose EXPLICIT presence matters. The typed serializer's omitempty
+// cannot round-trip tools.deferThreshold: 0 (explicit "never defer" vs unset
+// "use default 3") or an MCP server's disabled: false (explicitly enabled), so
+// SetNotify/UpdateNotify edit only the notify member's bytes instead. The
+// assertions run against the RAW file, because reading through FileConfig
+// would hide exactly the presence loss being tested.
+func TestSetNotifyPreservesExplicitUnrelatedValues(t *testing.T) {
+	dir := t.TempDir()
+
+	for name, body := range map[string]string{
+		"explicit zero deferThreshold": `{
+	"tools": {"deferThreshold": 0},
+	"mcp": {"servers": {"firecrawl": {"command": "npx", "disabled": false}}}
+}`,
+		"unknown keys stay untouched": `{
+	"activeProvider": "openai",
+	"customTopLevel": {"nested": [1, 2, 3]},
+	"notify": {"mode": "both"}
+}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name+".json")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+				t.Fatalf("SetNotify: %v", err)
+			}
+
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if strings.Contains(name, "explicit zero") {
+				tools, ok := obj["tools"]
+				if !ok || !strings.Contains(string(tools), `"deferThreshold": 0`) {
+					t.Errorf("tools.deferThreshold: 0 lost through a notify write; tools = %s", string(tools))
+				}
+				mcp, ok := obj["mcp"]
+				if !ok || !strings.Contains(string(mcp), `"disabled": false`) {
+					t.Errorf("mcp disabled: false lost through a notify write; mcp = %s", string(mcp))
+				}
+			}
+			if strings.Contains(name, "unknown keys") {
+				if _, ok := obj["customTopLevel"]; !ok {
+					t.Error("unknown top-level key lost through a notify write")
+				}
+			}
+		})
+	}
+}
+
+// Maintainer regression (PR #1001): concurrent partial updates must not lose
+// each other's explicit change. Two `zero config notify` calls (--mode off and
+// --focus always) racing from both/unfocused previously interleaved their
+// read-merge-write and one write silently undid the other (reproduced 50/50
+// without the lock). UpdateNotify serializes the whole transaction.
+func TestUpdateNotifyConcurrentPartialUpdatesLoseNoField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	if err := os.WriteFile(path, []byte(`{"notify":{"mode":"both","focusMode":"unfocused"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := UpdateNotify(path, func(current NotifyConfig) NotifyConfig {
+			current.Mode = "off"
+			return current
+		}); err != nil {
+			errs <- fmt.Errorf("mode update: %w", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := UpdateNotify(path, func(current NotifyConfig) NotifyConfig {
+			current.FocusMode = "always"
+			return current
+		}); err != nil {
+			errs <- fmt.Errorf("focus update: %w", err)
+		}
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent update failed: %v", err)
+	}
+
+	stored, err := UserNotify(path)
+	if err != nil {
+		t.Fatalf("read stored: %v", err)
+	}
+	// BOTH explicit changes must survive: mode from writer 1, focus from
+	// writer 2. The old race let the second writer's stale focus
+	// ("unfocused") or stale mode ("both") win.
+	if stored.Mode != "off" {
+		t.Errorf("mode = %q, want off (concurrent focus update must not clobber it)", stored.Mode)
+	}
+	if stored.FocusMode != "always" {
+		t.Errorf("focusMode = %q, want always (concurrent mode update must not clobber it)", stored.FocusMode)
 	}
 }
 

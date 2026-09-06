@@ -40,25 +40,26 @@ func runConfigNotify(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 
 	if options.mode != "" || options.focus != "" || options.reset {
-		// Seed omitted fields from the USER'S OWN file. Blank stays blank —
-		// blank means "use the built-in defaults"; --reset is the only path
-		// that clears both fields.
-		current, err := config.UserNotify(configPath)
-		if err != nil {
-			return writeAppError(stderr, err.Error(), exitUsage)
-		}
-		notify := current
-		if options.reset {
-			notify = config.NotifyConfig{}
-		} else {
+		// One serialized read-merge-write transaction: the lock covers
+		// reading the stored block, applying only the explicit fields, and
+		// replacing the file, so two concurrent partial updates (e.g.
+		// --mode off and --focus always from two terminals) cannot lose
+		// each other's change (maintainer review, PR #1001). Omitted
+		// fields preserve the values stored in the user's OWN file — blank
+		// stays blank; --reset is the only path that clears both fields.
+		_, err := config.UpdateNotify(configPath, func(current config.NotifyConfig) config.NotifyConfig {
+			if options.reset {
+				return config.NotifyConfig{}
+			}
 			if options.mode != "" {
-				notify.Mode = options.mode
+				current.Mode = options.mode
 			}
 			if options.focus != "" {
-				notify.FocusMode = options.focus
+				current.FocusMode = options.focus
 			}
-		}
-		if _, err := config.SetNotify(configPath, notify); err != nil {
+			return current
+		})
+		if err != nil {
 			return writeAppError(stderr, err.Error(), exitUsage)
 		}
 	}
