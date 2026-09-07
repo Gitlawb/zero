@@ -152,7 +152,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 			t.Fatalf("stored key does not match (present=%v, len=%d), want the survivor's sk-shared kept", ok, len(key))
 		}
 		// The survivor must actually be able to load it.
-		store, err := config.ProviderKeyStore()
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 		if err != nil {
 			t.Fatal(err)
 		}

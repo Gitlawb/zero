@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -12,6 +13,24 @@ import (
 	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
+
+func setTUIUserConfigRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", root)
+	case "darwin":
+		t.Setenv("HOME", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error = %v", err)
+	}
+	return configRoot
+}
 
 // caseSiblingModel builds the shape the resolver validly produces and the
 // identity comparisons could not tell apart: user config holds "work", and the
@@ -25,8 +44,7 @@ import (
 // status line nor a config row can show.
 func caseSiblingModel(t *testing.T, activeName string, builtProfiles *[]config.ProviderProfile) model {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", home)
+	home := setTUIUserConfigRoot(t)
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 
@@ -89,6 +107,39 @@ func caseSiblingModel(t *testing.T, activeName string, builtProfiles *[]config.P
 	m.height = 40
 	next, _ := m.openProviderManager()
 	return next
+}
+
+func TestProviderManagerFilteredUserRowDoesNotGrantProjectOwnership(t *testing.T) {
+	for _, action := range []string{"edit", "delete", "model"} {
+		t.Run(action, func(t *testing.T) {
+			m := caseSiblingModel(t, "WORK", nil)
+			// The user row is filtered out when its stored key cannot be loaded.
+			// Ownership must not depend on that row still being displayed.
+			m.savedProviders = m.savedProviders[1:]
+			m, _ = m.openProviderManager()
+			before, err := os.ReadFile(m.userConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch action {
+			case "edit":
+				m = managerKey(t, m, testKeyText("e"))
+				if m.providerWizard.step == providerWizardStepEditMenu {
+					t.Fatal("project row acquired edit ownership after user row was filtered")
+				}
+			case "delete":
+				m = managerKey(t, m, testKeyText("d"))
+				next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+				m = drainProviderManagerCmds(t, next, cmd)
+			case "model":
+				persisted, _, err := m.persistSelectedModel(config.ProviderProfile{Name: "WORK", Model: "changed"})
+				if err != nil || persisted {
+					t.Fatalf("project model persistence = %t, error=%v", persisted, err)
+				}
+			}
+			assertUserRowUntouched(t, m, before)
+		})
+	}
 }
 
 // selectManagerRow moves the manager cursor onto the named row.

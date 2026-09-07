@@ -128,20 +128,22 @@ func TestModelSwitchSyncsSavedProviders(t *testing.T) {
 		}
 	})
 
-	t.Run("switchProviderModel syncs the selected resolved spelling", func(t *testing.T) {
+	t.Run("a separately resolved spelling stays session only", func(t *testing.T) {
 		m := newSession(t)
+		// Resolve preserves a user row's spelling. A concrete lowercase row
+		// beside persisted OpenAI is project/env-derived, not a session alias.
 		m.savedProviders[0].Name = "openai"
 
 		next, status, ok, _ := m.switchProviderModel("openai", "gpt-5.5")
 		if !ok {
 			t.Fatalf("switch failed: %s", status)
 		}
-		if next.savedProviders[0].Model != "gpt-5.5" {
-			t.Fatalf("savedProviders model = %q, want the switched model on selected row %q", next.savedProviders[0].Model, next.savedProviders[0].Name)
+		if next.providerProfile.Model != "gpt-5.5" || !strings.Contains(status, "session only") {
+			t.Fatalf("expected a session-only model switch, status=%q", status)
 		}
 		cfg := readTUIConfigFixture(t, next.userConfigPath)
-		if cfg.Providers[0].Name != "OpenAI" || cfg.Providers[0].Model != "gpt-5.5" {
-			t.Fatalf("persisted row = %+v, want model updated while preserving disk spelling", cfg.Providers[0])
+		if cfg.Providers[0].Name != "OpenAI" || cfg.Providers[0].Model != "gpt-5.1" {
+			t.Fatal("project spelling changed the persisted user row")
 		}
 	})
 

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"net"
 	"net/http"
@@ -1374,27 +1373,11 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 			return "", false, nil
 		}
 	}
-	var owner config.ProviderProfile
-	owners := 0
-	var nameConflictErr error
-	for _, profile := range m.savedProviders {
-		profileCatalogID := strings.TrimSpace(profile.CatalogID)
-		if profileCatalogID == "" || !config.SameProviderIdentity(profileCatalogID, providerID) {
-			if config.SameProviderIdentity(profile.Name, providerID) && nameConflictErr == nil {
-				nameConflictErr = fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogID is %q)", strings.TrimSpace(profile.Name), providerID, profileCatalogID)
-			}
-			continue
-		}
-		owner = profile
-		owners++
+	owner, found, err := config.CatalogProviderOwner(m.savedProviders, providerID)
+	if err != nil {
+		return "", false, err
 	}
-	if nameConflictErr != nil && owners == 0 {
-		return "", false, nameConflictErr
-	}
-	if owners > 1 {
-		return "", false, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id; manage the intended profile by its exact name", providerID, owners)
-	}
-	if owners == 1 && owner.APIKeyStored {
+	if found && owner.APIKeyStored {
 		return owner.Name, true, nil
 	}
 	return "", false, nil
@@ -1449,14 +1432,6 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nKept the saved key for " + name + "."})
 		return m, nil
 	}
-}
-
-func deleteProviderKey(configPath, provider string) (bool, error) {
-	if strings.TrimSpace(configPath) != "" {
-		removed, _, err := config.DeleteResolvedProviderCredentials(configPath, provider)
-		return removed, err
-	}
-	return config.ForgetProviderKey(provider)
 }
 
 func providerWizardRuntimeProfile(profile config.ProviderProfile) config.ProviderProfile {

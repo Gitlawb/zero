@@ -145,6 +145,28 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, string,
 		}
 		name := strings.TrimSpace(replacement)
 		explicit := name != ""
+		if !explicit {
+			// Preserve the legacy exact-name composition inside the same lock
+			// and publication boundary as every other provider repair.
+			legacyName := providerMergeName(*cfg, cfg.Providers[unnamed])
+			for index, profile := range cfg.Providers {
+				if index == unnamed || strings.TrimSpace(profile.Name) != legacyName {
+					continue
+				}
+				legacy := cfg.Providers[unnamed]
+				legacy.Name = legacyName
+				remove := unnamed
+				if unnamed < index {
+					cfg.Providers[unnamed] = mergeProfile(legacy, profile)
+					remove = index
+				} else {
+					cfg.Providers[index] = mergeProfile(profile, legacy)
+				}
+				cfg.Providers = append(cfg.Providers[:remove], cfg.Providers[remove+1:]...)
+				chosen = legacyName
+				return nil
+			}
+		}
 		if !explicit && !activeMatchesNamedRow {
 			name = activeName
 		}
@@ -411,6 +433,16 @@ func catalogProviderOwner(providers []ProviderProfile, catalogID string) (int, c
 	return -1, catalogOwnershipNone, fmt.Errorf("saved profile %q does not prove ownership of catalog provider %q (catalogID is %q); rename or remove that row with `zero providers remove %s`, then run `zero providers add %s`", name, catalogID, strings.TrimSpace(providers[namedIndex].CatalogID), name, catalogID)
 }
 
+// CatalogProviderOwner returns the uniquely owned or adoptable legacy catalog
+// row, using the same ownership decision as catalog credential publication.
+func CatalogProviderOwner(providers []ProviderProfile, catalogID string) (ProviderProfile, bool, error) {
+	index, ownership, err := catalogProviderOwner(providers, catalogID)
+	if err != nil || ownership == catalogOwnershipNone {
+		return ProviderProfile{}, false, err
+	}
+	return providers[index], true, nil
+}
+
 // ResolvePersistedProviderName maps a user- or session-supplied provider
 // spelling to the EXACT name of the persisted row it addresses, so a caller
 // that gated on credential identity (ProviderPersisted, a resolved provider
@@ -512,18 +544,23 @@ func ProviderKeyRetainedAfterRemoval(path string, name string) (bool, error) {
 // A missing file is an empty list, not an error: every caller here asks "what
 // is already saved?", and "nothing yet" is a legitimate answer.
 func persistedProviders(path string) ([]ProviderProfile, error) {
+	cfg, err := persistedFileConfig(path)
+	return cfg.Providers, err
+}
+
+func persistedFileConfig(path string) (FileConfig, error) {
 	data, err := os.ReadFile(strings.TrimSpace(path))
 	if os.IsNotExist(err) {
-		return nil, nil
+		return FileConfig{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var cfg FileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
-	return cfg.Providers, nil
+	return cfg, nil
 }
 
 // PersistedProviderIdentity reports whether a persisted user-config row already
@@ -654,25 +691,28 @@ func resolvePersistedProviderIdentity(providers []ProviderProfile, identity stri
 // row's name nor as another row's catalog id.
 //
 // Credential cleanup uses this before treating the catalog id as one of the
-// target profile's own credential keys. With stored-key "work-xai",
-// stored-key "xai", and keyless "personal-xai" all carrying catalogId "xai",
-// the "xai" token and key belong to whoever logged in under that spelling —
-// deleting them while logging out of "work-xai" takes down a sibling's login.
+// target profile's own keys. Claims include provider rows and dictation because
+// both use the same flat credential-store namespace. Any future feature that
+// stores keys there must add its claims here too.
 func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
-	providers, err := persistedProviders(path)
+	cfg, err := persistedFileConfig(path)
 	if err != nil {
 		return false, err
 	}
-	return catalogIdentityExclusive(providers, catalogID, owner), nil
+	return catalogIdentityExclusive(cfg, catalogID, owner), nil
 }
 
-func catalogIdentityExclusive(providers []ProviderProfile, catalogID, owner string) bool {
+func catalogIdentityExclusive(cfg FileConfig, catalogID, owner string) bool {
 	catalogID = strings.TrimSpace(catalogID)
 	owner = strings.TrimSpace(owner)
 	if catalogID == "" || owner == "" {
 		return false
 	}
-	for _, row := range providers {
+	if sameProviderIdentity(string(cfg.STT.Provider), catalogID) ||
+		sameProviderIdentity(string(cfg.STT.StreamProvider), catalogID) {
+		return false
+	}
+	for _, row := range cfg.Providers {
 		name := strings.TrimSpace(row.Name)
 		if name == owner {
 			continue
@@ -684,15 +724,16 @@ func catalogIdentityExclusive(providers []ProviderProfile, catalogID, owner stri
 	return true
 }
 
-// ProviderCredentialCandidates returns every credential-store key that can
-// belong exclusively to the addressed persisted profile. The requested spelling
-// and canonical row name are always included; a catalog id is included only when
-// no sibling row can own credentials under it. Auth status, refresh, and logout
-// share this resolver so each command addresses the same stored login.
+// ProviderCredentialCandidates returns every OAuth-store key that can belong
+// exclusively to the addressed persisted profile. The requested spelling and
+// canonical row name are included; a catalog id is included only when no sibling
+// row can own a token under it. Auth status, refresh, and logout share this
+// resolver so each command addresses the same stored login.
 //
-// The canonical name is returned separately for marker mutations. On a config
+// The canonical name is returned separately for row-scoped API-key marker and
+// key deletion; it is empty when no persisted row owns the address. On a config
 // read error, callers still receive the requested spelling so logout can delete
-// the credential it was explicitly asked to clear before reporting the error.
+// the OAuth credential it was explicitly asked to clear before reporting the error.
 // An ambiguous provider identity is different: it returns no candidates at all,
 // so a destructive caller cannot act on a spelling several profiles could own.
 func ProviderCredentialCandidates(path, addressedName string) (candidates []string, canonicalName string, err error) {
@@ -701,7 +742,7 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 			err = fmt.Errorf("%s", redaction.ErrorMessage(err, redaction.Options{}))
 		}
 	}()
-	providers, err := persistedProviders(path)
+	cfg, err := persistedFileConfig(path)
 	if err != nil {
 		canonicalName = strings.TrimSpace(addressedName)
 		if canonicalName != "" {
@@ -709,10 +750,10 @@ func ProviderCredentialCandidates(path, addressedName string) (candidates []stri
 		}
 		return candidates, canonicalName, err
 	}
-	return providerCredentialCandidates(providers, addressedName)
+	return providerCredentialCandidates(cfg, addressedName)
 }
 
-func providerCredentialCandidates(providers []ProviderProfile, addressedName string) (candidates []string, canonicalName string, err error) {
+func providerCredentialCandidates(cfg FileConfig, addressedName string) (candidates []string, canonicalName string, err error) {
 	add := func(candidate string) {
 		candidate = strings.TrimSpace(candidate)
 		if candidate != "" && !slices.Contains(candidates, candidate) {
@@ -721,7 +762,7 @@ func providerCredentialCandidates(providers []ProviderProfile, addressedName str
 	}
 	canonicalName = strings.TrimSpace(addressedName)
 	add(canonicalName)
-	row, match, err := resolvePersistedProviderIdentity(providers, addressedName)
+	row, match, err := resolvePersistedProviderIdentity(cfg.Providers, addressedName)
 	if err != nil {
 		if match == PersistedIdentityAmbiguous {
 			return nil, canonicalName, err
@@ -729,20 +770,14 @@ func providerCredentialCandidates(providers []ProviderProfile, addressedName str
 		return candidates, canonicalName, err
 	}
 	if match == PersistedIdentityNone {
-		catalogMatches := 0
-		for _, provider := range providers {
-			if sameProviderIdentity(provider.CatalogID, addressedName) {
-				catalogMatches++
-			}
-		}
-		if catalogMatches > 1 {
-			return nil, canonicalName, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id", addressedName, catalogMatches)
-		}
-		return candidates, canonicalName, nil
+		// Keep the requested spelling as an OAuth candidate, but return no
+		// canonical row name: without a persisted row there is no API-key entry
+		// this address is proven to own.
+		return candidates, "", nil
 	}
 	canonicalName = strings.TrimSpace(row.Name)
 	add(canonicalName)
-	if catalogIdentityExclusive(providers, row.CatalogID, canonicalName) {
+	if catalogIdentityExclusive(cfg, row.CatalogID, canonicalName) {
 		add(row.CatalogID)
 	}
 	return candidates, canonicalName, nil

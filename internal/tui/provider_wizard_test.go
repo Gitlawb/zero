@@ -1224,6 +1224,28 @@ func TestWizardProviderStoredKey(t *testing.T) {
 	}
 }
 
+func TestWizardAdoptsLegacyCatalogNamedRow(t *testing.T) {
+	for _, name := range []string{"Groq", "Anthropic", "OpenRouter"} {
+		for _, stored := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stored=%v", name, stored), func(t *testing.T) {
+				provider, ok := providercatalog.Get(strings.ToLower(name))
+				if !ok {
+					t.Fatal("missing catalog provider")
+				}
+				m := model{savedProviders: []config.ProviderProfile{{Name: name, APIKeyStored: stored}}, providerWizard: &providerWizardState{step: providerWizardStepProvider, providers: []providercatalog.Descriptor{provider}}}
+				owner, found, err := m.wizardProviderStoredKey(provider)
+				if err != nil || found != stored || (stored && owner != name) {
+					t.Fatalf("owner=%q found=%v err=%v", owner, found, err)
+				}
+				next, _ := m.advanceProviderWizard()
+				if next.providerWizard == nil || next.providerWizard.step == providerWizardStepProvider || next.providerWizard.err != "" {
+					t.Fatalf("wizard did not advance: %+v", next.providerWizard)
+				}
+			})
+		}
+	}
+}
+
 func TestAdvanceProviderWizardRedactsStoredKeyOwnershipError(t *testing.T) {
 	secret := "sk-proj-abcdefghijklmnopqrst"
 	m := model{
@@ -1246,20 +1268,28 @@ func TestAdvanceProviderWizardRedactsStoredKeyOwnershipError(t *testing.T) {
 
 func TestProviderWizardManageKeyRemove(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
-	t.Run("exclusive catalog alias is removed and memory is refreshed", func(t *testing.T) {
+	t.Run("shared catalog alias survives and memory is refreshed", func(t *testing.T) {
+		userRoot := t.TempDir()
+		t.Setenv("HOME", userRoot)
+		t.Setenv("APPDATA", userRoot)
+		t.Setenv("LOCALAPPDATA", userRoot)
+		t.Setenv("XDG_CONFIG_HOME", userRoot)
 		configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		profile := config.ProviderProfile{Name: "acme", CatalogID: "acme-cloud", APIKeyStored: true}
-		if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
+		if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true},{"name":"other","catalogId":"acme-cloud"}]}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.Set("acme-cloud", "sk-secret"); err != nil {
+		if err := store.Set("acme", "sk-secret"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Set("acme-cloud", "unrelated-secret"); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1269,8 +1299,11 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 		if next.providerWizard != nil {
 			t.Fatal("remove should close the wizard")
 		}
-		if _, ok, _ := store.Get("acme-cloud"); ok {
-			t.Fatal("remove should delete the catalog-alias key from the credential store")
+		if _, ok, _ := store.Get("acme"); ok {
+			t.Fatal("remove should delete the persisted row key from the credential store")
+		}
+		if key, ok, err := store.Get("acme-cloud"); err != nil || !ok || key != "unrelated-secret" {
+			t.Fatalf("catalog-id key present=%v, error=%v; want it preserved", ok, err)
 		}
 		if cfg := readProviderWizardConfigFixture(t, configPath); cfg.Providers[0].APIKeyStored {
 			t.Fatal("case-variant removal left apiKeyStored set")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -988,11 +989,48 @@ func TestRunAuthLogoutDeletesCatalogIDToken(t *testing.T) {
 	}
 }
 
-// TestRunAuthLogoutDeletesCatalogIDAPIKey covers jatmn's second #725 follow-up
-// finding: logout's OAuth-token deletion covers the profile name, canonical
-// persisted name, and catalog id, but API-key deletion only covered the first
-// two — a key stored under the catalog id (e.g. captured via `zero auth
-// openrouter`-style catalog flows) survived `zero auth logout my-xai`.
+// Catalog ids share the flat API-key store with dictation, so logout must leave
+// a catalog alias alone when dictation also claims it.
+func TestRunAuthLogoutPreservesDictationCatalogAPIKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-groq","catalogId":"groq","apiKeyStored":true}],"stt":{"provider":"groq"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("my-groq", "chat-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("groq", "dictation-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "groq"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if _, ok, err := keyStore.Get("my-groq"); err != nil || ok {
+		t.Fatalf("persisted row API key survived logout: ok=%v err=%v", ok, err)
+	}
+	if key, ok, err := keyStore.Get("groq"); err != nil || !ok || key != "dictation-key" {
+		t.Fatalf("dictation key = %q, %v, %v; want it preserved", key, ok, err)
+	}
+	if !strings.Contains(stdout.String(), "Logged out") {
+		t.Fatalf("stdout = %q, want a logout confirmation", stdout.String())
+	}
+}
+
+// TestRunAuthLogoutDeletesCatalogIDAPIKey covers jatmn's #725 finding: a key
+// stored under a profile's exclusive catalog id by a catalog-style auth flow
+// must not survive logout of that profile's persisted name.
 func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
@@ -1005,7 +1043,7 @@ func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := keyStore.Set("xai", "catalog-id-key"); err != nil {
+	if err := keyStore.Set("xai", "catalog-flow-key"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1021,6 +1059,33 @@ func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Logged out") {
 		t.Fatalf("stdout = %q, want a logout confirmation", stdout.String())
+	}
+}
+
+func TestRunAuthLogoutWithoutPersistedRowPreservesDictationKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"stt":{"provider":"groq"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("groq", "dictation-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "groq"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if key, ok, err := keyStore.Get("groq"); err != nil || !ok || key != "dictation-key" {
+		t.Fatalf("dictation key = %q, %v, %v; want it preserved", key, ok, err)
 	}
 }
 
@@ -1078,15 +1143,8 @@ func TestRunAuthLogoutKeepsDistinctUnicodeCredentials(t *testing.T) {
 	}
 }
 
-// TestRunAuthLogoutResolvesCandidatesDespiteUnrelatedAmbiguousConfig covers
-// jatmn's third #725 follow-up finding: identity resolution and OAuth/API-key
-// candidate expansion were gated on PreflightUserConfig succeeding, even
-// though PersistedProviderIdentity/ProviderRow only read+parse raw JSON and
-// never validate case-duplicate names. An unrelated ambiguous pair elsewhere
-// in the file (demo/DEMO) must not suppress deleting every credential for the
-// unambiguous profile actually being logged out — only the final marker-write
-// should fail on that unrelated validation error.
-func TestRunAuthLogoutRejectsUnrelatedAmbiguousConfigBeforeCredentialDeletion(t *testing.T) {
+// Unrelated invalid rows must not prevent an unambiguous credential revocation.
+func TestRunAuthLogoutRevokesDespiteUnrelatedAmbiguousConfig(t *testing.T) {
 	setCLIUserConfigRoot(t)
 	storePath := withAuthStore(t)
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
@@ -1114,14 +1172,77 @@ func TestRunAuthLogoutRejectsUnrelatedAmbiguousConfigBeforeCredentialDeletion(t 
 	code := runWithDeps([]string{"auth", "logout", "my-xai"}, &stdout, &stderr, appDeps{
 		userConfigPath: func() (string, error) { return configPath, nil },
 	})
-	if code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
-		t.Fatalf("exit = %d stderr = %q, want the unrelated ambiguity surfaced as a truthful marker-update failure", code, stderr.String())
+	if code != exitSuccess {
+		t.Fatalf("exit = %d stderr = %q, want successful targeted revocation", code, stderr.String())
 	}
-	if _, ok, err := store.Load(oauth.ProviderKey("xai")); err != nil || !ok {
-		t.Fatalf("catalog-id OAuth token changed after rejected logout: ok=%v err=%v", ok, err)
+	if _, ok, err := store.Load(oauth.ProviderKey("xai")); err != nil || ok {
+		t.Fatalf("catalog-id OAuth token survived logout: ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := keyStore.Get("xai"); err != nil || !ok {
-		t.Fatalf("catalog-id API key changed after rejected logout: ok=%v err=%v", ok, err)
+	if _, ok, err := keyStore.Get("xai"); err != nil || ok {
+		t.Fatalf("catalog-id API key survived logout: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestRunAuthLogoutRevokesWithBrokenConfig(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		t.Run(fmt.Sprint(malformed), func(t *testing.T) {
+			setCLIUserConfigRoot(t)
+			storePath := withAuthStore(t)
+			t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+			path := filepath.Join(t.TempDir(), "config.json")
+			data := []byte(`{"providers":[{}, {"name":"work","catalogId":"xai","apiKeyStored":true}]}`)
+			if malformed {
+				data = []byte(`{"providers":[`)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tokens, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := config.ProviderKeyStoreForConfigPath(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"work", "xai"} {
+				if err := tokens.Save(oauth.ProviderKey(name), oauth.Token{AccessToken: "fixture"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := keys.Set(name, "fixture"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			code := runWithDeps([]string{"auth", "logout", "work"}, &stdout, &stderr, appDeps{userConfigPath: func() (string, error) { return path, nil }})
+			if malformed {
+				if code == exitSuccess || !strings.Contains(stderr.String(), "explicit credential revocation completed") {
+					t.Fatalf("exit=%d stderr=%s", code, &stderr)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(after, data) {
+					t.Fatal("malformed config was changed")
+				}
+			} else if code != exitSuccess {
+				t.Fatalf("exit=%d stderr=%s", code, &stderr)
+			}
+			for _, name := range []string{"work", "xai"} {
+				wantPresent := malformed && name == "xai"
+				if _, ok, err := tokens.Load(oauth.ProviderKey(name)); err != nil || ok != wantPresent {
+					t.Fatalf("OAuth %s present=%v want=%v err=%v", name, ok, wantPresent, err)
+				}
+				if _, ok, err := keys.Get(name); err != nil || ok != wantPresent {
+					t.Fatalf("API key %s present=%v want=%v err=%v", name, ok, wantPresent, err)
+				}
+			}
+			if !malformed {
+				after, err := os.ReadFile(path)
+				var cfg config.FileConfig
+				if err != nil || json.Unmarshal(after, &cfg) != nil || len(cfg.Providers) != 2 || cfg.Providers[0].Name != "" || cfg.Providers[1].APIKeyStored {
+					t.Fatal("targeted marker update did not preserve unnamed row")
+				}
+			}
+		})
 	}
 }
 

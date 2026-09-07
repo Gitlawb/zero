@@ -861,14 +861,20 @@ func TestProviderManagerAmbiguousCaseVariantSessionDoesNotGuessLiveRow(t *testin
 	}
 }
 
-func TestProviderManagerCleanupRedactsCredentialStoreError(t *testing.T) {
+func TestProviderManagerCleanupDoesNotDeleteCredentialsAgain(t *testing.T) {
+	setTUIUserConfigRoot(t)
 	t.Setenv("ZERO_CRED_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_FILE", filepath.Join(t.TempDir(), "tokens.json"))
 	secret := "sk-proj-12345678901234567890"
-	dir := filepath.Join(t.TempDir(), secret)
-	if err := os.MkdirAll(filepath.Join(dir, "credentials.json.lock"), 0o700); err != nil {
+	store, err := config.ProviderKeyStore()
+	if err != nil {
 		t.Fatal(err)
 	}
-	msg, ok := providerManagerCleanupCmd(filepath.Join(dir, "config.json"), config.ProviderProfile{Name: "work"}, true)().(providerManagerCleanupMsg)
+	if err := store.Set("work", secret); err != nil {
+		t.Fatal(err)
+	}
+	msg, ok := providerManagerCleanupCmd(config.ProviderProfile{Name: "work"})().(providerManagerCleanupMsg)
 	if !ok {
 		t.Fatal("cleanup command returned the wrong message type")
 	}
@@ -876,8 +882,11 @@ func TestProviderManagerCleanupRedactsCredentialStoreError(t *testing.T) {
 	if strings.Contains(text, secret) {
 		t.Fatalf("cleanup warning leaked credential-like text: %q", text)
 	}
-	if !strings.Contains(text, "could not be deleted") {
-		t.Fatalf("cleanup warning missing failure context: %q", text)
+	if strings.Contains(text, "could not be deleted") {
+		t.Fatalf("OAuth-only cleanup attempted a second API-key deletion: %q", text)
+	}
+	if key, present, err := store.Get("work"); err != nil || !present || key != secret {
+		t.Fatalf("cleanup changed a credential written after the transaction: present=%v err=%v", present, err)
 	}
 }
 
@@ -1047,10 +1056,9 @@ func TestProviderDeleteKeyNoteResolvesCaseVariantSpelling(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"WORK","apiKeyStored":true},{"name":"other"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// "work" addresses the sole WORK row, whose removal takes the key with it.
-	// No other displayed row carries "WORK", so the bridge is safe here — that
-	// sibling check is the whole difference from the project-row case above.
-	owner, err := config.ProviderRowOwnershipAt(path, []string{"work", "other"}, "work")
+	// A session alias can address the sole WORK row when no concrete resolved
+	// row named "work" exists. A project row with that name is tested separately.
+	owner, err := config.ProviderRowOwnershipAt(path, nil, "work")
 	if err != nil {
 		t.Fatal(err)
 	}

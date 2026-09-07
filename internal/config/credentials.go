@@ -212,14 +212,16 @@ func DeleteProviderCredentials(path string, candidates []string, markerProvider 
 // marker under the provider config/key transaction lock.
 func DeleteResolvedProviderCredentials(path, addressedName string) (removed bool, canonicalName string, err error) {
 	_, err = runProviderProfileOperation(path, false, false, func(op *providerProfileOperation) error {
-		_, match, resolveErr := resolvePersistedProviderIdentity(op.config.Providers, addressedName)
+		row, match, resolveErr := resolvePersistedProviderIdentity(op.config.Providers, addressedName)
 		if resolveErr != nil {
 			return resolveErr
 		}
 		if match == PersistedIdentityNone {
 			return fmt.Errorf("provider %q not found", strings.TrimSpace(addressedName))
 		}
-		candidates, canonical, resolveErr := providerCredentialCandidates(op.config.Providers, addressedName)
+		// API-key ownership starts at the persisted row, not the requested OAuth
+		// spelling: that spelling can also be a dictation-owned catalog key.
+		candidates, canonical, resolveErr := providerCredentialCandidates(op.config, row.Name)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -228,6 +230,88 @@ func DeleteResolvedProviderCredentials(path, addressedName string) (removed bool
 		return resolveErr
 	})
 	return removed, canonicalName, err
+}
+
+// RevokeProviderCredentials serializes explicit logout with provider mutations.
+// Unlike reversible profile edits, revocation never restores deleted credentials
+// because a later marker write failed. Unreadable config permits only the literal
+// addressed credential, with an error explaining that aliases/markers were skipped.
+func RevokeProviderCredentials(path, addressedName string, revokeOAuth func(string) (bool, error)) (removed bool, err error) {
+	if strings.TrimSpace(path) == "" || strings.TrimSpace(addressedName) == "" || revokeOAuth == nil {
+		return false, fmt.Errorf("config path, provider name and OAuth revocation callback are required; credentials not revoked")
+	}
+	release, err := acquireProviderWriteLock(path)
+	if err != nil {
+		return false, fmt.Errorf("credentials not revoked: %w", err)
+	}
+	defer func() { err = errors.Join(err, release()) }()
+	cfg, readErr := persistedFileConfig(path)
+	candidates := []string{addressedName}
+	keyCandidates := candidates
+	canonical := ""
+	if readErr == nil {
+		candidates, canonical, err = providerCredentialCandidates(cfg, addressedName)
+		if err != nil {
+			return false, fmt.Errorf("credentials not revoked: %w", err)
+		}
+		keyCandidates = nil
+		if canonical != "" {
+			matches := 0
+			for _, profile := range cfg.Providers {
+				if SameProviderIdentity(profile.Name, canonical) {
+					matches++
+				}
+			}
+			if matches > 1 {
+				return false, fmt.Errorf("credentials not revoked: ambiguous persisted provider names sharing %q", canonical)
+			}
+			keyCandidates, _, err = providerCredentialCandidates(cfg, canonical)
+			if err != nil {
+				return false, fmt.Errorf("credentials not revoked: %w", err)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		deleted, deleteErr := revokeOAuth(candidate)
+		removed = removed || deleted
+		if deleteErr != nil {
+			return removed, fmt.Errorf("credential revocation incomplete: %w", deleteErr)
+		}
+	}
+	if len(keyCandidates) > 0 {
+		store, storeErr := ProviderKeyStoreForConfigPath(path)
+		if storeErr != nil {
+			return removed, fmt.Errorf("API-key revocation incomplete: %w", storeErr)
+		}
+		for _, candidate := range keyCandidates {
+			deleted, deleteErr := store.Delete(candidate)
+			removed = removed || deleted
+			if deleteErr != nil {
+				return removed, fmt.Errorf("API-key revocation incomplete: %w", deleteErr)
+			}
+		}
+	}
+	if readErr != nil {
+		return removed, fmt.Errorf("explicit credential revocation completed; config could not be read, so aliases and markers were not changed: %w", readErr)
+	}
+	changed := false
+	for i := range cfg.Providers {
+		if canonical != "" && SameProviderIdentity(cfg.Providers[i].Name, canonical) && cfg.Providers[i].APIKeyStored {
+			cfg.Providers[i].APIKeyStored = false
+			changed = true
+		}
+	}
+	if changed {
+		// A targeted revocation must not require repairing unrelated legacy rows.
+		data, writeErr := json.MarshalIndent(cfg, "", "  ")
+		if writeErr == nil {
+			writeErr = writeConfigData(path, append(data, '\n'))
+		}
+		if writeErr != nil {
+			return removed, fmt.Errorf("credentials revoked, but stored-key marker update failed: %w", writeErr)
+		}
+	}
+	return removed, nil
 }
 
 func (op *providerProfileOperation) deleteProviderCredentials(candidates []string, markerProvider string) (bool, error) {
