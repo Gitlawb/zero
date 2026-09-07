@@ -204,7 +204,14 @@ func TestRunAuthHelp(t *testing.T) {
 }
 
 func TestRunAuthResetJSON(t *testing.T) {
-	withAuthStore(t)
+	path := withAuthStore(t)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "synthetic-reset-test-token"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	if code := runWithDeps([]string{"auth", "reset", "--json"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
 		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
@@ -217,6 +224,14 @@ func TestRunAuthResetJSON(t *testing.T) {
 	}
 	if !payload.Reset {
 		t.Fatalf("payload = %+v, want reset=true", payload)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"auth", "status"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("status exit = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No OAuth provider logins are stored.") {
+		t.Fatalf("expected empty store after JSON reset, got: %q", stdout.String())
 	}
 }
 
