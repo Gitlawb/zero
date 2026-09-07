@@ -59,6 +59,7 @@ type linuxSandboxBwrapPlan struct {
 }
 
 type linuxBwrapFilesystemPlan struct {
+	Err                    error
 	Args                   []string
 	ProtectedCreateTargets []string
 }
@@ -189,6 +190,9 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 		"--die-with-parent",
 	}
 	filesystemPlan := buildLinuxBwrapFilesystemPlan(config.PermissionProfile)
+	if filesystemPlan.Err != nil {
+		return linuxSandboxBwrapPlan{}, filesystemPlan.Err
+	}
 	args = append(args, filesystemPlan.Args...)
 	if pathExists(helperPath) {
 		args = append(args, "--ro-bind", helperPath, helperPath)
@@ -221,6 +225,22 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 }
 
 func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
+	if problems := profile.FileSystem.CredentialDiscoveryErrors; len(problems) > 0 {
+		return fmt.Errorf("cannot guarantee credential protection: %s", strings.Join(problems, "; "))
+	}
+	for _, path := range profile.FileSystem.DenyRead {
+		if _, err := os.Lstat(path); err != nil {
+			return fmt.Errorf("bubblewrap cannot guarantee an explicit deny for %s: %w", path, err)
+		}
+	}
+	if len(profile.FileSystem.SSHDenyReadFiles) > 0 {
+		return fmt.Errorf("bubblewrap cannot guarantee selective SSH key protection across concurrent path replacement; deny the containing directory explicitly or use a pathname-policy backend")
+	}
+	for _, path := range append(append([]string{}, profile.FileSystem.DenyRead...), profile.FileSystem.DenyReadIfExists...) {
+		if linuxNonPlatformSymlinkInPath(path) {
+			return fmt.Errorf("bubblewrap cannot guarantee deny-read protection through a mutable symlink: %s", path)
+		}
+	}
 	if files := profile.FileSystem.ProcessTrustedDenyReadFiles; len(files) > 0 {
 		return fmt.Errorf("bubblewrap cannot securely deny credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
 	}
@@ -324,7 +344,14 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 		}
 		unreadable = append(unreadable, path)
 	}
-	args = appendUnreadableLinuxPaths(args, unreadable, fs.DenyReadCarveouts, fs.WriteRoots)
+	classified := classifyUnreadableLinuxPaths(unreadable)
+	if classified.err != nil {
+		return linuxBwrapFilesystemPlan{Err: classified.err}
+	}
+	if len(classified.links) > 0 {
+		return linuxBwrapFilesystemPlan{Err: errors.New("bubblewrap cannot guarantee deny-read protection through a mutable symlink")}
+	}
+	args = appendClassifiedUnreadableLinuxPaths(args, classified, fs.DenyReadCarveouts)
 	return linuxBwrapFilesystemPlan{
 		Args:                   args,
 		ProtectedCreateTargets: dedupeStrings(protectedCreateTargets),
@@ -399,56 +426,19 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
 }
 
-// appendUnreadableLinuxPaths emits bwrap args that hide the given deny paths.
-// Directories keep the existing tmpfs mask. Regular files stay `--ro-bind
-// /dev/null path`. Symlink dests cannot use that bind: mount(2) LOOKUP_FOLLOW
-// would mask the current target (so a later retarget reopens a new credential)
-// or ENOENT a dangling link. Instead mask the resolved regular-file target and,
-// when the parent is a credential directory, tmpfs-overlay the parent omitting
-// denied basenames so the lexical dentry disappears without following.
-func appendUnreadableLinuxPaths(args []string, paths []string, carveouts []string, writeRoots []WritableRoot) []string {
-	classified := classifyUnreadableLinuxPaths(paths)
+// Denies are classified once; uncertain entries abort planning before args are used.
+func appendClassifiedUnreadableLinuxPaths(args []string, classified linuxUnreadableClassified, carveouts []string) []string {
 	for _, dir := range classified.dirs {
 		args = appendUnreadableLinuxDirArgs(args, dir, carveouts)
 	}
-	omits := linuxDeniedBasenamesByParent(classified.files, classified.links, classified.dirs)
-	seenParents := make(map[string]struct{})
-	for _, link := range classified.links {
-		args = appendUnreadableLinuxResolvedSymlinkArgs(args, link, carveouts)
-		parent := filepath.Clean(filepath.Dir(link))
-		overlayParent := linuxCanonicalDest(parent)
-		if linuxParentOverlaid(seenParents, overlayParent) {
-			continue
-		}
-		if !linuxCredentialParentSafeToTmpfs(overlayParent, writeRoots) && !linuxCredentialParentSafeToTmpfs(parent, writeRoots) {
-			continue
-		}
-		var applied bool
-		args, applied = appendLinuxParentTmpfsOmitting(args, overlayParent, omits[overlayParent])
-		if applied {
-			// Record every spelling of the parent only after the overlay is
-			// actually added. macOS /var vs /private/var (and similar aliases)
-			// must skip file binds using either form, otherwise --ro-bind
-			// /dev/null and --tmpfs name different dests for the same directory.
-			recordLinuxParentSpellings(seenParents, parent)
-			recordLinuxParentSpellings(seenParents, overlayParent)
-		}
-	}
 	for _, file := range classified.files {
-		parent := filepath.Clean(filepath.Dir(file))
-		if linuxParentOverlaid(seenParents, parent) {
-			// Parent was already tmpfs-overlaid (symlink sibling in the same
-			// credential dir). Re-binding /dev/null onto the regular file would
-			// target a dest that no longer exists after the overlay and can
-			// abort bubblewrap at startup.
-			continue
-		}
 		args = append(args, "--ro-bind", "/dev/null", file)
 	}
 	return args
 }
 
 type linuxUnreadableClassified struct {
+	err   error
 	files []string
 	dirs  []string
 	links []string
@@ -475,7 +465,8 @@ func classifyUnreadableLinuxPaths(paths []string) linuxUnreadableClassified {
 			inspect = canonical
 		}
 		if inspect == "" {
-			continue
+			out.err = fmt.Errorf("cannot classify deny-read path %q", path)
+			return out
 		}
 		info, err := os.Lstat(inspect)
 		if err != nil && canonical != "" && canonical != inspect {
@@ -483,7 +474,8 @@ func classifyUnreadableLinuxPaths(paths []string) linuxUnreadableClassified {
 			inspect = canonical
 		}
 		if err != nil {
-			continue
+			out.err = fmt.Errorf("cannot classify deny-read path %s: %w", path, err)
+			return out
 		}
 		switch {
 		case info.Mode().Type() == os.ModeSymlink:
@@ -504,14 +496,6 @@ func classifyUnreadableLinuxPaths(paths []string) linuxUnreadableClassified {
 		}
 	}
 	return out
-}
-
-func linuxCanonicalDest(path string) string {
-	path = filepath.Clean(path)
-	if canonical := normalizeProfilePath(path); canonical != "" {
-		return canonical
-	}
-	return path
 }
 
 // linuxNonPlatformSymlinkInPath reports a symlink in path's resolution other
@@ -546,77 +530,6 @@ func linuxPlatformPrefixSymlink(path string) bool {
 	}
 }
 
-func linuxParentSpellings(parent string) []string {
-	parent = filepath.Clean(parent)
-	seen := make(map[string]struct{})
-	var out []string
-	add := func(path string) {
-		path = filepath.Clean(strings.TrimSpace(path))
-		if path == "" {
-			return
-		}
-		if _, ok := seen[path]; ok {
-			return
-		}
-		seen[path] = struct{}{}
-		out = append(out, path)
-	}
-	add(parent)
-	add(normalizeProfilePathLexically(parent))
-	add(normalizeProfilePath(parent))
-	return out
-}
-
-func recordLinuxParentSpellings(seen map[string]struct{}, parent string) {
-	for _, spelling := range linuxParentSpellings(parent) {
-		seen[spelling] = struct{}{}
-	}
-}
-
-func linuxParentOverlaid(seen map[string]struct{}, parent string) bool {
-	for _, spelling := range linuxParentSpellings(parent) {
-		if _, ok := seen[spelling]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func linuxDeniedBasenamesByParent(groups ...[]string) map[string]map[string]struct{} {
-	out := make(map[string]map[string]struct{})
-	add := func(path string) {
-		parent := linuxCanonicalDest(filepath.Dir(path))
-		base := filepath.Base(path)
-		m, ok := out[parent]
-		if !ok {
-			m = make(map[string]struct{})
-			out[parent] = m
-		}
-		m[base] = struct{}{}
-	}
-	for _, group := range groups {
-		for _, path := range group {
-			add(path)
-		}
-	}
-	return out
-}
-
-func appendUnreadableLinuxResolvedSymlinkArgs(args []string, path string, carveouts []string) []string {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || resolved == "" {
-		return args
-	}
-	info, err := os.Lstat(resolved)
-	if err != nil {
-		return args
-	}
-	if info.IsDir() {
-		return appendUnreadableLinuxDirArgs(args, resolved, carveouts)
-	}
-	return append(args, "--ro-bind", "/dev/null", resolved)
-}
-
 func appendUnreadableLinuxDirArgs(args []string, path string, carveouts []string) []string {
 	nested := nestedCarveoutPaths(path, carveouts)
 	if len(nested) == 0 {
@@ -634,79 +547,6 @@ func appendUnreadableLinuxDirArgs(args []string, path string, carveouts []string
 		}
 	}
 	return append(args, "--remount-ro", path)
-}
-
-// linuxCredentialParentSafeToTmpfs reports that parent may be reconstructed
-// inside the sandbox to hide a lexical symlink dentry. HOME, `/`, `/tmp`,
-// `/etc`, `/var`, and write roots must never be tmpfs-overlaid: reconstructing
-// HOME is forbidden and would hide the workspace. Only credential directories
-// such as ~/.ssh and ~/.gnupg (including nested dirs under them) qualify.
-func linuxCredentialParentSafeToTmpfs(parent string, writeRoots []WritableRoot) bool {
-	parent = filepath.Clean(parent)
-	if parent == "" || parent == "." || parent == string(filepath.Separator) {
-		return false
-	}
-	switch parent {
-	case "/tmp", "/etc", "/var", "/usr", "/home", "/root", "/opt", "/dev", "/proc", "/sys", "/run", "/mnt", "/media":
-		return false
-	}
-	if !linuxCredentialDirPath(parent) {
-		return false
-	}
-	for _, wr := range writeRoots {
-		root := filepath.Clean(strings.TrimSpace(wr.Root))
-		if root != "" && (parent == root || pathWithinRoot(parent, root) || pathWithinRoot(root, parent)) {
-			return false
-		}
-	}
-	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() {
-		return false
-	}
-	return true
-}
-
-func linuxCredentialDirPath(path string) bool {
-	base := filepath.Base(filepath.Clean(path))
-	switch base {
-	case ".ssh", ".gnupg", ".aws", ".azure":
-		return true
-	}
-	slash := filepath.ToSlash(filepath.Clean(path))
-	for _, marker := range []string{"/.ssh/", "/.gnupg/", "/.aws/", "/.azure/"} {
-		if strings.Contains(slash, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func appendLinuxParentTmpfsOmitting(args []string, parent string, omit map[string]struct{}) ([]string, bool) {
-	parent = filepath.Clean(parent)
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return args, false
-	}
-	// 555 keeps option-2 public names (config, known_hosts, *.pub) listable
-	// after the overlay; denied basenames are simply not rebound.
-	args = append(args, "--perms", "555", "--tmpfs", parent)
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == "." || name == ".." {
-			continue
-		}
-		if _, skip := omit[name]; skip {
-			continue
-		}
-		sibling := filepath.Join(parent, name)
-		if !pathExists(sibling) {
-			// os.ReadDir returns dangling symlinks; bwrap --ro-bind sources
-			// must resolve, so skip them rather than aborting sandbox startup.
-			continue
-		}
-		args = append(args, "--ro-bind", sibling, sibling)
-	}
-	return append(args, "--remount-ro", parent), true
 }
 
 // nestedCarveoutPaths returns the carveouts that sit strictly inside root,
