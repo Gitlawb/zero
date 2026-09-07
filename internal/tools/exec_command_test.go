@@ -373,10 +373,6 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreground server should return session_id, meta=%#v output=%q", start.Meta, start.Output)
 	}
-	addr := parseListeningAddress(start.Output)
-	if addr == "" {
-		t.Fatalf("server output did not include listening address: %q", start.Output)
-	}
 	t.Cleanup(func() {
 		writeTool.Run(context.Background(), map[string]any{
 			"session_id": sessionID,
@@ -384,7 +380,12 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 		})
 	})
 
-	response, err := http.Get("http://" + addr)
+	addr := waitForListeningAddress(t, writeTool, sessionID, start.Output)
+
+	// Bounded, so a server that accepts a connection and never answers fails here
+	// with its address instead of hanging until the package timeout kills the run.
+	client := &http.Client{Timeout: 30 * time.Second}
+	response, err := client.Get("http://" + addr)
 	if err != nil {
 		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, start.Output)
 	}
@@ -396,6 +397,54 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if string(bytes) != "zero-server-ok" {
 		t.Fatalf("server response = %q", string(bytes))
 	}
+}
+
+// waitForListeningAddress polls the exec session until the helper says where it
+// is listening.
+//
+// ONE YIELD IS AN ALLOWANCE, NOT A GUARANTEE, AND THIS TEST TREATED IT AS ONE.
+//
+// The helper is this test binary re-executed. The first read used to be its only
+// chance: 500ms to be spawned through the process manager, reach net.Listen and
+// have its line drained back. A Windows CI runner under load does not get there
+// in time, so the read returned "Command is still running." with no address and
+// the test failed as though the server were broken. It failed that way on
+// unrelated contributor PRs, which is worse than a slow test: it reports somebody
+// else's change as the fault.
+//
+// Polling is what the banner in that very output tells the caller to do, so it is
+// what this does, up to a bound far above any plausible start.
+//
+// AND IT STILL FAILS FAST WHEN THE FAILURE IS REAL. A session that has gone away
+// answers with StatusError, and a process that exited before listening answers
+// with an exit_code line. Either is a genuine defect, so neither is worth waiting
+// out: they end the loop immediately with what the session actually said.
+func waitForListeningAddress(t *testing.T, writeTool Tool, sessionID int, first string) string {
+	t.Helper()
+	if addr := parseListeningAddress(first); addr != "" {
+		return addr
+	}
+	transcript := []string{first}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		poll := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"chars":         "",
+			"yield_time_ms": 250,
+		})
+		transcript = append(transcript, poll.Output)
+		if addr := parseListeningAddress(poll.Output); addr != "" {
+			return addr
+		}
+		if poll.Status != StatusOK {
+			t.Fatalf("the exec session was gone before the server reported an address:\n%s", strings.Join(transcript, "\n--- poll ---\n"))
+		}
+		if strings.Contains(poll.Output, "exit_code:") {
+			t.Fatalf("the server process exited before it reported an address:\n%s", strings.Join(transcript, "\n--- poll ---\n"))
+		}
+	}
+	t.Fatalf("the server never reported a listening address within the deadline:\n%s", strings.Join(transcript, "\n--- poll ---\n"))
+	return ""
 }
 
 func parseListeningAddress(output string) string {
