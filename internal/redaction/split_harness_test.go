@@ -304,6 +304,27 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 	})
 }
 
+func TestIncompletePrefixInsideValidOpenAIKey(t *testing.T) {
+	first := "sk-" + strings.Repeat("a", 24) + "123456"
+	for _, tail := range []string{"sk-proj-abcdefg", "sk-ant-abcdefgh", "github_pat_abcd", "glpat-abcdefghi", "AIzaabcdefghijk"} {
+		for _, gap := range []string{"\x00", "\x1b", "\x9b", "\u009b", "\x00\x1b\u009b"} {
+			if got := RedactString(first+gap+tail, Options{}); got != RedactedSecret {
+				t.Errorf("incomplete prefix %q after gap %q leaked: %q", tail, gap, got)
+			}
+		}
+	}
+	// A complete neighbor remains independent, with the original gap intact.
+	second := "sk-proj-" + strings.Repeat("b", 24)
+	if got, want := RedactString(first+"\x00"+second, Options{}), RedactedSecret+"\x00"+RedactedSecret; got != want {
+		t.Errorf("complete neighboring key: got %q, want %q", got, want)
+	}
+	// An incomplete prefix still separates non-secret prose from a split key.
+	prose := "sk-my-awesome-kebab-project"
+	if got, want := RedactString(prose+"\x00sk-proj-abcdefg\x00hijklmnop12345", Options{}), prose+"\x00"+RedactedSecret; got != want {
+		t.Errorf("prose before split key: got %q, want %q", got, want)
+	}
+}
+
 func TestNeighboringJWTLengths(t *testing.T) {
 	header := "eyJhbGciOiJIUzI1NiJ9"                                                                                     // gitleaks:allow -- synthetic redaction fixture
 	payloads := []string{"eyJzdWIiOiIxMjM0NTY3ODkwIn0", "eyJzdWIiOiJib2JieSIsIm5hbWUiOiJCIn0", strings.Repeat("a", 256)} // gitleaks:allow -- synthetic redaction fixture

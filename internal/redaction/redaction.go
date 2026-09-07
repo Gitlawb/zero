@@ -444,7 +444,7 @@ var (
 	anchoredOpenaiKeyPattern     = regexp.MustCompile(`^sk-[A-Za-z0-9_-]{20,}`)
 )
 
-func startsIndependentCredential(s string) bool {
+func startsIndependentCredential(s string, allowIncompletePrefix bool) bool {
 	if len(s) < 15 {
 		return false
 	}
@@ -492,8 +492,8 @@ func startsIndependentCredential(s string) bool {
 			}
 		}
 	}
-	if strings.HasPrefix(s, "sk-proj-") || strings.HasPrefix(s, "sk-ant-") || strings.HasPrefix(s, "github_pat_") ||
-		strings.HasPrefix(s, "glpat-") || strings.HasPrefix(s, "AIza") {
+	if allowIncompletePrefix && (strings.HasPrefix(s, "sk-proj-") || strings.HasPrefix(s, "sk-ant-") || strings.HasPrefix(s, "github_pat_") ||
+		strings.HasPrefix(s, "glpat-") || strings.HasPrefix(s, "AIza")) {
 		return true
 	}
 	return false
@@ -561,7 +561,14 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 		return false
 	}
 
-	for _, cSpan := range cand.spans {
+	for i := 0; i < len(cand.spans); i++ {
+		cSpan := cand.spans[i]
+		// Mixed C0, raw C1, and UTF-8 C1 spans form one gap. Classify the
+		// following token only after the whole run, preserving its original bytes.
+		for cSpan.validGap && i+1 < len(cand.spans) && cand.spans[i+1].validGap && cand.spans[i+1].start == cSpan.end {
+			i++
+			cSpan.end = cand.spans[i].end
+		}
 		if cSpan.start < candStartOrig {
 			continue
 		}
@@ -581,6 +588,8 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 			logCursor++
 		}
 
+		logPre := cand.logical[candStartLog:logCursor]
+		prefixValid := isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen)
 		tailInSrc := src[matchStart+cSpan.end:]
 		tailWindow := tailInSrc
 		if len(tailWindow) > 64 {
@@ -589,7 +598,9 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 		// A complete neighboring JWT may need more than 64 bytes to reach
 		// its signature. Inspect its full first token; the helper stops at
 		// the next delimiter, so successive gaps examine disjoint segments.
-		startsNew := startsIndependentCredential(tailInSrc)
+		// An incomplete prefix can separate prose from a later split secret,
+		// but cannot end an already-valid candidate and expose its suffix.
+		startsNew := startsIndependentCredential(tailInSrc, !prefixValid)
 		if startsNew {
 			checkCandidate(logCursor)
 			candStartOrig = cSpan.end
@@ -601,8 +612,7 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 			continue
 		}
 
-		logPre := cand.logical[candStartLog:logCursor]
-		if isCandidateValid(logPre, shape, isOpenAI, runningDots, runningDigits, hasInteriorHyphen) {
+		if prefixValid {
 			if idx := strings.IndexAny(tailWindow, "/\\"); idx >= 0 {
 				segment := tailWindow[:idx]
 				if len(segment) < 15 && !strings.Contains(segment, "\n") {
@@ -619,7 +629,7 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 			if spaceIdx := strings.IndexAny(firstWord, " \t\n\r"); spaceIdx >= 0 {
 				firstWord = firstWord[:spaceIdx]
 			}
-			if isOpenAI && strings.Contains(firstWord, "-") && !secretMatchHasDigit(firstWord) && !startsIndependentCredential(firstWord) {
+			if isOpenAI && strings.Contains(firstWord, "-") && !secretMatchHasDigit(firstWord) && !startsIndependentCredential(firstWord, true) {
 				checkCandidate(logCursor)
 				if lastConsumedEnd <= 0 {
 					lastConsumedEnd = cSpan.start
