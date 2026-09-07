@@ -88,13 +88,45 @@ func TestApplyPatchPathsParseGitDefaultAndNoPrefixOutput(t *testing.T) {
 	}
 }
 
-func TestApplyPatchPathsUseExecutorRenameMetadata(t *testing.T) {
+func TestApplyPatchPathsRejectContradictoryRenameMetadata(t *testing.T) {
 	patch := "diff --git source.txt destination.txt\n" +
 		"similarity index 100%\n" +
 		"rename from other.txt\n" +
 		"rename to destination.txt\n"
-	if got, want := mustApplyPatchPaths(t, patch), []string{"other.txt", "destination.txt"}; !slices.Equal(got, want) {
-		t.Fatalf("executor paths = %q, want %q", got, want)
+	if prepared, err := prepareApplyPatchArguments(map[string]any{"patch": patch}); err == nil {
+		t.Fatalf("prepareApplyPatchArguments = %#v, want disagreement error", prepared)
+	}
+}
+
+func TestApplyPatchPathsRejectContradictoryGitHeaders(t *testing.T) {
+	tests := map[string]string{
+		"rename destination": "diff --git old.txt new.txt\nrename from old.txt\nrename to other.txt\n",
+		"copy source":        "diff --git old.txt new.txt\ncopy from other.txt\ncopy to new.txt\n",
+		"update":             "diff --git old.txt new.txt\n--- old.txt\n+++ other.txt\n@@ -1 +1 @@\n-old\n+new\n",
+		"create":             "diff --git new.txt new.txt\n--- /dev/null\n+++ other.txt\n@@ -0,0 +1 @@\n+new\n",
+		"delete":             "diff --git old.txt old.txt\n--- other.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+	}
+	for name, patch := range tests {
+		t.Run(name, func(t *testing.T) {
+			if prepared, err := prepareApplyPatchArguments(map[string]any{"patch": patch}); err == nil {
+				t.Fatalf("prepareApplyPatchArguments = %#v, want disagreement error", prepared)
+			}
+		})
+	}
+}
+
+func TestApplyPatchPathsAcceptMatchingGitHeaders(t *testing.T) {
+	tests := map[string]string{
+		"rename": "diff --git old.txt new.txt\nrename from old.txt\nrename to new.txt\n",
+		"copy":   "diff --git old.txt new.txt\ncopy from old.txt\ncopy to new.txt\n",
+		"update": "diff --git old.txt new.txt\n--- old.txt\n+++ new.txt\n@@ -1 +1 @@\n-old\n+new\n",
+		"create": "diff --git new.txt new.txt\n--- /dev/null\n+++ new.txt\n@@ -0,0 +1 @@\n+new\n",
+		"delete": "diff --git old.txt old.txt\n--- old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+	}
+	for name, patch := range tests {
+		t.Run(name, func(t *testing.T) {
+			mustApplyPatchPaths(t, patch)
+		})
 	}
 }
 
@@ -108,6 +140,15 @@ func gitGeneratedPatch(t *testing.T, operation string, noPrefix bool) (string, s
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
+		for _, entry := range os.Environ() {
+			if !strings.HasPrefix(entry, "GIT_CONFIG_") {
+				cmd.Env = append(cmd.Env, entry)
+			}
+		}
+		cmd.Env = append(cmd.Env,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+filepath.Join(dir, "empty-global-gitconfig"),
+		)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)

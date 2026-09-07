@@ -395,7 +395,7 @@ func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, 
 	// own metadata — the same binding protectedReadOpen and MCP resources/read
 	// use. The earlier check stays as a walk pruning optimization.
 	info, err := handle.Stat()
-	if err != nil || exclude.openedFileExcluded(resolvedPath, info) {
+	if err != nil || exclude.openedFileExcluded(resolvedPath, handle, info) {
 		return nil
 	}
 

@@ -527,14 +527,7 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 	// Carry both the configured absolute spelling and the resolved startup object
 	// before workers inherit the environment. The configured identity reserves the
 	// authority boundary across restart; the resolved identity protects this run.
-	if err := remote.CanonicalizeTokenFileEnv(); err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	token, err := remote.TokenFromEnv()
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	auth, err := remote.NewTokenAuthenticator(token)
+	auth, err := remote.NewAuthenticatorFromEnv()
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}

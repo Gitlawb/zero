@@ -19,16 +19,16 @@ type readExcluder struct {
 	// symlink or hard link to a protected credential in between, and the open
 	// then returns the credential. Callers that open must re-ask here with the
 	// FileInfo from their handle.
-	handle func(string, os.FileInfo) bool
+	handle func(string, *os.File, os.FileInfo) bool
 }
 
 func (e readExcluder) fileExcluded(path string) bool { return e.file != nil && e.file(path) }
 func (e readExcluder) dirExcluded(path string) bool  { return e.dir != nil && e.dir(path) }
 
 // openedFileExcluded is the authoritative check, run after the object is open.
-func (e readExcluder) openedFileExcluded(path string, info os.FileInfo) bool {
+func (e readExcluder) openedFileExcluded(path string, file *os.File, info os.FileInfo) bool {
 	if e.handle != nil {
-		return e.handle(path, info)
+		return e.handle(path, file, info)
 	}
 	return e.fileExcluded(path)
 }
@@ -46,7 +46,7 @@ func sandboxReadExcluder(engine *sandbox.Engine) readExcluder {
 	if !rx.Active() {
 		return readExcluder{}
 	}
-	return readExcluder{file: rx.PathExcluded, dir: rx.DirExcluded, handle: rx.FileExcluded}
+	return readExcluder{file: rx.PathExcluded, dir: rx.DirExcluded, handle: rx.FileHandleExcluded}
 }
 
 // sandboxReadExcluderWithin is sandboxReadExcluder for callers that can name
@@ -67,5 +67,5 @@ func sandboxReadExcluderWithin(engine *sandbox.Engine, workspaceRoot string) rea
 	if !rx.Active() {
 		return readExcluder{}
 	}
-	return readExcluder{file: rx.PathExcluded, dir: rx.DirExcluded, handle: rx.FileExcluded}
+	return readExcluder{file: rx.PathExcluded, dir: rx.DirExcluded, handle: rx.FileHandleExcluded}
 }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/daemon/remote"
 )
 
 // TestEngineLessRegistryMatrix drives every registry-dispatched tool that
@@ -211,6 +213,49 @@ func TestProtectedReadOpenClosesTheCheckToUseWindow(t *testing.T) {
 	after := registry.Run(context.Background(), "read_file", map[string]any{"path": "notes.txt"})
 	if after.Status == StatusOK || strings.Contains(after.Output, "bridge-secret") {
 		t.Fatalf("read_file served the token through a path swapped after an earlier successful read: %+v", after)
+	}
+}
+
+func TestStartupIdentityLifecycleProtectsReadFileAndGrep(t *testing.T) {
+	ws := t.TempDir()
+	token := filepath.Join(ws, "bridge-token")
+	alias := filepath.Join(ws, "retired-token-alias")
+	const oldSecret = "startup-lifecycle-secret"
+	if err := os.WriteFile(token, []byte(oldSecret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	t.Setenv(remote.EnvToken, "")
+	t.Setenv(remote.EnvTokenFile, token)
+	t.Setenv(remote.EnvTokenFileResolved, "")
+	t.Setenv(remote.EnvTokenFileIdentity, "")
+	auth, err := remote.NewAuthenticatorFromEnv()
+	if err != nil {
+		t.Fatalf("daemon startup: %v", err)
+	}
+	replacement := filepath.Join(ws, "replacement")
+	if err := os.WriteFile(replacement, []byte("replacement-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, token); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.Authenticate(oldSecret); err != nil {
+		t.Fatalf("startup credential must remain live after path replacement: %v", err)
+	}
+
+	registry := NewRegistry()
+	registry.Register(NewScopedReadFileTool(ws, nil))
+	registry.Register(NewScopedGrepTool(ws, nil))
+	read := registry.Run(context.Background(), "read_file", map[string]any{"path": filepath.Base(alias)})
+	if read.Status == StatusOK || strings.Contains(read.Output, oldSecret) {
+		t.Fatalf("read_file disclosed retired startup token: %+v", read)
+	}
+	grep := registry.Run(context.Background(), "grep", map[string]any{"pattern": oldSecret})
+	if strings.Contains(grep.Output, filepath.Base(alias)) || strings.Contains(grep.Output, oldSecret) {
+		t.Fatalf("grep disclosed retired startup token: %+v", grep)
 	}
 }
 

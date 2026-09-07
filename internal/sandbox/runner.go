@@ -1156,6 +1156,7 @@ func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
 		// authority pointers. Neither belongs in an agent-controlled child.
 		daemonRemoteTokenFileEnv,
 		daemonRemoteTokenFileResolvedEnv,
+		daemonRemoteTokenFileIdentityEnv,
 	}
 	for _, descriptor := range providercatalog.All() {
 		for _, key := range descriptor.AuthEnvVars {
@@ -1193,6 +1194,14 @@ func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
 		}
 	}
 	return out
+}
+
+// ScrubSensitiveEnv returns a copy of env with the same credential variables
+// removed as an agent-controlled sandbox command. It is for the few external
+// processes (such as format-on-write) which are launched outside Engine but
+// must share its environment boundary.
+func ScrubSensitiveEnv(env []string, additionalKeys ...string) []string {
+	return scrubSensitiveEnv(env, additionalKeys...)
 }
 
 func normalizeSensitiveEnvKeys(keys []string) []string {

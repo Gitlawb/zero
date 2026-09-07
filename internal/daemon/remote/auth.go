@@ -34,6 +34,7 @@ const (
 	EnvToken             = remotetoken.EnvToken
 	EnvTokenFile         = remotetoken.EnvTokenFile
 	EnvTokenFileResolved = remotetoken.EnvTokenFileResolved
+	EnvTokenFileIdentity = remotetoken.EnvTokenFileIdentity
 )
 
 // ErrUnauthorized is returned when a token does not match.
@@ -47,7 +48,8 @@ type Authenticator interface {
 // TokenAuthenticator compares a presented token against a fixed secret in
 // constant time.
 type TokenAuthenticator struct {
-	token string
+	token              string
+	protectionIdentity string
 }
 
 // NewTokenAuthenticator builds a token authenticator, refusing an empty secret
@@ -148,6 +150,50 @@ func CanonicalizeTokenFileEnv() error {
 		return fmt.Errorf("remote: persist token file source: %w", err)
 	}
 	return nil
+}
+
+// NewAuthenticatorFromEnv opens a file token once, derives protection identity
+// from that handle, reads authentication bytes from the same handle, and only
+// then publishes the trusted worker handoff. This prevents atomic replacement
+// of the configured name from retiring the startup inode's aliases.
+func NewAuthenticatorFromEnv() (*TokenAuthenticator, error) {
+	if token := strings.TrimSpace(os.Getenv(EnvToken)); token != "" {
+		return NewTokenAuthenticator(token)
+	}
+	source, selected, err := remotetoken.ResolveSource()
+	if err != nil {
+		return nil, fmt.Errorf("remote: %w", err)
+	}
+	if !selected {
+		return nil, fmt.Errorf("remote: set %s or %s", EnvToken, EnvTokenFile)
+	}
+	file, err := os.Open(source.ReadPath())
+	if err != nil {
+		return nil, fmt.Errorf("remote: read token file: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("remote: token file must be a regular file")
+	}
+	identity, ok := remotetoken.IdentityOfFile(file)
+	if !ok {
+		return nil, errors.New("remote: token file identity is unavailable on this platform")
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("remote: read token file: %w", err)
+	}
+	auth, err := NewTokenAuthenticator(string(data))
+	if err != nil {
+		return nil, err
+	}
+	auth.protectionIdentity = identity
+	source.Identity = identity
+	if err := remotetoken.PersistSource(source); err != nil {
+		return nil, fmt.Errorf("remote: persist token file source: %w", err)
+	}
+	return auth, nil
 }
 
 // Attestation is an optional post-token hook (e.g. workload attestation). The

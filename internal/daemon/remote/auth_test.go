@@ -29,6 +29,65 @@ func TestTokenAuthenticator(t *testing.T) {
 	}
 }
 
+func TestNewAuthenticatorFromEnvPinsOpenedFileIdentityAcrossReplacement(t *testing.T) {
+	t.Setenv(EnvToken, "")
+	t.Setenv(EnvTokenFileResolved, "")
+	t.Setenv(EnvTokenFileIdentity, "")
+	dir := t.TempDir()
+	token := filepath.Join(dir, "token")
+	alias := filepath.Join(dir, "startup-token-alias")
+	if err := os.WriteFile(token, []byte("old-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	t.Setenv(EnvTokenFile, token)
+	auth, err := NewAuthenticatorFromEnv()
+	if err != nil {
+		t.Fatalf("NewAuthenticatorFromEnv: %v", err)
+	}
+	if err := auth.Authenticate("old-secret"); err != nil {
+		t.Fatalf("startup token rejected: %v", err)
+	}
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, []byte("new-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, token); err != nil {
+		t.Fatal(err)
+	}
+	aliasFile, err := os.Open(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, ok := remotetoken.IdentityOfFile(aliasFile)
+	aliasFile.Close()
+	if !ok || os.Getenv(EnvTokenFileIdentity) != want {
+		t.Fatalf("startup identity = %q, want alias identity %q", os.Getenv(EnvTokenFileIdentity), want)
+	}
+	if err := auth.Authenticate("new-secret"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("running authenticator accepted replacement token: %v", err)
+	}
+
+	restarted, err := NewAuthenticatorFromEnv()
+	if err != nil {
+		t.Fatalf("restart NewAuthenticatorFromEnv: %v", err)
+	}
+	if err := restarted.Authenticate("new-secret"); err != nil {
+		t.Fatalf("replacement token rejected after restart: %v", err)
+	}
+	if err := restarted.Authenticate("old-secret"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("restart retained retired authenticator credential: %v", err)
+	}
+	if err := auth.Authenticate("old-secret"); err != nil {
+		t.Fatalf("running authenticator stopped matching its pinned credential: %v", err)
+	}
+	if got := os.Getenv(EnvTokenFileIdentity); got == want {
+		t.Fatal("restart retained old file identity")
+	}
+}
+
 func TestTokenFromEnv(t *testing.T) {
 	// Clear both so the no-config path errors.
 	t.Setenv(EnvToken, "")

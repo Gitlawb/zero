@@ -14,6 +14,9 @@ const (
 	EnvToken             = "ZERO_DAEMON_REMOTE_TOKEN"
 	EnvTokenFile         = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
 	EnvTokenFileResolved = "ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED"
+	// EnvTokenFileIdentity is a trusted daemon-to-worker handoff containing the
+	// stable identity of the opened file whose bytes supplied authentication.
+	EnvTokenFileIdentity = "ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_IDENTITY"
 )
 
 // FileSource carries both identities needed for file-backed token enforcement.
@@ -22,6 +25,7 @@ const (
 type FileSource struct {
 	Configured string
 	Resolved   string
+	Identity   string
 }
 
 // SelectedFilePath returns the configured token-file pathname exactly as the
@@ -61,6 +65,7 @@ func SourceFromEnv() (FileSource, bool) {
 			source.Resolved = resolved
 		}
 	}
+	source.Identity = os.Getenv(EnvTokenFileIdentity)
 	return source, true
 }
 
@@ -86,8 +91,20 @@ func PersistSource(source FileSource) error {
 	if err := os.Setenv(EnvTokenFile, source.Configured); err != nil {
 		return err
 	}
-	return os.Setenv(EnvTokenFileResolved, source.Resolved)
+	if err := os.Setenv(EnvTokenFileResolved, source.Resolved); err != nil {
+		return err
+	}
+	return os.Setenv(EnvTokenFileIdentity, source.Identity)
 }
+
+// IdentityOf returns stable identity when FileInfo exposes it. On Windows,
+// FileInfo lacks the required file index; handle-consuming callers must use
+// IdentityOfFile instead.
+func IdentityOf(info os.FileInfo) (string, bool) { return fileIdentity(info) }
+
+// IdentityOfFile returns the cross-process stable identity of file's already
+// opened handle. It never reopens the pathname represented by file.
+func IdentityOfFile(file *os.File) (string, bool) { return openFileIdentity(file) }
 
 // Paths returns the distinct configured and resolved identities.
 func (source FileSource) Paths() []string {

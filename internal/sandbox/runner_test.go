@@ -873,6 +873,7 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		"ZERO_DAEMON_REMOTE_TOKEN=bridge-token-inline",
 		"ZERO_DAEMON_REMOTE_TOKEN_FILE=/home/user/.zero/remote-token",
 		"ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED=/home/user/.zero/resolved-remote-token",
+		"ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_IDENTITY=unix:1:2",
 		"COMPANY_LLM_SECRET=custom-secret",
 		"ZERO_OAUTH_MY_SVC_CLIENT_SECRET=oauth-secret",
 		"zero_oauth_second_client_secret=case-insensitive-secret",

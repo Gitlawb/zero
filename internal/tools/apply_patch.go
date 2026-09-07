@@ -49,6 +49,17 @@ func preparedPatchPaths(prepared *applyPatchPreparation) []string {
 	return prepared.paths
 }
 
+// ApplyPatchPaths derives preflight paths with the executor's parser. Invalid
+// input returns nil so sandbox preflight fails closed; execution reports the
+// detailed preparation error. Paths remain relative to the patch's cwd.
+func ApplyPatchPaths(args map[string]any) []string {
+	prepared, err := prepareApplyPatchArguments(args)
+	if err != nil {
+		return nil
+	}
+	return preparedPatchPaths(prepared)
+}
+
 func (applyPatchTool) isBuiltInApplyPatch() {}
 
 // PrepareFreeformApplyPatchArguments converts native structured-patch input

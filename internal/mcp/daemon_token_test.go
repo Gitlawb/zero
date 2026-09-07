@@ -155,6 +155,44 @@ func TestResourcesReadRefusesHardLinkedToken(t *testing.T) {
 	}
 }
 
+func TestResourcesReadRetainsStartupIdentityAfterTokenReplacement(t *testing.T) {
+	workspace := t.TempDir()
+	token := filepath.Join(workspace, "bridge-token")
+	alias := filepath.Join(workspace, "retired-token-alias")
+	const secret = "mcp-startup-lifecycle-secret"
+	if err := os.WriteFile(token, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	t.Setenv(remote.EnvToken, "")
+	t.Setenv(remote.EnvTokenFile, token)
+	t.Setenv(remote.EnvTokenFileResolved, "")
+	t.Setenv(remote.EnvTokenFileIdentity, "")
+	if _, err := remote.NewAuthenticatorFromEnv(); err != nil {
+		t.Fatalf("daemon startup: %v", err)
+	}
+	replacement := filepath.Join(workspace, "replacement")
+	if err := os.WriteFile(replacement, []byte("replacement-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, token); err != nil {
+		t.Fatal(err)
+	}
+
+	var input bytes.Buffer
+	writeServerTestMessage(t, &input, rpcMessage{ID: 1, Method: "resources/read", Params: mustRaw(map[string]any{"uri": fileURI(alias)})})
+	var output bytes.Buffer
+	if err := Serve(context.Background(), &input, &output, tools.NewRegistry(), ServeOptions{WorkspaceRoot: workspace}); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	read := readServerTestMessage(t, newMessageReader(&output))
+	if read.Error == nil || len(read.Result) != 0 || strings.Contains(read.Error.Message, secret) {
+		t.Fatalf("resources/read disclosed retired startup token: %#v", read)
+	}
+}
+
 // TestServeMCPResourcesWorkWithoutADaemonToken pins the ordinary MCP startup
 // shape: no ZERO_DAEMON_REMOTE_TOKEN_FILE at all. credentialGuard.ReadExclusions()
 // used to return a nil *ReadExclusions whenever the disabled-mode policy had

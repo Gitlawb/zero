@@ -166,7 +166,7 @@ func (server toolServer) readResource(rawParams json.RawMessage) ([]ResourceCont
 	if err != nil {
 		return nil, jsonRPCResourceNotFound, fmt.Errorf("resource not found: %s", uri)
 	}
-	if server.credentialGuard.ReadExclusions().FileExcluded(absolute, info) {
+	if server.credentialGuard.ReadExclusions().FileHandleExcluded(absolute, file, info) {
 		return nil, jsonRPCResourceNotFound, fmt.Errorf("resource not found: %s", uri)
 	}
 	if info.IsDir() {

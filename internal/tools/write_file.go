@@ -13,6 +13,7 @@ type writeFileTool struct {
 	baseTool
 	workspaceRoot string
 	scope         PathScope
+	formatter     writtenFileFormatter
 }
 
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -35,6 +36,7 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
+		formatter:     maybeFormatWrittenFile,
 	}
 }
 
@@ -113,7 +115,11 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
-	content = maybeFormatWrittenFile(ctx, absolutePath, content)
+	tool.formatter(ctx, root, target.relative, absolutePath, tool.workspaceRoot, content, writeMode)
+	content, err = readPublishedContent(root, target.relative, absolutePath, tool.workspaceRoot)
+	if err != nil {
+		return errorResult("Error reading written file " + relativePath + ": " + err.Error())
+	}
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
 	newInfo, _ := root.Stat(target.relative)

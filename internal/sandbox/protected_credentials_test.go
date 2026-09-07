@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 // protectedTokenFixture writes a bridge token inside the workspace and points
@@ -927,5 +929,56 @@ func TestProtectedCredentialsDoNotBlockUnrelatedRequests(t *testing.T) {
 	})
 	if decision.Action == ActionDeny {
 		t.Fatalf("ordinary workspace read was denied: %q", decision.Reason)
+	}
+}
+
+func TestProtectedCredentialIdentitySurvivesConfiguredFileReplacement(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, "token")
+	alias := filepath.Join(dir, "old-token-alias")
+	if err := os.WriteFile(token, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	startup, err := os.Open(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := remotetoken.IdentityOfFile(startup)
+	startup.Close()
+	if !ok {
+		t.Fatal("stable file identity unavailable")
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+	t.Setenv(daemonRemoteTokenFileResolvedEnv, token)
+	t.Setenv(daemonRemoteTokenFileIdentityEnv, identity)
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, token); err != nil {
+		t.Fatal(err)
+	}
+
+	rx := ProtectedCredentialExclusions(dir)
+	aliasFile, err := os.Open(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasInfo, err := aliasFile.Stat()
+	if err != nil {
+		aliasFile.Close()
+		t.Fatal(err)
+	}
+	if !rx.FileHandleExcluded(alias, aliasFile, aliasInfo) {
+		aliasFile.Close()
+		t.Fatal("hard-link alias of startup token became readable after configured path replacement")
+	}
+	aliasFile.Close()
+	if !rx.PathExcluded(token) {
+		t.Fatal("configured token name was not reserved")
 	}
 }

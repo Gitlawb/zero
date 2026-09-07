@@ -49,6 +49,7 @@ const (
 	daemonRemoteTokenEnv             = remotetoken.EnvToken
 	daemonRemoteTokenFileEnv         = remotetoken.EnvTokenFile
 	daemonRemoteTokenFileResolvedEnv = remotetoken.EnvTokenFileResolved
+	daemonRemoteTokenFileIdentityEnv = remotetoken.EnvTokenFileIdentity
 )
 
 // The daemon-token pathname contract
@@ -144,9 +145,10 @@ func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
 // no stat at all and is what keeps the configured pathname reserved when the
 // token is rotated underneath a long walk.
 type protectedPathCache struct {
-	roots []string
-	folds []bool
-	infos []os.FileInfo
+	roots    []string
+	folds    []bool
+	infos    []os.FileInfo
+	identity string
 }
 
 func newProtectedPathCache(roots []string) *protectedPathCache {
@@ -158,6 +160,7 @@ func newProtectedPathCache(roots []string) *protectedPathCache {
 		folds: make([]bool, len(roots)),
 		infos: make([]os.FileInfo, len(roots)),
 	}
+	cache.identity = os.Getenv(daemonRemoteTokenFileIdentityEnv)
 	for index, root := range roots {
 		cache.folds[index] = protectedPathFoldsCase(root)
 		if info, err := os.Stat(root); err == nil {
@@ -230,6 +233,9 @@ func (cache *protectedPathCache) denied(workspaceRoot, path string) bool {
 	if !requestInfo.Mode().IsRegular() {
 		return false
 	}
+	if identity, ok := remotetoken.IdentityOf(requestInfo); ok && identity == cache.identity && identity != "" {
+		return true
+	}
 	for _, protectedInfo := range cache.infos {
 		if protectedInfo == nil {
 			continue
@@ -247,9 +253,20 @@ func (cache *protectedPathCache) denied(workspaceRoot, path string) bool {
 // the pathname resolves to on a second look — there is no window between this
 // check and the use. Callers that own the open should prefer it; a caller that
 // only has a pathname is stuck with the pre-open comparison above.
-func protectedInfoDenied(protected []string, info os.FileInfo) bool {
+func protectedInfoDenied(protected []string, file *os.File, info os.FileInfo) bool {
 	if info == nil {
 		return false
+	}
+	identity, ok := remotetoken.IdentityOfFile(file)
+	if !ok {
+		identity, ok = remotetoken.IdentityOf(info)
+	}
+	if startupIdentity := os.Getenv(daemonRemoteTokenFileIdentityEnv); startupIdentity != "" {
+		// An actual consumer must not fall back to current pathname metadata
+		// when the startup identity cannot be established for its open handle.
+		if file != nil && !ok || ok && identity == startupIdentity {
+			return true
+		}
 	}
 	for _, entry := range protected {
 		protectedInfo, err := os.Stat(entry)
@@ -543,13 +560,19 @@ func (rx *ReadExclusions) PathExcluded(path string) bool {
 // The pathname rules still apply on top, so a configured token pathname stays
 // excluded even when the file behind it does not exist.
 func (rx *ReadExclusions) FileExcluded(path string, info os.FileInfo) bool {
+	return rx.FileHandleExcluded(path, nil, info)
+}
+
+// FileHandleExcluded performs the stable-identity check against the consumed
+// handle. This is required on Windows, where FileInfo omits the file index.
+func (rx *ReadExclusions) FileHandleExcluded(path string, file *os.File, info os.FileInfo) bool {
 	if !rx.Active() {
 		return false
 	}
 	if rx.protectedDenied(path) {
 		return true
 	}
-	if protectedInfoDenied(rx.protectedRoots, info) {
+	if protectedInfoDenied(rx.protectedRoots, file, info) {
 		return true
 	}
 	return readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path)

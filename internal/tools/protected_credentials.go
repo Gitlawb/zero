@@ -53,11 +53,18 @@ func protectedReadOpen(path, workspaceRoot string) (*os.File, os.FileInfo, error
 		return nil, nil, err
 	}
 	exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
-	if exclusions.FileExcluded(path, info) {
+	if exclusions.FileHandleExcluded(path, file, info) {
 		file.Close()
 		return nil, nil, protectedCredentialErr(path, "readable")
 	}
 	return file, info, nil
+}
+
+// ProtectedReadOpen opens path through a rooted handle and rejects any handle
+// whose identity belongs to a protected credential. Callers must read from the
+// returned handle rather than reopening path.
+func ProtectedReadOpen(path, workspaceRoot string) (*os.File, os.FileInfo, error) {
+	return protectedReadOpen(path, workspaceRoot)
 }
 
 // protectedRootRead is the equivalent for callers that already hold the root,
@@ -73,7 +80,7 @@ func protectedRootRead(root *os.Root, relative, absolute, workspaceRoot string) 
 		return nil, nil, err
 	}
 	exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
-	if exclusions.FileExcluded(absolute, info) {
+	if exclusions.FileHandleExcluded(absolute, file, info) {
 		file.Close()
 		return nil, nil, protectedCredentialErr(absolute, "readable")
 	}
@@ -112,7 +119,7 @@ func writeRootedFile(root *os.Root, relative, absolute, workspaceRoot string, co
 			return false, statErr
 		}
 		exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
-		if exclusions.FileExcluded(absolute, info) {
+		if exclusions.FileHandleExcluded(absolute, file, info) {
 			file.Close()
 			return false, protectedCredentialErr(absolute, "writable")
 		}
