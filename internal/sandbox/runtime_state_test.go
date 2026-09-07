@@ -283,7 +283,7 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t),
 		Backend: Backend{
 			Name:            BackendLinuxBwrap,
 			Available:       true,

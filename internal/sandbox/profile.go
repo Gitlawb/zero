@@ -34,6 +34,7 @@ type FileSystemPolicy struct {
 	CredentialDiscoveryErrors []string `json:"credentialDiscoveryErrors,omitempty"`
 	// SSHDenyReadFiles require a pathname deny. Linux cannot safely rebuild
 	// their parents from mutable sibling pathnames to mask individual keys.
+	// Absent candidates remain here because a host writer may create them later.
 	SSHDenyReadFiles []string `json:"sshDenyReadFiles,omitempty"`
 	// DenyReadCarveouts are subtrees that stay readable INSIDE a denied root.
 	// They exist so a directory-level credential deny can also cover the files
@@ -544,11 +545,7 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		sshKeys := scanner.privateKeyDenyCandidates(home)
 		candidates = append(candidates, gitCredentials)
 		candidates = append(candidates, sshKeys...)
-		for _, key := range sshKeys {
-			if _, err := os.Lstat(key); !os.IsNotExist(err) {
-				sshFiles = append(sshFiles, key)
-			}
-		}
+		sshFiles = append(sshFiles, sshKeys...)
 		// Keep the lexical candidate as well as any EvalSymlinks target so a
 		// same-user atomic symlink retarget after profile construction still
 		// hits a deny on ~/.gnupg, ~/.git-credentials, and SSH private keys.
