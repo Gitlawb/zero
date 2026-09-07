@@ -181,6 +181,89 @@ func TestWriteFileToolOverwritePreservesExistingEncoding(t *testing.T) {
 	}
 }
 
+func TestWriteFileToolExplicitEncodingIntent(t *testing.T) {
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "")
+	// Explicit intent wins independently; omitted intent retains automatic
+	// restoration. Every case also exercises a second tracked overwrite.
+	for _, tt := range []struct {
+		name, existing, content, bom, endings, want string
+	}{
+		{"default both", "\ufeffold\r\n", "new\n", "", "", "\ufeffnew\r\n"},
+		{"remove BOM retain CRLF", "\ufeffold\r\n", "new\n", "remove", "", "new\r\n"},
+		{"LF retain BOM", "\ufeffold\r\n", "new\n", "", "lf", "\ufeffnew\n"},
+		{"LF without BOM", "old\r\n", "new\n", "", "lf", "new\n"},
+		{"remove and LF", "\ufeffold\r\n", "\ufeffnew\r\n", "remove", "lf", "new\n"},
+		{"add BOM retain LF", "old\n", "new\n", "add", "", "\ufeffnew\n"},
+		{"CRLF retain BOM", "\ufeffold\n", "new\n", "", "crlf", "\ufeffnew\r\n"},
+		{"CRLF without BOM", "old\n", "new\n", "", "crlf", "new\r\n"},
+		{"add and CRLF", "old\n", "new\n", "add", "crlf", "\ufeffnew\r\n"},
+		{"empty remove BOM", "\ufeffold\r\n", "", "remove", "", ""},
+		{"empty default", "\ufeffold\r\n", "", "", "", "\ufeff"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "example.txt")
+			if err := os.WriteFile(path, []byte(tt.existing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			path, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := RunOptions{FileTracker: NewFileTracker()}
+			read := NewScopedReadFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": path}, options)
+			if read.Status != StatusOK {
+				t.Fatal(read.Output)
+			}
+			args := map[string]any{"path": path, "content": tt.content, "overwrite": true}
+			if tt.bom != "" {
+				args["bom"] = tt.bom
+			}
+			if tt.endings != "" {
+				args["line_endings"] = tt.endings
+			}
+			for i := 0; i < 2; i++ {
+				result := NewScopedWriteFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), args, options)
+				if result.Status != StatusOK {
+					t.Fatal(result.Output)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != tt.want {
+					t.Fatalf("written bytes = %q, want %q", got, tt.want)
+				}
+				if !options.FileTracker.SeenWhole(path) {
+					t.Fatal("encoding intent discarded whole-file observation")
+				}
+			}
+		})
+	}
+}
+
+func TestWriteFileToolRejectsInvalidEncodingIntent(t *testing.T) {
+	for _, key := range []string{"bom", "line_endings"} {
+		for _, value := range []any{"invalid", true} {
+			root := t.TempDir()
+			path := filepath.Join(root, "example.txt")
+			if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+				"path": path, "content": "replacement", "overwrite": true, key: value,
+			})
+			if result.Status != StatusError {
+				t.Fatalf("accepted %s=%v", key, value)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != "original" {
+				t.Fatalf("invalid intent changed target: %q, %v", got, err)
+			}
+		}
+	}
+}
+
 func TestWriteFileToolEncodingPreservationKeepsWholeFileObservation(t *testing.T) {
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "")
 	tests := []struct {
@@ -233,6 +316,7 @@ func TestWriteFileToolNewFileRetainsCallerBytes(t *testing.T) {
 	want := []byte("\xef\xbb\xbfnew\r\ntext\n")
 	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "example.txt", "content": string(want),
+		"bom": "remove", "line_endings": "lf",
 	})
 	if result.Status != StatusOK {
 		t.Fatalf("write failed: %s", result.Output)
