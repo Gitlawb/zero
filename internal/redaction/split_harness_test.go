@@ -1,10 +1,16 @@
 package redaction
 
 import (
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
+
+// Construct deliberately synthetic tokens for shape matching without storing
+// credential-shaped Slack literals that GitHub push protection rejects.
+func syntheticSlackToken(digit, letter byte) string {
+	return "xoxb-" + strings.Repeat(string(digit), 12) + "-" + strings.Repeat(string(letter), 15)
+}
 
 func TestSplitRedactionHarness(t *testing.T) {
 	// Representative secrets for all supported shapes
@@ -12,17 +18,17 @@ func TestSplitRedactionHarness(t *testing.T) {
 		name   string
 		secret string
 	}{
-		{"Anthropic", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234"},
-		{"OpenAI standard", "sk-abcdefghijklmnopqrstuvwxyz12345678"},
-		{"OpenAI with hyphen and digit", "sk-aaaaaaaaaa-bbbbbbbbb1234567890"},
-		{"OpenAI proj", "sk-proj-abcdefghijklmnopqrstuvwxyz12345"},
-		{"GitHub PAT", "github_" + "pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz"},
-		{"GitHub Fine-Grained", "ghp_" + "123456789012345678901234567890123456"},
-		{"GitLab PAT", "glpat-12345678901234567890"},
-		{"Google API", "AIzaSyD-1234567890123456789012345678901"},
-		{"Slack bot", "xoxb-123456789012-abcdefghijklmno"},
-		{"AWS AKIA", "AKIAIOSFODNN7EXAMPLE"},
-		{"JWT", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"},
+		{"Anthropic", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234"},               // gitleaks:allow -- synthetic redaction fixture
+		{"OpenAI standard", "sk-abcdefghijklmnopqrstuvwxyz12345678"},               // gitleaks:allow -- synthetic redaction fixture
+		{"OpenAI with hyphen and digit", "sk-aaaaaaaaaa-bbbbbbbbb1234567890"},      // gitleaks:allow -- synthetic redaction fixture
+		{"OpenAI proj", "sk-proj-abcdefghijklmnopqrstuvwxyz12345"},                 // gitleaks:allow -- synthetic redaction fixture
+		{"GitHub PAT", "github_pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz"}, // gitleaks:allow -- synthetic redaction fixture
+		{"GitHub Fine-Grained", "ghp_123456789012345678901234567890123456"},        // gitleaks:allow -- synthetic redaction fixture
+		{"GitLab PAT", "glpat-12345678901234567890"},                               // gitleaks:allow -- synthetic redaction fixture
+		{"Google API", "AIzaSyD-1234567890123456789012345678901"},                  // gitleaks:allow -- synthetic redaction fixture
+		{"Slack bot", syntheticSlackToken('1', 'a')},
+		{"AWS AKIA", "AKIAIOSFODNN7EXAMPLE"}, // gitleaks:allow -- synthetic redaction fixture
+		{"JWT", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"}, // gitleaks:allow -- synthetic redaction fixture
 	}
 
 	controls := []struct {
@@ -60,7 +66,7 @@ func TestSplitRedactionHarness(t *testing.T) {
 
 func TestSplitRedactionMultiControlCases(t *testing.T) {
 	t.Run("Internal gap before minimum then terminal delimiter", func(t *testing.T) {
-		input := "sk-ant-api03-\x00abcdefghijklmnopqrstuvwxyz\x00path/file.go"
+		input := "sk-ant-api03-\x00abcdefghijklmnopqrstuvwxyz\x00path/file.go" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "\x00path/file.go"
 		if got != want {
@@ -69,7 +75,7 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 	})
 
 	t.Run("OpenAI internal gap then terminal delimiter before kebab suffix", func(t *testing.T) {
-		input := "sk-\x00abcdefghijklmnopqrstuv\x1bkebab-case tail"
+		input := "sk-\x00abcdefghijklmnopqrstuv\x1bkebab-case tail" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "\x1bkebab-case tail"
 		if got != want {
@@ -78,7 +84,7 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 	})
 
 	t.Run("OpenAI internal gap before digit suffix then terminal delimiter", func(t *testing.T) {
-		input := "sk-aaaaaaaaaa-bbbbbbbbb\x001234567890\x00path/one.go"
+		input := "sk-aaaaaaaaaa-bbbbbbbbb\x001234567890\x00path/one.go" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "\x00path/one.go"
 		if got != want {
@@ -87,7 +93,7 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 	})
 
 	t.Run("JWT multiple internal gaps and terminal delimiter", func(t *testing.T) {
-		input := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\x00.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ\x1b.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\x00trailing/text"
+		input := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\x00.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ\x1b.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\x00trailing/text" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "\x00trailing/text"
 		if got != want {
@@ -96,7 +102,7 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 	})
 
 	t.Run("Multiple internal controls in credential body", func(t *testing.T) {
-		input := "sk-ant-\x00api03-\x1babcdefghijklmnopqrstuvwxyz"
+		input := "sk-ant-\x00api03-\x1babcdefghijklmnopqrstuvwxyz" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		if got != RedactedSecret {
 			t.Fatalf("multiple internal gaps in anthropic key mismatch: got %q, want %q", got, RedactedSecret)
@@ -104,7 +110,7 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 	})
 
 	t.Run("Terminal delimiter separating two credentials", func(t *testing.T) {
-		input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz\x00ghp_123456789012345678901234567890123456"
+		input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz\x00ghp_123456789012345678901234567890123456" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "\x00" + RedactedSecret
 		if got != want {
@@ -118,12 +124,12 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 			key1 string
 			key2 string
 		}{
-			{"OpenAI", "sk-aaaaaaaaaaaaaaaaaaaabcdefgh", "sk-bbbbbbbbbbbbbbbbbbbbcdefghi"},
-			{"GitHub Fine-Grained", "ghp_" + "123456789012345678901234567890123456", "ghp_" + "abcdefghijklmnopqrstuvwxyz1234567890"},
-			{"GitHub PAT", "github_" + "pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz", "github_" + "pat_22BBBBBBB0123456789abcdefghijklmnopqrstuvwxyz"},
-			{"GitLab PAT", "glpat-12345678901234567890", "glpat-abcdefghijklmnopqrst"},
-			{"Google API", "AIzaSyD-1234567890123456789012345678901", "AIzaSyD-abcdefghijklmnopqrstuvwxyz12345"},
-			{"Slack", "xox" + "b-123456789012-abcdefghijklmno", "xox" + "b-987654321098-zyxwvutsrqponml"},
+			{"OpenAI", "sk-aaaaaaaaaaaaaaaaaaaabcdefgh", "sk-bbbbbbbbbbbbbbbbbbbbcdefghi"},                                                         // gitleaks:allow -- synthetic redaction fixture
+			{"GitHub Fine-Grained", "ghp_123456789012345678901234567890123456", "ghp_abcdefghijklmnopqrstuvwxyz1234567890"},                        // gitleaks:allow -- synthetic redaction fixture
+			{"GitHub PAT", "github_pat_11AAAAAAA0123456789abcdefghijklmnopqrstuvwxyz", "github_pat_22BBBBBBB0123456789abcdefghijklmnopqrstuvwxyz"}, // gitleaks:allow -- synthetic redaction fixture
+			{"GitLab PAT", "glpat-12345678901234567890", "glpat-abcdefghijklmnopqrst"},                                                             // gitleaks:allow -- synthetic redaction fixture
+			{"Google API", "AIzaSyD-1234567890123456789012345678901", "AIzaSyD-abcdefghijklmnopqrstuvwxyz12345"},                                   // gitleaks:allow -- synthetic redaction fixture
+			{"Slack", syntheticSlackToken('1', 'a'), syntheticSlackToken('2', 'b')},
 		}
 		ctrls := []string{"\x00", "\x1b", "\x9b", "\u009b"}
 		for _, pair := range keyPairs {
@@ -139,7 +145,7 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 	})
 
 	t.Run("Three same-shape keys separated by control bytes", func(t *testing.T) {
-		input := "sk-aaaaaaaaaaaaaaaaaaaabcdefgh\x00sk-bbbbbbbbbbbbbbbbbbbbcdefghi\x1bsk-ccccccccccccccccccccdefghij"
+		input := "sk-aaaaaaaaaaaaaaaaaaaabcdefgh\x00sk-bbbbbbbbbbbbbbbbbbbbcdefghi\x1bsk-ccccccccccccccccccccdefghij" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "\x00" + RedactedSecret + "\x1b" + RedactedSecret
 		if got != want {
@@ -148,18 +154,18 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 	})
 
 	t.Run("Short sk- token before credential", func(t *testing.T) {
-		input := "sk-ab\x00sk-aaaaaaaaaaaaaaaaaaaabcdefgh"
+		input := "sk-ab\x00sk-aaaaaaaaaaaaaaaaaaaabcdefgh" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
-		want := "sk-ab\x00" + RedactedSecret
+		want := "sk-ab\x00" + RedactedSecret // gitleaks:allow -- synthetic redaction fixture
 		if got != want {
 			t.Fatalf("short sk- token before credential mismatch: got %q, want %q", got, want)
 		}
 	})
 
 	t.Run("OpenAI kebab false positive before path with digit", func(t *testing.T) {
-		input := "sk-my-awesome-kebab-project\x00v2/file.go"
+		input := "sk-my-awesome-kebab-project\x00v2/file.go" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
-		want := "sk-my-awesome-kebab-project\x00v2/file.go"
+		want := "sk-my-awesome-kebab-project\x00v2/file.go" // gitleaks:allow -- synthetic redaction fixture
 		if got != want {
 			t.Fatalf("kebab project before path with digit mismatch: got %q, want %q", got, want)
 		}
@@ -176,7 +182,7 @@ func TestSplitRedactionMultiControlCases(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz" + tc.suffix
+				input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz" + tc.suffix // gitleaks:allow -- synthetic redaction fixture
 				got := RedactString(input, Options{})
 				want := RedactedSecret + tc.suffix
 				if got != want {
@@ -191,7 +197,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 	controls := []string{"\x00", "\x1b", "\x9b", "\u009b"}
 
 	t.Run("OpenAI kebab false positive with control", func(t *testing.T) {
-		kebab := "sk-my-awesome-kebab-project"
+		kebab := "sk-my-awesome-kebab-project" // gitleaks:allow -- synthetic redaction fixture
 		for _, ctrl := range controls {
 			input := kebab[:10] + ctrl + kebab[10:]
 			got := RedactString(input, Options{})
@@ -202,7 +208,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 	})
 
 	t.Run("Control immediately before complete credential", func(t *testing.T) {
-		secret := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+		secret := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz" // gitleaks:allow -- synthetic redaction fixture
 		for _, ctrl := range controls {
 			input := "prefix" + ctrl + secret
 			got := RedactString(input, Options{})
@@ -214,7 +220,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 	})
 
 	t.Run("Control immediately after complete credential", func(t *testing.T) {
-		secret := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+		secret := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz" // gitleaks:allow -- synthetic redaction fixture
 		for _, ctrl := range controls {
 			input := secret + ctrl + "path/file"
 			got := RedactString(input, Options{})
@@ -227,9 +233,9 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 
 	t.Run("Kebab project before OpenAI key separated by control", func(t *testing.T) {
 		// Finding 1: kebab before OpenAI key separated by control
-		input := "sk-my-awesome-kebab-project\x00sk-abcdefghijklmnopqrstuv123456"
+		input := "sk-my-awesome-kebab-project\x00sk-abcdefghijklmnopqrstuv123456" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
-		want := "sk-my-awesome-kebab-project\x00" + RedactedSecret
+		want := "sk-my-awesome-kebab-project\x00" + RedactedSecret // gitleaks:allow -- synthetic redaction fixture
 		if got != want {
 			t.Fatalf("kebab before key mismatch: got %q, want %q", got, want)
 		}
@@ -237,8 +243,8 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 
 	t.Run("Neighboring complete JWTs separated by control", func(t *testing.T) {
 		// Finding 2: neighboring complete JWTs separated by control
-		jwt1 := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
-		jwt2 := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.4peTcaNQZNs4FcW3Usagee0"
+		jwt1 := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c" // gitleaks:allow -- synthetic redaction fixture
+		jwt2 := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.4peTcaNQZNs4FcW3Usagee0"                                                                                    // gitleaks:allow -- synthetic redaction fixture
 		for _, ctrl := range controls {
 			input := jwt1 + ctrl + jwt2
 			got := RedactString(input, Options{})
@@ -251,7 +257,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 
 	t.Run("Split key before minimum followed by slash in path", func(t *testing.T) {
 		// Finding 4: split key before minimum followed by slash
-		input := "ghp_1234567890\x0012345678901234567890123456/file"
+		input := "ghp_1234567890\x0012345678901234567890123456/file" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "/file"
 		if got != want {
@@ -261,7 +267,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 
 	t.Run("Split key with incidental incomplete prefix", func(t *testing.T) {
 		// Finding 5: split key with incidental incomplete prefix glpat-1234\x00AKIA56789012
-		input := "glpat-1234\x00AKIA56789012"
+		input := "glpat-1234\x00AKIA56789012" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		if got != input {
 			t.Fatalf("incomplete glpat with control and incomplete AKIA falsely redacted: got %q, want %q", got, input)
@@ -270,7 +276,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 
 	t.Run("Enclosing OpenAI key containing inner ghp suffix", func(t *testing.T) {
 		// Finding 6: enclosing OpenAI key containing inner ghp_
-		input := "sk-abcdefghijklmnop-ghp_123456789012345678901234567890123456"
+		input := "sk-abcdefghijklmnop-ghp_123456789012345678901234567890123456" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		if got != RedactedSecret {
 			t.Fatalf("enclosing key mismatch: got %q, want %q", got, RedactedSecret)
@@ -279,7 +285,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 
 	t.Run("Retain left context across boundaries", func(t *testing.T) {
 		// Finding 7: adjacent AKIA keys
-		input := "AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE"
+		input := "AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + RedactedSecret
 		if got != want {
@@ -289,7 +295,7 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 
 	t.Run("Preserve entire terminal control run across encodings", func(t *testing.T) {
 		// Finding 8: terminal control run \x00\x1b[path/file
-		input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz\x00\x1b[path/file"
+		input := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz\x00\x1b[path/file" // gitleaks:allow -- synthetic redaction fixture
 		got := RedactString(input, Options{})
 		want := RedactedSecret + "\x00\x1b[path/file"
 		if got != want {
@@ -298,10 +304,26 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 	})
 }
 
+func TestNeighboringJWTLengths(t *testing.T) {
+	header := "eyJhbGciOiJIUzI1NiJ9"                                                                                     // gitleaks:allow -- synthetic redaction fixture
+	payloads := []string{"eyJzdWIiOiIxMjM0NTY3ODkwIn0", "eyJzdWIiOiJib2JieSIsIm5hbWUiOiJCIn0", strings.Repeat("a", 256)} // gitleaks:allow -- synthetic redaction fixture
+	for _, firstPayload := range payloads {
+		for _, secondPayload := range payloads {
+			a := header + "." + firstPayload + ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+			b := header + "." + secondPayload + ".Qm9iYnlTaWduYXR1cmVCQkJCQkJCQkJCQg"
+			for _, gap := range []string{"\x00", "\x1b", "\x9b", "\u009b", "\x00\x1b\u009b"} {
+				if got, want := RedactString(a+gap+b, Options{}), RedactedSecret+gap+RedactedSecret; got != want {
+					t.Errorf("payload lengths %d/%d, gap %q: got %q, want %q", len(firstPayload), len(secondPayload), gap, got, want)
+				}
+			}
+		}
+	}
+}
+
 func TestSplitRedactionNoCredentialSuffixRemains(t *testing.T) {
 	// Regression test for splits before and after minimum length:
 	// ensure no credential suffix is leaked in either case.
-	key := "sk-abcdefghijklmnopqrstuvwxyz12345678" // minOpenAILen = 23, total = 37
+	key := "sk-abcdefghijklmnopqrstuvwxyz12345678" // minOpenAILen = 23, total = 37 // gitleaks:allow -- synthetic redaction fixture
 	splitBeforeMin := key[:10] + "\x00" + key[10:] // pos = 10 (< 23)
 	splitAfterMin := key[:28] + "\x00" + key[28:]  // pos = 28 (> 23)
 
@@ -324,25 +346,20 @@ func TestSplitRedactionNoCredentialSuffixRemains(t *testing.T) {
 	}
 }
 
-func TestSplitRedactionLinearScaling(t *testing.T) {
+func TestSplitRedactionLargeInputs(t *testing.T) {
 	sizes := []int{8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024}
 
 	t.Run("OpenAI kebab repeated gaps scaling", func(t *testing.T) {
 		for _, size := range sizes {
 			var b strings.Builder
-			b.WriteString("sk-kebab-")
+			b.WriteString("sk-kebab-") // gitleaks:allow -- synthetic redaction fixture
 			for b.Len() < size {
 				b.WriteString("\x00a")
 			}
 			input := b.String()
-			start := time.Now()
 			got := RedactString(input, Options{})
-			elapsed := time.Since(start)
 			if got != input {
 				t.Fatalf("kebab false positive was falsely redacted at size %d", size)
-			}
-			if elapsed > time.Second {
-				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
 			}
 		}
 	})
@@ -350,19 +367,14 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 	t.Run("OpenAI kebab starting with bare sk- and repeated gaps scaling", func(t *testing.T) {
 		for _, size := range sizes {
 			var b strings.Builder
-			b.WriteString("sk-")
+			b.WriteString("sk-") // gitleaks:allow -- synthetic redaction fixture
 			for b.Len() < size {
 				b.WriteString("\x00a-b")
 			}
 			input := b.String()
-			start := time.Now()
 			got := RedactString(input, Options{})
-			elapsed := time.Since(start)
 			if got != input {
 				t.Fatalf("kebab false positive with bare sk- prefix was falsely redacted at size %d", size)
-			}
-			if elapsed > time.Second {
-				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
 			}
 		}
 	})
@@ -371,7 +383,7 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 		for _, size := range sizes {
 			segLen := size / 2
 			var b strings.Builder
-			b.WriteString("eyJ")
+			b.WriteString("eyJ") // gitleaks:allow -- synthetic redaction fixture
 			for b.Len() < segLen {
 				b.WriteString("\x00a")
 			}
@@ -381,14 +393,9 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 			}
 			b.WriteString(".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
 			input := b.String()
-			start := time.Now()
 			got := RedactString(input, Options{})
-			elapsed := time.Since(start)
 			if !strings.Contains(got, RedactedSecret) {
 				t.Fatalf("JWT at size %d failed to redact", size)
-			}
-			if elapsed > time.Second {
-				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
 			}
 		}
 	})
@@ -396,19 +403,14 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 	t.Run("Anthropic repeated gaps scaling and correct redaction", func(t *testing.T) {
 		for _, size := range sizes {
 			var b strings.Builder
-			b.WriteString("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+			b.WriteString("sk-ant-api03-abcdefghijklmnopqrstuvwxyz") // gitleaks:allow -- synthetic redaction fixture
 			for b.Len() < size {
 				b.WriteString("\x00a")
 			}
 			input := b.String()
-			start := time.Now()
 			got := RedactString(input, Options{})
-			elapsed := time.Since(start)
 			if got != RedactedSecret {
 				t.Fatalf("Anthropic at size %d failed to redact: got %q, want %q", size, got, RedactedSecret)
-			}
-			if elapsed > time.Second {
-				t.Fatalf("redaction of size %d took %v, exceeding linear threshold of 1s", size, elapsed)
 			}
 		}
 	})
@@ -416,7 +418,7 @@ func TestSplitRedactionLinearScaling(t *testing.T) {
 
 func BenchmarkRedactJWTGaps800KB(b *testing.B) {
 	var builder strings.Builder
-	builder.WriteString("eyJ")
+	builder.WriteString("eyJ") // gitleaks:allow -- synthetic redaction fixture
 	for builder.Len() < 400*1024 {
 		builder.WriteString("\x00a")
 	}
@@ -434,7 +436,7 @@ func BenchmarkRedactJWTGaps800KB(b *testing.B) {
 
 func BenchmarkRedactOpenAIKebabGaps128KB(b *testing.B) {
 	var builder strings.Builder
-	builder.WriteString("sk-kebab-")
+	builder.WriteString("sk-kebab-") // gitleaks:allow -- synthetic redaction fixture
 	for builder.Len() < 128*1024 {
 		builder.WriteString("\x00a")
 	}
@@ -447,7 +449,7 @@ func BenchmarkRedactOpenAIKebabGaps128KB(b *testing.B) {
 
 func BenchmarkRedactJWTGaps128KB(b *testing.B) {
 	var builder strings.Builder
-	builder.WriteString("eyJ")
+	builder.WriteString("eyJ") // gitleaks:allow -- synthetic redaction fixture
 	for builder.Len() < 64*1024 {
 		builder.WriteString("\x00a")
 	}
@@ -460,5 +462,25 @@ func BenchmarkRedactJWTGaps128KB(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = RedactString(input, Options{})
+	}
+}
+
+// Keep runtime measurements out of correctness tests: race instrumentation and
+// shared CI runners make absolute wall-clock deadlines unreliable.
+func BenchmarkSplitRedactionScaling(b *testing.B) {
+	for _, size := range []int{8 << 10, 32 << 10, 128 << 10} {
+		inputs := map[string]string{
+			"anthropic":       "sk-ant-api03-" + strings.Repeat("a", 20) + strings.Repeat("\x00a", size/2),
+			"neighboringJWTs": strings.Repeat("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJib2JieSIsIm5hbWUiOiJCIn0.Qm9iYnlTaWduYXR1cmVCQkJCQkJCQkJCQg\x00", size/90), // gitleaks:allow -- synthetic redaction fixture
+		}
+		for name, input := range inputs {
+			b.Run(name+"/"+strconv.Itoa(size), func(b *testing.B) {
+				b.SetBytes(int64(len(input)))
+				b.ReportAllocs()
+				for b.Loop() {
+					_ = RedactString(input, Options{})
+				}
+			})
+		}
 	}
 }

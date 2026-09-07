@@ -586,7 +586,10 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 		if len(tailWindow) > 64 {
 			tailWindow = tailWindow[:64]
 		}
-		startsNew := startsIndependentCredential(tailWindow)
+		// A complete neighboring JWT may need more than 64 bytes to reach
+		// its signature. Inspect its full first token; the helper stops at
+		// the next delimiter, so successive gaps examine disjoint segments.
+		startsNew := startsIndependentCredential(tailInSrc)
 		if startsNew {
 			checkCandidate(logCursor)
 			candStartOrig = cSpan.end
