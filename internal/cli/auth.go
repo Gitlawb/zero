@@ -263,6 +263,7 @@ type authArgs struct {
 	json       bool
 	device     bool
 	watch      bool
+	confirm    bool
 	scopes     []string
 	help       bool
 }
@@ -288,6 +289,8 @@ func parseAuthArgs(sub string, args []string) (authArgs, error) {
 			parsed.device = true
 		case arg == "--watch":
 			parsed.watch = true
+		case arg == "--confirm":
+			parsed.confirm = true
 		case arg == "--scope":
 			if i+1 >= len(args) {
 				return authArgs{}, fmt.Errorf("--scope requires a value")
@@ -323,7 +326,7 @@ func validateAuthFlags(sub string, a authArgs) error {
 		"logout":  {"json": true},
 		"status":  {"json": true},
 		"refresh": {"watch": true},
-		"reset":   {"json": true},
+		"reset":   {"json": true, "confirm": true},
 	}[sub]
 	bad := func(name string) error { return fmt.Errorf("zero auth %s does not accept %s", sub, name) }
 	if a.json && !allowed["json"] {
@@ -334,6 +337,9 @@ func validateAuthFlags(sub string, a authArgs) error {
 	}
 	if a.watch && !allowed["watch"] {
 		return bad("--watch")
+	}
+	if a.confirm && !allowed["confirm"] {
+		return bad("--confirm")
 	}
 	if len(a.scopes) > 0 && !allowed["scope"] {
 		return bad("--scope")
@@ -584,6 +590,9 @@ func runAuthReset(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if len(parsed.positional) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth reset takes no arguments (got %q)", parsed.positional[0]))
 	}
+	if !parsed.confirm {
+		return writeExecUsageError(stderr, "zero auth reset clears all stored OAuth logins and shared MCP tokens; rerun with --confirm to reset")
+	}
 	manager, err := newAuthManager(deps, stdout)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -626,7 +635,7 @@ Commands:
   logout <provider>                               Delete a provider's stored login
   status [provider]                               Show login presence/expiry (never the token)
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
-  reset                                           Reset the OAuth token store (clears corrupted entries and tokens)
+  reset --confirm [--json]                        Clear all OAuth logins and shared MCP tokens (also repairs corrupted stores)
   openrouter                                      Log in to OpenRouter in the browser; mints an API key
   chatgpt                                         Log in to ChatGPT in the browser (Codex backend, ChatGPT Plus/Pro)
 

@@ -616,7 +616,7 @@ type keyringManifest struct {
 }
 
 func (b keyringBlob) corruptError(detail string) error {
-	return fmt.Errorf("oauth: keyring token data at %s (account %q) %s; run `zero auth reset` or remove entries %q, %q.a.0..%d, and %q.b.0..%d to recover",
+	return fmt.Errorf("oauth: keyring token data at %s (account %q) %s; run `zero auth reset --confirm` (clears all OAuth logins and shared MCP tokens) or remove entries %q, %q.a.0..%d, and %q.b.0..%d to recover",
 		b.location(), b.account, detail, b.account, b.account, keyringMaxChunks-1, b.account, keyringMaxChunks-1)
 }
 
@@ -880,6 +880,8 @@ func (b keyringBlob) sweepCleanupAccount() {
 					}
 					// A successful migration can adopt chunks whose cleanup failed.
 					// The manifest owns them even if removing the stale marker fails.
+					// Any surplus beyond its count is left orphaned rather than
+					// risking deletion of a live generation during recovery.
 					if manifest.live == family {
 						_, _ = b.kr.Delete(b.service, b.cleanupAccount())
 						return

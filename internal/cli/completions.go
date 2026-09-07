@@ -78,7 +78,8 @@ var completionRoot = completionNode{
 			{names: []string{"tools"}, children: leafNodes("list")},
 			{names: []string{"oauth"}, children: leafNodes("login", "logout", "status")},
 		}},
-		{names: []string{"auth"}, children: leafNodes("openrouter", "chatgpt", "login", "logout", "status", "refresh", "reset")},
+		{names: []string{"auth"}, children: append(leafNodes("openrouter", "chatgpt", "login", "logout", "status", "refresh"),
+			completionNode{names: []string{"reset"}, flags: []string{"--confirm", "--json", "--help"}})},
 		{names: []string{"sandbox"}, children: []completionNode{
 			{names: []string{"policy"}}, {names: []string{"setup"}}, {names: []string{"check"}},
 			{names: []string{"grants"}, children: leafNodes("list", "allow", "deny", "revoke", "clear")},
