@@ -610,8 +610,49 @@ func TestFormatExecPromptKeepsConversationMessagesWhenNoisyEventsFollow(t *testi
 			t.Fatalf("expected prompt to contain %q, got %q", want, prompt)
 		}
 	}
-	if strings.Contains(prompt, "noisy tool result") {
-		t.Fatalf("expected prompt to omit noisy non-conversation events, got %q", prompt)
+	// The tool results here follow the last assistant answer, so they are work
+	// nothing has spoken for yet. They are carried on purpose: that is the whole
+	// of what an interrupted turn leaves behind (#913). The property this test
+	// was written for (#460) is that CONVERSATION survives a noisy turn, and the
+	// assertions above still hold it.
+	if !strings.Contains(prompt, "noisy tool result") {
+		t.Fatalf("expected unanswered tool work to be carried, got %q", prompt)
+	}
+	if count := strings.Count(prompt, "noisy tool result"); count > 24 {
+		t.Fatalf("carried %d tool events, over the tail allowance of 24: %q", count, prompt)
+	}
+}
+
+// AND WORK THE ASSISTANT ALREADY SPOKE FOR STAYS FILTERED.
+//
+// The counterpart to the case above, and what keeps that one from being
+// satisfied by carrying every tool event ever recorded. Once an answer describes
+// the work, repeating the raw results adds length and no information.
+func TestFormatExecPromptOmitsToolWorkAnAnswerAlreadyCovers(t *testing.T) {
+	events := []Event{
+		{Sequence: 1, Type: EventMessage, Payload: json.RawMessage(`{"role":"user","content":"first user request"}`)},
+	}
+	for sequence := 2; sequence <= 20; sequence++ {
+		events = append(events, Event{Sequence: sequence, Type: EventToolResult, Payload: json.RawMessage(`{"name":"read_file","output":"already summarized tool result"}`)})
+	}
+	events = append(events,
+		Event{Sequence: 21, Type: EventMessage, Payload: json.RawMessage(`{"role":"assistant","content":"I read the files and here is the summary"}`)},
+		Event{Sequence: 22, Type: EventMessage, Payload: json.RawMessage(`{"role":"user","content":"latest user request"}`)},
+	)
+
+	prompt := FormatExecPrompt("continue", PreparedExec{
+		Mode:          ModeResume,
+		Session:       Metadata{SessionID: "session-already-answered"},
+		ContextEvents: events,
+	})
+
+	if strings.Contains(prompt, "already summarized tool result") {
+		t.Fatalf("tool work the assistant already described was repeated verbatim, got %q", prompt)
+	}
+	for _, want := range []string{"first user request", "here is the summary", "latest user request"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected prompt to contain %q, got %q", want, prompt)
+		}
 	}
 }
 

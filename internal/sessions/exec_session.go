@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -188,23 +189,98 @@ func FormatExecPrompt(prompt string, prepared PreparedExec) string {
 	}, "\n")
 }
 
+// promptContextEvents chooses what a resumed turn is told about the session so
+// far.
+//
+// A RESUMED TURN NEEDS TO KNOW WHAT THE PREVIOUS ONE DID, NOT ONLY WHAT IT SAID.
+//
+// Conversation events alone were selected here, so a turn that read six files
+// and then died before answering left this behind:
+//
+//   - #1 message: add retries to the http client
+//   - #6 error: provider error: upstream timeout
+//
+// Nothing names the files, so the next turn re-reads them from scratch (#913).
+// On a turn that ENDS NORMALLY the assistant's answer describes the work, which
+// is why this was survivable; an interrupted turn produces no such answer, and
+// the record of the work goes with it.
+//
+// ONLY THE UNSUMMARIZED TAIL, NOT EVERY TOOL EVENT. Filtering tool events out
+// was deliberate (#460) and is right for work the assistant has already
+// described: forty read_file results add length and no information next to the
+// answer that explains them. It is wrong only for work with no answer after it,
+// which is precisely what an interrupted turn leaves behind. So the events after
+// the last assistant message come along, and everything the assistant already
+// spoke for stays filtered.
+//
+// The tail also gets its own allowance rather than sharing the conversation
+// budget, so a tool-heavy interrupted turn can never push an earlier message out
+// of the context. That is the property #460 added this filter for and it still
+// holds.
 func promptContextEvents(events []Event) []Event {
 	const maxPromptContextEvents = 80
+	// Enough to describe an interrupted turn's work, small enough that the
+	// conversation still dominates the prompt.
+	const maxPromptContextTailEvents = 24
 
-	filtered := make([]Event, 0, len(events))
-	for _, event := range events {
-		switch event.Type {
-		case EventMessage, EventCompaction, EventSessionFork, EventSessionChild, EventSpecialistStart, EventSpecialistStop, EventError:
-			filtered = append(filtered, event)
+	lastSpoken := -1
+	for index, event := range events {
+		if event.Type == EventMessage && payloadRole(event.Payload) == "assistant" {
+			lastSpoken = index
 		}
 	}
-	if len(filtered) == 0 {
-		filtered = append(filtered, events...)
+
+	conversation := make([]Event, 0, len(events))
+	tail := make([]Event, 0, maxPromptContextTailEvents)
+	for index, event := range events {
+		switch event.Type {
+		case EventMessage, EventCompaction, EventSessionFork, EventSessionChild, EventSpecialistStart, EventSpecialistStop, EventError:
+			conversation = append(conversation, event)
+		case EventToolCall, EventToolResult:
+			if index > lastSpoken {
+				tail = append(tail, event)
+			}
+		}
 	}
-	if len(filtered) > maxPromptContextEvents {
-		filtered = filtered[len(filtered)-maxPromptContextEvents:]
+	if len(conversation) == 0 && len(tail) == 0 {
+		// An unrecognized event stream still says more than nothing.
+		conversation = append(conversation, events...)
 	}
-	return filtered
+	if len(conversation) > maxPromptContextEvents {
+		conversation = conversation[len(conversation)-maxPromptContextEvents:]
+	}
+	tailBudget := min(maxPromptContextTailEvents, maxPromptContextEvents-len(conversation))
+	if tailBudget < 0 {
+		tailBudget = 0
+	}
+	if len(tail) > tailBudget {
+		tail = tail[len(tail)-tailBudget:]
+	}
+	if len(tail) == 0 {
+		return conversation
+	}
+	// Merged back into execution order: the sequence numbers are rendered, so a
+	// list that jumps backwards would read as a corrupted history.
+	merged := make([]Event, 0, len(conversation)+len(tail))
+	merged = append(merged, conversation...)
+	merged = append(merged, tail...)
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Sequence < merged[j].Sequence })
+	return merged
+}
+
+// payloadRole reads the "role" field of a message payload, returning "" when the
+// payload is not a decodable object or carries no role.
+func payloadRole(payload json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var decoded struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(decoded.Role)
 }
 
 func forkTitle(title string) string {
