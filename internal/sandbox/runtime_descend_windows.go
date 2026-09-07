@@ -97,9 +97,24 @@ func createRuntimeTailRetainingHandle(base string, tail []string) ([]windowsCrea
 			return created, parent, fmt.Errorf("create sandbox runtime root %s: %w", path, createErr)
 		}
 		identity, idErr := handleRuntimeIdentity(handle)
+		if idErr == nil && runtimeCreationFailure != nil {
+			idErr = runtimeCreationFailure(path)
+		}
 		if idErr != nil {
+			// CREATED, AND ABOUT TO BE FORGOTTEN. The ledger entry is appended on
+			// the next line, so returning here left a directory this run had made
+			// with nothing above holding a record of it: setup reports failure and
+			// leaves it behind, and if an ancestor WAS recorded, that ancestor's
+			// compensation then fails on a directory it cannot explain.
+			//
+			// Undone through the handle rather than published to the ledger,
+			// because the identity the ledger needs is the thing that just failed.
+			err := fmt.Errorf("identify the sandbox runtime directory created at %s: %w", path, idErr)
+			if undoErr := removeWindowsObjectByHandle(handle); undoErr != nil {
+				err = fmt.Errorf("%w; and the directory this run created there could not be removed: %w", err, undoErr)
+			}
 			_ = windows.CloseHandle(handle)
-			return created, parent, fmt.Errorf("identify the sandbox runtime directory created at %s: %w", path, idErr)
+			return created, parent, err
 		}
 		created = append(created, windowsCreatedRuntimeDir{path: path, identity: identity, identified: true})
 		_ = windows.CloseHandle(parent)

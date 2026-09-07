@@ -72,6 +72,21 @@ func createRuntimeDirIdentified(path string) (string, bool, error) {
 	return identity, true, nil
 }
 
+// removeWindowsObjectByHandle deletes the object this handle is open on.
+//
+// THROUGH THE HANDLE, NOT THE NAME. Every caller is on a failure path partway
+// through a creation, and the one object it may remove is the one it just made
+// and is still holding. Re-resolving the name to delete it is the substitution
+// hole this whole descent exists to close, and here it would be a pathname
+// authoritative delete of somebody else's directory.
+//
+// The handle needs DELETE access, which the creating opens above ask for.
+func removeWindowsObjectByHandle(handle windows.Handle) error {
+	var iosb windows.IO_STATUS_BLOCK
+	deleteIt := byte(1)
+	return windows.NtSetInformationFile(handle, &iosb, &deleteIt, 1, windows.FileDispositionInformation)
+}
+
 // createWindowsChildDirectory creates exactly one directory component beneath
 // parent and returns the handle to the object it created.
 //
@@ -93,9 +108,12 @@ func createWindowsChildDirectory(parent windows.Handle, name string) (windows.Ha
 
 	var handle windows.Handle
 	var iosb windows.IO_STATUS_BLOCK
+	// DELETE because the caller has to be able to undo this creation through the
+	// handle it just got, without going back through the name. See
+	// removeWindowsObjectByHandle.
 	err = windows.NtCreateFile(
 		&handle,
-		windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
+		windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
 		&attributes,
 		&iosb,
 		nil,

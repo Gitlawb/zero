@@ -55,17 +55,41 @@ func createRuntimeTailRetainingFD(base string, tail []string) ([]windowsCreatedR
 			_ = unix.Close(parent)
 			return created, -1, fmt.Errorf("open sandbox runtime component %s: %w", path, openErr)
 		}
+		// CREATED, AND ABOUT TO BE FORGOTTEN. Both checks below run before the
+		// ledger entry is appended, so failing either used to return a directory
+		// this run had made with nothing above holding a record of it: setup
+		// reported failure and left it behind, and a recorded ancestor's
+		// compensation then failed on a child it could not explain.
+		//
+		// Undone relative to the parent descriptor rather than published to the
+		// ledger, because on the identity path the identity the ledger needs is the
+		// thing that just failed, and the descriptor is the only authority here
+		// that is not a name.
+		undoCreation := func(err error) error {
+			if !madeIt {
+				return err
+			}
+			if undoErr := unix.Unlinkat(parent, name, unix.AT_REMOVEDIR); undoErr != nil {
+				return fmt.Errorf("%w; and the directory this run created there could not be removed: %w", err, undoErr)
+			}
+			return err
+		}
 		if err := refuseForeignRuntimeDirectory(child, path); err != nil {
+			err = undoCreation(err)
 			_ = unix.Close(child)
 			_ = unix.Close(parent)
 			return created, -1, err
 		}
 		if madeIt {
 			identity, idErr := runtimeDirectoryIdentity(child)
+			if idErr == nil && runtimeCreationFailure != nil {
+				idErr = runtimeCreationFailure(path)
+			}
 			if idErr != nil {
+				err := undoCreation(fmt.Errorf("identify the sandbox runtime directory created at %s: %w", path, idErr))
 				_ = unix.Close(child)
 				_ = unix.Close(parent)
-				return created, -1, fmt.Errorf("identify the sandbox runtime directory created at %s: %w", path, idErr)
+				return created, -1, err
 			}
 			created = append(created, windowsCreatedRuntimeDir{path: path, identity: identity, identified: true})
 		}

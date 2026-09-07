@@ -68,10 +68,31 @@ func acquireSharedRuntimeLeaseAtFD(parent int, name string) (runtimeLeaseHandle,
 		return runtimeLeaseHandle{}, false, err
 	}
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_SH); err != nil {
+		// The lock is the last step, and until now the created fact went out only
+		// alongside a lease object. Failing here returned no object, so this
+		// invocation's own lease file stayed on disk with nothing recording it,
+		// and its directory could never be compensated afterwards.
+		err = undoCreatedRuntimeLeaseAtFD(created, parent, name, err)
 		_ = file.Close()
 		return runtimeLeaseHandle{}, false, err
 	}
 	return runtimeLeaseHandle{file: file}, created, nil
+}
+
+// undoCreatedRuntimeLeaseAtFD removes a lease file this call created, when a
+// later step means no lease object will be returned to carry that fact.
+//
+// Relative to the verified parent descriptor, and only when this call is the one
+// that created the file: a lease that was already there belongs to whoever is
+// holding it.
+func undoCreatedRuntimeLeaseAtFD(created bool, parent int, name string, cause error) error {
+	if !created {
+		return cause
+	}
+	if undoErr := unix.Unlinkat(parent, name, 0); undoErr != nil {
+		return fmt.Errorf("%w; and the lease file this run created could not be removed: %w", cause, undoErr)
+	}
+	return cause
 }
 
 // openRuntimeLeaseAtFD opens or creates the lease under parent and proves it is
@@ -98,23 +119,37 @@ func openRuntimeLeaseAtFD(parent int, name string) (*os.File, bool, error) {
 		}
 		return nil, false, err
 	}
+	// Every failure from here on has already created the file when created is
+	// true, and returns no lease object to carry that fact, so each one undoes
+	// its own creation rather than leaving an unrecorded artifact behind.
+	if runtimeCreationFailure != nil {
+		if injected := runtimeCreationFailure(name); injected != nil {
+			injected = undoCreatedRuntimeLeaseAtFD(created, parent, name, injected)
+			_ = unix.Close(fd)
+			return nil, false, injected
+		}
+	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
+		err = undoCreatedRuntimeLeaseAtFD(created, parent, name, fmt.Errorf("inspect the sandbox runtime lease %s: %w", name, err))
 		_ = unix.Close(fd)
-		return nil, false, fmt.Errorf("inspect the sandbox runtime lease %s: %w", name, err)
+		return nil, false, err
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		err := undoCreatedRuntimeLeaseAtFD(created, parent, name, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is not an ordinary file (mode %#o)", name, stat.Mode&unix.S_IFMT))
 		_ = unix.Close(fd)
-		return nil, false, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is not an ordinary file (mode %#o)", name, stat.Mode&unix.S_IFMT)
+		return nil, false, err
 	}
 	if uid := unix.Getuid(); uid >= 0 && stat.Uid != uint32(uid) {
+		err := undoCreatedRuntimeLeaseAtFD(created, parent, name, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is owned by uid %d, not %d", name, stat.Uid, uid))
 		_ = unix.Close(fd)
-		return nil, false, fmt.Errorf("refusing to use the sandbox runtime lease at %s: it is owned by uid %d, not %d", name, stat.Uid, uid)
+		return nil, false, err
 	}
 	file := os.NewFile(uintptr(fd), name)
 	if file == nil {
+		err := undoCreatedRuntimeLeaseAtFD(created, parent, name, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name))
 		_ = unix.Close(fd)
-		return nil, false, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
+		return nil, false, err
 	}
 	return file, created, nil
 }
@@ -152,15 +187,20 @@ func tryAcquireExclusiveRuntimeLeaseRootedUnix(root string) (runtimeLeaseHandle,
 	}
 	defer func() { _ = unix.Close(parent) }()
 
-	file, _, err := openRuntimeLeaseAtFD(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
+	name := filepath.Base(sandboxRuntimeLeasePath(root))
+	file, created, err := openRuntimeLeaseAtFD(parent, name)
 	if err != nil {
 		return runtimeLeaseHandle{}, false, err
 	}
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = file.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			// Somebody holds it, so it is not this call's to remove, whatever the
+			// open reported. A file this call created cannot reach here anyway.
+			_ = file.Close()
 			return runtimeLeaseHandle{}, true, nil
 		}
+		err = undoCreatedRuntimeLeaseAtFD(created, parent, name, err)
+		_ = file.Close()
 		return runtimeLeaseHandle{}, false, err
 	}
 	return runtimeLeaseHandle{file: file}, false, nil

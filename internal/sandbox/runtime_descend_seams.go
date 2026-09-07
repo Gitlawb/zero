@@ -14,6 +14,17 @@ package sandbox
 // production.
 var runtimeDescentBarrier func()
 
+// runtimeCreationFailure, when set, is consulted immediately after this run
+// creates a runtime object and before the step that would publish it: a
+// directory component's identity read, or the lease file's inspection, wrapping
+// and locking. Returning an error stands in for that step failing.
+//
+// It is the only way to reach those paths, and they are the ones where the
+// transaction knows it created something that nothing above it knows about yet.
+// The argument is the created component's path, or the lease file's name. Nil in
+// production.
+var runtimeCreationFailure func(string) error
+
 // runtimeCleanupExclusivityBarrier, when set, runs during compensation while the
 // exclusive cleanup lease is held: after it has been taken and before the first
 // thing is removed. It exists so a test can put a contender into that window and

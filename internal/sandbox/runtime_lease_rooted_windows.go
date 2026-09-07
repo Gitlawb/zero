@@ -109,7 +109,7 @@ func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLea
 	// the first, and the handle is asked for the second below.
 	err = windows.NtCreateFile(
 		&handle,
-		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+		windows.DELETE|windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
 		&attributes,
 		&iosb,
 		nil,
@@ -127,21 +127,50 @@ func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLea
 	// create itself can distinguish the file it made from one that arrived a
 	// moment earlier.
 	created := iosb.Information == windowsFileCreatedDisposition
+	// And every failure below has already created the file when that is true,
+	// while returning no lease object to carry the fact, so each undoes its own
+	// creation instead of leaving an unrecorded artifact in a directory
+	// compensation then cannot empty.
+	if runtimeCreationFailure != nil {
+		if injected := runtimeCreationFailure(name); injected != nil {
+			injected = undoCreatedRuntimeLease(created, handle, injected)
+			_ = windows.CloseHandle(handle)
+			return runtimeLeaseHandle{}, false, injected
+		}
+	}
 	if err := refuseReparseRuntimeLeaseHandle(handle, name); err != nil {
+		err = undoCreatedRuntimeLease(created, handle, err)
 		_ = windows.CloseHandle(handle)
 		return runtimeLeaseHandle{}, false, err
 	}
 	file := os.NewFile(uintptr(handle), name)
 	if file == nil {
+		err := undoCreatedRuntimeLease(created, handle, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name))
 		_ = windows.CloseHandle(handle)
-		return runtimeLeaseHandle{}, false, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
+		return runtimeLeaseHandle{}, false, err
 	}
 	lease := runtimeLeaseHandle{file: file}
 	if err := windows.LockFileEx(windows.Handle(file.Fd()), 0, 0, 1, 0, &lease.overlapped); err != nil {
+		err = undoCreatedRuntimeLease(created, windows.Handle(file.Fd()), err)
 		_ = file.Close()
 		return runtimeLeaseHandle{}, false, err
 	}
 	return lease, created, nil
+}
+
+// undoCreatedRuntimeLease removes a lease file this call created, when a later
+// step means no lease object will be returned to carry that fact.
+//
+// Through the handle, and only when this call is the one that created the file:
+// a lease that was already there belongs to whoever is holding it.
+func undoCreatedRuntimeLease(created bool, handle windows.Handle, cause error) error {
+	if !created {
+		return cause
+	}
+	if undoErr := removeWindowsObjectByHandle(handle); undoErr != nil {
+		return fmt.Errorf("%w; and the lease file this run created could not be removed: %w", cause, undoErr)
+	}
+	return cause
 }
 
 // refuseReparseRuntimeLeaseHandle proves the opened lease is an ordinary file.
@@ -223,7 +252,7 @@ func tryAcquireExclusiveRuntimeLeaseRooted(root string) (runtimeLeaseHandle, boo
 	// is how that is expressed.
 	err = windows.NtCreateFile(
 		&handle,
-		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+		windows.DELETE|windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
 		&attributes,
 		&iosb,
 		nil,
@@ -237,22 +266,29 @@ func tryAcquireExclusiveRuntimeLeaseRooted(root string) (runtimeLeaseHandle, boo
 	if err != nil {
 		return runtimeLeaseHandle{}, false, err
 	}
+	created := iosb.Information == windowsFileCreatedDisposition
 	if err := refuseReparseRuntimeLeaseHandle(handle, name); err != nil {
+		err = undoCreatedRuntimeLease(created, handle, err)
 		_ = windows.CloseHandle(handle)
 		return runtimeLeaseHandle{}, false, err
 	}
 	file := os.NewFile(uintptr(handle), name)
 	if file == nil {
+		err := undoCreatedRuntimeLease(created, handle, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name))
 		_ = windows.CloseHandle(handle)
-		return runtimeLeaseHandle{}, false, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name)
+		return runtimeLeaseHandle{}, false, err
 	}
 	lease := runtimeLeaseHandle{file: file}
 	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
 	if err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &lease.overlapped); err != nil {
-		_ = file.Close()
 		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			// Somebody holds it, so it is not this call's to remove, whatever the
+			// open reported. A file this call created cannot reach here anyway.
+			_ = file.Close()
 			return runtimeLeaseHandle{}, true, nil
 		}
+		err = undoCreatedRuntimeLease(created, windows.Handle(file.Fd()), err)
+		_ = file.Close()
 		return runtimeLeaseHandle{}, false, err
 	}
 	return lease, false, nil
