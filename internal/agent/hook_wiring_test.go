@@ -94,36 +94,46 @@ func TestDispatchHelpersAreNoopWithoutDispatcher(t *testing.T) {
 	}
 }
 
-// A SUCCESSFUL beforeTool HOOK'S OUTPUT MUST REACH THE MODEL, NOT ONLY THE AUDIT.
+// A SUCCESSFUL beforeTool HOOK'S NOTICE MUST STAY TYPED.
 //
 // executeToolCall used to read the beforeTool outcome only when Blocked was true,
 // so a hook that ran fine and produced an enforcement notice — for instance that
 // it ran under the weakened DenyRead token — put that notice in the audit record
-// and nowhere anybody could see it. Only vetoes and afterTool feedback reached a
-// surface. joinHookMessages is the delivery: beforeTool's messages ride out on
-// the same tool result afterTool feedback already uses.
-func TestJoinHookMessagesDeliversSuccessfulBeforeToolOutput(t *testing.T) {
+// and nowhere anybody could see it. The first fix delivered it as prose appended
+// to the result output, which reached the model and no interactive surface,
+// because those build their enforcement furniture from the typed slice.
+//
+// So the delivery is the typed field, and this pins the merge: the hook's notice
+// first, the tool's own after it, each exactly once, blanks contributing nothing.
+func TestBeforeToolNoticesMergeIntoTheTypedField(t *testing.T) {
 	const notice = "hook ran without WRITE_RESTRICTED because denyRead is configured"
+	const toolOwned = "the sandbox dropped the network capability for this call"
 
-	// A successful beforeTool hook alone still reaches the model.
-	if got := joinHookMessages([]string{notice}, ""); got != notice {
-		t.Fatalf("a successful beforeTool notice was dropped: %q", got)
+	result := withBeforeToolNotices(ToolResult{Output: "ok"}, []string{notice})
+	if len(result.EnforcementNotices) != 1 || result.EnforcementNotices[0] != notice {
+		t.Fatalf("a successful beforeTool notice did not reach the typed field: %v", result.EnforcementNotices)
 	}
-	// And it does not displace afterTool feedback; both arrive, in order.
-	got := joinHookMessages([]string{notice}, "gofmt reformatted main.go")
-	if !strings.Contains(got, notice) || !strings.Contains(got, "gofmt reformatted main.go") {
-		t.Fatalf("expected both the beforeTool notice and the afterTool feedback, got %q", got)
+	// AND NOT THE OUTPUT AS WELL, or every surface that renders the slice shows
+	// the disclosure twice.
+	if strings.Contains(result.Output, notice) {
+		t.Errorf("the notice was written into the output as well as the typed field: %q", result.Output)
 	}
-	if strings.Index(got, notice) > strings.Index(got, "gofmt reformatted main.go") {
-		t.Fatalf("beforeTool output should precede afterTool feedback, got %q", got)
+
+	// Both arrive, hook first, when the tool carries its own.
+	result = withBeforeToolNotices(ToolResult{EnforcementNotices: []string{toolOwned}}, []string{notice})
+	if len(result.EnforcementNotices) != 2 || result.EnforcementNotices[0] != notice || result.EnforcementNotices[1] != toolOwned {
+		t.Fatalf("the hook and tool notices did not merge in order: %v", result.EnforcementNotices)
 	}
-	// Empty and whitespace-only messages contribute nothing, so a run with no hook
-	// output stays silent rather than appending an empty header.
-	if got := joinHookMessages([]string{"", "   "}, ""); got != "" {
-		t.Fatalf("blank hook messages produced %q, want nothing", got)
+
+	// The same disclosure from both sides is carried once.
+	result = withBeforeToolNotices(ToolResult{EnforcementNotices: []string{notice}}, []string{notice})
+	if len(result.EnforcementNotices) != 1 {
+		t.Errorf("one disclosure reported by both the hook and the tool was carried %d times: %v", len(result.EnforcementNotices), result.EnforcementNotices)
 	}
-	// afterTool alone is unchanged, which is the behaviour that already worked.
-	if got := joinHookMessages(nil, "vet found an issue"); got != "vet found an issue" {
-		t.Fatalf("afterTool-only feedback changed shape: %q", got)
+
+	// Blank notices contribute nothing, so a run with no hook output stays silent.
+	result = withBeforeToolNotices(ToolResult{}, []string{"", "   "})
+	if len(result.EnforcementNotices) != 0 {
+		t.Errorf("blank hook notices produced %v, want nothing", result.EnforcementNotices)
 	}
 }

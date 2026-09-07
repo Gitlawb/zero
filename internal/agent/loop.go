@@ -1510,7 +1510,11 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// afterTool hooks run once the tool has executed; their output (e.g. a
 	// formatter or vet result) is surfaced back to the model on the result.
 	if toolFound {
-		if feedback := joinHookMessages(beforeToolNotices, dispatchAfterTool(ctx, options, call, args, result)); feedback != "" {
+		// The beforeTool notices are NOT folded in here any more. They are typed
+		// enforcement data, and appending them as hook prose was what kept them out
+		// of every surface that renders the typed slice. afterTool output is
+		// ordinary feedback and still travels this way.
+		if feedback := dispatchAfterTool(ctx, options, call, args, result); strings.TrimSpace(feedback) != "" {
 			var didRedact bool
 			result.Output, didRedact = appendHookFeedback(result.Output, feedback)
 			if didRedact {
@@ -1537,7 +1541,10 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// Secret scrubbing happens at the registry boundary (the single point both
 	// the agent loop and the MCP server pass through), so result.Output is
 	// already redacted here and result.Redacted reflects whether it changed.
-	return ToolResult{
+	//
+	// Wrapped in the same finalization every other return from a hooked call
+	// uses, so the normal path cannot drift away from the veto and retry paths.
+	return withBeforeToolNotices(ToolResult{
 		Risk:               executedRisk,
 		ToolCallID:         call.ID,
 		Name:               call.Name,
@@ -1558,7 +1565,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// the Run turn loop performs the actual provider switch. Empty for every
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
-	}, nil
+	}, beforeToolNotices), nil
 }
 
 const sandboxNamespaceLimitedReason = "sandbox output is limited to the sandbox PID namespace; host/global state requires approval"
@@ -2074,40 +2081,76 @@ func noticesBefore(outcome hooks.DispatchOutcome) []string {
 // tool can size, this needs the rebudget step as well, which means converting
 // through tools.Result the way the tail does rather than editing Output in
 // place. Do not widen it without that.
+// withBeforeToolNotices carries a successful beforeTool hook's disclosures onto
+// the result as TYPED enforcement notices, and is the single finalization point
+// every return path from a hooked call goes through.
+//
+// It used to fold them into result.Output as prose. That reached the provider,
+// which reads the output, and reached nothing else. Every interactive surface
+// builds its enforcement furniture from the typed slice, and for an edit or a
+// write the card shows Display.Preview instead of Output, so the disclosure was
+// absent from the live card in both its collapsed and expanded states and from
+// the session payload that restores them. A notice about a weakened token was
+// therefore shown to the model and hidden from the operator, on exactly the
+// results where something was written.
+//
+// Typed here, the canonical accessors compose it per surface, the same way a
+// tool's own notices already work. Nothing is written into Output as well:
+// decoration has one owner per surface or the disclosure appears twice.
 func withBeforeToolNotices(result ToolResult, notices []string) ToolResult {
-	feedback := joinHookMessages(notices, "")
-	if strings.TrimSpace(feedback) == "" {
-		return result
-	}
-	output, didRedact := appendHookFeedback(result.Output, feedback)
-	result.Output = output
+	merged, didRedact := mergeEnforcementNotices(notices, result.EnforcementNotices)
+	result.EnforcementNotices = merged
 	if didRedact {
 		result.Redacted = true
 	}
 	return result
 }
 
+// mergeEnforcementNotices puts a beforeTool hook's disclosures ahead of the
+// tool's own and drops exact repeats, so a surface rendering the slice shows
+// each disclosure exactly once.
+//
+// Hook notices are third-party text arriving on an intercepted path that bypasses
+// the registry's redaction boundary, so they are scrubbed here the way
+// appendHookFeedback scrubbed them while they travelled as prose. The bool
+// reports whether scrubbing changed anything, so Redacted keeps matching the
+// registry's contract.
+func mergeEnforcementNotices(before []string, own []string) ([]string, bool) {
+	if len(before) == 0 && len(own) == 0 {
+		return nil, false
+	}
+	merged := make([]string, 0, len(before)+len(own))
+	seen := make(map[string]struct{}, len(before)+len(own))
+	redacted := false
+	for index, notice := range append(append([]string(nil), before...), own...) {
+		if index < len(before) {
+			scrubbed := redaction.RedactString(notice, redaction.Options{})
+			redacted = redacted || scrubbed != notice
+			notice = scrubbed
+		}
+		if strings.TrimSpace(notice) == "" {
+			continue
+		}
+		if _, already := seen[notice]; already {
+			continue
+		}
+		seen[notice] = struct{}{}
+		merged = append(merged, notice)
+	}
+	if len(merged) == 0 {
+		return nil, redacted
+	}
+	return merged, redacted
+}
+
 // appendHookFeedback appends afterTool hook output to a tool result's output,
 // scrubbed for secrets like every other string crossing the tool boundary. The
 // returned bool reports whether scrubbing changed the feedback, so the caller can
 // set ToolResult.Redacted to match the registry's redaction contract.
-// joinHookMessages folds a successful beforeTool hook's enforcement notices in
-// with the afterTool feedback so both reach the model through the one delivery
-// path, rather than the notices being produced and then dropped. It takes the
-// notices, never DispatchOutcome.Messages: see the capture site above.
-func joinHookMessages(before []string, after string) string {
-	parts := make([]string, 0, len(before)+1)
-	for _, message := range before {
-		if strings.TrimSpace(message) != "" {
-			parts = append(parts, message)
-		}
-	}
-	if strings.TrimSpace(after) != "" {
-		parts = append(parts, after)
-	}
-	return strings.Join(parts, "\n\n")
-}
-
+// The joiner that folded beforeTool notices in with the afterTool feedback is
+// gone. Sending a typed enforcement notice out as hook prose was the defect, not
+// the delivery: see withBeforeToolNotices. afterTool feedback still arrives here
+// on its own, which is all this path was ever meant to carry.
 func appendHookFeedback(output string, feedback string) (string, bool) {
 	scrubbed := redaction.RedactString(feedback, redaction.Options{})
 	redacted := scrubbed != feedback
