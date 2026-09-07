@@ -599,7 +599,7 @@ func TestWalkSSHPrivateKeyFilesFindsKeyAfterCrowdedSiblingDir(t *testing.T) {
 	if err := os.MkdirAll(junkDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < sshPrivateKeyWalkMaxEntries+32; i++ {
+	for i := 0; i < sshPrivateKeyWalkPageSize+32; i++ {
 		mustWriteFile(t, filepath.Join(junkDir, fmt.Sprintf("host-%04d", i)), "ssh-ed25519 AAAA\n")
 	}
 	nestedKey := filepath.Join(sshDir, "keys", "work_ed25519")

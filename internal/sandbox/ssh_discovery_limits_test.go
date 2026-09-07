@@ -33,15 +33,11 @@ func assertLinuxCredentialPlanRejected(t *testing.T, profile PermissionProfile) 
 }
 
 func TestSSHDiscoveryLimitsRejectExecution(t *testing.T) {
-	for _, kind := range []string{"directory entry", "config Include match", "config size", "directory depth"} {
+	for _, kind := range []string{"config Include match", "config size"} {
 		t.Run(kind, func(t *testing.T) {
 			home := t.TempDir()
 			sshDir := filepath.Join(home, ".ssh")
 			switch kind {
-			case "directory entry":
-				for i := 0; i <= sshPrivateKeyWalkMaxEntries; i++ {
-					mustWriteFile(t, filepath.Join(sshDir, fmt.Sprintf("file-%03d", i)), "public data")
-				}
 			case "config Include match":
 				mustWriteFile(t, filepath.Join(sshDir, "config"), "Include includes/*\n")
 				for i := 0; i <= sshIncludeMatchCap; i++ {
@@ -49,12 +45,6 @@ func TestSSHDiscoveryLimitsRejectExecution(t *testing.T) {
 				}
 			case "config size":
 				mustWriteFile(t, filepath.Join(sshDir, "config"), strings.Repeat("#", sshConfigMaxBytes+1))
-			case "directory depth":
-				dir := sshDir
-				for i := 0; i <= sshPrivateKeyWalkMaxDepth; i++ {
-					dir = filepath.Join(dir, "nested")
-				}
-				mustWriteFile(t, filepath.Join(dir, "private"), sshPrivateKeyFixture())
 			}
 			credentials := credentialDenyReadPathsIn(credentialPathOptions{Homes: []string{home}}, nil)
 			profile := PermissionProfile{FileSystem: FileSystemPolicy{
@@ -64,6 +54,31 @@ func TestSSHDiscoveryLimitsRejectExecution(t *testing.T) {
 			_, err := BuildLinuxSandboxBwrapArgs(sshTestBwrapOptions(t, profile))
 			if err == nil || !strings.Contains(err.Error(), kind+" limit exceeded") {
 				t.Fatalf("incomplete discovery did not reject execution: %v", err)
+			}
+		})
+	}
+}
+
+func TestSSHDiscoveryWalksLargeAndDeepDirectories(t *testing.T) {
+	for _, kind := range []string{"large", "deep"} {
+		t.Run(kind, func(t *testing.T) {
+			sshDir := filepath.Join(t.TempDir(), ".ssh")
+			dir := sshDir
+			if kind == "large" {
+				for i := range 600 {
+					mustWriteFile(t, filepath.Join(dir, fmt.Sprintf("public-%03d", i)), "public data")
+				}
+			} else {
+				for range 12 {
+					dir = filepath.Join(dir, "d")
+				}
+			}
+			key := filepath.Join(dir, "work-key")
+			mustWriteFile(t, key, sshPrivateKeyFixture())
+			scanner := &sshDiscovery{}
+			keys := scanner.walkPrivateKeyFiles(sshDir)
+			if len(scanner.errors) != 0 || len(keys) != 1 || keys[0] != key {
+				t.Fatalf("discovery = %v, errors = %v; want the nested key", keys, scanner.errors)
 			}
 		})
 	}

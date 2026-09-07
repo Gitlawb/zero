@@ -11,7 +11,7 @@ import (
 // Exercise profile construction and command planning together so dropping an
 // error between discovery, finalization, and helper serialization is detected.
 func TestSSHIncompleteProfileRefusesCommand(t *testing.T) {
-	for _, kind := range []string{"directory entry", "config Include match"} {
+	for _, kind := range []string{"config size", "config Include match"} {
 		t.Run(kind, func(t *testing.T) {
 			home := t.TempDir()
 			for _, name := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "APPDATA", "LOCALAPPDATA"} {
@@ -21,10 +21,8 @@ func TestSSHIncompleteProfileRefusesCommand(t *testing.T) {
 				t.Setenv(name, "")
 			}
 			sshDir := filepath.Join(home, ".ssh")
-			if kind == "directory entry" {
-				for i := 0; i <= sshPrivateKeyWalkMaxEntries; i++ {
-					mustWriteFile(t, filepath.Join(sshDir, fmt.Sprintf("file-%03d", i)), "public")
-				}
+			if kind == "config size" {
+				mustWriteFile(t, filepath.Join(sshDir, "config"), strings.Repeat("#", sshConfigMaxBytes+1))
 			} else {
 				mustWriteFile(t, filepath.Join(sshDir, "config"), "Include includes/*\n")
 				for i := 0; i <= sshIncludeMatchCap; i++ {
