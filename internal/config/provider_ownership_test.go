@@ -50,10 +50,17 @@ func TestResolveProviderRowOwnership(t *testing.T) {
 			// "OpenAI" row, with no sibling to confuse it.
 			name:          "sole case variant",
 			persisted:     []string{"OpenAI"},
-			resolved:      []string{"openai"},
+			resolved:      nil, // session alias, not a separately resolved row
 			row:           "openai",
 			wantBacked:    true,
 			wantPersisted: "OpenAI",
+		},
+		{
+			name:       "project row after unusable user row is filtered out",
+			persisted:  []string{"work"},
+			resolved:   []string{"WORK"},
+			row:        "WORK",
+			wantBacked: false,
 		},
 		{
 			name:       "env-only row with no persisted counterpart",

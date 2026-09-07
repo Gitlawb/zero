@@ -125,9 +125,11 @@ zero doctor
 
 If an upgraded `config.json` contains one legacy provider profile without a
 name, repair it with `zero providers repair-config`. The command preserves the
-saved `activeProvider` name (falling back to `openai`), or accepts an explicit
-replacement with `--name <name>`. Multiple unnamed rows are not guessed; repair
-those directly in `config.json`.
+saved `activeProvider` name (falling back to `openai`). If a row already has that
+exact name, the command preserves the field merge older releases used, with
+later nonempty fields taking precedence. An explicit `--name <unique-name>`
+keeps the legacy row separate instead. Case-only collisions and multiple
+unnamed rows are not merged by guessing; follow the error's repair guidance.
 
 For API providers, set the matching environment variable before setup or enter
 the key in the wizard:
