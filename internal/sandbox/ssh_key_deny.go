@@ -16,14 +16,9 @@ const sshConfigMaxBytes = 1 << 20
 
 const sshIncludeMatchCap = 64
 
-// sshPrivateKeyWalkMaxDepth bounds recursive discovery under ~/.ssh. Nested
-// directories and directory symlinks are walked with cycle detection.
-const sshPrivateKeyWalkMaxDepth = 8
-
-// sshPrivateKeyWalkMaxEntries is a per-directory cap on entries considered
-// under ~/.ssh. One extra entry detects overflow without unbounded allocation;
-// incomplete discovery refuses execution rather than dropping later keys.
-const sshPrivateKeyWalkMaxEntries = 256
+// Page directory reads so busy SSH directories do not require one large
+// allocation or become incomplete merely because they contain many entries.
+const sshPrivateKeyWalkPageSize = 256
 
 const sshPrivateKeySniffBytes = 128
 
@@ -88,12 +83,8 @@ func (s *sshDiscovery) privateKeyDenyCandidates(home string) []string {
 func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 	var out []string
 	visitedDirs := make(map[string]bool)
-	var walk func(dir string, depth int)
-	walk = func(dir string, depth int) {
-		if depth > sshPrivateKeyWalkMaxDepth {
-			s.fail(dir, "directory depth limit exceeded")
-			return
-		}
+	pending := []string{sshDir}
+	walk := func(dir string) {
 		realDir := dir
 		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 			realDir = resolved
@@ -116,55 +107,61 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 			s.fail(dir, err.Error())
 			return
 		}
-		// Bound allocation and detect whether any entries would be omitted.
-		entries, err := d.ReadDir(sshPrivateKeyWalkMaxEntries + 1)
-		_ = d.Close()
-		if err != nil && err != io.EOF {
-			s.fail(dir, err.Error())
-			return
-		}
-		if len(entries) > sshPrivateKeyWalkMaxEntries {
-			s.fail(dir, "directory entry limit exceeded")
-			return
-		}
-		for _, entry := range entries {
-			name := entry.Name()
-			if name == "." || name == ".." {
-				continue
+		defer d.Close()
+		for {
+			entries, err := d.ReadDir(sshPrivateKeyWalkPageSize)
+			if err != nil && err != io.EOF {
+				s.fail(dir, err.Error())
+				return
 			}
-			path := filepath.Join(dir, name)
-			info, err := os.Lstat(path)
-			if err != nil {
-				s.fail(path, err.Error())
-				continue
-			}
-			mode := info.Mode()
-			if mode.Type() == os.ModeSymlink {
-				targetStat, err := os.Stat(path)
-				if err == nil && targetStat.IsDir() {
-					walk(path, depth+1)
+			for _, entry := range entries {
+				name := entry.Name()
+				if name == "." || name == ".." {
 					continue
 				}
-				// Inspect leaf symlinks (bounded, specials rejected) so a
-				// custom-named link to a PEM/OpenSSH key is still denied.
+				path := filepath.Join(dir, name)
+				info, err := os.Lstat(path)
+				if err != nil {
+					s.fail(path, err.Error())
+					continue
+				}
+				mode := info.Mode()
+				if mode.Type() == os.ModeSymlink {
+					targetStat, err := os.Stat(path)
+					if err == nil && targetStat.IsDir() {
+						pending = append(pending, path)
+						continue
+					}
+					// Inspect leaf symlinks (bounded, specials rejected) so a
+					// custom-named link to a PEM/OpenSSH key is still denied.
+					if isSSHPrivateKeyFileName(name) || s.fileLooksLikePrivateKey(path) {
+						out = append(out, path)
+					}
+					continue
+				}
+				if info.IsDir() {
+					pending = append(pending, path)
+					continue
+				}
+				if !mode.IsRegular() {
+					continue
+				}
 				if isSSHPrivateKeyFileName(name) || s.fileLooksLikePrivateKey(path) {
 					out = append(out, path)
 				}
-				continue
 			}
-			if info.IsDir() {
-				walk(path, depth+1)
-				continue
-			}
-			if !mode.IsRegular() {
-				continue
-			}
-			if isSSHPrivateKeyFileName(name) || s.fileLooksLikePrivateKey(path) {
-				out = append(out, path)
+			if err == io.EOF {
+				return
 			}
 		}
 	}
-	walk(sshDir, 0)
+	// Iteration keeps open directory handles and call-stack depth constant even
+	// for deeply nested layouts. The physical-path set still breaks link cycles.
+	for len(pending) > 0 {
+		dir := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		walk(dir)
+	}
 	return out
 }
 
