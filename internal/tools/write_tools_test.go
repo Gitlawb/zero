@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1081,6 +1082,45 @@ func TestStructuredPatchCopyFailureReportsSurvivingPartialTarget(t *testing.T) {
 	targetPath := filepath.Join(root, "target.txt")
 	if got := mustReadTestFile(t, targetPath); got != "partial" {
 		t.Fatalf("partial target content = %q", got)
+	}
+}
+
+func TestIncompleteStructuredPatchNoReplaceWriteReportsOnlyVerifiedTarget(t *testing.T) {
+	for name, content := range map[string]string{
+		"complete publication": "complete content\n",
+		"partial publication":  "partial",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			workspace, err := os.OpenRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer workspace.Close()
+			targetPath := filepath.Join(root, "target.txt")
+			writeTestFile(t, targetPath, content)
+			change := structuredPatchChange{
+				kind: structuredPatchAdd,
+				to: structuredPatchTarget{
+					requested: "target.txt",
+					relative:  "target.txt",
+					absolute:  targetPath,
+				},
+				after: "complete content\n",
+				mode:  0o644,
+			}
+
+			outcome := incompleteStructuredPatchWrite(workspace, change, true)
+			if content == change.after {
+				if len(outcome.completed) != 1 || outcome.completed[0].kind != structuredPatchAdd || len(outcome.incompletePaths) != 0 {
+					t.Fatalf("verified publication outcome = %#v", outcome)
+				}
+				return
+			}
+			if len(outcome.completed) != 0 || !slices.Equal(outcome.incompletePaths, []string{"target.txt"}) {
+				t.Fatalf("partial publication outcome = %#v", outcome)
+			}
+		})
 	}
 }
 

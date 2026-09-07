@@ -450,6 +450,28 @@ func TestToolCallResultEmitsOnlyRedactedFileDiffs(t *testing.T) {
 	}
 }
 
+func TestToolCallResultOmitsSemanticallyUnchangedRedactedDiff(t *testing.T) {
+	oldSecret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	newSecret := "ghp_9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA"
+	scrubbed := tools.ScrubResultSecrets(tools.Result{
+		ChangedFiles: []string{"credentials.txt"},
+		FileDiffs: []tools.FileDiff{{
+			Path: filepath.Join(t.TempDir(), "credentials.txt"), OldExists: true, NewExists: true,
+			OldText: "token=" + oldSecret, NewText: "token=" + newSecret,
+		}},
+	})
+	update := toolCallResult(agent.ToolResult{
+		ToolCallID: "call", Status: tools.StatusOK,
+		ChangedFiles: scrubbed.ChangedFiles, FileDiffs: scrubbed.FileDiffs,
+	})
+	if len(update.Content) != 0 {
+		t.Fatalf("ACP emitted semantically unchanged redacted diff: %#v", update.Content)
+	}
+	if len(update.Locations) != 1 || update.Locations[0].Path != "credentials.txt" {
+		t.Fatalf("ACP path fallback = %#v", update.Locations)
+	}
+}
+
 func TestToolCallResultOmitsDefaultIgnorableSplitSecretsOnEitherSide(t *testing.T) {
 	secret := "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG"
 	for name, separator := range map[string]string{

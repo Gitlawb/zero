@@ -447,7 +447,7 @@ func TestScrubResultSecretsRedactsPreview(t *testing.T) {
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	res := scrubResultSecrets(Result{
 		Display:   Display{Preview: "+++ b/x\n+token := \"" + secret + "\""},
-		FileDiffs: []FileDiff{{Path: filepath.Join(t.TempDir(), "x"), OldExists: true, NewExists: true, OldText: secret, NewText: secret}},
+		FileDiffs: []FileDiff{{Path: filepath.Join(t.TempDir(), "x"), OldExists: true, NewExists: true, OldText: "before " + secret, NewText: "after " + secret}},
 	})
 	if strings.Contains(res.Display.Preview, secret) {
 		t.Errorf("Display.Preview (the card-only code preview) must be redacted, leaked: %q", res.Display.Preview)
@@ -455,7 +455,7 @@ func TestScrubResultSecretsRedactsPreview(t *testing.T) {
 	if !res.Redacted {
 		t.Error("scrubbing a secret from the preview should set Redacted")
 	}
-	if strings.Contains(res.FileDiffs[0].OldText, secret) || strings.Contains(res.FileDiffs[0].NewText, secret) {
+	if len(res.FileDiffs) != 1 || strings.Contains(res.FileDiffs[0].OldText, secret) || strings.Contains(res.FileDiffs[0].NewText, secret) {
 		t.Errorf("FileDiff must be redacted: %#v", res.FileDiffs)
 	}
 }
@@ -516,6 +516,48 @@ func TestScrubResultSecretsDoesNotMutateCallerFileDiffSlice(t *testing.T) {
 	}
 	if original[0].NewText != "unsafe" || original[1].OldText != retainedOld || original[1].NewText != retainedNew {
 		t.Fatalf("caller slice was mutated: %#v", original)
+	}
+}
+
+func TestScrubResultSecretsDropsSemanticallyUnchangedRedactedDiff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.txt")
+	oldSecret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	newSecret := "ghp_9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA"
+	result := scrubResultSecrets(Result{
+		ChangedFiles: []string{"credentials.txt"},
+		FileDiffs: []FileDiff{{
+			Path: path, OldExists: true, NewExists: true,
+			OldText: "token=" + oldSecret, NewText: "token=" + newSecret,
+		}},
+	})
+	if len(result.FileDiffs) != 0 {
+		t.Fatalf("semantically unchanged redacted diff = %#v", result.FileDiffs)
+	}
+	if got, want := result.ChangedFiles, []string{"credentials.txt"}; !slices.Equal(got, want) {
+		t.Fatalf("ChangedFiles = %#v, want %#v", got, want)
+	}
+	if !result.Redacted {
+		t.Fatal("credential rotation must set Redacted")
+	}
+}
+
+func TestScrubResultSecretsKeepsRealTransitionAroundRedactedSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.txt")
+	oldSecret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	newSecret := "ghp_9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA"
+	result := scrubResultSecrets(Result{FileDiffs: []FileDiff{{
+		Path: path, OldExists: true, NewExists: true,
+		OldText: "environment=staging token=" + oldSecret,
+		NewText: "environment=production token=" + newSecret,
+	}}})
+	if len(result.FileDiffs) != 1 {
+		t.Fatalf("redacted real transition = %#v", result.FileDiffs)
+	}
+	if result.FileDiffs[0].OldText == result.FileDiffs[0].NewText {
+		t.Fatalf("redacted transition became unchanged: %#v", result.FileDiffs[0])
+	}
+	if strings.Contains(result.FileDiffs[0].OldText, oldSecret) || strings.Contains(result.FileDiffs[0].NewText, newSecret) {
+		t.Fatalf("redacted transition leaked a secret: %#v", result.FileDiffs[0])
 	}
 }
 

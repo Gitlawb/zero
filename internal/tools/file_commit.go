@@ -14,6 +14,11 @@ var errFileChangedDuringWrite = errors.New("file changed on disk before the writ
 // object that will actually be mutated.
 var fileWriteBeforeCommit func(path string)
 
+// fileWriteStat is a deterministic test seam for proving that the opened-file
+// identity is captured before the final preimage comparison. Production uses
+// the file descriptor directly.
+var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
+
 // commitFileContents binds an overwrite to the file identity and bytes that
 // the caller observed. A create uses exclusive creation. An overwrite opens the
 // observed object without truncation, verifies identity/content through that
@@ -33,7 +38,12 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 		if err != nil {
 			return err
 		}
-		return writeAndVerifyFileIdentity(path, file, content, false)
+		openedInfo, err := fileWriteStat(file)
+		if err != nil {
+			_ = file.Close()
+			return err
+		}
+		return writeAndVerifyFileIdentity(path, file, openedInfo, content, false)
 	}
 
 	flags := os.O_WRONLY
@@ -44,7 +54,7 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 	if err != nil {
 		return err
 	}
-	openedInfo, err := file.Stat()
+	openedInfo, err := fileWriteStat(file)
 	if err != nil {
 		_ = file.Close()
 		return err
@@ -69,15 +79,10 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 			return errFileChangedDuringWrite
 		}
 	}
-	return writeAndVerifyFileIdentity(path, file, content, true)
+	return writeAndVerifyFileIdentity(path, file, openedInfo, content, true)
 }
 
-func writeAndVerifyFileIdentity(path string, file *os.File, content string, truncate bool) error {
-	openedInfo, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return err
-	}
+func writeAndVerifyFileIdentity(path string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
 	if truncate {
 		if err := file.Truncate(0); err != nil {
 			_ = file.Close()

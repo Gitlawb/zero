@@ -360,6 +360,13 @@ func scrubResultSecrets(res Result) Result {
 			diff.NewText = scrubbed
 			res.Redacted = true
 		}
+		// Redaction can collapse two distinct credentials to the same token. At
+		// this final outbound boundary, retain rich evidence only when the
+		// transformed sides still describe a real transition; ChangedFiles
+		// remains the safe path-only fallback.
+		if diff.OldExists == diff.NewExists && diff.OldText == diff.NewText {
+			continue
+		}
 		fileDiffs = append(fileDiffs, diff)
 	}
 	res.FileDiffs = fileDiffs

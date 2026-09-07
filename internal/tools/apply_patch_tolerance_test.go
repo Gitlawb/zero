@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -571,9 +572,9 @@ func TestApplyStructuredPatchChangeRefusesSourceChangedAfterPlanning(t *testing.
 		"copy":   {kind: structuredPatchCopy, from: target, to: destination, before: "planned\n", after: "planned\n", mode: 0o644},
 	} {
 		writeTestFile(t, path, "changed after planning\n")
-		committed, err := applyStructuredPatchChange(workspace, change)
-		if err == nil || committed || !strings.Contains(err.Error(), "changed on disk between planning and commit") {
-			t.Fatalf("%s: expected a refusal, got committed=%v err=%v", name, committed, err)
+		outcome, err := applyStructuredPatchChange(workspace, change)
+		if err == nil || len(outcome.completed) != 0 || len(outcome.incompletePaths) != 0 || !strings.Contains(err.Error(), "changed on disk between planning and commit") {
+			t.Fatalf("%s: expected a refusal, got outcome=%#v err=%v", name, outcome, err)
 		}
 		if content, _ := os.ReadFile(path); string(content) != "changed after planning\n" {
 			t.Fatalf("%s: file must be untouched, got %q", name, string(content))
@@ -750,5 +751,53 @@ func TestApplyPatchOperationsReportsWorkspaceRelativeCommittedPrefixUnderCwd(t *
 	}
 	if got := result.ChangedFiles; len(got) != 1 || got[0] != "sub/dir/first.txt" {
 		t.Fatalf("nested partial ChangedFiles = %#v", got)
+	}
+}
+
+func TestApplyPatchMoveReportsPublishedDestinationWhenSourceRemovalFails(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "source.txt"), "before\n")
+	priorRemove := structuredPatchRemove
+	structuredPatchRemove = func(workspace *os.Root, name string) error {
+		if name == "source.txt" {
+			return os.ErrPermission
+		}
+		return priorRemove(workspace, name)
+	}
+	t.Cleanup(func() { structuredPatchRemove = priorRemove })
+
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: source.txt",
+		"*** Move to: destination.txt",
+		"@@",
+		"-before",
+		"+after",
+		"*** End Patch",
+		"",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusError {
+		t.Fatalf("move status = %s, want error", result.Status)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "source.txt")); got != "before\n" {
+		t.Fatalf("source content = %q", got)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "destination.txt")); got != "after\n" {
+		t.Fatalf("destination content = %q", got)
+	}
+	if got, want := result.ChangedFiles, []string{"destination.txt"}; !slices.Equal(got, want) {
+		t.Fatalf("ChangedFiles = %#v, want %#v", got, want)
+	}
+	resolvedDestination, err := filepath.EvalSymlinks(filepath.Join(root, "destination.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDiff := FileDiff{Path: resolvedDestination, OldExists: false, NewExists: true, NewText: "after\n"}
+	if got := result.FileDiffs; len(got) != 1 || got[0] != wantDiff {
+		t.Fatalf("FileDiffs = %#v, want %#v", got, []FileDiff{wantDiff})
+	}
+	if !strings.Contains(result.Display.Preview, "destination.txt") || strings.Contains(result.Display.Preview, "source.txt") {
+		t.Fatalf("preview must show only destination creation: %q", result.Display.Preview)
 	}
 }
