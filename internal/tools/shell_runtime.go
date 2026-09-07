@@ -181,6 +181,21 @@ func shellGuidanceForRuntime(shell shellRuntime) string {
 	return guidance
 }
 
+// HostExecCommandShellGuidance returns the shell guidance appended to
+// exec_command's description on this host, or "" where none is appended.
+//
+// Exported for the per-turn token ratchet in internal/agent. That budget has to
+// separate what every host pays for the tool schemas from what THIS host pays
+// for its shell guidance, because the guidance varies by shell and by
+// PowerShell version, and a single number covering both silently means a
+// different thing on each machine.
+func HostExecCommandShellGuidance() string {
+	if runtimeGOOS() != "windows" {
+		return ""
+	}
+	return shellGuidanceForGOOS(runtimeGOOS())
+}
+
 // HostShellEnvironmentGuidance returns the concise, model-facing shell rule
 // for the current host.
 func HostShellEnvironmentGuidance() string {
