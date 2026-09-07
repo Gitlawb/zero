@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 // These ceilings are a deliberate ratchet on Zero's fixed per-turn overhead — the
@@ -78,9 +80,30 @@ func TestEagerToolSchemaTokenBudget(t *testing.T) {
 	// guidance is the one part of the eager set that is not the same everywhere.
 	// Charged separately below rather than folded in here, or this ceiling would
 	// mean a different thing on every machine. See the constants above.
-	guidance := ApproxTextTokens(tools.HostExecCommandShellGuidance())
-	got := total - guidance
-	t.Logf("eager core tool schemas: %d tokens across %d tools (%d total, %d host shell guidance)", got, len(exposed), total, guidance)
+	//
+	// Removed from the description BEFORE estimating rather than subtracted from
+	// the total afterwards. ApproxTextTokens is an integer division, so
+	// floor((schema+guidance)/4) - floor(guidance/4) comes out one token high
+	// whenever the two remainders add past four, and which side of that line a
+	// host lands on depends on the length of its guidance: exactly the
+	// host-dependence this number is supposed to be rid of.
+	guidance := tools.HostExecCommandShellGuidance()
+	schemas := make([]zeroruntime.ToolDefinition, len(exposed))
+	copy(schemas, exposed)
+	stripped := 0
+	for index := range schemas {
+		without := strings.TrimSuffix(schemas[index].Description, guidance)
+		if without != schemas[index].Description {
+			stripped++
+		}
+		schemas[index].Description = without
+	}
+	if guidance != "" && stripped != 1 {
+		t.Fatalf("SETUP INVALID: this host's shell guidance came off %d descriptions, want exactly exec_command's; internal/tools pins it as that description's tail", stripped)
+	}
+	got := estimateToolDefTokens(schemas)
+	guidanceTokens := ApproxTextTokens(guidance)
+	t.Logf("eager core tool schemas: %d tokens across %d tools (%d total, %d host shell guidance)", got, len(exposed), total, guidanceTokens)
 	if got > maxEagerToolSchemaTokens {
 		// NOT "defer a tool": this test pins DeferThreshold at 0, so marking a
 		// tool deferred leaves it exposed here and changes nothing. Deferral is
@@ -89,8 +112,8 @@ func TestEagerToolSchemaTokenBudget(t *testing.T) {
 		// deliberate raise.
 		t.Fatalf("eager tool schemas are %d tokens, over the %d ceiling — trim a schema, drop a core tool, or raise the ceiling deliberately (deferring will NOT help: this test disables deferral)", got, maxEagerToolSchemaTokens)
 	}
-	if guidance > maxExecCommandShellGuidanceTokens {
-		t.Fatalf("this host's exec_command shell guidance is %d tokens, over the %d ceiling — trim the guidance in internal/tools/shell_runtime.go or raise the ceiling deliberately", guidance, maxExecCommandShellGuidanceTokens)
+	if guidanceTokens > maxExecCommandShellGuidanceTokens {
+		t.Fatalf("this host's exec_command shell guidance is %d tokens, over the %d ceiling — trim the guidance in internal/tools/shell_runtime.go or raise the ceiling deliberately", guidanceTokens, maxExecCommandShellGuidanceTokens)
 	}
 }
 

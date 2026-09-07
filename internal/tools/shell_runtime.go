@@ -190,10 +190,17 @@ func shellGuidanceForRuntime(shell shellRuntime) string {
 // PowerShell version, and a single number covering both silently means a
 // different thing on each machine.
 func HostExecCommandShellGuidance() string {
-	if runtimeGOOS() != "windows" {
+	return hostExecCommandShellGuidance(runtimeGOOS())
+}
+
+// hostExecCommandShellGuidance is the guidance a host running goos appends. It
+// is the pair of execCommandDescription, so the two can be checked against each
+// other for every platform rather than only for the running one.
+func hostExecCommandShellGuidance(goos string) string {
+	if goos != "windows" {
 		return ""
 	}
-	return shellGuidanceForGOOS(runtimeGOOS())
+	return shellGuidanceForGOOS(goos)
 }
 
 // HostShellEnvironmentGuidance returns the concise, model-facing shell rule
