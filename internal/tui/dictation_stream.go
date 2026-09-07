@@ -113,6 +113,9 @@ func (m *model) applyStreamingText(text string) {
 		m.dictation.regionEnd = state.cursor
 		m.dictation.regionPrefix = ""
 		m.dictation.regionAnchor = string(stateRunes[:state.cursor])
+		if needsLeadingSpace(state) {
+			m.dictation.regionPrefix = " "
+		}
 	}
 	// Replace [regionStart, regionEnd) with prefix + the new cumulative text.
 	rendered := m.dictation.regionPrefix + text
