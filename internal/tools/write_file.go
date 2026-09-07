@@ -24,9 +24,11 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"path":      {Type: "string", Description: "Absolute or relative path of the file to write."},
-					"content":   {Type: "string", Description: "Full file contents to write."},
-					"overwrite": {Type: "boolean", Description: "Whether to allow overwriting an existing file.", Default: false},
+					"path":         {Type: "string", Description: "Absolute or relative path of the file to write."},
+					"content":      {Type: "string", Description: "Full file contents to write."},
+					"overwrite":    {Type: "boolean", Description: "Whether to allow overwriting an existing file.", Default: false},
+					"bom":          {Type: "string", Enum: []string{"auto", "add", "remove"}, Default: "auto", Description: "Existing-file overwrites only: auto preserves an existing or supplied UTF-8 BOM; add/remove explicitly sets its presence. New files retain content bytes. Applied before optional formatting."},
+					"line_endings": {Type: "string", Enum: []string{"auto", "lf", "crlf"}, Default: "auto", Description: "Existing-file overwrites only: auto preserves dominant existing endings (or supplied dominant CRLF); lf/crlf explicitly selects endings, independently of bom. New files retain content bytes. Applied before optional formatting."},
 				},
 				Required:             []string{"path", "content"},
 				AdditionalProperties: false,
@@ -56,6 +58,20 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	overwrite, err := boolArg(args, "overwrite", false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
+	}
+	bom, err := stringArg(args, "bom", "auto", false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
+	}
+	if bom != "auto" && bom != "add" && bom != "remove" {
+		return errorResult("Error: Invalid arguments for write_file: bom must be auto, add, or remove")
+	}
+	lineEndings, err := stringArg(args, "line_endings", "auto", false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
+	}
+	if lineEndings != "auto" && lineEndings != "lf" && lineEndings != "crlf" {
+		return errorResult("Error: Invalid arguments for write_file: line_endings must be auto, lf, or crlf")
 	}
 
 	absolutePath, relativePath, err := resolveScopedTargetPath(tool.workspaceRoot, tool.scope, requestedPath)
@@ -114,7 +130,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		}
 		priorContent = string(prev)
 		priorContentKnown = true
-		content = preserveWriteFileEncoding(prev, content)
+		content = preserveWriteFileEncoding(prev, content, bom, lineEndings)
 	}
 	modelEquivalentContent := content
 
@@ -201,10 +217,13 @@ var utf8BOM = []byte{0xef, 0xbb, 0xbf}
 // preserveWriteFileEncoding restores byte-level features hidden by read_file's
 // normalized text view. It keeps line endings consistent with the existing
 // file, while still allowing an LF file to be explicitly replaced with
-// consistently CRLF content.
-func preserveWriteFileEncoding(existing []byte, content string) string {
+// consistently CRLF content. Explicit BOM and line-ending intent independently
+// overrides this automatic behavior, before optional formatting.
+func preserveWriteFileEncoding(existing []byte, content, bom, lineEndings string) string {
 	updated := []byte(content)
-	if bytes.HasPrefix(existing, utf8BOM) && !bytes.HasPrefix(updated, utf8BOM) {
+	if bom == "remove" {
+		updated = bytes.TrimPrefix(updated, utf8BOM)
+	} else if (bom == "add" || bytes.HasPrefix(existing, utf8BOM)) && !bytes.HasPrefix(updated, utf8BOM) {
 		updated = append(append([]byte(nil), utf8BOM...), updated...)
 	}
 
@@ -215,6 +234,9 @@ func preserveWriteFileEncoding(existing []byte, content string) string {
 		// Unlike LF returned by read_file, caller-supplied dominant CRLF is an
 		// unambiguous request to change an LF file's convention.
 		useCRLF = true
+	}
+	if lineEndings != "auto" {
+		useCRLF = lineEndings == "crlf"
 	}
 	updated = bytes.ReplaceAll(updated, []byte("\r\n"), []byte("\n"))
 	if useCRLF {
