@@ -659,6 +659,7 @@ type agentUsageMsg struct {
 }
 
 type agentResponseMsg struct {
+	planUpdate    *planUpdateMsg // fallback when no live runtime message sink is configured
 	runID         int
 	rows          []transcriptRow
 	usageEvents   []zeroruntime.Usage
@@ -705,8 +706,9 @@ type agentRowMsg struct {
 // and captures model by value, so it cannot mutate m.plan directly — it sends
 // this message through the runtimeMessageSink instead.
 type planUpdateMsg struct {
-	runID int
-	items []tools.PlanItem
+	runID    int
+	items    []tools.PlanItem
+	syncTool bool
 }
 
 // planStepExplanationMsg carries the model's fresh, plain-English write-up of a
@@ -2645,6 +2647,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if msg.planUpdate != nil {
+			m.applyPlanUpdate(*msg.planUpdate)
+		}
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
 		if msg.err != nil {
 			m.petOutcome = terminalpet.Failed
@@ -2854,7 +2859,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.plan.updateFromItems(msg.items, m.now())
+		m.applyPlanUpdate(msg)
 		return m, nil
 	case planStepExplanationMsg:
 		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
@@ -5470,8 +5475,19 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
-	planBaseline, _, planBaselineErr := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
-	return func() tea.Msg {
+	var publication *planPublication
+	if tool, ok := m.registry.Get("update_plan"); ok {
+		if reader, ok := tool.(currentPlanReader); ok {
+			publication = newPlanPublication(m.cwd, m.activeSession.SessionID, reader.CurrentPlan())
+		}
+	}
+	return func() (message tea.Msg) {
+		defer func() {
+			if response, ok := message.(agentResponseMsg); ok && m.runtimeMessageSink == nil {
+				response.planUpdate = publication.update(runID)
+				message = response
+			}
+		}()
 		started := m.now()
 		if m.turnTimer != nil {
 			m.turnTimer.start(started)
@@ -5511,6 +5527,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					options.Registry.Register(tool)
 				}
 			}
+		}
+		if _, ok := options.Registry.Get("update_plan"); ok && publication != nil {
+			options.Registry.Register(publication)
 		}
 		peerAwareRun := runOptions.transientSystemPrompt != "" || m.sessionContainsPeerMessages()
 		if peerAwareRun && m.peerService != nil {
@@ -5872,43 +5891,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
-			// Keep the latest plan state in sync for run details and step
-			// drill-in. Only on a successful result: an errored call
-			// (including one refused because its run was already cancelled)
-			// must not re-read the shared plan and write it into this run's
-			// session file, which could clobber that file with a later
-			// session's state.
-			if result.Name == "update_plan" && result.Status == tools.StatusOK {
-				// Use the plan snapshot the successful call carried with its
-				// result, never a fresh CurrentPlan() read: this callback runs
-				// after update_plan released its mutex, so a cancel plus
-				// /new or /resume in that window can clear or hydrate the
-				// shared tool, and re-reading it here would persist the wrong
-				// session's plan (or an empty reset) under this run's session.
-				if items, ok := planSnapshotFromResult(result); ok {
-					if m.runtimeMessageSink != nil {
-						m.runtimeMessageSink(planUpdateMsg{runID: runID, items: items})
-					}
-					// Persist every update_plan call to the durable plan store
-					// (under the user config directory, outside the workspace):
-					// it is the single source of truth /plan reads from, so a
-					// plan built entirely through update_plan still survives a
-					// restart/resume, and one seeded by /plan open keeps
-					// reflecting later agent updates. Storing outside the
-					// workspace keeps the tool's read-only / auto-allow
-					// contract honest: no workspace write grant is required.
-					if m.activeSession.SessionID != "" {
-						content := formatPlanItems(items)
-						err := planBaselineErr
-						if err == nil {
-							_, err = planmode.WritePlanIfUnchanged(runCtx, m.cwd, m.activeSession.SessionID, content, planBaseline)
-						}
-						if err != nil {
-							m.sendAgentRow(runID, transcriptRow{kind: rowError, text: "plan file write error: " + err.Error()})
-						} else {
-							planBaseline = content
-						}
-					}
+			// The run-local tool has already accepted or rejected the durable
+			// write. Publish only its accepted snapshot, including recovery to a
+			// competing writer's value after a conflict.
+			if result.Name == "update_plan" && m.runtimeMessageSink != nil {
+				if update := publication.update(runID); update != nil {
+					m.runtimeMessageSink(*update)
 				}
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
