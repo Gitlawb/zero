@@ -1040,6 +1040,59 @@ func TestACPResumesAcrossTwoSpellingsOfOneWorkspace(t *testing.T) {
 	}
 }
 
+func TestACPResumeAppliesStandaloneSessionKindPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind sessions.SessionKind
+		want bool
+	}{
+		{name: "regular", kind: "", want: true},
+		{name: "fork", kind: sessions.SessionKindFork, want: true},
+		{name: "child", kind: sessions.SessionKindChild},
+		{name: "side", kind: sessions.SessionKindSide},
+		{name: "spec draft", kind: sessions.SessionKindSpecDraft},
+		{name: "spec impl", kind: sessions.SessionKindSpecImpl},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := testDeps(t)
+			workspace := t.TempDir()
+			created, err := deps.Store.Create(sessions.CreateInput{
+				SessionID: "kind-policy", Cwd: workspace, SessionKind: tc.kind,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{
+				SessionID: created.SessionID, Cwd: workspace,
+			}, &ResumeSessionResult{})
+			if tc.want {
+				if err != nil {
+					t.Fatalf("session/resume: %v", err)
+				}
+				return
+			}
+			var rpcErr *rpcError
+			if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+				t.Fatalf("session/resume = %v, want invalid params", err)
+			}
+			if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("must stay closed")},
+			}, &PromptResult{}); err == nil {
+				t.Fatal("rejected subordinate session became promptable")
+			}
+			if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+				SessionID: created.SessionID, Cwd: workspace,
+			}, &LoadSessionResult{}); err != nil {
+				t.Fatalf("session/load should retain render-only access: %v", err)
+			}
+		})
+	}
+}
+
 // THE WIRE KEYS ARE AN EXTERNAL CONTRACT, not internal names.
 //
 // Nothing pinned them, so renaming a Go field — or dropping an omitempty —
@@ -1591,6 +1644,8 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "grep", "toolCallId": "call-99", "arguments": `{"pattern":"TODO"}`}},
 		// No id at all: unpairable, so it must be skipped rather than replayed.
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "orphan", "arguments": "{}"}},
+		// An identified result is still unpairable when its start is absent.
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "orphan", "toolCallId": "missing-call", "status": "ok", "output": "must not replay"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1742,6 +1797,155 @@ func TestACPPromptPersistsToolActivityForFreshLoad(t *testing.T) {
 	}
 	if len(result.Locations) != 2 || result.Locations[0].Path != "a.go" || result.Locations[1].Path != "b.go" {
 		t.Fatalf("replayed tool locations = %+v", result.Locations)
+	}
+}
+
+func TestACPPersistenceStopsAtFirstFailedEventDependency(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failAt    int
+		wantTypes []sessions.EventType
+	}{
+		{name: "user message", failAt: 1},
+		{name: "tool call", failAt: 2, wantTypes: []sessions.EventType{sessions.EventMessage}},
+		{name: "tool result", failAt: 3, wantTypes: []sessions.EventType{sessions.EventMessage, sessions.EventToolCall}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := testDeps(t)
+			attempts := 0
+			deps.PersistEvent = func(sessionID string, input sessions.AppendEventInput) error {
+				attempts++
+				if attempts == tc.failAt {
+					return errors.New("injected append failure")
+				}
+				_, err := deps.Store.AppendEvents(sessionID, []sessions.AppendEventInput{input})
+				return err
+			}
+			deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+				call := agent.ToolCall{ID: "call-prefix", Name: "read_file", Arguments: `{"path":"a.go"}`}
+				opts.OnToolCall(call)
+				opts.OnToolResult(agent.ToolResult{
+					ToolCallID: call.ID, Name: call.Name, Status: tools.StatusOK, Output: "content",
+				})
+				return agent.Result{FinalAnswer: "done"}, nil
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			workspace := t.TempDir()
+			writer := newHarness(t, deps)
+			var created NewSessionResult
+			if err := writer.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("read it")},
+			}, &PromptResult{}); err != nil {
+				t.Fatalf("session/prompt: %v", err)
+			}
+			writer.stop()
+			if attempts != tc.failAt {
+				t.Fatalf("append attempts = %d, want persistence to stop at %d", attempts, tc.failAt)
+			}
+			events, err := deps.Store.ReadEvents(created.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != len(tc.wantTypes) {
+				t.Fatalf("durable events = %+v, want prefix %v", events, tc.wantTypes)
+			}
+			for i, want := range tc.wantTypes {
+				if events[i].Type != want {
+					t.Fatalf("durable event %d = %s, want %s", i, events[i].Type, want)
+				}
+			}
+
+			// Reopen through a fresh ACP instance: the durable prefix may contain
+			// an in-progress call, but never its orphan result or an assistant
+			// answer whose prerequisite write failed.
+			loader := newHarness(t, deps)
+			defer loader.stop()
+			if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+				SessionID: created.SessionID, Cwd: workspace,
+			}, &LoadSessionResult{}); err != nil {
+				t.Fatalf("fresh session/load: %v", err)
+			}
+			select {
+			case update := <-loader.tools:
+				if tc.failAt != 3 || update.SessionUpdate != UpdateToolCall || update.ToolCallID != "call-prefix" || update.Status != ToolStatusInProgress {
+					t.Fatalf("replayed tool update = %+v", update)
+				}
+			case <-time.After(100 * time.Millisecond):
+				if tc.failAt == 3 {
+					t.Fatal("persisted tool-call prefix was not replayed")
+				}
+			}
+			select {
+			case update := <-loader.tools:
+				t.Fatalf("dependent tool suffix was replayed: %+v", update)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestACPCompactionFailureFallsBackToRawHistory(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "bad-compaction", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "raw question"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "raw answer"}},
+		// JSON-valid but semantically invalid: rehydration rejects the missing summary.
+		{Type: sessions.EventCompaction, Payload: map[string]any{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	loader := newHarness(t, deps)
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: created.SessionID, Cwd: workspace,
+	}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	loadedText := drainTextUntil(t, loader.updates, func(text string) bool {
+		return strings.Contains(text, "raw answer") && strings.Contains(text, "Raw session history was restored")
+	})
+	if !strings.Contains(loadedText, "raw answer") || !strings.Contains(loadedText, "Raw session history was restored") {
+		t.Fatalf("load output = %q", loadedText)
+	}
+	loader.stop()
+
+	prompts := make(chan string, 1)
+	realRun := deps.RunAgent
+	deps.RunAgent = func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		prompts <- prompt
+		return realRun(ctx, prompt, provider, opts)
+	}
+	resumer := newHarness(t, deps)
+	defer resumer.stop()
+	if err := resumer.client.Call(ctx, MethodSessionResume, ResumeSessionParams{
+		SessionID: created.SessionID, Cwd: workspace,
+	}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	if err := resumer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("continue")},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	select {
+	case prompt := <-prompts:
+		if !strings.Contains(prompt, "raw question") || !strings.Contains(prompt, "raw answer") {
+			t.Fatalf("resumed prompt lost raw fallback history:\n%s", prompt)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 }
 

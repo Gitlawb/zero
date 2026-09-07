@@ -44,8 +44,11 @@ type Deps struct {
 	// ResolveWorkspaceRoot validates + normalizes a client-supplied cwd (must be an
 	// existing directory; never the bare root). It is the file-tool confinement root.
 	ResolveWorkspaceRoot func(cwd string) (string, error)
-	Store                *sessions.Store
-	AgentInfo            Implementation
+	// PersistEvent is an optional test seam for injecting event-store failures.
+	// Production callers leave it nil and use Store.AppendEvents.
+	PersistEvent func(sessionID string, input sessions.AppendEventInput) error
+	Store        *sessions.Store
+	AgentInfo    Implementation
 }
 
 // Workspace is the per-turn execution environment passed to the agent. ACP does
@@ -213,7 +216,7 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/load params")
 	}
-	return a.activatePersistedSession(ctx, p, true)
+	return a.activatePersistedSession(ctx, p, persistedSessionLoad)
 }
 
 func (a *Agent) handleSessionResume(ctx context.Context, params json.RawMessage) (any, error) {
@@ -221,14 +224,21 @@ func (a *Agent) handleSessionResume(ctx context.Context, params json.RawMessage)
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/resume params")
 	}
-	return a.activatePersistedSession(ctx, p, false)
+	return a.activatePersistedSession(ctx, p, persistedSessionResume)
 }
+
+type persistedSessionOperation uint8
+
+const (
+	persistedSessionLoad persistedSessionOperation = iota
+	persistedSessionResume
+)
 
 // activatePersistedSession restores the agent's internal conversation context
 // for both lifecycle methods. session/load additionally replays user-visible
 // history as ordered session/update notifications; session/resume deliberately
 // does not, which makes it safe for an already-rendered desktop reconnect.
-func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParams, replay bool) (any, error) {
+func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParams, operation persistedSessionOperation) (any, error) {
 	// BOTH METHODS, BEFORE ANYTHING IS LOOKED UP. session/resume shares this
 	// params type with session/load, so the wire cannot tell an omitted cwd from
 	// an empty one; the blank case used to be answered with the persisted cwd,
@@ -242,6 +252,9 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	meta, err := a.deps.Store.Get(p.SessionID)
 	if err != nil || meta == nil {
 		return nil, RPCError(codeInvalidParams, "session not found: "+p.SessionID)
+	}
+	if operation == persistedSessionResume && !sessions.IsResumableKind(meta.SessionKind) {
+		return nil, RPCError(codeInvalidParams, "session is not resumable: "+p.SessionID)
 	}
 	if strings.TrimSpace(meta.Cwd) == "" {
 		return nil, RPCError(codeInvalidParams, "session has no persisted workspace: "+p.SessionID)
@@ -271,7 +284,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// Load history BEFORE publishing the session so no concurrent prompt observes
 	// a half-initialized session (registerSession sets history under the lock and
 	// reuses an already-live session rather than orphaning its in-flight turn).
-	history, messages, historyErr := a.loadHistory(meta.SessionID)
+	history, messages, historyWarning, historyErr := a.loadHistory(meta.SessionID)
 	// RESUME PROMISES RESTORED CONTEXT, SO A FAILED RESTORATION IS A FAILED
 	// RESUME. historyErr used to do nothing but suppress replay and raise a
 	// warning: the session was registered and reported ready regardless, so a
@@ -283,7 +296,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// best-effort policy deliberately rather than by inheriting this helper: it
 	// replays what it has and warns about the rest, which is the right trade for
 	// a client rebuilding a transcript it can still scroll. Reported by @jatmn.
-	if !replay && historyErr != nil {
+	if operation == persistedSessionResume && historyErr != nil {
 		return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
 	}
 	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
@@ -298,7 +311,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	}
 	sess := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
 	note := &notifier{conn: a.conn, sessionID: sess.id}
-	if replay && historyErr == nil {
+	if operation == persistedSessionLoad && historyErr == nil {
 		for _, message := range messages {
 			if message.tool != nil {
 				note.send(*message.tool)
@@ -307,6 +320,12 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 			note.send(replayMessageChunk(message.role, replayMessageID(message.eventID), message.content))
 		}
 	}
+	a.warnPersistence(
+		note,
+		"rehydrate session compaction",
+		"Could not apply session compaction. Raw session history was restored instead.",
+		historyWarning,
+	)
 	a.warnPersistence(
 		note,
 		"load session history",
@@ -474,8 +493,15 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	// durable log has the same order the client observed and an interrupted call
 	// remains visible after a fresh-process load.
 	var persistenceErr error
+	persistenceFailed := false
 	persist := func(input sessions.AppendEventInput) {
-		persistenceErr = errors.Join(persistenceErr, a.persistEvent(sess.id, input))
+		if persistenceFailed {
+			return
+		}
+		if err := a.persistEvent(sess.id, input); err != nil {
+			persistenceErr = errors.Join(persistenceErr, err)
+			persistenceFailed = true
+		}
 	}
 	persist(messageEvent("user", userText))
 
@@ -784,6 +810,9 @@ func (a *Agent) configOptions(s *acpSession) []SessionConfigOption {
 // ---- persistence + continuity ----
 
 func (a *Agent) persistEvent(sessionID string, input sessions.AppendEventInput) error {
+	if a.deps.PersistEvent != nil {
+		return a.deps.PersistEvent(sessionID, input)
+	}
 	if a.deps.Store == nil {
 		return nil
 	}
@@ -837,9 +866,9 @@ type persistedMessage struct {
 	tool *ToolCallUpdate
 }
 
-func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage, error) {
+func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage, error, error) {
 	if a.deps.Store == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	// THE EFFECTIVE CONVERSATION, NOT THE RAW LOG. A compacted session keeps its
 	// original prefix on disk alongside an EventCompaction that names the events
@@ -856,11 +885,17 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 	// it replaced, so a loop that skips everything but EventMessage would drop the
 	// summary exactly as before. It is projected below. Reported by @jatmn.
 	events, err := a.deps.Store.ReadRehydratedEvents(sessionID)
+	var rehydrateWarning error
 	if err != nil {
-		return nil, nil, err
+		rehydrateWarning = err
+		events, err = a.deps.Store.ReadEvents(sessionID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	var records []turnRecord
 	var messages []persistedMessage
+	seenToolCalls := make(map[string]struct{})
 	var pendingUser string
 	havePending := false
 	for _, e := range events {
@@ -898,6 +933,13 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 		// only the wire rendering differs. Reported by @jatmn.
 		if e.Type == sessions.EventToolCall || e.Type == sessions.EventToolResult {
 			if upd := replayToolUpdate(e); upd != nil {
+				if e.Type == sessions.EventToolResult {
+					if _, ok := seenToolCalls[upd.ToolCallID]; !ok {
+						continue
+					}
+				} else {
+					seenToolCalls[upd.ToolCallID] = struct{}{}
+				}
 				messages = append(messages, persistedMessage{
 					eventID: persistedMessageIdentity(sessionID, e),
 					tool:    upd,
@@ -937,7 +979,7 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 	if havePending {
 		records = append(records, turnRecord{user: pendingUser})
 	}
-	return records, messages, nil
+	return records, messages, rehydrateWarning, nil
 }
 
 // replayToolUpdate rebuilds the ACP notification for one stored tool event.
