@@ -544,6 +544,31 @@ func TestImageBudgetNonZeroResidueAllowsSmallerLaterImage(t *testing.T) {
 	}
 }
 
+func TestImageCountBudgetPreservesTextAndSkipsFurtherDecoding(t *testing.T) {
+	content := []Content{{Type: "image", Data: "invalid"}}
+	for range 17 {
+		content = append(content, Content{Type: "image", MimeType: "image/png", Data: tinyPNGBase64})
+	}
+	content = append(content, Content{Type: "text", Text: "trailing text"})
+	previous := decodeImageBase64
+	decodes := 0
+	decodeImageBase64 = func(s string) ([]byte, error) {
+		decodes++
+		return previous(s)
+	}
+	t.Cleanup(func() { decodeImageBase64 = previous })
+	result := registryTool{
+		client: &nonTextClient{content: content},
+		server: Server{Name: "shots"}, remote: RemoteTool{Name: "screenshot"},
+	}.Run(context.Background(), map[string]any{})
+	if len(result.Images) != 16 || decodes != 17 {
+		t.Fatalf("forwarded %d images with %d decodes, want 16 images and 17 attempts including invalid input", len(result.Images), decodes)
+	}
+	if !strings.Contains(result.Output, "trailing text") || !strings.Contains(result.Output, "1 image/png block, which was not inspected") {
+		t.Fatalf("missing text or count-budget notice: %s", result.Output)
+	}
+}
+
 func BenchmarkForwardImagesFourHalfBudget(b *testing.B) {
 	payload := paddedPNGBase64(imageinput.MaxImageBytes / 2)
 	content := []Content{

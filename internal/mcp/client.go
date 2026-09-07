@@ -536,14 +536,16 @@ func DroppedContentSummary(content []Content) string {
 // capture tools already use. Blocks that cannot be decoded, exceed
 // imageinput.MaxImageBytes individually, sniff to a type outside the provider
 // allow-list, or would push the result over an aggregate
-// imageinput.MaxImageBytes budget, are left for DroppedContentSummary to name.
+// imageinput.MaxImageBytes budget or maxForwardedImages count, are left for
+// DroppedContentSummary to name.
 //
 // The aggregate cap is the same 10 MiB as the per-image cap: a server that
 // returns many individually valid images must not retain all of them in
 // Result.Images. Once the next valid image would exceed the remaining
 // budget it is skipped; a later smaller image may still fit. Later image
-// payloads are not decoded only once remaining is zero; a leftover residue
-// still fully decodes the next candidate before the length check rejects it.
+// payloads are not decoded once remaining is zero or the count cap is reached.
+// A leftover residue still fully decodes the next candidate before the length
+// check rejects it.
 func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
 	images, _ := forwardImages(content)
 	return images
@@ -567,6 +569,9 @@ const (
 // count decode attempts; production uses standard base64.
 var decodeImageBase64 = base64.StdEncoding.DecodeString
 
+// Bound provider content-block overhead independently of decoded image size.
+const maxForwardedImages = 16
+
 func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 	disp := make([]itemDisp, len(content))
 	var images []zeroruntime.ImageBlock
@@ -577,7 +582,7 @@ func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 			continue
 		}
 		if item.Type == "image" {
-			if remaining == 0 {
+			if remaining == 0 || len(images) >= maxForwardedImages {
 				disp[i] = dispUninspected
 				continue
 			}
