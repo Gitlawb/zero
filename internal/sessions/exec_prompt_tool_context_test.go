@@ -142,3 +142,32 @@ func TestResumePromptUnchangedWithoutToolEvents(t *testing.T) {
 		t.Fatalf("a tool-free session rendered %d context lines, want 2:\n%s", strings.Count(out, "- #"), out)
 	}
 }
+
+// TOOL OUTPUT MUST NOT RIDE ALONG INTO A LATER PROMPT.
+//
+// The tail is there to say what the interrupted turn did, and the call already
+// says that. Carrying the result body would put up to 500 bytes of raw tool
+// output into a prompt on a later turn, and nothing redacts on the way in.
+func TestResumePromptCarriesToolOutcomeWithoutOutput(t *testing.T) {
+	secret := "AKIAIOSFODNN7EXAMPLE-and-more-file-contents"
+	events := []Event{
+		{Sequence: 1, Type: EventMessage, Payload: toolContextPayload(t, map[string]any{"role": "user", "content": "look at the config"})},
+		{Sequence: 2, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{"id": "c1", "name": "read_file", "arguments": `{"path":"deploy/prod.env"}`})},
+		{Sequence: 3, Type: EventToolResult, Payload: toolContextPayload(t, map[string]any{"name": "read_file", "status": "ok", "output": secret})},
+		{Sequence: 4, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{"id": "c2", "name": "read_file", "arguments": `{"path":"deploy/missing.env"}`})},
+		{Sequence: 5, Type: EventToolResult, Payload: toolContextPayload(t, map[string]any{"name": "read_file", "status": "error", "output": "no such file"})},
+		{Sequence: 6, Type: EventError, Payload: toolContextPayload(t, map[string]any{"message": "provider error: upstream timeout"})},
+	}
+	out := resumePrompt(t, events)
+
+	if strings.Contains(out, secret) {
+		t.Errorf("tool output reached the resume prompt:\n%s", out)
+	}
+	// What the turn DID still survives: the paths from the calls, and how each
+	// one ended.
+	for _, want := range []string{"deploy/prod.env", "deploy/missing.env", "error"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the resume prompt lost %q, so the next turn cannot tell what happened:\n%s", want, out)
+		}
+	}
+}

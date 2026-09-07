@@ -236,9 +236,13 @@ func promptContextEvents(events []Event) []Event {
 		switch event.Type {
 		case EventMessage, EventCompaction, EventSessionFork, EventSessionChild, EventSpecialistStart, EventSpecialistStop, EventError:
 			conversation = append(conversation, event)
-		case EventToolCall, EventToolResult:
+		case EventToolCall:
 			if index > lastSpoken {
 				tail = append(tail, event)
+			}
+		case EventToolResult:
+			if index > lastSpoken {
+				tail = append(tail, toolResultOutcome(event))
 			}
 		}
 	}
@@ -266,6 +270,42 @@ func promptContextEvents(events []Event) []Event {
 	merged = append(merged, tail...)
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Sequence < merged[j].Sequence })
 	return merged
+}
+
+// toolResultOutcome strips a tool result down to WHICH tool ran and HOW IT
+// ENDED, dropping the output body.
+//
+// The tail exists so a resumed turn knows what the interrupted one did, and the
+// CALL already carries that: the tool name and its arguments, which is the path
+// for a read. The result adds only a 500-byte prefix of the output, which is
+// worth little beside the call and is the one part of an event that can carry
+// file contents. Nothing redacts on the way into a prompt, so keeping it would
+// re-emit raw tool output into a later turn on the strength of a truncation
+// limit alone.
+//
+// The status stays, because dropping it would be worse than dropping the whole
+// result: a bare call reads as work that succeeded, so a failed read would come
+// back as a file the next turn believes it already has.
+func toolResultOutcome(event Event) Event {
+	var decoded struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(event.Payload, &decoded); err != nil {
+		// Undecodable: drop the payload rather than pass an unknown shape through.
+		event.Payload = json.RawMessage(`{}`)
+		return event
+	}
+	trimmed, err := json.Marshal(map[string]string{
+		"name":   decoded.Name,
+		"status": decoded.Status,
+	})
+	if err != nil {
+		event.Payload = json.RawMessage(`{}`)
+		return event
+	}
+	event.Payload = json.RawMessage(trimmed)
+	return event
 }
 
 // payloadRole reads the "role" field of a message payload, returning "" when the

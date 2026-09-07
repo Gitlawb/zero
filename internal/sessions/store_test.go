@@ -615,10 +615,18 @@ func TestFormatExecPromptKeepsConversationMessagesWhenNoisyEventsFollow(t *testi
 	// of what an interrupted turn leaves behind (#913). The property this test
 	// was written for (#460) is that CONVERSATION survives a noisy turn, and the
 	// assertions above still hold it.
-	if !strings.Contains(prompt, "noisy tool result") {
-		t.Fatalf("expected unanswered tool work to be carried, got %q", prompt)
+	// The tool results here follow the last assistant answer, so they are work
+	// nothing has spoken for yet, and an interrupted turn leaves exactly this
+	// behind (#913). Their IDENTITY is carried; their OUTPUT is not, because the
+	// call beside them already names what was touched and the body is the part
+	// that can carry file contents into a later prompt.
+	if !strings.Contains(prompt, "tool_result: read_file") {
+		t.Fatalf("expected unanswered tool work to be named, got %q", prompt)
 	}
-	if count := strings.Count(prompt, "noisy tool result"); count > 24 {
+	if strings.Contains(prompt, "noisy tool result") {
+		t.Fatalf("tool output body reached the prompt, got %q", prompt)
+	}
+	if count := strings.Count(prompt, "tool_result:"); count > 24 {
 		t.Fatalf("carried %d tool events, over the tail allowance of 24: %q", count, prompt)
 	}
 }
@@ -648,6 +656,9 @@ func TestFormatExecPromptOmitsToolWorkAnAnswerAlreadyCovers(t *testing.T) {
 
 	if strings.Contains(prompt, "already summarized tool result") {
 		t.Fatalf("tool work the assistant already described was repeated verbatim, got %q", prompt)
+	}
+	if strings.Contains(prompt, "tool_result:") {
+		t.Fatalf("an answered turn still listed its tool events, got %q", prompt)
 	}
 	for _, want := range []string{"first user request", "here is the summary", "latest user request"} {
 		if !strings.Contains(prompt, want) {
