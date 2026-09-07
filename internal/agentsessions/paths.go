@@ -124,7 +124,9 @@ func globTranscripts(root string, pattern string) []string {
 // root is a symlink. The eventual read also goes through os.Root (openContained),
 // which binds containment at open time and closes the check/open race; this
 // discovery-time check prevents a symlinked project/date directory from being
-// indexed in the first place.
+// indexed in the first place. On Windows, Lstat does not identify junctions as
+// ModeSymlink; this function is therefore only a best-effort index filter there.
+// The os.Root read is the containment boundary on every platform.
 func pathHasSymlink(root string, match string) bool {
 	relative, err := filepath.Rel(root, match)
 	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -208,12 +210,39 @@ func slugCandidates(cwd string) []string {
 // because the directory has since been deleted, which is common in old
 // transcripts — degrades to a lexical clean rather than dropping the session.
 func normalizeDir(path string) string {
+	return normalizeDirForOS(path, runtime.GOOS)
+}
+
+func normalizeDirForOS(path string, goos string) string {
+	return normalizeDirWithFS(path, goos, os.Stat, filepath.EvalSymlinks)
+}
+
+func normalizeDirWithFS(
+	path string,
+	goos string,
+	stat func(string) (os.FileInfo, error),
+	evalSymlinks func(string) (string, error),
+) string {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
 		return ""
 	}
 	cleaned := filepath.Clean(trimmed)
-	resolved, err := filepath.EvalSymlinks(cleaned)
+	// A foreign transcript controls this value. Windows path resolution can dial
+	// UNC shares (and mapped drives) while merely building /resume, so discovery
+	// never performs filesystem I/O for Windows paths. Exact lexical matching is
+	// still useful and case-folded below; any stronger containment decision is
+	// deferred to the rooted open used when the transcript is actually read.
+	if goos == "windows" {
+		return cleaned
+	}
+	// EvalSymlinks is useful for local aliases such as /tmp -> /private/tmp, but
+	// only after a local stat proves the path currently exists. Missing or stale
+	// transcript paths stay lexical and cannot trigger resolver-specific probes.
+	if _, err := stat(cleaned); err != nil {
+		return cleaned
+	}
+	resolved, err := evalSymlinks(cleaned)
 	if err != nil {
 		return cleaned
 	}
@@ -226,8 +255,8 @@ func sameDir(left string, right string) bool {
 }
 
 func sameDirForOS(left string, right string, goos string) bool {
-	normalizedLeft := normalizeDir(left)
-	normalizedRight := normalizeDir(right)
+	normalizedLeft := normalizeDirForOS(left, goos)
+	normalizedRight := normalizeDirForOS(right, goos)
 	if normalizedLeft == "" || normalizedRight == "" {
 		return false
 	}

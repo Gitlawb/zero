@@ -369,7 +369,7 @@ func CompactionMessages(events []Event) []zeroruntime.Message {
 			status := strings.ToLower(stringField("status"))
 			messages = append(messages, zeroruntime.Message{
 				Role: zeroruntime.MessageRoleTool, ToolCallID: firstSessionString(stringField("toolCallId"), stringField("id")),
-				Content: stringField("output"), IsError: status != "" && status != "ok", ChangedFiles: sessionStringSlice(payload["changedFiles"]),
+				Content: stringField("output"), IsError: status == "error", ChangedFiles: sessionStringSlice(payload["changedFiles"]),
 			})
 		case EventCompaction:
 			if summary := stringField("summary"); summary != "" {

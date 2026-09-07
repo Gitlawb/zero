@@ -186,9 +186,16 @@ func ImportSource(store *sessions.Store, adapter Adapter, source ForeignSession,
 	if err != nil {
 		return ImportResult{}, err
 	}
-	if len(events) == 0 {
+	if !hasImportableSourceContent(events) {
 		return ImportResult{}, fmt.Errorf("import %s: %w", id, ErrNoImportableContent)
 	}
+	// The imported transcript crosses a model trust boundary. Persist one
+	// generated note before any foreign turn so every resume projection tells the
+	// continuing model that history is reference context, not instructions or
+	// inherited authorization. This sits outside the adapter's source-event cap:
+	// MaxEvents describes copied transcript events, while the boundary is Zero's
+	// mandatory safety metadata.
+	events = append([]sessions.AppendEventInput{importBoundaryEvent(adapter.Name())}, events...)
 
 	created, discardCreated, err := store.CreateDiscardable(sessions.CreateInput{
 		// THE STORE IS THE CHOKEPOINT FOR DISPLAY VALUES. These fields are
