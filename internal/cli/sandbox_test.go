@@ -561,6 +561,7 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	profile, _ := plan["permissionProfile"].(map[string]any)
 	fileSystem, _ := profile["fileSystem"].(map[string]any)
 	wantDenyRead := []string(nil)
+	wantSSHFiles := []string(nil)
 	if runtime.GOOS != "windows" {
 		credentialHome := emptyHome
 		if resolved, err := filepath.EvalSymlinks(emptyHome); err == nil {
@@ -590,6 +591,11 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 			filepath.Join(credentialHome, ".config", "gcloud"),
 			filepath.Join(credentialHome, ".config", "zero"),
 		}
+		for _, path := range wantDenyRead {
+			if filepath.Dir(path) == filepath.Join(credentialHome, ".ssh") {
+				wantSSHFiles = append(wantSSHFiles, path)
+			}
+		}
 		if emptyHome != credentialHome {
 			for _, rel := range []string{
 				".git-credentials",
@@ -610,6 +616,12 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	sort.Strings(wantDenyRead)
 	if !reflect.DeepEqual(gotDenyRead, wantDenyRead) {
 		t.Fatalf("manager credential deny baseline = %#v, want %#v", gotDenyRead, wantDenyRead)
+	}
+	gotSSHFiles := jsonStringSlice(fileSystem["sshDenyReadFiles"])
+	sort.Strings(gotSSHFiles)
+	sort.Strings(wantSSHFiles)
+	if !reflect.DeepEqual(gotSSHFiles, wantSSHFiles) {
+		t.Fatalf("manager absent SSH key protection = %#v, want %#v", gotSSHFiles, wantSSHFiles)
 	}
 	wantCarveouts := []string(nil)
 	wantEnsureDirs := []string(nil)
@@ -639,6 +651,7 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 		t.Fatalf("manager credential ensure dirs = %#v, want %#v", gotEnsureDirs, wantEnsureDirs)
 	}
 	delete(fileSystem, "denyReadIfExists")
+	delete(fileSystem, "sshDenyReadFiles")
 	delete(fileSystem, "denyReadCarveouts")
 	delete(fileSystem, "ensureDenyReadDirs")
 	fileSystem["readRoots"] = filterJSONStringRoots(fileSystem["readRoots"], tempRoots)

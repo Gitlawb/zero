@@ -67,7 +67,7 @@ func TestGrantRequestPermissionsNetworkOverlaysPolicyForTurn(t *testing.T) {
 	workspace := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t),
 		Backend: Backend{
 			Name:            BackendLinuxBwrap,
 			Available:       true,
@@ -105,6 +105,7 @@ func TestGrantRequestPermissionsNetworkOverlaysPolicyForTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan with network grant: %v", err)
 	}
+	t.Cleanup(plan.Cleanup)
 	if plan.Policy.Network != NetworkAllow || plan.PermissionProfile.Network.Mode != NetworkAllow {
 		t.Fatalf("network turn grant should build a network-allow command plan, got policy=%s profile=%s", plan.Policy.Network, plan.PermissionProfile.Network.Mode)
 	}

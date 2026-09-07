@@ -107,3 +107,46 @@ func TestSSHAllowReadDirectoryKeepsExternalKeyDeny(t *testing.T) {
 		t.Fatal("allowing the SSH directory also exposed a referenced key outside it")
 	}
 }
+
+func TestLinuxAbsentSSHKeyRefusesCommandBeforeCreation(t *testing.T) {
+	for _, kind := range []string{"absent-directory", "empty-directory", "configured-external-key"} {
+		t.Run(kind, func(t *testing.T) {
+			home := t.TempDir()
+			sshDir := filepath.Join(home, ".ssh")
+			key := filepath.Join(sshDir, "id_ed25519")
+			var allowRead []string
+			if kind == "empty-directory" {
+				if err := os.Mkdir(sshDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "configured-external-key" {
+				key = filepath.Join(home, "keys", "future-key")
+				mustWriteFile(t, filepath.Join(sshDir, "config"), "IdentityFile ~/keys/future-key\n")
+				// Isolate the external candidate from the conventional key denies.
+				allowRead = []string{sshDir}
+			}
+			credentials := credentialDenyReadPathsIn(credentialPathOptions{Homes: []string{home}}, allowRead)
+			profile := PermissionProfile{FileSystem: FileSystemPolicy{
+				Kind: FileSystemRestricted, ReadRoots: []string{"/"},
+				DenyReadIfExists: credentials.Paths, SSHDenyReadFiles: credentials.SSHFiles,
+			}}
+			// Fail closed before launch: there must be no running sandbox in which
+			// a trusted host writer can later make this key readable.
+			for _, created := range []bool{false, true} {
+				if created {
+					mustWriteFile(t, key, sshPrivateKeyFixture())
+				}
+				args, err := BuildLinuxSandboxBwrapArgs(sshTestBwrapOptions(t, profile))
+				if err == nil || !strings.Contains(err.Error(), "selective SSH key protection") || len(args) != 0 {
+					t.Errorf("profile constructed before key creation allowed command planning (created=%v): %v", created, err)
+				}
+			}
+			// An explicit directory deny covers both present and future keys.
+			credentials = finalizeCredentialDenyPaths(credentials, []string{normalizeProfilePath(filepath.Dir(key))})
+			if len(credentials.SSHFiles) != 0 {
+				t.Errorf("containing-directory deny did not cover future external key: %v", credentials.SSHFiles)
+			}
+		})
+	}
+}

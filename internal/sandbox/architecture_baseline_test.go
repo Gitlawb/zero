@@ -76,7 +76,7 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t),
 		Backend: Backend{
 			Name:            BackendLinuxBwrap,
 			Available:       true,
@@ -90,6 +90,7 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
+	t.Cleanup(plan.Cleanup)
 
 	if plan.TargetBackend != BackendLinuxBwrap || !plan.Wrapped || plan.EnforcementLevel != EnforcementNative || plan.DowngradeReason != "" {
 		t.Fatalf("wrapped command metadata = %#v, want native linux-bwrap", plan)
@@ -107,6 +108,7 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan unavailable auto plan: %v", err)
 	}
+	t.Cleanup(degraded.Cleanup)
 	if degraded.Wrapped || degraded.EnforcementLevel != EnforcementDegraded || degraded.DowngradeReason != "native sandbox unavailable" {
 		t.Fatalf("unavailable command metadata = %#v, want degraded direct plan", degraded)
 	}

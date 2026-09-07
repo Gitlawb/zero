@@ -29,7 +29,7 @@ const sshPrivateKeySniffBytes = 128
 
 // sshWellKnownPrivateKeyNames are the OpenSSH default private-key basenames.
 // They are emitted even when ~/.ssh is absent so pathname-policy backends can
-// reserve them; mount-based Linux still masks only paths that exist.
+// reserve them; mount-based Linux must refuse unprotected future key paths.
 var sshWellKnownPrivateKeyNames = []string{
 	"id_rsa",
 	"id_dsa",

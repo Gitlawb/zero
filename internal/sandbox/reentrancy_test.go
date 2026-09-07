@@ -100,13 +100,14 @@ func TestBuildCommandPlanWrapsWhenNotAlreadySandboxed(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t),
 		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
+	t.Cleanup(plan.Cleanup)
 	if !plan.Wrapped || plan.Name != "/usr/bin/zero-linux-sandbox" {
 		t.Fatalf("expected a wrapped Linux helper plan, got wrapped=%v name=%q", plan.Wrapped, plan.Name)
 	}
