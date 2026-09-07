@@ -232,33 +232,41 @@ func BuildWindowsSandboxSetupArgs(options WindowsSandboxSetupArgsOptions) (Windo
 
 // undoWindowsSetupRuntimeCreation removes what building the setup args created.
 //
-// The lease goes first and only under an EXCLUSIVE acquisition. That is not
-// tidiness: taking it exclusively is the proof that no other process is holding
-// the runtime root this is about to delete. If somebody is, the lease and the
-// tree both stay and the caller is told, which is the honest answer rather than
-// a rollback that reports success while removing a live tree.
+// EXCLUSIVITY IS HELD ACROSS EVERY MUTATION THAT DEPENDS ON IT, not just taken
+// and handed back. Taking the lease exclusively proves no command is holding the
+// runtime root this is about to delete, and that proof has to still be true when
+// the last directory goes, not only when the first one does.
+//
+// Two ways the old shape broke that. It released the lease before removing the
+// lease pathname and before compensating the tree, so a command blocked on the
+// shared lease was let in during the removal: it could take the old lease object
+// while cleanup unlinked the name out from under it (the lease is opened
+// FILE_SHARE_DELETE, and the comment claiming Windows forbids that delete was
+// simply wrong), after which a later cleanup could lock a different object at the
+// same pathname and conclude the root was free. And an acquisition that came back
+// in-use said the tree was "left in place" and then removed it anyway on the very
+// next statement, which is the outcome the message exists to promise never
+// happens.
+//
+// So: acquire, mutate, release, in that order, and mutate nothing at all unless
+// the acquisition succeeded. Leaving a tree behind is recoverable by the next
+// run; deleting a live one is not.
 func undoWindowsSetupRuntimeCreation(root string, created []windowsCreatedRuntimeDir, leasePath string, ownsLease bool) error {
-	var errs []error
-	if ownsLease {
-		lease, inUse, err := tryAcquireSandboxRuntimeCleanupLease(root)
-		switch {
-		case err != nil:
-			errs = append(errs, fmt.Errorf("take the sandbox runtime lease before removing it: %w", err))
-		case inUse:
-			errs = append(errs, fmt.Errorf("the sandbox runtime root %s is in use by another process, so %s and the tree it protects were left in place", root, leasePath))
-		default:
-			// Released before the remove: a file cannot be deleted on Windows while
-			// this process still holds it open.
-			lease.release()
-			if err := os.Remove(leasePath); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, fmt.Errorf("remove the sandbox runtime lease %s: %w", leasePath, err))
-			}
-		}
+	if !ownsLease {
+		return windowsRuntimeRootRollback{created: created}.run()
 	}
-	if err := (windowsRuntimeRootRollback{created: created}).run(); err != nil {
-		errs = append(errs, err)
+	lease, inUse, err := tryAcquireSandboxRuntimeCleanupLease(root)
+	switch {
+	case err != nil:
+		return fmt.Errorf("take the sandbox runtime lease before removing it: %w; %s and the tree it protects were left in place", err, leasePath)
+	case inUse:
+		return fmt.Errorf("the sandbox runtime root %s is in use by another process, so %s and the tree it protects were left in place", root, leasePath)
 	}
-	return errors.Join(errs...)
+	defer lease.release()
+	if runtimeCleanupExclusivityBarrier != nil {
+		runtimeCleanupExclusivityBarrier()
+	}
+	return windowsRuntimeRootRollback{created: created, leasePath: leasePath}.run()
 }
 
 func ParseWindowsSandboxSetupArgs(args []string) (WindowsSandboxSetupConfig, error) {
@@ -725,6 +733,18 @@ type windowsRuntimeRootRollback struct {
 	// and a pathname-only undo removes the substitute while the original keeps
 	// this run's grant and stamp.
 	created []windowsCreatedRuntimeDir
+	// leasePath is the lease file this invocation created, or "" when it did not
+	// create one and has no business removing it.
+	//
+	// Removed DURING the walk rather than before it, immediately ahead of the
+	// directory that contains it, because the two orderings each break something.
+	// Removing it first ends the exclusion the whole cleanup depends on: the name
+	// disappears at once, and the next process to want the root creates a fresh
+	// lease file at that name and enters a tree this walk is still deleting.
+	// Removing it last leaves its parent non-empty, so the parent can never be
+	// compensated. Between those, the latest possible moment is just before the
+	// parent is removed.
+	leasePath string
 	// stamp is the runtime stamp's state before this run touched it.
 	//
 	// The stamp is the one artifact setup writes INSIDE the runtime root, and it
@@ -877,8 +897,24 @@ func (rollback windowsRuntimeRootRollback) run() error {
 	if err := rollback.stamp.restore(); err != nil {
 		errs = append(errs, err)
 	}
+	leaseRemoved := false
+	removeLease := func() {
+		if rollback.leasePath == "" || leaseRemoved {
+			return
+		}
+		leaseRemoved = true
+		if err := os.Remove(rollback.leasePath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove the sandbox runtime lease %s: %w", rollback.leasePath, err))
+		}
+	}
 	for index := len(rollback.created) - 1; index >= 0; index-- {
 		entry := rollback.created[index]
+		// The lease sits beside the runtime root, so this is the directory whose
+		// removal it would otherwise block. See the field comment for why it goes
+		// here and not at either end of the walk.
+		if filepath.Clean(entry.path) == filepath.Dir(rollback.leasePath) {
+			removeLease()
+		}
 		// Same rule as the stamp: prove this is the directory we made before
 		// removing it. A substitute at the same name belongs to whoever put it
 		// there.
@@ -893,6 +929,8 @@ func (rollback windowsRuntimeRootRollback) run() error {
 			errs = append(errs, err)
 		}
 	}
+	// Its parent was already there, so the walk never reached it.
+	removeLease()
 	return errors.Join(errs...)
 }
 

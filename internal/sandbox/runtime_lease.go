@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"fmt"
 	"sync"
 )
 
@@ -40,13 +39,13 @@ func sandboxRuntimeLeasePath(root string) string {
 	return root + sandboxRuntimeLeaseSuffix
 }
 
-func acquireSandboxRuntimeLease(root string) (*sandboxRuntimeLease, error) {
-	handle, err := acquireSharedRuntimeLease(sandboxRuntimeLeasePath(root))
-	if err != nil {
-		return nil, fmt.Errorf("acquire sandbox runtime lease: %w", err)
-	}
-	return &sandboxRuntimeLease{handle: handle}, nil
-}
+// The pathname-based shared acquisition that used to live here is gone with its
+// two platform halves. It opened the lease by full pathname, so it followed a
+// link planted at that name and, on Windows, opened without FILE_SHARE_DELETE,
+// which alone stops cleanup from ever removing the lease it is holding. Every
+// caller now goes through acquireRuntimeLeaseForPlatform, which descends from a
+// retained parent handle no-follow. Leaving the weaker door defined next to the
+// stronger one is how a later change quietly takes it.
 
 func tryAcquireSandboxRuntimeCleanupLease(root string) (*sandboxRuntimeLease, bool, error) {
 	handle, inUse, err := tryAcquireExclusiveRuntimeLease(root)

@@ -14,6 +14,13 @@ package sandbox
 // production.
 var runtimeDescentBarrier func()
 
+// runtimeCleanupExclusivityBarrier, when set, runs during compensation while the
+// exclusive cleanup lease is held: after it has been taken and before the first
+// thing is removed. It exists so a test can put a contender into that window and
+// prove the exclusion still covers it, which is precisely where the old shape had
+// already handed the lease back. Nil in production.
+var runtimeCleanupExclusivityBarrier func()
+
 // runtimeBaseOpenedByName, when set, receives the ONE path this descent opens by
 // name. The whole security property is which path that is: the fixed cache or
 // temp directory above the owned tail, never a predictable component Zero owns. A

@@ -13,19 +13,6 @@ type runtimeLeaseHandle struct {
 	overlapped windows.Overlapped
 }
 
-func acquireSharedRuntimeLease(path string) (runtimeLeaseHandle, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return runtimeLeaseHandle{}, err
-	}
-	handle := runtimeLeaseHandle{file: file}
-	if err := windows.LockFileEx(windows.Handle(file.Fd()), 0, 0, 1, 0, &handle.overlapped); err != nil {
-		_ = file.Close()
-		return runtimeLeaseHandle{}, err
-	}
-	return handle, nil
-}
-
 // BOTH SIDES HAVE TO MEAN THE SAME OBJECT.
 //
 // This opened the lease by full pathname with os.OpenFile and no no-follow flag,

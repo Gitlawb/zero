@@ -12,18 +12,6 @@ type runtimeLeaseHandle struct {
 	file *os.File
 }
 
-func acquireSharedRuntimeLease(path string) (runtimeLeaseHandle, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return runtimeLeaseHandle{}, err
-	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_SH); err != nil {
-		_ = file.Close()
-		return runtimeLeaseHandle{}, err
-	}
-	return runtimeLeaseHandle{file: file}, nil
-}
-
 // BOTH SIDES HAVE TO MEAN THE SAME OBJECT.
 //
 // Cleanup opened the lease by full pathname while acquisition opened it relative
