@@ -52,9 +52,8 @@ const (
 )
 
 type transientNotice struct {
-	text      string
-	tone      transientNoticeTone
-	expiresAt time.Time
+	text string
+	tone transientNoticeTone
 }
 
 // transientNoticeExpiredMsg is sequence-gated so an older timer can never
@@ -72,17 +71,29 @@ func (m model) showTransientNotice(text string, tone transientNoticeTone) (model
 		return m, nil
 	}
 	seq := m.transientNoticeSeq
-	return m, tea.Tick(transientNoticeDuration, func(time.Time) tea.Msg {
+	m.transientNoticeTimerSeq = seq
+	return m, transientNoticeExpiryCmd(seq)
+}
+
+// showTransientNoticeInline is for handlers that cannot return a tea.Cmd. The
+// outer Update path notices the new sequence and schedules its one-shot expiry.
+func (m model) showTransientNoticeInline(text string, tone transientNoticeTone) model {
+	m, _ = m.setTransientNotice(text, tone)
+	return m
+}
+
+func transientNoticeExpiryCmd(seq int) tea.Cmd {
+	return tea.Tick(transientNoticeDuration, func(time.Time) tea.Msg {
 		return transientNoticeExpiredMsg{seq: seq}
 	})
 }
 
-// showTransientNoticeInline is for handlers that cannot return a tea.Cmd. The
-// composer blink is already a permanent, low-cost UI tick, so it clears this
-// notice within one blink after expiry without introducing a second timer chain.
-func (m model) showTransientNoticeInline(text string, tone transientNoticeTone) model {
-	m, _ = m.setTransientNotice(text, tone)
-	return m
+func (m model) ensureTransientNoticeTimer() (model, tea.Cmd) {
+	if m.transientNotice.text == "" || m.transientNoticeTimerSeq == m.transientNoticeSeq {
+		return m, nil
+	}
+	m.transientNoticeTimerSeq = m.transientNoticeSeq
+	return m, transientNoticeExpiryCmd(m.transientNoticeSeq)
 }
 
 func (m model) setTransientNotice(text string, tone transientNoticeTone) (model, bool) {
@@ -91,26 +102,11 @@ func (m model) setTransientNotice(text string, tone transientNoticeTone) (model,
 		return m, false
 	}
 	m.transientNotice = transientNotice{
-		text:      text,
-		tone:      tone,
-		expiresAt: m.noticeNow().Add(transientNoticeDuration),
+		text: text,
+		tone: tone,
 	}
 	m.transientNoticeSeq++
 	return m, true
-}
-
-func (m model) noticeNow() time.Time {
-	if m.now != nil {
-		return m.now()
-	}
-	return time.Now()
-}
-
-func (m model) expireTransientNotice() model {
-	if expiresAt := m.transientNotice.expiresAt; !expiresAt.IsZero() && !m.noticeNow().Before(expiresAt) {
-		m.transientNotice = transientNotice{}
-	}
-	return m
 }
 
 func (m model) transientNoticeLine(width int) string {

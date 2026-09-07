@@ -150,6 +150,32 @@ func RepairUnnamedProvider(path string, replacement string) (FileConfig, string,
 	name := strings.TrimSpace(replacement)
 	explicit := name != ""
 	if !explicit {
+		// Older Resolve merged an unnamed row into its exact effective-name
+		// sibling, in file order. Preserve that composition, not just the name:
+		// the named row may supply the model while the unnamed row supplies the
+		// endpoint and credential. Splitting them strands a working legacy config.
+		legacyName := providerMergeName(cfg, cfg.Providers[unnamed])
+		for index, profile := range cfg.Providers {
+			if index == unnamed || strings.TrimSpace(profile.Name) != legacyName {
+				continue
+			}
+			before := cfg
+			cfg.Providers = append([]ProviderProfile(nil), cfg.Providers...)
+			legacy := cfg.Providers[unnamed]
+			legacy.Name = legacyName
+			remove := unnamed
+			if unnamed < index {
+				cfg.Providers[unnamed] = mergeProfile(legacy, profile)
+				remove = index
+			} else {
+				cfg.Providers[index] = mergeProfile(profile, legacy)
+			}
+			cfg.Providers = append(cfg.Providers[:remove], cfg.Providers[remove+1:]...)
+			if err := writeProviderNameRepair(path, before, cfg); err != nil {
+				return FileConfig{}, "", err
+			}
+			return cfg, legacyName, nil
+		}
 		// activeProvider is a safe default for the unnamed row ONLY while it
 		// selects no named row. Once activeMatchesNamedRow is true, that value is
 		// evidence the active pointer belongs to the OTHER row — reusing it as

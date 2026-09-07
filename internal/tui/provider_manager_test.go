@@ -1049,10 +1049,9 @@ func TestProviderDeleteKeyNoteResolvesCaseVariantSpelling(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"WORK","apiKeyStored":true},{"name":"other"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// "work" addresses the sole WORK row, whose removal takes the key with it.
-	// No other displayed row carries "WORK", so the bridge is safe here — that
-	// sibling check is the whole difference from the project-row case above.
-	owner, err := config.ProviderRowOwnershipAt(path, []string{"work", "other"}, "work")
+	// A session alias can address the sole WORK row when no concrete resolved
+	// row named "work" exists. A project row with that name is tested separately.
+	owner, err := config.ProviderRowOwnershipAt(path, nil, "work")
 	if err != nil {
 		t.Fatal(err)
 	}

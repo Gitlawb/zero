@@ -521,9 +521,9 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	})
 	m.input.SetValue("/model openai/gpt-4.1")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting a run")
 	}
 	if captured.Model != "openai/gpt-4.1" {
@@ -867,9 +867,9 @@ func TestModelCommandAcceptsManualModelForCustomProvider(t *testing.T) {
 	})
 	m.input.SetValue("/model qwen-custom-latest")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting a run")
 	}
 	if captured.Model != "qwen-custom-latest" {

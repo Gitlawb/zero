@@ -109,6 +109,39 @@ func caseSiblingModel(t *testing.T, activeName string, builtProfiles *[]config.P
 	return next
 }
 
+func TestProviderManagerFilteredUserRowDoesNotGrantProjectOwnership(t *testing.T) {
+	for _, action := range []string{"edit", "delete", "model"} {
+		t.Run(action, func(t *testing.T) {
+			m := caseSiblingModel(t, "WORK", nil)
+			// The user row is filtered out when its stored key cannot be loaded.
+			// Ownership must not depend on that row still being displayed.
+			m.savedProviders = m.savedProviders[1:]
+			m, _ = m.openProviderManager()
+			before, err := os.ReadFile(m.userConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch action {
+			case "edit":
+				m = managerKey(t, m, testKeyText("e"))
+				if m.providerWizard.step == providerWizardStepEditMenu {
+					t.Fatal("project row acquired edit ownership after user row was filtered")
+				}
+			case "delete":
+				m = managerKey(t, m, testKeyText("d"))
+				next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+				m = drainProviderManagerCmds(t, next, cmd)
+			case "model":
+				persisted, _, err := m.persistSelectedModel(config.ProviderProfile{Name: "WORK", Model: "changed"})
+				if err != nil || persisted {
+					t.Fatalf("project model persistence = %t, error=%v", persisted, err)
+				}
+			}
+			assertUserRowUntouched(t, m, before)
+		})
+	}
+}
+
 // selectManagerRow moves the manager cursor onto the named row.
 func selectManagerRow(t *testing.T, m model, name string) model {
 	t.Helper()

@@ -116,8 +116,8 @@ type ProviderRowOwnership struct {
 	// on this instead of parsing Reason's text.
 	Lookup ProviderNameLookup
 	// Shadowed is true when a credential-identity match was found but rejected
-	// because a DIFFERENT resolved row already carries that persisted row's
-	// exact spelling — the case-sibling defect this type exists to prevent.
+	// because the resolved list contains a separate row with this spelling or
+	// the persisted spelling — even when the saved row was filtered as unusable.
 	Shadowed bool
 }
 
@@ -134,10 +134,11 @@ type ProviderRowOwnership struct {
 //   - Otherwise, a credential-identity match is a candidate only when exactly
 //     one persisted row carries that identity. Several is ambiguous, and a
 //     mutation under ambiguity would pick a row at random.
-//   - The candidate is REJECTED when another resolved row already carries that
-//     persisted row's exact spelling. That row is the user row's own entry in
-//     the list; this one is a project or environment row that merely shares a
-//     credential identity with it, and it must not write through it.
+//   - A concrete resolved row with a different spelling is NOT the persisted
+//     row. User-layer merging preserves that row's exact name, even when the
+//     active selector uses different casing. The display list may omit an
+//     unusable user row, so its absence cannot prove ownership. Normalized
+//     fallback is only for a session alias not present as a separate row.
 //
 // The last clause is the whole defect: with user "work" and project "WORK" both
 // resolved, "WORK" found the sole identity match "work" and edited or deleted it
@@ -160,12 +161,12 @@ func ResolveProviderRowOwnership(persisted []ProviderProfile, resolvedNames []st
 	}
 	for _, resolved := range resolvedNames {
 		resolved = strings.TrimSpace(resolved)
-		if resolved == name || resolved == "" {
+		if resolved == "" {
 			continue
 		}
-		if resolved == persistedName {
+		if resolved == name || resolved == persistedName {
 			return ProviderRowOwnership{Lookup: lookup, Shadowed: true, Reason: fmt.Sprintf(
-				"%q is not the saved provider %q — that row is listed separately, so this entry comes from project config or the environment",
+				"%q is not the saved provider %q — this resolved row comes from project config or the environment",
 				name, persistedName)}
 		}
 	}

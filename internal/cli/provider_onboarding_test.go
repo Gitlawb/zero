@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,81 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 )
+
+func TestProviderMutationsRejectProjectCaseSibling(t *testing.T) {
+	for _, command := range []string{"remove", "rename"} {
+		t.Run(command, func(t *testing.T) {
+			setCLIUserConfigRoot(t)
+			t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+			path, err := config.DefaultUserConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			user := config.ProviderProfile{Name: "work", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4o", APIKeyStored: true}
+			writeProviderOnboardingConfig(t, path, config.FileConfig{ActiveProvider: "work", Providers: []config.ProviderProfile{user}})
+			workspace := t.TempDir()
+			project := config.ProviderProfile{Name: "WORK", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}
+			writeProviderOnboardingConfig(t, filepath.Join(workspace, ".zero", "config.json"), config.FileConfig{Providers: []config.ProviderProfile{project}})
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := config.ProviderKeyStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Set("work", "user-key"); err != nil {
+				t.Fatal(err)
+			}
+			deps := providerSetupDeps(path)
+			deps.getwd = func() (string, error) { return workspace, nil }
+			args := []string{"providers", command, "WORK"}
+			if command == "rename" {
+				args = append(args, "renamed")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps(args, &stdout, &stderr, deps); code == exitSuccess || !strings.Contains(stderr.String(), "not the saved provider") {
+				t.Fatalf("project mutation exit=%d, stderr=%q", code, stderr.String())
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("project mutation changed user config: %v", err)
+			}
+			key, ok, err := store.Get("work")
+			if err != nil || !ok || key != "user-key" {
+				t.Fatalf("project mutation changed user credential: present=%t, error=%v", ok, err)
+			}
+		})
+	}
+}
+
+func TestRunProvidersRepairConfigPreservesLegacyMergedProfile(t *testing.T) {
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprint(reversed), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			rows := []config.ProviderProfile{
+				{ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://legacy.example/v1", APIKey: "legacy-key"},
+				{Name: "work", Model: "legacy-model"},
+			}
+			if reversed {
+				rows[0], rows[1] = rows[1], rows[0]
+			}
+			writeProviderOnboardingConfig(t, path, config.FileConfig{ActiveProvider: "work", Providers: rows, MaxTurns: 17})
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps([]string{"providers", "repair-config"}, &stdout, &stderr, providerSetupDeps(path)); code != exitSuccess {
+				t.Fatalf("repair exit=%d stderr=%q", code, stderr.String())
+			}
+			resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("fresh Resolve after legacy upgrade repair: %v", err)
+			}
+			p := resolved.Provider
+			if len(resolved.Providers) != 1 || p.Name != "work" || p.Model != "legacy-model" || p.BaseURL != "https://legacy.example/v1" || p.APIKey != "legacy-key" || resolved.MaxTurns != 17 {
+				t.Fatal("repair changed the legacy merged provider or unrelated config")
+			}
+		})
+	}
+}
 
 func TestRunProvidersUseSetsActiveProvider(t *testing.T) {
 	var stdout bytes.Buffer
@@ -885,17 +961,9 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 	})
 }
 
-// The bare repair used activeProvider as the unnamed row's default name even
-// when that value already selected a DIFFERENT named row. It then proposed a
-// duplicate, rejected its own candidate, left the file unchanged, and reported
-// that the file contained duplicate rows — about a file whose second row has no
-// name at all — without mentioning the --name escape that works.
-//
-// activeProvider is now only a default while it selects no named row, so this
-// case falls through to the "openai" fallback and succeeds. The command also
-// reports the name the row actually got: it used to re-derive the defaulting
-// rules and say "Named legacy provider Groq" about a row named "openai".
-func TestRunProvidersRepairConfigDoesNotProposeAnOwnedActiveName(t *testing.T) {
+// Bare repair preserves the exact merge older releases performed, including
+// later-row precedence, instead of proposing a duplicate or splitting the row.
+func TestRunProvidersRepairConfigMergesAnOwnedActiveName(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
@@ -908,11 +976,11 @@ func TestRunProvidersRepairConfigDoesNotProposeAnOwnedActiveName(t *testing.T) {
 	if code := runWithDeps([]string{"providers", "repair-config"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
 		t.Fatalf("bare repair exit=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Named legacy provider openai") {
+	if !strings.Contains(stdout.String(), "Named legacy provider Groq") {
 		t.Fatalf("repair reported a name the row did not get: %q", stdout.String())
 	}
 	cfg := readFileConfig(t, configPath)
-	if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "openai" || cfg.Providers[1].Name != "Groq" {
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "Groq" || cfg.Providers[0].Model != "llama" {
 		t.Fatalf("repaired rows = %+v", cfg.Providers)
 	}
 	// activeProvider already selected the named row; the repair must not move it.
@@ -938,7 +1006,7 @@ func TestRunProvidersRepairConfigExplainsCollidingDefaultName(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	seed := `{"activeProvider":"openai","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"openai","provider_kind":"openai","model":"gpt-4.1"}]}`
+	seed := `{"activeProvider":"openai","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"OPENAI","provider_kind":"openai","model":"gpt-4.1"}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -976,8 +1044,8 @@ func TestRunProvidersRepairConfigExplainsCollidingDefaultName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh Resolve after guided repair: %v", err)
 	}
-	if resolved.Provider.Name != "openai" {
-		t.Fatalf("resolved provider = %q, want the untouched active openai row", resolved.Provider.Name)
+	if resolved.Provider.Name != "OPENAI" {
+		t.Fatalf("resolved provider = %q, want the untouched active OPENAI row", resolved.Provider.Name)
 	}
 	if readFileConfig(t, configPath).Providers[0].Name != "legacy" {
 		t.Fatalf("guided repair did not name the legacy row: %+v", readFileConfig(t, configPath).Providers)

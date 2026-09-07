@@ -70,6 +70,62 @@ func TestRegisterToolsAddsPromptGatedMCPTools(t *testing.T) {
 	}
 }
 
+func TestRegisterToolsPublishesServerToolsInOneGeneration(t *testing.T) {
+	registry := tools.NewRegistry()
+	before := registry.Snapshot().Generation
+	client := &fakeToolClient{listed: []RemoteTool{
+		{Name: "lookup", Description: "Lookup documentation"},
+		{Name: "search", Description: "Search documentation"},
+	}}
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{ClientFactory: func(context.Context, Server) (ToolClient, error) {
+		return client, nil
+	}})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+
+	after := registry.Snapshot()
+	if after.Generation != before+1 {
+		t.Fatalf("registry generation = %d, want %d", after.Generation, before+1)
+	}
+	for _, name := range []string{"mcp_docs_lookup", "mcp_docs_search"} {
+		if _, ok := registry.Get(name); !ok {
+			t.Fatalf("expected %s to be published in the batch", name)
+		}
+	}
+}
+
+func TestRegisterToolsPublishesNoneWhenServerToolValidationFails(t *testing.T) {
+	registry := tools.NewRegistry()
+	before := registry.Snapshot().Generation
+	client := &fakeToolClient{listed: []RemoteTool{
+		{Name: "lookup", Description: "Lookup documentation"},
+		{Name: "", Description: "Invalid nameless tool"},
+	}}
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{ClientFactory: func(context.Context, Server) (ToolClient, error) {
+		return client, nil
+	}})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+
+	if got := registry.Snapshot().Generation; got != before {
+		t.Fatalf("registry generation = %d, want unchanged %d", got, before)
+	}
+	if _, ok := registry.Get("mcp_docs_lookup"); ok {
+		t.Fatal("valid prefix of rejected server batch was published")
+	}
+	if skipped := runtime.Skipped(); len(skipped) != 1 || skipped[0].Name != "docs" || skipped[0].Err == nil {
+		t.Fatalf("Skipped() = %#v, want one validation failure for docs", skipped)
+	}
+}
+
 func TestRegisterToolsMarksPersistentlyApprovedToolsAllow(t *testing.T) {
 	store, err := NewPermissionStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "permissions.json"),
