@@ -120,6 +120,39 @@ func TestSetupArgsCompensateWhenTheyFailAfterCreatingTheTree(t *testing.T) {
 	}
 }
 
+// AND A FAILURE DURING THE LEASE CREATION ITSELF LEAVES NOTHING EITHER.
+//
+// The interval above opens once the selection has succeeded. This one is inside
+// the selection: the lease file has been created and the step after it fails, so
+// no lease object comes back and the builder takes the early return that
+// compensates only what the selection managed to report. The created lease file
+// was not part of that report, and it keeps its directory non-empty, so every
+// component the same invocation created stayed behind with it.
+//
+// Both candidate roots are failed, because failing only the preferred one
+// relocates to the fallback and the build goes on to succeed.
+func TestSetupArgsCompensateWhenTheLeaseCreationFails(t *testing.T) {
+	cacheRoot, workspace, root := setupCompensationFixture(t)
+
+	runtimeCreationFailure = func(created string) error {
+		if strings.HasSuffix(created, sandboxRuntimeLeaseSuffix) {
+			return errors.New("injected failure after the lease file was created")
+		}
+		return nil
+	}
+	t.Cleanup(func() { runtimeCreationFailure = nil })
+
+	if _, err := buildSetupPlan(t, workspace); err == nil {
+		t.Fatal("SETUP INVALID: the builder succeeded, so the injected failure never fired and nothing here is under test")
+	}
+	if _, err := os.Lstat(sandboxRuntimeLeasePath(root)); err == nil {
+		t.Error("the lease file this invocation created survived the failure that happened right after creating it")
+	}
+	if ownedRuntimeTreeExists(cacheRoot) {
+		t.Error("the owned runtime tree survived a failure inside the invocation that created it")
+	}
+}
+
 // A PRE-EXISTING TREE IS NOT THIS INVOCATION'S TO REMOVE.
 //
 // Without this, a rollback that deleted the runtime root unconditionally would
