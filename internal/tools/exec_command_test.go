@@ -788,6 +788,13 @@ func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
 		t.Fatalf("session_id is not numeric: %v", err)
 	}
 
+	// SAME SHAPE AS THE SERVER TEST ABOVE, one window narrower.
+	//
+	// The shell is started with a 10ms yield, so it has almost certainly not
+	// reached `read` yet, and the echo then had exactly one fixed 1000ms window to
+	// travel back through the PTY. Writing early is fine, the terminal buffers it,
+	// but a loaded runner can spend that whole second still getting the shell up.
+	// So the echo is polled for rather than demanded within one window.
 	result := writeTool.Run(context.Background(), map[string]any{
 		"session_id":    sessionID,
 		"chars":         "hello\n",
@@ -796,11 +803,31 @@ func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("write_stdin status = %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "got:hello") {
-		t.Fatalf("expected PTY input output, got %q", result.Output)
+	var transcript strings.Builder
+	transcript.WriteString(result.Output)
+	exitCode := result.Meta["exit_code"]
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(transcript.String(), "got:hello") && time.Now().Before(deadline) {
+		poll := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"chars":         "",
+			"yield_time_ms": 250,
+		})
+		transcript.WriteString(poll.Output)
+		if code := poll.Meta["exit_code"]; code != "" {
+			exitCode = code
+		}
+		if poll.Status != StatusOK {
+			// The session is gone. Either the echo already arrived, which the loop
+			// condition will see, or it never will and the assertions below say so.
+			break
+		}
 	}
-	if result.Meta["exit_code"] != "0" {
-		t.Fatalf("expected exited session, got meta=%#v output=%q", result.Meta, result.Output)
+	if !strings.Contains(transcript.String(), "got:hello") {
+		t.Fatalf("expected PTY input output, got %q", transcript.String())
+	}
+	if exitCode != "0" {
+		t.Fatalf("expected exited session, got exit_code=%q output=%q", exitCode, transcript.String())
 	}
 }
 
