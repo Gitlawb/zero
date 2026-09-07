@@ -37,11 +37,13 @@ type DispatchOutcome struct {
 	// produced any, in run order. afterTool validators use this to feed results
 	// (e.g. a formatter diff or vet warning) back to the model on the tool result.
 	//
-	// PRESENTATION TEXT, NOT A NOTICE CHANNEL. hookMessage composes the hook's
-	// ordinary stdout (or stderr) together with any enforcement notices, because
-	// afterTool wants both on one line. A caller that only wants to know what the
-	// sandbox did must read Notices instead: delivering this slice would put every
-	// successful hook's routine logging into the model's context.
+	// PRESENTATION TEXT, NOT A NOTICE CHANNEL, and it no longer carries notices at
+	// all. hookMessage used to fold them in so afterTool got both on one line;
+	// that made the disclosure arrive twice once the typed slice was composed by
+	// every surface. Enforcement disclosures are on Notices, for both hook phases.
+	// A caller that only wants to know what the sandbox did must read that:
+	// delivering this slice would put every successful hook's routine logging into
+	// the model's context.
 	Messages []string
 	// Notices carries only the enforcement disclosures, one entry per notice, in
 	// run order across every hook that ran.
@@ -278,15 +280,24 @@ func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 
 // hookMessage returns the output worth surfacing from a hook run: stdout when
 // present, else stderr. Empty when the hook produced no output.
+// STDOUT OR STDERR, AND NOTHING ELSE. The enforcement notices used to be
+// prepended here as well, so that afterTool got the disclosure and its own output
+// on one line. That was the only delivery available when this was written, and it
+// is not any more: the notices travel typed on DispatchOutcome.Notices, and the
+// agent loop merges them into ToolResult.EnforcementNotices for beforeTool and
+// afterTool alike.
+//
+// Keeping the fold as well made the same disclosure arrive twice, once from the
+// typed slice that every surface composes and once inside the hook feedback block
+// in the body. The two writers carry the identical fixed string, so the model saw
+// it doubled and a bash or exec card showed it in both the furniture and the body.
+// One owner per fact, and for a notice that owner is the typed slice.
 func hookMessage(result commandResult) string {
 	message := strings.TrimSpace(result.Stdout)
 	if message == "" {
 		message = strings.TrimSpace(result.Stderr)
 	}
-	// PREPENDED, and present even when the hook itself said nothing. A hook that
-	// runs silently under a weakened token is exactly the case where the only
-	// thing worth surfacing IS the disclosure.
-	return withHookEnforcementNotices(message, result.Notices)
+	return message
 }
 
 func withHookEnforcementNotices(message string, notices []string) string {

@@ -112,12 +112,19 @@ func TestTheHookRunnerOnlyDisclosesEnforcementForAChildThatLaunched(t *testing.T
 			if got := len(result.Notices) > 0; got != testCase.wantNotice {
 				t.Fatalf("notices present = %v, want %v: %#v", got, testCase.wantNotice, result.Notices)
 			}
-			message := hookMessage(result)
-			if testCase.wantNotice && !strings.Contains(message, launchStateNotice) {
-				t.Errorf("a launched child lost its disclosure:\n%s", message)
+			// Asserted on Notices, which is where the disclosure travels. It used
+			// to be folded into the hook message as well, and the agent loop now
+			// merges Notices into the typed enforcement slice for both hook
+			// phases, so carrying it in both places delivered it twice.
+			notices := strings.Join(result.Notices, "\n")
+			if testCase.wantNotice && !strings.Contains(notices, launchStateNotice) {
+				t.Errorf("a launched child lost its disclosure:\n%s", notices)
 			}
-			if !testCase.wantNotice && strings.Contains(message, launchStateNotice) {
-				t.Errorf("a child that never launched claimed the token was traded away:\n%s", message)
+			if !testCase.wantNotice && strings.Contains(notices, launchStateNotice) {
+				t.Errorf("a child that never launched claimed the token was traded away:\n%s", notices)
+			}
+			if message := hookMessage(result); strings.Contains(message, launchStateNotice) {
+				t.Errorf("the disclosure also rode along in the hook message, so it reaches the model twice:\n%s", message)
 			}
 		})
 	}

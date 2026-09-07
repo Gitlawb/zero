@@ -89,8 +89,8 @@ func TestDispatchHelpersAreNoopWithoutDispatcher(t *testing.T) {
 	if _, blocked := dispatchBeforeTool(context.Background(), options, ToolCall{Name: "bash"}, nil); blocked {
 		t.Fatal("a nil dispatcher must never block a tool")
 	}
-	if feedback := dispatchAfterTool(context.Background(), options, ToolCall{Name: "bash"}, nil, tools.Result{}); feedback != "" {
-		t.Fatalf("a nil dispatcher must yield no feedback, got %q", feedback)
+	if feedback, notices := dispatchAfterTool(context.Background(), options, ToolCall{Name: "bash"}, nil, tools.Result{}); feedback != "" || notices != nil {
+		t.Fatalf("a nil dispatcher must yield no feedback and no notices, got %q and %v", feedback, notices)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestBeforeToolNoticesMergeIntoTheTypedField(t *testing.T) {
 	const notice = "hook ran without WRITE_RESTRICTED because denyRead is configured"
 	const toolOwned = "the sandbox dropped the network capability for this call"
 
-	result := withBeforeToolNotices(ToolResult{Output: "ok"}, []string{notice})
+	result := withAppliedHookNotices(ToolResult{Output: "ok"}, []string{notice}, nil)
 	if len(result.EnforcementNotices) != 1 || result.EnforcementNotices[0] != notice {
 		t.Fatalf("a successful beforeTool notice did not reach the typed field: %v", result.EnforcementNotices)
 	}
@@ -120,19 +120,19 @@ func TestBeforeToolNoticesMergeIntoTheTypedField(t *testing.T) {
 	}
 
 	// Both arrive, hook first, when the tool carries its own.
-	result = withBeforeToolNotices(ToolResult{EnforcementNotices: []string{toolOwned}}, []string{notice})
+	result = withAppliedHookNotices(ToolResult{EnforcementNotices: []string{toolOwned}}, []string{notice}, nil)
 	if len(result.EnforcementNotices) != 2 || result.EnforcementNotices[0] != notice || result.EnforcementNotices[1] != toolOwned {
 		t.Fatalf("the hook and tool notices did not merge in order: %v", result.EnforcementNotices)
 	}
 
 	// The same disclosure from both sides is carried once.
-	result = withBeforeToolNotices(ToolResult{EnforcementNotices: []string{notice}}, []string{notice})
+	result = withAppliedHookNotices(ToolResult{EnforcementNotices: []string{notice}}, []string{notice}, nil)
 	if len(result.EnforcementNotices) != 1 {
 		t.Errorf("one disclosure reported by both the hook and the tool was carried %d times: %v", len(result.EnforcementNotices), result.EnforcementNotices)
 	}
 
 	// Blank notices contribute nothing, so a run with no hook output stays silent.
-	result = withBeforeToolNotices(ToolResult{}, []string{"", "   "})
+	result = withAppliedHookNotices(ToolResult{}, []string{"", "   "}, nil)
 	if len(result.EnforcementNotices) != 0 {
 		t.Errorf("blank hook notices produced %v, want nothing", result.EnforcementNotices)
 	}
