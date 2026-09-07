@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -181,9 +182,12 @@ func TestImportedWorkspaceIdentitySurvivesDisplayRedaction(t *testing.T) {
 	if strings.Contains(result.Session.Cwd, secret) || !strings.Contains(result.Session.Cwd, "[REDACTED]") {
 		t.Fatalf("display cwd is not redacted: %q", result.Session.Cwd)
 	}
-	wantWorkspace, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		t.Fatal(err)
+	wantWorkspace := filepath.Clean(workspace)
+	if runtime.GOOS != "windows" {
+		wantWorkspace, err = filepath.EvalSymlinks(workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if result.Session.WorkspaceKey != wantWorkspace {
 		t.Fatalf("workspace key = %q, want %q", result.Session.WorkspaceKey, wantWorkspace)
