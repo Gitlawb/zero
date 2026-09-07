@@ -96,15 +96,28 @@ var protectedMetadataNames = []string{".git", ".zero", ".agents"}
 // gitMetadataWriteCarveouts below.
 var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
-// gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
-// under the OS-level sandbox even though the rest of .git is writable to git
-// subprocesses. Nonexistent paths are harmless no-ops in every backend's
-// enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
+// gitMetadataWriteCarveouts returns the .git paths that stay write-denied under
+// the OS-level sandbox even though the rest of .git is writable to git
+// subprocesses. Worktrees and submodules store .git as a regular pointer file,
+// so they protect that file itself: constructing .git/hooks below it makes
+// bwrap fail before the command starts. All other entry and error states retain
+// the legacy child paths. The pointer is deliberately not parsed here;
+// repository-controlled metadata must not redirect sandbox rules elsewhere.
 func gitMetadataWriteCarveouts(root string) []string {
-	return []string{
-		filepath.Join(root, ".git", "hooks"),
-		filepath.Join(root, ".git", "config"),
+	return gitMetadataWriteCarveoutsWithLstat(root, os.Lstat)
+}
+
+func gitMetadataWriteCarveoutsWithLstat(root string, lstat func(string) (os.FileInfo, error)) []string {
+	gitPath := filepath.Join(root, ".git")
+	children := []string{
+		filepath.Join(gitPath, "hooks"),
+		filepath.Join(gitPath, "config"),
 	}
+	info, err := lstat(gitPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return children
+	}
+	return []string{gitPath}
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
