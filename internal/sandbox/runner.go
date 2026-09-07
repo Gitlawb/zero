@@ -229,6 +229,9 @@ func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy
 	if execRequest.EnforcementLevel == EnforcementDisabled || execRequest.EnforcementLevel == EnforcementDegraded || execRequest.TargetBackend == BackendNone || !execRequest.RequiresPlatformSandbox {
 		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
 	}
+	if problems := execRequest.PermissionProfile.FileSystem.CredentialDiscoveryErrors; len(problems) > 0 {
+		return CommandPlan{}, fmt.Errorf("cannot guarantee credential protection: %s", strings.Join(problems, "; "))
+	}
 	switch backend.Name {
 	case BackendLinuxBwrap:
 		if backend.Available && backend.Executable != "" {

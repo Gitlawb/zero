@@ -268,6 +268,18 @@ zero sandbox policy
 zero sandbox grants list
 ```
 
+On Unix, the credential baseline discovers SSH private keys and GPG stores.
+SSH discovery is bounded: exceeding a directory, config-size, or Include limit,
+or failing to inspect a required input, refuses sandboxed execution. It does not
+silently run with a partial list of protected keys.
+
+Linux's mount-based backend refuses selective SSH-key denies and credential
+denies through mutable symlinks. An explicit deny of an existing containing
+directory can cover the keys, but also hides that directory's public files,
+including SSH configuration and known hosts. Explicit Linux `denyRead` paths
+must already exist. macOS uses pathname rules; automatic credential discovery
+remains disabled on Windows.
+
 ## Web And Local Control
 
 Zero includes local file/search/edit/shell tools, `web_fetch` for public URLs,

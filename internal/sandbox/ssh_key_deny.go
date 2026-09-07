@@ -1,14 +1,15 @@
 package sandbox
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// sshConfigMaxIncludeDepth bounds Include recursion. Unreadable or cyclic
-// includes are skipped rather than failing the profile build.
+// sshConfigMaxIncludeDepth bounds Include recursion. Cycles terminate normally;
+// unreadable inputs and exceeded limits make the profile refuse execution.
 const sshConfigMaxIncludeDepth = 16
 
 const sshConfigMaxBytes = 1 << 20
@@ -16,15 +17,12 @@ const sshConfigMaxBytes = 1 << 20
 const sshIncludeMatchCap = 64
 
 // sshPrivateKeyWalkMaxDepth bounds recursive discovery under ~/.ssh. Nested
-// directories such as ~/.ssh/keys are walked; directory symlinks are not
-// followed, so a cycle cannot hang profile construction.
+// directories and directory symlinks are walked with cycle detection.
 const sshPrivateKeyWalkMaxDepth = 8
 
 // sshPrivateKeyWalkMaxEntries is a per-directory cap on entries considered
-// under ~/.ssh. Extra entries in one directory (a large known_hosts.d, for
-// example) are skipped; walking continues in sibling and parent directories
-// so a private key elsewhere is still discovered. It is not a process-wide
-// abort that unwinds the whole tree.
+// under ~/.ssh. One extra entry detects overflow without unbounded allocation;
+// incomplete discovery refuses execution rather than dropping later keys.
 const sshPrivateKeyWalkMaxEntries = 256
 
 const sshPrivateKeySniffBytes = 128
@@ -64,7 +62,15 @@ var sshSupportDirectives = map[string]bool{
 // *.pub stay readable so git host resolution still works. Keys named outside
 // ~/.ssh are discovered by parsing ~/.ssh/config (and Include) for IdentityFile
 // and the other path-valued directives.
-func sshPrivateKeyDenyCandidates(home string) []string {
+type sshDiscovery struct {
+	errors []string
+}
+
+func (s *sshDiscovery) fail(path, reason string) {
+	s.errors = append(s.errors, fmt.Sprintf("SSH discovery incomplete for %s: %s", path, reason))
+}
+
+func (s *sshDiscovery) privateKeyDenyCandidates(home string) []string {
 	home = strings.TrimSpace(home)
 	if home == "" {
 		return nil
@@ -74,17 +80,18 @@ func sshPrivateKeyDenyCandidates(home string) []string {
 	for _, name := range sshWellKnownPrivateKeyNames {
 		candidates = append(candidates, filepath.Join(sshDir, name))
 	}
-	candidates = append(candidates, walkSSHPrivateKeyFiles(sshDir)...)
-	candidates = append(candidates, sshConfigReferencedPaths(home, sshDir)...)
+	candidates = append(candidates, s.walkPrivateKeyFiles(sshDir)...)
+	candidates = append(candidates, s.collectConfigPaths(filepath.Join(sshDir, "config"), home, sshDir, make(map[string]bool), 0)...)
 	return candidates
 }
 
-func walkSSHPrivateKeyFiles(sshDir string) []string {
+func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 	var out []string
 	visitedDirs := make(map[string]bool)
 	var walk func(dir string, depth int)
 	walk = func(dir string, depth int) {
 		if depth > sshPrivateKeyWalkMaxDepth {
+			s.fail(dir, "directory depth limit exceeded")
 			return
 		}
 		realDir := dir
@@ -96,31 +103,39 @@ func walkSSHPrivateKeyFiles(sshDir string) []string {
 		}
 		visitedDirs[realDir] = true
 
-		d, err := os.Open(dir)
+		root, err := os.OpenRoot(dir)
 		if err != nil {
+			if !os.IsNotExist(err) {
+				s.fail(dir, err.Error())
+			}
 			return
 		}
-		// Bound allocation to the per-directory cap. os.ReadDir would load the
-		// whole directory first. Overflow of one dir must not abort siblings.
-		entries, err := d.ReadDir(sshPrivateKeyWalkMaxEntries)
+		d, err := root.Open(".")
+		_ = root.Close()
+		if err != nil {
+			s.fail(dir, err.Error())
+			return
+		}
+		// Bound allocation and detect whether any entries would be omitted.
+		entries, err := d.ReadDir(sshPrivateKeyWalkMaxEntries + 1)
 		_ = d.Close()
 		if err != nil && err != io.EOF {
+			s.fail(dir, err.Error())
 			return
 		}
-		n := 0
+		if len(entries) > sshPrivateKeyWalkMaxEntries {
+			s.fail(dir, "directory entry limit exceeded")
+			return
+		}
 		for _, entry := range entries {
-			if n >= sshPrivateKeyWalkMaxEntries {
-				// Skip the rest of this directory only; sibling dirs still walk.
-				break
-			}
 			name := entry.Name()
 			if name == "." || name == ".." {
 				continue
 			}
 			path := filepath.Join(dir, name)
-			n++
 			info, err := os.Lstat(path)
 			if err != nil {
+				s.fail(path, err.Error())
 				continue
 			}
 			mode := info.Mode()
@@ -132,7 +147,7 @@ func walkSSHPrivateKeyFiles(sshDir string) []string {
 				}
 				// Inspect leaf symlinks (bounded, specials rejected) so a
 				// custom-named link to a PEM/OpenSSH key is still denied.
-				if isSSHPrivateKeyFileName(name) || sshFileLooksLikePrivateKey(path) {
+				if isSSHPrivateKeyFileName(name) || s.fileLooksLikePrivateKey(path) {
 					out = append(out, path)
 				}
 				continue
@@ -144,7 +159,7 @@ func walkSSHPrivateKeyFiles(sshDir string) []string {
 			if !mode.IsRegular() {
 				continue
 			}
-			if isSSHPrivateKeyFileName(name) || sshFileLooksLikePrivateKey(path) {
+			if isSSHPrivateKeyFileName(name) || s.fileLooksLikePrivateKey(path) {
 				out = append(out, path)
 			}
 		}
@@ -189,7 +204,7 @@ func sshKnownHostsFamilyName(name string) bool {
 	return false
 }
 
-func sshFileLooksLikePrivateKey(path string) bool {
+func (s *sshDiscovery) fileLooksLikePrivateKey(path string) bool {
 	// Always sniff. IdentityFile ~/keys/config (or authorized_keys / *.pub /
 	// known_hosts) can hold a PEM/OpenSSH/PuTTY private-key payload and must
 	// not stay readable. Real config, authorized_keys, public keys, and
@@ -197,52 +212,39 @@ func sshFileLooksLikePrivateKey(path string) bool {
 	// in sshShouldDenyReferencedPath still keep genuine support files readable.
 	data, ok := readRegularFileBounded(path, sshPrivateKeySniffBytes)
 	if !ok {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			s.fail(path, "cannot inspect potential private key")
+		} else if err != nil && !os.IsNotExist(err) {
+			s.fail(path, err.Error())
+		}
 		return false
 	}
-	s := strings.TrimSpace(string(data))
-	if strings.HasPrefix(s, "PuTTY-User-Key-File") {
+	content := strings.TrimSpace(string(data))
+	if strings.HasPrefix(content, "PuTTY-User-Key-File") {
 		return true
 	}
-	if !strings.HasPrefix(s, "-----BEGIN ") {
+	if !strings.HasPrefix(content, "-----BEGIN ") {
 		return false
 	}
-	return strings.Contains(s, "PRIVATE KEY")
+	return strings.Contains(content, "PRIVATE KEY")
 }
 
-// readRegularFileBounded Lstats first and refuses FIFOs, devices, and
-// sockets so profile construction cannot block on a special file. Regular-file
-// symlinks are followed: OpenSSH reads ~/.ssh/config and Include targets
-// through them, so a relocated IdentityFile would otherwise stay readable.
-// The resolved path is Lstat'd again and opened (bounded LimitReader) so a
-// FIFO or device behind the link is never opened.
+// readRegularFileBounded reads only from an inspected regular-file descriptor.
+// SSH paths intentionally may reference files outside ~/.ssh; this is file-type
+// validation, not a claim that path resolution is contained inside that tree.
 func readRegularFileBounded(path string, maxBytes int) ([]byte, bool) {
 	if maxBytes <= 0 {
 		return nil, false
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, false
-	}
-	readPath := path
-	if info.Mode().Type() == os.ModeSymlink {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return nil, false
-		}
-		info, err = os.Lstat(resolved)
-		if err != nil {
-			return nil, false
-		}
-		readPath = resolved
-	}
-	if !info.Mode().IsRegular() {
-		return nil, false
-	}
-	f, err := os.Open(readPath)
+	f, err := openSSHInspectionFile(path)
 	if err != nil {
 		return nil, false
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
 	data, err := io.ReadAll(io.LimitReader(f, int64(maxBytes)))
 	if err != nil {
 		return nil, false
@@ -250,12 +252,9 @@ func readRegularFileBounded(path string, maxBytes int) ([]byte, bool) {
 	return data, true
 }
 
-func sshConfigReferencedPaths(home, sshDir string) []string {
-	return collectSSHConfigPaths(filepath.Join(sshDir, "config"), home, sshDir, make(map[string]bool), 0)
-}
-
-func collectSSHConfigPaths(path, home, sshDir string, seen map[string]bool, depth int) []string {
+func (s *sshDiscovery) collectConfigPaths(path, home, sshDir string, seen map[string]bool, depth int) []string {
 	if depth > sshConfigMaxIncludeDepth {
+		s.fail(path, "config Include depth limit exceeded")
 		return nil
 	}
 	identity := sshConfigIdentity(path)
@@ -264,9 +263,16 @@ func collectSSHConfigPaths(path, home, sshDir string, seen map[string]bool, dept
 	}
 	seen[identity] = true
 
-	data, ok := readRegularFileBounded(path, sshConfigMaxBytes)
+	data, ok := readRegularFileBounded(path, sshConfigMaxBytes+1)
 	if !ok {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			s.fail(path, "cannot read regular config file")
+		}
 		return nil
+	}
+	if len(data) > sshConfigMaxBytes {
+		s.fail(path, "config size limit exceeded")
+		data = data[:sshConfigMaxBytes]
 	}
 
 	var out []string
@@ -277,8 +283,8 @@ func collectSSHConfigPaths(path, home, sshDir string, seen map[string]bool, dept
 		}
 		if key == "include" {
 			for _, pattern := range values {
-				for _, include := range sshIncludePaths(pattern, home, sshDir) {
-					out = append(out, collectSSHConfigPaths(include, home, sshDir, seen, depth+1)...)
+				for _, include := range s.includePaths(pattern, home, sshDir) {
+					out = append(out, s.collectConfigPaths(include, home, sshDir, seen, depth+1)...)
 				}
 			}
 			continue
@@ -293,12 +299,12 @@ func collectSSHConfigPaths(path, home, sshDir string, seen map[string]bool, dept
 				continue
 			}
 			if !keyMaterial {
-				if sshFileLooksLikePrivateKey(expanded) {
+				if s.fileLooksLikePrivateKey(expanded) {
 					out = append(out, expanded)
 				}
 				continue
 			}
-			if !sshShouldDenyReferencedPath(expanded, home, sshDir) {
+			if !s.shouldDenyReferencedPath(expanded, home, sshDir) {
 				continue
 			}
 			out = append(out, expanded)
@@ -318,7 +324,7 @@ func sshConfigIdentity(path string) string {
 	return cleaned
 }
 
-func sshIncludePaths(pattern, home, sshDir string) []string {
+func (s *sshDiscovery) includePaths(pattern, home, sshDir string) []string {
 	expanded := expandSSHConfigPath(pattern, home, sshDir)
 	if expanded == "" {
 		return nil
@@ -328,7 +334,8 @@ func sshIncludePaths(pattern, home, sshDir string) []string {
 		return nil
 	}
 	if len(matches) > sshIncludeMatchCap {
-		matches = matches[:sshIncludeMatchCap]
+		s.fail(expanded, "config Include match limit exceeded")
+		return nil
 	}
 	return matches
 }
@@ -526,6 +533,10 @@ func expandSSHConfigPathTokens(value, home string) (string, bool) {
 }
 
 func sshShouldDenyReferencedPath(path, home, sshDir string) bool {
+	return (&sshDiscovery{}).shouldDenyReferencedPath(path, home, sshDir)
+}
+
+func (s *sshDiscovery) shouldDenyReferencedPath(path, home, sshDir string) bool {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return false
@@ -547,7 +558,7 @@ func sshShouldDenyReferencedPath(path, home, sshDir string) bool {
 	// (or a relocated key named config / authorized_keys / known_hosts) with a
 	// private-key payload is denied. Genuine public keys, genuine known-hosts,
 	// config, and authorized_keys do not match and stay readable.
-	if sshFileLooksLikePrivateKey(cleaned) {
+	if s.fileLooksLikePrivateKey(cleaned) {
 		return true
 	}
 	return !sshPublicOrConfigName(filepath.Base(cleaned))

@@ -30,6 +30,11 @@ type FileSystemPolicy struct {
 	// path-based policies can protect future paths; mount-based Linux only
 	// masks entries that exist when the namespace is assembled.
 	DenyReadIfExists []string `json:"denyReadIfExists,omitempty"`
+	// CredentialDiscoveryErrors prevent execution with an incomplete baseline.
+	CredentialDiscoveryErrors []string `json:"credentialDiscoveryErrors,omitempty"`
+	// SSHDenyReadFiles require a pathname deny. Linux cannot safely rebuild
+	// their parents from mutable sibling pathnames to mask individual keys.
+	SSHDenyReadFiles []string `json:"sshDenyReadFiles,omitempty"`
 	// DenyReadCarveouts are subtrees that stay readable INSIDE a denied root.
 	// They exist so a directory-level credential deny can also cover the files
 	// a store publishes (arbitrary temporary names, files created later in the
@@ -136,6 +141,7 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 		})
 	}
 	userDenyRead := normalizeProfilePaths(policy.DenyRead)
+	userDenyRead = appendLexicalCredentialDenyPaths(userDenyRead, nil, policy.DenyRead)
 	commandAllowedRoots := append([]string{}, roots...)
 	for _, root := range readRoots {
 		if root != profileRootPath() {
@@ -151,6 +157,8 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			WriteRoots:                  writeRoots,
 			DenyRead:                    userDenyRead,
 			DenyReadIfExists:            credentials.Paths,
+			CredentialDiscoveryErrors:   credentials.DiscoveryErrors,
+			SSHDenyReadFiles:            credentials.SSHFiles,
 			DenyReadCarveouts:           credentials.Carveouts,
 			EnsureDenyReadDirs:          credentials.EnsureDirs,
 			ProcessTrustedDenyReadFiles: credentials.ProcessTrustedFinalFiles,
@@ -206,6 +214,8 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 // them, the trusted non-secret subtrees that stay readable, and the trusted
 // Zero-owned directories a mount-based backend may create so its mask exists.
 type credentialDenyPaths struct {
+	DiscoveryErrors          []string
+	SSHFiles                 []string
 	Paths                    []string
 	Carveouts                []string
 	EnsureDirs               []string
@@ -281,6 +291,8 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 	processDirs := append([]string{}, trusted.Dirs...)
 	appendUntrusted := func(options credentialPathOptions) {
 		paths := credentialDenyReadPathsIn(options, policy.AllowRead)
+		trusted.DiscoveryErrors = append(trusted.DiscoveryErrors, paths.DiscoveryErrors...)
+		trusted.SSHFiles = append(trusted.SSHFiles, pathsOutsideOverlappingRoots(paths.SSHFiles, commandAllowedRoots)...)
 		// A command-controlled credential setting cannot revoke a root that was
 		// deliberately granted to that same command. Dropping only overlapping
 		// command candidates preserves all unrelated process and command denies.
@@ -504,6 +516,8 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	var dirs []string
 	var lexicalCandidates []string
 	var lexicalDirs []string
+	scanner := &sshDiscovery{}
+	var sshFiles []string
 	for _, home := range options.Homes {
 		if strings.TrimSpace(home) == "" {
 			continue
@@ -527,14 +541,19 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// of ~/.ssh, so config and known_hosts stay readable for git host
 		// resolution (#815).
 		gitCredentials := filepath.Join(home, ".git-credentials")
-		sshKeys := sshPrivateKeyDenyCandidates(home)
+		sshKeys := scanner.privateKeyDenyCandidates(home)
 		candidates = append(candidates, gitCredentials)
 		candidates = append(candidates, sshKeys...)
+		for _, key := range sshKeys {
+			if _, err := os.Lstat(key); !os.IsNotExist(err) {
+				sshFiles = append(sshFiles, key)
+			}
+		}
 		// Keep the lexical candidate as well as any EvalSymlinks target so a
 		// same-user atomic symlink retarget after profile construction still
 		// hits a deny on ~/.gnupg, ~/.git-credentials, and SSH private keys.
-		// Use-time handle-relative / openat enforcement is a pre-existing
-		// backend gap, not introduced here.
+		// Linux rejects selective SSH masks and mutable symlink denies; Seatbelt
+		// applies the lexical pathname rule at access time.
 		lexicalCandidates = append(lexicalCandidates, gnupg, gitCredentials)
 		lexicalCandidates = append(lexicalCandidates, sshKeys...)
 		lexicalDirs = append(lexicalDirs, gnupg)
@@ -644,10 +663,12 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	dirList := normalizeProfilePaths(dirs)
 	dirList = appendLexicalCredentialDenyPaths(dirList, nil, lexicalDirs)
 	return credentialDenyPaths{
-		Paths:      out,
-		Carveouts:  credentialCarveoutPaths(out, carveouts),
-		EnsureDirs: credentialRetainedDirs(out, normalizeProfilePaths(ensureDirs)),
-		Dirs:       credentialRetainedDirs(out, dirList),
+		DiscoveryErrors: scanner.errors,
+		SSHFiles:        credentialRetainedDirs(out, normalizeProfilePaths(sshFiles)),
+		Paths:           out,
+		Carveouts:       credentialCarveoutPaths(out, carveouts),
+		EnsureDirs:      credentialRetainedDirs(out, normalizeProfilePaths(ensureDirs)),
+		Dirs:            credentialRetainedDirs(out, dirList),
 	}
 }
 
@@ -899,6 +920,7 @@ func credentialRetainedDirs(denied []string, dirs []string) []string {
 // Children inside a retained carveout stay explicit denies, because the
 // carveout re-allows that subtree.
 func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead []string) credentialDenyPaths {
+	credentials.SSHFiles = credentialRetainedFiles(credentials.SSHFiles, userDenyRead, credentials.EnsureDirs, credentials.Carveouts)
 	credentials.Paths = pathsOutsideRoots(credentials.Paths, userDenyRead)
 	credentials.Carveouts = pathsOutsideOverlappingRoots(credentials.Carveouts, userDenyRead)
 	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
