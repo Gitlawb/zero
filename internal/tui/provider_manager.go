@@ -17,7 +17,6 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
-	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 const providerManagerMaxVisible = 10
@@ -408,7 +407,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		resolvedProfile := row.profile
 		resolvedProfile.Name = exactName
 		resolvedProfile.APIKeyStored = false
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, resolvedProfile, false)
+		cleanup = providerManagerCleanupCmd(resolvedProfile)
 	} else {
 		// Project- and environment-derived rows have no user-config row and no
 		// credential of their own to delete. Removing them from the session is
@@ -538,23 +537,13 @@ type providerManagerCleanupMsg struct {
 	notes []string
 }
 
-// providerManagerCleanupCmd finishes a delete off the UI goroutine: the
-// keychain delete shells out to `security` on macOS and the OAuth-login lookup
-// reads the token store — blocking work the confirm keypress must not wait on.
-// A failed key delete is surfaced rather than letting a lingering secret read
-// as a clean removal.
-func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile, deleteStoredKey bool) tea.Cmd {
+// providerManagerCleanupCmd checks for a retained OAuth login off the UI
+// goroutine. API-key deletion already completed inside the provider transaction.
+func providerManagerCleanupCmd(profile config.ProviderProfile) tea.Cmd {
 	name := profile.Name
 	catalogID := profile.CatalogID
 	return func() tea.Msg {
 		notes := []string{}
-		var storeErr error
-		if deleteStoredKey {
-			_, storeErr = config.DeleteProviderCredentials(configPath, []string{name}, name)
-		}
-		if storeErr != nil {
-			notes = append(notes, "Warning: its stored API key could not be deleted ("+redaction.ErrorMessage(storeErr, redaction.Options{})+").")
-		}
 		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {
 			notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
 		}

@@ -120,7 +120,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
 	if content == modelKnownContent {
-		options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(content), lineCount(content))
+		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
 		options.FileTracker.RecordCreated(absolutePath)

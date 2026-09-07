@@ -1075,8 +1075,8 @@ func TestEditedDiffCardHandlesBareBlankHunkContext(t *testing.T) {
 
 func TestReadCardBodyShowsExploredSummary(t *testing.T) {
 	m := limeTestModel()
-	// Mirrors the real read_file output shape: "<right-aligned N> | <text>".
-	detail := "File: internal/agent/loop.go\n\n  12 | func Run() {\n  13 | }\n"
+	// Mirrors the real read_file output shape: "N→<text>".
+	detail := "File: internal/agent/loop.go\n\n12→func Run() {\n13→}\n"
 	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "read_file", status: tools.StatusOK, detail: detail}
 	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "read_file", detail: "internal/agent/loop.go"}})
 	got := plainRender(t, m.renderRow(row, 80, rc))
@@ -1097,7 +1097,7 @@ func TestReadCardBodyShowsExploredSummary(t *testing.T) {
 
 	row.expanded = true
 	expanded := plainRender(t, m.renderRow(row, 80, rc))
-	for _, want := range []string{"Explored", "└ Read", "internal/agent/loop.go", "func Run()", "13 |"} {
+	for _, want := range []string{"Explored", "└ Read", "internal/agent/loop.go", "func Run()", "13→"} {
 		if !strings.Contains(expanded, want) {
 			t.Fatalf("expanded read card = %q, missing %q", expanded, want)
 		}

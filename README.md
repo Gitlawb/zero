@@ -125,9 +125,11 @@ zero doctor
 
 If an upgraded `config.json` contains one legacy provider profile without a
 name, repair it with `zero providers repair-config`. The command preserves the
-saved `activeProvider` name (falling back to `openai`), or accepts an explicit
-replacement with `--name <name>`. Multiple unnamed rows are not guessed; repair
-those directly in `config.json`.
+saved `activeProvider` name (falling back to `openai`). If a row already has that
+exact name, the command preserves the field merge older releases used, with
+later nonempty fields taking precedence. An explicit `--name <unique-name>`
+keeps the legacy row separate instead. Case-only collisions and multiple
+unnamed rows are not merged by guessing; follow the error's repair guidance.
 
 For API providers, set the matching environment variable before setup or enter
 the key in the wizard:
@@ -377,9 +379,13 @@ go run ./cmd/zero-perf-bench
 
 Experimental: `ZERO_OPENAI_TURN_SESSION=1` enables the optimized OpenAI turn
 session (background connection prewarm + request-prefix telemetry) for headless
-`zero exec` runs against official OpenAI profiles. Off by default; `0`/`false`
-disable. A/B-benchmark it by running the same `zero-perf-bench` suite with the
-variable unset and set.
+`zero exec` runs against official OpenAI profiles. Off by default; `0`, `false`,
+or `off` disable it. A/B-benchmark it by running the same `zero-perf-bench` suite
+with the variable unset and set.
+
+Native ChatGPT Responses sessions are enabled by default. Set
+`ZERO_CHATGPT_TURN_SESSION=0`, `false`, or `off` to restore stateless HTTP/SSE
+transport.
 
 ### Code Quality and Security Checks
 

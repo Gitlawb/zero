@@ -260,14 +260,14 @@ func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"hello "}}]}`)
-		writeSSE(w, `{"choices":[{"delta":{"content":"zero"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"zero"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}`)
 		writeSSE(w, `[DONE]`)
 	})
 
 	events := collectProviderEvents(t, provider)
 	assertEvent(t, events[0], zeroruntime.StreamEventText, "hello ")
 	assertEvent(t, events[1], zeroruntime.StreamEventText, "zero")
-	if events[2].Type != zeroruntime.StreamEventUsage || events[2].Usage.PromptTokens != 12 || events[2].Usage.CompletionTokens != 5 || events[2].Usage.CachedInputTokens != 3 {
+	if events[2].Type != zeroruntime.StreamEventUsage || events[2].Usage.PromptTokens != 12 || events[2].Usage.CompletionTokens != 5 || events[2].Usage.CachedInputTokens != 3 || events[2].Usage.CacheWriteTokens != 2 {
 		t.Fatalf("unexpected usage event: %#v", events[2])
 	}
 	if events[3].Type != zeroruntime.StreamEventDone {

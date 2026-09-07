@@ -1942,6 +1942,26 @@ func TestCatalogIdentityExclusive(t *testing.T) {
 	if exclusive, err := CatalogIdentityExclusive(sole, "openrouter", "my-router"); err != nil || !exclusive {
 		t.Fatalf("exclusive = %v err = %v, want true when only the owner claims the id", exclusive, err)
 	}
+
+	for name, stt := range map[string]STTConfig{
+		"batch dictation":     {Provider: STTProviderGroq},
+		"streaming dictation": {StreamProvider: STTProviderDeepgram},
+	} {
+		t.Run(name, func(t *testing.T) {
+			catalogID := string(stt.Provider)
+			if catalogID == "" {
+				catalogID = string(stt.StreamProvider)
+			}
+			path := filepath.Join(t.TempDir(), "config.json")
+			writeConfigFixture(t, path, FileConfig{
+				Providers: []ProviderProfile{{Name: "my-" + catalogID, CatalogID: catalogID}},
+				STT:       stt,
+			}, 0o600)
+			if exclusive, err := CatalogIdentityExclusive(path, catalogID, "my-"+catalogID); err != nil || exclusive {
+				t.Fatalf("exclusive = %v err = %v, want false when dictation claims the catalog id", exclusive, err)
+			}
+		})
+	}
 }
 
 func TestProviderCredentialCandidates(t *testing.T) {
@@ -2000,6 +2020,15 @@ func TestProviderCredentialCandidates(t *testing.T) {
 		candidates, canonical, err := ProviderCredentialCandidates(path, "work")
 		if err == nil || len(candidates) != 0 || canonical != "work" {
 			t.Fatalf("candidates = %q canonical = %q err = %v, want no candidates and an exact-name ambiguity error", candidates, canonical, err)
+		}
+	})
+
+	t.Run("does not invent an API-key owner for an unsaved address", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{}, 0o600)
+		candidates, canonical, err := ProviderCredentialCandidates(path, "groq")
+		if err != nil || !slices.Equal(candidates, []string{"groq"}) || canonical != "" {
+			t.Fatalf("candidates = %q canonical = %q err = %v, want OAuth candidate and no persisted row owner", candidates, canonical, err)
 		}
 	})
 

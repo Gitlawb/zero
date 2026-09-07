@@ -102,6 +102,10 @@ func copyToolDefinitions(toolDefs []zeroruntime.ToolDefinition) []zeroruntime.To
 	for index, definition := range toolDefs {
 		copied[index] = definition
 		copied[index].Parameters = copySchemaMap(definition.Parameters)
+		if definition.Format != nil {
+			format := *definition.Format
+			copied[index].Format = &format
+		}
 	}
 	return copied
 }

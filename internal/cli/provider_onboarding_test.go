@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,81 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 )
+
+func TestProviderMutationsRejectProjectCaseSibling(t *testing.T) {
+	for _, command := range []string{"remove", "rename"} {
+		t.Run(command, func(t *testing.T) {
+			setCLIUserConfigRoot(t)
+			t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+			path, err := config.DefaultUserConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			user := config.ProviderProfile{Name: "work", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4o", APIKeyStored: true}
+			writeProviderOnboardingConfig(t, path, config.FileConfig{ActiveProvider: "work", Providers: []config.ProviderProfile{user}})
+			workspace := t.TempDir()
+			project := config.ProviderProfile{Name: "WORK", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}
+			writeProviderOnboardingConfig(t, filepath.Join(workspace, ".zero", "config.json"), config.FileConfig{Providers: []config.ProviderProfile{project}})
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := config.ProviderKeyStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Set("work", "user-key"); err != nil {
+				t.Fatal(err)
+			}
+			deps := providerSetupDeps(path)
+			deps.getwd = func() (string, error) { return workspace, nil }
+			args := []string{"providers", command, "WORK"}
+			if command == "rename" {
+				args = append(args, "renamed")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps(args, &stdout, &stderr, deps); code == exitSuccess || !strings.Contains(stderr.String(), "not the saved provider") {
+				t.Fatalf("project mutation exit=%d, stderr=%q", code, stderr.String())
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("project mutation changed user config: %v", err)
+			}
+			key, ok, err := store.Get("work")
+			if err != nil || !ok || key != "user-key" {
+				t.Fatalf("project mutation changed user credential: present=%t, error=%v", ok, err)
+			}
+		})
+	}
+}
+
+func TestRunProvidersRepairConfigPreservesLegacyMergedProfile(t *testing.T) {
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprint(reversed), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			rows := []config.ProviderProfile{
+				{ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://legacy.example/v1", APIKey: "legacy-key"},
+				{Name: "work", Model: "legacy-model"},
+			}
+			if reversed {
+				rows[0], rows[1] = rows[1], rows[0]
+			}
+			writeProviderOnboardingConfig(t, path, config.FileConfig{ActiveProvider: "work", Providers: rows, MaxTurns: 17})
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps([]string{"providers", "repair-config"}, &stdout, &stderr, providerSetupDeps(path)); code != exitSuccess {
+				t.Fatalf("repair exit=%d stderr=%q", code, stderr.String())
+			}
+			resolved, err := config.Resolve(config.ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("fresh Resolve after legacy upgrade repair: %v", err)
+			}
+			p := resolved.Provider
+			if len(resolved.Providers) != 1 || p.Name != "work" || p.Model != "legacy-model" || p.BaseURL != "https://legacy.example/v1" || p.APIKey != "legacy-key" || resolved.MaxTurns != 17 {
+				t.Fatal("repair changed the legacy merged provider or unrelated config")
+			}
+		})
+	}
+}
 
 func TestRunProvidersUseSetsActiveProvider(t *testing.T) {
 	var stdout bytes.Buffer
@@ -120,6 +196,7 @@ func TestRunProvidersRepairConfigMigratesLegacyActiveReference(t *testing.T) {
 }
 
 func TestProviderRepairCommandsCanResolveIndependentLegacyNameProblems(t *testing.T) {
+	setCLIUserConfigRoot(t)
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{
@@ -673,9 +750,9 @@ func writeProviderOnboardingConfig(t *testing.T, path string, cfg config.FileCon
 	}
 }
 
-// Runtime provider credentials are user-scoped even when tests inject a
-// non-default config path.
-func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
+// Provider credentials live beside the config being edited. An injected config
+// path must not redirect deletion into the default per-user credential store.
+func TestRunProvidersRemoveDeletesKeyFromConfigStore(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
@@ -684,11 +761,18 @@ func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	defaultStore, err := config.ProviderKeyStore()
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("open default store: %v", err)
 	}
-	if err := store.Set("gw", "sk-secret"); err != nil {
+	if err := defaultStore.Set("gw", "ambient-secret"); err != nil {
+		t.Fatalf("seed default key: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatalf("open config store: %v", err)
+	}
+	if err := store.Set("gw", "config-secret"); err != nil {
 		t.Fatalf("seed key: %v", err)
 	}
 
@@ -724,7 +808,10 @@ func TestRunProvidersRemoveDeletesKeyFromUserStore(t *testing.T) {
 		t.Fatalf("active must hand off, got %q", payload.ActiveProvider)
 	}
 	if _, ok, _ := store.Get("gw"); ok {
-		t.Fatalf("stored key must be deleted from the user-scoped store")
+		t.Fatalf("stored key must be deleted from the config-adjacent store")
+	}
+	if key, ok, getErr := defaultStore.Get("gw"); getErr != nil || !ok || key != "ambient-secret" {
+		t.Fatalf("default-store key = %q, %v, %v; want it untouched", key, ok, getErr)
 	}
 }
 
@@ -736,13 +823,12 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("ZERO_CRED_STORAGE", "file")
-			setCLIUserConfigRoot(t)
 			dir := t.TempDir()
 			configPath := filepath.Join(dir, "config.json")
 			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+			store, err := config.ProviderKeyStoreAt(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -751,7 +837,7 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 			}
 			// A directory at the lock-file path is a hermetic, cross-platform
 			// failure: Delete cannot acquire its write lock.
-			lockPath := filepath.Join(filepath.Dir(configPath), "credentials.json.lock")
+			lockPath := filepath.Join(dir, "credentials.json.lock")
 			if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
@@ -786,14 +872,13 @@ func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
 
 func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
-	setCLIUserConfigRoot(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	seed := []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
 	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	store, err := config.ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,6 +906,38 @@ func TestRunProvidersRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testin
 	}
 	if payload.KeyRemoved {
 		t.Fatal("remove reported deleting a credential still owned by the survivor")
+	}
+}
+
+func TestRunProvidersRemoveReportsRetainedSharedCredential(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	seed := []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Kept its stored API key because another saved provider still uses that credential.") {
+		t.Fatalf("stdout = %q, want retained-key explanation", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no warning", stderr.String())
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("shared key present=%v matched=%v err=%v; want present, matching, nil", ok, key == "sk-shared", getErr)
 	}
 }
 
@@ -880,17 +997,9 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 	})
 }
 
-// The bare repair used activeProvider as the unnamed row's default name even
-// when that value already selected a DIFFERENT named row. It then proposed a
-// duplicate, rejected its own candidate, left the file unchanged, and reported
-// that the file contained duplicate rows — about a file whose second row has no
-// name at all — without mentioning the --name escape that works.
-//
-// activeProvider is now only a default while it selects no named row, so this
-// case falls through to the "openai" fallback and succeeds. The command also
-// reports the name the row actually got: it used to re-derive the defaulting
-// rules and say "Named legacy provider Groq" about a row named "openai".
-func TestRunProvidersRepairConfigDoesNotProposeAnOwnedActiveName(t *testing.T) {
+// Bare repair preserves the exact merge older releases performed, including
+// later-row precedence, instead of proposing a duplicate or splitting the row.
+func TestRunProvidersRepairConfigMergesAnOwnedActiveName(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
@@ -903,11 +1012,11 @@ func TestRunProvidersRepairConfigDoesNotProposeAnOwnedActiveName(t *testing.T) {
 	if code := runWithDeps([]string{"providers", "repair-config"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
 		t.Fatalf("bare repair exit=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Named legacy provider openai") {
+	if !strings.Contains(stdout.String(), "Named legacy provider Groq") {
 		t.Fatalf("repair reported a name the row did not get: %q", stdout.String())
 	}
 	cfg := readFileConfig(t, configPath)
-	if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "openai" || cfg.Providers[1].Name != "Groq" {
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "Groq" || cfg.Providers[0].Model != "llama" {
 		t.Fatalf("repaired rows = %+v", cfg.Providers)
 	}
 	// activeProvider already selected the named row; the repair must not move it.
@@ -933,7 +1042,7 @@ func TestRunProvidersRepairConfigExplainsCollidingDefaultName(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	seed := `{"activeProvider":"openai","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"openai","provider_kind":"openai","model":"gpt-4.1"}]}`
+	seed := `{"activeProvider":"openai","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"OPENAI","provider_kind":"openai","model":"gpt-4.1"}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -971,8 +1080,8 @@ func TestRunProvidersRepairConfigExplainsCollidingDefaultName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh Resolve after guided repair: %v", err)
 	}
-	if resolved.Provider.Name != "openai" {
-		t.Fatalf("resolved provider = %q, want the untouched active openai row", resolved.Provider.Name)
+	if resolved.Provider.Name != "OPENAI" {
+		t.Fatalf("resolved provider = %q, want the untouched active OPENAI row", resolved.Provider.Name)
 	}
 	if readFileConfig(t, configPath).Providers[0].Name != "legacy" {
 		t.Fatalf("guided repair did not name the legacy row: %+v", readFileConfig(t, configPath).Providers)

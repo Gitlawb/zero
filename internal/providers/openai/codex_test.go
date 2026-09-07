@@ -771,7 +771,7 @@ func TestCodexProviderParsesResponsesTextDeltas(t *testing.T) {
 		`{"type":"response.output_text.delta","delta":"hello "}`,
 		`{"type":"response.output_text.delta","delta":"world"}`,
 		`{"type":"response.output_text.delta","delta":"!"}`,
-		`{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":1},"input_tokens_details":{"cached_tokens":2}}}}`,
+		`{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":1},"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}}}`,
 	)
 	defer srv.Close()
 
@@ -809,8 +809,8 @@ func TestCodexProviderParsesResponsesTextDeltas(t *testing.T) {
 	if usage == nil {
 		t.Fatal("expected a usage event, got none")
 	}
-	if usage.InputTokens != 7 || usage.OutputTokens != 3 || usage.CachedInputTokens != 2 || usage.ReasoningTokens != 1 {
-		t.Fatalf("usage = %+v, want input=7 output=3 cached=2 reasoning=1", *usage)
+	if usage.InputTokens != 7 || usage.OutputTokens != 3 || usage.CachedInputTokens != 2 || usage.CacheWriteTokens != 1 || usage.ReasoningTokens != 1 {
+		t.Fatalf("usage = %+v, want input=7 output=3 cached=2 cache-write=1 reasoning=1", *usage)
 	}
 	if !gotDone {
 		t.Fatal("expected a done event, got none")

@@ -154,6 +154,52 @@ func TestCommitProviderProfileCapturesKeyAndPersistsRow(t *testing.T) {
 	}
 }
 
+func TestRevokeProviderCredentialsHoldsLockAndDoesNotRestoreOnMarkerFailure(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work", APIKeyStored: true}}}, 0o600)
+	store, err := ProviderKeyStoreForConfigPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	oldAcquire := acquireProviderWriteLock
+	held := false
+	acquireProviderWriteLock = func(path string) (func() error, error) {
+		release, err := lockProviderWrite(path)
+		if err != nil {
+			return nil, err
+		}
+		held = true
+		return func() error { held = false; return release() }, nil
+	}
+	t.Cleanup(func() { acquireProviderWriteLock = oldAcquire })
+	removed, err := RevokeProviderCredentials(path, "work", func(string) (bool, error) {
+		if !held {
+			t.Fatal("OAuth revoked outside transaction lock")
+		}
+		// Make publication fail after config has been read, on every platform.
+		if err := os.Rename(path, path+".original"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil
+	})
+	if !removed || err == nil || !strings.Contains(err.Error(), "credentials revoked, but stored-key marker update failed") {
+		t.Fatalf("removed=%v err=%v", removed, err)
+	}
+	if held {
+		t.Fatal("transaction lock not released")
+	}
+	if _, ok, err := store.Get("work"); err != nil || ok {
+		t.Fatalf("revoked key restored: present=%v err=%v", ok, err)
+	}
+}
+
 func TestCommitProviderProfileReturnsCommittedResultWhenLockReleaseFails(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")

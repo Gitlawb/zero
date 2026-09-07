@@ -472,7 +472,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	name := options.names[0]
-	resolvedName, persisted, err := resolvePersistedProviderName(configPath, name)
+	_, persisted, err := resolvePersistedProviderName(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -487,20 +487,17 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		if exit, handled := reportUnpersistedProviderRemove(stdout, stderr, deps, name, options.json, configPath); handled {
 			return exit
 		}
-	} else {
-		name = resolvedName
 	}
-	// Resolve credential identity to the exact persisted row before entering the
-	// transactional row/key mutation.
-	exactName, err := config.ResolvePersistedProviderName(configPath, name)
+	// Check the original requested row before entering the config/key transaction.
+	name, err = resolveProviderMutationName(configPath, options.names[0], deps)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	cfg, keyRemoved, err := config.RemoveProviderAndKey(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	cfg, keyRemoved, err := config.RemoveProviderAndKey(configPath, exactName)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-
+	keyRetained := config.CredentialKeyRetained(cfg.Providers, name)
 	if options.json {
 		payload := map[string]any{
 			"removed":        name,
@@ -519,6 +516,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 	if keyRemoved {
 		if _, err := fmt.Fprintln(stdout, "Deleted its stored API key."); err != nil {
+			return exitCrash
+		}
+	} else if keyRetained {
+		if _, err := fmt.Fprintln(stdout, "Kept its stored API key because another saved provider still uses that credential."); err != nil {
 			return exitCrash
 		}
 	}
@@ -552,7 +553,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	oldName := options.names[0]
-	resolvedName, persisted, err := resolvePersistedProviderName(configPath, oldName)
+	_, persisted, err := resolvePersistedProviderName(configPath, oldName)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -560,14 +561,12 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		if exit, handled := reportUnpersistedProviderRename(stdout, stderr, deps, oldName, options.json, configPath); handled {
 			return exit
 		}
-	} else {
-		oldName = resolvedName
 	}
 	// Same bridge as remove: the persisted check matches credential identity
 	// while RenameProvider matches the row's exact spelling.
-	oldName, err = config.ResolvePersistedProviderName(configPath, oldName)
+	oldName, err = resolveProviderMutationName(configPath, options.names[0], deps)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	cfg, err := config.RenameProvider(configPath, oldName, options.names[1])
 	if err != nil {
@@ -598,6 +597,42 @@ func resolvePersistedProviderName(path, identity string) (string, bool, error) {
 		return strings.TrimSpace(identity), false, nil
 	}
 	return strings.TrimSpace(profile.Name), true, nil
+}
+
+// A spelling copied from providers list can identify a project/env row, not an
+// alias for a user row. Exact persisted requests stay usable for repairing an
+// otherwise invalid config; only a fallback needs cross-layer resolution.
+func resolveProviderMutationName(path, name string, deps appDeps) (string, error) {
+	persisted, _, err := resolvePersistedProviderName(path, name)
+	if err != nil || persisted == strings.TrimSpace(name) {
+		return persisted, err
+	}
+	root, err := resolveWorkspaceRoot("", deps)
+	if err != nil {
+		return "", err
+	}
+	options, err := config.DefaultResolveOptions(root)
+	if err != nil {
+		return "", err
+	}
+	// Use the same user file the mutation will write, including injected paths.
+	options.UserConfigPath = path
+	resolved, err := config.Resolve(options)
+	if err != nil {
+		return "", err
+	}
+	names := config.ProviderProfileNames(resolved.Providers)
+	row, lookup := config.LookupProviderName(names, name)
+	if lookup == config.ProviderNameExact {
+		owner, err := config.ProviderRowOwnershipAt(path, names, row)
+		if err != nil {
+			return "", err
+		}
+		if !owner.UserBacked {
+			return "", fmt.Errorf("%s; change that provider in its project configuration or environment instead", owner.Reason)
+		}
+	}
+	return persisted, nil
 }
 
 // providerResolvedByName reports whether name matches a provider in a

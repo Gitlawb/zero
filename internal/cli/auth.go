@@ -469,49 +469,14 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := config.PreflightUserConfig(configPath); err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
-	}
-	credentialCandidates, configProvider, err := config.ProviderCredentialCandidates(configPath, provider)
-	if err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
-	}
 	manager, err := newAuthManager(deps, stdout, "", "")
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	// Delete every candidate the runtime bearer resolver would have tried
-	// (ProviderProfile.OAuthLoginCandidates: profile name, then catalog id) —
-	// not just the spelling the user typed. A profile saved as
-	// {name:"my-xai", catalogId:"xai"} logged in via `zero auth login xai`
-	// stores its token under "xai"; `zero auth logout my-xai` must delete that
-	// too, or the login silently survives. The same candidate set is used below
-	// for the API key store, which has the identical asymmetry.
-	//
-	// The catalog id joins that set only when the resolved profile is the ONLY
-	// row claiming it. Catalog ids are shared by design — stored-key "work-xai",
-	// stored-key "xai", and keyless "personal-xai" can all carry catalogId
-	// "xai" — so expanding unconditionally made `logout work-xai` delete the
-	// "xai" token and the "xai" profile's API key while clearing only
-	// work-xai's marker. When the id is shared, the user has to name the
-	// profile whose credential they mean.
-	removed := false
-	for _, candidate := range credentialCandidates {
-		candidateRemoved, err := manager.Logout(candidate)
-		if err != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
-		}
-		removed = removed || candidateRemoved
+	removed, err := config.RevokeProviderCredentials(configPath, provider, manager.Logout)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	// Also drop any stored API key and its marker so `auth logout` clears the whole
-	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
-	// failures rather than reporting success while a credential remains.
-	keyRemoved, keyErr := config.DeleteProviderCredentials(configPath, credentialCandidates, configProvider)
-	if keyErr != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
-	}
-
-	removed = removed || keyRemoved
 	if parsed.json {
 		payload := struct {
 			Provider string `json:"provider"`
