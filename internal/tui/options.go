@@ -70,7 +70,13 @@ type Options struct {
 	// invocation. Called lazily per use so newly installed skills are picked up
 	// without a restart. Nil means the session has no skills wiring (skills stay
 	// model-pulled via the skill tool only).
-	LoadSkills      func() []skills.Skill
+	LoadSkills func() []skills.Skill
+	// AllowEscalation opts this session into mid-run model escalation, set from
+	// --allow-escalation. It wires the model switchers onto every turn's options;
+	// the escalate_model tool itself is registered by the caller on the same flag.
+	// Both halves are required: the tool without the switchers is inert, and the
+	// switchers without the tool are unreachable.
+	AllowEscalation bool
 	PermissionMode  agent.PermissionMode
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string

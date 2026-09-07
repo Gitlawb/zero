@@ -327,9 +327,15 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return writeAppError(stderr, err.Error(), 1)
 	}
 	addDirs = append(addDirs, moreDirs...)
+	// --allow-escalation opts the interactive session into mid-run model
+	// escalation, mirroring the exec flag of the same name.
+	allowEscalation, args, err := splitLeadingAllowEscalationFlag(args)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
 
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme, allowEscalation)
 	}
 
 	// --add-dir grants an extra write root, and only the interactive TUI and
@@ -374,6 +380,13 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeAppError(stderr, err.Error(), 1)
 		}
 		moreDirs = append(moreDirs, evenMoreDirs...)
+		// --allow-escalation may sit on either side of --skip-permissions-unsafe,
+		// like --theme and --add-dir, so re-split it here and OR the two results
+		// rather than letting the side it was written on decide.
+		skipAllowEscalation, rest, err := splitLeadingAllowEscalationFlag(rest)
+		if err != nil {
+			return writeAppError(stderr, err.Error(), 1)
+		}
 		// A misplaced --add-dir anywhere in the remainder is the more specific error,
 		// so check for it across all of rest before rejecting stray args.
 		for _, arg := range rest {
@@ -390,7 +403,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `zero exec --skip-permissions-unsafe -p \"...\"`", 1)
 			}
 		}
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme, allowEscalation || skipAllowEscalation)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -694,11 +707,11 @@ func fillAppDeps(deps appDeps) appDeps {
 	return deps
 }
 
-func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string) int {
-	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false)
+func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, allowEscalation bool) int {
+	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false, allowEscalation)
 }
 
-func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
+func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool, allowEscalation bool) int {
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
@@ -790,6 +803,14 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+	// Mid-run model escalation is opt-in on this surface too. The tool is present
+	// only when the operator asked for it with --allow-escalation, and the
+	// switchers that make it do anything ride on the same flag through
+	// Options.AllowEscalation below. Registering one without the other ships a
+	// tool the loop will never act on, which looks like a feature and is not.
+	if allowEscalation {
+		registry.Register(tools.NewEscalateModelTool())
+	}
 	executionRunner := execution.NewRunner(nil)
 	sandboxStore, err := deps.newSandboxStore()
 	if err != nil {
@@ -1033,6 +1054,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Specialists:    specialistRuntime.specialists,
 			Skills:         pluginActivation.skillInfos(deps.skillsDir()),
 		},
+		AllowEscalation: allowEscalation,
 		// LoadSkills backs /skills and direct /<skill-name> invocation in the TUI.
 		// It resolves against the same merged set (default dir + plugin skill
 		// roots) as the skill tool and the system-prompt list, re-read per use so
@@ -1378,6 +1400,7 @@ Flags:
   -v, --version                  Print version
   -p, --prompt                   Run a one-shot prompt
       --add-dir <path>           Allow writes in an extra directory (repeatable)
+      --allow-escalation         Let the agent escalate to a stronger model mid-run via escalate_model
       --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)
 `)
 	return err
@@ -1432,6 +1455,35 @@ func splitLeadingAddDirFlags(args []string) ([]string, []string, error) {
 		}
 	}
 	return addDirs, args, nil
+}
+
+// splitLeadingAllowEscalationFlag strips a leading --allow-escalation from the
+// root argument list, opting the interactive session into mid-run model
+// escalation.
+//
+// OPT-IN, THE SAME WAY exec IS. Escalation moves a run onto a different model,
+// which changes what the run costs and which provider sees the conversation, so
+// it is a decision the operator makes rather than a default. The exec flag
+// already answers this conservatively and the interactive surface should not
+// answer it differently.
+//
+// Bare flag only: repeating it is harmless, and an =value form is rejected so a
+// mistyped --allow-escalation=false is a loud error instead of silently enabling
+// the thing it was trying to turn off.
+func splitLeadingAllowEscalationFlag(args []string) (bool, []string, error) {
+	allow := false
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--allow-escalation":
+			allow = true
+			args = args[1:]
+		case strings.HasPrefix(args[0], "--allow-escalation="):
+			return false, nil, errors.New("--allow-escalation takes no value; pass it bare to enable mid-run model escalation, or omit it")
+		default:
+			return allow, args, nil
+		}
+	}
+	return allow, args, nil
 }
 
 // splitLeadingThemeFlag strips a leading --theme <auto|theme-name> (space or =form)
