@@ -12,6 +12,42 @@ func withWindowsHost(t *testing.T) {
 	t.Cleanup(func() { denyReadWarningHostGOOS = previous })
 }
 
+// withProvisionedWindowsHost pins the one thing about these simulated fixtures
+// that was still reading the real machine.
+//
+// windowsSandboxInitialized stats the per-host setup marker, and BuildCommandPlan
+// consults it: a box where `zero sandbox setup` has run resolves these requests
+// at native enforcement, and every other box, including every CI runner, gets
+// unelevated. The plan comes out wrapped either way, so the disclosure assertions
+// held, but the level they were asserting against was whatever the developer's
+// machine happened to be. A simulated fixture should not have an answer that
+// depends on that.
+func withProvisionedWindowsHost(t *testing.T) {
+	t.Helper()
+	withWindowsHost(t)
+	previous := windowsSandboxInitialized
+	windowsSandboxInitialized = func() bool { return true }
+	t.Cleanup(func() { windowsSandboxInitialized = previous })
+}
+
+// requireWrappedRestrictedTokenPlan fails when the manager stops routing a
+// configured deny_read request through the restricted-token producer.
+//
+// NOT A SKIP, WHICH IS WHAT THIS WAS. The fixtures pin GOOS, an available native
+// backend, command wrapping, an explicit executable and now the setup marker, so
+// an unwrapped result here is not an environment these tests cannot run in: it is
+// the producer whose disclosure they exist to check having gone away. Skipping
+// reported every one of them green in that case, which is the only case worth
+// being told about.
+func requireWrappedRestrictedTokenPlan(t *testing.T, wrapped bool, target BackendName, level EnforcementLevel) {
+	t.Helper()
+	if wrapped && target == BackendWindowsRestrictedToken {
+		return
+	}
+	t.Fatalf("SETUP INVALID: the manager built no wrapped restricted-token plan for a configured deny_read request (wrapped %t, target %s, level %s), so the disclosure under test is unreachable and passing here would mean nothing",
+		wrapped, target, level)
+}
+
 func windowsRestrictedTokenBackend() Backend {
 	return Backend{
 		Name:            BackendWindowsRestrictedToken,

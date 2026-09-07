@@ -23,6 +23,7 @@ import (
 // of this test managed to fail against a working fix.
 func windowsDisclosurePlan(t *testing.T, mode PolicyMode, denyRead []string, preference SandboxPreference) CommandPlan {
 	t.Helper()
+	withProvisionedWindowsHost(t)
 	workspace := t.TempDir()
 	backend := windowsRestrictedTokenBackend()
 	backend.CommandWrapping = true
@@ -49,9 +50,7 @@ func TestEveryPlanThatBuildsTheRestrictedTokenCarriesTheDisclosure(t *testing.T)
 	denyRead := []string{`C:\Users\someone\.config\creds`}
 
 	plan := windowsDisclosurePlan(t, ModeEnforce, denyRead, SandboxPreferenceAuto)
-	if !plan.Wrapped {
-		t.Skipf("this environment did not produce a wrapped Windows plan (backend %s, level %s)", plan.TargetBackend, plan.EnforcementLevel)
-	}
+	requireWrappedRestrictedTokenPlan(t, plan.Wrapped, plan.TargetBackend, plan.EnforcementLevel)
 	if len(plan.Notes) == 0 {
 		t.Fatalf("a wrapped Windows plan carried no disclosure; every real deny_read execution gets the non-WRITE_RESTRICTED token and is told nothing (level %s)", plan.EnforcementLevel)
 	}
@@ -103,9 +102,7 @@ func TestEnforcementForCarriesThePlanNoticesToTheGenericContract(t *testing.T) {
 	denyRead := []string{`C:\Users\someone\.config\creds`}
 
 	plan := windowsDisclosurePlan(t, ModeEnforce, denyRead, SandboxPreferenceAuto)
-	if !plan.Wrapped {
-		t.Skipf("this environment did not produce a wrapped Windows plan (%s)", plan.EnforcementLevel)
-	}
+	requireWrappedRestrictedTokenPlan(t, plan.Wrapped, plan.TargetBackend, plan.EnforcementLevel)
 	if len(plan.Notes) == 0 {
 		t.Fatal("SETUP INVALID: the plan carries no notes, so the projection has nothing to carry")
 	}

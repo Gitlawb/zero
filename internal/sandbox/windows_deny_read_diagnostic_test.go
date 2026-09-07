@@ -10,6 +10,7 @@ import (
 // the resolution actually produces.
 func diagnosticWarnings(t *testing.T, mode PolicyMode, denyRead []string, preference SandboxPreference) (SandboxExecutionRequest, []string) {
 	t.Helper()
+	withProvisionedWindowsHost(t)
 	workspace := t.TempDir()
 	backend := windowsRestrictedTokenBackend()
 	backend.CommandWrapping = true
@@ -74,9 +75,7 @@ func TestDiagnosticsStillDiscloseTheTradeWhereTheTokenRuns(t *testing.T) {
 	withWindowsHost(t)
 
 	request, warnings := diagnosticWarnings(t, ModeEnforce, []string{`C:\Users\someone\.config\creds`}, SandboxPreferenceAuto)
-	if !request.CommandWrapped || request.TargetBackend != BackendWindowsRestrictedToken {
-		t.Skipf("this environment produced no wrapped Windows plan (target %s, level %s)", request.TargetBackend, request.EnforcementLevel)
-	}
+	requireWrappedRestrictedTokenPlan(t, request.CommandWrapped, request.TargetBackend, request.EnforcementLevel)
 	if denyReadWarning(warnings) == "" {
 		t.Fatalf("a plan that does build the restricted token disclosed nothing: %v", warnings)
 	}
