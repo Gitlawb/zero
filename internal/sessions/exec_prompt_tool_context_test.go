@@ -163,11 +163,27 @@ func TestResumePromptCarriesToolOutcomeWithoutOutput(t *testing.T) {
 	if strings.Contains(out, secret) {
 		t.Errorf("tool output reached the resume prompt:\n%s", out)
 	}
-	// What the turn DID still survives: the paths from the calls, and how each
-	// one ended.
-	for _, want := range []string{"deploy/prod.env", "deploy/missing.env", "error"} {
+	// What the turn DID still survives: the paths, from the calls.
+	for _, want := range []string{"deploy/prod.env", "deploy/missing.env"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the resume prompt lost %q, so the next turn cannot tell what happened:\n%s", want, out)
 		}
+	}
+	// And HOW EACH ONE ENDED, asserted only against the tool_result lines. The
+	// prompt also carries a provider error message, so an unscoped search for
+	// "error" passes whether or not the status survived. It did pass with the
+	// status blanked out, which is why this is scoped.
+	var resultLines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "tool_result:") {
+			resultLines = append(resultLines, line)
+		}
+	}
+	if len(resultLines) != 2 {
+		t.Fatalf("SETUP INVALID: %d tool_result lines, want 2:\n%s", len(resultLines), out)
+	}
+	joined := strings.Join(resultLines, "\n")
+	if !strings.Contains(joined, "ok") || !strings.Contains(joined, "error") {
+		t.Errorf("the tool_result lines lost their outcome, so a failed read reads as a file the next turn already has:\n%s", joined)
 	}
 }
