@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -397,6 +398,31 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if string(bytes) != "zero-server-ok" {
 		t.Fatalf("server response = %q", string(bytes))
 	}
+
+	// AND THE SESSION DELIVERS OUTPUT MID-FLIGHT, PINNED DETERMINISTICALLY.
+	//
+	// The helper prints this line only when it serves a request, so it cannot have
+	// been in the first read: the request had not happened yet. It can only arrive
+	// through a poll of a process that is still running, which is the delivery the
+	// address parse used to cover by accident and only on a machine slow enough to
+	// miss the first read. A regression where a live session buffers everything
+	// until it exits leaves the rest of this test green and fails here.
+	deadline := time.Now().Add(60 * time.Second)
+	var served strings.Builder
+	for !strings.Contains(served.String(), "served") && time.Now().Before(deadline) {
+		poll := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"chars":         "",
+			"yield_time_ms": 250,
+		})
+		served.WriteString(poll.Output)
+		if poll.Status != StatusOK {
+			t.Fatalf("the exec session was gone before it reported serving the request:\n%s", served.String())
+		}
+	}
+	if !strings.Contains(served.String(), "served") {
+		t.Fatalf("a still-running session never delivered the line the server printed while serving:\n%s", served.String())
+	}
 }
 
 // waitForListeningAddress polls the exec session until the helper says where it
@@ -427,11 +453,28 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 // transcript is kept anyway, so a failure shows every chunk rather than the last.
 func waitForListeningAddress(t *testing.T, writeTool Tool, sessionID int, first string) string {
 	t.Helper()
-	if addr := parseListeningAddress(first); addr != "" {
+	if addr := validListeningAddress(first); addr != "" {
 		return addr
 	}
+	// AND WHEN IT DOES NOT, THIS TEST STOPS COVERING THE FIRST READ.
+	//
+	// That parse used to be the only assertion in the repo that a still-running
+	// session's first read carries the child's stdout at all: every other test
+	// either uses a tiny yield against a helper that prints later, or uses a large
+	// one against a helper that exits, which is the collect-on-exit branch. The
+	// manager-level equivalent is skipped on Windows because it shells out to
+	// /bin/sh. The coverage cannot be pinned deterministically without
+	// reintroducing the race, since collect() blocks the whole window either way,
+	// so it is given up deliberately here and paid back after the request below,
+	// where a line that cannot exist before the first read proves the poll path.
 	transcript := []string{first}
-	deadline := time.Now().Add(30 * time.Second)
+	// Sixty seconds, not thirty. Starting this helper was measured here at 0.74s
+	// to 4.79s with every core saturated, on a box faster than a CI runner, and
+	// windows-latest additionally scans a freshly linked test binary on its first
+	// execution. A deadline of the same order as the latency it tolerates is the
+	// mistake that produced the 500ms budget; the point is a bound, and every
+	// genuine failure below leaves before reaching it anyway.
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		poll := writeTool.Run(context.Background(), map[string]any{
 			"session_id":    sessionID,
@@ -439,9 +482,18 @@ func waitForListeningAddress(t *testing.T, writeTool Tool, sessionID int, first 
 			"yield_time_ms": 250,
 		})
 		transcript = append(transcript, poll.Output)
-		if addr := parseListeningAddress(poll.Output); addr != "" {
+		if addr := validListeningAddress(poll.Output); addr != "" {
 			return addr
 		}
+		// FAST-FAIL, BECAUSE THE LOOP HAS NO PACING OF ITS OWN. All the spacing
+		// comes from collect() waiting out its yield inside a LIVE session; every
+		// error return happens in microseconds. Continue removes the process the
+		// moment it observes the exit, so without these two the loop free-runs on
+		// a dead id: measured at 3028 polls in 5 seconds, which on a 4-vCPU runner
+		// would peg a core for the whole deadline and hand t.Fatalf hundreds of
+		// kilobytes of the same sentence. The exit result is also delivered
+		// exactly once, so folding it into the blob and continuing loses the one
+		// poll that says what went wrong.
 		if poll.Status != StatusOK {
 			t.Fatalf("the exec session was gone before the server reported an address:\n%s", strings.Join(transcript, "\n--- poll ---\n"))
 		}
@@ -451,6 +503,31 @@ func waitForListeningAddress(t *testing.T, writeTool Tool, sessionID int, first 
 	}
 	t.Fatalf("the server never reported a listening address within the deadline:\n%s", strings.Join(transcript, "\n--- poll ---\n"))
 	return ""
+}
+
+// validListeningAddress is parseListeningAddress plus the check that what it
+// found is actually an address.
+//
+// A read DRAINS, and the formatter wraps each drain in its own body, so a line
+// split across two reads arrives as two fragments with banner text wedged between
+// them and no concatenation can rejoin it. The formatter also terminates the
+// partial chunk, so the fragment looks like a whole line and the bare parse
+// returns a truncated address: the test would then fail on an unreachable port
+// and point the next reader at the network instead of at the parse. Rejecting
+// anything that is not host:port keeps polling instead.
+func validListeningAddress(output string) string {
+	addr := parseListeningAddress(output)
+	if addr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return ""
+	}
+	if number, err := strconv.Atoi(port); err != nil || number <= 0 {
+		return ""
+	}
+	return addr
 }
 
 func parseListeningAddress(output string) string {
@@ -482,7 +559,12 @@ func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
 		t.Fatalf("session_id is not numeric: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	// Ten seconds, not two. Inside this the helper must cold-start, run its 250ms
+	// sleep, exit and pass the reap, and a cold start alone was measured at up to
+	// 1.44s under load: two seconds was a budget with almost nothing left in it. The
+	// loop returns as soon as the session is gone, so the bound only costs anything
+	// when the reap genuinely never happens.
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, ok := manager.Snapshot(sessionID); !ok {
 			return

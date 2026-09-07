@@ -70,6 +70,9 @@ func runBashToolHelper(command string) {
 		fmt.Println("listening", listener.Addr().String())
 		server := &http.Server{
 			Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				// Printed per request, so a test can prove the session delivers output
+				// mid-flight: this line cannot exist before the first read has happened.
+				fmt.Println("served", request.URL.Path)
 				_, _ = response.Write([]byte("zero-server-ok"))
 			}),
 		}
@@ -522,7 +525,14 @@ func TestBashToolTimeoutKillsBackgroundChildren(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("expected timeout error status, got %s: %q", result.Status, result.Output)
 	}
-	if elapsed > time.Second {
+	// The regression this guards is Run blocking until the background child's own
+	// sleep ends, so the bound only has to sit under that. One second sat almost
+	// exactly on it: the call legitimately costs a sandbox plan, a fork and exec of
+	// a shell plus a subshell, the 300ms timeout itself and the post-kill drain,
+	// and spawn alone was measured here at 720ms to 1.44s with every core busy. A
+	// merely slow runner therefore failed a correct system. Three seconds is still
+	// far below the child's lifetime, so nothing is given up.
+	if elapsed > 3*time.Second {
 		t.Fatalf("Run blocked %s past the 300ms timeout; background child held the pipes", elapsed)
 	}
 
