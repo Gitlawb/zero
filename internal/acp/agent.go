@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -48,9 +49,11 @@ type Deps struct {
 // advertised their tools; keeping a stale registry after a cancelled turn would
 // leak its server process and its permission state into the next turn.
 type Workspace struct {
-	Registry *tools.Registry
-	Sandbox  *sandbox.Engine
-	Cleanup  func() error
+	Registry       *tools.Registry
+	Sandbox        *sandbox.Engine
+	DeferThreshold int
+	Notices        []string
+	Cleanup        func() error
 }
 
 // Close releases resources created with the workspace. A nil cleanup is valid
@@ -285,6 +288,11 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	registry := workspace.Registry
 	sandboxEngine := workspace.Sandbox
 	note := &notifier{conn: a.conn, sessionID: sess.id}
+	for _, notice := range workspace.Notices {
+		if text := strings.TrimSpace(redaction.RedactString(notice, redaction.Options{})); text != "" {
+			note.text("\n\n[zero warning] " + text + "\n")
+		}
+	}
 
 	opts := agent.Options{
 		Cwd:            sess.cwd,
@@ -294,6 +302,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		Registry:       registry,
 		Sandbox:        sandboxEngine,
 		PermissionMode: mode,
+		DeferThreshold: workspace.DeferThreshold,
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
 		OnText:         note.text,

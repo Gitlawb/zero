@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -155,8 +157,14 @@ func TestBuildACPWorkspaceRegistersSandboxedMCPToolsAndClosesThem(t *testing.T) 
 			if options.WorkspaceRoot != workspaceRoot {
 				t.Fatalf("MCP execution workspace = %q, want %q", options.WorkspaceRoot, workspaceRoot)
 			}
+			if !options.AdvertiseInAuto {
+				t.Fatal("ACP MCP tools must be advertised in auto mode without being pre-approved")
+			}
 			registered = true
-			registry.Register(cliFakeDeferredTool{name: "mcp_docs_search"})
+			registry.Register(cliFakeDeferredTool{
+				name: "mcp_docs_search", permission: tools.PermissionPrompt,
+				advertiseInAuto: options.AdvertiseInAuto,
+			})
 			return closeFunc(func() error {
 				closed = true
 				return nil
@@ -182,11 +190,58 @@ func TestBuildACPWorkspaceRegistersSandboxedMCPToolsAndClosesThem(t *testing.T) 
 	if _, ok := workspace.Registry.Get(tools.ToolSearchToolName); !ok {
 		t.Fatal("ACP registry is missing tool_search for deferred MCP tools")
 	}
+	if workspace.DeferThreshold != 1 {
+		t.Fatalf("workspace defer threshold = %d, want 1", workspace.DeferThreshold)
+	}
 	if err := workspace.Close(); err != nil {
 		t.Fatalf("close ACP workspace: %v", err)
 	}
 	if !closed {
 		t.Fatal("ACP workspace did not close its MCP runtime")
+	}
+}
+
+func TestBuildACPWorkspacePreservesRedactedMCPSetupNotices(t *testing.T) {
+	setTrustConfigRoot(t)
+	workspaceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspaceRoot, ".zero"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := `{"mcp":{"servers":{"project-docs":{"type":"stdio","command":"project-docs"}}}}`
+	if err := os.WriteFile(filepath.Join(workspaceRoot, ".zero", "config.json"), []byte(projectConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	grantStore, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := fillAppDeps(appDeps{
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {Type: "stdio", Command: "fake-docs"},
+			}}, nil
+		},
+		newMCPStore:     func() (*mcp.PermissionStore, error) { return nil, nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return grantStore, nil },
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return fakeMCPRuntimeWithSkips{skipped: []mcp.SkippedServer{{
+				Name: "docs", Err: errors.New("token=" + secret),
+			}}}, nil
+		},
+	})
+
+	workspace, err := buildACPWorkspace(context.Background(), workspaceRoot, config.ResolvedConfig{}, agent.PermissionModeAuto, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+	joined := strings.Join(workspace.Notices, "\n")
+	if !strings.Contains(joined, "untrusted workspace") || !strings.Contains(joined, "MCP server docs unavailable") {
+		t.Fatalf("workspace notices = %#v", workspace.Notices)
+	}
+	if strings.Contains(joined, secret) || !strings.Contains(joined, "[REDACTED]") {
+		t.Fatalf("workspace notices leaked secret: %q", joined)
 	}
 }
 

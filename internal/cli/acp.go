@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -90,11 +91,17 @@ func buildACPWorkspace(ctx context.Context, workspaceRoot string, resolved confi
 	}
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
 
-	workspace := &acp.Workspace{Registry: registry, Sandbox: engine}
+	workspace := &acp.Workspace{
+		Registry: registry, Sandbox: engine,
+		DeferThreshold: resolved.Tools.DeferThreshold,
+	}
 	if mode != agent.PermissionModePlan {
 		// MCP stdio servers are subprocesses. Passing the engine to their runner
 		// keeps them inside the exact sandbox / lifecycle path used by zero exec.
-		runtime, _, err := registerMCPToolsForWorkspace(ctx, workspaceRoot, registry, deps, mcp.AutonomyLow, workspaceRoot, execution.NewRunner(engine))
+		runtime, trustSkip, err := registerMCPToolsForWorkspaceWithOptions(
+			ctx, workspaceRoot, registry, deps, mcp.AutonomyLow, workspaceRoot,
+			mcp.RegisterOptions{Execution: execution.NewRunner(engine), AdvertiseInAuto: true},
+		)
 		if err != nil {
 			// RegisterTools may have connected an earlier server before reporting a
 			// later failure, so do not orphan a partial runtime on this error path.
@@ -104,12 +111,38 @@ func buildACPWorkspace(ctx context.Context, workspaceRoot string, resolved confi
 			return nil, err
 		}
 		workspace.Cleanup = runtime.Close
+		workspace.Notices = acpMCPSetupNotices(trustSkip, runtime)
 	}
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	// MCP tools are deferred-eligible. Register their loader only after every
 	// ACP-visible tool is present, using the same mode the agent receives.
 	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, mode, nil, nil)
 	return workspace, nil
+}
+
+func acpMCPSetupNotices(skip trustSkip, runtime mcpToolRuntime) []string {
+	var notices []string
+	if skip.excludedProjectConfig {
+		if skip.trustCheckErrored {
+			notices = append(notices, "The workspace-trust store could not be read; project MCP servers were ignored (fail-closed). Run 'zero trust' to enable them.")
+		} else {
+			notices = append(notices, "Project MCP servers were ignored in this untrusted workspace. Run 'zero trust' to enable them.")
+		}
+	}
+	if runtime == nil {
+		return notices
+	}
+	for _, skipped := range runtime.Skipped() {
+		if skipped.UnconfiguredDefault {
+			continue
+		}
+		message := fmt.Sprintf("MCP server %s unavailable, skipped", skipped.Name)
+		if skipped.Err != nil {
+			message += ": " + redaction.ErrorMessage(skipped.Err, redaction.Options{})
+		}
+		notices = append(notices, redaction.RedactString(message, redaction.Options{}))
+	}
+	return notices
 }
 
 // acpWorkspaceRootResolver validates a client-supplied cwd into a confinement
