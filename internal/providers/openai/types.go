@@ -109,7 +109,8 @@ type usage struct {
 }
 
 type promptTokenDetails struct {
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 type completionTokenDetails struct {

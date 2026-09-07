@@ -211,6 +211,14 @@ type Tool interface {
 	Run(ctx context.Context, args map[string]any) Result
 }
 
+// IsBuiltInApplyPatch reports whether tool is Zero's scoped patch tool. The
+// marker method is package-private so external and MCP tools cannot claim this
+// identity merely by sharing the public name "apply_patch".
+func IsBuiltInApplyPatch(tool Tool) bool {
+	_, ok := tool.(interface{ isBuiltInApplyPatch() })
+	return ok
+}
+
 // ArgsPermissioner is an optional interface a Tool can implement to refine its
 // permission for a SPECIFIC call based on its arguments. When a tool implements
 // it, the agent loop consults PermissionForArgs(args) instead of the static

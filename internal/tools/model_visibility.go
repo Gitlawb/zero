@@ -1,9 +1,11 @@
 package tools
 
 // ModelVisible reports whether a registered tool is advertised to an agent.
-// edit_file remains implemented for compatibility with existing integrations,
-// but its text-only replacement contract cannot safely disambiguate repeated
-// source fragments. Agents use apply_patch for contextual existing-file edits.
+// Every registered tool is visible. edit_file (exact search/replace with a
+// uniqueness guard, CRLF and fuzzy fallbacks) was hidden for a while in favour
+// of apply_patch; head-to-head benchmarking showed that when a model misses the
+// patch grammar it degrades to whole-file rewrites, so both edit tools are
+// advertised and the prompt steers between them.
 func ModelVisible(tool Tool) bool {
-	return tool != nil && tool.Name() != "edit_file"
+	return tool != nil
 }

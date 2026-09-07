@@ -124,11 +124,15 @@ func TestServerEndToEnd(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve did not return after shutdown")
 	}
-	// Socket, status, and lock files are removed on exit.
-	for _, p := range []string{paths.Socket, paths.Status, paths.Lock} {
+	// Runtime endpoints are removed on exit. The advisory lock file remains as
+	// a stable inode, but the kernel lock on it has been released.
+	for _, p := range []string{paths.Socket, paths.Status} {
 		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("file %s not cleaned up after shutdown: %v", p, err)
 		}
+	}
+	if _, err := os.Stat(paths.Lock); err != nil {
+		t.Fatalf("stable lock file missing after shutdown: %v", err)
 	}
 }
 
