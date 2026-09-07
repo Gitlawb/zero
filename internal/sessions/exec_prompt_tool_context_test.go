@@ -3,6 +3,7 @@ package sessions
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -160,30 +161,67 @@ func TestResumePromptCarriesToolOutcomeWithoutOutput(t *testing.T) {
 	}
 	out := resumePrompt(t, events)
 
-	if strings.Contains(out, secret) {
-		t.Errorf("tool output reached the resume prompt:\n%s", out)
+	// THE TOOL LINES ARE PINNED WHOLE, NOT SEARCHED.
+	//
+	// Two reasons the obvious assertions are too weak to say what the trim
+	// promises. Searching the prompt for the fixture's full secret only rejects
+	// that exact string, so a change that carried a truncated or partly
+	// redacted prefix of the output would pass it. And asking whether "ok" and
+	// "error" each appear somewhere among the result lines passes just as well
+	// when the two statuses are swapped, or both attached to the wrong call.
+	//
+	// Pinning the whole of every tool line covers both: nothing but the tool
+	// name and the outcome survives a result, each outcome sits on its own
+	// line, and the line order pairs each one with the call above it.
+	//
+	// Compared as a set of fields per line rather than as a string, because the
+	// renderer walks the payload map and Go randomizes that order, so the same
+	// events render their fields in a different order on every run.
+	want := []struct {
+		sequence int
+		kind     string
+		fields   []string
+	}{
+		{2, "tool_call", []string{"c1", "read_file", `{"path":"deploy/prod.env"}`}},
+		{3, "tool_result", []string{"read_file", "ok"}},
+		{4, "tool_call", []string{"c2", "read_file", `{"path":"deploy/missing.env"}`}},
+		{5, "tool_result", []string{"read_file", "error"}},
 	}
-	// What the turn DID still survives: the paths, from the calls.
-	for _, want := range []string{"deploy/prod.env", "deploy/missing.env"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the resume prompt lost %q, so the next turn cannot tell what happened:\n%s", want, out)
-		}
-	}
-	// And HOW EACH ONE ENDED, asserted only against the tool_result lines. The
-	// prompt also carries a provider error message, so an unscoped search for
-	// "error" passes whether or not the status survived. It did pass with the
-	// status blanked out, which is why this is scoped.
-	var resultLines []string
+	var toolLines []string
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "tool_result:") {
-			resultLines = append(resultLines, line)
+		if strings.HasPrefix(line, "- #") && (strings.Contains(line, "tool_call:") || strings.Contains(line, "tool_result:")) {
+			toolLines = append(toolLines, line)
 		}
 	}
-	if len(resultLines) != 2 {
-		t.Fatalf("SETUP INVALID: %d tool_result lines, want 2:\n%s", len(resultLines), out)
+	if len(toolLines) != len(want) {
+		t.Fatalf("the resume prompt carries %d tool lines, want %d:\n%s", len(toolLines), len(want), out)
 	}
-	joined := strings.Join(resultLines, "\n")
-	if !strings.Contains(joined, "ok") || !strings.Contains(joined, "error") {
-		t.Errorf("the tool_result lines lost their outcome, so a failed read reads as a file the next turn already has:\n%s", joined)
+	for index, line := range toolLines {
+		var sequence int
+		var kind string
+		rest, found := strings.CutPrefix(line, "- #")
+		if !found {
+			t.Fatalf("unparsable context line %q", line)
+		}
+		if _, err := fmt.Sscanf(rest, "%d %s", &sequence, &kind); err != nil {
+			t.Fatalf("unparsable context line %q: %v", line, err)
+		}
+		kind = strings.TrimSuffix(kind, ":")
+		_, payload, _ := strings.Cut(rest, ": ")
+		fields := strings.Fields(payload)
+		slices.Sort(fields)
+		expected := slices.Clone(want[index].fields)
+		slices.Sort(expected)
+		if sequence != want[index].sequence || kind != want[index].kind || !slices.Equal(fields, expected) {
+			t.Errorf("tool line %d is not what the trim promises.\ngot:  #%d %s %v\nwant: #%d %s %v\nfull prompt:\n%s",
+				index, sequence, kind, fields, want[index].sequence, want[index].kind, expected, out)
+		}
+	}
+	// Named on its own so a leak reports as a leak rather than as the
+	// formatting drift the comparison above would also catch. A PREFIX, because
+	// the danger is output reaching a later prompt at all, not this exact
+	// fixture string reaching it.
+	if strings.Contains(out, secret[:16]) {
+		t.Errorf("tool output reached the resume prompt:\n%s", out)
 	}
 }
