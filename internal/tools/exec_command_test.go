@@ -419,6 +419,12 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 // answers with StatusError, and a process that exited before listening answers
 // with an exit_code line. Either is a genuine defect, so neither is worth waiting
 // out: they end the loop immediately with what the session actually said.
+//
+// Each read DRAINS: managedProcess.collect returns only the bytes produced since
+// the previous call, so these chunks are incremental and none of them is the whole
+// output. Each is parsed on its own, which is sound because the helper writes its
+// address with a single Println and a write that small does not tear. The whole
+// transcript is kept anyway, so a failure shows every chunk rather than the last.
 func waitForListeningAddress(t *testing.T, writeTool Tool, sessionID int, first string) string {
 	t.Helper()
 	if addr := parseListeningAddress(first); addr != "" {
