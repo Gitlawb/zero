@@ -1,6 +1,8 @@
 package agentsessions
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,7 +106,69 @@ func TestImportRejectsTranscriptChangedAfterDiscovery(t *testing.T) {
 	}
 }
 func (invalidImportAdapter) Read(ForeignSession, ReadOptions) ([]sessions.AppendEventInput, error) {
-	return []sessions.AppendEventInput{{Type: sessions.EventMessage, Payload: map[string]any{"invalid": make(chan int)}}}, nil
+	return []sessions.AppendEventInput{{Type: sessions.EventMessage, Payload: map[string]any{
+		"role": "user", "content": "hello", "invalid": make(chan int),
+	}}}, nil
+}
+
+type staticImportAdapter struct {
+	events []sessions.AppendEventInput
+}
+
+func (staticImportAdapter) Name() string { return "static" }
+func (a staticImportAdapter) Discover(string) ([]ForeignSession, error) {
+	return []ForeignSession{{Agent: a.Name(), ID: "one", Title: "one", Cwd: "/w"}}, nil
+}
+func (a staticImportAdapter) Read(ForeignSession, ReadOptions) ([]sessions.AppendEventInput, error) {
+	return append([]sessions.AppendEventInput{}, a.events...), nil
+}
+
+func TestImportRejectsDiagnosticOnlyContentButKeepsPartialHistory(t *testing.T) {
+	diagnostic := sessions.AppendEventInput{
+		Type: sessions.EventError, Payload: map[string]any{"message": "one source record was omitted"},
+	}
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := Import(store, staticImportAdapter{events: []sessions.AppendEventInput{diagnostic}}, "one", ReadOptions{}); !errors.Is(err, ErrNoImportableContent) {
+		t.Fatalf("diagnostic-only import error = %v, want ErrNoImportableContent", err)
+	}
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("diagnostic-only import created a local session: %+v", metas)
+	}
+
+	partial := staticImportAdapter{events: []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "retained question"}},
+		diagnostic,
+	}}
+	result, err := Import(store, partial, "one", ReadOptions{})
+	if err != nil {
+		t.Fatalf("partial import: %v", err)
+	}
+	events, err := store.ReadEvents(result.Session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[0].Type != sessions.EventMessage || events[1].Type != sessions.EventMessage || events[2].Type != sessions.EventError {
+		t.Fatalf("partial import events = %+v", events)
+	}
+	var boundary map[string]any
+	if err := json.Unmarshal(events[0].Payload, &boundary); err != nil {
+		t.Fatal(err)
+	}
+	if !NoteEventIsBoundary(boundary) || !strings.Contains(fmt.Sprint(boundary["content"]), "reference context only") {
+		t.Fatalf("first event is not the import trust boundary: %+v", boundary)
+	}
+	prepared, err := sessions.PrepareExec(sessions.PrepareExecOptions{Store: store, Resume: result.Session.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := sessions.FormatExecPrompt("continue", prepared)
+	if !strings.Contains(prompt, "reference context only") || !strings.Contains(prompt, "retained question") {
+		t.Fatalf("resumed prompt lost boundary or retained history:\n%s", prompt)
+	}
 }
 
 // WHAT THE STORE HOLDS IS WHAT EVERY CONSUMER DRAWS. The import used

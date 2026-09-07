@@ -1,6 +1,7 @@
 package agentsessions
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -292,6 +293,27 @@ func TestSameDirUsesCaseInsensitiveComparisonOnWindows(t *testing.T) {
 	}
 	if sameDirForOS("/Work/Project", "/work/other", "windows") {
 		t.Fatal("Windows workspace comparison accepted different paths")
+	}
+}
+
+func TestWindowsForeignPathsNeverTouchTheFilesystemDuringNormalization(t *testing.T) {
+	path := `\\192.0.2.201\share\loot`
+	called := false
+	got := normalizeDirWithFS(path, "windows",
+		func(string) (os.FileInfo, error) {
+			called = true
+			return nil, errors.New("must not stat a foreign Windows path")
+		},
+		func(string) (string, error) {
+			called = true
+			return "", errors.New("must not resolve a foreign Windows path")
+		},
+	)
+	if called {
+		t.Fatal("Windows path normalization performed filesystem I/O")
+	}
+	if got != filepath.Clean(path) {
+		t.Fatalf("normalizeDirWithFS = %q, want lexical %q", got, filepath.Clean(path))
 	}
 }
 

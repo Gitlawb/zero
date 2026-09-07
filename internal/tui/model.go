@@ -1402,6 +1402,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		return m, nil
+	case sessionPickerLoadedMsg:
+		if msg.picker != nil {
+			m.picker = msg.picker
+			return m, nil
+		}
+		if msg.text != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.text})
+		}
+		return m, nil
 	case peerMessageMsg:
 		admitted := m.canAcceptPeerMessage(msg.message)
 		if msg.admit != nil {
@@ -4852,9 +4861,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		// `/resume <id>` and `/resume latest` still resolve directly. The picker falls
 		// back to the text path when there is nothing to resume.
 		if strings.TrimSpace(command.text) == "" {
-			if next, ok := m.openSessionPicker(); ok {
-				return next, nil
-			}
+			return m, m.sessionPickerCmd()
 		}
 		text := ""
 		m, text, cmd := m.startResumeCommand(command.text)

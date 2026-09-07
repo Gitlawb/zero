@@ -26,6 +26,21 @@ func TestCompactionMessagesPreservesInteractiveAndMutationEvidence(t *testing.T)
 	}
 }
 
+func TestCompactionMessagesKeepsToolOutcomePolarityTriState(t *testing.T) {
+	events := []Event{
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"ok","status":"ok","output":"done"}`)},
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"error","status":"error","output":"failed"}`)},
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"unknown","status":"unknown","output":"unverified"}`)},
+	}
+	messages := CompactionMessages(events)
+	if len(messages) != 3 {
+		t.Fatalf("compaction messages = %#v", messages)
+	}
+	if messages[0].IsError || !messages[1].IsError || messages[2].IsError {
+		t.Fatalf("tool outcome polarity = ok:%v error:%v unknown:%v", messages[0].IsError, messages[1].IsError, messages[2].IsError)
+	}
+}
+
 func TestStorePlansRewindBySequence(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
 		time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC),

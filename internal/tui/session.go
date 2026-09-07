@@ -224,6 +224,31 @@ type foreignSessionImportedMsg struct {
 	err           error
 }
 
+type sessionPickerLoadedMsg struct {
+	picker *commandPicker
+	text   string
+}
+
+// sessionPickerCmd keeps discovery of external agent stores off Bubble Tea's
+// Update loop. A transcript can name an unavailable workspace and vendor stores
+// can be slow even when local, so /resume must remain responsive while their
+// bounded indexes are read.
+func (m model) sessionPickerCmd() tea.Cmd {
+	snapshot := model{
+		sessionStore:     m.sessionStore,
+		agentSessionsEnv: m.agentSessionsEnv,
+		cwd:              m.cwd,
+		now:              m.now,
+	}
+	return func() tea.Msg {
+		picker := snapshot.newSessionPicker()
+		if picker != nil {
+			return sessionPickerLoadedMsg{picker: picker}
+		}
+		return sessionPickerLoadedMsg{text: snapshot.resumeText()}
+	}
+}
+
 // startResumeCommand keeps foreign transcript I/O off Bubble Tea's Update
 // loop. Local Zero resumes stay synchronous; a foreign reference returns a
 // command whose result is applied by finishForeignSessionImport.
@@ -783,13 +808,21 @@ func (m model) sessionHasResumableContent(sessionID string) bool {
 // sessionHasResumableContent so callers that already hold the events (e.g. the
 // session picker refresh) don't re-read them.
 func eventsHaveResumableContent(events []sessions.Event) bool {
+	importedBoundary := false
 	for _, event := range events {
 		switch event.Type {
 		case sessions.EventToolCall, sessions.EventToolResult:
 			return true
 		case sessions.EventMessage:
 			payload := sessionPayload(event)
+			if agentsessions.NoteEventIsBoundary(payload) {
+				importedBoundary = true
+				continue
+			}
 			if strings.EqualFold(payloadString(payload, "role"), "user") {
+				if importedBoundary && strings.TrimSpace(payloadString(payload, "content")) != "" {
+					return true
+				}
 				continue
 			}
 			content := strings.TrimSpace(payloadString(payload, "content"))
@@ -799,17 +832,6 @@ func eventsHaveResumableContent(events []sessions.Event) bool {
 		}
 	}
 	return false
-}
-
-// openSessionPicker opens the /resume picker; ok is false when there is nothing to
-// resume (the caller then falls back to the text list / "none" message).
-func (m model) openSessionPicker() (model, bool) {
-	picker := m.newSessionPicker()
-	if picker == nil {
-		return m, false
-	}
-	m.picker = picker
-	return m, true
 }
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {

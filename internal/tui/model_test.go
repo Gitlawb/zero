@@ -1027,9 +1027,11 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("expected /resume to be handled without starting an agent run")
+	if cmd == nil {
+		t.Fatal("expected /resume discovery to run outside Update")
 	}
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
 	// Bare /resume now opens the interactive session picker (like /model & /provider).
 	if next.picker == nil || next.picker.kind != pickerSession {
 		t.Fatalf("expected /resume to open the session picker, got picker=%#v", next.picker)
@@ -1094,6 +1096,22 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	}
 }
 
+func TestBareResumeDefersSessionDiscoveryOutsideUpdate(t *testing.T) {
+	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t)})
+	m.input.SetValue("/resume")
+	started := time.Now()
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("/resume blocked Update for %v", elapsed)
+	}
+	if cmd == nil {
+		t.Fatal("/resume did not return a discovery command")
+	}
+	if next := updated.(model); next.picker != nil {
+		t.Fatal("picker was built synchronously inside Update")
+	}
+}
+
 func TestSessionPickerLabelAlignsTitles(t *testing.T) {
 	today := sessionPickerLabel("20:47:50", "Today title")
 	older := sessionPickerLabel("Jul 24 10:47", "Older title")
@@ -1123,7 +1141,12 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, pickerCmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if pickerCmd == nil {
+		t.Fatal("expected async session discovery command")
+	}
+	updated, _ = m.Update(execCmd(pickerCmd))
 	m = updated.(model)
 	if m.picker == nil || m.picker.kind != pickerSession {
 		t.Fatalf("expected the session picker to open, got %#v", m.picker)
