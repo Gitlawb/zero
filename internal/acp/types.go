@@ -210,6 +210,21 @@ type ToolCallUpdate struct {
 	RawInput      json.RawMessage    `json:"rawInput,omitempty"`
 	Content       []ToolCallContent  `json:"content,omitempty"`
 	Locations     []ToolCallLocation `json:"locations,omitempty"`
+	// Meta is ACP's extension channel. ZERO-owned values must remain beneath a
+	// namespaced key so protocol-shaped clients can preserve them while decoding
+	// and re-encoding a tool call.
+	Meta map[string]json.RawMessage `json:"_meta,omitempty"`
+}
+
+// BrowserToolDetails identifies the browser helper operation behind a tool
+// call. Version is the schema version for this optional ZERO extension;
+// Command is one of install, launch, connect, open, snapshot, click, type,
+// press, or action. Future fields must remain display-safe and must not
+// include browser profile data, cookies, typed text, URL paths/queries, or
+// DevTools endpoints.
+type BrowserToolDetails struct {
+	Version int    `json:"version"`
+	Command string `json:"command"`
 }
 
 // ToolCallContent is a tool call's rendered output. ZERO emits "content" (a

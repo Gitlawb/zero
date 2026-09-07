@@ -2,7 +2,9 @@ package acp
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -44,10 +46,123 @@ func toolKindFor(name string) string {
 
 // toolTitle builds a concise human title, e.g. "read_file src/main.go".
 func toolTitle(name, rawArgs string) string {
+	if browser, ok := browserToolDetails(name); ok {
+		return browserToolTitle(browser.Command, rawArgs)
+	}
 	if hint := primaryArgHint(rawArgs); hint != "" {
 		return name + " " + hint
 	}
 	return name
+}
+
+// browserToolDetails identifies ZERO's local browser helpers without treating
+// similarly named MCP tools as browser automation. The descriptor intentionally
+// contains no request data: ACP tool input is already protocol-visible, but a
+// durable UI must not need to retain text, local CDP targets, or full URLs just
+// to recognise the browser operation.
+func browserToolDetails(name string) (*BrowserToolDetails, bool) {
+	const prefix = "browser_"
+	command, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return nil, false
+	}
+	switch command {
+	case "install", "launch", "connect", "open", "snapshot", "click", "type", "press", "action":
+		return &BrowserToolDetails{Version: 1, Command: command}, true
+	default:
+		return nil, false
+	}
+}
+
+const zeroBrowserMetaKey = "github.com/Gitlawb/zero/browser"
+
+// attachBrowserToolDetails stores ZERO's browser descriptor in ACP's reserved
+// extension channel. Keeping this in one helper prevents start, result, and
+// permission payloads from drifting onto different wire shapes.
+func attachBrowserToolDetails(update *ToolCallUpdate, name string) {
+	browser, ok := browserToolDetails(name)
+	if !ok {
+		return
+	}
+	raw, err := json.Marshal(browser)
+	if err != nil {
+		return
+	}
+	update.Meta = map[string]json.RawMessage{zeroBrowserMetaKey: raw}
+}
+
+// browserToolTitle avoids putting browser_type text, an attached DevTools
+// endpoint, or a URL query/fragment in a tool-card title. Those values can
+// carry credentials or session data; the UI only needs the operation and, for
+// navigation, a human-recognisable origin.
+func browserToolTitle(command, rawArgs string) string {
+	switch command {
+	case "action":
+		action, ok := exactJSONStringArg(rawArgs, "command")
+		if !ok {
+			return "browser action"
+		}
+		if action, ok := tools.NormalizedBrowserActionCommand(action); ok {
+			return "browser action " + action
+		}
+		return "browser action"
+	case "open":
+		rawURL, ok := exactJSONStringArg(rawArgs, "url")
+		if !ok {
+			return "browser open"
+		}
+		normalized, err := tools.NormalizeBrowserOpenURL(rawURL)
+		if err != nil {
+			return "browser open"
+		}
+		u, err := url.Parse(normalized)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return "browser open"
+		}
+		origin := u.Scheme + "://" + u.Host
+		if !browserTitleTextSafe(origin) {
+			return "browser open"
+		}
+		return "browser open " + truncateHint(origin)
+	default:
+		return "browser " + command
+	}
+}
+
+// browserTitleTextSafe validates text after URL parsing has decoded escaped
+// UTF-8 in the host. Valid UTF-8 alone is not presentation-safe: control,
+// format/bidi, and line/paragraph separator runes can reorder or split the
+// permission label shown to a user. The execution URL remains unchanged.
+func browserTitleTextSafe(text string) bool {
+	if !utf8.ValidString(text) {
+		return false
+	}
+	for _, r := range text {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// exactJSONStringArg mirrors ZERO's map-based tool argument decoding: only the
+// exact JSON key is considered, and a non-string value is invalid. In
+// particular, an incidental "URL" key must not change a permission title when
+// browser_open will only read "url".
+func exactJSONStringArg(rawArgs, key string) (string, bool) {
+	var args map[string]json.RawMessage
+	if json.Unmarshal([]byte(rawArgs), &args) != nil {
+		return "", false
+	}
+	raw, ok := args[key]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	return value, true
 }
 
 // primaryArgHint extracts the most relevant argument (path/pattern/command) from
@@ -89,7 +204,7 @@ func rawInput(args string) json.RawMessage {
 // toolCallStart maps an advertised ZERO tool call to the initial ACP "tool_call"
 // update (status in_progress — ZERO executes immediately after advertising).
 func toolCallStart(call agent.ToolCall) ToolCallUpdate {
-	return ToolCallUpdate{
+	upd := ToolCallUpdate{
 		SessionUpdate: UpdateToolCall,
 		ToolCallID:    call.ID,
 		Title:         toolTitle(call.Name, call.Arguments),
@@ -97,6 +212,8 @@ func toolCallStart(call agent.ToolCall) ToolCallUpdate {
 		Status:        ToolStatusInProgress,
 		RawInput:      rawInput(call.Arguments),
 	}
+	attachBrowserToolDetails(&upd, call.Name)
+	return upd
 }
 
 // toolCallResult maps a finished ZERO tool result to a "tool_call_update".
@@ -116,6 +233,7 @@ func toolCallResult(result agent.ToolResult) ToolCallUpdate {
 	if locs := toolResultLocations(result); len(locs) > 0 {
 		upd.Locations = locs
 	}
+	attachBrowserToolDetails(&upd, result.Name)
 	return upd
 }
 
