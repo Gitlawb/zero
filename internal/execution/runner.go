@@ -89,7 +89,7 @@ func (runner *Runner) ExecuteCaptured(ctx context.Context, input CapturedRequest
 	stderr := &capturedBuffer{limit: maxCapturedStreamBytes}
 	prepared.Command.Stdout = stdout
 	prepared.Command.Stderr = stderr
-	runErr := prepared.Command.Run()
+	runErr := RunCommand(ctx, prepared.Command)
 	report, reportErr := AdapterReport{}, error(nil)
 	if prepared.Report != nil {
 		report, reportErr = prepared.Report()

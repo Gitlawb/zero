@@ -298,7 +298,12 @@ func main() {
 			panic(err)
 		}
 	}
-	time.Sleep(3 * time.Second)
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		if _, err := os.Stat(os.Getenv("PERFBENCH_BLOCKING_STUB_STOP")); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 `), 0o600); err != nil {
 		t.Fatalf("write blocking exec stub: %v", err)
@@ -311,6 +316,72 @@ func main() {
 		t.Fatalf("build blocking exec stub: %v\n%s", err, output)
 	}
 	return binary
+}
+
+// Override Err only after Done closes, allowing both context failures to be
+// injected at the readiness handoff rather than racing process startup.
+type stubFailureContext struct {
+	context.Context
+	failure error
+}
+
+func (ctx stubFailureContext) Err() error {
+	if ctx.Context.Err() != nil {
+		return ctx.failure
+	}
+	return nil
+}
+
+func runAfterStubReady[T any](t *testing.T, failure error, run func(context.Context) T) T {
+	t.Helper()
+	root := t.TempDir()
+	ready, stop := filepath.Join(root, "ready"), filepath.Join(root, "stop")
+	t.Setenv("PERFBENCH_BLOCKING_STUB_READY", ready)
+	t.Setenv("PERFBENCH_BLOCKING_STUB_STOP", stop)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan T, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		// Independent of the production process-tree cleanup being tested.
+		if err := os.WriteFile(stop, nil, 0o600); err != nil {
+			t.Error(err)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("stub did not stop after independent cleanup")
+		}
+	})
+	go func() {
+		defer close(done)
+		result <- run(stubFailureContext{Context: ctx, failure: failure})
+	}()
+	watchdog := time.NewTimer(15 * time.Second)
+	defer watchdog.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case <-result:
+			t.Fatal("runner returned before run_end readiness handoff")
+		case <-watchdog.C:
+			t.Fatal("stub did not emit run_end before watchdog")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case outcome := <-result:
+		return outcome
+	case <-time.After(4 * time.Second):
+		t.Fatal("runner did not return after context failure")
+	}
+	var zero T
+	return zero
 }
 
 func TestNewExecRunnerNonZeroRunEndIsFailNotError(t *testing.T) {
@@ -359,38 +430,22 @@ func TestNewExecRunnerRunEndCannotHideContextFailure(t *testing.T) {
 	stub := writeBlockingExecStub(t)
 	tests := []struct {
 		name    string
-		context func(t *testing.T) context.Context
 		wantErr error
 	}{
 		{
-			name: "cancellation",
-			context: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithCancel(context.Background())
-				t.Cleanup(cancel)
-				timer := time.AfterFunc(time.Second, cancel)
-				t.Cleanup(func() { timer.Stop() })
-				return ctx
-			},
+			name:    "cancellation",
 			wantErr: context.Canceled,
 		},
 		{
-			name: "deadline",
-			context: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				t.Cleanup(cancel)
-				return ctx
-			},
+			name:    "deadline",
 			wantErr: context.DeadlineExceeded,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ready := filepath.Join(t.TempDir(), "ready")
-			t.Setenv("PERFBENCH_BLOCKING_STUB_READY", ready)
-			outcome := NewExecRunner(stub)(test.context(t), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
-			if _, err := os.Stat(ready); err != nil {
-				t.Fatalf("stub did not emit run_end before the context failed: %v", err)
-			}
+			outcome := runAfterStubReady(t, test.wantErr, func(ctx context.Context) TaskOutcome {
+				return NewExecRunner(stub)(ctx, BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+			})
 			if outcome.Err == nil || !errors.Is(outcome.Err, test.wantErr) {
 				t.Fatalf("run_end must not hide %v, got %#v", test.wantErr, outcome)
 			}

@@ -662,38 +662,22 @@ func TestNewTurnExecRunnerRunEndCannotHideContextFailure(t *testing.T) {
 	stub := writeBlockingExecStub(t)
 	tests := []struct {
 		name    string
-		context func(t *testing.T) context.Context
 		wantErr error
 	}{
 		{
-			name: "cancellation",
-			context: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithCancel(context.Background())
-				t.Cleanup(cancel)
-				timer := time.AfterFunc(time.Second, cancel)
-				t.Cleanup(func() { timer.Stop() })
-				return ctx
-			},
+			name:    "cancellation",
 			wantErr: context.Canceled,
 		},
 		{
-			name: "deadline",
-			context: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				t.Cleanup(cancel)
-				return ctx
-			},
+			name:    "deadline",
 			wantErr: context.DeadlineExceeded,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ready := filepath.Join(t.TempDir(), "ready")
-			t.Setenv("PERFBENCH_BLOCKING_STUB_READY", ready)
-			outcome := NewTurnExecRunner(stub)(test.context(t), task, RunContext{Model: "m"})
-			if _, err := os.Stat(ready); err != nil {
-				t.Fatalf("stub did not emit run_end before the context failed: %v", err)
-			}
+			outcome := runAfterStubReady(t, test.wantErr, func(ctx context.Context) TurnTaskOutcome {
+				return NewTurnExecRunner(stub)(ctx, task, RunContext{Model: "m"})
+			})
 			if outcome.Err == nil || !errors.Is(outcome.Err, test.wantErr) {
 				t.Fatalf("run_end must not hide %v, got %#v", test.wantErr, outcome)
 			}

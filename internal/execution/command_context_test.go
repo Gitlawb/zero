@@ -11,6 +11,16 @@ import (
 	"time"
 )
 
+func TestRunCommandCanceledBeforePlainCommandStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	command := exec.Command(os.Args[0], "-test.run=^$")
+	err := RunCommand(ctx, command)
+	if !errors.Is(err, context.Canceled) || command.Process != nil {
+		t.Fatalf("canceled command must not start: err=%v process=%v", err, command.Process)
+	}
+}
+
 func TestRunCommandKillsDescendantAfterRootExit(t *testing.T) {
 	switch os.Getenv("ZERO_COMMAND_TREE_HELPER") {
 	case "root":

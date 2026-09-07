@@ -16,6 +16,9 @@ func RunCommand(ctx context.Context, command *exec.Cmd) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tree, err := prepareCommandTree(command)
 	if err != nil {
 		return err
@@ -23,7 +26,11 @@ func RunCommand(ctx context.Context, command *exec.Cmd) (err error) {
 	defer func() { err = errors.Join(err, tree.close()) }()
 
 	command.WaitDelay = processWaitDelay
-	command.Cancel = tree.cancel
+	// Adapters may return exec.Command, which rejects a non-nil Cancel.
+	// The watcher below also owns cancellation for commands without that hook.
+	if command.Cancel != nil {
+		command.Cancel = tree.cancel
+	}
 	if err := command.Start(); err != nil {
 		_ = tree.attach(nil)
 		return err
