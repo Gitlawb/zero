@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/testutil"
 )
 
 // controllableLauncher records every launched spec and lets a test control each
@@ -80,18 +82,6 @@ func newSwarmFor(t *testing.T, l MemberLauncher) *Swarm {
 	return sw
 }
 
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
 func okFor(spec MemberSpec, _ int) (MemberResult, error) {
 	return MemberResult{Result: "ok:" + spec.Task, SessionID: "sess-" + spec.ID}, nil
 }
@@ -103,7 +93,7 @@ func TestSpawnCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	waitFor(t, "task done", func() bool {
+	testutil.WaitFor(t, "task done", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusDone
 	})
@@ -120,7 +110,7 @@ func TestSpawnInheritsPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	waitFor(t, "spec recorded", func() bool { return len(l.recorded()) == 1 })
+	testutil.WaitFor(t, "spec recorded", func() bool { return len(l.recorded()) == 1 })
 	spec := l.recorded()[0]
 	if spec.Model != "orch-model" {
 		t.Fatalf("member model = %q, want inherited orch-model", spec.Model)
@@ -153,7 +143,7 @@ func TestConcurrencyCapAndQueueDrains(t *testing.T) {
 	}
 	// Release everyone; the queue should drain one-per-slot until all are done.
 	close(gate)
-	waitFor(t, "all tasks done", func() bool { return sw.Coordinator().Summarize().Done == 5 })
+	testutil.WaitFor(t, "all tasks done", func() bool { return sw.Coordinator().Summarize().Done == 5 })
 	if team.Running() != 0 || team.QueueDepth() != 0 {
 		t.Fatalf("after drain running=%d queue=%d, want 0/0", team.Running(), team.QueueDepth())
 	}
@@ -171,7 +161,7 @@ func TestRetryOnTemporaryError(t *testing.T) {
 	})
 	sw := newSwarmFor(t, l)
 	id, _ := sw.Spawn(Policy{}, "team", "teammate", "task", "")
-	waitFor(t, "task recovered", func() bool {
+	testutil.WaitFor(t, "task recovered", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusDone
 	})
@@ -190,7 +180,7 @@ func TestRetryExhaustionFails(t *testing.T) {
 	})
 	sw := newSwarmFor(t, l)
 	id, _ := sw.Spawn(Policy{}, "team", "teammate", "task", "")
-	waitFor(t, "task failed", func() bool {
+	testutil.WaitFor(t, "task failed", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusFailed
 	})
@@ -205,7 +195,7 @@ func TestPermanentErrorNoRetry(t *testing.T) {
 	})
 	sw := newSwarmFor(t, l)
 	id, _ := sw.Spawn(Policy{}, "team", "teammate", "task", "")
-	waitFor(t, "task failed", func() bool {
+	testutil.WaitFor(t, "task failed", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusFailed
 	})
@@ -291,7 +281,7 @@ func TestClosePreventsMemberRetry(t *testing.T) {
 		sw.Close()
 		close(closed)
 	}()
-	waitFor(t, "swarm closed state", func() bool {
+	testutil.WaitFor(t, "swarm closed state", func() bool {
 		sw.lifecycleMu.RLock()
 		defer sw.lifecycleMu.RUnlock()
 		return sw.closed
@@ -320,7 +310,7 @@ func TestCloseWaitsForMemberWatchers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	waitFor(t, "task running", func() bool {
+	testutil.WaitFor(t, "task running", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusRunning
 	})
@@ -360,7 +350,7 @@ func TestHandoffDeliversNoteAndRetiresOriginal(t *testing.T) {
 	sw := newSwarmFor(t, l)
 	pol := Policy{Model: "m"}
 	origID, _ := sw.Spawn(pol, "team", "teammate", "original task", "/w")
-	waitFor(t, "original running", func() bool {
+	testutil.WaitFor(t, "original running", func() bool {
 		task, ok := sw.Coordinator().Get(origID)
 		return ok && task.Status == StatusRunning
 	})
@@ -384,7 +374,7 @@ func TestHandoffDeliversNoteAndRetiresOriginal(t *testing.T) {
 	}
 	// The new member carries the handoff note in its task and preserves cwd.
 	close(gate)
-	waitFor(t, "spec for new member", func() bool {
+	testutil.WaitFor(t, "spec for new member", func() bool {
 		for _, s := range l.recorded() {
 			if s.ID == newID {
 				return true
@@ -400,7 +390,7 @@ func TestHandoffDeliversNoteAndRetiresOriginal(t *testing.T) {
 		}
 	}
 	// A handoff of an already-terminal task is rejected.
-	waitFor(t, "new task done", func() bool {
+	testutil.WaitFor(t, "new task done", func() bool {
 		task, ok := sw.Coordinator().Get(newID)
 		return ok && task.Status == StatusDone
 	})
@@ -427,7 +417,7 @@ func TestAdoptOrphans(t *testing.T) {
 		t.Fatalf("adopted = %v, want [orphan-1]", adopted)
 	}
 	// The orphan is relaunched under a fresh agent and completes.
-	waitFor(t, "orphan completed", func() bool {
+	testutil.WaitFor(t, "orphan completed", func() bool {
 		task, ok := sw.Coordinator().Get("orphan-1")
 		return ok && task.Status == StatusDone
 	})
@@ -468,7 +458,7 @@ func TestCollectScopesToTeam(t *testing.T) {
 	sw := newSwarmFor(t, l)
 	a, _ := sw.Spawn(Policy{}, "alpha", "teammate", "ta", "")
 	_, _ = sw.Spawn(Policy{}, "beta", "teammate", "tb", "")
-	waitFor(t, "alpha done", func() bool {
+	testutil.WaitFor(t, "alpha done", func() bool {
 		task, ok := sw.Coordinator().Get(a)
 		return ok && task.Status == StatusDone
 	})
@@ -614,7 +604,7 @@ func TestAdmittedDispatchDoesNotLaunchAfterClose(t *testing.T) {
 		sw.Close()
 		close(closed)
 	}()
-	waitFor(t, "swarm closed state", func() bool {
+	testutil.WaitFor(t, "swarm closed state", func() bool {
 		sw.lifecycleMu.RLock()
 		defer sw.lifecycleMu.RUnlock()
 		return sw.closed
@@ -674,7 +664,7 @@ func TestCloseBetweenLaunchPrecheckAndReturn(t *testing.T) {
 		sw.Close()
 		close(closed)
 	}()
-	waitFor(t, "swarm closed state", func() bool {
+	testutil.WaitFor(t, "swarm closed state", func() bool {
 		sw.lifecycleMu.RLock()
 		defer sw.lifecycleMu.RUnlock()
 		return sw.closed
@@ -772,7 +762,7 @@ func TestCloseBetweenRetryLaunchPrecheckAndReturn(t *testing.T) {
 		sw.Close()
 		close(closed)
 	}()
-	waitFor(t, "swarm closed state", func() bool {
+	testutil.WaitFor(t, "swarm closed state", func() bool {
 		sw.lifecycleMu.RLock()
 		defer sw.lifecycleMu.RUnlock()
 		return sw.closed
@@ -964,7 +954,7 @@ func TestCloseFailsQueuedSpecOnLateCreatedTeam(t *testing.T) {
 		sw.Close()
 		close(closed)
 	}()
-	waitFor(t, "swarm closed state", func() bool {
+	testutil.WaitFor(t, "swarm closed state", func() bool {
 		sw.lifecycleMu.RLock()
 		defer sw.lifecycleMu.RUnlock()
 		return sw.closed
